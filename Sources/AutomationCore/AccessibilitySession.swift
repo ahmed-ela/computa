@@ -1,0 +1,793 @@
+import ApplicationServices
+import CoreFoundation
+import Foundation
+
+public struct AccessibilityApplicationTarget: Codable, Equatable, Sendable {
+    public let processIdentifier: Int32
+    public let bundleIdentifier: String?
+    public let applicationName: String?
+
+    public init(
+        processIdentifier: Int32,
+        bundleIdentifier: String? = nil,
+        applicationName: String? = nil
+    ) {
+        self.processIdentifier = processIdentifier
+        self.bundleIdentifier = bundleIdentifier
+        self.applicationName = applicationName
+    }
+
+    public init(application: RunningApplicationInfo) {
+        self.init(
+            processIdentifier: application.processIdentifier,
+            bundleIdentifier: application.bundleIdentifier,
+            applicationName: application.localizedName
+        )
+    }
+}
+
+public struct AccessibilityTreeLimits: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case maxDepth
+        case maxElements
+        case maxChildrenPerElement
+        case maxActionsPerElement
+        case maxTextLength
+    }
+
+    public static let agentDefault = AccessibilityTreeLimits(
+        validatedMaxDepth: 8,
+        maxElements: 400,
+        maxChildrenPerElement: 80,
+        maxActionsPerElement: 32,
+        maxTextLength: 1_024
+    )
+
+    public let maxDepth: Int
+    public let maxElements: Int
+    public let maxChildrenPerElement: Int
+    public let maxActionsPerElement: Int
+    public let maxTextLength: Int
+
+    public init(
+        maxDepth: Int = 8,
+        maxElements: Int = 400,
+        maxChildrenPerElement: Int = 80,
+        maxActionsPerElement: Int = 32,
+        maxTextLength: Int = 1_024
+    ) throws {
+        guard (0 ... 32).contains(maxDepth) else {
+            throw AutomationError.invalidAccessibilityTreeLimit(name: "maxDepth", value: maxDepth)
+        }
+        guard (1 ... 2_000).contains(maxElements) else {
+            throw AutomationError.invalidAccessibilityTreeLimit(name: "maxElements", value: maxElements)
+        }
+        guard (1 ... 500).contains(maxChildrenPerElement) else {
+            throw AutomationError.invalidAccessibilityTreeLimit(
+                name: "maxChildrenPerElement",
+                value: maxChildrenPerElement
+            )
+        }
+        guard (1 ... 128).contains(maxActionsPerElement) else {
+            throw AutomationError.invalidAccessibilityTreeLimit(
+                name: "maxActionsPerElement",
+                value: maxActionsPerElement
+            )
+        }
+        guard (1 ... 4_096).contains(maxTextLength) else {
+            throw AutomationError.invalidAccessibilityTreeLimit(name: "maxTextLength", value: maxTextLength)
+        }
+
+        self.init(
+            validatedMaxDepth: maxDepth,
+            maxElements: maxElements,
+            maxChildrenPerElement: maxChildrenPerElement,
+            maxActionsPerElement: maxActionsPerElement,
+            maxTextLength: maxTextLength
+        )
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            maxDepth: container.decode(Int.self, forKey: .maxDepth),
+            maxElements: container.decode(Int.self, forKey: .maxElements),
+            maxChildrenPerElement: container.decode(Int.self, forKey: .maxChildrenPerElement),
+            maxActionsPerElement: container.decode(Int.self, forKey: .maxActionsPerElement),
+            maxTextLength: container.decode(Int.self, forKey: .maxTextLength)
+        )
+    }
+
+    private init(
+        validatedMaxDepth: Int,
+        maxElements: Int,
+        maxChildrenPerElement: Int,
+        maxActionsPerElement: Int,
+        maxTextLength: Int
+    ) {
+        maxDepth = validatedMaxDepth
+        self.maxElements = maxElements
+        self.maxChildrenPerElement = maxChildrenPerElement
+        self.maxActionsPerElement = maxActionsPerElement
+        self.maxTextLength = maxTextLength
+    }
+}
+
+public enum AccessibilitySetValue: Codable, Equatable, Sendable {
+    case text(String)
+    case boolean(Bool)
+    case number(Double)
+}
+
+public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
+    public let index: Int
+    public let parentIndex: Int?
+    public let childIndices: [Int]
+    public let depth: Int
+    public let role: String?
+    public let subrole: String?
+    public let title: String?
+    public let elementDescription: String?
+    public let help: String?
+    public let identifier: String?
+    public let value: String?
+    public let frame: WindowFrame?
+    public let isEnabled: Bool?
+    public let isFocused: Bool?
+    public let supportedActions: [String]
+    public let isValueSettable: Bool
+
+    init(
+        index: Int,
+        parentIndex: Int?,
+        childIndices: [Int],
+        depth: Int,
+        role: String?,
+        subrole: String?,
+        title: String?,
+        elementDescription: String?,
+        help: String?,
+        identifier: String?,
+        value: String?,
+        frame: WindowFrame?,
+        isEnabled: Bool?,
+        isFocused: Bool?,
+        supportedActions: [String],
+        isValueSettable: Bool
+    ) {
+        self.index = index
+        self.parentIndex = parentIndex
+        self.childIndices = childIndices
+        self.depth = depth
+        self.role = role
+        self.subrole = subrole
+        self.title = title
+        self.elementDescription = elementDescription
+        self.help = help
+        self.identifier = identifier
+        self.value = value
+        self.frame = frame
+        self.isEnabled = isEnabled
+        self.isFocused = isFocused
+        self.supportedActions = supportedActions
+        self.isValueSettable = isValueSettable
+    }
+}
+
+public struct AccessibilityTreeSnapshot: Codable, Equatable, Sendable {
+    public let id: UUID
+    public let application: AccessibilityApplicationTarget
+    public let limits: AccessibilityTreeLimits
+    public let rootIndex: Int?
+    public let elements: [AccessibilityTreeElement]
+    public let wasTruncated: Bool
+
+    init(
+        id: UUID,
+        application: AccessibilityApplicationTarget,
+        limits: AccessibilityTreeLimits,
+        rootIndex: Int?,
+        elements: [AccessibilityTreeElement],
+        wasTruncated: Bool
+    ) {
+        self.id = id
+        self.application = application
+        self.limits = limits
+        self.rootIndex = rootIndex
+        self.elements = elements
+        self.wasTruncated = wasTruncated
+    }
+
+    public func element(at index: Int) -> AccessibilityTreeElement? {
+        guard elements.indices.contains(index), elements[index].index == index else {
+            return nil
+        }
+        return elements[index]
+    }
+}
+
+final class AccessibilityElementHandle {
+    let storage: AnyObject
+
+    init(_ storage: AnyObject) {
+        self.storage = storage
+    }
+}
+
+struct AccessibilityElementDescription {
+    let role: String?
+    let subrole: String?
+    let title: String?
+    let elementDescription: String?
+    let help: String?
+    let identifier: String?
+    let value: String?
+    let frame: WindowFrame?
+    let isEnabled: Bool?
+    let isFocused: Bool?
+    let supportedActions: [String]
+    let isValueSettable: Bool
+    let wasTruncated: Bool
+}
+
+struct AccessibilityChildBatch {
+    let elements: [AccessibilityElementHandle]
+    let wasTruncated: Bool
+}
+
+protocol AccessibilityTreeRuntime {
+    func applicationElement(processIdentifier: Int32) throws -> AccessibilityElementHandle
+    func describe(
+        _ element: AccessibilityElementHandle,
+        limits: AccessibilityTreeLimits
+    ) throws -> AccessibilityElementDescription
+    func children(
+        of element: AccessibilityElementHandle,
+        limit: Int
+    ) throws -> AccessibilityChildBatch
+    func representsSameElement(
+        _ lhs: AccessibilityElementHandle,
+        _ rhs: AccessibilityElementHandle
+    ) -> Bool
+    func identityHash(for element: AccessibilityElementHandle) -> Int
+    func supportedActions(for element: AccessibilityElementHandle) throws -> [String]
+    func perform(action: String, on element: AccessibilityElementHandle) throws
+    func isValueSettable(on element: AccessibilityElementHandle) throws -> Bool
+    func set(value: AccessibilitySetValue, on element: AccessibilityElementHandle) throws
+}
+
+struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
+    func applicationElement(processIdentifier: Int32) throws -> AccessibilityElementHandle {
+        AccessibilityElementHandle(AXUIElementCreateApplication(processIdentifier))
+    }
+
+    func describe(
+        _ element: AccessibilityElementHandle,
+        limits: AccessibilityTreeLimits
+    ) throws -> AccessibilityElementDescription {
+        let element = try axElement(from: element)
+        let role = try boundedString(attribute: kAXRoleAttribute, from: element, limit: limits.maxTextLength)
+        let subrole = try boundedString(attribute: kAXSubroleAttribute, from: element, limit: limits.maxTextLength)
+        let title = try boundedString(attribute: kAXTitleAttribute, from: element, limit: limits.maxTextLength)
+        let description = try boundedString(
+            attribute: kAXDescriptionAttribute,
+            from: element,
+            limit: limits.maxTextLength
+        )
+        let help = try boundedString(attribute: kAXHelpAttribute, from: element, limit: limits.maxTextLength)
+        let identifier = try boundedString(
+            attribute: kAXIdentifierAttribute,
+            from: element,
+            limit: limits.maxTextLength
+        )
+        let value = try boundedValue(attribute: kAXValueAttribute, from: element, limit: limits.maxTextLength)
+        let actions = try actionNames(for: element)
+        let boundedActions = Array(actions.prefix(limits.maxActionsPerElement))
+
+        return AccessibilityElementDescription(
+            role: role.value,
+            subrole: subrole.value,
+            title: title.value,
+            elementDescription: description.value,
+            help: help.value,
+            identifier: identifier.value,
+            value: value.value,
+            frame: try frame(of: element),
+            isEnabled: try bool(attribute: kAXEnabledAttribute, from: element),
+            isFocused: try bool(attribute: kAXFocusedAttribute, from: element),
+            supportedActions: boundedActions,
+            isValueSettable: try attributeIsSettable(kAXValueAttribute, on: element),
+            wasTruncated: role.wasTruncated
+                || subrole.wasTruncated
+                || title.wasTruncated
+                || description.wasTruncated
+                || help.wasTruncated
+                || identifier.wasTruncated
+                || value.wasTruncated
+                || actions.count > boundedActions.count
+        )
+    }
+
+    func children(
+        of element: AccessibilityElementHandle,
+        limit: Int
+    ) throws -> AccessibilityChildBatch {
+        let element = try axElement(from: element)
+        var count: CFIndex = 0
+        let countResult = AXUIElementGetAttributeValueCount(
+            element,
+            kAXChildrenAttribute as CFString,
+            &count
+        )
+        switch countResult {
+        case .success:
+            break
+        case .attributeUnsupported, .noValue:
+            return AccessibilityChildBatch(elements: [], wasTruncated: false)
+        default:
+            throw axFailure(countResult, operation: "count AXChildren")
+        }
+
+        let requestedCount = min(max(0, limit), count)
+        guard requestedCount > 0 else {
+            return AccessibilityChildBatch(elements: [], wasTruncated: count > 0)
+        }
+
+        var values: CFArray?
+        let copyResult = AXUIElementCopyAttributeValues(
+            element,
+            kAXChildrenAttribute as CFString,
+            0,
+            requestedCount,
+            &values
+        )
+        try requireSuccess(copyResult, operation: "read AXChildren")
+
+        let handles = (values as? [AnyObject] ?? []).compactMap { value -> AccessibilityElementHandle? in
+            guard CFGetTypeID(value) == AXUIElementGetTypeID() else {
+                return nil
+            }
+            return AccessibilityElementHandle(value)
+        }
+        return AccessibilityChildBatch(
+            elements: handles,
+            wasTruncated: count > requestedCount || handles.count < requestedCount
+        )
+    }
+
+    func representsSameElement(
+        _ lhs: AccessibilityElementHandle,
+        _ rhs: AccessibilityElementHandle
+    ) -> Bool {
+        guard
+            CFGetTypeID(lhs.storage) == AXUIElementGetTypeID(),
+            CFGetTypeID(rhs.storage) == AXUIElementGetTypeID()
+        else {
+            return false
+        }
+        return CFEqual(lhs.storage, rhs.storage)
+    }
+
+    func identityHash(for element: AccessibilityElementHandle) -> Int {
+        Int(truncatingIfNeeded: CFHash(element.storage))
+    }
+
+    func supportedActions(for element: AccessibilityElementHandle) throws -> [String] {
+        try actionNames(for: axElement(from: element))
+    }
+
+    func perform(action: String, on element: AccessibilityElementHandle) throws {
+        let result = AXUIElementPerformAction(try axElement(from: element), action as CFString)
+        try requireSuccess(result, operation: "perform \(action)")
+    }
+
+    func isValueSettable(on element: AccessibilityElementHandle) throws -> Bool {
+        try attributeIsSettable(kAXValueAttribute, on: axElement(from: element))
+    }
+
+    func set(value: AccessibilitySetValue, on element: AccessibilityElementHandle) throws {
+        let rawValue: CFTypeRef
+        switch value {
+        case let .text(text):
+            rawValue = text as CFString
+        case let .boolean(boolean):
+            rawValue = boolean as CFBoolean
+        case let .number(number):
+            rawValue = number as CFNumber
+        }
+        let result = AXUIElementSetAttributeValue(
+            try axElement(from: element),
+            kAXValueAttribute as CFString,
+            rawValue
+        )
+        try requireSuccess(result, operation: "set AXValue")
+    }
+
+    private func axElement(from handle: AccessibilityElementHandle) throws -> AXUIElement {
+        guard CFGetTypeID(handle.storage) == AXUIElementGetTypeID() else {
+            throw AutomationError.unexpectedAttributeType(attribute: "AXUIElement")
+        }
+        return unsafeDowncast(handle.storage, to: AXUIElement.self)
+    }
+
+    private func actionNames(for element: AXUIElement) throws -> [String] {
+        var names: CFArray?
+        let result = AXUIElementCopyActionNames(element, &names)
+        switch result {
+        case .success:
+            return names as? [String] ?? []
+        case .attributeUnsupported, .noValue:
+            return []
+        default:
+            throw axFailure(result, operation: "list supported actions")
+        }
+    }
+
+    private func attributeIsSettable(_ attribute: String, on element: AXUIElement) throws -> Bool {
+        var settable: DarwinBoolean = false
+        let result = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
+        switch result {
+        case .success:
+            return settable.boolValue
+        case .attributeUnsupported, .noValue:
+            return false
+        default:
+            throw axFailure(result, operation: "check whether \(attribute) is settable")
+        }
+    }
+
+    private func frame(of element: AXUIElement) throws -> WindowFrame? {
+        guard
+            let positionValue = try copyAttribute(kAXPositionAttribute, from: element),
+            let sizeValue = try copyAttribute(kAXSizeAttribute, from: element),
+            CFGetTypeID(positionValue) == AXValueGetTypeID(),
+            CFGetTypeID(sizeValue) == AXValueGetTypeID()
+        else {
+            return nil
+        }
+
+        let positionAXValue = unsafeDowncast(positionValue, to: AXValue.self)
+        let sizeAXValue = unsafeDowncast(sizeValue, to: AXValue.self)
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard
+            AXValueGetValue(positionAXValue, .cgPoint, &point),
+            AXValueGetValue(sizeAXValue, .cgSize, &size),
+            point.x.isFinite,
+            point.y.isFinite,
+            size.width.isFinite,
+            size.height.isFinite
+        else {
+            return nil
+        }
+        return WindowFrame(x: point.x, y: point.y, width: size.width, height: size.height)
+    }
+
+    private func bool(attribute: String, from element: AXUIElement) throws -> Bool? {
+        guard let value = try copyAttribute(attribute, from: element) else {
+            return nil
+        }
+        if CFGetTypeID(value) == CFBooleanGetTypeID() {
+            return CFBooleanGetValue(unsafeDowncast(value, to: CFBoolean.self))
+        }
+        if CFGetTypeID(value) == CFNumberGetTypeID() {
+            return unsafeDowncast(value, to: CFNumber.self) as NSNumber != 0
+        }
+        return nil
+    }
+
+    private func boundedString(
+        attribute: String,
+        from element: AXUIElement,
+        limit: Int
+    ) throws -> (value: String?, wasTruncated: Bool) {
+        guard let value = try copyAttribute(attribute, from: element) else {
+            return (nil, false)
+        }
+        guard CFGetTypeID(value) == CFStringGetTypeID(), let string = value as? String else {
+            return (nil, false)
+        }
+        return bound(string, limit: limit)
+    }
+
+    private func boundedValue(
+        attribute: String,
+        from element: AXUIElement,
+        limit: Int
+    ) throws -> (value: String?, wasTruncated: Bool) {
+        guard let value = try copyAttribute(attribute, from: element) else {
+            return (nil, false)
+        }
+
+        let rendered: String?
+        switch CFGetTypeID(value) {
+        case CFStringGetTypeID():
+            rendered = value as? String
+        case CFBooleanGetTypeID():
+            rendered = CFBooleanGetValue(unsafeDowncast(value, to: CFBoolean.self)) ? "true" : "false"
+        case CFNumberGetTypeID():
+            rendered = String(describing: unsafeDowncast(value, to: CFNumber.self) as NSNumber)
+        default:
+            rendered = nil
+        }
+        guard let rendered else {
+            return (nil, false)
+        }
+        return bound(rendered, limit: limit)
+    }
+
+    private func bound(_ value: String, limit: Int) -> (value: String?, wasTruncated: Bool) {
+        guard value.count > limit else {
+            return (value, false)
+        }
+        return (String(value.prefix(limit)), true)
+    }
+
+    private func copyAttribute(_ attribute: String, from element: AXUIElement) throws -> CFTypeRef? {
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        switch result {
+        case .success:
+            return value
+        case .attributeUnsupported, .noValue:
+            return nil
+        default:
+            throw axFailure(result, operation: "read \(attribute)")
+        }
+    }
+
+    private func requireSuccess(_ result: AXError, operation: String) throws {
+        guard result == .success else {
+            throw axFailure(result, operation: operation)
+        }
+    }
+
+    private func axFailure(_ result: AXError, operation: String) -> AutomationError {
+        .accessibilityFailure(operation: operation, code: result.rawValue)
+    }
+}
+
+/// A serial, snapshot-scoped Accessibility session for one selected process.
+///
+/// Element indices are deterministic preorder positions within one snapshot.
+/// Capturing a new snapshot invalidates the previous one. Every attempted
+/// mutation invalidates the current snapshot, requiring the caller to inspect
+/// fresh UI before issuing another action.
+public final class AccessibilitySession {
+    private struct ActiveSnapshot {
+        let snapshot: AccessibilityTreeSnapshot
+        let handles: [AccessibilityElementHandle]
+    }
+
+    public let application: AccessibilityApplicationTarget
+
+    private let runtime: any AccessibilityTreeRuntime
+    private let accessibilityCheck: () -> Bool
+    private var activeSnapshot: ActiveSnapshot?
+
+    public convenience init(application: RunningApplicationInfo) {
+        self.init(target: AccessibilityApplicationTarget(application: application))
+    }
+
+    public convenience init(
+        processIdentifier: Int32,
+        bundleIdentifier: String? = nil,
+        applicationName: String? = nil
+    ) {
+        self.init(
+            target: AccessibilityApplicationTarget(
+                processIdentifier: processIdentifier,
+                bundleIdentifier: bundleIdentifier,
+                applicationName: applicationName
+            )
+        )
+    }
+
+    public init(target: AccessibilityApplicationTarget) {
+        application = target
+        runtime = SystemAccessibilityTreeRuntime()
+        accessibilityCheck = { AXIsProcessTrusted() }
+    }
+
+    init(
+        target: AccessibilityApplicationTarget,
+        runtime: any AccessibilityTreeRuntime,
+        accessibilityCheck: @escaping () -> Bool
+    ) {
+        application = target
+        self.runtime = runtime
+        self.accessibilityCheck = accessibilityCheck
+    }
+
+    public func snapshot(
+        limits: AccessibilityTreeLimits = .agentDefault
+    ) throws -> AccessibilityTreeSnapshot {
+        activeSnapshot = nil
+        guard accessibilityCheck() else {
+            throw AutomationError.permissionNotGranted(.accessibility)
+        }
+
+        let root = try runtime.applicationElement(processIdentifier: application.processIdentifier)
+        var handles = [AccessibilityElementHandle]()
+        var seenHandlesByHash = [Int: [AccessibilityElementHandle]]()
+        var elements = [AccessibilityTreeElement]()
+        var wasTruncated = false
+
+        @discardableResult
+        func visit(
+            _ handle: AccessibilityElementHandle,
+            parentIndex: Int?,
+            depth: Int
+        ) throws -> Int? {
+            guard elements.count < limits.maxElements else {
+                wasTruncated = true
+                return nil
+            }
+            let identityHash = runtime.identityHash(for: handle)
+            if seenHandlesByHash[identityHash, default: []].contains(where: {
+                runtime.representsSameElement($0, handle)
+            }) {
+                return nil
+            }
+
+            let description = try runtime.describe(handle, limits: limits)
+            let index = elements.count
+            handles.append(handle)
+            seenHandlesByHash[identityHash, default: []].append(handle)
+            elements.append(
+                AccessibilityTreeElement(
+                    index: index,
+                    parentIndex: parentIndex,
+                    childIndices: [],
+                    depth: depth,
+                    role: description.role,
+                    subrole: description.subrole,
+                    title: description.title,
+                    elementDescription: description.elementDescription,
+                    help: description.help,
+                    identifier: description.identifier,
+                    value: description.value,
+                    frame: description.frame,
+                    isEnabled: description.isEnabled,
+                    isFocused: description.isFocused,
+                    supportedActions: description.supportedActions,
+                    isValueSettable: description.isValueSettable
+                )
+            )
+            wasTruncated = wasTruncated || description.wasTruncated
+
+            let childLimit = depth < limits.maxDepth ? limits.maxChildrenPerElement : 0
+            let childBatch = try runtime.children(of: handle, limit: childLimit)
+            wasTruncated = wasTruncated || childBatch.wasTruncated
+
+            var childIndices = [Int]()
+            if depth < limits.maxDepth {
+                for child in childBatch.elements {
+                    guard elements.count < limits.maxElements else {
+                        wasTruncated = true
+                        break
+                    }
+                    if let childIndex = try visit(child, parentIndex: index, depth: depth + 1) {
+                        childIndices.append(childIndex)
+                    }
+                }
+            }
+
+            let current = elements[index]
+            elements[index] = AccessibilityTreeElement(
+                index: current.index,
+                parentIndex: current.parentIndex,
+                childIndices: childIndices,
+                depth: current.depth,
+                role: current.role,
+                subrole: current.subrole,
+                title: current.title,
+                elementDescription: current.elementDescription,
+                help: current.help,
+                identifier: current.identifier,
+                value: current.value,
+                frame: current.frame,
+                isEnabled: current.isEnabled,
+                isFocused: current.isFocused,
+                supportedActions: current.supportedActions,
+                isValueSettable: current.isValueSettable
+            )
+            return index
+        }
+
+        let rootIndex = try visit(root, parentIndex: nil, depth: 0)
+        let id = UUID()
+        let snapshot = AccessibilityTreeSnapshot(
+            id: id,
+            application: application,
+            limits: limits,
+            rootIndex: rootIndex,
+            elements: elements,
+            wasTruncated: wasTruncated
+        )
+        activeSnapshot = ActiveSnapshot(
+            snapshot: snapshot,
+            handles: handles
+        )
+        return snapshot
+    }
+
+    public func perform(
+        _ action: SemanticAXAction,
+        at index: Int,
+        in snapshot: AccessibilityTreeSnapshot
+    ) throws {
+        try requirePermission()
+        let resolved = try resolve(index: index, snapshot: snapshot)
+        activeSnapshot = nil
+        guard resolved.element.supportedActions.contains(action.rawValue) else {
+            throw AutomationError.unsupportedAction(action.rawValue)
+        }
+        let currentActions = try runtime.supportedActions(for: resolved.handle)
+        guard currentActions.contains(action.rawValue) else {
+            throw AutomationError.unsupportedAction(action.rawValue)
+        }
+
+        try runtime.perform(action: action.rawValue, on: resolved.handle)
+    }
+
+    public func setValue(
+        _ value: AccessibilitySetValue,
+        at index: Int,
+        in snapshot: AccessibilityTreeSnapshot
+    ) throws {
+        try requirePermission()
+        let resolved = try resolve(index: index, snapshot: snapshot)
+        activeSnapshot = nil
+        guard resolved.element.isValueSettable else {
+            throw AutomationError.attributeNotSettable(kAXValueAttribute as String)
+        }
+        if case let .text(text) = value, text.count > resolved.limits.maxTextLength {
+            throw AutomationError.accessibilityValueTooLong(
+                maximum: resolved.limits.maxTextLength,
+                actual: text.count
+            )
+        }
+        guard try runtime.isValueSettable(on: resolved.handle) else {
+            throw AutomationError.attributeNotSettable(kAXValueAttribute as String)
+        }
+
+        try runtime.set(value: value, on: resolved.handle)
+    }
+
+    public func invalidateSnapshot() {
+        activeSnapshot = nil
+    }
+
+    private func resolve(
+        index: Int,
+        snapshot: AccessibilityTreeSnapshot
+    ) throws -> (
+        element: AccessibilityTreeElement,
+        handle: AccessibilityElementHandle,
+        limits: AccessibilityTreeLimits
+    ) {
+        guard let activeSnapshot, activeSnapshot.snapshot == snapshot else {
+            throw AutomationError.staleAccessibilitySnapshot
+        }
+        guard
+            activeSnapshot.snapshot.elements.indices.contains(index),
+            activeSnapshot.handles.indices.contains(index),
+            activeSnapshot.snapshot.elements[index].index == index
+        else {
+            throw AutomationError.accessibilityElementIndexNotFound(index)
+        }
+        return (
+            activeSnapshot.snapshot.elements[index],
+            activeSnapshot.handles[index],
+            activeSnapshot.snapshot.limits
+        )
+    }
+
+    private func requirePermission() throws {
+        guard accessibilityCheck() else {
+            activeSnapshot = nil
+            throw AutomationError.permissionNotGranted(.accessibility)
+        }
+    }
+}
