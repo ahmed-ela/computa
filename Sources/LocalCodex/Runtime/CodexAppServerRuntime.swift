@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import AutomationCore
 @preconcurrency import Foundation
 
@@ -145,12 +146,210 @@ enum ComputerToolArgumentContract {
     }
 }
 
+enum ComputerV2TargetContract {
+    enum TargetRegionError: Error, Equatable {
+        case invalidGeometry
+        case pointOutsideWindow
+    }
+
+    private static func sameFrame(
+        _ left: WindowFrame,
+        _ right: WindowFrame,
+        tolerance: Double
+    ) -> Bool {
+        [left.x, left.y, left.width, left.height,
+         right.x, right.y, right.width, right.height].allSatisfy(\.isFinite)
+            && abs(left.x - right.x) <= tolerance
+            && abs(left.y - right.y) <= tolerance
+            && abs(left.width - right.width) <= tolerance
+            && abs(left.height - right.height) <= tolerance
+    }
+
+    static func isRunning(
+        _ bound: ActivatedApplication,
+        in applications: [RunningApplicationInfo]
+    ) -> Bool {
+        applications.filter {
+            $0.processIdentifier == bound.processIdentifier
+                && $0.bundleIdentifier == bound.bundleIdentifier
+                && !$0.isTerminated
+        }.count == 1
+    }
+
+    static func contains(_ point: ScreenPoint, in frame: WindowFrame) -> Bool {
+        frame.x.isFinite && frame.y.isFinite
+            && frame.width.isFinite && frame.height.isFinite
+            && frame.width > 0 && frame.height > 0
+            && (frame.x + frame.width).isFinite
+            && (frame.y + frame.height).isFinite
+            && point.x.isFinite && point.y.isFinite
+            && point.x >= frame.x && point.x < frame.x + frame.width
+            && point.y >= frame.y && point.y < frame.y + frame.height
+    }
+
+    /// A bounded neighborhood of the intended input target in the specified
+    /// capture frame. V2 uses it for both the window image and the separate
+    /// downscaled display baseline. This rejects a changed button or
+    /// same-sized navigation without treating a
+    /// clock or animation elsewhere in the window as a changed target.
+    static func targetPixelRegion(
+        for points: [ScreenPoint],
+        windowFrame: WindowFrame,
+        imageWidth: Int,
+        imageHeight: Int,
+        radius: Int = 128
+    ) throws -> CGRect {
+        guard !points.isEmpty,
+              imageWidth > 0, imageHeight > 0,
+              radius > 0,
+              windowFrame.x.isFinite, windowFrame.y.isFinite,
+              windowFrame.width.isFinite, windowFrame.height.isFinite,
+              windowFrame.width > 0, windowFrame.height > 0,
+              (windowFrame.x + windowFrame.width).isFinite,
+              (windowFrame.y + windowFrame.height).isFinite
+        else { throw TargetRegionError.invalidGeometry }
+
+        var minX = imageWidth
+        var minY = imageHeight
+        var maxX = 0
+        var maxY = 0
+        for point in points {
+            guard contains(point, in: windowFrame) else {
+                throw TargetRegionError.pointOutsideWindow
+            }
+            let imageX = (point.x - windowFrame.x) * Double(imageWidth) / windowFrame.width
+            let imageY = (point.y - windowFrame.y) * Double(imageHeight) / windowFrame.height
+            guard imageX.isFinite, imageY.isFinite,
+                  imageX >= 0, imageY >= 0,
+                  imageX < Double(imageWidth), imageY < Double(imageHeight)
+            else { throw TargetRegionError.invalidGeometry }
+            let x = Int(imageX.rounded(.down))
+            let y = Int(imageY.rounded(.down))
+            minX = min(minX, max(0, x - radius))
+            minY = min(minY, max(0, y - radius))
+            maxX = max(maxX, min(imageWidth, x + radius + 1))
+            maxY = max(maxY, min(imageHeight, y + radius + 1))
+        }
+        guard maxX > minX, maxY > minY else {
+            throw TargetRegionError.invalidGeometry
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    static func isSameFocusedWindow(
+        _ current: FocusedWindowInfo?,
+        as capturedFrame: WindowFrame,
+        for bound: ActivatedApplication
+    ) -> Bool {
+        guard let current,
+              current.processIdentifier == bound.processIdentifier,
+              current.bundleIdentifier == bound.bundleIdentifier,
+              let frame = current.frame
+        else { return false }
+        return sameFrame(frame, capturedFrame, tolerance: 2)
+    }
+
+    static func matchingWindow(
+        for focused: FocusedWindowInfo,
+        in windows: [CapturableWindowInfo]
+    ) -> CapturableWindowInfo? {
+        guard let frame = focused.frame else { return nil }
+        let matches = windows.filter {
+            $0.isOnScreen
+                && $0.owningProcessIdentifier == focused.processIdentifier
+                && $0.owningBundleIdentifier == focused.bundleIdentifier
+                && sameFrame($0.frame, frame, tolerance: 8)
+        }
+        // AX and ScreenCaptureKit can describe the same Chrome window with
+        // different titles. Cross-API title equality is not a reliable
+        // identity check; require a unique PID/bundle/frame match instead.
+        // Subsequent checks retain the SC window ID, fingerprint, and exact
+        // focused AX window identity before any approved input.
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    static func isSameWindow(
+        _ current: CapturableWindowInfo?,
+        as captured: CapturableWindowInfo
+    ) -> Bool {
+        guard let current else { return false }
+        return current.windowID == captured.windowID
+            && current.isOnScreen
+            && current.owningProcessIdentifier == captured.owningProcessIdentifier
+            && current.owningBundleIdentifier == captured.owningBundleIdentifier
+            && (current.title == nil || captured.title == nil || current.title == captured.title)
+            && sameFrame(current.frame, captured.frame, tolerance: 2)
+    }
+}
+
+enum LocalThreadContext: Equatable, Sendable {
+    case constrained
+    case expanded
+
+    static func forModel(_ modelID: String) -> Self {
+        switch modelID {
+        case "lmstudio-community/Qwen3.5-9B-MLX-4bit",
+             "lmstudio-community/Qwen3.5-4B-MLX-4bit":
+            .expanded
+        default:
+            // Keep the validated 27B limit, and use it for unvalidated models.
+            .constrained
+        }
+    }
+
+    var contextWindow: Int {
+        switch self {
+        case .constrained: 4096
+        case .expanded: 8192
+        }
+    }
+
+    var autoCompactTokenLimit: Int {
+        switch self {
+        case .constrained: 3584
+        case .expanded: 7168
+        }
+    }
+
+    func supportsModelSwitch(to modelID: String) -> Bool {
+        self == Self.forModel(modelID)
+    }
+}
+
 /// A small native client for the open-source Codex App Server protocol.
 ///
 /// App Server owns the agent loop, thread state, MCP startup, sandboxing, and
 /// tool execution. This adapter keeps JSON-RPC out of the SwiftUI layer and
 /// deliberately declines approval requests until the GUI presents them.
 final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
+    static func localThreadConfig(for modelID: String) -> [String: Any] {
+        let context = LocalThreadContext.forModel(modelID)
+        return [
+            "memories.use_memories": false,
+            "skills.include_instructions": false,
+            "include_permissions_instructions": false,
+            "include_apps_instructions": false,
+            "include_environment_context": false,
+            "features.plugins": false,
+            "features.apps": false,
+            "features.browser_use": false,
+            "features.computer_use": false,
+            "features.goals": false,
+            "features.image_generation": false,
+            "features.in_app_browser": false,
+            "features.multi_agent": false,
+            "features.multi_agent_v2": false,
+            "features.shell_tool": false,
+            "features.sleep_tool": false,
+            "features.unified_exec": false,
+            "features.view_image": false,
+            "features.workspace_dependencies": false,
+            "web_search": "disabled",
+            "model_context_window": context.contextWindow,
+            "model_auto_compact_token_limit": context.autoCompactTokenLimit,
+        ]
+    }
+
     struct Configuration: Sendable {
         var executablePath: String
         var modelProvider: String
@@ -180,11 +379,11 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
             return Configuration(
                 executablePath: "/Applications/ChatGPT.app/Contents/Resources/codex",
                 modelProvider: "lmstudio",
-                model: "mlx-community/Qwen3.8-27B-4bit",
+                model: LocalModelCatalog.defaultModelID,
                 workspacePath: documents,
                 codexHomePath: codexHome.path,
                 baseInstructions: """
-                You are LocalCodex, a concise local desktop agent. Follow the user's request precisely. For computer use, observe with an Accessibility snapshot or screenshot, act only through the provided desktop tools, then observe again. Prefer semantic Accessibility actions over coordinates. Google Chrome's bundle identifier is com.google.Chrome. Respect approval gates and never infer success from an action acknowledgement.
+                You are LocalCodex, a concise local desktop agent. Follow the user's request precisely. For computer use, observe with an Accessibility snapshot or screenshot, act only through the provided desktop tools, then observe again. Prefer semantic Accessibility actions over coordinates. When both visual context and an exact control are needed, use computer_v2_capture with include_accessibility=true; its AX snapshot_id supports a semantic action, while capture_id and image-pixel coordinates are only for image-space actions. AX screen frames are not image-pixel coordinates. Google Chrome's bundle identifier is com.google.Chrome. Respect approval gates and never infer success from an action acknowledgement.
                 """,
                 reasoningEffort: "medium"
             )
@@ -211,8 +410,12 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         eventStream
     }
 
-    func submit(prompt: String, toTaskID taskID: AgentTask.ID) async throws {
-        try await core.submit(prompt: prompt, taskID: taskID)
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {
+        try await core.submit(prompt: prompt, taskID: taskID, modelID: modelID)
+    }
+
+    func interrupt(taskID: AgentTask.ID) async throws {
+        try await core.interrupt(taskID: taskID)
     }
 
     func resolveApproval(requestID: String, approved: Bool) async throws {
@@ -243,6 +446,27 @@ private extension CodexAppServerRuntime {
         private struct ActiveAccessibilitySession {
             let session: AccessibilitySession
             let snapshot: AccessibilityTreeSnapshot
+        }
+
+        private struct ComputerV2Capture {
+            let mapper: ScreenshotCoordinateMapper
+            let displayID: UInt32
+            let displayFrame: WindowFrame
+            let displayImage: CGImage
+            let showsCursor: Bool
+            let focusedWindowFrame: WindowFrame
+            let focusedWindowIdentity: FocusedWindowIdentity
+            let window: CapturableWindowInfo
+            let windowImage: CGImage
+            let fingerprint: WindowCaptureFingerprint
+        }
+
+        private struct ComputerV2Session {
+            let epoch: UUID
+            var application: ActivatedApplication?
+            var accessibility: ActiveAccessibilitySession?
+            var accessibilityWindowIdentity: FocusedWindowIdentity?
+            var capture: ComputerV2Capture?
         }
 
         private enum DesktopInputAction {
@@ -289,6 +513,20 @@ private extension CodexAppServerRuntime {
                     return "Type \(text.count) characters"
                 }
             }
+
+            var pointerTargets: [ScreenPoint] {
+                switch self {
+                case .move(let point), .click(let point),
+                     .doubleClick(let point), .rightClick(let point):
+                    return [point]
+                case .scroll(let point, _, _):
+                    return [point]
+                case .drag(let start, let end, _):
+                    return [start, end]
+                case .keypress, .type:
+                    return []
+                }
+            }
         }
 
         enum RuntimeError: LocalizedError {
@@ -296,6 +534,7 @@ private extension CodexAppServerRuntime {
             case serverStopped
             case malformedResponse(String)
             case serverError(String)
+            case contextChangeRequiresNewTask
 
             var errorDescription: String? {
                 switch self {
@@ -307,6 +546,8 @@ private extension CodexAppServerRuntime {
                     "Codex App Server returned an invalid response: \(detail)"
                 case .serverError(let detail):
                     detail
+                case .contextChangeRequiresNewTask:
+                    "Codex App Server cannot change this task's context window while its thread is loaded. Create a new task for the selected model."
                 }
             }
         }
@@ -325,11 +566,16 @@ private extension CodexAppServerRuntime {
         private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
         private var threadForTask: [AgentTask.ID: String] = [:]
         private var taskForThread: [String: AgentTask.ID] = [:]
-        private var resumedThreads: Set<String> = []
+        private var turnForTask: [AgentTask.ID: String] = [:]
+        private var contextForLoadedThread: [String: LocalThreadContext] = [:]
         private var lastErrorMessageForTask: [AgentTask.ID: String] = [:]
         private var pendingServerApprovals: [String: PendingServerApproval] = [:]
         private var pendingComputerUseApprovals: [String: CheckedContinuation<Bool, Never>] = [:]
+        private var computerApprovalTask: [String: AgentTask.ID] = [:]
         private var accessibilitySessions: [Int32: ActiveAccessibilitySession] = [:]
+        private var computerV2Sessions: [AgentTask.ID: ComputerV2Session] = [:]
+        private var computerV2InFlight: [AgentTask.ID: UUID] = [:]
+        private var computerGlobalInFlight: UUID?
         private var isReady = false
 
         init(
@@ -391,49 +637,56 @@ private extension CodexAppServerRuntime {
             events.yield(.connectionChanged(.connected(provider: "Codex App Server · LM Studio selected")))
         }
 
-        func submit(prompt: String, taskID: AgentTask.ID) async throws {
+        func submit(prompt: String, taskID: AgentTask.ID, modelID: String) async throws {
             try await start()
+            let requestedContext = LocalThreadContext.forModel(modelID)
 
             let threadID: String
             if let existing = threadForTask[taskID] {
                 threadID = existing
-                if !resumedThreads.contains(threadID) {
+                if let loadedContext = contextForLoadedThread[threadID] {
+                    // App Server ignores config overrides when thread/resume
+                    // rejoins a loaded thread; turn/start has no config field.
+                    guard loadedContext.supportsModelSwitch(to: modelID) else {
+                        throw RuntimeError.contextChangeRequiresNewTask
+                    }
+                } else {
                     _ = try await request(
                         method: "thread/resume",
                         params: [
                             "threadId": threadID,
                             "modelProvider": configuration.modelProvider,
-                            "model": configuration.model,
+                            "model": modelID,
                             "cwd": configuration.workspacePath,
                             "sandbox": "workspace-write",
                             "approvalPolicy": "on-request",
                             "baseInstructions": configuration.baseInstructions,
-                            "config": localThreadConfig(),
+                            "config": CodexAppServerRuntime.localThreadConfig(for: modelID),
                             "excludeTurns": true,
                         ]
                     )
-                    resumedThreads.insert(threadID)
+                    contextForLoadedThread[threadID] = requestedContext
                 }
             } else {
                 let response = try await request(
                     method: "thread/start",
                     params: [
                         "modelProvider": configuration.modelProvider,
-                        "model": configuration.model,
+                        "model": modelID,
                         "cwd": configuration.workspacePath,
                         "sandbox": "workspace-write",
                         "approvalPolicy": "on-request",
                         "ephemeral": false,
                         "threadSource": "local_codex",
                         "baseInstructions": configuration.baseInstructions,
-                        "config": localThreadConfig(),
+                        "config": CodexAppServerRuntime.localThreadConfig(for: modelID),
                         "dynamicTools": dynamicToolSpecs(),
                     ]
                 )
                 threadID = try parseThreadID(from: response)
                 threadForTask[taskID] = threadID
                 taskForThread[threadID] = taskID
-                resumedThreads.insert(threadID)
+                contextForLoadedThread[threadID] = requestedContext
 
                 let title = String(prompt.prefix(72))
                 _ = try? await request(
@@ -442,41 +695,57 @@ private extension CodexAppServerRuntime {
                 )
             }
 
-            _ = try await request(
+            // Bindings and screenshot coordinates are valid for one turn only.
+            // A resumed thread must observe and bind its target again.
+            computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID())
+
+            let turnResponse = try await request(
                 method: "turn/start",
                 params: [
                     "threadId": threadID,
                     "input": [["type": "text", "text": prompt]],
                     "effort": configuration.reasoningEffort,
+                    "model": modelID,
                 ]
             )
+            if let object = try JSONSerialization.jsonObject(with: turnResponse) as? [String: Any],
+               let result = object["result"] as? [String: Any],
+               let turn = result["turn"] as? [String: Any],
+               let turnID = turn["id"] as? String {
+                turnForTask[taskID] = turnID
+            }
         }
 
-        private func localThreadConfig() -> [String: Any] {
-            [
-                "memories.use_memories": false,
-                "skills.include_instructions": false,
-                "include_permissions_instructions": false,
-                "include_apps_instructions": false,
-                "include_environment_context": false,
-                "features.plugins": false,
-                "features.apps": false,
-                "features.browser_use": false,
-                "features.computer_use": false,
-                "features.goals": false,
-                "features.image_generation": false,
-                "features.in_app_browser": false,
-                "features.multi_agent": false,
-                "features.multi_agent_v2": false,
-                "features.shell_tool": false,
-                "features.sleep_tool": false,
-                "features.unified_exec": false,
-                "features.view_image": false,
-                "features.workspace_dependencies": false,
-                "web_search": "disabled",
-                "model_context_window": 4096,
-                "model_auto_compact_token_limit": 3584,
-            ]
+        func interrupt(taskID: AgentTask.ID) async throws {
+            guard let threadID = threadForTask[taskID],
+                  let turnID = turnForTask[taskID] else {
+                throw RuntimeError.serverError("This task has no active turn to stop.")
+            }
+
+            // Revoke the model's current desktop binding before waking any
+            // pending approval. A late dynamic-tool continuation then fails
+            // its epoch check rather than acting on a stopped turn.
+            computerV2Sessions.removeValue(forKey: taskID)
+            for requestID in computerApprovalTask.compactMap({ $0.value == taskID ? $0.key : nil }) {
+                computerApprovalTask.removeValue(forKey: requestID)
+                pendingComputerUseApprovals.removeValue(forKey: requestID)?.resume(returning: false)
+                events.yield(.approvalResolved(requestID: requestID))
+            }
+            let serverApprovalsToDecline = pendingServerApprovals.filter {
+                $0.value.request.taskID == taskID
+            }
+            for (requestID, approval) in serverApprovalsToDecline {
+                pendingServerApprovals.removeValue(forKey: requestID)
+                try? sendResponse(
+                    id: approval.serverRequestID,
+                    result: ["decision": "decline"]
+                )
+                events.yield(.approvalResolved(requestID: requestID))
+            }
+            _ = try await request(
+                method: "turn/interrupt",
+                params: ["threadId": threadID, "turnId": turnID]
+            )
         }
 
         func loadTasks() async throws -> [AgentTask] {
@@ -531,6 +800,7 @@ private extension CodexAppServerRuntime {
 
         func resolveApproval(requestID: String, approved: Bool) throws {
             if let continuation = pendingComputerUseApprovals.removeValue(forKey: requestID) {
+                computerApprovalTask.removeValue(forKey: requestID)
                 continuation.resume(returning: approved)
                 events.yield(.approvalResolved(requestID: requestID))
                 return
@@ -644,10 +914,17 @@ private extension CodexAppServerRuntime {
 
             switch method {
             case "turn/started":
+                if let turn = params["turn"] as? [String: Any],
+                   let turnID = turn["id"] as? String {
+                    turnForTask[taskID] = turnID
+                }
+                computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID())
                 lastErrorMessageForTask.removeValue(forKey: taskID)
                 events.yield(.taskStatusChanged(taskID: taskID, status: .running))
 
             case "turn/completed":
+                turnForTask.removeValue(forKey: taskID)
+                computerV2Sessions.removeValue(forKey: taskID)
                 let turn = params["turn"] as? [String: Any]
                 let status = turn?["status"] as? String
                 events.yield(.taskStatusChanged(
@@ -662,6 +939,7 @@ private extension CodexAppServerRuntime {
                 emitCompletedItem(item, type: type, taskID: taskID)
 
             case "error":
+                computerV2Sessions.removeValue(forKey: taskID)
                 let error = params["error"] as? [String: Any]
                 let message = error?["message"] as? String
                     ?? params["message"] as? String
@@ -853,32 +1131,10 @@ private extension CodexAppServerRuntime {
         }
 
         private func dynamicToolSpecs() -> [[String: Any]] {
-            return [
-                [
-                    "type": "function",
-                    "name": "computer",
-                    "description": "Observe or control macOS. Call with action and parameters: permission_status {}; open {bundle_id,url?} (Chrome is com.google.Chrome); apps {}; snapshot {process_id,query?} where query prioritizes matching labels/values; ax {process_id,snapshot_id,element_index,ax_action}; set_text {process_id,snapshot_id,element_index,text} (text max \(ComputerToolContract.maximumSemanticTextLength) characters); capture {display_id?,shows_cursor?}; move/click/double_click/right_click {process_id,x,y}; scroll {process_id,x,y,delta_x,delta_y}; drag {process_id,x,y,end_x,end_y,duration?}; keypress {process_id,key,modifiers?}; type {process_id,text}. Mutating actions require approval. Observe again after every action.",
-                    "inputSchema": [
-                        "type": "object",
-                        "properties": [
-                            "action": [
-                                "type": "string",
-                                "enum": [
-                                    "permission_status", "open", "apps", "snapshot", "ax", "set_text",
-                                    "capture", "move", "click", "double_click", "right_click", "scroll",
-                                    "drag", "keypress", "type",
-                                ],
-                            ],
-                            "parameters": [
-                                "type": "object",
-                                "additionalProperties": true,
-                            ],
-                        ],
-                        "required": ["action"],
-                        "additionalProperties": false,
-                    ],
-                ],
-            ]
+            // Existing rollouts retain their original `computer` definition on
+            // resume. New threads use a versioned contract so the model never
+            // has to carry a process ID from one call to the next.
+            ComputerV2ToolContract.specs
         }
 
         private func handleDynamicToolCall(
@@ -916,8 +1172,23 @@ private extension CodexAppServerRuntime {
             arguments: [String: Any],
             taskID: AgentTask.ID?
         ) async throws -> [[String: Any]] {
+            if tool.hasPrefix("computer_v2_") {
+                return try await executeComputerV2(tool, arguments: arguments, taskID: taskID)
+            }
             switch tool {
             case "computer":
+                guard computerGlobalInFlight == nil else {
+                    throw RuntimeError.serverError(
+                        "Another computer action is still pending. Try again after it completes."
+                    )
+                }
+                let operationID = UUID()
+                computerGlobalInFlight = operationID
+                defer {
+                    if computerGlobalInFlight == operationID {
+                        computerGlobalInFlight = nil
+                    }
+                }
                 let action = try requiredString("action", in: arguments)
                 var parameters = try ComputerToolArgumentContract.parameters(in: arguments)
                 let mappedTool: String
@@ -998,66 +1269,12 @@ private extension CodexAppServerRuntime {
 
             case "desktop_snapshot_app":
                 let processID = try requiredProcessID(arguments)
-                let preferredText: String?
-                if let rawQuery = arguments["query"] {
-                    guard let query = rawQuery as? String,
-                          !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                          query.count <= 200
-                    else {
-                        throw RuntimeError.malformedResponse(
-                            "query must be a non-empty string of at most 200 characters"
-                        )
-                    }
-                    preferredText = query
-                } else {
-                    preferredText = nil
-                }
-                let defaults = AccessibilityTreeLimits.agentDefault
-                // A query is useful only if the matching control is captured in
-                // the source tree. Search a larger bounded tree for targeted
-                // lookups while keeping their formatted output at 1K below.
-                let defaultElementLimit = preferredText == nil ? 240 : 1_000
-                let maximumElementLimit = preferredText == nil ? 400 : 1_000
-                let requestedElementLimit = (arguments["max_elements"] as? NSNumber)?.intValue
-                    ?? defaultElementLimit
-                let limits = try AccessibilityTreeLimits(
-                    maxDepth: (arguments["max_depth"] as? NSNumber)?.intValue ?? defaults.maxDepth,
-                    maxElements: min(requestedElementLimit, maximumElementLimit),
-                    maxChildrenPerElement: defaults.maxChildrenPerElement,
-                    maxActionsPerElement: 12,
-                    maxTextLength: ComputerToolContract.maximumSemanticTextLength
+                let result = try await makeAccessibilitySnapshot(
+                    processID: processID,
+                    arguments: arguments
                 )
-                let runningApplications = await MainActor.run {
-                    RunningApplicationCatalog().applications()
-                }
-                guard let target = ComputerToolContract.accessibilityTarget(
-                    processIdentifier: processID,
-                    runningApplications: runningApplications
-                ) else {
-                    throw RuntimeError.serverError(
-                        "The selected application process is no longer available. Call desktop_list_apps again."
-                    )
-                }
-                let session = AccessibilitySession(target: target)
-                let snapshot = try session.snapshot(limits: limits)
-                accessibilitySessions[processID] = ActiveAccessibilitySession(
-                    session: session,
-                    snapshot: snapshot
-                )
-                let formatter = AccessibilitySnapshotTextFormatter(
-                    elementLimit: limits.maxElements,
-                    fieldCharacterLimit: 72,
-                    actionLimit: 6,
-                    // A targeted lookup only needs the matching rows and a
-                    // little surrounding context. Two 1K targeted snapshots
-                    // leave enough of this model's real 4K window for an
-                    // act-and-observe-again cycle without forcing compaction.
-                    outputCharacterLimit: preferredText == nil ? 3_000 : 1_000,
-                    prioritizesRelevantElements: true,
-                    preferredText: preferredText,
-                    usesCompactElementLines: true
-                )
-                return [textContent(snapshot.formattedForModel(using: formatter))]
+                accessibilitySessions[processID] = result.active
+                return [textContent(result.text)]
 
             case "desktop_perform_action":
                 let processID = try requiredProcessID(arguments)
@@ -1229,6 +1446,991 @@ private extension CodexAppServerRuntime {
             }
         }
 
+        private func makeAccessibilitySnapshot(
+            processID: Int32,
+            arguments: [String: Any]
+        ) async throws -> (active: ActiveAccessibilitySession, text: String) {
+            let preferredText: String?
+            if let rawQuery = arguments["query"] {
+                guard let query = rawQuery as? String,
+                      !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      query.count <= 200
+                else {
+                    throw RuntimeError.malformedResponse(
+                        "query must be a non-empty string of at most 200 characters"
+                    )
+                }
+                preferredText = query
+            } else {
+                preferredText = nil
+            }
+            let defaults = AccessibilityTreeLimits.agentDefault
+            // Targeted lookups search a larger bounded tree but return less text.
+            let defaultElementLimit = preferredText == nil ? 240 : 1_000
+            let maximumElementLimit = preferredText == nil ? 400 : 1_000
+            let requestedElementLimit = (arguments["max_elements"] as? NSNumber)?.intValue
+                ?? defaultElementLimit
+            let limits = try AccessibilityTreeLimits(
+                maxDepth: (arguments["max_depth"] as? NSNumber)?.intValue ?? defaults.maxDepth,
+                maxElements: min(requestedElementLimit, maximumElementLimit),
+                maxChildrenPerElement: defaults.maxChildrenPerElement,
+                maxActionsPerElement: 12,
+                maxTextLength: ComputerToolContract.maximumSemanticTextLength
+            )
+            let runningApplications = await MainActor.run {
+                RunningApplicationCatalog().applications()
+            }
+            guard let target = ComputerToolContract.accessibilityTarget(
+                processIdentifier: processID,
+                runningApplications: runningApplications
+            ) else {
+                throw RuntimeError.serverError(
+                    "The selected application process is no longer available. Call desktop_list_apps again."
+                )
+            }
+            let session = AccessibilitySession(target: target)
+            let snapshot = try session.snapshot(limits: limits)
+            let active = ActiveAccessibilitySession(session: session, snapshot: snapshot)
+            let formatter = AccessibilitySnapshotTextFormatter(
+                elementLimit: limits.maxElements,
+                fieldCharacterLimit: 72,
+                actionLimit: 6,
+                outputCharacterLimit: preferredText == nil ? 3_000 : 1_000,
+                prioritizesRelevantElements: true,
+                preferredText: preferredText,
+                usesCompactElementLines: true
+            )
+            return (active, snapshot.formattedForModel(using: formatter))
+        }
+
+        private func computerV2Session(
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) throws -> ComputerV2Session {
+            guard let session = computerV2Sessions[taskID], session.epoch == epoch else {
+                throw RuntimeError.serverError(
+                    "This computer-use turn is no longer active. Start a fresh turn and observe again."
+                )
+            }
+            return session
+        }
+
+        private func computerV2BoundApplication(
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> ActivatedApplication {
+            guard let application = try computerV2Session(
+                taskID: taskID,
+                epoch: epoch
+            ).application else {
+                throw RuntimeError.serverError(
+                    "No application is bound in this turn. Call computer_v2_open first."
+                )
+            }
+            let running = await MainActor.run {
+                RunningApplicationCatalog().applications()
+            }
+            _ = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard ComputerV2TargetContract.isRunning(application, in: running) else {
+                computerV2Sessions[taskID]?.application = nil
+                computerV2Sessions[taskID]?.accessibility = nil
+                computerV2Sessions[taskID]?.accessibilityWindowIdentity = nil
+                computerV2Sessions[taskID]?.capture = nil
+                throw RuntimeError.serverError(
+                    "The bound application changed or quit. Open it again before interacting."
+                )
+            }
+            return application
+        }
+
+        private func computerV2ApprovalDetails(
+            arguments: [String: Any],
+            application: ActivatedApplication
+        ) -> String {
+            prettyJSON([
+                "model_arguments": arguments,
+                "resolved_target": [
+                    "bundle_id": application.bundleIdentifier,
+                    "process_id": application.processIdentifier,
+                ],
+            ])
+        }
+
+        private func clearComputerV2Observation(taskID: AgentTask.ID, epoch: UUID) throws {
+            var session = try computerV2Session(taskID: taskID, epoch: epoch)
+            session.accessibility = nil
+            session.accessibilityWindowIdentity = nil
+            session.capture = nil
+            computerV2Sessions[taskID] = session
+        }
+
+        private func computerV2FocusedWindowObservation() async throws -> FocusedWindowObservation? {
+            // AX's system-wide focused-application query can briefly return
+            // cannotComplete while AppKit hands activation from the native
+            // approval overlay to the opened app. Observation may wait for
+            // that handoff; pre-input checks below never retry or retarget.
+            for attempt in 0 ..< 20 {
+                do {
+                    return try await MainActor.run {
+                        try FocusedWindowReader().focusedWindowObservation()
+                    }
+                } catch AutomationError.accessibilityFailure(_, let code)
+                    where code == AXError.cannotComplete.rawValue && attempt < 19 {
+                    try await Task.sleep(for: .milliseconds(25))
+                }
+            }
+            return nil
+        }
+
+        private func executeComputerV2(
+            _ tool: String,
+            arguments: [String: Any],
+            taskID: AgentTask.ID?
+        ) async throws -> [[String: Any]] {
+            guard let taskID else {
+                throw RuntimeError.serverError("Computer use requires a known task and thread.")
+            }
+            // LM Studio currently accepts strict JSON schemas but can still
+            // emit missing fields. Validation here, before approval, is the
+            // actual enforcement boundary.
+            let call = try ComputerV2ToolContract.validate(
+                tool: tool,
+                arguments: arguments
+            )
+            guard computerV2InFlight[taskID] == nil else {
+                throw RuntimeError.serverError(
+                    "Another computer action is still pending for this task."
+                )
+            }
+            let needsDesktopIsolation = call.tool != .status && call.tool != .apps
+            guard !needsDesktopIsolation || computerGlobalInFlight == nil else {
+                throw RuntimeError.serverError(
+                    "Another computer action is still pending. Try again after it completes."
+                )
+            }
+            let operationID = UUID()
+            computerV2InFlight[taskID] = operationID
+            if needsDesktopIsolation {
+                computerGlobalInFlight = operationID
+            }
+            defer {
+                if computerV2InFlight[taskID] == operationID {
+                    computerV2InFlight.removeValue(forKey: taskID)
+                }
+                if computerGlobalInFlight == operationID {
+                    computerGlobalInFlight = nil
+                }
+            }
+            guard let epoch = computerV2Sessions[taskID]?.epoch else {
+                throw RuntimeError.serverError(
+                    "This computer-use turn is not active. Start a fresh turn."
+                )
+            }
+
+            switch call.tool {
+            case .status:
+                return [textContent(try encodeJSON(PermissionInspector().current()))]
+
+            case .apps:
+                let applications = await MainActor.run {
+                    RunningApplicationCatalog().applications()
+                }
+                _ = try computerV2Session(taskID: taskID, epoch: epoch)
+                return [textContent(try encodeJSON(applications))]
+
+            case .open:
+                return try await computerV2Open(
+                    arguments: arguments,
+                    taskID: taskID,
+                    epoch: epoch
+                )
+
+            case .snapshot:
+                let application = try await computerV2BoundApplication(
+                    taskID: taskID,
+                    epoch: epoch
+                )
+                let focusedObservation = try await computerV2FocusedWindowObservation()
+                guard let focusedObservation,
+                      focusedObservation.info.processIdentifier == application.processIdentifier,
+                      focusedObservation.info.bundleIdentifier == application.bundleIdentifier else {
+                    throw RuntimeError.serverError(
+                        "The bound app does not have the focused window. Open it again before snapshot."
+                    )
+                }
+                let result = try await makeAccessibilitySnapshot(
+                    processID: application.processIdentifier,
+                    arguments: arguments
+                )
+                _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+                guard try await focusedObservation.identity.isStillFocused() else {
+                    throw RuntimeError.serverError(
+                        "The focused window changed during snapshot. Observe again."
+                    )
+                }
+                var session = try computerV2Session(taskID: taskID, epoch: epoch)
+                session.accessibility = result.active
+                session.accessibilityWindowIdentity = focusedObservation.identity
+                session.capture = nil
+                computerV2Sessions[taskID] = session
+                return [textContent(result.text)]
+
+            case .ax, .setText:
+                return try await computerV2SemanticAction(
+                    call,
+                    taskID: taskID,
+                    epoch: epoch
+                )
+
+            case .capture:
+                return try await computerV2Capture(
+                    arguments: arguments,
+                    taskID: taskID,
+                    epoch: epoch
+                )
+
+            case .click, .pointer:
+                return try await computerV2PointerAction(
+                    call,
+                    taskID: taskID,
+                    epoch: epoch
+                )
+
+            case .keypress, .type:
+                return try await computerV2KeyboardAction(
+                    call,
+                    taskID: taskID,
+                    epoch: epoch
+                )
+            }
+        }
+
+        private func computerV2Open(
+            arguments: [String: Any],
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> [[String: Any]] {
+            let bundleID = try requiredString("bundle_id", in: arguments)
+            let url = try optionalOpenURL(arguments["url"])
+            let summary = url.map {
+                "Open \(bundleID) at \($0.absoluteString)"
+            } ?? "Launch or activate \(bundleID)"
+            let approved = await requestComputerUseApproval(
+                taskID: taskID,
+                title: "Allow an application action?",
+                summary: summary,
+                details: prettyJSON(arguments)
+            )
+            guard approved else {
+                throw RuntimeError.serverError("The user declined the application action.")
+            }
+            _ = try computerV2Session(taskID: taskID, epoch: epoch)
+            let controller = await MainActor.run { ComputerInputController() }
+            let application = try await controller.launchOrActivateApplication(
+                bundleIdentifier: bundleID,
+                opening: url
+            )
+            _ = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard application.bundleIdentifier == bundleID else {
+                throw RuntimeError.serverError(
+                    "The launched process did not match the approved application."
+                )
+            }
+            let running = await MainActor.run {
+                RunningApplicationCatalog().applications()
+            }
+            _ = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard ComputerV2TargetContract.isRunning(application, in: running) else {
+                throw RuntimeError.serverError(
+                    "The approved application is no longer running."
+                )
+            }
+            var session = try computerV2Session(taskID: taskID, epoch: epoch)
+            session.application = application
+            session.accessibility = nil
+            session.accessibilityWindowIdentity = nil
+            session.capture = nil
+            computerV2Sessions[taskID] = session
+            let navigationNote = url == nil ? "" :
+                " URL navigation may still be loading; if the first snapshot lacks page content, take another snapshot before acting."
+            return [textContent(
+                try encodeJSON(application)
+                    + "\nBound this app for the current turn. Observe before acting; no process ID is needed."
+                    + navigationNote
+            )]
+        }
+
+        private func computerV2SemanticAction(
+            _ call: ComputerV2ToolContract.ValidatedCall,
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> [[String: Any]] {
+            let application = try await computerV2BoundApplication(
+                taskID: taskID,
+                epoch: epoch
+            )
+            guard let active = try computerV2Session(
+                taskID: taskID,
+                epoch: epoch
+            ).accessibility,
+                  let windowIdentity = try computerV2Session(
+                      taskID: taskID,
+                      epoch: epoch
+                  ).accessibilityWindowIdentity,
+                  let snapshotID = UUID(uuidString: try requiredString(
+                      "snapshot_id",
+                      in: call.arguments
+                  )),
+                  active.snapshot.id == snapshotID
+            else {
+                throw RuntimeError.serverError(
+                    "The Accessibility snapshot is missing or stale. Capture a fresh snapshot."
+                )
+            }
+            let index = try requiredIndex(call.arguments)
+            let element = active.snapshot.element(at: index)
+            let elementName = element?.title
+                ?? element?.elementDescription
+                ?? element?.role
+                ?? "element \(index)"
+
+            let summary: String
+            let title: String
+            let semanticAction: SemanticAXAction?
+            let textValue: String?
+            if call.tool == .ax {
+                let actionName = try requiredString("ax_action", in: call.arguments)
+                semanticAction = SemanticAXAction(rawValue: actionName)
+                textValue = nil
+                summary = "\(actionName) on \(elementName)"
+                title = "Allow a desktop action?"
+            } else {
+                semanticAction = nil
+                textValue = try requiredString("text", in: call.arguments)
+                summary = "Set text on \(elementName)"
+                title = "Allow text entry?"
+            }
+            let approved = await requestComputerUseApproval(
+                taskID: taskID,
+                title: title,
+                summary: summary,
+                details: computerV2ApprovalDetails(
+                    arguments: call.arguments,
+                    application: application
+                )
+            )
+            guard approved else {
+                throw RuntimeError.serverError("The user declined the desktop action.")
+            }
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            guard try computerV2Session(taskID: taskID, epoch: epoch)
+                .accessibility?.snapshot.id == snapshotID else {
+                throw RuntimeError.serverError(
+                    "The approved Accessibility snapshot is no longer current."
+                )
+            }
+            try await prepareAccessibilityMutation(
+                active,
+                processIdentifier: application.processIdentifier
+            )
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            guard try await windowIdentity.isStillFocused() else {
+                throw RuntimeError.serverError(
+                    "The inspected window changed before the approved action. Observe again."
+                )
+            }
+            try clearComputerV2Observation(taskID: taskID, epoch: epoch)
+            if let semanticAction {
+                try active.session.refreshAndPerform(
+                    semanticAction,
+                    at: index,
+                    in: active.snapshot
+                )
+            } else if let textValue {
+                try active.session.refreshAndSetValue(
+                    .text(textValue),
+                    at: index,
+                    in: active.snapshot
+                )
+            }
+            return [textContent(
+                "Requested \(summary). Capture a fresh snapshot to verify the result."
+            )]
+        }
+
+        private func computerV2Capture(
+            arguments: [String: Any],
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> [[String: Any]] {
+            let includeAccessibility = arguments["include_accessibility"] as? Bool ?? false
+            let application = try await computerV2BoundApplication(
+                taskID: taskID,
+                epoch: epoch
+            )
+            let focusedObservation = try await computerV2FocusedWindowObservation()
+            guard let focusedObservation else {
+                throw RuntimeError.serverError(
+                    "The bound app does not have the focused window. Open it again before capture."
+                )
+            }
+            let focused = focusedObservation.info
+            guard focused.processIdentifier == application.processIdentifier,
+                  focused.bundleIdentifier == application.bundleIdentifier,
+                  let focusedFrame = focused.frame else {
+                throw RuntimeError.serverError(
+                    "The bound app does not have the focused window. Open it again before capture."
+                )
+            }
+            let center = ScreenPoint(
+                x: focusedFrame.x + focusedFrame.width / 2,
+                y: focusedFrame.y + focusedFrame.height / 2
+            )
+            let windowScreenshotter = await MainActor.run { WindowScreenshotter() }
+            let windowsBefore = try await windowScreenshotter.availableWindows()
+            guard let window = ComputerV2TargetContract.matchingWindow(
+                for: focused,
+                in: windowsBefore
+            ) else {
+                throw RuntimeError.serverError(
+                    "The focused app window could not be identified uniquely. Observe again."
+                )
+            }
+            let screenshotter = await MainActor.run { DisplayScreenshotter() }
+            let displays = try await screenshotter.availableDisplays()
+            let selectedDisplay: CapturableDisplayInfo?
+            if let displayID = try optionalUInt32("display_id", in: arguments) {
+                selectedDisplay = displays.first { $0.displayID == displayID }
+            } else {
+                selectedDisplay = displays.first {
+                    ComputerV2TargetContract.contains(center, in: $0.frame)
+                }
+            }
+            guard let selectedDisplay,
+                  ComputerV2TargetContract.contains(center, in: selectedDisplay.frame)
+            else {
+                throw RuntimeError.serverError(
+                    "The focused window is not on the selected display. Capture it again."
+                )
+            }
+            let limits = try DisplayCaptureLimits(
+                maximumWidth: 896,
+                maximumHeight: 720,
+                maximumPixelCount: 600_000
+            )
+            let showsCursor = arguments["shows_cursor"] as? Bool ?? false
+            let displayImage = try await screenshotter.captureDisplay(
+                displayID: selectedDisplay.displayID,
+                limits: limits,
+                showsCursor: showsCursor
+            )
+            let focusedAfter = try await MainActor.run {
+                try FocusedWindowReader().focusedWindow()
+            }
+            let windowsAfter = try await windowScreenshotter.availableWindows()
+            guard ComputerV2TargetContract.isSameWindow(
+                windowsAfter.first(where: { $0.windowID == window.windowID }),
+                as: window
+            ) else {
+                throw RuntimeError.serverError(
+                    "The app window changed during capture. Observe again."
+                )
+            }
+            let windowImageAfter = try await windowScreenshotter.captureWindow(
+                windowID: window.windowID,
+                scaleFactor: 1
+            )
+            let fingerprintAfter = try WindowCaptureFingerprint.make(from: windowImageAfter)
+            let windowsAfterImage = try await windowScreenshotter.availableWindows()
+            guard let stableWindow = windowsAfterImage.first(where: {
+                $0.windowID == window.windowID
+            }),
+                  ComputerV2TargetContract.isSameWindow(stableWindow, as: window),
+                  stableWindow.frame == window.frame else {
+                throw RuntimeError.serverError(
+                    "The app window changed during capture. Observe again."
+                )
+            }
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            guard ComputerV2TargetContract.isSameFocusedWindow(
+                focusedAfter,
+                as: focusedFrame,
+                for: application
+            ), try await focusedObservation.identity.isStillFocused() else {
+                throw RuntimeError.serverError(
+                    "The focused window changed during capture. Capture a fresh screenshot."
+                )
+            }
+            let mapper = try ScreenshotCoordinateMapper(
+                frame: window.frame,
+                imageWidth: windowImageAfter.width,
+                imageHeight: windowImageAfter.height,
+                captureID: UUID(),
+                capturedAt: Date()
+            )
+            var accessibilityObservation: (active: ActiveAccessibilitySession, text: String)?
+            if includeAccessibility {
+                let observed = try await makeAccessibilitySnapshot(
+                    processID: application.processIdentifier,
+                    arguments: [:]
+                )
+                _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+                guard try await focusedObservation.identity.isStillFocused() else {
+                    throw RuntimeError.serverError(
+                        "The focused window changed while combining screenshot and Accessibility. Observe again."
+                    )
+                }
+                let windowsAfterAccessibility = try await windowScreenshotter.availableWindows()
+                guard let currentWindow = windowsAfterAccessibility.first(where: {
+                    $0.windowID == window.windowID
+                }),
+                      ComputerV2TargetContract.isSameWindow(currentWindow, as: window),
+                      currentWindow.frame == window.frame else {
+                    throw RuntimeError.serverError(
+                        "The app window changed while combining screenshot and Accessibility. Observe again."
+                    )
+                }
+                let imageAfterAccessibility = try await windowScreenshotter.captureWindow(
+                    windowID: window.windowID,
+                    scaleFactor: 1
+                )
+                guard try WindowCaptureFingerprint.make(from: imageAfterAccessibility)
+                    == fingerprintAfter else {
+                    throw RuntimeError.serverError(
+                        "The app image changed while combining screenshot and Accessibility. Observe again."
+                    )
+                }
+                accessibilityObservation = observed
+            }
+            var session = try computerV2Session(taskID: taskID, epoch: epoch)
+            session.accessibility = accessibilityObservation?.active
+            session.accessibilityWindowIdentity = accessibilityObservation == nil
+                ? nil : focusedObservation.identity
+            session.capture = ComputerV2Capture(
+                mapper: mapper,
+                displayID: selectedDisplay.displayID,
+                displayFrame: selectedDisplay.frame,
+                displayImage: displayImage,
+                showsCursor: showsCursor,
+                focusedWindowFrame: focusedFrame,
+                focusedWindowIdentity: focusedObservation.identity,
+                window: window,
+                windowImage: windowImageAfter,
+                fingerprint: fingerprintAfter
+            )
+            computerV2Sessions[taskID] = session
+            var content = [textContent(ComputerV2ToolContract.captureMetadata(mapper: mapper))]
+            if let accessibilityObservation {
+                content.append(textContent(
+                    "SYNCHRONIZED_AX screen_frame=screen_points; image coordinates=image_pixels. "
+                        + "Use snapshot_id with computer_v2_ax or capture_id with computer_v2_click.\n"
+                        + accessibilityObservation.text
+                ))
+            }
+            content.append(try imageContent(windowImageAfter))
+            return content
+        }
+
+        private func computerV2MappedPointerAction(
+            _ call: ComputerV2ToolContract.ValidatedCall,
+            capture: ComputerV2Capture
+        ) throws -> DesktopInputAction {
+            guard let captureID = UUID(uuidString: try requiredString(
+                "capture_id",
+                in: call.arguments
+            )) else {
+                throw RuntimeError.malformedResponse("A valid capture_id is required.")
+            }
+            let start = try capture.mapper.screenPoint(
+                imageX: requiredFiniteDouble("x", in: call.arguments),
+                imageY: requiredFiniteDouble("y", in: call.arguments),
+                captureID: captureID,
+                maximumAge: 600
+            )
+            guard ComputerV2TargetContract.contains(
+                start,
+                in: capture.focusedWindowFrame
+            ) else {
+                throw RuntimeError.serverError(
+                    "The proposed point is outside the captured app window. Observe again."
+                )
+            }
+            if call.tool == .click {
+                return .click(start)
+            }
+            switch call.pointerAction {
+            case .move:
+                return .move(start)
+            case .doubleClick:
+                return .doubleClick(start)
+            case .rightClick:
+                return .rightClick(start)
+            case .scroll:
+                let deltaX = try optionalInt32("delta_x", in: call.arguments) ?? 0
+                let deltaY = try optionalInt32("delta_y", in: call.arguments) ?? 0
+                guard deltaX != 0 || deltaY != 0 else {
+                    throw RuntimeError.malformedResponse("A non-zero scroll delta is required.")
+                }
+                return .scroll(point: start, deltaX: deltaX, deltaY: deltaY)
+            case nil:
+                throw RuntimeError.malformedResponse("Unsupported pointer action.")
+            }
+        }
+
+        private func verifyComputerV2WindowUnchanged(
+            _ capture: ComputerV2Capture,
+            targetPoints: [ScreenPoint] = []
+        ) async throws {
+            let screenshotter = await MainActor.run { WindowScreenshotter() }
+            let windows = try await screenshotter.availableWindows()
+            guard ComputerV2TargetContract.isSameWindow(
+                windows.first(where: { $0.windowID == capture.window.windowID }),
+                as: capture.window
+            ) else {
+                throw RuntimeError.serverError(
+                    "The captured app window was replaced or moved. Observe again."
+                )
+            }
+            let image = try await screenshotter.captureWindow(
+                windowID: capture.window.windowID,
+                scaleFactor: 1
+            )
+            let baseline: WindowCaptureFingerprint
+            let current: WindowCaptureFingerprint
+            if targetPoints.isEmpty {
+                baseline = capture.fingerprint
+                current = try WindowCaptureFingerprint.make(from: image)
+            } else {
+                let region = try ComputerV2TargetContract.targetPixelRegion(
+                    for: targetPoints,
+                    windowFrame: capture.window.frame,
+                    imageWidth: capture.windowImage.width,
+                    imageHeight: capture.windowImage.height
+                )
+                baseline = try WindowCaptureFingerprint.make(
+                    from: capture.windowImage,
+                    pixelRegion: region
+                )
+                current = try WindowCaptureFingerprint.make(
+                    from: image,
+                    pixelRegion: region
+                )
+            }
+            guard baseline == current else {
+                throw RuntimeError.serverError(
+                    "The app window target changed after capture. Observe and approve again."
+                )
+            }
+        }
+
+        private func verifyComputerV2DisplayTargetUnchanged(
+            _ capture: ComputerV2Capture,
+            targetPoints: [ScreenPoint]
+        ) async throws {
+            let screenshotter = await MainActor.run { DisplayScreenshotter() }
+            let displays = try await screenshotter.availableDisplays()
+            guard let display = displays.first(where: { $0.displayID == capture.displayID }),
+                  display.frame == capture.displayFrame else {
+                throw RuntimeError.serverError(
+                    "The captured display changed. Capture a fresh screenshot."
+                )
+            }
+            let limits = try DisplayCaptureLimits(
+                maximumWidth: 896,
+                maximumHeight: 720,
+                maximumPixelCount: 600_000
+            )
+            let currentImage = try await screenshotter.captureDisplay(
+                displayID: capture.displayID,
+                limits: limits,
+                showsCursor: capture.showsCursor
+            )
+            let region = try ComputerV2TargetContract.targetPixelRegion(
+                for: targetPoints,
+                windowFrame: capture.displayFrame,
+                imageWidth: capture.displayImage.width,
+                imageHeight: capture.displayImage.height,
+                radius: 64
+            )
+            let baseline = try WindowCaptureFingerprint.make(
+                from: capture.displayImage,
+                pixelRegion: region
+            )
+            let current = try WindowCaptureFingerprint.make(
+                from: currentImage,
+                pixelRegion: region
+            )
+            guard baseline == current else {
+                throw RuntimeError.serverError(
+                    "The visible target changed after capture. Capture a fresh screenshot."
+                )
+            }
+        }
+
+        private func computerV2PointerAction(
+            _ call: ComputerV2ToolContract.ValidatedCall,
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> [[String: Any]] {
+            let application = try await computerV2BoundApplication(
+                taskID: taskID,
+                epoch: epoch
+            )
+            guard let capture = try computerV2Session(
+                taskID: taskID,
+                epoch: epoch
+            ).capture else {
+                throw RuntimeError.serverError(
+                    "A current screenshot is required before image-coordinate input."
+                )
+            }
+            let action = try computerV2MappedPointerAction(call, capture: capture)
+            let approved = await requestComputerUseApproval(
+                taskID: taskID,
+                title: "Allow computer input?",
+                summary: action.summary,
+                details: prettyJSON([
+                    "model_arguments": call.arguments,
+                    "resolved_target": [
+                        "bundle_id": application.bundleIdentifier,
+                        "process_id": application.processIdentifier,
+                    ],
+                    "resolved_action": action.summary,
+                ])
+            )
+            guard approved else {
+                throw RuntimeError.serverError("The user declined computer input.")
+            }
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            guard try computerV2Session(taskID: taskID, epoch: epoch)
+                .capture?.mapper.captureID == capture.mapper.captureID else {
+                throw RuntimeError.serverError("The approved screenshot is no longer current.")
+            }
+            // Repeat the age/ID check after the user approval may have waited.
+            _ = try computerV2MappedPointerAction(call, capture: capture)
+            let controller = await MainActor.run { ComputerInputController() }
+            let activated = try await controller.activateApplication(
+                processIdentifier: application.processIdentifier
+            )
+            guard activated.processIdentifier == application.processIdentifier,
+                  activated.bundleIdentifier == application.bundleIdentifier else {
+                throw RuntimeError.serverError("The approved application target changed.")
+            }
+            let focused = try await MainActor.run {
+                try FocusedWindowReader().focusedWindow()
+            }
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            guard ComputerV2TargetContract.isSameFocusedWindow(
+                focused,
+                as: capture.focusedWindowFrame,
+                for: application
+            ) else {
+                throw RuntimeError.serverError(
+                    "The app window moved or changed after capture. Observe again."
+                )
+            }
+            try await verifyComputerV2WindowUnchanged(
+                capture,
+                targetPoints: action.pointerTargets
+            )
+            try await verifyComputerV2DisplayTargetUnchanged(
+                capture,
+                targetPoints: action.pointerTargets
+            )
+            guard try await capture.focusedWindowIdentity.isStillFocused() else {
+                throw RuntimeError.serverError(
+                    "The captured window lost focus before input. Observe again."
+                )
+            }
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            try clearComputerV2Observation(taskID: taskID, epoch: epoch)
+            try await Self.performComputerV2Input(
+                action,
+                using: controller,
+                application: application,
+                expectedWindowFrame: capture.focusedWindowFrame,
+                expectedWindowIdentity: capture.focusedWindowIdentity,
+                expectedWindowID: capture.window.windowID
+            )
+            return [textContent(
+                "Requested \(action.name). Capture a fresh screenshot or Accessibility snapshot to verify the result."
+            )]
+        }
+
+        private func computerV2KeyboardAction(
+            _ call: ComputerV2ToolContract.ValidatedCall,
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> [[String: Any]] {
+            let application = try await computerV2BoundApplication(
+                taskID: taskID,
+                epoch: epoch
+            )
+            let observation = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard observation.accessibility != nil || observation.capture != nil else {
+                throw RuntimeError.serverError(
+                    "Observe the bound app with a snapshot or screenshot before keyboard input."
+                )
+            }
+            var input = call.arguments
+            input["action"] = call.tool == .keypress ? "keypress" : "type"
+            let action = try parseDesktopInputAction(input)
+            let approved = await requestComputerUseApproval(
+                taskID: taskID,
+                title: "Allow computer input?",
+                summary: action.summary,
+                details: computerV2ApprovalDetails(
+                    arguments: call.arguments,
+                    application: application
+                )
+            )
+            guard approved else {
+                throw RuntimeError.serverError("The user declined computer input.")
+            }
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            let current = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard current.accessibility?.snapshot.id == observation.accessibility?.snapshot.id,
+                  current.capture?.mapper.captureID == observation.capture?.mapper.captureID else {
+                throw RuntimeError.serverError("The approved observation is no longer current.")
+            }
+            if let capture = observation.capture {
+                _ = try capture.mapper.screenPoint(
+                    imageX: 0,
+                    imageY: 0,
+                    captureID: capture.mapper.captureID,
+                    maximumAge: 600
+                )
+            }
+            let controller = await MainActor.run { ComputerInputController() }
+            let activated = try await controller.activateApplication(
+                processIdentifier: application.processIdentifier
+            )
+            guard activated.processIdentifier == application.processIdentifier,
+                  activated.bundleIdentifier == application.bundleIdentifier else {
+                throw RuntimeError.serverError("The approved application target changed.")
+            }
+            if let capture = observation.capture {
+                let focused = try await MainActor.run {
+                    try FocusedWindowReader().focusedWindow()
+                }
+                guard ComputerV2TargetContract.isSameFocusedWindow(
+                    focused,
+                    as: capture.focusedWindowFrame,
+                    for: application
+                ) else {
+                    throw RuntimeError.serverError(
+                        "The app window moved or changed after capture. Observe again."
+                    )
+                }
+                try await verifyComputerV2WindowUnchanged(capture)
+            } else if let active = observation.accessibility {
+                try await prepareAccessibilityMutation(
+                    active,
+                    processIdentifier: application.processIdentifier
+                )
+            }
+            guard let windowIdentity = observation.capture?.focusedWindowIdentity
+                ?? observation.accessibilityWindowIdentity,
+                  try await windowIdentity.isStillFocused() else {
+                throw RuntimeError.serverError(
+                    "The inspected window changed before keyboard input. Observe again."
+                )
+            }
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            try clearComputerV2Observation(taskID: taskID, epoch: epoch)
+            try await Self.performComputerV2Input(
+                action,
+                using: controller,
+                application: application,
+                expectedWindowFrame: observation.capture?.focusedWindowFrame,
+                expectedWindowIdentity: windowIdentity,
+                expectedWindowID: nil
+            )
+            return [textContent(
+                "Requested \(action.name). Observe the app again to verify the result."
+            )]
+        }
+
+        /// The final focus check and each synchronous input primitive execute
+        /// in one MainActor turn. This closes the async gap between screenshot
+        /// revalidation and posting the event, including a different task or
+        /// the user taking focus while an approval was on screen.
+        @MainActor
+        private static func performComputerV2Input(
+            _ action: DesktopInputAction,
+            using controller: ComputerInputController,
+            application: ActivatedApplication,
+            expectedWindowFrame: WindowFrame?,
+            expectedWindowIdentity: FocusedWindowIdentity,
+            expectedWindowID: UInt32?
+        ) async throws {
+            let focused = try FocusedWindowReader().focusedWindow()
+            guard let focused,
+                  focused.processIdentifier == application.processIdentifier,
+                  focused.bundleIdentifier == application.bundleIdentifier
+            else {
+                throw RuntimeError.serverError(
+                    "The approved app lost focus before input. Observe again."
+                )
+            }
+            if let expectedWindowFrame {
+                guard ComputerV2TargetContract.isSameFocusedWindow(
+                    focused,
+                    as: expectedWindowFrame,
+                    for: application
+                ) else {
+                    throw RuntimeError.serverError(
+                        "The approved window changed before input. Observe again."
+                    )
+                }
+            }
+            guard try expectedWindowIdentity.isStillFocused() else {
+                throw RuntimeError.serverError(
+                    "The approved window lost focus before input. Observe again."
+                )
+            }
+            if !action.pointerTargets.isEmpty {
+                guard let expectedWindowID else {
+                    throw RuntimeError.serverError("The pointer target has no verified window.")
+                }
+                try WindowHitTestVerifier().verifyUnobstructed(
+                    expectedWindowID: expectedWindowID,
+                    points: action.pointerTargets
+                )
+            }
+
+            switch action {
+            case .move(let point):
+                try controller.moveMouse(to: point)
+            case .click(let point):
+                try controller.click(at: point)
+            case .doubleClick(let point):
+                try controller.doubleClick(at: point)
+            case .rightClick(let point):
+                try controller.rightClick(at: point)
+            case .scroll(let point, let deltaX, let deltaY):
+                try controller.scroll(at: point, deltaX: deltaX, deltaY: deltaY)
+            case .drag:
+                // Legacy persisted `computer` calls still use the separate
+                // `perform` path. V2 must not post a delayed drag sequence.
+                throw RuntimeError.serverError("Drag is unavailable in computer V2.")
+            case .keypress(let chord, _):
+                guard try expectedWindowIdentity.isSameFocusedUIElement() else {
+                    throw RuntimeError.serverError(
+                        "The focused control changed before keyboard input. Observe again."
+                    )
+                }
+                try controller.pressKeyChord(chord)
+            case .type(let text):
+                guard try expectedWindowIdentity.isSameFocusedUIElement() else {
+                    throw RuntimeError.serverError(
+                        "The focused control changed before keyboard input. Observe again."
+                    )
+                }
+                try controller.enterText(text)
+            }
+        }
+
         private func requestComputerUseApproval(
             taskID: AgentTask.ID?,
             title: String,
@@ -1245,6 +2447,9 @@ private extension CodexAppServerRuntime {
             )
             return await withCheckedContinuation { continuation in
                 pendingComputerUseApprovals[request.id] = continuation
+                if let taskID {
+                    computerApprovalTask[request.id] = taskID
+                }
                 events.yield(.approvalRequested(request))
             }
         }
@@ -1667,8 +2872,17 @@ private extension CodexAppServerRuntime {
             let unresolvedApprovalIDs = Array(pendingComputerUseApprovals.keys)
                 + Array(pendingServerApprovals.keys)
             pendingComputerUseApprovals.removeAll()
+            computerApprovalTask.removeAll()
             pendingServerApprovals.removeAll()
             accessibilitySessions.removeAll()
+            computerV2Sessions.removeAll()
+            // A restarted App Server has no loaded thread state. Keep task-to-
+            // thread IDs for cold resume, but reapply the selected model's
+            // context configuration before the next turn.
+            contextForLoadedThread.removeAll()
+            turnForTask.removeAll()
+            computerV2InFlight.removeAll()
+            computerGlobalInFlight = nil
             for continuation in computerUseContinuations {
                 continuation.resume(returning: false)
             }

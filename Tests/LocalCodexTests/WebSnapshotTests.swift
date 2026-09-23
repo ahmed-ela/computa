@@ -75,6 +75,8 @@ final class WebSnapshotTests: XCTestCase {
         XCTAssertNil(snapshot.tasks.first?.entries.last?.tool?.output)
         XCTAssertTrue(snapshot.tasks.last?.entries.isEmpty == true)
         XCTAssertEqual(snapshot.pendingApprovalCount, 1)
+        XCTAssertFalse(snapshot.tasks.first?.modelSelectable ?? true)
+        XCTAssertEqual(snapshot.modelOptions.map(\.id), LocalModelCatalog.options.map(\.id))
 
         let encoded = try JSONEncoder().encode(snapshot)
         let encodedText = try XCTUnwrap(String(data: encoded, encoding: .utf8))

@@ -19,6 +19,36 @@ final class AppStateTests: XCTestCase {
         )
     }
 
+    func testLocalThreadConfigUsesModelSpecificContextLimits() {
+        let expectedLimits: [(modelID: String, window: Int, compactLimit: Int)] = [
+            (LocalModelCatalog.defaultModelID, 4096, 3584),
+            ("lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit", 4096, 3584),
+            ("lmstudio-community/Qwen3.5-9B-MLX-4bit", 8192, 7168),
+            ("lmstudio-community/Qwen3.5-4B-MLX-4bit", 8192, 7168),
+            ("unlisted/model", 4096, 3584),
+        ]
+
+        for limits in expectedLimits {
+            let config = CodexAppServerRuntime.localThreadConfig(for: limits.modelID)
+            XCTAssertEqual(config["model_context_window"] as? Int, limits.window, limits.modelID)
+            XCTAssertEqual(
+                config["model_auto_compact_token_limit"] as? Int,
+                limits.compactLimit,
+                limits.modelID
+            )
+            XCTAssertEqual(config["web_search"] as? String, "disabled", limits.modelID)
+        }
+    }
+
+    func testLoadedThreadCanSwitchOnlyBetweenModelsWithTheSameContextLimits() {
+        let constrained = LocalThreadContext.forModel(LocalModelCatalog.defaultModelID)
+        let expanded = LocalThreadContext.forModel("lmstudio-community/Qwen3.5-9B-MLX-4bit")
+
+        XCTAssertTrue(expanded.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
+        XCTAssertFalse(constrained.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
+        XCTAssertFalse(expanded.supportsModelSwitch(to: LocalModelCatalog.defaultModelID))
+    }
+
     @MainActor
     func testSubmittingComposerAppendsLocalUserEntry() async {
         let state = AppState(tasks: [
@@ -96,6 +126,84 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
+    func testSelectedModelIsPassedToRuntimeWithoutChangingOtherTasks() async throws {
+        let recorder = ModelSubmissionRecorder()
+        let state = AppState(tasks: [], runtime: ModelRecordingRuntime(recorder: recorder))
+        state.createTask()
+        let firstTaskID = try XCTUnwrap(state.selectedTaskID)
+        let fourBID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
+        let nineBID = "lmstudio-community/Qwen3.5-9B-MLX-4bit"
+
+        XCTAssertTrue(state.setTaskModel(fourBID, taskID: firstTaskID))
+        let submitted = await state.submit(prompt: "Use the selected model", toTaskID: firstTaskID)
+        XCTAssertTrue(submitted)
+        let submission = await recorder.lastSubmission()
+        XCTAssertEqual(submission?.taskID, firstTaskID)
+        XCTAssertEqual(submission?.modelID, fourBID)
+
+        state.createTask()
+        let secondTaskID = try XCTUnwrap(state.selectedTaskID)
+        XCTAssertTrue(state.setTaskModel(nineBID, taskID: secondTaskID))
+        let secondSubmitted = await state.submit(prompt: "Use the other small model", toTaskID: secondTaskID)
+        XCTAssertTrue(secondSubmitted)
+        let secondSubmission = await recorder.lastSubmission()
+        XCTAssertEqual(secondSubmission?.taskID, secondTaskID)
+        XCTAssertEqual(secondSubmission?.modelID, nineBID)
+
+        state.createTask()
+        XCTAssertEqual(state.selectedTask?.model, LocalModelCatalog.defaultModelID)
+        XCTAssertFalse(state.setTaskModel("unlisted/model", taskID: firstTaskID))
+    }
+
+    func testCatalogIncludesBothQwen35MLX4BitModels() {
+        let expectedIDs = [
+            "lmstudio-community/Qwen3.5-9B-MLX-4bit",
+            "lmstudio-community/Qwen3.5-4B-MLX-4bit",
+        ]
+
+        for modelID in expectedIDs {
+            let option = LocalModelCatalog.option(for: modelID)
+            XCTAssertNotNil(option)
+            XCTAssertFalse(option?.highMemory ?? true)
+        }
+        XCTAssertEqual(LocalModelCatalog.defaultModelID, "mlx-community/Qwen3.8-27B-4bit")
+    }
+
+    @MainActor
+    func testDefaultModelSelectionPersistsForNewTasks() throws {
+        let suiteName = "LocalCodexTests.ModelSelection.\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { preferences.removePersistentDomain(forName: suiteName) }
+        let alternateID = try XCTUnwrap(LocalModelCatalog.options.last?.id)
+
+        let state = AppState(tasks: [], preferences: preferences)
+        XCTAssertTrue(state.setDefaultModel(alternateID))
+        state.createTask()
+        XCTAssertEqual(state.selectedTask?.model, alternateID)
+
+        let reopened = AppState(tasks: [], preferences: preferences)
+        XCTAssertEqual(reopened.defaultModel, alternateID)
+        XCTAssertFalse(reopened.setDefaultModel("unlisted/model"))
+        XCTAssertEqual(reopened.defaultModel, alternateID)
+    }
+
+    @MainActor
+    func testModelCannotChangeDuringActiveTurn() throws {
+        let state = AppState(tasks: [])
+        state.createTask()
+        let taskID = try XCTUnwrap(state.selectedTaskID)
+        let alternateID = try XCTUnwrap(LocalModelCatalog.options.last?.id)
+
+        state.activeTurnTaskIDs.insert(taskID)
+        XCTAssertFalse(state.setTaskModel(alternateID, taskID: taskID))
+        XCTAssertFalse(WebUISnapshot(state: state).tasks.first?.modelSelectable ?? true)
+
+        state.apply(.taskStatusChanged(taskID: taskID, status: .completed))
+        XCTAssertTrue(state.setTaskModel(alternateID, taskID: taskID))
+        XCTAssertTrue(WebUISnapshot(state: state).tasks.first?.modelSelectable ?? false)
+    }
+
+    @MainActor
     func testPermissionInitializationAndRefreshNeverRequestAccess() {
         let permissions = PermissionClientRecorder()
         let state = AppState(tasks: [], permissionClient: permissions)
@@ -165,6 +273,84 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.connectionState, .connected(provider: "Rejecting runtime"))
         XCTAssertEqual(state.selectedTask?.status, .waiting)
         XCTAssertEqual(state.selectedTask?.entries.last?.title, "Prompt was not delivered")
+    }
+
+    @MainActor
+    func testStopTargetsOnlyRunningTaskAndWaitsForAuthoritativeStatus() async {
+        let first = AgentTask(
+            id: "thread-running",
+            title: "Running task",
+            summary: "Before",
+            status: .running,
+            workspace: "/tmp/first",
+            model: "Local provider"
+        )
+        let second = AgentTask(
+            id: "thread-inactive",
+            title: "Waiting task",
+            summary: "Before",
+            status: .waiting,
+            workspace: "/tmp/second",
+            model: "Local provider"
+        )
+        let recorder = InterruptionRecorder()
+        let state = AppState(
+            tasks: [first, second],
+            runtime: InterruptionRecordingRuntime(recorder: recorder)
+        )
+        let approval = ActionApprovalRequest(
+            id: "pending-for-first",
+            taskID: first.id,
+            kind: .computerUse,
+            title: "Pending action",
+            summary: "Before stop",
+            details: "Native decision"
+        )
+        state.apply(.approvalRequested(approval))
+
+        let inactiveStop = await state.interrupt(taskID: second.id)
+        let runningStop = await state.interrupt(taskID: first.id)
+        XCTAssertFalse(inactiveStop)
+        XCTAssertTrue(runningStop)
+        XCTAssertEqual(state.tasks.first?.status, .running)
+        XCTAssertTrue(state.interruptingTaskIDs.contains(first.id))
+        let duplicateStop = await state.interrupt(taskID: first.id)
+        let recordedTaskIDs = await recorder.recordedTaskIDs()
+        XCTAssertFalse(duplicateStop)
+        XCTAssertEqual(recordedTaskIDs, [first.id])
+
+        state.apply(.taskStatusChanged(taskID: first.id, status: .waiting))
+        XCTAssertFalse(state.interruptingTaskIDs.contains(first.id))
+        XCTAssertTrue(state.pendingApprovals.isEmpty)
+        XCTAssertEqual(state.tasks.first?.status, .waiting)
+    }
+
+    @MainActor
+    func testFailedStopCanBeRetriedAndDoesNotChangeTaskStatus() async {
+        let task = AgentTask(
+            id: "thread-stop-failure",
+            title: "Running task",
+            summary: "Before",
+            status: .running,
+            workspace: "/tmp/workspace",
+            model: "Local provider"
+        )
+        let recorder = InterruptionRecorder()
+        let state = AppState(
+            tasks: [task],
+            runtime: InterruptionRecordingRuntime(recorder: recorder, shouldFail: true)
+        )
+
+        let firstStop = await state.interrupt(taskID: task.id)
+        XCTAssertFalse(firstStop)
+        XCTAssertFalse(state.interruptingTaskIDs.contains(task.id))
+        XCTAssertEqual(state.selectedTask?.status, .running)
+        XCTAssertEqual(state.selectedTask?.entries.last?.title, "Could not stop task")
+        XCTAssertTrue(state.selectedTask?.entries.last?.body.contains("Stop request was rejected") == true)
+        let retryStop = await state.interrupt(taskID: task.id)
+        let recordedTaskIDs = await recorder.recordedTaskIDs()
+        XCTAssertFalse(retryStop)
+        XCTAssertEqual(recordedTaskIDs, [task.id, task.id])
     }
 
     @MainActor
@@ -423,7 +609,9 @@ private struct StubRuntime: AgentRuntimeClient {
         }
     }
 
-    func submit(prompt: String, toTaskID taskID: AgentTask.ID) async throws {}
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {}
+
+    func interrupt(taskID: AgentTask.ID) async throws {}
 
     func resolveApproval(requestID: String, approved: Bool) async throws {}
 }
@@ -442,8 +630,47 @@ private struct RejectingRuntime: AgentRuntimeClient {
         AsyncStream { continuation in continuation.finish() }
     }
 
-    func submit(prompt: String, toTaskID taskID: AgentTask.ID) async throws {
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {
         throw TurnRejected()
+    }
+
+    func interrupt(taskID: AgentTask.ID) async throws {}
+
+    func resolveApproval(requestID: String, approved: Bool) async throws {}
+}
+
+private actor InterruptionRecorder {
+    private var IDs: [AgentTask.ID] = []
+
+    func record(taskID: AgentTask.ID) {
+        IDs.append(taskID)
+    }
+
+    func recordedTaskIDs() -> [AgentTask.ID] {
+        IDs
+    }
+}
+
+private struct InterruptionRecordingRuntime: AgentRuntimeClient {
+    struct StopRejected: LocalizedError {
+        var errorDescription: String? { "Stop request was rejected." }
+    }
+
+    let recorder: InterruptionRecorder
+    var shouldFail = false
+    let providerName = "Interruption recording runtime"
+
+    func loadTasks() async throws -> [AgentTask] { [] }
+
+    func events() -> AsyncStream<AgentRuntimeEvent> {
+        AsyncStream { continuation in continuation.finish() }
+    }
+
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {}
+
+    func interrupt(taskID: AgentTask.ID) async throws {
+        await recorder.record(taskID: taskID)
+        if shouldFail { throw StopRejected() }
     }
 
     func resolveApproval(requestID: String, approved: Bool) async throws {}
@@ -472,7 +699,9 @@ private struct ApprovalRecordingRuntime: AgentRuntimeClient {
         AsyncStream { continuation in continuation.finish() }
     }
 
-    func submit(prompt: String, toTaskID taskID: AgentTask.ID) async throws {}
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {}
+
+    func interrupt(taskID: AgentTask.ID) async throws {}
 
     func resolveApproval(requestID: String, approved: Bool) async throws {
         await recorder.record(requestID: requestID, approved: approved)
@@ -544,7 +773,9 @@ private struct ApprovalObservingRuntime: AgentRuntimeClient {
         AsyncStream { continuation in continuation.finish() }
     }
 
-    func submit(prompt: String, toTaskID taskID: AgentTask.ID) async throws {}
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {}
+
+    func interrupt(taskID: AgentTask.ID) async throws {}
 
     func resolveApproval(requestID: String, approved: Bool) async throws {
         let observedState = await observation(requestID)
@@ -559,4 +790,35 @@ private struct ApprovalObservingRuntime: AgentRuntimeClient {
             throw ResolutionRejected()
         }
     }
+}
+
+private actor ModelSubmissionRecorder {
+    private var submission: (taskID: AgentTask.ID, modelID: String)?
+
+    func record(taskID: AgentTask.ID, modelID: String) {
+        submission = (taskID, modelID)
+    }
+
+    func lastSubmission() -> (taskID: AgentTask.ID, modelID: String)? {
+        submission
+    }
+}
+
+private struct ModelRecordingRuntime: AgentRuntimeClient {
+    let recorder: ModelSubmissionRecorder
+    let providerName = "Model recording runtime"
+
+    func loadTasks() async throws -> [AgentTask] { [] }
+
+    func events() -> AsyncStream<AgentRuntimeEvent> {
+        AsyncStream { continuation in continuation.finish() }
+    }
+
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {
+        await recorder.record(taskID: taskID, modelID: modelID)
+    }
+
+    func interrupt(taskID: AgentTask.ID) async throws {}
+
+    func resolveApproval(requestID: String, approved: Bool) async throws {}
 }

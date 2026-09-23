@@ -7,6 +7,8 @@ import Observation
 final class AppState {
     @ObservationIgnored private let runtime: (any AgentRuntimeClient)?
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
+    @ObservationIgnored private let preferences: UserDefaults
+    private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
 
     var tasks: [AgentTask]
     var selectedTaskID: AgentTask.ID?
@@ -16,21 +18,28 @@ final class AppState {
     var presentedSheet: SheetDestination?
 
     var appearance: AppAppearance = .system
-    var defaultModel = "Qwen3.8-27B 4-bit"
+    var defaultModel: String
     var showToolPayloads = true
     var connectionState: RuntimeConnectionState = .disconnected
     var automationPermissions: AutomationPermissionSnapshot
     var pendingApprovals: [ActionApprovalRequest] = []
     var resolvingApprovalIDs: Set<String> = []
+    var activeTurnTaskIDs: Set<AgentTask.ID> = []
+    var interruptingTaskIDs: Set<AgentTask.ID> = []
     @ObservationIgnored private var resolvedDuringApprovalAttemptIDs: Set<String> = []
 
     init(
         tasks: [AgentTask] = SampleData.tasks,
         runtime: (any AgentRuntimeClient)? = nil,
-        permissionClient: any AutomationPermissionClient = PermissionInspector()
+        permissionClient: any AutomationPermissionClient = PermissionInspector(),
+        preferences: UserDefaults = .standard
     ) {
         self.runtime = runtime
         self.permissionClient = permissionClient
+        self.preferences = preferences
+        let storedModel = preferences.string(forKey: Self.defaultModelPreferenceKey)
+        defaultModel = storedModel.flatMap(LocalModelCatalog.option(for:))?.id
+            ?? LocalModelCatalog.defaultModelID
         automationPermissions = permissionClient.current()
         self.tasks = tasks
         selectedTaskID = tasks.first?.id
@@ -64,6 +73,60 @@ final class AppState {
         selectedTaskID = task.id
         selectedEntryID = nil
         composerText = ""
+    }
+
+    @discardableResult
+    func setDefaultModel(_ modelID: String) -> Bool {
+        guard LocalModelCatalog.option(for: modelID) != nil else { return false }
+        defaultModel = modelID
+        preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
+        return true
+    }
+
+    @discardableResult
+    func setTaskModel(_ modelID: String, taskID: AgentTask.ID) -> Bool {
+        guard LocalModelCatalog.option(for: modelID) != nil,
+              let index = tasks.firstIndex(where: { $0.id == taskID }),
+              canChangeModel(for: taskID)
+        else { return false }
+        tasks[index].model = modelID
+        return true
+    }
+
+    func canChangeModel(for taskID: AgentTask.ID) -> Bool {
+        guard let task = tasks.first(where: { $0.id == taskID }) else { return false }
+        return task.status != .running
+            && !activeTurnTaskIDs.contains(taskID)
+            && !pendingApprovals.contains(where: { $0.taskID == taskID })
+    }
+
+    /// Stop is a human UI action for a running task. The App Server owns the
+    /// resulting status; keep it running here until its turn event arrives.
+    @discardableResult
+    func interrupt(taskID: AgentTask.ID) async -> Bool {
+        guard let runtime,
+              tasks.contains(where: { $0.id == taskID && $0.status == .running }),
+              !interruptingTaskIDs.contains(taskID)
+        else { return false }
+
+        interruptingTaskIDs.insert(taskID)
+        do {
+            try await runtime.interrupt(taskID: taskID)
+            return true
+        } catch {
+            interruptingTaskIDs.remove(taskID)
+            guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return false }
+            let failure = TimelineEntry(
+                kind: .system,
+                title: "Could not stop task",
+                body: error.localizedDescription
+            )
+            tasks[index].entries.append(failure)
+            if selectedTaskID == taskID {
+                selectedEntryID = failure.id
+            }
+            return false
+        }
     }
 
     func refreshAutomationPermissions() {
@@ -166,6 +229,9 @@ final class AppState {
             ? priorSelection
             : newTasks.first?.id
         selectedEntryID = selectedTask?.entries.last?.id
+        interruptingTaskIDs.formIntersection(
+            Set(newTasks.filter { $0.status == .running }.map(\.id))
+        )
     }
 
     func apply(_ event: AgentRuntimeEvent) {
@@ -192,6 +258,11 @@ final class AppState {
             guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
             tasks[index].status = status
             tasks[index].updatedAt = .now
+            if status != .running {
+                activeTurnTaskIDs.remove(taskID)
+                interruptingTaskIDs.remove(taskID)
+                pendingApprovals.removeAll { $0.taskID == taskID }
+            }
 
         case .approvalRequested(let request):
             guard !pendingApprovals.contains(where: { $0.id == request.id }) else { return }
@@ -205,13 +276,17 @@ final class AppState {
 
         case .connectionChanged(let state):
             connectionState = state
+            if case .failed = state {
+                activeTurnTaskIDs.removeAll()
+                interruptingTaskIDs.removeAll()
+            }
         }
     }
 
     @discardableResult
     func submitComposer() async -> Bool {
         let prompt = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, let selectedTaskID else {
+        guard !prompt.isEmpty, let selectedTaskID, canChangeModel(for: selectedTaskID) else {
             return false
         }
         composerText = ""
@@ -224,7 +299,8 @@ final class AppState {
     func submit(prompt rawPrompt: String, toTaskID taskID: AgentTask.ID) async -> Bool {
         let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty,
-              let index = tasks.firstIndex(where: { $0.id == taskID })
+              let index = tasks.firstIndex(where: { $0.id == taskID }),
+              canChangeModel(for: taskID)
         else {
             return false
         }
@@ -243,9 +319,12 @@ final class AppState {
         }
 
         if let runtime {
+            let modelID = tasks[index].model
+            activeTurnTaskIDs.insert(taskID)
             do {
-                try await runtime.submit(prompt: prompt, toTaskID: taskID)
+                try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
             } catch {
+                activeTurnTaskIDs.remove(taskID)
                 if case .connected = connectionState {
                     // A rejected turn (for example, a missing local model) does
                     // not mean the App Server transport itself disconnected.

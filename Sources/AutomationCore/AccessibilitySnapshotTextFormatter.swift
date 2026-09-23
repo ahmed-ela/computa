@@ -113,8 +113,9 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
 
         if usesCompactElementLines {
             let focused = element.isFocused == true ? " focused=1" : ""
+            let screenFrame = element.frame.map { " screen_frame=\(format($0))" } ?? ""
             return "#\(element.index) role=\(role) label=\(label) value=\(value) "
-                + "actions=\(actions) settable=\(bit(element.isValueSettable))\(focused)"
+                + "actions=\(actions) settable=\(bit(element.isValueSettable))\(focused)\(screenFrame)"
         }
 
         let parent = element.parentIndex.map(String.init) ?? "-"
@@ -148,11 +149,25 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         if element.index == rootIndex { return 10_000 }
 
         var score = 0
-        if let preferredText,
-           !preferredText.isEmpty,
-           searchableText(for: element).localizedCaseInsensitiveContains(preferredText)
-        {
+        let matchesPreferredText = preferredText.map { preferredText in
+            !preferredText.isEmpty
+                && searchableText(for: element).localizedCaseInsensitiveContains(preferredText)
+        } ?? false
+        if matchesPreferredText {
             score += 20_000
+            // Chrome tab labels can appear as many matching radio buttons. A
+            // matching page heading should survive a short output budget, while
+            // matching action targets still take precedence over the heading.
+            switch nonempty(element.role) {
+            case "AXHeading":
+                score += 3_000
+            case "AXButton", "AXCheckBox", "AXComboBox", "AXLink", "AXMenuItem",
+                 "AXPopUpButton", "AXSearchField", "AXSlider", "AXTextArea",
+                 "AXTextField":
+                score += 3_500
+            default:
+                break
+            }
         }
         if label(for: element) != nil { score += 400 }
         if nonempty(element.value) != nil { score += 300 }

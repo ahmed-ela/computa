@@ -11,6 +11,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let permissions: WebPermissionSnapshot
     let appearance: String
     let defaultModel: String
+    let modelOptions: [LocalModelOption]
     let showToolPayloads: Bool
     let isInspectorPresented: Bool
     let isSettingsPresented: Bool
@@ -23,7 +24,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
             WebTaskSnapshot(
                 task,
                 includeEntries: task.id == state.selectedTaskID,
-                includeToolPayloads: state.showToolPayloads
+                includeToolPayloads: state.showToolPayloads,
+                modelSelectable: state.canChangeModel(for: task.id)
             )
         }
         pendingApprovalCount = state.pendingApprovals.count
@@ -31,6 +33,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         permissions = WebPermissionSnapshot(state.automationPermissions)
         appearance = state.appearance.rawValue
         defaultModel = state.defaultModel
+        modelOptions = LocalModelCatalog.options
         showToolPayloads = state.showToolPayloads
         isInspectorPresented = state.isInspectorPresented
         isSettingsPresented = state.presentedSheet == .settings
@@ -46,13 +49,15 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
     let updatedAt: TimeInterval
     let workspace: String
     let model: String
+    let modelSelectable: Bool
     let branch: String?
     let entries: [WebEntrySnapshot]
 
     init(
         _ task: AgentTask,
         includeEntries: Bool = true,
-        includeToolPayloads: Bool = true
+        includeToolPayloads: Bool = true,
+        modelSelectable: Bool = true
     ) {
         id = task.id
         title = task.title
@@ -62,6 +67,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         updatedAt = task.updatedAt.timeIntervalSince1970
         workspace = task.workspace
         model = task.model
+        self.modelSelectable = modelSelectable
         branch = task.branch
         entries = includeEntries
             ? task.entries.map { WebEntrySnapshot($0, includeToolPayload: includeToolPayloads) }

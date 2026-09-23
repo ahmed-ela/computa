@@ -41,8 +41,16 @@ export interface TaskSnapshot {
   updatedAt: number;
   workspace: string;
   model: string;
+  modelSelectable: boolean;
   branch?: string;
   entries: EntrySnapshot[];
+}
+
+export interface ModelOption {
+  id: string;
+  label: string;
+  detail: string;
+  highMemory: boolean;
 }
 
 export interface AppSnapshot {
@@ -55,6 +63,7 @@ export interface AppSnapshot {
   permissions: PermissionSnapshot;
   appearance: 'system' | 'light' | 'dark';
   defaultModel: string;
+  modelOptions: ModelOption[];
   showToolPayloads: boolean;
   isInspectorPresented: boolean;
   isSettingsPresented: boolean;
@@ -66,10 +75,13 @@ export type NativeAction =
   | { action: 'selectEntry'; id: string }
   | { action: 'createTask' }
   | { action: 'submitPrompt'; prompt: string }
+  | { action: 'interruptTask'; taskID: string }
   | { action: 'toggleInspector' }
   | { action: 'showSettings' }
   | { action: 'dismissSettings' }
   | { action: 'setAppearance'; value: 'system' | 'light' | 'dark' }
+  | { action: 'setDefaultModel'; modelID: string }
+  | { action: 'setTaskModel'; taskID: string; modelID: string }
   | { action: 'setShowToolPayloads'; value: boolean }
   | { action: 'refreshPermissions' }
   | { action: 'requestAccessibilityPermission' }

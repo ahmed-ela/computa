@@ -8,7 +8,8 @@ protocol AgentRuntimeClient: Sendable {
 
     func loadTasks() async throws -> [AgentTask]
     func events() -> AsyncStream<AgentRuntimeEvent>
-    func submit(prompt: String, toTaskID taskID: AgentTask.ID) async throws
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws
+    func interrupt(taskID: AgentTask.ID) async throws
     func resolveApproval(requestID: String, approved: Bool) async throws
 }
 

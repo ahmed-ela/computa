@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Safe computer-use benchmark</title>
+  <style>
+    :root { font: 16px/1.5 -apple-system, BlinkMacSystemFont, sans-serif; color: #20273b; background: #f5f7fc; }
+    body { margin: 0; }
+    main { max-width: 740px; padding: 32px; margin: 0 auto; }
+    section { padding: 22px; margin: 18px 0; background: white; border: 1px solid #dce2ee; border-radius: 14px; }
+    h1 { margin-bottom: 4px; }
+    h2 { margin-top: 0; font-size: 1.1rem; }
+    button, input, select { font: inherit; }
+    button { padding: 9px 14px; border: 1px solid #304a93; border-radius: 8px; color: #fff; background: #365bc4; cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #ff8c42; outline-offset: 2px; }
+    label { display: block; margin: 10px 0; }
+    input, select { padding: 7px; border: 1px solid #7d8ba7; border-radius: 6px; }
+    output { display: block; min-height: 1.5em; margin-top: 10px; font-family: ui-monospace, monospace; font-weight: 600; }
+    #visual-icon { display: inline-grid; width: 56px; height: 56px; padding: 8px; place-items: center; border: 3px solid #134e9d; border-radius: 50%; background: #17a3ee; }
+    #visual-icon svg { width: 28px; height: 28px; fill: #fff; }
+    .scroll-gap { height: 105vh; background: linear-gradient(#f5f7fc, #e8eefc); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Safe computer-use benchmark</h1>
+    <p>Local, neutral test controls only. Reload with a fresh <code>run</code> query value to reset every result.</p>
+    <p id="identity">Run: <span id="run-value"></span> · Tab: <span id="tab-value"></span></p>
+
+    <section>
+      <h2>Semantic button</h2>
+      <button id="semantic-button" type="button">Mark semantic complete</button>
+      <output id="semantic-result" aria-live="polite">READY</output>
+    </section>
+
+    <section>
+      <h2>Visual-only target</h2>
+      <p>For the screenshot-only case, click the blue circular button with a white star.</p>
+      <!-- Deliberately unnamed to isolate screenshot grounding from AX labels. -->
+      <button id="visual-icon" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 2 2.9 6.6 7.1.7-5.4 4.7 1.6 7L12 17.3 5.8 21l1.6-7L2 9.3l7.1-.7z"/></svg></button>
+      <output id="visual-result" aria-live="polite">READY</output>
+    </section>
+
+    <section>
+      <h2>Form controls</h2>
+      <form id="form">
+        <label for="name">Name <input id="name" name="name" autocomplete="off" required></label>
+        <label for="color">Color <select id="color" name="color"><option>Amber</option><option>Cyan</option><option>Violet</option></select></label>
+        <button type="submit">Submit form</button>
+      </form>
+      <output id="form-result" aria-live="polite">READY</output>
+    </section>
+
+    <section>
+      <h2>Delayed result</h2>
+      <button id="delayed-button" type="button">Start delayed result</button>
+      <button id="delayed-release" type="button" disabled>Continue delayed result</button>
+      <output id="delayed-result" aria-live="polite">READY</output>
+    </section>
+
+    <section>
+      <h2>Tab identity</h2>
+      <p>Both tabs have the same title; the query value below distinguishes them.</p>
+      <button id="tab-button" type="button">Mark this tab complete</button>
+      <output id="tab-result" aria-live="polite">READY</output>
+    </section>
+  </main>
+
+  <div class="scroll-gap" aria-hidden="true"></div>
+  <main>
+    <section>
+      <h2>Below-the-fold target</h2>
+      <button id="scroll-button" type="button">Complete after scrolling</button>
+      <output id="scroll-result" aria-live="polite">READY</output>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const params = new URLSearchParams(location.search);
+      const rawRun = params.get('run') ?? 'manual';
+      const run = /^[A-Za-z0-9_-]{1,48}$/.test(rawRun) ? rawRun : 'invalid-run';
+      const tab = params.get('tab') === 'B' ? 'B' : 'A';
+      document.querySelector('#run-value').textContent = run;
+      document.querySelector('#tab-value').textContent = tab;
+      const mark = (id, value) => { document.querySelector(id).textContent = value; };
+      document.querySelector('#semantic-button').addEventListener('click', () => mark('#semantic-result', `SEMANTIC_OK:${run}`));
+      document.querySelector('#visual-icon').addEventListener('click', () => mark('#visual-result', `VISUAL_OK:${run}`));
+      document.querySelector('#form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        const name = document.querySelector('#name').value.trim();
+        const color = document.querySelector('#color').value;
+        mark('#form-result', `FORM_OK:${run}:${name}:${color}`);
+      });
+      document.querySelector('#delayed-button').addEventListener('click', () => {
+        mark('#delayed-result', 'WAITING');
+        document.querySelector('#delayed-release').disabled = false;
+      });
+      document.querySelector('#delayed-release').addEventListener('click', () => {
+        document.querySelector('#delayed-release').disabled = true;
+        setTimeout(() => mark('#delayed-result', `DELAYED_OK:${run}`), 750);
+      });
+      document.querySelector('#tab-button').addEventListener('click', () => mark('#tab-result', `TAB_OK:${run}:${tab}`));
+      document.querySelector('#scroll-button').addEventListener('click', () => mark('#scroll-result', `SCROLL_OK:${run}`));
+    })();
+  </script>
+</body>
+</html>

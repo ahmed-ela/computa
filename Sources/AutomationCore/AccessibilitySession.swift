@@ -486,7 +486,10 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
         switch result {
         case .success:
             return names as? [String] ?? []
-        case .attributeUnsupported, .noValue:
+        case .attributeUnsupported, .noValue, .failure:
+            // Some apps return the generic AX failure for optional action
+            // metadata. Treat that element as having no actionable capability;
+            // a mutation still requires a fresh, successful action check.
             return []
         default:
             throw axFailure(result, operation: "list supported actions")
@@ -499,7 +502,9 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
         switch result {
         case .success:
             return settable.boolValue
-        case .attributeUnsupported, .noValue:
+        case .attributeUnsupported, .noValue, .failure:
+            // A failed optional settable query must not make the element
+            // writable or abort an otherwise useful read-only snapshot.
             return false
         default:
             throw axFailure(result, operation: "check whether \(attribute) is settable")
@@ -599,7 +604,10 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
         switch result {
         case .success:
             return value
-        case .attributeUnsupported, .noValue:
+        case .attributeUnsupported, .noValue, .failure:
+            // A generic AX failure on an optional descriptive attribute is
+            // not permission to infer a value. Keep the element visible with
+            // that field absent; mutation still re-reads target capabilities.
             return nil
         default:
             throw axFailure(result, operation: "read \(attribute)")

@@ -98,6 +98,14 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 await state?.submit(prompt: prompt, toTaskID: taskID)
             }
 
+        case "interruptTask":
+            guard let taskID = body["taskID"] as? String,
+                  state.tasks.contains(where: { $0.id == taskID && $0.status == .running })
+            else { return }
+            Task { @MainActor [weak state] in
+                await state?.interrupt(taskID: taskID)
+            }
+
         case "toggleInspector":
             state.isInspectorPresented.toggle()
 
@@ -113,6 +121,16 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                   let appearance = AppAppearance(rawValue: value)
             else { return }
             state.appearance = appearance
+
+        case "setDefaultModel":
+            guard let modelID = body["modelID"] as? String else { return }
+            state.setDefaultModel(modelID)
+
+        case "setTaskModel":
+            guard let modelID = body["modelID"] as? String,
+                  let taskID = body["taskID"] as? String
+            else { return }
+            state.setTaskModel(modelID, taskID: taskID)
 
         case "setShowToolPayloads":
             guard let value = body["value"] as? Bool else { return }

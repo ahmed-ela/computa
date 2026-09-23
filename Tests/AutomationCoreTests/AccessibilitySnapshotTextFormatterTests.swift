@@ -186,6 +186,62 @@ final class AccessibilitySnapshotTextFormatterTests: XCTestCase {
         XCTAssertFalse(output.contains("enabled="))
     }
 
+    func testCompactLinesIncludeAvailableScreenFramesAndStayWithinBudget() {
+        let snapshot = makeSnapshot(elements: [
+            makeElement(index: 0, role: "AXWindow"),
+            makeElement(
+                index: 1,
+                parentIndex: 0,
+                role: "AXButton",
+                title: "1",
+                frame: WindowFrame(x: 879, y: 723.5, width: 48, height: 48),
+                actions: ["AXPress"]
+            ),
+            makeElement(index: 2, parentIndex: 0, role: "AXStaticText", value: "Ready"),
+        ])
+        let formatter = AccessibilitySnapshotTextFormatter(
+            outputCharacterLimit: 512,
+            usesCompactElementLines: true
+        )
+
+        let output = formatter.format(snapshot)
+
+        XCTAssertLessThanOrEqual(output.count, 512)
+        XCTAssertTrue(output.contains(
+            "#1 role=\"AXButton\" label=\"1\" value=- actions=[\"AXPress\"] "
+                + "settable=0 screen_frame=[879,723.5,48,48]"
+        ))
+        XCTAssertTrue(output.contains(
+            "#2 role=\"AXStaticText\" label=- value=\"Ready\" actions=[] settable=0"
+        ))
+        XCTAssertFalse(output.contains("#2 role=\"AXStaticText\" label=- value=\"Ready\" "
+            + "actions=[] settable=0 screen_frame="))
+        XCTAssertTrue(output.contains("shown=3 total=3 source_truncated=0 output_truncated=0"))
+    }
+
+    func testCompactFramesAreDroppedAsWholeElementsWhenOutputBudgetIsTight() {
+        let snapshot = makeSnapshot(elements: (0 ..< 20).map { index in
+            makeElement(
+                index: index,
+                role: "AXButton",
+                title: "Button \(index)",
+                frame: WindowFrame(x: Double(index), y: 20, width: 48, height: 48),
+                actions: ["AXPress"]
+            )
+        })
+        let formatter = AccessibilitySnapshotTextFormatter(
+            outputCharacterLimit: 512,
+            usesCompactElementLines: true
+        )
+
+        let output = formatter.format(snapshot)
+
+        XCTAssertLessThanOrEqual(output.count, 512)
+        XCTAssertTrue(output.contains("output_truncated=1"))
+        XCTAssertTrue(output.contains("screen_frame=[0,20,48,48]"))
+        XCTAssertFalse(output.contains("#19 role="))
+    }
+
     func testPreferredTextSurfacesLatePassiveValueAheadOfActionableControls() {
         var elements = [makeElement(index: 0, role: "AXWindow")]
         elements += (1 ... 24).map { index in
@@ -219,6 +275,83 @@ final class AccessibilitySnapshotTextFormatterTests: XCTestCase {
             "#25 role=\"AXStaticText\" label=- value=\"LOCALCODEX_CHROME_OK\""
         ))
         XCTAssertTrue(output.contains("output_truncated=1"))
+    }
+
+    func testMatchingHeadingSurvivesRepeatedMatchingChromeTabsWithinBudget() throws {
+        var elements = [makeElement(index: 0, role: "AXWindow")]
+        elements += (1 ... 10).map { index in
+            makeElement(
+                index: index,
+                parentIndex: 0,
+                role: "AXRadioButton",
+                title: "Example Domain — Chrome tab \(index)",
+                value: "selected",
+                actions: ["AXPress"]
+            )
+        }
+        elements.append(makeElement(
+            index: 11,
+            parentIndex: 0,
+            role: "AXHeading",
+            title: "Example Domain"
+        ))
+        let formatter = AccessibilitySnapshotTextFormatter(
+            elementLimit: 12,
+            fieldCharacterLimit: 80,
+            outputCharacterLimit: 1_000,
+            prioritizesRelevantElements: true,
+            preferredText: "Example Domain",
+            usesCompactElementLines: true
+        )
+
+        let output = formatter.format(makeSnapshot(elements: elements))
+
+        XCTAssertLessThanOrEqual(output.count, 1_000)
+        XCTAssertTrue(output.contains("output_truncated=1"))
+        let headingRange = try XCTUnwrap(output.range(
+            of: "#11 role=\"AXHeading\" label=\"Example Domain\""
+        ))
+        let tabRange = try XCTUnwrap(output.range(of: "#1 role=\"AXRadioButton\""))
+        XCTAssertLessThan(headingRange.lowerBound, tabRange.lowerBound)
+    }
+
+    func testMatchingActionButtonRemainsAheadOfMatchingHeading() throws {
+        var elements = [makeElement(index: 0, role: "AXWindow")]
+        elements += (1 ... 10).map { index in
+            makeElement(
+                index: index,
+                parentIndex: 0,
+                role: "AXRadioButton",
+                title: "Calculator 1 tab \(index)",
+                actions: ["AXPress"]
+            )
+        }
+        elements.append(makeElement(
+            index: 11,
+            parentIndex: 0,
+            role: "AXHeading",
+            title: "Calculator 1"
+        ))
+        elements.append(makeElement(
+            index: 12,
+            parentIndex: 0,
+            role: "AXButton",
+            title: "1",
+            actions: ["AXPress"]
+        ))
+        let formatter = AccessibilitySnapshotTextFormatter(
+            elementLimit: 13,
+            outputCharacterLimit: 512,
+            prioritizesRelevantElements: true,
+            preferredText: "1",
+            usesCompactElementLines: true
+        )
+
+        let output = formatter.format(makeSnapshot(elements: elements))
+        let buttonRange = try XCTUnwrap(output.range(of: "#12 role=\"AXButton\" label=\"1\""))
+        let headingRange = try XCTUnwrap(output.range(of: "#11 role=\"AXHeading\""))
+
+        XCTAssertLessThan(buttonRange.lowerBound, headingRange.lowerBound)
     }
 
     func testModelDefaultUsesCompactLimits() {
