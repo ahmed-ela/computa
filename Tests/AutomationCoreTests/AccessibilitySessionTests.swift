@@ -230,6 +230,30 @@ final class AccessibilitySessionTests: XCTestCase {
         XCTAssertEqual(runtime.childRequests.map(\.limit), [2, 0, 0])
     }
 
+    func testAgentDefaultReachesChromeStyleWebControlAtDepthNine() throws {
+        let button = FakeAccessibilityNode(
+            identifier: "fixture-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        var root = button
+        for depth in (0..<9).reversed() {
+            root = FakeAccessibilityNode(
+                identifier: "container-\(depth)",
+                children: [root]
+            )
+        }
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+
+        let snapshot = try makeSession(runtime: runtime).snapshot()
+
+        XCTAssertEqual(snapshot.elements.last?.depth, 9)
+        XCTAssertEqual(snapshot.elements.last?.identifier, "fixture-button")
+        XCTAssertEqual(snapshot.elements.last?.supportedActions, [SemanticAXAction.press.rawValue])
+        XCTAssertFalse(snapshot.wasTruncated)
+    }
+
     func testSnapshotSuppressesCyclesWithoutDuplicatingIndices() throws {
         let root = FakeAccessibilityNode(identifier: "root")
         let child = FakeAccessibilityNode(identifier: "child")

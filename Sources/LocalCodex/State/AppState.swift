@@ -6,6 +6,7 @@ import Observation
 @Observable
 final class AppState {
     @ObservationIgnored private let runtime: (any AgentRuntimeClient)?
+    @ObservationIgnored private let permissionClient: any AutomationPermissionClient
 
     var tasks: [AgentTask]
     var selectedTaskID: AgentTask.ID?
@@ -18,15 +19,18 @@ final class AppState {
     var defaultModel = "Qwen3.8-27B 4-bit"
     var showToolPayloads = true
     var connectionState: RuntimeConnectionState = .disconnected
-    var automationPermissions = PermissionInspector().current()
+    var automationPermissions: AutomationPermissionSnapshot
     var pendingApprovals: [ActionApprovalRequest] = []
     var resolvingApprovalIDs: Set<String> = []
 
     init(
         tasks: [AgentTask] = SampleData.tasks,
-        runtime: (any AgentRuntimeClient)? = nil
+        runtime: (any AgentRuntimeClient)? = nil,
+        permissionClient: any AutomationPermissionClient = PermissionInspector()
     ) {
         self.runtime = runtime
+        self.permissionClient = permissionClient
+        automationPermissions = permissionClient.current()
         self.tasks = tasks
         selectedTaskID = tasks.first?.id
         selectedEntryID = tasks.first?.entries.last?.id
@@ -62,7 +66,19 @@ final class AppState {
     }
 
     func refreshAutomationPermissions() {
-        automationPermissions = PermissionInspector().current()
+        automationPermissions = permissionClient.current()
+    }
+
+    /// This is only called by the native bridge for the matching Settings
+    /// button. Model/runtime code has no permission-request action.
+    func requestAccessibilityPermission() {
+        automationPermissions = permissionClient.requestAccessibility()
+    }
+
+    /// This is only called by the native bridge for the matching Settings
+    /// button. Model/runtime code has no permission-request action.
+    func requestScreenRecordingPermission() {
+        automationPermissions = permissionClient.requestScreenRecording()
     }
 
     func resolveApproval(_ request: ActionApprovalRequest, approved: Bool) async {

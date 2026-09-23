@@ -6,9 +6,11 @@ export interface ConnectionSnapshot {
   tone: Tone;
 }
 
+export type PermissionStatus = 'Granted' | 'Not granted';
+
 export interface PermissionSnapshot {
-  accessibility: string;
-  screenRecording: string;
+  accessibility: PermissionStatus;
+  screenRecording: PermissionStatus;
 }
 
 export interface ToolSnapshot {
@@ -69,7 +71,9 @@ export type NativeAction =
   | { action: 'dismissSettings' }
   | { action: 'setAppearance'; value: 'system' | 'light' | 'dark' }
   | { action: 'setShowToolPayloads'; value: boolean }
-  | { action: 'refreshPermissions' };
+  | { action: 'refreshPermissions' }
+  | { action: 'requestAccessibilityPermission' }
+  | { action: 'requestScreenRecordingPermission' };
 
 declare global {
   interface Window {

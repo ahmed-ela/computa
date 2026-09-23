@@ -1032,6 +1032,11 @@ code,
   background: var(--surface-hover);
 }
 
+.secondary-button:disabled {
+  opacity: 0.55;
+  background: var(--surface-subtle);
+}
+
 .no-task-view {
   flex: 1;
 }
@@ -1294,6 +1299,35 @@ code,
 .locked-setting {
   color: var(--green);
   text-transform: none;
+}
+
+.permission-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.permission-status {
+  min-width: 68px;
+  color: var(--orange);
+  font-size: 10px;
+  text-align: right;
+}
+
+.permission-status.granted {
+  color: var(--green);
+}
+
+.permission-request-button {
+  min-width: 102px;
+}
+
+.permission-note {
+  margin: 3px 0 0;
+  color: var(--text-tertiary);
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .refresh-button {

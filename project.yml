@@ -42,6 +42,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ahmedelamin.LocalCodex
         PRODUCT_NAME: LocalCodex
+        DEVELOPMENT_TEAM: MSMG8CJLB3
+        CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: LocalCodex
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools

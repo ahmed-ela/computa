@@ -36,7 +36,11 @@ public struct AccessibilityTreeLimits: Codable, Equatable, Sendable {
     }
 
     public static let agentDefault = AccessibilityTreeLimits(
-        validatedMaxDepth: 8,
+        // Chromium exposes document controls below a relatively deep chain of
+        // window, toolbar, web-area, and landmark groups. A depth of eight
+        // reaches the web area but can stop immediately before its controls.
+        // The element cap still bounds traversal cost for unusually deep apps.
+        validatedMaxDepth: 16,
         maxElements: 400,
         maxChildrenPerElement: 80,
         maxActionsPerElement: 32,
@@ -258,7 +262,33 @@ protocol AccessibilityTreeRuntime {
 
 struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
     func applicationElement(processIdentifier: Int32) throws -> AccessibilityElementHandle {
-        AccessibilityElementHandle(AXUIElementCreateApplication(processIdentifier))
+        let application = AXUIElementCreateApplication(processIdentifier)
+
+        // Application children commonly begin with a very large menu bar. For
+        // computer use that can exhaust a bounded preorder snapshot before the
+        // actual document or browser content is reached. Prefer the app's
+        // focused/main window as the observation root. Chromium can briefly
+        // expose neither attribute while opening a new tab, so fall back to
+        // its ordered AXWindows collection before traversing the application
+        // menu tree. Retain the application element only for apps without a
+        // window.
+        for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
+            if let window = try copyAttribute(attribute, from: application),
+               CFGetTypeID(window) == AXUIElementGetTypeID() {
+                return AccessibilityElementHandle(window as AnyObject)
+            }
+        }
+        if let windows = try copyAttribute(kAXWindowsAttribute, from: application) as? [AnyObject] {
+            for window in windows where CFGetTypeID(window) == AXUIElementGetTypeID() {
+                let accessibilityWindow = unsafeDowncast(window, to: AXUIElement.self)
+                if try copyAttribute(kAXSubroleAttribute, from: accessibilityWindow) as? String
+                    == kAXStandardWindowSubrole
+                {
+                    return AccessibilityElementHandle(window)
+                }
+            }
+        }
+        return AccessibilityElementHandle(application)
     }
 
     func describe(

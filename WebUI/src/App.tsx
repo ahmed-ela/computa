@@ -13,7 +13,6 @@ type IconName =
   | 'chevron'
   | 'computer'
   | 'copy'
-  | 'file'
   | 'gear'
   | 'info'
   | 'inspect'
@@ -33,7 +32,6 @@ const iconPaths: Record<IconName, string> = {
   chevron: 'm9 18 6-6-6-6',
   computer: 'M4 5h16v11H4V5Zm5 15h6m-3-4v4',
   copy: 'M8 8h11v11H8V8Zm-3 8H4V4h12v1',
-  file: 'M7 3h7l4 4v14H7V3Zm7 0v5h5',
   gear: 'M12 8.7a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6Zm8 3.3-2.1-1 .1-2.3-2.1-2.1-2.3.1-1-2.1H9.4l-1 2.1-2.3-.1L4 8.7l.1 2.3L2 12l2.1 1-.1 2.3 2.1 2.1 2.3-.1 1 2.1h3.2l1-2.1 2.3.1 2.1-2.1-.1-2.3 2.1-1Z',
   info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Zm0-9v5m0-9h.01',
   inspect: 'M4 4h16v16H4V4Zm11 0v16M18 8h-1m1 4h-1m1 4h-1',
@@ -396,12 +394,12 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
           {task.entries.length === 0 ? (
             <div className="empty-conversation">
               <span className="empty-mark"><Icon name="sparkles" size={22} /></span>
-              <h1>What should we build?</h1>
-              <p>Ask LocalCodex to inspect files, write code, or use approved desktop tools.</p>
+              <h1>What should we do?</h1>
+              <p>Ask local Qwen to inspect an app, open Chrome, or perform an approved computer action.</p>
               <div className="suggestion-grid">
-                <button onClick={() => post({ action: 'submitPrompt', prompt: 'Inspect this workspace and explain its architecture.' })}>Explain this workspace</button>
-                <button onClick={() => post({ action: 'submitPrompt', prompt: 'Run the tests and fix any failures.' })}>Run and fix tests</button>
-                <button onClick={() => post({ action: 'submitPrompt', prompt: 'Find the highest-impact improvement and implement it.' })}>Improve the project</button>
+                <button onClick={() => post({ action: 'submitPrompt', prompt: 'Check computer-use permissions and tell me what is available.' })}>Check permissions</button>
+                <button onClick={() => post({ action: 'submitPrompt', prompt: 'List the running applications and summarize what is available.' })}>Show running apps</button>
+                <button onClick={() => post({ action: 'submitPrompt', prompt: 'Open Google Chrome and inspect its focused window.' })}>Inspect Chrome</button>
               </div>
             </div>
           ) : (
@@ -468,6 +466,8 @@ function Inspector({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSnapsh
 
 function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
   if (!snapshot.isSettingsPresented) return null;
+  const accessibilityGranted = snapshot.permissions.accessibility === 'Granted';
+  const screenRecordingGranted = snapshot.permissions.screenRecording === 'Granted';
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={() => post({ action: 'dismissSettings' })}>
       <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -492,7 +492,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
           </section>
           <section>
             <h2>Local runtime</h2>
-            <div className="setting-row"><span><strong>Model</strong><small>Configured in the native App Server adapter.</small></span><code>{snapshot.defaultModel}</code></div>
+            <div className="setting-row"><span><strong>Model</strong><small>MLX 4-bit through LM Studio; this Mac runs a 4,096-token context.</small></span><code>{snapshot.defaultModel}</code></div>
             <div className="setting-row"><span><strong>Connection</strong><small>{snapshot.connection.label}</small></span><span className={`setting-state ${toneClass(snapshot.connection.tone)}`}><span />{snapshot.connection.state}</span></div>
           </section>
           <section>
@@ -505,12 +505,38 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
                 onChange={(event) => post({ action: 'setShowToolPayloads', value: (event.currentTarget as HTMLInputElement).checked })}
               />
             </label>
-            <div className="setting-row"><span><strong>Computer-action approvals</strong><small>Native enforcement always requires an explicit decision.</small></span><span className="locked-setting"><Icon name="check" size={14} /> Always on</span></div>
+            <div className="setting-row"><span><strong>Native computer tool</strong><small>One compact tool covers app discovery, semantic inspection, captures, mouse, keyboard, text, scroll, and drag actions.</small></span><code>computer</code></div>
+            <div className="setting-row"><span><strong>Mutating computer actions</strong><small>Native enforcement always requires an explicit decision before input or app changes.</small></span><span className="locked-setting"><Icon name="check" size={14} /> Approval on</span></div>
           </section>
           <section>
             <h2>Computer use</h2>
-            <div className="setting-row"><span><strong>Accessibility</strong><small>Required for semantic UI inspection and actions.</small></span><span>{snapshot.permissions.accessibility}</span></div>
-            <div className="setting-row"><span><strong>Screen Recording</strong><small>Required for window discovery and captures.</small></span><span>{snapshot.permissions.screenRecording}</span></div>
+            <div className="setting-row permission-row">
+              <span><strong>Accessibility</strong><small>Required for semantic UI inspection and actions.</small></span>
+              <span className="permission-controls">
+                <span className={accessibilityGranted ? 'permission-status granted' : 'permission-status'}>{snapshot.permissions.accessibility}</span>
+                <button
+                  className="secondary-button permission-request-button"
+                  disabled={accessibilityGranted}
+                  onClick={() => post({ action: 'requestAccessibilityPermission' })}
+                >
+                  {accessibilityGranted ? 'Granted' : 'Request access'}
+                </button>
+              </span>
+            </div>
+            <div className="setting-row permission-row">
+              <span><strong>Screen Recording</strong><small>Required for screenshots.</small></span>
+              <span className="permission-controls">
+                <span className={screenRecordingGranted ? 'permission-status granted' : 'permission-status'}>{snapshot.permissions.screenRecording}</span>
+                <button
+                  className="secondary-button permission-request-button"
+                  disabled={screenRecordingGranted}
+                  onClick={() => post({ action: 'requestScreenRecordingPermission' })}
+                >
+                  {screenRecordingGranted ? 'Granted' : 'Request access'}
+                </button>
+              </span>
+            </div>
+            <p className="permission-note">Permission onboarding is explicit: macOS prompts appear only after you click Request access. Local models cannot grant or request access.</p>
             <button className="secondary-button refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</button>
           </section>
         </div>
@@ -547,8 +573,8 @@ const previewSnapshot: AppSnapshot | null = import.meta.env.DEV ? {
   tasks: [
     {
       id: 'preview',
-      title: 'Build the Octane interface',
-      summary: 'Replace the native presentation layer with a WebKit UI',
+      title: 'Inspect Chrome locally',
+      summary: 'Use Qwen and the native computer tool to inspect Chrome',
       status: 'Running',
       statusTone: 'blue',
       updatedAt: Date.now() / 1000 - 82,
@@ -556,17 +582,17 @@ const previewSnapshot: AppSnapshot | null = import.meta.env.DEV ? {
       model: 'Qwen3.8-27B · 4-bit',
       branch: 'local',
       entries: [
-        { id: 'user', kind: 'user', title: 'You', body: 'Build this interface with Octane and WebKit.', timestamp: Date.now() / 1000 - 76 },
-        { id: 'reasoning', kind: 'reasoning', title: 'Working', body: 'Inspecting the native state boundary and preparing a safe bridge.', timestamp: Date.now() / 1000 - 65 },
+        { id: 'user', kind: 'user', title: 'You', body: 'Open Chrome and inspect the active page.', timestamp: Date.now() / 1000 - 76 },
+        { id: 'reasoning', kind: 'reasoning', title: 'Working', body: 'Checking permissions and locating Chrome before observing its focused window.', timestamp: Date.now() / 1000 - 65 },
         {
           id: 'tool',
           kind: 'tool',
-          title: 'Build web assets',
-          body: 'Compiled the Octane SPA.',
+          title: 'Computer snapshot',
+          body: 'Observed the Chrome Accessibility tree.',
           timestamp: Date.now() / 1000 - 40,
-          tool: { name: 'bun run build', summary: 'Compiled Octane for WKWebView', status: 'Succeeded', tone: 'green', input: 'bun run build', output: 'build complete' },
+          tool: { name: 'computer', summary: 'Captured a bounded semantic snapshot', status: 'Succeeded', tone: 'green', input: '{"action":"snapshot","parameters":{"process_id":812}}', output: 'Chrome window observed' },
         },
-        { id: 'assistant', kind: 'assistant', title: 'LocalCodex', body: 'The presentation layer now matches the Codex desktop structure while the privileged runtime remains native Swift.', timestamp: Date.now() / 1000 - 18 },
+        { id: 'assistant', kind: 'assistant', title: 'LocalCodex', body: 'Chrome is open and the active page is available through the native computer-use harness.', timestamp: Date.now() / 1000 - 18 },
       ],
     },
   ],

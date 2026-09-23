@@ -92,6 +92,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             state.isInspectorPresented.toggle()
 
         case "showSettings":
+            state.refreshAutomationPermissions()
             state.presentedSheet = .settings
 
         case "dismissSettings":
@@ -109,6 +110,12 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
         case "refreshPermissions":
             state.refreshAutomationPermissions()
+
+        case "requestAccessibilityPermission":
+            state.requestAccessibilityPermission()
+
+        case "requestScreenRecordingPermission":
+            state.requestScreenRecordingPermission()
 
         default:
             return

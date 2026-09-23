@@ -1,3 +1,4 @@
+import AutomationCore
 import XCTest
 @testable import LocalCodex
 
@@ -92,6 +93,34 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.tasks.count, 1)
         XCTAssertEqual(state.selectedTask?.status, .draft)
         XCTAssertEqual(state.selectedTask?.model, state.defaultModel)
+    }
+
+    @MainActor
+    func testPermissionInitializationAndRefreshNeverRequestAccess() {
+        let permissions = PermissionClientRecorder()
+        let state = AppState(tasks: [], permissionClient: permissions)
+
+        state.refreshAutomationPermissions()
+
+        XCTAssertEqual(permissions.currentCalls, 2)
+        XCTAssertEqual(permissions.accessibilityRequestCalls, 0)
+        XCTAssertEqual(permissions.screenRecordingRequestCalls, 0)
+    }
+
+    @MainActor
+    func testExplicitPermissionRequestsStaySeparateAndRefreshState() {
+        let permissions = PermissionClientRecorder()
+        let state = AppState(tasks: [], permissionClient: permissions)
+
+        state.requestAccessibilityPermission()
+        XCTAssertEqual(state.automationPermissions.accessibility, .granted)
+        XCTAssertEqual(state.automationPermissions.screenRecording, .notGranted)
+
+        state.requestScreenRecordingPermission()
+        XCTAssertEqual(state.automationPermissions.accessibility, .granted)
+        XCTAssertEqual(state.automationPermissions.screenRecording, .granted)
+        XCTAssertEqual(permissions.accessibilityRequestCalls, 1)
+        XCTAssertEqual(permissions.screenRecordingRequestCalls, 1)
     }
 
     @MainActor
@@ -213,6 +242,40 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.pendingApprovals, [replacement])
         let resolution = await recorder.lastResolution()
         XCTAssertNil(resolution)
+    }
+}
+
+private final class PermissionClientRecorder: AutomationPermissionClient {
+    private var snapshot = AutomationPermissionSnapshot(
+        accessibility: .notGranted,
+        screenRecording: .notGranted
+    )
+
+    private(set) var currentCalls = 0
+    private(set) var accessibilityRequestCalls = 0
+    private(set) var screenRecordingRequestCalls = 0
+
+    func current() -> AutomationPermissionSnapshot {
+        currentCalls += 1
+        return snapshot
+    }
+
+    func requestAccessibility() -> AutomationPermissionSnapshot {
+        accessibilityRequestCalls += 1
+        snapshot = AutomationPermissionSnapshot(
+            accessibility: .granted,
+            screenRecording: snapshot.screenRecording
+        )
+        return snapshot
+    }
+
+    func requestScreenRecording() -> AutomationPermissionSnapshot {
+        screenRecordingRequestCalls += 1
+        snapshot = AutomationPermissionSnapshot(
+            accessibility: snapshot.accessibility,
+            screenRecording: .granted
+        )
+        return snapshot
     }
 }
 
