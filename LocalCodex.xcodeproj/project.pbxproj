@@ -32,6 +32,7 @@
 		8A3A063EFEB53C628263F106 /* LocalQwenLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E62054450FAE8DA550FF86E /* LocalQwenLiveTests.swift */; };
 		8E58C5F3FFFA6210E7A5DB00 /* PermissionInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9D19908E7AFCBBE655C94E8 /* PermissionInspector.swift */; };
 		917403A3DFAF4AEC28D0E613 /* CaptureDimensionsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E7C3234A6EA12AF984B058E /* CaptureDimensionsTests.swift */; };
+		97D675E4C3C4BB6E56EAEE6D /* WebBridgePermissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E70ADD59B761C5E00F86E30 /* WebBridgePermissionTests.swift */; };
 		986D07D6939351E528B45BCD /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDBBB086AA87B6ADE5494FF2 /* AppState.swift */; };
 		99FC9818F52229665902B4D8 /* SampleData.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6E00E6AE5775C9013D0F9E1 /* SampleData.swift */; };
 		9AB2C3F799A3D44952F4E158 /* WindowScreenshotter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6E9FCF86C007483ADAC8BFD /* WindowScreenshotter.swift */; };
@@ -81,6 +82,7 @@
 		2487286DF17C9F9F59C1F64F /* AppStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateTests.swift; sourceTree = "<group>"; };
 		38EC6AC8B9C8CB1DA67C5AE6 /* RolloutPrimitiveTraceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RolloutPrimitiveTraceTests.swift; sourceTree = "<group>"; };
 		3D672D5255FCC82F85D5217A /* AccessibilityElementController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityElementController.swift; sourceTree = "<group>"; };
+		3E70ADD59B761C5E00F86E30 /* WebBridgePermissionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebBridgePermissionTests.swift; sourceTree = "<group>"; };
 		3F38658C85CC330776BB92F8 /* RunningApplications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunningApplications.swift; sourceTree = "<group>"; };
 		43BF8F7365FD407FA306D9C5 /* FocusedWindowReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusedWindowReader.swift; sourceTree = "<group>"; };
 		5E62054450FAE8DA550FF86E /* LocalQwenLiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalQwenLiveTests.swift; sourceTree = "<group>"; };
@@ -219,6 +221,7 @@
 				5E62054450FAE8DA550FF86E /* LocalQwenLiveTests.swift */,
 				DF297B57DF9F4EA64D9928B6 /* RolloutPrimitiveTrace.swift */,
 				38EC6AC8B9C8CB1DA67C5AE6 /* RolloutPrimitiveTraceTests.swift */,
+				3E70ADD59B761C5E00F86E30 /* WebBridgePermissionTests.swift */,
 				7FBAEA827104B6535CFA472D /* WebSnapshotTests.swift */,
 			);
 			path = LocalCodexTests;
@@ -440,6 +443,7 @@
 				8A3A063EFEB53C628263F106 /* LocalQwenLiveTests.swift in Sources */,
 				717F1C65943F58CBEE0193B6 /* RolloutPrimitiveTrace.swift in Sources */,
 				3997C0599D3C6BE712D065B5 /* RolloutPrimitiveTraceTests.swift in Sources */,
+				97D675E4C3C4BB6E56EAEE6D /* WebBridgePermissionTests.swift in Sources */,
 				688E9AB78E1839D3B6081C7F /* WebSnapshotTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

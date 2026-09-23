@@ -536,7 +536,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
                 </button>
               </span>
             </div>
-            <p className="permission-note">Permission onboarding is explicit: macOS prompts appear only after you click Request access. Local models cannot grant or request access.</p>
+            <p className="permission-note">Click Request access to ask macOS. If access remains denied, LocalCodex opens System Settings, directly to Screen &amp; System Audio Recording when available. Add and enable LocalCodex in the screen-recording list, not System Audio Recording Only; then relaunch LocalCodex and refresh here. Local models cannot grant access, but once granted they can capture screenshots without a separate approval for each capture.</p>
             <button className="secondary-button refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</button>
           </section>
         </div>

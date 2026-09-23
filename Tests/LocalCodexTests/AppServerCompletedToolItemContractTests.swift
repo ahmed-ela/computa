@@ -112,4 +112,74 @@ final class AppServerCompletedToolItemContractTests: XCTestCase {
         XCTAssertNil(ComputerToolArgumentContract.optionalStringArray("command"))
         XCTAssertNil(ComputerToolArgumentContract.optionalStringArray(["command", 1] as [Any]))
     }
+
+    func testComputerToolParametersRejectPresentStringInsteadOfSilentlyUsingEmptyObject() throws {
+        XCTAssertThrowsError(
+            try ComputerToolArgumentContract.parameters(
+                in: ["parameters": #"{"pid":820}"#]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ComputerToolArgumentContract.ValidationError,
+                .parametersMustBeObject
+            )
+            XCTAssertTrue(error.localizedDescription.contains("JSON object"))
+        }
+        XCTAssertEqual(try ComputerToolArgumentContract.parameters(in: [:]).count, 0)
+        let parameters = try ComputerToolArgumentContract.parameters(
+            in: ["parameters": ["process_id": 820]]
+        )
+        XCTAssertEqual(parameters["process_id"] as? Int, 820)
+    }
+
+    func testComputerToolCanonicalProcessIDRemainsValid() throws {
+        XCTAssertEqual(
+            try ComputerToolArgumentContract.requiredProcessID(["process_id": 820]),
+            820
+        )
+    }
+
+    func testComputerToolNumericPIDAliasIsValidWhenCanonicalKeyIsAbsent() throws {
+        XCTAssertEqual(
+            try ComputerToolArgumentContract.requiredProcessID(["pid": 820]),
+            820
+        )
+    }
+
+    func testComputerToolPIDAliasRejectsInvalidNumericValues() {
+        let invalidValues: [Any] = [
+            true,
+            NSNumber(value: 820.5),
+            NSNumber(value: 0),
+            NSNumber(value: -1),
+            NSNumber(value: Int64(Int32.max) + 1),
+            "820",
+        ]
+        for value in invalidValues {
+            XCTAssertThrowsError(
+                try ComputerToolArgumentContract.requiredProcessID(["pid": value])
+            ) { error in
+                XCTAssertEqual(
+                    error as? ComputerToolArgumentContract.ValidationError,
+                    .invalidProcessID
+                )
+            }
+        }
+    }
+
+    func testComputerToolBothProcessIDKeysAreRejectedEvenWhenEqual() {
+        for alias in [820, 821] {
+            XCTAssertThrowsError(
+                try ComputerToolArgumentContract.requiredProcessID([
+                    "process_id": 820,
+                    "pid": alias,
+                ])
+            ) { error in
+                XCTAssertEqual(
+                    error as? ComputerToolArgumentContract.ValidationError,
+                    .ambiguousProcessID
+                )
+            }
+        }
+    }
 }

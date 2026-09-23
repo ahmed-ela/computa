@@ -74,6 +74,47 @@ enum ComputerToolContract {
 }
 
 enum ComputerToolArgumentContract {
+    enum ValidationError: LocalizedError, Equatable {
+        case parametersMustBeObject
+        case ambiguousProcessID
+        case invalidProcessID
+
+        var errorDescription: String? {
+            switch self {
+            case .parametersMustBeObject:
+                "computer parameters must be a JSON object; do not send a JSON-encoded string."
+            case .ambiguousProcessID:
+                "Supply only one of process_id or pid, not both."
+            case .invalidProcessID:
+                "A valid numeric process_id (or pid) is required."
+            }
+        }
+    }
+
+    static func parameters(in arguments: [String: Any]) throws -> [String: Any] {
+        guard let rawParameters = arguments["parameters"] else { return [:] }
+        guard let parameters = rawParameters as? [String: Any] else {
+            throw ValidationError.parametersMustBeObject
+        }
+        return parameters
+    }
+
+    static func requiredProcessID(_ arguments: [String: Any]) throws -> Int32 {
+        let hasProcessID = arguments.keys.contains("process_id")
+        let hasPID = arguments.keys.contains("pid")
+        guard !(hasProcessID && hasPID) else {
+            throw ValidationError.ambiguousProcessID
+        }
+        let rawValue = hasProcessID ? arguments["process_id"] : arguments["pid"]
+        guard let integer = exactInt64(rawValue),
+              integer > 0,
+              let processID = Int32(exactly: integer)
+        else {
+            throw ValidationError.invalidProcessID
+        }
+        return processID
+    }
+
     static func finiteDouble(_ rawValue: Any?) -> Double? {
         guard let number = rawValue as? NSNumber,
               CFGetTypeID(number) != CFBooleanGetTypeID(),
@@ -878,7 +919,7 @@ private extension CodexAppServerRuntime {
             switch tool {
             case "computer":
                 let action = try requiredString("action", in: arguments)
-                var parameters = arguments["parameters"] as? [String: Any] ?? [:]
+                var parameters = try ComputerToolArgumentContract.parameters(in: arguments)
                 let mappedTool: String
                 switch action {
                 case "permission_status":
@@ -1398,13 +1439,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func requiredProcessID(_ arguments: [String: Any]) throws -> Int32 {
-            guard let integer = ComputerToolArgumentContract.exactInt64(arguments["process_id"]),
-                  integer > 0,
-                  let value = Int32(exactly: integer)
-            else {
-                throw RuntimeError.malformedResponse("A valid process_id is required.")
-            }
-            return value
+            try ComputerToolArgumentContract.requiredProcessID(arguments)
         }
 
         private func requiredIndex(_ arguments: [String: Any]) throws -> Int {

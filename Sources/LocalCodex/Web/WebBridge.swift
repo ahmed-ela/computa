@@ -12,9 +12,19 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private var latestContent: Data?
     private var nextRevision: UInt64 = 0
     private var pageIsReady = false
+    private let openScreenRecordingSettings: (URL) -> Bool
 
-    init(state: AppState) {
+    static let screenRecordingSettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"
+    )!
+    static let systemSettingsAppURL = URL(fileURLWithPath: "/System/Applications/System Settings.app")
+
+    init(
+        state: AppState,
+        openScreenRecordingSettings: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }
+    ) {
         self.state = state
+        self.openScreenRecordingSettings = openScreenRecordingSettings
     }
 
     func attach(webView: WKWebView) {
@@ -115,10 +125,21 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             state.requestAccessibilityPermission()
 
         case "requestScreenRecordingPermission":
-            state.requestScreenRecordingPermission()
+            requestScreenRecordingPermission()
 
         default:
             return
+        }
+    }
+
+    /// Only the human-operated Settings action reaches this method. Opening
+    /// System Settings does not change TCC authorization; the user must grant it.
+    func requestScreenRecordingPermission() {
+        guard let state else { return }
+        state.requestScreenRecordingPermission()
+        guard state.automationPermissions.screenRecording == .notGranted else { return }
+        if !openScreenRecordingSettings(Self.screenRecordingSettingsURL) {
+            _ = openScreenRecordingSettings(Self.systemSettingsAppURL)
         }
     }
 
