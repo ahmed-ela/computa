@@ -85,24 +85,89 @@
       document.querySelector('#run-value').textContent = run;
       document.querySelector('#tab-value').textContent = tab;
       const mark = (id, value) => { document.querySelector(id).textContent = value; };
-      document.querySelector('#semantic-button').addEventListener('click', () => mark('#semantic-result', `SEMANTIC_OK:${run}`));
-      document.querySelector('#visual-icon').addEventListener('click', () => mark('#visual-result', `VISUAL_OK:${run}`));
+      const telemetryURL = (values) => {
+        const query = new URLSearchParams({ run, tab, ...values });
+        return `/CuaV2SafeBenchmark.telemetry?${query}`;
+      };
+      const postTelemetry = async (values) => {
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          try {
+            const response = await fetch(telemetryURL(values), {
+              method: 'POST',
+              cache: 'no-store',
+              credentials: 'omit',
+              keepalive: true,
+              referrerPolicy: 'no-referrer'
+            });
+            if (response.ok && await response.text() === 'ACK') return true;
+          } catch (_) {}
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        return false;
+      };
+      const unrelatedOutputIDs = [
+        'semantic-result', 'visual-result', 'form-result',
+        'delayed-result', 'scroll-result'
+      ];
+      let presenceInFlight = false;
+      let presenceSequence = 0;
+      const reportPresence = async () => {
+        if (presenceInFlight) return;
+        presenceInFlight = true;
+        presenceSequence += 1;
+        await postTelemetry({
+          kind: 'presence',
+          sequence: String(presenceSequence),
+          visibility: document.visibilityState,
+          tab_result: document.querySelector('#tab-result').textContent,
+          unrelated_ready: unrelatedOutputIDs.every((id) => document.querySelector(`#${id}`).textContent === 'READY') ? '1' : '0'
+        });
+        presenceInFlight = false;
+      };
+      const reportMutation = (control, selector) => {
+        void postTelemetry({
+          kind: 'mutation',
+          control,
+          value: document.querySelector(selector).textContent
+        });
+      };
+      document.querySelector('#semantic-button').addEventListener('click', () => {
+        mark('#semantic-result', `SEMANTIC_OK:${run}`);
+        reportMutation('semantic-button', '#semantic-result');
+      });
+      document.querySelector('#visual-icon').addEventListener('click', () => {
+        mark('#visual-result', `VISUAL_OK:${run}`);
+        reportMutation('visual-icon', '#visual-result');
+      });
       document.querySelector('#form').addEventListener('submit', (event) => {
         event.preventDefault();
         const name = document.querySelector('#name').value.trim();
         const color = document.querySelector('#color').value;
         mark('#form-result', `FORM_OK:${run}:${name}:${color}`);
+        reportMutation('form', '#form-result');
       });
       document.querySelector('#delayed-button').addEventListener('click', () => {
         mark('#delayed-result', 'WAITING');
         document.querySelector('#delayed-release').disabled = false;
+        reportMutation('delayed-button', '#delayed-result');
       });
       document.querySelector('#delayed-release').addEventListener('click', () => {
         document.querySelector('#delayed-release').disabled = true;
+        reportMutation('delayed-release', '#delayed-result');
         setTimeout(() => mark('#delayed-result', `DELAYED_OK:${run}`), 750);
       });
-      document.querySelector('#tab-button').addEventListener('click', () => mark('#tab-result', `TAB_OK:${run}:${tab}`));
-      document.querySelector('#scroll-button').addEventListener('click', () => mark('#scroll-result', `SCROLL_OK:${run}`));
+      document.querySelector('#tab-button').addEventListener('click', () => {
+        const result = `TAB_OK:${run}:${tab}`;
+        mark('#tab-result', result);
+        reportMutation('tab-button', '#tab-result');
+      });
+      document.querySelector('#scroll-button').addEventListener('click', () => {
+        mark('#scroll-result', `SCROLL_OK:${run}`);
+        reportMutation('scroll-button', '#scroll-result');
+      });
+      document.addEventListener('visibilitychange', () => { void reportPresence(); });
+      setInterval(() => { void reportPresence(); }, 250);
+      void reportPresence();
     })();
   </script>
 </body>

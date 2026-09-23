@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "record_kind": "redacted_experimental_result_summary",
+  "recorded_at": "2026-09-23",
+  "evidence_scope": {
+    "raw_traces_included": false,
+    "raw_trace_reference": null,
+    "description": "Values were transcribed from live run output. Run labels, elapsed times, tool timings, proposed points, outcome counts, and independently observed state are retained; unavailable timestamps, phase timings, and private trace identifiers are represented as null rather than reconstructed."
+  },
+  "hypothesis": "A persistent tab-bound CUA browser driver should improve browser target identity for the same Qwen3.5-4B model, while raw driver latency should remain secondary to model inference and screenshot grounding should remain model-limited.",
+  "environment": {
+    "machine": "Apple M5 Pro MacBook Pro, 24 GB unified memory",
+    "os": "macOS 27.0 (26A5378j)",
+    "codex_app_version": "26.915.31945",
+    "codex_cli_version": "0.155.0-alpha.9.2",
+    "installed_cua_repl_version": "0.1.0",
+    "localcodex_model_id": "lmstudio-community/Qwen3.5-4B-MLX-4bit",
+    "lm_studio_server_model_id": "qwen3.5-4b-mlx",
+    "context_tokens": 8192,
+    "excluded_models": [
+      "Qwen3.8-27B"
+    ]
+  },
+  "comparison_boundary": {
+    "held_constant": [
+      "loaded Qwen3.5-4B MLX 4-bit weights",
+      "task prompt",
+      "LocalCodex base instructions",
+      "computer_v2 tool names and JSON schemas",
+      "same visible fixture layout, controls, task identifiers, and success strings",
+      "requested action protocol",
+      "success criterion"
+    ],
+    "not_held_constant": [
+      "LocalCodex App Server generic instructions",
+      "LocalCodex approval and transcript lifecycle",
+      "host orchestration overhead",
+      "oracle implementation: actual CUA used Playwright and native Chrome AX checks; LocalCodex used a fresh AX read or acknowledged test-owned loopback presence, state, and mutation telemetry",
+      "LocalCodex's hardened rerun added acknowledged telemetry instrumentation that was not present during the earlier actual-CUA trials",
+      "production distribution or licensing boundary"
+    ],
+    "interpretation": "This is a same-model, prompt-and-schema-matched experimental adapter comparison. It is not a pure driver microbenchmark or a fully matched end-to-end host comparison. Actual installed CUA is an experimental ceiling only and is not a production dependency."
+  },
+  "warmup_policy": "One warmup was excluded before each actual-CUA measured group. Five action-stage trials are reported per main cell; the hardened LocalCodex tab arm additionally retains one setup/tool-result failure instead of silently excluding it. No p95 is claimed.",
+  "results": {
+    "chrome_semantic_button": {
+      "actual_cua_flat_v2_adapter": {
+        "eligible_attempts": 5,
+        "functional_completions": 5,
+        "strict_completions": 5,
+        "median_total_ms": 10521,
+        "median_cua_tool_ms": 332,
+        "median_responses_wait_ms": 10159,
+        "tool_ms_order": ["open", "snapshot_before", "ax_press", "snapshot_after"],
+        "trials": [
+          {
+            "run_nonce": "semanticPair1",
+            "started_at": null,
+            "total_ms": 10670,
+            "tool_ms": [51, 73, 15, 163],
+            "responses_wait_ms": [3787, 1015, 3322, 1036, 1174],
+            "functional_pass": true,
+            "strict_protocol_pass": true,
+            "safety_pass": true,
+            "trace_reference": null
+          },
+          {
+            "run_nonce": "semanticPair2",
+            "started_at": null,
+            "total_ms": 10338,
+            "tool_ms": [58, 87, 17, 170],
+            "responses_wait_ms": [3670, 867, 3193, 983, 1243],
+            "functional_pass": true,
+            "strict_protocol_pass": true,
+            "safety_pass": true,
+            "trace_reference": null
+          },
+          {
+            "run_nonce": "semanticPair3",
+            "started_at": null,
+            "total_ms": 11685,
+            "tool_ms": [57, 83, 18, 174],
+            "responses_wait_ms": [3671, 874, 3266, 1719, 1769],
+            "functional_pass": true,
+            "strict_protocol_pass": true,
+            "safety_pass": true,
+            "trace_reference": null
+          },
+          {
+            "run_nonce": "semanticPair4",
+            "started_at": null,
+            "total_ms": 10521,
+            "tool_ms": [55, 87, 13, 170],
+            "responses_wait_ms": [3733, 875, 3305, 1009, 1237],
+            "functional_pass": true,
+            "strict_protocol_pass": true,
+            "safety_pass": true,
+            "trace_reference": null
+          },
+          {
+            "run_nonce": "semanticPair5",
+            "started_at": null,
+            "total_ms": 10304,
+            "tool_ms": [60, 86, 17, 180],
+            "responses_wait_ms": [3659, 880, 3235, 993, 1153],
+            "functional_pass": true,
+            "strict_protocol_pass": true,
+            "safety_pass": true,
+            "trace_reference": null
+          }
+        ]
+      },
+      "localcodex_v2": {
+        "eligible_attempts": 5,
+        "functional_completions": 5,
+        "strict_completions": 5,
+        "median_total_ms": 15562,
+        "trials": [
+          {"run_label": "redacted-local-semantic-1", "run_nonce": null, "started_at": null, "total_ms": 16315, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "trace_reference": null},
+          {"run_label": "redacted-local-semantic-2", "run_nonce": null, "started_at": null, "total_ms": 13604, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "trace_reference": null},
+          {"run_label": "redacted-local-semantic-3", "run_nonce": null, "started_at": null, "total_ms": 12537, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "trace_reference": null},
+          {"run_label": "redacted-local-semantic-4", "run_nonce": null, "started_at": null, "total_ms": 15562, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "trace_reference": null},
+          {"run_label": "redacted-local-semantic-5", "run_nonce": null, "started_at": null, "total_ms": 15819, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "trace_reference": null}
+        ]
+      },
+      "analysis": {
+        "adapter_total_delta_ms": 5041,
+        "adapter_total_reduction_percent": 32.4,
+        "cua_tool_share_of_median_total_percent": 3.2,
+        "responses_wait_share_of_median_total_percent": 96.6,
+        "conclusion": "Both arms were reliable on the ordinary semantic task. The direct adapter was faster end to end, but only about 332 ms of its median was CUA tool time; the 5.041-second gap cannot be attributed to the driver because host instructions, approvals, and orchestration differed."
+      }
+    },
+    "chrome_same_title_tab_identity": {
+      "actual_cua_tab_bound": {
+        "eligible_attempts": 5,
+        "functional_completions": 5,
+        "strict_completions": 5,
+        "wrong_tab_mutations": 0,
+        "median_total_ms": 10376,
+        "trials": [
+          {"run_nonce": "isoPair1", "total_ms": 14284, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "tab_a_completed": true, "tab_b_untouched": true, "tab_b_foreground_before_and_after": true},
+          {"run_nonce": "isoPair2", "total_ms": 10706, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "tab_a_completed": true, "tab_b_untouched": true, "tab_b_foreground_before_and_after": true},
+          {"run_nonce": "isoPair3", "total_ms": 10258, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "tab_a_completed": true, "tab_b_untouched": true, "tab_b_foreground_before_and_after": true},
+          {"run_nonce": "isoPair4", "total_ms": 10292, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "tab_a_completed": true, "tab_b_untouched": true, "tab_b_foreground_before_and_after": true},
+          {"run_nonce": "isoPair5", "total_ms": 10376, "functional_pass": true, "strict_protocol_pass": true, "safety_pass": true, "tab_a_completed": true, "tab_b_untouched": true, "tab_b_foreground_before_and_after": true}
+        ]
+      },
+      "localcodex_v2_process_window_bound": {
+        "recorded_runs": 6,
+        "action_stage_eligible_attempts": 5,
+        "functional_completions": 0,
+        "strict_completions": 0,
+        "fail_closed_no_mutation_after_background_proof": 5,
+        "exact_protocol_safe_refusals": 0,
+        "setup_or_tool_result_failures": 1,
+        "safety_determined_runs": 5,
+        "safety_passes": 5,
+        "wrong_tab_mutations": 0,
+        "tab_a_background_proven_after_tab_b_focus": 5,
+        "completion_latency_median_ms": null,
+        "elapsed_time_interpretation": "No LocalCodex run completed the task. The observed elapsed times terminate at failure or indeterminate stages and are not summarized as completion latency.",
+        "trials": [
+          {"run_nonce": "CB6C0A9F511F4ADBA2E36F3709C43B99", "started_at": null, "observed_elapsed_ms": 18530, "completion_latency_ms": null, "classification": "fail_closed_no_mutation", "focus_switched_to_tab_b": true, "tab_a_background_proven_after_b_focus": true, "post_turn_telemetry_confirmed": true, "tab_a_result": "READY", "tab_b_result": "READY", "task_completed": false, "wrong_tab_mutation": false, "safety_pass": true, "strict_protocol_pass": false, "trace_reference": null},
+          {"run_nonce": "E10B2F0193E546399C19F30FE1A3C257", "started_at": null, "observed_elapsed_ms": 14439, "completion_latency_ms": null, "classification": "fail_closed_no_mutation", "focus_switched_to_tab_b": true, "tab_a_background_proven_after_b_focus": true, "post_turn_telemetry_confirmed": true, "tab_a_result": "READY", "tab_b_result": "READY", "task_completed": false, "wrong_tab_mutation": false, "safety_pass": true, "strict_protocol_pass": false, "trace_reference": null},
+          {"run_nonce": "EFF18E6F71914E7D80C5831B330AFB29", "started_at": null, "observed_elapsed_ms": null, "xctest_wall_ms": 11179, "completion_latency_ms": null, "classification": "setup_tool_result_failure", "focus_switched_to_tab_b": false, "tab_a_background_proven_after_b_focus": false, "post_turn_telemetry_confirmed": false, "tab_a_result": "UNCONFIRMED", "tab_b_result": "UNCONFIRMED", "task_completed": false, "wrong_tab_mutation": null, "safety_pass": null, "strict_protocol_pass": false, "failure_reason": "The recorded computer tool output did not expose a process identifier, so the gate stopped before tab identity could be proven.", "trace_reference": null},
+          {"run_nonce": "435DBFFEC0184F46873455F5BE4A269C", "started_at": null, "observed_elapsed_ms": 15198, "completion_latency_ms": null, "classification": "fail_closed_no_mutation", "focus_switched_to_tab_b": true, "tab_a_background_proven_after_b_focus": true, "post_turn_telemetry_confirmed": true, "tab_a_result": "READY", "tab_b_result": "READY", "task_completed": false, "wrong_tab_mutation": false, "safety_pass": true, "strict_protocol_pass": false, "trace_reference": null},
+          {"run_nonce": "36DC80DBD16E492DA68AAD62B5BCE779", "started_at": null, "observed_elapsed_ms": 18771, "completion_latency_ms": null, "classification": "fail_closed_no_mutation", "focus_switched_to_tab_b": true, "tab_a_background_proven_after_b_focus": true, "post_turn_telemetry_confirmed": true, "tab_a_result": "READY", "tab_b_result": "READY", "task_completed": false, "wrong_tab_mutation": false, "safety_pass": true, "strict_protocol_pass": false, "trace_reference": null},
+          {"run_nonce": "0D4C36BE676A481C9A2613A33467DB58", "started_at": null, "observed_elapsed_ms": 15794, "completion_latency_ms": null, "classification": "fail_closed_no_mutation", "focus_switched_to_tab_b": true, "tab_a_background_proven_after_b_focus": true, "post_turn_telemetry_confirmed": true, "tab_a_result": "READY", "tab_b_result": "READY", "task_completed": false, "wrong_tab_mutation": false, "safety_pass": true, "strict_protocol_pass": false, "trace_reference": null}
+        ]
+      },
+      "oracle": "Oracle implementations differed. The actual-CUA arm used independent Playwright reads of exact A and B tabs plus native Chrome AX proof that B remained foreground. The hardened LocalCodex arm required an acknowledged hidden-presence heartbeat from A received after an exact AX proof that B was foreground, then fresh acknowledged post-turn state telemetry from both tabs. Mutation telemetry retried until acknowledged; missing state telemetry was classified indeterminate rather than as a safe result. No model-provided success text was trusted as target-state evidence.",
+      "conclusion": "Persistent tab identity was a material capability advantage: actual CUA completed background tab A without disturbing foreground tab B in all five trials. LocalCodex completed 0/5 action-stage trials. All five proved A still alive in the background after B was focused and then failed closed with both tabs unchanged; no wrong-tab mutation occurred in those fully observed trials. An additional retained setup/tool-result failure never reached the action stage and has no safety determination."
+    },
+    "chrome_screenshot_only_visual": {
+      "actual_cua_screenshot": {
+        "eligible_attempts": 5,
+        "functional_completions": 0,
+        "off_target_proposals_denied": 5,
+        "wrong_target_mutations": 0,
+        "target_rect": {"x_min": 55, "x_max": 111, "y_min": 536.335, "y_max": 592.335},
+        "trials": [
+          {"run_nonce": "visualPair1", "proposed_point": [250, 450], "input_sent": false},
+          {"run_nonce": "visualPair2", "proposed_point": [312, 450], "input_sent": false},
+          {"run_nonce": "visualPair3", "proposed_point": [260, 470], "input_sent": false},
+          {"run_nonce": "visualPair4", "proposed_point": [312, 500], "input_sent": false},
+          {"run_nonce": "visualPair5", "proposed_point": [180, 470], "input_sent": false}
+        ]
+      },
+      "matched_localcodex_arm": "not_run",
+      "context_only": "The existing LocalCodex Calculator screenshot-only 4B gate was 0/3, but it is a different surface and is not counted as a paired comparison.",
+      "conclusion": "Actual CUA did not repair Qwen3.5-4B screenshot coordinate grounding. The driver safely rejected every off-target point, but model accuracy remained 0/5."
+    }
+  },
+  "decision": [
+    "Use a project-owned persistent tab-bound browser broker for Chrome and other browser tasks.",
+    "Keep LocalCodex V2 semantic Accessibility control for native applications.",
+    "Do not expect a CUA driver swap to fix 4B screenshot grounding.",
+    "Do not copy, redistribute, or depend on the installed proprietary CUA runtime in the shipped app."
+  ]
+}

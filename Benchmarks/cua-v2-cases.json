@@ -12,7 +12,7 @@
     "reset": "Use a fresh run nonce and reload the exact URL; the page has no persistent storage or remote requests."
   },
   "status_meanings": {
-    "existing_gate": "An opt-in LocalCodex XCTest already executes this exact class of task, with a stated independent oracle; it is not yet a paired CUA result.",
+    "existing_gate": "An opt-in LocalCodex XCTest executes this exact class of task with a stated independent oracle. Paired CUA evidence, when available, is referenced separately and does not change this executable-coverage status.",
     "driver_gate": "An opt-in LocalCodex model-free primitive XCTest emits per-call timings and checks observation identity; it omits App Server dispatch and approvals and is not directly comparable to CUA tool-call wall time.",
     "planned": "The fixture and task definition exist, but no paired runner or independent oracle harness exists yet. Never count as a pass."
   },
@@ -156,7 +156,7 @@
       "oracle": "A fresh independent page/AX read finds #semantic-result exactly SEMANTIC_OK:<run>; all other outputs remain READY.",
       "reset": "Reload with a fresh run nonce; no other page state is reused.",
       "cua_comparable": true,
-      "comparison_note": "LocalCodex has a Qwen agent gate. Codex CUA also has a six-repetition scripted record, but that model-free evidence cannot be compared directly to the Qwen whole-turn latency. A same-model agent comparison is still unavailable."
+      "comparison_note": "A five-trial same-Qwen-4B experimental CUA adapter comparison is recorded in same-4b-cua-v2-2026-09-23.json. The requested protocol and success criterion were aligned, but oracle implementations differed. Its direct adapter also omits LocalCodex App Server instructions, approvals, and orchestration, so its whole-turn latency is not a pure driver comparison."
     },
     {
       "id": "chrome.visual.icon",
@@ -167,7 +167,7 @@
       "oracle": "A fresh independent page/AX read finds #visual-result exactly VISUAL_OK:<run>; all other outputs remain READY; click point lies within the icon button.",
       "reset": "Reload with a fresh run nonce.",
       "cua_comparable": true,
-      "comparison_note": "The visual arm must use screenshot-only observations in both harnesses and the same model for agent-in-loop scoring."
+      "comparison_note": "The actual-CUA same-Qwen-4B screenshot-only arm was 0/5 in same-4b-cua-v2-2026-09-23.json. The matching LocalCodex fixture arm was not run, so this case remains planned and is not a paired comparison."
     },
     {
       "id": "chrome.form",
@@ -204,14 +204,15 @@
     },
     {
       "id": "chrome.tab.isolation",
-      "kind": "planned_driver_identity",
+      "kind": "agent_browser_identity",
       "surface": "two Chrome tabs of new safe local fixture",
-      "status": "planned",
+      "status": "existing_gate",
+      "localcodex_gate": "CuaV2SafeChromeSemanticLiveTests/testQwenRetainedAXPressAcrossSameTitleChromeTabSwitchWithV2",
       "task": "Open two tabs with the same page title but tab=A and tab=B, bind A, switch to B, then act only in A by bound tab identity.",
-      "oracle": "A's #tab-result is exactly TAB_OK:<run>:A while B's #tab-result remains READY; record a refusal if the driver cannot safely target background A.",
+      "oracle": "After exact B is proven foreground, acknowledged loopback telemetry must prove A is still alive and hidden. Fresh acknowledged post-turn telemetry must prove both tab states; mutations report their exact post-mutation values with retries. Missing telemetry is indeterminate, not a safe result. Completion requires A's #tab-result to be exactly TAB_OK:<run>:A while B remains READY.",
       "reset": "Close only the two created test tabs; create fresh run nonces and tab IDs for the next trial.",
       "cua_comparable": true,
-      "comparison_note": "This is a capability and safety comparison, not a like-for-like latency cell if V2 cannot bind a background tab."
+      "comparison_note": "The same-Qwen-4B experimental record is in same-4b-cua-v2-2026-09-23.json. The requested protocol and success criterion were aligned, but oracle implementations differed. Actual CUA completed 5/5. LocalCodex completed 0/5 action-stage trials: all five proved A remained backgrounded after B was focused and then failed closed with both tabs unchanged, with no wrong-tab mutation. One additional retained setup run stopped before tab identity could be proven and has no safety determination. This is a capability comparison, not a like-for-like completion-latency cell."
     },
     {
       "id": "safety.stale.snapshot",
