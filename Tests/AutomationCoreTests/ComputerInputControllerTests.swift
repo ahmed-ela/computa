@@ -62,6 +62,75 @@ private final class RecordingComputerInputRuntime: ComputerInputRuntime {
 
 final class ComputerInputControllerTests: XCTestCase {
     @MainActor
+    func testActiveSourceYieldsBeforeCooperativeTargetActivation() {
+        var calls = [String]()
+
+        let accepted = ApplicationActivationHandoff.request(
+            sourceProcessIdentifier: 10,
+            targetProcessIdentifier: 20,
+            sourceIsActive: true,
+            yieldToTarget: { calls.append("yield") },
+            activateFromSource: {
+                calls.append("activate-from-source")
+                return true
+            },
+            activateDirectly: {
+                calls.append("activate-directly")
+                return true
+            }
+        )
+
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(calls, ["yield", "activate-from-source"])
+    }
+
+    @MainActor
+    func testRejectedCooperativeActivationFailsClosed() {
+        var calls = [String]()
+
+        let accepted = ApplicationActivationHandoff.request(
+            sourceProcessIdentifier: 10,
+            targetProcessIdentifier: 20,
+            sourceIsActive: true,
+            yieldToTarget: { calls.append("yield") },
+            activateFromSource: {
+                calls.append("activate-from-source")
+                return false
+            },
+            activateDirectly: {
+                calls.append("activate-directly")
+                return true
+            }
+        )
+
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(calls, ["yield", "activate-from-source"])
+    }
+
+    @MainActor
+    func testInactiveSourceUsesDirectActivation() {
+        var calls = [String]()
+
+        let accepted = ApplicationActivationHandoff.request(
+            sourceProcessIdentifier: 10,
+            targetProcessIdentifier: 20,
+            sourceIsActive: false,
+            yieldToTarget: { calls.append("yield") },
+            activateFromSource: {
+                calls.append("activate-from-source")
+                return true
+            },
+            activateDirectly: {
+                calls.append("activate-directly")
+                return true
+            }
+        )
+
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(calls, ["activate-directly"])
+    }
+
+    @MainActor
     func testEveryOperationFailsClosedBeforeRuntimeUse() async {
         var permissionChecks = 0
         let runtime = RecordingComputerInputRuntime()

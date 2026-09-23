@@ -44,9 +44,8 @@ targets:
         PRODUCT_NAME: LocalCodex
         DEVELOPMENT_TEAM: MSMG8CJLB3
         CODE_SIGN_STYLE: Automatic
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: LocalCodex
-        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Config/LocalCodex-Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MARKETING_VERSION: 0.1.0
         CURRENT_PROJECT_VERSION: 1

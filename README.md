@@ -67,9 +67,9 @@ The App Server exposes one prompt-efficient dynamic tool named `computer`, backe
 | `move`, `click`, `double_click`, `right_click`, `scroll`, `drag` | Send native pointer input to an explicitly identified target process. |
 | `keypress`, `type` | Send approved keyboard input to an explicitly identified target process. |
 
-All mutations pause for a native approval decision. Before raw input, LocalCodex reactivates the approved target process so a focus change during approval cannot silently redirect the event. Each semantic Accessibility mutation is bound to the exact process, snapshot UUID, and element index the model inspected; an attempted mutation invalidates the snapshot so the model must inspect again before another action. The model is instructed to observe again after every action instead of treating an acknowledgement as proof of success.
+All mutations pause for a native approval decision. Before raw input, LocalCodex reactivates the approved target process so a focus change during approval cannot silently redirect the event. Each semantic Accessibility mutation is bound to the exact process, snapshot UUID, and element index the model inspected; an attempted mutation invalidates the snapshot so the model must inspect again before another action. The model is instructed to observe again after every action instead of treating an acknowledgement as proof of success. Display `capture` is read-only and does **not** present a per-screenshot native approval gate: once macOS Screen Recording access is granted, a local model turn can request captures while LocalCodex runs.
 
-Permission onboarding is explicit. AutomationCore can read permission state without prompting, but only the human-operated **Request access** buttons in LocalCodex Settings ask macOS for Accessibility or Screen Recording access. Permission-dependent tool calls fail closed when authorization is absent; the local model cannot grant or request access itself.
+Permission onboarding is explicit. AutomationCore can read permission state without prompting, and only the human-operated **Request access** buttons in LocalCodex Settings call the macOS permission-request APIs. A button press is not proof of a grant: on this macOS 27 installation, Screen Recording returned denied without a system prompt and requires adding the installed LocalCodex app in **System Settings → Privacy & Security → Screen & System Audio Recording**. Refresh LocalCodex Settings after granting access and relaunch the app if macOS requests it. Permission-dependent tool calls fail closed when authorization is absent; the local model cannot grant or request access itself.
 
 ## Prerequisites
 
@@ -78,7 +78,7 @@ Permission onboarding is explicit. AutomationCore can read permission state with
 - XcodeGen when regenerating the Xcode project (`brew install xcodegen`);
 - the Codex/ChatGPT desktop app installed at `/Applications/ChatGPT.app`, including its executable `Contents/Resources/codex`;
 - for live inference, LM Studio with its local server running and `mlx-community/Qwen3.8-27B-4bit` downloaded and available;
-- Accessibility permission for semantic inspection and native input, plus Screen Recording permission for display capture. Grant either explicitly from **Settings → Computer use → Request access**.
+- Accessibility permission for semantic inspection and native input, plus Screen Recording permission for display capture. Use **Settings → Computer use → Request access** or the applicable macOS Privacy & Security pane, then verify that the app reports **Granted**. On this macOS 27 installation, Screen Recording needs manual registration in System Settings.
 
 The UI and App Server transport can start without LM Studio, but a model turn cannot complete until the configured model and server are available.
 
@@ -140,7 +140,7 @@ open .build/DerivedData/Build/Products/Debug/LocalCodex.app
 
 The packaged application is a universal macOS app containing both Apple Silicon and Intel slices. Extract `LocalCodex-macOS.zip`, move `LocalCodex.app` to Applications if desired, and open it. The archive contains the compiled Octane interface and the system-WebKit Swift host; it does not contain Bun, Node.js, Electron, Chromium, model weights, or the LM Studio chat-template patch described above.
 
-The local release is signed for this machine with Ahmed's Apple Development identity (`TeamIdentifier=MSMG8CJLB3`) and hardened runtime enabled. That stable identity keeps Accessibility and Screen Recording grants attached across ordinary rebuilds. It is not Developer ID signed or notarized, so Gatekeeper assessment still rejects it as a distribution build; that is expected for this private local install.
+The local release is signed for this machine with Ahmed's Apple Development identity (`TeamIdentifier=MSMG8CJLB3`) and hardened runtime enabled. macOS can still bind Accessibility approval for a local development build to that build's exact code hash, so replacing the application may require requesting Accessibility again even though the signing identity is unchanged. Screen Recording can remain attached to the designated signing requirement. It is not Developer ID signed or notarized, so Gatekeeper assessment still rejects it as a distribution build; that is expected for this private local install.
 
 For faster command-line iteration, the same targets are available through Swift Package Manager:
 
@@ -186,7 +186,7 @@ The live gates verify protocol primitives as well as projected application state
 
 ## Verification status
 
-As of September 22, 2026, this workspace has established:
+As of September 23, 2026, this workspace has established:
 
 - successful Swift Package and native Xcode application builds;
 - the separate opt-in production-runtime test passing against LM Studio, including an exact `LOCAL_QWEN_OK` assistant entry, task status `Completed`, and the corresponding Web UI snapshot;
@@ -195,6 +195,7 @@ As of September 22, 2026, this workspace has established:
 - exact call-ID continuity from LM Studio's streamed function call, through App Server's `item/tool/call` and native result, into the continuation request and final streamed `LOCAL_COMPUTER_TOOL_OK` response;
 - the semantic Chrome gate passing in 83.418 seconds with `open → snapshot → ax → snapshot`, call IDs `call_1293236275110009` through `call_1293236275110012`, and final snapshot token `LOCALCODEX_CHROME_OK_002BB3D4C85F4AFBAA6914E223BB5D19` present in both rollout and raw App Server results;
 - the visual Chrome gate passing in 273.905 seconds with exactly `open → capture → click → snapshot`, call IDs `call_1293236275110013` through `call_1293236275110016`, one valid PNG at both validated layers, a click inside the independently measured fixture-button frame, and final snapshot token `LOCALCODEX_CHROME_OK_F2A624DDE65F413EB5CB7DB18E360F0C`;
+- the current hardened installed signed app (binary SHA-256 `c93d16fa5124001c8a4ab07c557aa774aaed0292e54f92aebe5ae9626f188bc1`) completing a manually approved semantic Chrome turn with `open → snapshot → ax` (`AXPress`) `→ snapshot`, call IDs `call_1293236275110045` through `call_1293236275110048`: the final model-visible Chrome snapshot identified bundle `com.google.Chrome`, and it and an independent native Chrome Accessibility read both contained `HARDENED_INSTALLED_AX_OK_C93D16FA`; LocalCodex reached `Completed` with that token as its final answer;
 - the Octane sidebar, transcript, composer, inspector, settings, and light/dark appearance rendering inside the native WebKit window;
 - initialization of the installed Codex App Server over stdio;
 - an App Server `thread/start` accepting the `lmstudio` provider, configured Qwen model, workspace sandbox, approval policy, and compact `computer` dynamic-tool schema;
@@ -209,7 +210,7 @@ As of September 22, 2026, this workspace has established:
 - bounded, tamper-checked Accessibility snapshots and approval-gated semantic, pointer, and keyboard actions;
 - targeted semantic searches scanning up to 1,000 bounded source elements while keeping the formatted result within a 1,000-character local-model budget.
 
-The deterministic suite currently has 76 passing tests, with the four external model/desktop gates skipped unless explicitly enabled. It covers the local composer, injected runtime snapshots, exact App Server frame decoding, model-rollout primitive decoding, permission guards, capture sizing, strict model-argument parsing, Accessibility snapshot formatting and tamper checks, guarded semantic mutations, strict fixture-target approval, and native input routing. Both Chrome gates above were run separately against the production runtime after the deterministic suite compiled them.
+The current strict Swift suite has 107 total tests: 103 deterministic tests passed, four external model/desktop gates skipped unless explicitly enabled, and zero failures. The Bun typecheck, production UI build, and signed universal Xcode Release build also passed. The Swift suite covers the local composer, injected runtime snapshots, exact App Server frame decoding, model-rollout primitive decoding, permission guards, capture sizing, strict model-argument parsing, Accessibility snapshot formatting and tamper checks, guarded semantic mutations, strict fixture-target approval, and native input routing. Both opt-in Chrome gates above were run separately against the production runtime; the installed-app semantic turns were separate, human-approved runs.
 
 ## Current limitations
 
@@ -217,6 +218,7 @@ The deterministic suite currently has 76 passing tests, with the four external m
 - Chrome is controlled through the same generic app launch, Accessibility, capture, pointer, and keyboard actions as other macOS applications; there is no browser extension or Chrome-specific automation protocol.
 - This Mac also has Codex's richer installed `cua_repl`/computer-use stack, but LocalCodex does not load or copy it. The project-owned clean-room `computer` tool is the only desktop tool exposed to Qwen.
 - The successful semantic and visual smoke turns prove both model/runtime paths on the controlled Chrome fixture; they do not establish that this quantized model will reliably select and format every desktop tool call on arbitrary interfaces.
+- The current hardened installed signed app passed the manually approved semantic Chrome gate, but Screen Recording is still **Not granted** for it, so an installed-app screenshot turn remains unverified. The earlier visual Chrome result came from an opt-in production-runtime test host, not this installed app.
 - App Server persists a task's dynamic-tool schema when that task is created. Tasks created by an older LocalCodex build do not gain the new `computer` tool when resumed; start a new task for computer use after upgrading.
 - The App Server executable path, default provider/model, and initial workspace are currently fixed in code rather than selected in the settings UI.
 - The distributed ZIP is Apple Development signed with hardened runtime enabled for Ahmed's local use. It is not Developer ID signed or notarized for public distribution.

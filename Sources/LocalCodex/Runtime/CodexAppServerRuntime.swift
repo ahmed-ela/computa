@@ -58,6 +58,19 @@ enum AppServerCompletedToolItemContract {
 
 enum ComputerToolContract {
     static let maximumSemanticTextLength = 4_096
+
+    static func accessibilityTarget(
+        processIdentifier: Int32,
+        runningApplications: [RunningApplicationInfo]
+    ) -> AccessibilityApplicationTarget? {
+        let matches = runningApplications.filter {
+            $0.processIdentifier == processIdentifier && !$0.isTerminated
+        }
+        guard matches.count == 1, let application = matches.first else {
+            return nil
+        }
+        return AccessibilityApplicationTarget(application: application)
+    }
 }
 
 enum ComputerToolArgumentContract {
@@ -973,7 +986,18 @@ private extension CodexAppServerRuntime {
                     maxActionsPerElement: 12,
                     maxTextLength: ComputerToolContract.maximumSemanticTextLength
                 )
-                let session = AccessibilitySession(processIdentifier: processID)
+                let runningApplications = await MainActor.run {
+                    RunningApplicationCatalog().applications()
+                }
+                guard let target = ComputerToolContract.accessibilityTarget(
+                    processIdentifier: processID,
+                    runningApplications: runningApplications
+                ) else {
+                    throw RuntimeError.serverError(
+                        "The selected application process is no longer available. Call desktop_list_apps again."
+                    )
+                }
+                let session = AccessibilitySession(target: target)
                 let snapshot = try session.snapshot(limits: limits)
                 accessibilitySessions[processID] = ActiveAccessibilitySession(
                     session: session,
@@ -1019,15 +1043,17 @@ private extension CodexAppServerRuntime {
                 guard approved else {
                     throw RuntimeError.serverError("The user declined the desktop action.")
                 }
-                // The native approval overlay can move focus back to
-                // LocalCodex. Chromium may acknowledge AXPress on a
-                // background element without dispatching the page click, so
-                // restore the exact inspected process before acting.
-                let controller = await MainActor.run { ComputerInputController() }
-                _ = try await controller.activateApplication(processIdentifier: processID)
-                try active.session.perform(action, at: index, in: active.snapshot)
-                accessibilitySessions.removeValue(forKey: processID)
-                return [textContent("Performed \(actionName) on element \(index). Capture a fresh snapshot before the next action.")]
+                defer { accessibilitySessions.removeValue(forKey: processID) }
+                try await prepareAccessibilityMutation(
+                    active,
+                    processIdentifier: processID
+                )
+                try active.session.refreshAndPerform(
+                    action,
+                    at: index,
+                    in: active.snapshot
+                )
+                return [textContent("Requested \(actionName) on element \(index). Capture a fresh snapshot to verify the result before the next action.")]
 
             case "desktop_set_text":
                 let processID = try requiredProcessID(arguments)
@@ -1056,10 +1082,16 @@ private extension CodexAppServerRuntime {
                 guard approved else {
                     throw RuntimeError.serverError("The user declined text entry.")
                 }
-                let controller = await MainActor.run { ComputerInputController() }
-                _ = try await controller.activateApplication(processIdentifier: processID)
-                try active.session.setValue(.text(value), at: index, in: active.snapshot)
-                accessibilitySessions.removeValue(forKey: processID)
+                defer { accessibilitySessions.removeValue(forKey: processID) }
+                try await prepareAccessibilityMutation(
+                    active,
+                    processIdentifier: processID
+                )
+                try active.session.refreshAndSetValue(
+                    .text(value),
+                    at: index,
+                    in: active.snapshot
+                )
                 return [textContent("Set text on element \(index). Capture a fresh snapshot before the next action.")]
 
             case "desktop_list_windows":
@@ -1408,6 +1440,48 @@ private extension CodexAppServerRuntime {
                 )
             }
             return active
+        }
+
+        private func prepareAccessibilityMutation(
+            _ active: ActiveAccessibilitySession,
+            processIdentifier: Int32
+        ) async throws {
+            // The native approval overlay activates LocalCodex. Restore the
+            // exact inspected process and window before using the retained AX
+            // handle. Requiring a short continuous focused interval lets the
+            // approval click, SwiftUI teardown, and AppKit activation handoff
+            // quiesce before Chromium receives the one approved action, while
+            // still preserving the originally inspected snapshot target.
+            let controller = await MainActor.run { ComputerInputController() }
+            _ = try await controller.activateApplication(
+                processIdentifier: processIdentifier
+            )
+            let initialFocusState = try active.session.focusState(in: active.snapshot)
+            guard initialFocusState != .notWindow else {
+                return
+            }
+            if initialFocusState != .focused {
+                _ = try active.session.raiseSnapshotWindow(in: active.snapshot)
+            }
+
+            var consecutiveFocusedSamples = 0
+            for _ in 0 ..< 80 {
+                switch try active.session.focusState(in: active.snapshot) {
+                case .focused:
+                    consecutiveFocusedSamples += 1
+                    if consecutiveFocusedSamples == 12 {
+                        return
+                    }
+                case .notWindow:
+                    return
+                case .applicationNotFocused, .windowNotFocused:
+                    consecutiveFocusedSamples = 0
+                }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            throw RuntimeError.serverError(
+                "The inspected Accessibility window did not become focused. Capture a fresh snapshot and try again."
+            )
         }
 
         private func textContent(_ text: String) -> [String: Any] {

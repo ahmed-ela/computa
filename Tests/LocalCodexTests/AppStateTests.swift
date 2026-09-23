@@ -202,6 +202,136 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
+    func testApprovalGateIsRemovedForAMainRunLoopTurnBeforeRuntimeResolution() async {
+        let task = AgentTask(
+            id: "thread-approval-ordering",
+            title: "Approval ordering",
+            summary: "Waiting",
+            status: .running,
+            workspace: "/tmp/live",
+            model: "Local provider"
+        )
+        let recorder = ApprovalInvocationRecorder()
+        let probe = ApprovalInvocationProbe()
+        let runtime = ApprovalObservingRuntime(
+            tasks: [task],
+            recorder: recorder,
+            observation: { requestID in
+                probe.observe(requestID: requestID)
+            }
+        )
+        let state = AppState(tasks: [task], runtime: runtime)
+        probe.state = state
+        await state.startRuntime()
+        let request = ActionApprovalRequest(
+            id: "approval-ordering-1",
+            taskID: task.id,
+            kind: .computerUse,
+            title: "Control Chrome?",
+            summary: "Press the exact button",
+            details: "AXPress"
+        )
+        state.apply(.approvalRequested(request))
+        DispatchQueue.main.async {
+            probe.queuedMainTurnDidRun = true
+        }
+
+        await state.resolveApproval(request, approved: true)
+
+        let invocation = await recorder.lastInvocation()
+        XCTAssertEqual(invocation?.requestID, request.id)
+        XCTAssertEqual(invocation?.approved, true)
+        XCTAssertEqual(invocation?.observation.requestWasPending, false)
+        XCTAssertEqual(invocation?.observation.queuedMainTurnDidRun, true)
+        XCTAssertTrue(state.pendingApprovals.isEmpty)
+        XCTAssertTrue(state.resolvingApprovalIDs.isEmpty)
+    }
+
+    @MainActor
+    func testApprovalResolutionFailureRestoresRequestAndRecordsFailure() async {
+        let task = AgentTask(
+            id: "thread-approval-error",
+            title: "Approval failure",
+            summary: "Waiting",
+            status: .running,
+            workspace: "/tmp/live",
+            model: "Local provider"
+        )
+        let recorder = ApprovalInvocationRecorder()
+        let probe = ApprovalInvocationProbe()
+        let runtime = ApprovalObservingRuntime(
+            tasks: [task],
+            recorder: recorder,
+            shouldFail: true,
+            observation: { requestID in
+                probe.observe(requestID: requestID)
+            }
+        )
+        let state = AppState(tasks: [task], runtime: runtime)
+        probe.state = state
+        await state.startRuntime()
+        let request = ActionApprovalRequest(
+            id: "approval-error-1",
+            taskID: task.id,
+            kind: .command,
+            title: "Run this command?",
+            summary: "swift test",
+            details: "/tmp/live"
+        )
+        state.apply(.approvalRequested(request))
+
+        await state.resolveApproval(request, approved: true)
+
+        let invocation = await recorder.lastInvocation()
+        XCTAssertEqual(invocation?.observation.requestWasPending, false)
+        XCTAssertEqual(state.pendingApprovals, [request])
+        XCTAssertTrue(state.resolvingApprovalIDs.isEmpty)
+        XCTAssertEqual(state.tasks[0].entries.last?.title, "Approval could not be resolved")
+        XCTAssertEqual(state.tasks[0].entries.last?.body, "The approval response could not be delivered.")
+    }
+
+    @MainActor
+    func testResolvedApprovalIsNotRestoredWhenRuntimeThenThrows() async {
+        let task = AgentTask(
+            id: "thread-approval-resolved-before-error",
+            title: "Approval",
+            summary: "Waiting",
+            status: .running,
+            workspace: "/tmp/live",
+            model: "Local provider"
+        )
+        let recorder = ApprovalInvocationRecorder()
+        let probe = ApprovalInvocationProbe()
+        let runtime = ApprovalObservingRuntime(
+            tasks: [task],
+            recorder: recorder,
+            shouldFail: true,
+            observation: { requestID in
+                probe.state?.apply(.approvalResolved(requestID: requestID))
+                return probe.observe(requestID: requestID)
+            }
+        )
+        let state = AppState(tasks: [task], runtime: runtime)
+        probe.state = state
+        await state.startRuntime()
+        let request = ActionApprovalRequest(
+            id: "approval-resolved-before-error-1",
+            taskID: task.id,
+            kind: .computerUse,
+            title: "Control Chrome?",
+            summary: "Press the exact button",
+            details: "AXPress"
+        )
+        state.apply(.approvalRequested(request))
+
+        await state.resolveApproval(request, approved: true)
+
+        XCTAssertTrue(state.pendingApprovals.isEmpty)
+        XCTAssertTrue(state.resolvingApprovalIDs.isEmpty)
+        XCTAssertEqual(state.tasks[0].entries.last?.title, "Approval could not be resolved")
+    }
+
+    @MainActor
     func testResolvedOrReplacedApprovalCannotBeSentLate() async {
         let task = AgentTask(
             id: "thread-approval-stale",
@@ -346,5 +476,87 @@ private struct ApprovalRecordingRuntime: AgentRuntimeClient {
 
     func resolveApproval(requestID: String, approved: Bool) async throws {
         await recorder.record(requestID: requestID, approved: approved)
+    }
+}
+
+private struct ApprovalInvocationObservation: Equatable, Sendable {
+    let requestWasPending: Bool
+    let queuedMainTurnDidRun: Bool
+}
+
+private struct ApprovalInvocation: Equatable, Sendable {
+    let requestID: String
+    let approved: Bool
+    let observation: ApprovalInvocationObservation
+}
+
+private actor ApprovalInvocationRecorder {
+    private var invocation: ApprovalInvocation?
+
+    func record(_ newInvocation: ApprovalInvocation) {
+        invocation = newInvocation
+    }
+
+    func lastInvocation() -> ApprovalInvocation? {
+        invocation
+    }
+}
+
+@MainActor
+private final class ApprovalInvocationProbe {
+    weak var state: AppState?
+    var queuedMainTurnDidRun = false
+
+    func observe(requestID: String) -> ApprovalInvocationObservation {
+        ApprovalInvocationObservation(
+            requestWasPending: state?.pendingApprovals.contains(where: { $0.id == requestID }) ?? true,
+            queuedMainTurnDidRun: queuedMainTurnDidRun
+        )
+    }
+}
+
+private struct ApprovalObservingRuntime: AgentRuntimeClient {
+    struct ResolutionRejected: LocalizedError {
+        var errorDescription: String? { "The approval response could not be delivered." }
+    }
+
+    let tasks: [AgentTask]
+    let recorder: ApprovalInvocationRecorder
+    let shouldFail: Bool
+    let observation: @MainActor @Sendable (String) -> ApprovalInvocationObservation
+    let providerName = "Approval observing runtime"
+
+    init(
+        tasks: [AgentTask],
+        recorder: ApprovalInvocationRecorder,
+        shouldFail: Bool = false,
+        observation: @escaping @MainActor @Sendable (String) -> ApprovalInvocationObservation
+    ) {
+        self.tasks = tasks
+        self.recorder = recorder
+        self.shouldFail = shouldFail
+        self.observation = observation
+    }
+
+    func loadTasks() async throws -> [AgentTask] { tasks }
+
+    func events() -> AsyncStream<AgentRuntimeEvent> {
+        AsyncStream { continuation in continuation.finish() }
+    }
+
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID) async throws {}
+
+    func resolveApproval(requestID: String, approved: Bool) async throws {
+        let observedState = await observation(requestID)
+        await recorder.record(
+            ApprovalInvocation(
+                requestID: requestID,
+                approved: approved,
+                observation: observedState
+            )
+        )
+        if shouldFail {
+            throw ResolutionRejected()
+        }
     }
 }

@@ -123,6 +123,13 @@ public enum AccessibilitySetValue: Codable, Equatable, Sendable {
     case number(Double)
 }
 
+public enum AccessibilitySnapshotFocusState: Equatable, Sendable {
+    case notWindow
+    case applicationNotFocused
+    case windowNotFocused
+    case focused
+}
+
 public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
     public let index: Int
     public let parentIndex: Int?
@@ -134,6 +141,7 @@ public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
     public let elementDescription: String?
     public let help: String?
     public let identifier: String?
+    public let domIdentifier: String?
     public let value: String?
     public let frame: WindowFrame?
     public let isEnabled: Bool?
@@ -152,6 +160,7 @@ public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
         elementDescription: String?,
         help: String?,
         identifier: String?,
+        domIdentifier: String?,
         value: String?,
         frame: WindowFrame?,
         isEnabled: Bool?,
@@ -169,6 +178,7 @@ public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
         self.elementDescription = elementDescription
         self.help = help
         self.identifier = identifier
+        self.domIdentifier = domIdentifier
         self.value = value
         self.frame = frame
         self.isEnabled = isEnabled
@@ -225,6 +235,7 @@ struct AccessibilityElementDescription {
     let elementDescription: String?
     let help: String?
     let identifier: String?
+    let domIdentifier: String?
     let value: String?
     let frame: WindowFrame?
     let isEnabled: Bool?
@@ -241,6 +252,8 @@ struct AccessibilityChildBatch {
 
 protocol AccessibilityTreeRuntime {
     func applicationElement(processIdentifier: Int32) throws -> AccessibilityElementHandle
+    func applicationIsFrontmost(processIdentifier: Int32) throws -> Bool
+    func focusedWindow(processIdentifier: Int32) throws -> AccessibilityElementHandle?
     func describe(
         _ element: AccessibilityElementHandle,
         limits: AccessibilityTreeLimits
@@ -291,6 +304,21 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
         return AccessibilityElementHandle(application)
     }
 
+    func applicationIsFrontmost(processIdentifier: Int32) throws -> Bool {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        return try bool(attribute: kAXFrontmostAttribute, from: application) ?? false
+    }
+
+    func focusedWindow(processIdentifier: Int32) throws -> AccessibilityElementHandle? {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        guard let rawWindow = try copyAttribute(kAXFocusedWindowAttribute, from: application),
+              CFGetTypeID(rawWindow) == AXUIElementGetTypeID()
+        else {
+            return nil
+        }
+        return AccessibilityElementHandle(rawWindow as AnyObject)
+    }
+
     func describe(
         _ element: AccessibilityElementHandle,
         limits: AccessibilityTreeLimits
@@ -310,6 +338,16 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
             from: element,
             limit: limits.maxTextLength
         )
+        let domIdentifier: (value: String?, wasTruncated: Bool)
+        if identifier.value == nil {
+            domIdentifier = try boundedString(
+                attribute: kAXDOMIdentifierAttribute,
+                from: element,
+                limit: limits.maxTextLength
+            )
+        } else {
+            domIdentifier = (nil, false)
+        }
         let value = try boundedValue(attribute: kAXValueAttribute, from: element, limit: limits.maxTextLength)
         let actions = try actionNames(for: element)
         let boundedActions = Array(actions.prefix(limits.maxActionsPerElement))
@@ -321,6 +359,7 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
             elementDescription: description.value,
             help: help.value,
             identifier: identifier.value,
+            domIdentifier: domIdentifier.value,
             value: value.value,
             frame: try frame(of: element),
             isEnabled: try bool(attribute: kAXEnabledAttribute, from: element),
@@ -333,6 +372,7 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
                 || description.wasTruncated
                 || help.wasTruncated
                 || identifier.wasTruncated
+                || domIdentifier.wasTruncated
                 || value.wasTruncated
                 || actions.count > boundedActions.count
         )
@@ -676,6 +716,7 @@ public final class AccessibilitySession {
                     elementDescription: description.elementDescription,
                     help: description.help,
                     identifier: description.identifier,
+                    domIdentifier: description.domIdentifier,
                     value: description.value,
                     frame: description.frame,
                     isEnabled: description.isEnabled,
@@ -715,6 +756,7 @@ public final class AccessibilitySession {
                 elementDescription: current.elementDescription,
                 help: current.help,
                 identifier: current.identifier,
+                domIdentifier: current.domIdentifier,
                 value: current.value,
                 frame: current.frame,
                 isEnabled: current.isEnabled,
@@ -759,6 +801,203 @@ public final class AccessibilitySession {
         }
 
         try runtime.perform(action: action.rawValue, on: resolved.handle)
+    }
+
+    /// Reports whether the exact window retained by an approved snapshot is
+    /// now the focused window of the focused application. Process activation
+    /// alone is insufficient for Chromium, which can accept an Accessibility
+    /// action for a background window without dispatching the page event.
+    public func focusState(
+        in snapshot: AccessibilityTreeSnapshot
+    ) throws -> AccessibilitySnapshotFocusState {
+        try requirePermission()
+        guard let rootIndex = snapshot.rootIndex else {
+            return .notWindow
+        }
+        let resolved = try resolve(index: rootIndex, snapshot: snapshot)
+        guard resolved.element.role == kAXWindowRole as String else {
+            return .notWindow
+        }
+        guard try runtime.applicationIsFrontmost(
+            processIdentifier: application.processIdentifier
+        ) else {
+            return .applicationNotFocused
+        }
+        guard let focusedWindow = try runtime.focusedWindow(
+            processIdentifier: application.processIdentifier
+        ), runtime.representsSameElement(focusedWindow, resolved.handle) else {
+            return .windowNotFocused
+        }
+        return .focused
+    }
+
+    /// Raises the exact window retained by the snapshot without invalidating
+    /// its target handles. This is preparation for an already-approved
+    /// mutation, not a replacement mutation or a label-based retarget.
+    @discardableResult
+    public func raiseSnapshotWindow(
+        in snapshot: AccessibilityTreeSnapshot
+    ) throws -> Bool {
+        try requirePermission()
+        guard let rootIndex = snapshot.rootIndex else {
+            return false
+        }
+        let resolved = try resolve(index: rootIndex, snapshot: snapshot)
+        guard resolved.element.role == kAXWindowRole as String else {
+            return false
+        }
+        let action = kAXRaiseAction as String
+        guard resolved.element.supportedActions.contains(action) else {
+            throw AutomationError.unsupportedAction(action)
+        }
+        let currentActions = try runtime.supportedActions(for: resolved.handle)
+        guard currentActions.contains(action) else {
+            throw AutomationError.unsupportedAction(action)
+        }
+        try runtime.perform(action: action, on: resolved.handle)
+        return true
+    }
+
+    /// Refreshes after an approval delay, securely rebinds the approved
+    /// element, and performs the requested action on the current handle.
+    public func refreshAndPerform(
+        _ action: SemanticAXAction,
+        at index: Int,
+        in approvedSnapshot: AccessibilityTreeSnapshot
+    ) throws {
+        let refreshed = try refreshTarget(at: index, in: approvedSnapshot)
+        try perform(action, at: refreshed.index, in: refreshed.snapshot)
+    }
+
+    /// Refreshes after an approval delay, securely rebinds the approved
+    /// element, and sets its value on the current handle.
+    public func refreshAndSetValue(
+        _ value: AccessibilitySetValue,
+        at index: Int,
+        in approvedSnapshot: AccessibilityTreeSnapshot
+    ) throws {
+        let refreshed = try refreshTarget(at: index, in: approvedSnapshot)
+        try setValue(value, at: refreshed.index, in: refreshed.snapshot)
+    }
+
+    /// Chromium can report success for a detached web node, so mutations must
+    /// not use a cached child handle after native approval. Prefer exact AX
+    /// identity in the fresh tree. If Chromium rebuilt the node, permit a
+    /// logical rebind only through a complete stable AX/DOM identifier and a
+    /// unique semantic match. Web controls must remain in the same document.
+    /// Everything else fails closed as stale.
+    func refreshTarget(
+        at index: Int,
+        in approvedSnapshot: AccessibilityTreeSnapshot
+    ) throws -> (snapshot: AccessibilityTreeSnapshot, index: Int) {
+        try requirePermission()
+        let approved = try resolve(index: index, snapshot: approvedSnapshot)
+        guard let retainedSnapshot = activeSnapshot,
+              let rootIndex = approvedSnapshot.rootIndex,
+              retainedSnapshot.handles.indices.contains(rootIndex)
+        else {
+            throw AutomationError.staleAccessibilitySnapshot
+        }
+        let retainedRoot = retainedSnapshot.handles[rootIndex]
+        let retainedTarget = approved.handle
+
+        let refreshedSnapshot = try snapshot(limits: approvedSnapshot.limits)
+        guard let refreshedActive = activeSnapshot,
+              let refreshedRootIndex = refreshedSnapshot.rootIndex,
+              refreshedActive.handles.indices.contains(refreshedRootIndex),
+              runtime.representsSameElement(
+                  retainedRoot,
+                  refreshedActive.handles[refreshedRootIndex]
+              )
+        else {
+            activeSnapshot = nil
+            throw AutomationError.staleAccessibilitySnapshot
+        }
+
+        let identityMatches = refreshedSnapshot.elements.filter { candidate in
+            guard refreshedActive.handles.indices.contains(candidate.index) else {
+                return false
+            }
+            return runtime.representsSameElement(
+                retainedTarget,
+                refreshedActive.handles[candidate.index]
+            )
+        }
+        if !identityMatches.isEmpty {
+            guard identityMatches.count == 1,
+                  let rebound = identityMatches.first,
+                  hasSameApprovedSemantics(rebound, as: approved.element)
+            else {
+                activeSnapshot = nil
+                throw AutomationError.staleAccessibilitySnapshot
+            }
+            return (refreshedSnapshot, rebound.index)
+        }
+        // A unique visible match is not a unique target when either bounded
+        // traversal omitted nodes. In particular, another control with the
+        // same identifier may be beyond maxElements, maxDepth, or child limits.
+        // This restriction applies only to logical rebinds; a retained exact
+        // AX identity remains safe in a partial tree.
+        guard !approvedSnapshot.wasTruncated,
+              !refreshedSnapshot.wasTruncated,
+              application.bundleIdentifier != nil
+        else {
+            activeSnapshot = nil
+            throw AutomationError.staleAccessibilitySnapshot
+        }
+        guard hasStableIdentifier(approved.element, limits: approvedSnapshot.limits) else {
+            activeSnapshot = nil
+            throw AutomationError.staleAccessibilitySnapshot
+        }
+
+        // A DOM identifier is scoped to its document, not to the whole Chrome
+        // window. Keep the approved document's exact AX identity while its
+        // child control is rebuilt; another tab may expose the same ID and
+        // visible semantics. Chrome controls without a document ancestor may
+        // use the exact-identity path above, but cannot be logically rebound.
+        let approvedDocumentIndex = documentAncestorIndex(at: index, in: approvedSnapshot)
+        let retainedDocument = approvedDocumentIndex.flatMap { documentIndex in
+            retainedSnapshot.handles.indices.contains(documentIndex)
+                ? retainedSnapshot.handles[documentIndex] : nil
+        }
+        if approvedDocumentIndex != nil && retainedDocument == nil {
+            activeSnapshot = nil
+            throw AutomationError.staleAccessibilitySnapshot
+        }
+        if (approved.element.domIdentifier != nil
+            || application.bundleIdentifier?.hasPrefix("com.google.Chrome") == true),
+           retainedDocument == nil {
+            activeSnapshot = nil
+            throw AutomationError.staleAccessibilitySnapshot
+        }
+
+        let logicalMatches = refreshedSnapshot.elements.filter { candidate in
+            guard hasSameStableIdentifiers(
+                candidate,
+                as: approved.element,
+                limits: approvedSnapshot.limits
+            ), hasSameApprovedSemantics(candidate, as: approved.element) else {
+                return false
+            }
+            guard let retainedDocument else {
+                return true
+            }
+            guard let currentDocumentIndex = documentAncestorIndex(
+                at: candidate.index,
+                in: refreshedSnapshot
+            ), refreshedActive.handles.indices.contains(currentDocumentIndex) else {
+                return false
+            }
+            return runtime.representsSameElement(
+                retainedDocument,
+                refreshedActive.handles[currentDocumentIndex]
+            )
+        }
+        guard logicalMatches.count == 1, let rebound = logicalMatches.first else {
+            activeSnapshot = nil
+            throw AutomationError.staleAccessibilitySnapshot
+        }
+        return (refreshedSnapshot, rebound.index)
     }
 
     public func setValue(
@@ -812,6 +1051,59 @@ public final class AccessibilitySession {
             activeSnapshot.handles[index],
             activeSnapshot.snapshot.limits
         )
+    }
+
+    private func documentAncestorIndex(
+        at index: Int,
+        in snapshot: AccessibilityTreeSnapshot
+    ) -> Int? {
+        var ancestorIndex: Int? = index
+        while let index = ancestorIndex, let ancestor = snapshot.element(at: index) {
+            if ancestor.role == "AXWebArea" || ancestor.role == "AXDocument" {
+                return index
+            }
+            ancestorIndex = ancestor.parentIndex
+        }
+        return nil
+    }
+
+    private func hasStableIdentifier(
+        _ element: AccessibilityTreeElement,
+        limits: AccessibilityTreeLimits
+    ) -> Bool {
+        let identifiers = [element.identifier, element.domIdentifier].compactMap { $0 }
+        // The snapshot stores bounded strings without field-level truncation
+        // flags. A value at the cutoff may be a prefix shared by two distinct
+        // IDs, so only shorter values are safe as logical rebind keys.
+        return !identifiers.isEmpty && identifiers.allSatisfy { value in
+            !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && value.count < limits.maxTextLength
+        }
+    }
+
+    private func hasSameStableIdentifiers(
+        _ candidate: AccessibilityTreeElement,
+        as approved: AccessibilityTreeElement,
+        limits: AccessibilityTreeLimits
+    ) -> Bool {
+        hasStableIdentifier(candidate, limits: limits)
+            && candidate.identifier == approved.identifier
+            && candidate.domIdentifier == approved.domIdentifier
+    }
+
+    private func hasSameApprovedSemantics(
+        _ candidate: AccessibilityTreeElement,
+        as approved: AccessibilityTreeElement
+    ) -> Bool {
+        candidate.role == approved.role
+            && candidate.subrole == approved.subrole
+            && candidate.title == approved.title
+            && candidate.elementDescription == approved.elementDescription
+            && candidate.help == approved.help
+            && candidate.value == approved.value
+            && candidate.isEnabled == approved.isEnabled
+            && Set(candidate.supportedActions) == Set(approved.supportedActions)
+            && candidate.isValueSettable == approved.isValueSettable
     }
 
     private func requirePermission() throws {

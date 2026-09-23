@@ -181,6 +181,7 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
             element.elementDescription,
             element.help,
             element.identifier,
+            element.domIdentifier,
             element.value,
         ]
         .compactMap(nonempty)
@@ -188,7 +189,13 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
     }
 
     private func label(for element: AccessibilityTreeElement) -> String? {
-        [element.title, element.elementDescription, element.identifier, element.help]
+        [
+            element.title,
+            element.elementDescription,
+            element.identifier,
+            element.domIdentifier,
+            element.help,
+        ]
             .compactMap(nonempty)
             .first
     }

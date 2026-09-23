@@ -1,3 +1,4 @@
+import AutomationCore
 import XCTest
 @testable import LocalCodex
 
@@ -46,6 +47,45 @@ final class AppServerCompletedToolItemContractTests: XCTestCase {
 
     func testSemanticTextLimitMatchesAccessibilityMaximum() {
         XCTAssertEqual(ComputerToolContract.maximumSemanticTextLength, 4_096)
+    }
+
+    func testAccessibilityTargetCarriesVerifiedChromeBundleIdentity() {
+        let chrome = RunningApplicationInfo(
+            processIdentifier: 820,
+            bundleIdentifier: "com.google.Chrome",
+            localizedName: "Google Chrome",
+            activationPolicy: .regular,
+            isActive: true,
+            isHidden: false,
+            isTerminated: false
+        )
+        let other = RunningApplicationInfo(
+            processIdentifier: 821,
+            bundleIdentifier: "example.other",
+            localizedName: "Other",
+            activationPolicy: .regular,
+            isActive: false,
+            isHidden: false,
+            isTerminated: false
+        )
+
+        XCTAssertEqual(
+            ComputerToolContract.accessibilityTarget(
+                processIdentifier: 820,
+                runningApplications: [other, chrome]
+            ),
+            AccessibilityApplicationTarget(
+                processIdentifier: 820,
+                bundleIdentifier: "com.google.Chrome",
+                applicationName: "Google Chrome"
+            )
+        )
+        XCTAssertNil(
+            ComputerToolContract.accessibilityTarget(
+                processIdentifier: 822,
+                runningApplications: [other, chrome]
+            )
+        )
     }
 
     func testComputerToolFiniteNumbersRejectBooleansAndNonFiniteValues() {

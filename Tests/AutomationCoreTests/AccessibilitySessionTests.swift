@@ -8,6 +8,8 @@ private final class FakeAccessibilityNode: NSObject {
     let role: String
     var title: String?
     var value: String?
+    var reportedIdentifier: String?
+    var domIdentifier: String?
     var children: [FakeAccessibilityNode]
     var snapshotActions: [String]
     var currentActions: [String]
@@ -29,6 +31,8 @@ private final class FakeAccessibilityNode: NSObject {
         self.role = role
         self.title = title
         self.value = value
+        reportedIdentifier = identifier
+        domIdentifier = nil
         self.children = children
         snapshotActions = actions
         currentActions = actions
@@ -39,8 +43,11 @@ private final class FakeAccessibilityNode: NSObject {
 }
 
 private final class FakeAccessibilityTreeRuntime: AccessibilityTreeRuntime {
-    let root: FakeAccessibilityNode
+    var root: FakeAccessibilityNode
+    var focusedProcessIdentifier: Int32?
+    var focusedWindowNode: FakeAccessibilityNode?
     var applicationElementRequests = [Int32]()
+    var focusedWindowRequests = [Int32]()
     var describedNodeIDs = [String]()
     var childRequests = [(nodeID: String, limit: Int)]()
     var supportedActionRequests = [String]()
@@ -57,6 +64,15 @@ private final class FakeAccessibilityTreeRuntime: AccessibilityTreeRuntime {
         return AccessibilityElementHandle(root)
     }
 
+    func applicationIsFrontmost(processIdentifier: Int32) throws -> Bool {
+        focusedProcessIdentifier == processIdentifier
+    }
+
+    func focusedWindow(processIdentifier: Int32) throws -> AccessibilityElementHandle? {
+        focusedWindowRequests.append(processIdentifier)
+        return focusedWindowNode.map(AccessibilityElementHandle.init)
+    }
+
     func describe(
         _ element: AccessibilityElementHandle,
         limits: AccessibilityTreeLimits
@@ -69,7 +85,8 @@ private final class FakeAccessibilityTreeRuntime: AccessibilityTreeRuntime {
             title: node.title,
             elementDescription: nil,
             help: nil,
-            identifier: node.identifier,
+            identifier: node.reportedIdentifier,
+            domIdentifier: node.domIdentifier,
             value: node.value,
             frame: nil,
             isEnabled: true,
@@ -315,6 +332,588 @@ final class AccessibilitySessionTests: XCTestCase {
         }
     }
 
+    func testFocusStateRequiresExpectedApplicationAndExactSnapshotWindow() throws {
+        let root = FakeAccessibilityNode(identifier: "window", role: kAXWindowRole as String)
+        let otherWindow = FakeAccessibilityNode(identifier: "other", role: kAXWindowRole as String)
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let snapshot = try session.snapshot(limits: generousLimits())
+
+        runtime.focusedProcessIdentifier = 7
+        runtime.focusedWindowNode = root
+        XCTAssertEqual(try session.focusState(in: snapshot), .applicationNotFocused)
+
+        runtime.focusedProcessIdentifier = target.processIdentifier
+        runtime.focusedWindowNode = otherWindow
+        XCTAssertEqual(try session.focusState(in: snapshot), .windowNotFocused)
+
+        runtime.focusedWindowNode = root
+        XCTAssertEqual(try session.focusState(in: snapshot), .focused)
+        XCTAssertEqual(
+            runtime.focusedWindowRequests,
+            [target.processIdentifier, target.processIdentifier]
+        )
+    }
+
+    func testNonWindowSnapshotNeedsNoWindowFocusPreparation() throws {
+        let runtime = FakeAccessibilityTreeRuntime(
+            root: FakeAccessibilityNode(identifier: "application", role: kAXApplicationRole as String)
+        )
+        let session = makeSession(runtime: runtime)
+        let snapshot = try session.snapshot(limits: generousLimits())
+
+        XCTAssertEqual(try session.focusState(in: snapshot), .notWindow)
+        XCTAssertFalse(try session.raiseSnapshotWindow(in: snapshot))
+        XCTAssertTrue(runtime.focusedWindowRequests.isEmpty)
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRaiseSnapshotWindowPreservesApprovedTargetSnapshot() throws {
+        let button = FakeAccessibilityNode(
+            identifier: "button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        let root = FakeAccessibilityNode(
+            identifier: "window",
+            role: kAXWindowRole as String,
+            children: [button],
+            actions: [kAXRaiseAction as String]
+        )
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let snapshot = try session.snapshot(limits: generousLimits())
+
+        XCTAssertTrue(try session.raiseSnapshotWindow(in: snapshot))
+        try session.perform(.press, at: 1, in: snapshot)
+
+        XCTAssertEqual(runtime.performedActions.count, 2)
+        XCTAssertEqual(runtime.performedActions[0].nodeID, "window")
+        XCTAssertEqual(runtime.performedActions[0].action, kAXRaiseAction as String)
+        XCTAssertEqual(runtime.performedActions[1].nodeID, "button")
+        XCTAssertEqual(runtime.performedActions[1].action, SemanticAXAction.press.rawValue)
+    }
+
+    func testRaiseSnapshotWindowFailsClosedWhenRaiseIsNoLongerSupported() throws {
+        let root = FakeAccessibilityNode(
+            identifier: "window",
+            role: kAXWindowRole as String,
+            actions: [kAXRaiseAction as String]
+        )
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let snapshot = try session.snapshot(limits: generousLimits())
+        root.currentActions = []
+
+        XCTAssertThrowsError(try session.raiseSnapshotWindow(in: snapshot)) { error in
+            XCTAssertEqual(error as? AutomationError, .unsupportedAction(kAXRaiseAction as String))
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetRebindsToUniqueCurrentElementInSameRoot() throws {
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = "verify"
+        let root = FakeAccessibilityNode(
+            identifier: "window",
+            role: kAXWindowRole as String,
+            children: [oldButton],
+            actions: [kAXRaiseAction as String]
+        )
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+        let replacementButton = FakeAccessibilityNode(
+            identifier: "replacement-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        replacementButton.reportedIdentifier = "verify"
+        root.children = [replacementButton]
+
+        let refreshed = try session.refreshTarget(at: 1, in: approvedSnapshot)
+        try session.perform(.press, at: refreshed.index, in: refreshed.snapshot)
+
+        XCTAssertEqual(runtime.performedActions.count, 1)
+        XCTAssertEqual(runtime.performedActions[0].nodeID, "replacement-button")
+        XCTAssertTrue(runtime.supportedActionRequests.contains("replacement-button"))
+    }
+
+    func testRefreshTargetRebindsRecreatedControlWithinSameWebDocument() throws {
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = nil
+        oldButton.domIdentifier = "verify"
+        let document = FakeAccessibilityNode(
+            identifier: "document",
+            role: "AXWebArea",
+            children: [oldButton]
+        )
+        let root = FakeAccessibilityNode(
+            identifier: "window",
+            role: kAXWindowRole as String,
+            children: [document]
+        )
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime, application: chromeTarget)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+
+        let replacementButton = FakeAccessibilityNode(
+            identifier: "replacement-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        replacementButton.reportedIdentifier = nil
+        replacementButton.domIdentifier = "verify"
+        document.children = [replacementButton]
+
+        try session.refreshAndPerform(.press, at: 2, in: approvedSnapshot)
+
+        XCTAssertEqual(runtime.performedActions.map(\.nodeID), ["replacement-button"])
+    }
+
+    func testRefreshTargetRejectsSameDOMIdentifierInAnotherChromeTab() throws {
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = nil
+        oldButton.domIdentifier = "verify"
+        let approvedDocument = FakeAccessibilityNode(
+            identifier: "approved-document",
+            role: "AXWebArea",
+            children: [oldButton]
+        )
+        let root = FakeAccessibilityNode(
+            identifier: "window",
+            role: kAXWindowRole as String,
+            children: [approvedDocument]
+        )
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime, application: chromeTarget)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+
+        let otherButton = FakeAccessibilityNode(
+            identifier: "other-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        otherButton.reportedIdentifier = nil
+        otherButton.domIdentifier = "verify"
+        let otherDocument = FakeAccessibilityNode(
+            identifier: "other-document",
+            role: "AXWebArea",
+            children: [otherButton]
+        )
+        approvedDocument.children = []
+        root.children = [approvedDocument, otherDocument]
+
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 2, in: approvedSnapshot)) {
+            error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetRejectsChromeLogicalRebindWithoutDocumentAncestor() throws {
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = nil
+        oldButton.domIdentifier = "verify"
+        let root = FakeAccessibilityNode(
+            identifier: "window",
+            role: kAXWindowRole as String,
+            children: [oldButton]
+        )
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime, application: chromeTarget)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+
+        let otherButton = FakeAccessibilityNode(
+            identifier: "other-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        otherButton.reportedIdentifier = nil
+        otherButton.domIdentifier = "verify"
+        root.children = [otherButton]
+
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 1, in: approvedSnapshot)) {
+            error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetRejectsChromeAXIdentifierWithoutDocumentAncestor() throws {
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = "verify"
+        let root = FakeAccessibilityNode(identifier: "window", children: [oldButton])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime, application: chromeTarget)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+
+        let replacement = FakeAccessibilityNode(
+            identifier: "replacement-button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        replacement.reportedIdentifier = "verify"
+        root.children = [replacement]
+
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 1, in: approvedSnapshot)) {
+            error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetRejectsLogicalRebindWhenApplicationIdentityIsUnknown() throws {
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = "verify"
+        let root = FakeAccessibilityNode(identifier: "window", children: [oldButton])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let unknownApplication = AccessibilityApplicationTarget(processIdentifier: 4_242)
+        let session = makeSession(runtime: runtime, application: unknownApplication)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+
+        let replacement = FakeAccessibilityNode(
+            identifier: "replacement-button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        replacement.reportedIdentifier = "verify"
+        root.children = [replacement]
+
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 1, in: approvedSnapshot)) {
+            error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetRejectsDOMIdentifierWithoutDocumentWhenBundleIsUnknown() throws {
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = nil
+        oldButton.domIdentifier = "verify"
+        let root = FakeAccessibilityNode(identifier: "window", children: [oldButton])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+
+        let replacement = FakeAccessibilityNode(
+            identifier: "replacement-button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        replacement.reportedIdentifier = nil
+        replacement.domIdentifier = "verify"
+        root.children = [replacement]
+
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 1, in: approvedSnapshot)) {
+            error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetRejectsIdentifiersAtTextLengthCutoff() throws {
+        let limits = try AccessibilityTreeLimits(
+            maxDepth: 2,
+            maxElements: 10,
+            maxChildrenPerElement: 5,
+            maxActionsPerElement: 5,
+            maxTextLength: 4
+        )
+        for identifierKind in ["AX", "DOM"] {
+            let oldButton = FakeAccessibilityNode(
+                identifier: "old-button",
+                role: "AXButton",
+                title: "test",
+                actions: [SemanticAXAction.press.rawValue],
+                descriptionWasTruncated: true
+            )
+            oldButton.reportedIdentifier = identifierKind == "AX" ? "veri" : nil
+            oldButton.domIdentifier = identifierKind == "DOM" ? "veri" : nil
+            let root = FakeAccessibilityNode(identifier: "window", children: [oldButton])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            let session = makeSession(runtime: runtime)
+            let approvedSnapshot = try session.snapshot(limits: limits)
+
+            let replacement = FakeAccessibilityNode(
+                identifier: "replacement-button",
+                role: "AXButton",
+                title: "test",
+                actions: [SemanticAXAction.press.rawValue],
+                descriptionWasTruncated: true
+            )
+            replacement.reportedIdentifier = oldButton.reportedIdentifier
+            replacement.domIdentifier = oldButton.domIdentifier
+            root.children = [replacement]
+
+            XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 1, in: approvedSnapshot)) {
+                error in
+                XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+            }
+            XCTAssertTrue(runtime.performedActions.isEmpty, identifierKind)
+        }
+    }
+
+    func testRefreshTargetPrefersExactIdentityWithoutStableIdentifier() throws {
+        let button = FakeAccessibilityNode(
+            identifier: "button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        button.reportedIdentifier = nil
+        let root = FakeAccessibilityNode(identifier: "window", children: [button])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+
+        let refreshed = try session.refreshTarget(at: 1, in: approvedSnapshot)
+        try session.perform(.press, at: refreshed.index, in: refreshed.snapshot)
+
+        XCTAssertEqual(runtime.performedActions.count, 1)
+        XCTAssertEqual(runtime.performedActions[0].nodeID, "button")
+    }
+
+    func testRefreshTargetRejectsLogicalMatchWhenDuplicateIsHiddenPastElementBound() throws {
+        let limits = try AccessibilityTreeLimits(
+            maxDepth: 2,
+            maxElements: 2,
+            maxChildrenPerElement: 3,
+            maxActionsPerElement: 5,
+            maxTextLength: 100
+        )
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = "verify"
+        let root = FakeAccessibilityNode(identifier: "window", children: [oldButton])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: limits)
+        XCTAssertFalse(approvedSnapshot.wasTruncated)
+
+        let replacement = FakeAccessibilityNode(
+            identifier: "replacement-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        replacement.reportedIdentifier = "verify"
+        let hiddenDuplicate = FakeAccessibilityNode(
+            identifier: "hidden-duplicate",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        hiddenDuplicate.reportedIdentifier = "verify"
+        root.children = [replacement, hiddenDuplicate]
+
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 1, in: approvedSnapshot)) {
+            error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertFalse(runtime.describedNodeIDs.contains("hidden-duplicate"))
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetRejectsLogicalMatchWhenApprovedTreeWasIncomplete() throws {
+        let limits = try AccessibilityTreeLimits(
+            maxDepth: 2,
+            maxElements: 2,
+            maxChildrenPerElement: 3,
+            maxActionsPerElement: 5,
+            maxTextLength: 100
+        )
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = "verify"
+        let hiddenSibling = FakeAccessibilityNode(identifier: "hidden-sibling")
+        let root = FakeAccessibilityNode(identifier: "window", children: [oldButton, hiddenSibling])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: limits)
+        XCTAssertTrue(approvedSnapshot.wasTruncated)
+
+        let replacement = FakeAccessibilityNode(
+            identifier: "replacement-button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        replacement.reportedIdentifier = "verify"
+        root.children = [replacement]
+
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 1, in: approvedSnapshot)) {
+            error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetAllowsExactIdentityInIncompleteTrees() throws {
+        let limits = try AccessibilityTreeLimits(
+            maxDepth: 2,
+            maxElements: 2,
+            maxChildrenPerElement: 3,
+            maxActionsPerElement: 5,
+            maxTextLength: 100
+        )
+        let button = FakeAccessibilityNode(
+            identifier: "button",
+            role: "AXButton",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        let hiddenSibling = FakeAccessibilityNode(identifier: "hidden-sibling")
+        let root = FakeAccessibilityNode(identifier: "window", children: [button, hiddenSibling])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: limits)
+        XCTAssertTrue(approvedSnapshot.wasTruncated)
+
+        try session.refreshAndPerform(.press, at: 1, in: approvedSnapshot)
+
+        XCTAssertEqual(runtime.performedActions.map(\.nodeID), ["button"])
+    }
+
+    func testRefreshTargetFailsClosedWhenRetainedIdentityDriftsBesideLookalike() throws {
+        let originalButton = FakeAccessibilityNode(
+            identifier: "original-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        originalButton.reportedIdentifier = nil
+        originalButton.domIdentifier = "verify"
+        let root = FakeAccessibilityNode(identifier: "window", children: [originalButton])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+
+        originalButton.title = "Different action"
+        let lookalike = FakeAccessibilityNode(
+            identifier: "lookalike-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        lookalike.reportedIdentifier = nil
+        lookalike.domIdentifier = "verify"
+        root.children = [originalButton, lookalike]
+
+        XCTAssertThrowsError(try session.refreshTarget(at: 1, in: approvedSnapshot)) { error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetFailsClosedWhenCurrentTargetIsMissing() throws {
+        let button = FakeAccessibilityNode(
+            identifier: "verify",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        let root = FakeAccessibilityNode(identifier: "window", children: [button])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+        root.children = []
+
+        XCTAssertThrowsError(try session.refreshTarget(at: 1, in: approvedSnapshot)) { error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetFailsClosedWhenCurrentTargetIsAmbiguous() throws {
+        func fixtureButton() -> FakeAccessibilityNode {
+            FakeAccessibilityNode(
+                identifier: "verify",
+                role: "AXButton",
+                title: "Complete computer-use test",
+                actions: [SemanticAXAction.press.rawValue]
+            )
+        }
+        let root = FakeAccessibilityNode(identifier: "window", children: [fixtureButton()])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+        root.children = [fixtureButton(), fixtureButton()]
+
+        XCTAssertThrowsError(try session.refreshTarget(at: 1, in: approvedSnapshot)) { error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testRefreshTargetDoesNotFallBackToLabelWithoutStableIdentifier() throws {
+        let oldButton = FakeAccessibilityNode(
+            identifier: "old-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        oldButton.reportedIdentifier = nil
+        let root = FakeAccessibilityNode(identifier: "window", children: [oldButton])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approvedSnapshot = try session.snapshot(limits: generousLimits())
+        let replacement = FakeAccessibilityNode(
+            identifier: "replacement-button",
+            role: "AXButton",
+            title: "Complete computer-use test",
+            actions: [SemanticAXAction.press.rawValue]
+        )
+        replacement.reportedIdentifier = nil
+        root.children = [replacement]
+
+        XCTAssertThrowsError(try session.refreshTarget(at: 1, in: approvedSnapshot)) { error in
+            XCTAssertEqual(error as? AutomationError, .staleAccessibilitySnapshot)
+        }
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
     func testPerformRejectsActionNotAdvertisedBySnapshotWithoutRuntimeMutation() throws {
         let button = FakeAccessibilityNode(identifier: "button", role: "AXButton")
         button.currentActions = [SemanticAXAction.press.rawValue]
@@ -518,9 +1117,20 @@ final class AccessibilitySessionTests: XCTestCase {
         XCTAssertEqual(roundTripped, expected)
     }
 
-    private func makeSession(runtime: FakeAccessibilityTreeRuntime) -> AccessibilitySession {
+    private var chromeTarget: AccessibilityApplicationTarget {
+        AccessibilityApplicationTarget(
+            processIdentifier: target.processIdentifier,
+            bundleIdentifier: "com.google.Chrome",
+            applicationName: "Google Chrome"
+        )
+    }
+
+    private func makeSession(
+        runtime: FakeAccessibilityTreeRuntime,
+        application: AccessibilityApplicationTarget? = nil
+    ) -> AccessibilitySession {
         AccessibilitySession(
-            target: target,
+            target: application ?? target,
             runtime: runtime,
             accessibilityCheck: { true }
         )

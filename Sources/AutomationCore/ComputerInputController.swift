@@ -95,6 +95,24 @@ protocol ComputerInputRuntime: AnyObject {
 }
 
 @MainActor
+enum ApplicationActivationHandoff {
+    static func request(
+        sourceProcessIdentifier: Int32,
+        targetProcessIdentifier: Int32,
+        sourceIsActive: Bool,
+        yieldToTarget: () -> Void,
+        activateFromSource: () -> Bool,
+        activateDirectly: () -> Bool
+    ) -> Bool {
+        if sourceIsActive, sourceProcessIdentifier != targetProcessIdentifier {
+            yieldToTarget()
+            return activateFromSource()
+        }
+        return activateDirectly()
+    }
+}
+
+@MainActor
 final class SystemComputerInputRuntime: ComputerInputRuntime {
     private static let unicodeChunkSize = 20
 
@@ -147,7 +165,29 @@ final class SystemComputerInputRuntime: ComputerInputRuntime {
                 processIdentifier: processIdentifier
             )
         }
-        _ = application.activate(options: [.activateAllWindows])
+
+        if !application.isActive {
+            let source = NSRunningApplication.current
+            let accepted = ApplicationActivationHandoff.request(
+                sourceProcessIdentifier: source.processIdentifier,
+                targetProcessIdentifier: application.processIdentifier,
+                sourceIsActive: NSApplication.shared.isActive,
+                yieldToTarget: {
+                    NSApplication.shared.yieldActivation(to: application)
+                },
+                activateFromSource: {
+                    application.activate(from: source, options: [.activateAllWindows])
+                },
+                activateDirectly: {
+                    application.activate(options: [.activateAllWindows])
+                }
+            )
+            guard accepted else {
+                throw ComputerInputError.applicationActivationFailed(
+                    processIdentifier: processIdentifier
+                )
+            }
+        }
 
         for _ in 0 ..< 80 where !application.isActive {
             try await Task.sleep(for: .milliseconds(25))

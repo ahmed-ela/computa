@@ -276,6 +276,7 @@ final class AccessibilitySnapshotTextFormatterTests: XCTestCase {
             elementDescription: nil,
             help: nil,
             identifier: nil,
+            domIdentifier: nil,
             value: value,
             frame: frame,
             isEnabled: isEnabled,

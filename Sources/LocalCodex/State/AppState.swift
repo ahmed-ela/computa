@@ -22,6 +22,7 @@ final class AppState {
     var automationPermissions: AutomationPermissionSnapshot
     var pendingApprovals: [ActionApprovalRequest] = []
     var resolvingApprovalIDs: Set<String> = []
+    @ObservationIgnored private var resolvedDuringApprovalAttemptIDs: Set<String> = []
 
     init(
         tasks: [AgentTask] = SampleData.tasks,
@@ -83,18 +84,38 @@ final class AppState {
 
     func resolveApproval(_ request: ActionApprovalRequest, approved: Bool) async {
         guard let runtime,
-              pendingApprovals.contains(request),
+              let approvalIndex = pendingApprovals.firstIndex(of: request),
               !resolvingApprovalIDs.contains(request.id)
         else {
             return
         }
         resolvingApprovalIDs.insert(request.id)
-        defer { resolvingApprovalIDs.remove(request.id) }
+        defer {
+            resolvingApprovalIDs.remove(request.id)
+            resolvedDuringApprovalAttemptIDs.remove(request.id)
+        }
+
+        // Remove the exact request before resuming the runtime. Computer-use
+        // continuations may immediately activate another app, so the native
+        // approval gate must no longer be present when that happens.
+        pendingApprovals.remove(at: approvalIndex)
+        await nextMainRunLoopTurn()
+        // SwiftUI commits the removal asynchronously after observing the state
+        // change. Leave a small bounded interval for the native button event,
+        // view teardown, and AppKit activation bookkeeping to finish before a
+        // computer-use continuation can transfer focus to another process.
+        try? await Task.sleep(for: .milliseconds(100))
 
         do {
             try await runtime.resolveApproval(requestID: request.id, approved: approved)
-            pendingApprovals.removeAll { $0.id == request.id }
         } catch {
+            // A transport failure leaves the decision unresolved. Restore the
+            // request for retry unless a newer request with the same ID arrived
+            // while the runtime call was in flight.
+            if !resolvedDuringApprovalAttemptIDs.contains(request.id),
+               !pendingApprovals.contains(where: { $0.id == request.id }) {
+                pendingApprovals.insert(request, at: min(approvalIndex, pendingApprovals.endIndex))
+            }
             if let taskID = request.taskID,
                let index = tasks.firstIndex(where: { $0.id == taskID }) {
                 let failure = TimelineEntry(
@@ -104,6 +125,14 @@ final class AppState {
                 )
                 tasks[index].entries.append(failure)
                 selectedEntryID = failure.id
+            }
+        }
+    }
+
+    private func nextMainRunLoopTurn() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                continuation.resume()
             }
         }
     }
@@ -170,6 +199,9 @@ final class AppState {
 
         case .approvalResolved(let requestID):
             pendingApprovals.removeAll { $0.id == requestID }
+            if resolvingApprovalIDs.contains(requestID) {
+                resolvedDuringApprovalAttemptIDs.insert(requestID)
+            }
 
         case .connectionChanged(let state):
             connectionState = state
