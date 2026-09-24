@@ -49,6 +49,15 @@ final class ComputerV2ToolContractTests: XCTestCase {
         let groundClick = try spec(named: .groundClick)
         XCTAssertEqual(Set(groundClick.required), ["capture_id", "target"])
         XCTAssertEqual(Set(groundClick.properties.keys), ["capture_id", "target"])
+        let groundClickSpec = try XCTUnwrap(ComputerV2ToolContract.specs.first {
+            $0["name"] as? String == Tool.groundClick.rawValue
+        })
+        XCTAssertTrue((groundClickSpec["description"] as? String)?.contains(
+            "fresh post-action screenshot with synchronized Accessibility"
+        ) == true)
+        XCTAssertTrue((groundClickSpec["description"] as? String)?.contains(
+            "dispatch marker alone is not success"
+        ) == true)
     }
 
     func testVisualGroundingToolIsRegisteredOnlyForModelsWithMemoryHeadroom() {

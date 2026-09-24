@@ -15,7 +15,6 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
         ComputerV2ToolContract.Tool.open.rawValue,
         ComputerV2ToolContract.Tool.capture.rawValue,
         ComputerV2ToolContract.Tool.groundClick.rawValue,
-        ComputerV2ToolContract.Tool.snapshot.rawValue,
     ]
 
     private struct Failure: LocalizedError {
@@ -107,7 +106,7 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
 
         let submitted = await state.submit(
             prompt: """
-            Use exactly four computer tools in this order: computer_v2_open with {"bundle_id":"com.apple.calculator"}; computer_v2_capture with {}; computer_v2_ground_click with the exact returned capture_id and target "\(groundingTarget)"; computer_v2_snapshot with {}. Do not estimate coordinates, click any other control, use a process ID, or use another tool. Read the post-click snapshot, then reply with exactly \(token). If any step fails, say so instead of claiming success.
+            Use exactly three computer tools in this order: computer_v2_open with {"bundle_id":"com.apple.calculator"}; computer_v2_capture with {}; computer_v2_ground_click with the exact returned capture_id and target "\(groundingTarget)". Do not estimate coordinates, click any other control, use a process ID, or use another tool. Inspect the fresh screenshot in POST_ACTION_OBSERVATION and verify that Calculator visibly shows the appended digit 1; the dispatch marker alone is not success. Then reply with exactly \(token). If the action or observation fails or is inconclusive, say so instead of claiming success, and do not repeat the click.
             """,
             toTaskID: taskID
         )
@@ -120,14 +119,31 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
         XCTAssertTrue(audit.denied.isEmpty, audit.denied.joined(separator: "\n"))
         let calls = try toolCalls(completed)
         XCTAssertEqual(calls.map(\.name), expectedTools)
+        guard calls.count == expectedTools.count else {
+            throw Failure(
+                message: "Expected \(expectedTools.count) computer tools, received \(calls.count): "
+                    + calls.map(\.name).joined(separator: " -> ")
+            )
+        }
         XCTAssertTrue(calls.allSatisfy { $0.status == .succeeded })
         XCTAssertEqual(calls[0].arguments["bundle_id"] as? String, bundleID)
         XCTAssertEqual(Set(calls[0].arguments.keys), ["bundle_id"])
         XCTAssertTrue(calls[1].arguments.isEmpty)
         XCTAssertEqual(Set(calls[2].arguments.keys), ["capture_id", "target"])
-        XCTAssertTrue(calls[3].arguments.isEmpty)
         XCTAssertEqual(calls[2].arguments["capture_id"] as? String, audit.capture?.id.uuidString)
         XCTAssertEqual(calls[2].arguments["target"] as? String, groundingTarget)
+        XCTAssertTrue(calls[2].text.contains(
+            "POST_ACTION_OBSERVATION status=available action_dispatched=true"
+        ))
+        XCTAssertTrue(calls[2].text.contains("modality=image+accessibility"))
+        XCTAssertTrue(calls[2].text.contains("POST_ACTION_SYNCHRONIZED_AX"))
+        XCTAssertFalse(calls[2].text.contains("capture_id="))
+        XCTAssertTrue(calls[2].text.contains("AXSNAPSHOT id="))
+        XCTAssertTrue(calls[2].text.contains("bundle=\"\(bundleID)\""))
+        XCTAssertTrue(calls[2].content.contains(where: {
+            $0["type"] as? String == "inputImage"
+                && ($0["imageUrl"] as? String)?.hasPrefix("data:image/png;base64,") == true
+        }))
         XCTAssertEqual(
             completed.entries.last(where: { $0.kind == .assistant })?.body
                 .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -465,6 +481,7 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
         completionToken: String
     ) async throws {
         var lastFailure = "Rollout has not appeared."
+        var reportedFailure = ""
         for _ in 0..<80 {
             do {
                 let trace = try RolloutPrimitiveTrace.loadLatest(in: home)
@@ -474,6 +491,10 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
                     lastFailure = failure
                 } else { return }
             } catch { lastFailure = error.localizedDescription }
+            if lastFailure != reportedFailure {
+                print("CALCULATOR_ROLLOUT_PENDING \(lastFailure)")
+                reportedFailure = lastFailure
+            }
             try await Task.sleep(for: .milliseconds(250))
         }
         throw Failure(message: "Calculator rollout primitive did not converge: \(lastFailure)")
@@ -502,7 +523,6 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
               Set(calls[2].arguments.keys) == ["capture_id", "target"],
               calls[2].arguments["capture_id"] as? String == capture.id.uuidString,
               calls[2].arguments["target"] as? String == groundingTarget,
-              calls[3].arguments.isEmpty,
               let openOutput = trace.output(for: calls[0].callID) as? String,
               processIdentifier(openOutput) == pid,
               let captureOutput = trace.output(for: calls[1].callID) as? [[String: Any]],
@@ -510,10 +530,21 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
                   $0["type"] as? String == "input_image"
                       && ($0["image_url"] as? String)?.hasPrefix("data:image/png;base64,") == true
               }),
-              let snapshotOutput = trace.output(for: calls[3].callID) as? String,
-              snapshotOutput.contains("AXSNAPSHOT id="),
-              snapshotOutput.contains("pid=\(pid) "),
-              snapshotOutput.contains("bundle=\"\(bundleID)\"")
+              let groundedContent = trace.output(for: calls[2].callID) as? [[String: Any]],
+              groundedContent.contains(where: {
+                  $0["type"] as? String == "input_image"
+                      && ($0["image_url"] as? String)?.hasPrefix("data:image/png;base64,") == true
+              }),
+              let groundedOutput = rolloutOutputText(groundedContent),
+              groundedOutput.contains(
+                  "POST_ACTION_OBSERVATION status=available action_dispatched=true"
+              ),
+              groundedOutput.contains("modality=image+accessibility"),
+              groundedOutput.contains("POST_ACTION_SYNCHRONIZED_AX"),
+              !groundedOutput.contains("capture_id="),
+              groundedOutput.contains("AXSNAPSHOT id="),
+              groundedOutput.contains("pid=\(pid) "),
+              groundedOutput.contains("bundle=\"\(bundleID)\"")
         else { return "Function arguments, output IDs, screenshot, or bound identity changed" }
         let final = trace.assistantMessages.map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -527,6 +558,7 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
         expectedCapture: CaptureMetadata
     ) async throws {
         var lastFailure = "Wire trace has not appeared."
+        var reportedFailure = ""
         for _ in 0..<80 {
             do {
                 let trace = try AppServerWireTrace.load(url)
@@ -534,6 +566,10 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
                     trace, modelID: expectedModelID, capture: expectedCapture
                 ) { lastFailure = failure } else { return }
             } catch { lastFailure = error.localizedDescription }
+            if lastFailure != reportedFailure {
+                print("CALCULATOR_WIRE_PENDING \(lastFailure)")
+                reportedFailure = lastFailure
+            }
             try await Task.sleep(for: .milliseconds(250))
         }
         throw Failure(message: "Calculator raw App Server trace did not converge: \(lastFailure)")
@@ -622,11 +658,46 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
             if index == 2 {
                 guard Set(arguments.keys) == ["capture_id", "target"],
                       arguments["capture_id"] as? String == capture.id.uuidString,
-                      arguments["target"] as? String == groundingTarget else {
+                      arguments["target"] as? String == groundingTarget,
+                      content.contains(where: {
+                          $0["type"] as? String == "inputText"
+                              && ($0["text"] as? String)?.contains(
+                                  "POST_ACTION_OBSERVATION status=available action_dispatched=true"
+                              ) == true
+                      }),
+                      content.contains(where: {
+                          $0["type"] as? String == "inputImage"
+                              && ($0["imageUrl"] as? String)?.hasPrefix(
+                                  "data:image/png;base64,"
+                              ) == true
+                      }),
+                      content.contains(where: {
+                          $0["type"] as? String == "inputText"
+                              && ($0["text"] as? String)?.contains(
+                                  "POST_ACTION_SYNCHRONIZED_AX"
+                              ) == true
+                              && ($0["text"] as? String)?.contains("capture_id=") == false
+                              && ($0["text"] as? String)?.contains("AXSNAPSHOT id=") == true
+                              && ($0["text"] as? String)?.contains(
+                                  "bundle=\"\(bundleID)\""
+                              ) == true
+                      }) else {
                     return "Raw grounded-click arguments did not use the exact capture and target"
                 }
             }
         }
         return nil
+    }
+
+    private func rolloutOutputText(_ output: Any?) -> String? {
+        if let output = output as? String { return output }
+        guard let items = output as? [[String: Any]] else { return nil }
+        let text = items.compactMap { item -> String? in
+            guard ["input_text", "inputText"].contains(item["type"] as? String) else {
+                return nil
+            }
+            return item["text"] as? String
+        }.joined(separator: "\n")
+        return text.isEmpty ? nil : text
     }
 }

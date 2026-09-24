@@ -71,6 +71,26 @@ The final production-worker replay on September 24, 2026 completed all 91 reques
 
 This is 90 correct actions plus one deliberate refusal, not 91 correct actions. The retained JSON artifact is `../outputs/LocalCodex-production-grounding-cascade-2026-09-24.json` relative to the repository's parent project directory.
 
+## ShowUI alone
+
+ShowUI is not 100% accurate on this fixture. A separate one-process replay exercised the installed 2B 4-bit model alone through the production prompt and parser contract:
+
+| Result | Value |
+| --- | ---: |
+| Syntactically valid points | 91/91 |
+| Correct points inside the exact target box | 74/91 (81.3%) |
+| Wrong accepted points | 17/91 |
+| Development cohort | 42/52 |
+| Held-out visual-perturbation cohort | 32/39 |
+| Warm request p50 | 1.365 s |
+| Warm request p95 | 1.383 s |
+| Reported MLX peak | 3.264 GB |
+| Complete 91-request replay | 124.206 s |
+
+The errors were systematic: `weekly-check` was 0/7, `atlas-check` was 1/7, and `harbor-trash` was 3/7; every other retained target was 7/7. Because the model returned valid-looking coordinates for all 17 misses, ShowUI alone has no independent signal with which to reject those clicks. On the retained Calculator set it was 0/6, although those six rows are only two unique screenshots repeated three times each. The smaller Calculator images produced a 154 ms warm median, showing that speed did not imply correct localization.
+
+The retained artifacts are `LocalCodex-showui-alone-production-contract-2026-09-24.json`, `LocalCodex-showui-alone-2026-09-24.json`, and `LocalCodex-showui-alone-calculator-2026-09-24.json` in the parent project's `outputs` directory. As with the cascade result, this is one correlated synthetic-app pass, not a general real-world accuracy estimate.
+
 ## Product acceptance beyond this corpus
 
 The corpus replay verifies deterministic routing, grounding accuracy on retained fixtures, refusal behavior, and worker lifecycle. Product acceptance additionally requires:
@@ -82,4 +102,8 @@ The corpus replay verifies deterministic routing, grounding accuracy on retained
 
 The Calculator gate is intentionally separate because a retained-image hit is not proof that capture, model tool choice, approval, coordinate conversion, click delivery, post-action verification, and cleanup work together on the live desktop.
 
-The final September 24 opt-in run with Qwen3.5-4B passed that gate in 25.753 seconds: exactly `open → capture → ground_click → snapshot`, an independently verified digit-1 point, Calculator display transition `0 → 1`, matching rollout/raw-wire lifecycles, and successful owned cleanup. The immediately preceding attempt safely returned an occlusion error because a stale full-display macOS Screenshot overlay was above the target; it posted no click. This is one successful live run plus one correctly refused obstructed run, not a statistical reliability result.
+The September 24 baseline opt-in run with Qwen3.5-4B passed that gate in 25.753 seconds: exactly `open → capture → ground_click → snapshot`, an independently verified digit-1 point, Calculator display transition `0 → 1`, matching rollout/raw-wire lifecycles, and successful owned cleanup. The immediately preceding attempt safely returned an occlusion error because a stale full-display macOS Screenshot overlay was above the target; it posted no click.
+
+After the runtime began preparing the sidecar in parallel with Qwen and `ground_click` began returning a fresh verification-only screenshot with synchronized Accessibility, a settled-app rerun passed with exactly `open → capture → ground_click` in 18.904 seconds of XCTest wall time. The raw wire turn fell from 23.885 to 17.051 seconds (28.6%), while tool time fell from 10.751 to 3.369 seconds (68.7%). The verification observation carried no reusable `capture_id`; Qwen explicitly reported reading the visible `1` from its screenshot, while the synchronized AX text did not contain the display value. Total input-plus-output tokens fell from 19,010 to 15,254 (19.8%). Non-tool/Qwen time was 13.682 seconds, 80.2% of the optimized wire turn and 4.2% above the baseline run; the six-second capture-to-ground planning interval is now the largest single stage. This is one before/after run, potentially affected by model and OS caches, not a latency distribution. One preceding run safely reported post-action uncertainty while Calculator pixels were still moving, after which Qwen requested a separate capture and verified the result without repeating the click. Other intervening runs safely refused a duplicate visible digit, a changed capture, and a still-moving cold-launch window without posting a wrong click.
+
+The current run's raw App Server trace and rollout are retained in `../outputs/LocalCodex-4B-calculator-speed-2026-09-24/` relative to the repository's parent project directory. Their SHA-256 digests are `fbf814bae97c3fdbb3dfe9264009e3e5d9b72ae21a2336fc72d66650ade8f568` and `96e32d41931c66625f4e1f0412437a33b4117d9e021d1760cb6aefe77446f1e4`, respectively.

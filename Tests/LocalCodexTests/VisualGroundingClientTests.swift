@@ -4,6 +4,119 @@ import XCTest
 
 @MainActor
 final class VisualGroundingClientTests: XCTestCase {
+    private actor Gate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var isOpen = false
+
+        func wait() async {
+            guard !isOpen else { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func open() {
+            isOpen = true
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
+    func testResidencyGateAllowsOnlyOneMemoryFamilyAtATime() {
+        var gate = VisualGroundingResidencyGate()
+
+        XCTAssertTrue(gate.reserve(taskID: "visual-a", supportsSidecar: true))
+        XCTAssertTrue(gate.reserve(taskID: "visual-b", supportsSidecar: true))
+        XCTAssertFalse(gate.reserve(taskID: "large-a", supportsSidecar: false))
+        XCTAssertTrue(gate.allowsSidecar)
+
+        gate.release(taskID: "visual-a")
+        gate.release(taskID: "visual-b")
+        XCTAssertTrue(gate.reserve(taskID: "large-a", supportsSidecar: false))
+        XCTAssertFalse(gate.reserve(taskID: "visual-c", supportsSidecar: true))
+        XCTAssertFalse(gate.allowsSidecar)
+
+        gate.release(taskID: "large-a")
+        XCTAssertTrue(gate.reserve(taskID: "visual-c", supportsSidecar: true))
+        XCTAssertTrue(gate.allowsSidecar)
+    }
+
+    func testResidencyGateFailsClosedForRestoredMixedTurns() {
+        var gate = VisualGroundingResidencyGate()
+        gate.restoreActive(taskID: "visual", supportsSidecar: true)
+        gate.restoreActive(taskID: "large", supportsSidecar: false)
+
+        XCTAssertFalse(gate.allowsSidecar)
+        XCTAssertFalse(gate.reserve(taskID: "another-visual", supportsSidecar: true))
+        XCTAssertFalse(gate.reserve(taskID: "another-large", supportsSidecar: false))
+    }
+
+    func testPrepareStartsWorkerBeforeFirstGroundingRequest() async throws {
+        let harness = try makeHarness(script: Self.respondingWorker)
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        let client = PythonVisualGroundingClient(configuration: harness.configuration)
+
+        try await client.prepare()
+        let decision = try await client.ground(VisualGroundingRequest(
+            id: UUID(),
+            png: Data([1]),
+            width: 1,
+            height: 1,
+            target: "Test button"
+        ))
+
+        XCTAssertEqual(decision.point, VisualGroundingPoint(x: 0.25, y: 0.25))
+        let shutdownIssues = await client.shutdown()
+        XCTAssertTrue(shutdownIssues.isEmpty)
+    }
+
+    func testCancelledPrepareBeforeEntryDoesNotStartWorker() async throws {
+        let harness = try makeHarness(script: Self.respondingWorker, recordsStart: true)
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        let marker = harness.root.appendingPathComponent("worker.started")
+        let client = PythonVisualGroundingClient(configuration: harness.configuration)
+        let gate = Gate()
+        let pending = Task {
+            await gate.wait()
+            try await client.prepare()
+        }
+
+        pending.cancel()
+        await gate.open()
+        do {
+            try await pending.value
+            XCTFail("A cancelled prewarm unexpectedly started the worker.")
+        } catch is CancellationError {
+            // Expected: prepare checks cancellation before spawning a child.
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+
+        try await client.prepare()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        let shutdownIssues = await client.shutdown()
+        XCTAssertTrue(shutdownIssues.isEmpty)
+    }
+
+    func testPrepareCanRestartWorkerAfterSuspension() async throws {
+        let harness = try makeHarness(script: Self.respondingWorker)
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        let client = PythonVisualGroundingClient(configuration: harness.configuration)
+
+        try await client.prepare()
+        let firstShutdownIssues = await client.shutdown()
+        XCTAssertTrue(firstShutdownIssues.isEmpty)
+        try await client.prepare()
+        let decision = try await client.ground(VisualGroundingRequest(
+            id: UUID(),
+            png: Data([1]),
+            width: 1,
+            height: 1,
+            target: "Test button"
+        ))
+        XCTAssertEqual(decision.point, VisualGroundingPoint(x: 0.25, y: 0.25))
+        let secondShutdownIssues = await client.shutdown()
+        XCTAssertTrue(secondShutdownIssues.isEmpty)
+    }
+
     func testRoundTripRemovesOnlyOwnedScreenshotsAndCoalescesShutdown() async throws {
         let harness = try makeHarness(script: Self.respondingWorker)
         defer { try? FileManager.default.removeItem(at: harness.root) }
@@ -106,7 +219,7 @@ final class VisualGroundingClientTests: XCTestCase {
         let configuration: VisualGroundingConfiguration
     }
 
-    private func makeHarness(script: String) throws -> Harness {
+    private func makeHarness(script: String, recordsStart: Bool = false) throws -> Harness {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "LocalCodex-grounder-test-\(UUID().uuidString)",
@@ -123,7 +236,10 @@ final class VisualGroundingClientTests: XCTestCase {
             )
         }
         let worker = root.appendingPathComponent("worker.py")
-        try Data(script.utf8).write(to: worker)
+        let startRecord = recordsStart
+            ? "from pathlib import Path\nPath(__file__).with_suffix('.started').write_text('started')\n"
+            : ""
+        try Data((startRecord + script).utf8).write(to: worker)
         return Harness(
             root: root,
             requests: requests,

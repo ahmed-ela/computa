@@ -395,7 +395,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
                 workspacePath: documents,
                 codexHomePath: codexHome.path,
                 baseInstructions: """
-                You are LocalCodex, a concise local desktop agent. Follow the user's request precisely. For computer use, observe through Accessibility or a screenshot, act only with the provided desktop tools, then observe again. Prefer semantic Accessibility actions. A Chrome URL opened with computer_v2_open is an exact task-scoped tab; use its semantic snapshot and actions because browser-tab coordinates and keyboard input fail closed. In a native app, computer_v2_capture can include synchronized Accessibility. Use its snapshot_id for semantic actions and capture_id with image pixels for image actions. Never estimate coordinates. Accessibility frames use screen points, not image pixels. Chrome is com.google.Chrome. Respect approval gates and never infer success from an action acknowledgement.
+                You are LocalCodex, a concise local desktop agent. Follow the request precisely. For computer use, observe with Accessibility or a screenshot, act only through the provided desktop tools, then observe again. Prefer semantic Accessibility. A Chrome URL opened by computer_v2_open is an exact task-scoped tab; use its semantic snapshot and actions because browser coordinates and keyboard input fail closed. In native apps, computer_v2_capture can include synchronized Accessibility. Use snapshot_id for semantic actions and capture_id for image actions. Never estimate coordinates. Accessibility frames are screen points, not image pixels. Chrome is com.google.Chrome. Respect approvals and never infer success from an action acknowledgment. An available POST_ACTION_OBSERVATION includes a fresh screenshot and synchronized Accessibility; verify the visible outcome in its content, not its marker. Request another observation only if unavailable or inconclusive.
                 """,
                 reasoningEffort: "medium"
             )
@@ -618,6 +618,9 @@ private extension CodexAppServerRuntime {
         private var isShuttingDown = false
         private var serverGeneration = UUID()
         private var shutdownTask: Task<RuntimeShutdownReport, Never>?
+        private var visualGrounderPreparationTask: Task<Void, Never>?
+        private var visualGrounderPreparationID: UUID?
+        private var visualGroundingResidency = VisualGroundingResidencyGate()
         private var retiringChildren = [Int32: OwnedChildProcess]()
         private var childCleanupIssues = [String]()
         private var browserCleanupTasks = [UUID: Task<Void, Never>]()
@@ -709,6 +712,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func finishShutdown() async -> RuntimeShutdownReport {
+            await cancelVisualGrounderPreparation()
             let children = Array(retiringChildren.values)
             async let browserResult = browserBroker.shutdown()
             async let groundingIssues = visualGrounder.shutdown()
@@ -771,6 +775,23 @@ private extension CodexAppServerRuntime {
 
         func submit(prompt: String, taskID: AgentTask.ID, modelID: String) async throws {
             try await start()
+            let supportsVisualGrounding = LocalModelCatalog.supportsResidentVisualGrounding(modelID)
+            guard visualGroundingResidency.reserve(
+                taskID: taskID,
+                supportsSidecar: supportsVisualGrounding
+            ) else {
+                throw RuntimeError.serverError(
+                    "A turn using the other local-model memory profile is already running. "
+                        + "Wait for it to finish before switching between the 4B/9B visual "
+                        + "sidecar profile and the 27B/35B high-memory profile."
+                )
+            }
+            var turnAccepted = false
+            defer {
+                if !turnAccepted {
+                    visualGroundingResidency.release(taskID: taskID)
+                }
+            }
             let requestedContext = LocalThreadContext.forModel(modelID)
 
             let threadID: String
@@ -835,6 +856,9 @@ private extension CodexAppServerRuntime {
             let previousModel = modelForTask.updateValue(modelID, forKey: taskID)
             let turnResponse: Data
             do {
+                if !supportsVisualGrounding {
+                    try await suspendVisualGrounderForHighMemoryModel()
+                }
                 turnResponse = try await request(
                     method: "turn/start",
                     params: [
@@ -851,6 +875,12 @@ private extension CodexAppServerRuntime {
                     modelForTask.removeValue(forKey: taskID)
                 }
                 throw error
+            }
+            turnAccepted = true
+            if supportsVisualGrounding {
+                // Start only after App Server accepts the turn so a rejected
+                // submission cannot load and retain the multi-GB sidecar.
+                prepareVisualGrounderInBackground()
             }
             if let object = try JSONSerialization.jsonObject(with: turnResponse) as? [String: Any],
                let result = object["result"] as? [String: Any],
@@ -895,7 +925,7 @@ private extension CodexAppServerRuntime {
                 throw RuntimeError.malformedResponse("thread/list did not return a thread collection")
             }
 
-            return records.compactMap { record in
+            let tasks = records.compactMap { record -> AgentTask? in
                 guard let id = record["id"] as? String else { return nil }
                 threadForTask[id] = id
                 taskForThread[id] = id
@@ -913,6 +943,14 @@ private extension CodexAppServerRuntime {
                 let updatedSeconds = (record["updatedAt"] as? NSNumber)?.doubleValue
                     ?? Date.now.timeIntervalSince1970
 
+                let modelID = record["model"] as? String ?? configuration.model
+                modelForTask[id] = modelID
+                if status == .running {
+                    visualGroundingResidency.restoreActive(
+                        taskID: id,
+                        supportsSidecar: LocalModelCatalog.supportsResidentVisualGrounding(modelID)
+                    )
+                }
                 return AgentTask(
                     id: id,
                     title: title,
@@ -920,10 +958,17 @@ private extension CodexAppServerRuntime {
                     status: status,
                     updatedAt: Date(timeIntervalSince1970: updatedSeconds),
                     workspace: record["cwd"] as? String ?? configuration.workspacePath,
-                    model: record["model"] as? String ?? configuration.model,
+                    model: modelID,
                     entries: []
                 )
             }
+            if tasks.contains(where: {
+                $0.status == .running
+                    && LocalModelCatalog.supportsResidentVisualGrounding($0.model)
+            }) {
+                prepareVisualGrounderInBackground()
+            }
+            return tasks
         }
 
         func resolveApproval(requestID: String, approved: Bool) throws {
@@ -1056,6 +1101,7 @@ private extension CodexAppServerRuntime {
 
             case "turn/completed":
                 turnForTask.removeValue(forKey: taskID)
+                visualGroundingResidency.release(taskID: taskID)
                 discardComputerV2Session(taskID: taskID)
                 _ = cancelDynamicToolTasks(for: taskID)
                 let turn = params["turn"] as? [String: Any]
@@ -1072,6 +1118,7 @@ private extension CodexAppServerRuntime {
                 emitCompletedItem(item, type: type, taskID: taskID)
 
             case "error":
+                visualGroundingResidency.release(taskID: taskID)
                 discardComputerV2Session(taskID: taskID)
                 _ = cancelDynamicToolTasks(for: taskID)
                 let error = params["error"] as? [String: Any]
@@ -1276,13 +1323,51 @@ private extension CodexAppServerRuntime {
             ComputerV2ToolContract.specs(for: modelID)
         }
 
+        private func prepareVisualGrounderInBackground() {
+            guard visualGroundingResidency.allowsSidecar,
+                  visualGrounderPreparationTask == nil else { return }
+            let preparationID = UUID()
+            visualGrounderPreparationID = preparationID
+            visualGrounderPreparationTask = Task { [visualGrounder] in
+                try? await visualGrounder.prepare()
+                self.visualGrounderPreparationFinished(id: preparationID)
+            }
+        }
+
+        private func visualGrounderPreparationFinished(id: UUID) {
+            guard visualGrounderPreparationID == id else { return }
+            visualGrounderPreparationID = nil
+            visualGrounderPreparationTask = nil
+        }
+
+        private func cancelVisualGrounderPreparation() async {
+            let preparation = visualGrounderPreparationTask
+            visualGrounderPreparationID = nil
+            visualGrounderPreparationTask = nil
+            preparation?.cancel()
+            await preparation?.value
+        }
+
+        private func suspendVisualGrounderForHighMemoryModel() async throws {
+            await cancelVisualGrounderPreparation()
+            let issues = await visualGrounder.shutdown()
+            guard issues.isEmpty else {
+                throw RuntimeError.serverError(
+                    "The visual-grounding sidecar could not be stopped before loading this "
+                        + "high-memory model: \(issues.joined(separator: "; "))"
+                )
+            }
+        }
+
         private func baseInstructions(for modelID: String) -> String {
             let groundingInstruction: String
             if LocalModelCatalog.supportsResidentVisualGrounding(modelID) {
                 groundingInstruction = """
                 If a visible native target is absent from Accessibility, use \
                 computer_v2_ground_click with the exact capture_id and a concise target \
-                description.
+                description. It returns a fresh post-action screenshot with synchronized \
+                Accessibility when available; verify the visible outcome in that result rather \
+                than inferring success from action dispatch.
                 """
             } else {
                 groundingInstruction = """
@@ -1842,64 +1927,11 @@ private extension CodexAppServerRuntime {
                 )
 
             case .snapshot:
-                let application = try await computerV2BoundApplication(
+                return try await computerV2Snapshot(
+                    arguments: arguments,
                     taskID: taskID,
                     epoch: epoch
                 )
-                let currentSession = try computerV2Session(
-                    taskID: taskID,
-                    epoch: epoch
-                )
-                if let browserTab = currentSession.browserTab {
-                    let observation = try await browserBroker.snapshot(
-                        taskKey: browserTaskKey(taskID),
-                        binding: browserTab,
-                        query: arguments["query"] as? String
-                    )
-                    _ = try await computerV2BoundApplication(
-                        taskID: taskID,
-                        epoch: epoch
-                    )
-                    var session = try computerV2Session(taskID: taskID, epoch: epoch)
-                    guard session.browserTab?.handle == browserTab.handle else {
-                        throw RuntimeError.serverError(
-                            "The bound browser tab changed during snapshot. Open it again."
-                        )
-                    }
-                    session.browserTab = observation.binding
-                    session.browserSnapshot = observation.snapshot
-                    session.accessibility = nil
-                    session.accessibilityWindowIdentity = nil
-                    session.capture = nil
-                    computerV2Sessions[taskID] = session
-                    return [textContent(observation.snapshot.formattedText)]
-                }
-
-                let focusedObservation = try await computerV2FocusedWindowObservation()
-                guard let focusedObservation,
-                      focusedObservation.info.processIdentifier == application.processIdentifier,
-                      focusedObservation.info.bundleIdentifier == application.bundleIdentifier else {
-                    throw RuntimeError.serverError(
-                        "The bound app does not have the focused window. Open it again before snapshot."
-                    )
-                }
-                let result = try await makeAccessibilitySnapshot(
-                    processID: application.processIdentifier,
-                    arguments: arguments
-                )
-                _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
-                guard try await focusedObservation.identity.isStillFocused() else {
-                    throw RuntimeError.serverError(
-                        "The focused window changed during snapshot. Observe again."
-                    )
-                }
-                var session = try computerV2Session(taskID: taskID, epoch: epoch)
-                session.accessibility = result.active
-                session.accessibilityWindowIdentity = focusedObservation.identity
-                session.capture = nil
-                session.browserSnapshot = nil
-                computerV2Sessions[taskID] = session
-                return [textContent(result.text)]
 
             case .ax, .setText:
                 return try await computerV2SemanticAction(
@@ -1936,6 +1968,71 @@ private extension CodexAppServerRuntime {
                     epoch: epoch
                 )
             }
+        }
+
+        private func computerV2Snapshot(
+            arguments: [String: Any],
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> [[String: Any]] {
+            let application = try await computerV2BoundApplication(
+                taskID: taskID,
+                epoch: epoch
+            )
+            let currentSession = try computerV2Session(
+                taskID: taskID,
+                epoch: epoch
+            )
+            if let browserTab = currentSession.browserTab {
+                let observation = try await browserBroker.snapshot(
+                    taskKey: browserTaskKey(taskID),
+                    binding: browserTab,
+                    query: arguments["query"] as? String
+                )
+                _ = try await computerV2BoundApplication(
+                    taskID: taskID,
+                    epoch: epoch
+                )
+                var session = try computerV2Session(taskID: taskID, epoch: epoch)
+                guard session.browserTab?.handle == browserTab.handle else {
+                    throw RuntimeError.serverError(
+                        "The bound browser tab changed during snapshot. Open it again."
+                    )
+                }
+                session.browserTab = observation.binding
+                session.browserSnapshot = observation.snapshot
+                session.accessibility = nil
+                session.accessibilityWindowIdentity = nil
+                session.capture = nil
+                computerV2Sessions[taskID] = session
+                return [textContent(observation.snapshot.formattedText)]
+            }
+
+            let focusedObservation = try await computerV2FocusedWindowObservation()
+            guard let focusedObservation,
+                  focusedObservation.info.processIdentifier == application.processIdentifier,
+                  focusedObservation.info.bundleIdentifier == application.bundleIdentifier else {
+                throw RuntimeError.serverError(
+                    "The bound app does not have the focused window. Open it again before snapshot."
+                )
+            }
+            let result = try await makeAccessibilitySnapshot(
+                processID: application.processIdentifier,
+                arguments: arguments
+            )
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            guard try await focusedObservation.identity.isStillFocused() else {
+                throw RuntimeError.serverError(
+                    "The focused window changed during snapshot. Observe again."
+                )
+            }
+            var session = try computerV2Session(taskID: taskID, epoch: epoch)
+            session.accessibility = result.active
+            session.accessibilityWindowIdentity = focusedObservation.identity
+            session.capture = nil
+            session.browserSnapshot = nil
+            computerV2Sessions[taskID] = session
+            return [textContent(result.text)]
         }
 
         private func computerV2Open(
@@ -2445,6 +2542,11 @@ private extension CodexAppServerRuntime {
                         + "Use Accessibility, or start a task with one of those models."
                 )
             }
+            guard visualGroundingResidency.allowsSidecar else {
+                throw RuntimeError.serverError(
+                    "Visual grounding is unavailable while a 27B or 35B high-memory turn is active."
+                )
+            }
             _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
             let observed = try computerV2Session(taskID: taskID, epoch: epoch)
             guard observed.browserTab == nil else {
@@ -2503,14 +2605,94 @@ private extension CodexAppServerRuntime {
                     "The visual-grounding decision could not be encoded."
                 )
             }
-            return try await computerV2PointerAction(
+            let actionContent = try await computerV2PointerAction(
                 synthesized,
                 taskID: taskID,
                 epoch: epoch,
                 approvalModelArguments: call.arguments,
                 groundingEvidence: evidence,
-                approvalSummary: "Locate and click \(target)"
+                approvalSummary: "Locate and click \(target)",
+                returnsPostActionObservation: true
             )
+            let observationContent = await computerV2PostActionObservation(
+                taskID: taskID,
+                epoch: epoch
+            )
+            return actionContent + observationContent
+        }
+
+        private func computerV2PostActionObservation(
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async -> [[String: Any]] {
+            var lastError: Error?
+            for delay in [Duration.milliseconds(250), .milliseconds(150)] {
+                do {
+                    // A click highlight can change the pixels while the strict
+                    // synchronized image+AX capture is running. Give it one
+                    // bounded settle and one bounded retry; every attempt still
+                    // requires a stable, focused, bound window.
+                    try await Task.sleep(for: delay)
+                    let observation = try await computerV2ReadOnlyPostActionCapture(
+                        taskID: taskID,
+                        epoch: epoch
+                    )
+                    return [textContent(
+                        "POST_ACTION_OBSERVATION status=available action_dispatched=true "
+                            + "captured_after_input=true modality=image+accessibility. "
+                            + "Verify the requested visible outcome in the screenshot or Accessibility "
+                            + "content; this marker alone is not success. Do not repeat the click."
+                    )] + observation
+                } catch {
+                    lastError = error
+                }
+            }
+            // The mutation already happened. Never turn an observation
+            // failure into a failed action that the model might repeat.
+            let reason = lastError?.localizedDescription ?? "unknown observation error"
+            return [textContent(
+                "POST_ACTION_OBSERVATION status=unavailable action_dispatched=true. "
+                    + "The click was already dispatched; do not repeat it. "
+                    + "Capture one fresh observation to verify the result. Reason: \(reason)"
+            )]
+        }
+
+        private func computerV2ReadOnlyPostActionCapture(
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> [[String: Any]] {
+            let content = try await computerV2Capture(
+                arguments: ["include_accessibility": true],
+                taskID: taskID,
+                epoch: epoch
+            )
+            // The ordinary capture helper retains an actionable capture ID.
+            // This verification image must never re-arm pointer input after a
+            // mutation, so clear that capability before returning any content.
+            defer {
+                if var session = try? computerV2Session(taskID: taskID, epoch: epoch) {
+                    session.capture = nil
+                    computerV2Sessions[taskID] = session
+                }
+            }
+            guard content.count == 3,
+                  let synchronizedText = content[1]["text"] as? String,
+                  let newline = synchronizedText.firstIndex(of: "\n"),
+                  content[2]["type"] as? String == "inputImage" else {
+                throw RuntimeError.serverError(
+                    "The read-only post-action observation had an unexpected shape."
+                )
+            }
+            let snapshot = synchronizedText[synchronizedText.index(after: newline)...]
+            return [
+                textContent(
+                    "POST_ACTION_SYNCHRONIZED_AX screen_frame=screen_points. "
+                        + "The screenshot is verification-only and has no reusable capture_id. "
+                        + "Use its snapshot_id only for a separately approved semantic action.\n"
+                        + snapshot
+                ),
+                content[2],
+            ]
         }
 
         private func computerV2MappedPointerAction(
@@ -2655,7 +2837,8 @@ private extension CodexAppServerRuntime {
             epoch: UUID,
             approvalModelArguments: [String: Any]? = nil,
             groundingEvidence: [String: Any]? = nil,
-            approvalSummary: String? = nil
+            approvalSummary: String? = nil,
+            returnsPostActionObservation: Bool = false
         ) async throws -> [[String: Any]] {
             let application = try await computerV2BoundApplication(
                 taskID: taskID,
@@ -2753,6 +2936,12 @@ private extension CodexAppServerRuntime {
                 expectedWindowIdentity: capture.focusedWindowIdentity,
                 expectedWindowID: capture.window.windowID
             )
+            if returnsPostActionObservation {
+                return [textContent(
+                    "Requested \(action.name). The click was dispatched; "
+                        + "a fresh post-action observation follows. Do not repeat the action."
+                )]
+            }
             return [textContent(
                 "Requested \(action.name). Capture a fresh screenshot or Accessibility snapshot to verify the result."
             )]
@@ -3412,6 +3601,7 @@ private extension CodexAppServerRuntime {
             pendingServerApprovals.removeAll()
             accessibilitySessions.removeAll()
             computerV2Sessions.removeAll()
+            visualGroundingResidency.removeAll()
             // A restarted App Server has no loaded thread state. Keep task-to-
             // thread IDs for cold resume, but reapply the selected model's
             // context configuration before the next turn.

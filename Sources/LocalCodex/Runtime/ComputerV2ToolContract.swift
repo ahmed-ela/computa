@@ -360,7 +360,7 @@ enum ComputerV2ToolContract {
         case .groundClick:
             properties = ["capture_id": string, "target": string]
             required = ["capture_id", "target"]
-            description = "For a native screenshot-only target that AX cannot identify, locate and click the target using the local GoClick + GUI-Owl agreement cascade with ShowUI only on disagreement. Requires a current capture_id, native approval, and a fresh observation afterward."
+            description = "For a native screenshot-only target that AX cannot identify, locate and click the target using the local GoClick + GUI-Owl agreement cascade with ShowUI only on disagreement. Requires a current capture_id and native approval, then returns a fresh post-action screenshot with synchronized Accessibility when available. Verify the visible outcome; the dispatch marker alone is not success."
         case .click:
             properties = capturePoint; required = ["capture_id", "x", "y"]
             description = "Click x,y in the captured image of the bound app, then observe. Approval required."

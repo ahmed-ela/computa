@@ -191,8 +191,42 @@ struct VisualGroundingDecision: Codable, Equatable, Sendable {
 }
 
 protocol VisualGroundingClient: Sendable {
+    func prepare() async throws
     func ground(_ request: VisualGroundingRequest) async throws -> VisualGroundingDecision
     func shutdown() async -> [String]
+}
+
+struct VisualGroundingResidencyGate: Equatable, Sendable {
+    private enum Family: Equatable, Sendable {
+        case sidecarCompatible
+        case highMemory
+    }
+
+    private var active = [AgentTask.ID: Family]()
+
+    mutating func reserve(taskID: AgentTask.ID, supportsSidecar: Bool) -> Bool {
+        guard active[taskID] == nil else { return false }
+        let requested: Family = supportsSidecar ? .sidecarCompatible : .highMemory
+        guard active.values.allSatisfy({ $0 == requested }) else { return false }
+        active[taskID] = requested
+        return true
+    }
+
+    mutating func restoreActive(taskID: AgentTask.ID, supportsSidecar: Bool) {
+        active[taskID] = supportsSidecar ? .sidecarCompatible : .highMemory
+    }
+
+    mutating func release(taskID: AgentTask.ID) {
+        active.removeValue(forKey: taskID)
+    }
+
+    mutating func removeAll() {
+        active.removeAll()
+    }
+
+    var allowsSidecar: Bool {
+        !active.values.contains(.highMemory)
+    }
 }
 
 enum VisualGroundingError: Error, Equatable, LocalizedError, Sendable {
@@ -345,6 +379,11 @@ actor PythonVisualGroundingClient: VisualGroundingClient {
         } catch {
             return UnavailableVisualGroundingClient(detail: error.localizedDescription)
         }
+    }
+
+    func prepare() async throws {
+        try Task.checkCancellation()
+        try await ensureStarted()
     }
 
     func ground(_ request: VisualGroundingRequest) async throws -> VisualGroundingDecision {
@@ -806,6 +845,10 @@ actor PythonVisualGroundingClient: VisualGroundingClient {
 
 private struct UnavailableVisualGroundingClient: VisualGroundingClient {
     let detail: String
+
+    func prepare() async throws {
+        throw VisualGroundingError.unavailable(detail)
+    }
 
     func ground(_ request: VisualGroundingRequest) async throws -> VisualGroundingDecision {
         throw VisualGroundingError.unavailable(detail)
