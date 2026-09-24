@@ -6,6 +6,8 @@ import Observation
 @Observable
 final class AppState {
     @ObservationIgnored private let runtime: (any AgentRuntimeClient)?
+    @ObservationIgnored private var runtimeShutdown: Task<RuntimeShutdownReport, Never>?
+    @ObservationIgnored private var isShuttingDown = false
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
     @ObservationIgnored private let preferences: UserDefaults
     private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
@@ -145,40 +147,88 @@ final class AppState {
         automationPermissions = permissionClient.requestScreenRecording()
     }
 
-    func resolveApproval(_ request: ActionApprovalRequest, approved: Bool) async {
-        guard let runtime,
-              let approvalIndex = pendingApprovals.firstIndex(of: request),
-              !resolvingApprovalIDs.contains(request.id)
-        else {
-            return
+    @ObservationIgnored private var approvalAttemptTaskIDs: [String: AgentTask.ID] = [:]
+    @ObservationIgnored private var invalidatedApprovalAttemptIDs: Set<String> = []
+
+    @discardableResult
+    func resolveApproval(
+        _ request: ActionApprovalRequest,
+        approved: Bool,
+        settlePresentation: (@MainActor () async throws -> Void)? = nil
+    ) async -> ApprovalResolutionResult {
+        guard let runtime else {
+            return .init(requestID: request.id, status: .notAttempted, reason: "runtime_missing")
+        }
+        guard !isShuttingDown else {
+            return .init(requestID: request.id, status: .notAttempted, reason: "runtime_shutting_down")
+        }
+        guard !resolvingApprovalIDs.contains(request.id) else {
+            return .init(requestID: request.id, status: .notAttempted, reason: "resolution_in_flight")
+        }
+        guard let approvalIndex = pendingApprovals.firstIndex(of: request) else {
+            return .init(requestID: request.id, status: .notAttempted, reason: "exact_request_not_pending")
         }
         resolvingApprovalIDs.insert(request.id)
+        approvalAttemptTaskIDs[request.id] = request.taskID
+        invalidatedApprovalAttemptIDs.remove(request.id)
+        resolvedDuringApprovalAttemptIDs.remove(request.id)
         defer {
             resolvingApprovalIDs.remove(request.id)
+            approvalAttemptTaskIDs.removeValue(forKey: request.id)
+            invalidatedApprovalAttemptIDs.remove(request.id)
             resolvedDuringApprovalAttemptIDs.remove(request.id)
         }
 
-        // Remove the exact request before resuming the runtime. Computer-use
-        // continuations may immediately activate another app, so the native
-        // approval gate must no longer be present when that happens.
-        pendingApprovals.remove(at: approvalIndex)
-        await nextMainRunLoopTurn()
-        // SwiftUI commits the removal asynchronously after observing the state
-        // change. Leave a small bounded interval for the native button event,
-        // view teardown, and AppKit activation bookkeeping to finish before a
-        // computer-use continuation can transfer focus to another process.
-        try? await Task.sleep(for: .milliseconds(100))
+        @MainActor func restoreIfStillPending() -> Bool {
+            guard !isShuttingDown,
+                  !invalidatedApprovalAttemptIDs.contains(request.id),
+                  !resolvedDuringApprovalAttemptIDs.contains(request.id),
+                  !pendingApprovals.contains(where: { $0.id == request.id }) else { return false }
+            pendingApprovals.insert(request, at: min(approvalIndex, pendingApprovals.endIndex))
+            return true
+        }
 
+        // Preserve native approval-overlay teardown before resuming computer input.
+        // The injected settling operation is only a deterministic test seam.
+        pendingApprovals.remove(at: approvalIndex)
+        do {
+            if let settlePresentation {
+                try await settlePresentation()
+            } else {
+                await nextMainRunLoopTurn()
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            try Task.checkCancellation()
+        } catch {
+            return .init(
+                requestID: request.id, status: .notAttempted,
+                reason: "presentation_settle_failed: \(error.localizedDescription)",
+                requestRestored: restoreIfStillPending(),
+                resolvedEventObserved: resolvedDuringApprovalAttemptIDs.contains(request.id)
+            )
+        }
+        guard !isShuttingDown,
+              !invalidatedApprovalAttemptIDs.contains(request.id),
+              !resolvedDuringApprovalAttemptIDs.contains(request.id),
+              !pendingApprovals.contains(where: { $0.id == request.id }) else {
+            return .init(
+                requestID: request.id, status: .notAttempted,
+                reason: "request_invalidated_or_superseded_before_delivery",
+                resolvedEventObserved: resolvedDuringApprovalAttemptIDs.contains(request.id)
+            )
+        }
+
+        let dispatchStartedAt = DispatchTime.now().uptimeNanoseconds
         do {
             try await runtime.resolveApproval(requestID: request.id, approved: approved)
+            return .init(
+                requestID: request.id, status: .delivered, reason: "runtime_returned_success",
+                approved: approved, dispatchStartedAt: dispatchStartedAt,
+                resolvedEventObserved: resolvedDuringApprovalAttemptIDs.contains(request.id)
+            )
         } catch {
-            // A transport failure leaves the decision unresolved. Restore the
-            // request for retry unless a newer request with the same ID arrived
-            // while the runtime call was in flight.
-            if !resolvedDuringApprovalAttemptIDs.contains(request.id),
-               !pendingApprovals.contains(where: { $0.id == request.id }) {
-                pendingApprovals.insert(request, at: min(approvalIndex, pendingApprovals.endIndex))
-            }
+            let eventObserved = resolvedDuringApprovalAttemptIDs.contains(request.id)
+            let restored = restoreIfStillPending()
             if let taskID = request.taskID,
                let index = tasks.firstIndex(where: { $0.id == taskID }) {
                 let failure = TimelineEntry(
@@ -189,6 +239,13 @@ final class AppState {
                 tasks[index].entries.append(failure)
                 selectedEntryID = failure.id
             }
+            // In particular, approvalResolved followed by an error is NOT proof
+            // that this caller's approved=true/false decision was delivered.
+            return .init(
+                requestID: request.id, status: .failed, reason: error.localizedDescription,
+                dispatchStartedAt: dispatchStartedAt, requestRestored: restored,
+                resolvedEventObserved: eventObserved
+            )
         }
     }
 
@@ -203,23 +260,42 @@ final class AppState {
     /// Starts listening to the injected runtime. With no runtime installed the
     /// sample store remains fully local and this method is a no-op.
     func startRuntime() async {
-        guard let runtime else { return }
+        guard !isShuttingDown, let runtime else { return }
         connectionState = .connecting
 
         do {
             let snapshot = try await runtime.loadTasks()
+            guard !isShuttingDown else { return }
             replaceTasks(with: snapshot)
             connectionState = .connected(provider: runtime.providerName)
 
             for await event in runtime.events() {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, !isShuttingDown else { return }
                 apply(event)
             }
         } catch is CancellationError {
             return
         } catch {
+            guard !isShuttingDown else { return }
             connectionState = .failed(message: error.localizedDescription)
         }
+    }
+
+    func shutdownRuntime() async -> RuntimeShutdownReport {
+        if let runtimeShutdown { return await runtimeShutdown.value }
+        isShuttingDown = true
+        let runtime = self.runtime
+        let task = Task {
+            await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
+        }
+        runtimeShutdown = task
+        let report = await task.value
+        pendingApprovals.removeAll()
+        resolvingApprovalIDs.removeAll()
+        activeTurnTaskIDs.removeAll()
+        interruptingTaskIDs.removeAll()
+        connectionState = .disconnected
+        return report
     }
 
     func replaceTasks(with newTasks: [AgentTask]) {
@@ -255,6 +331,11 @@ final class AppState {
             }
 
         case .taskStatusChanged(let taskID, let status):
+            if status != .running {
+                for (requestID, owner) in approvalAttemptTaskIDs where owner == taskID {
+                    invalidatedApprovalAttemptIDs.insert(requestID)
+                }
+            }
             guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
             tasks[index].status = status
             tasks[index].updatedAt = .now
@@ -277,6 +358,7 @@ final class AppState {
         case .connectionChanged(let state):
             connectionState = state
             if case .failed = state {
+                invalidatedApprovalAttemptIDs.formUnion(resolvingApprovalIDs)
                 activeTurnTaskIDs.removeAll()
                 interruptingTaskIDs.removeAll()
             }

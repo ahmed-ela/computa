@@ -4,3 +4,5 @@ WebUI/node_modules/
 xcuserdata/
 *.xcuserstate
 *.profraw
+__pycache__/
+*.py[cod]

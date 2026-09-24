@@ -282,6 +282,18 @@ enum ComputerV2TargetContract {
     }
 }
 
+enum ComputerV2FreshnessPolicy {
+    /// A model-grounded coordinate depends on the context of the whole image,
+    /// so an unchanged target crop is insufficient proof. Explicit coordinates
+    /// retain the smaller target-region check to tolerate unrelated animation.
+    static func windowFingerprintTargets(
+        _ targetPoints: [ScreenPoint],
+        usesVisualGrounding: Bool
+    ) -> [ScreenPoint] {
+        usesVisualGrounding ? [] : targetPoints
+    }
+}
+
 enum LocalThreadContext: Equatable, Sendable {
     case constrained
     case expanded
@@ -383,7 +395,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
                 workspacePath: documents,
                 codexHomePath: codexHome.path,
                 baseInstructions: """
-                You are LocalCodex, a concise local desktop agent. Follow the user's request precisely. For computer use, observe with an Accessibility snapshot or screenshot, act only through the provided desktop tools, then observe again. Prefer semantic Accessibility actions over coordinates. When both visual context and an exact control are needed, use computer_v2_capture with include_accessibility=true; its AX snapshot_id supports a semantic action, while capture_id and image-pixel coordinates are only for image-space actions. AX screen frames are not image-pixel coordinates. Google Chrome's bundle identifier is com.google.Chrome. Respect approval gates and never infer success from an action acknowledgement.
+                You are LocalCodex, a concise local desktop agent. Follow the user's request precisely. For computer use, observe through Accessibility or a screenshot, act only with the provided desktop tools, then observe again. Prefer semantic Accessibility actions. A Chrome URL opened with computer_v2_open is an exact task-scoped tab; use its semantic snapshot and actions because browser-tab coordinates and keyboard input fail closed. In a native app, computer_v2_capture can include synchronized Accessibility. Use its snapshot_id for semantic actions and capture_id with image pixels for image actions. Never estimate coordinates. Accessibility frames use screen points, not image pixels. Chrome is com.google.Chrome. Respect approval gates and never infer success from an action acknowledgement.
                 """,
                 reasoningEffort: "medium"
             )
@@ -395,10 +407,19 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
     private let core: Core
     private let eventStream: AsyncStream<AgentRuntimeEvent>
 
-    init(configuration: Configuration) {
+    init(
+        configuration: Configuration,
+        browserBroker: ChromeTabBroker = ChromeTabBroker(),
+        visualGrounder: any VisualGroundingClient = PythonVisualGroundingClient.local()
+    ) {
         var continuation: AsyncStream<AgentRuntimeEvent>.Continuation?
         eventStream = AsyncStream { continuation = $0 }
-        core = Core(configuration: configuration, events: continuation!)
+        core = Core(
+            configuration: configuration,
+            events: continuation!,
+            browserBroker: browserBroker,
+            visualGrounder: visualGrounder
+        )
     }
 
     func loadTasks() async throws -> [AgentTask] {
@@ -421,6 +442,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
     func resolveApproval(requestID: String, approved: Bool) async throws {
         try await core.resolveApproval(requestID: requestID, approved: approved)
     }
+
+    func shutdown() async -> RuntimeShutdownReport {
+        await core.shutdown()
+    }
 }
 
 private extension CodexAppServerRuntime {
@@ -441,6 +466,11 @@ private extension CodexAppServerRuntime {
             let serverRequestID: ServerRequestID
             let method: String
             let request: ActionApprovalRequest
+        }
+
+        private struct DynamicToolTask {
+            let taskID: AgentTask.ID?
+            let task: Task<Void, Never>
         }
 
         private struct ActiveAccessibilitySession {
@@ -467,6 +497,9 @@ private extension CodexAppServerRuntime {
             var accessibility: ActiveAccessibilitySession?
             var accessibilityWindowIdentity: FocusedWindowIdentity?
             var capture: ComputerV2Capture?
+            var browserTab: BrowserTabBinding?
+            var browserSnapshot: BrowserTabSnapshot?
+            var browserLifetime: BrowserTabLifetime?
         }
 
         private enum DesktopInputAction {
@@ -554,8 +587,10 @@ private extension CodexAppServerRuntime {
 
         private let configuration: Configuration
         private let events: AsyncStream<AgentRuntimeEvent>.Continuation
+        private let browserBroker: ChromeTabBroker
+        private let visualGrounder: any VisualGroundingClient
 
-        private var process: Process?
+        private var process: OwnedChildProcess?
         private var input: FileHandle?
         private var outputHandle: FileHandle?
         private var errorHandle: FileHandle?
@@ -564,9 +599,11 @@ private extension CodexAppServerRuntime {
         private var outputBuffer = Data()
         private var nextRequestID = 1
         private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
+        private var dynamicToolTasks = [ServerRequestID: DynamicToolTask]()
         private var threadForTask: [AgentTask.ID: String] = [:]
         private var taskForThread: [String: AgentTask.ID] = [:]
         private var turnForTask: [AgentTask.ID: String] = [:]
+        private var modelForTask: [AgentTask.ID: String] = [:]
         private var contextForLoadedThread: [String: LocalThreadContext] = [:]
         private var lastErrorMessageForTask: [AgentTask.ID: String] = [:]
         private var pendingServerApprovals: [String: PendingServerApproval] = [:]
@@ -577,30 +614,41 @@ private extension CodexAppServerRuntime {
         private var computerV2InFlight: [AgentTask.ID: UUID] = [:]
         private var computerGlobalInFlight: UUID?
         private var isReady = false
+        private var isStartingServer = false
+        private var isShuttingDown = false
+        private var serverGeneration = UUID()
+        private var shutdownTask: Task<RuntimeShutdownReport, Never>?
+        private var retiringChildren = [Int32: OwnedChildProcess]()
+        private var childCleanupIssues = [String]()
+        private var browserCleanupTasks = [UUID: Task<Void, Never>]()
 
         init(
             configuration: Configuration,
-            events: AsyncStream<AgentRuntimeEvent>.Continuation
+            events: AsyncStream<AgentRuntimeEvent>.Continuation,
+            browserBroker: ChromeTabBroker,
+            visualGrounder: any VisualGroundingClient
         ) {
             self.configuration = configuration
             self.events = events
+            self.browserBroker = browserBroker
+            self.visualGrounder = visualGrounder
         }
 
         func start() async throws {
+            guard !isShuttingDown else { throw RuntimeError.serverStopped }
             guard !isReady else { return }
+            guard !isStartingServer else {
+                throw RuntimeError.serverError("The App Server is still starting.")
+            }
+            isStartingServer = true
+            defer { isStartingServer = false }
             guard FileManager.default.isExecutableFile(atPath: configuration.executablePath) else {
                 throw RuntimeError.executableMissing(configuration.executablePath)
             }
-
             events.yield(.connectionChanged(.connecting))
-
-            let process = Process()
             let stdin = Pipe()
             let stdout = Pipe()
             let stderr = Pipe()
-
-            process.executableURL = URL(fileURLWithPath: configuration.executablePath)
-            process.arguments = ["app-server", "--listen", "stdio://"]
             try FileManager.default.createDirectory(
                 atPath: configuration.codexHomePath,
                 withIntermediateDirectories: true
@@ -610,31 +658,115 @@ private extension CodexAppServerRuntime {
             }
             var environment = ProcessInfo.processInfo.environment
             environment["CODEX_HOME"] = configuration.codexHomePath
-            process.environment = environment
-            process.standardInput = stdin
-            process.standardOutput = stdout
-            process.standardError = stderr
-
-            try process.run()
+            let process = try OwnedChildProcess(
+                executableURL: URL(fileURLWithPath: configuration.executablePath),
+                arguments: ["app-server", "--listen", "stdio://"],
+                environment: environment,
+                inputDescriptor: stdin.fileHandleForReading.fileDescriptor,
+                outputDescriptor: stdout.fileHandleForWriting.fileDescriptor,
+                errorDescriptor: stderr.fileHandleForWriting.fileDescriptor
+            )
+            try? stdin.fileHandleForReading.close()
+            try? stdout.fileHandleForWriting.close()
+            try? stderr.fileHandleForWriting.close()
             self.process = process
+            serverGeneration = UUID()
             input = stdin.fileHandleForWriting
             beginReading(stdout.fileHandleForReading)
             beginReadingErrors(stderr.fileHandleForReading)
+            do {
+                _ = try await request(
+                    method: "initialize",
+                    params: [
+                        "clientInfo": [
+                            "name": "local_codex",
+                            "title": "LocalCodex",
+                            "version": "0.1.0",
+                        ],
+                        "capabilities": ["experimentalApi": true],
+                    ]
+                )
+                guard !isShuttingDown, self.process === process else {
+                    throw RuntimeError.serverStopped
+                }
+                try sendNotification(method: "initialized", params: [:])
+                isReady = true
+                events.yield(.connectionChanged(.connected(provider: "Codex App Server · LM Studio selected")))
+            } catch {
+                if self.process === process { serverFailed(error) }
+                throw error
+            }
+        }
 
-            _ = try await request(
-                method: "initialize",
-                params: [
-                    "clientInfo": [
-                        "name": "local_codex",
-                        "title": "LocalCodex",
-                        "version": "0.1.0",
-                    ],
-                    "capabilities": ["experimentalApi": true],
-                ]
-            )
-            try sendNotification(method: "initialized", params: [:])
-            isReady = true
-            events.yield(.connectionChanged(.connected(provider: "Codex App Server · LM Studio selected")))
+        func shutdown() async -> RuntimeShutdownReport {
+            if let shutdownTask { return await shutdownTask.value }
+            isShuttingDown = true
+            // Revokes all task lifetimes and approval continuations synchronously.
+            serverFailed(RuntimeError.serverStopped)
+            let task = Task { await self.finishShutdown() }
+            shutdownTask = task
+            return await task.value
+        }
+
+        private func finishShutdown() async -> RuntimeShutdownReport {
+            let children = Array(retiringChildren.values)
+            async let browserResult = browserBroker.shutdown()
+            async let groundingIssues = visualGrounder.shutdown()
+            let processIssues = await withTaskGroup(of: [String].self) { group in
+                for child in children {
+                    group.addTask { await child.stop().issues }
+                }
+                var issues = [String]()
+                for await result in group { issues.append(contentsOf: result) }
+                return issues
+            }
+            let browser = await browserResult
+            let grounder = await groundingIssues
+            let issues = Array(Set(
+                processIssues + childCleanupIssues + browser.issues + grounder
+            )).sorted()
+            for cleanup in browserCleanupTasks.values { cleanup.cancel() }
+            browserCleanupTasks.removeAll()
+            events.yield(.connectionChanged(.disconnected))
+            events.finish()
+            return RuntimeShutdownReport(issues: issues)
+        }
+
+        @discardableResult
+        private func scheduleBrowserCleanup(
+            taskID: AgentTask.ID,
+            binding: BrowserTabBinding
+        ) -> Task<Void, Never> {
+            binding.lifetime.revoke()
+            let key = browserTaskKey(taskID)
+            let id = UUID()
+            let cleanup = Task<Void, Never> {
+                await browserBroker.revoke(taskKey: key, binding: binding)
+                browserCleanupTasks.removeValue(forKey: id)
+            }
+            browserCleanupTasks[id] = cleanup
+            return cleanup
+        }
+
+        @discardableResult
+        private func discardComputerV2Session(taskID: AgentTask.ID) -> Task<Void, Never>? {
+            let session = computerV2Sessions.removeValue(forKey: taskID)
+            session?.browserLifetime?.revoke()
+            session?.browserTab?.lifetime.revoke()
+            let requestIDs = computerApprovalTask.compactMap { $0.value == taskID ? $0.key : nil }
+            for requestID in requestIDs {
+                computerApprovalTask.removeValue(forKey: requestID)
+                pendingComputerUseApprovals.removeValue(forKey: requestID)?.resume(returning: false)
+                events.yield(.approvalResolved(requestID: requestID))
+            }
+            let serverApprovals = pendingServerApprovals.filter { $0.value.request.taskID == taskID }
+            for (requestID, approval) in serverApprovals {
+                pendingServerApprovals.removeValue(forKey: requestID)
+                try? sendResponse(id: approval.serverRequestID, result: ["decision": "decline"])
+                events.yield(.approvalResolved(requestID: requestID))
+            }
+            guard let binding = session?.browserTab else { return nil }
+            return scheduleBrowserCleanup(taskID: taskID, binding: binding)
         }
 
         func submit(prompt: String, taskID: AgentTask.ID, modelID: String) async throws {
@@ -660,7 +792,7 @@ private extension CodexAppServerRuntime {
                             "cwd": configuration.workspacePath,
                             "sandbox": "workspace-write",
                             "approvalPolicy": "on-request",
-                            "baseInstructions": configuration.baseInstructions,
+                            "baseInstructions": baseInstructions(for: modelID),
                             "config": CodexAppServerRuntime.localThreadConfig(for: modelID),
                             "excludeTurns": true,
                         ]
@@ -678,9 +810,9 @@ private extension CodexAppServerRuntime {
                         "approvalPolicy": "on-request",
                         "ephemeral": false,
                         "threadSource": "local_codex",
-                        "baseInstructions": configuration.baseInstructions,
+                        "baseInstructions": baseInstructions(for: modelID),
                         "config": CodexAppServerRuntime.localThreadConfig(for: modelID),
-                        "dynamicTools": dynamicToolSpecs(),
+                        "dynamicTools": dynamicToolSpecs(for: modelID),
                     ]
                 )
                 threadID = try parseThreadID(from: response)
@@ -697,17 +829,29 @@ private extension CodexAppServerRuntime {
 
             // Bindings and screenshot coordinates are valid for one turn only.
             // A resumed thread must observe and bind its target again.
+            discardComputerV2Session(taskID: taskID)
             computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID())
 
-            let turnResponse = try await request(
-                method: "turn/start",
-                params: [
-                    "threadId": threadID,
-                    "input": [["type": "text", "text": prompt]],
-                    "effort": configuration.reasoningEffort,
-                    "model": modelID,
-                ]
-            )
+            let previousModel = modelForTask.updateValue(modelID, forKey: taskID)
+            let turnResponse: Data
+            do {
+                turnResponse = try await request(
+                    method: "turn/start",
+                    params: [
+                        "threadId": threadID,
+                        "input": [["type": "text", "text": prompt]],
+                        "effort": configuration.reasoningEffort,
+                        "model": modelID,
+                    ]
+                )
+            } catch {
+                if let previousModel {
+                    modelForTask[taskID] = previousModel
+                } else {
+                    modelForTask.removeValue(forKey: taskID)
+                }
+                throw error
+            }
             if let object = try JSONSerialization.jsonObject(with: turnResponse) as? [String: Any],
                let result = object["result"] as? [String: Any],
                let turn = result["turn"] as? [String: Any],
@@ -721,31 +865,15 @@ private extension CodexAppServerRuntime {
                   let turnID = turnForTask[taskID] else {
                 throw RuntimeError.serverError("This task has no active turn to stop.")
             }
-
-            // Revoke the model's current desktop binding before waking any
-            // pending approval. A late dynamic-tool continuation then fails
-            // its epoch check rather than acting on a stopped turn.
-            computerV2Sessions.removeValue(forKey: taskID)
-            for requestID in computerApprovalTask.compactMap({ $0.value == taskID ? $0.key : nil }) {
-                computerApprovalTask.removeValue(forKey: requestID)
-                pendingComputerUseApprovals.removeValue(forKey: requestID)?.resume(returning: false)
-                events.yield(.approvalResolved(requestID: requestID))
-            }
-            let serverApprovalsToDecline = pendingServerApprovals.filter {
-                $0.value.request.taskID == taskID
-            }
-            for (requestID, approval) in serverApprovalsToDecline {
-                pendingServerApprovals.removeValue(forKey: requestID)
-                try? sendResponse(
-                    id: approval.serverRequestID,
-                    result: ["decision": "decline"]
-                )
-                events.yield(.approvalResolved(requestID: requestID))
-            }
+            // Revocation precedes both the RPC and every cleanup await.
+            let cleanup = discardComputerV2Session(taskID: taskID)
+            let toolTasks = cancelDynamicToolTasks(for: taskID)
+            for task in toolTasks { await task.value }
             _ = try await request(
                 method: "turn/interrupt",
                 params: ["threadId": threadID, "turnId": turnID]
             )
+            await cleanup?.value
         }
 
         func loadTasks() async throws -> [AgentTask] {
@@ -838,15 +966,16 @@ private extension CodexAppServerRuntime {
         }
 
         private func beginReading(_ handle: FileHandle) {
+            let generation = serverGeneration
             outputHandle = handle
             handle.readabilityHandler = { [weak self] readable in
                 let data = readable.availableData
                 guard !data.isEmpty else {
                     readable.readabilityHandler = nil
-                    Task { await self?.serverEnded() }
+                    Task { await self?.serverEnded(generation: generation) }
                     return
                 }
-                Task { await self?.receive(output: data) }
+                Task { await self?.receive(output: data, generation: generation) }
             }
         }
 
@@ -862,7 +991,8 @@ private extension CodexAppServerRuntime {
             }
         }
 
-        private func receive(output data: Data) {
+        private func receive(output data: Data, generation: UUID) {
+            guard !isShuttingDown, generation == serverGeneration, process != nil else { return }
             outputBuffer.append(data)
 
             while let newline = outputBuffer.firstIndex(of: 0x0A) {
@@ -908,6 +1038,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func handleNotification(method: String, params: [String: Any]) {
+            guard !isShuttingDown else { return }
             guard let threadID = params["threadId"] as? String,
                   let taskID = taskForThread[threadID]
             else { return }
@@ -918,13 +1049,15 @@ private extension CodexAppServerRuntime {
                    let turnID = turn["id"] as? String {
                     turnForTask[taskID] = turnID
                 }
+                discardComputerV2Session(taskID: taskID)
                 computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID())
                 lastErrorMessageForTask.removeValue(forKey: taskID)
                 events.yield(.taskStatusChanged(taskID: taskID, status: .running))
 
             case "turn/completed":
                 turnForTask.removeValue(forKey: taskID)
-                computerV2Sessions.removeValue(forKey: taskID)
+                discardComputerV2Session(taskID: taskID)
+                _ = cancelDynamicToolTasks(for: taskID)
                 let turn = params["turn"] as? [String: Any]
                 let status = turn?["status"] as? String
                 events.yield(.taskStatusChanged(
@@ -939,7 +1072,8 @@ private extension CodexAppServerRuntime {
                 emitCompletedItem(item, type: type, taskID: taskID)
 
             case "error":
-                computerV2Sessions.removeValue(forKey: taskID)
+                discardComputerV2Session(taskID: taskID)
+                _ = cancelDynamicToolTasks(for: taskID)
                 let error = params["error"] as? [String: Any]
                 let message = error?["message"] as? String
                     ?? params["message"] as? String
@@ -1041,9 +1175,13 @@ private extension CodexAppServerRuntime {
                 emitAutomaticDecline(method: method, params: params, taskID: taskID)
 
             case "item/tool/call":
-                Task {
+                let generation = serverGeneration
+                let operation = Task {
+                    defer { dynamicToolTasks.removeValue(forKey: id) }
+                    guard !isShuttingDown, generation == serverGeneration else { return }
                     await handleDynamicToolCall(id: id, params: params, taskID: taskID)
                 }
+                dynamicToolTasks[id] = DynamicToolTask(taskID: taskID, task: operation)
 
             default:
                 try? sendError(id: id, message: "LocalCodex does not yet handle \(method).")
@@ -1130,11 +1268,29 @@ private extension CodexAppServerRuntime {
             }
         }
 
-        private func dynamicToolSpecs() -> [[String: Any]] {
-            // Existing rollouts retain their original `computer` definition on
-            // resume. New threads use a versioned contract so the model never
-            // has to carry a process ID from one call to the next.
-            ComputerV2ToolContract.specs
+        private func dynamicToolSpecs(for modelID: String) -> [[String: Any]] {
+            // Existing rollouts retain their original dynamic-tool definition
+            // on resume. New threads use a model-aware V2 contract so the 27B
+            // and 35B models are never offered a resident sidecar they cannot
+            // safely fit beside.
+            ComputerV2ToolContract.specs(for: modelID)
+        }
+
+        private func baseInstructions(for modelID: String) -> String {
+            let groundingInstruction: String
+            if LocalModelCatalog.supportsResidentVisualGrounding(modelID) {
+                groundingInstruction = """
+                If a visible native target is absent from Accessibility, use \
+                computer_v2_ground_click with the exact capture_id and a concise target \
+                description.
+                """
+            } else {
+                groundingInstruction = """
+                Visual grounding is not offered with this model because the resident \
+                sidecar would exceed this Mac's safe memory budget; use Accessibility.
+                """
+            }
+            return configuration.baseInstructions + "\n" + groundingInstruction
         }
 
         private func handleDynamicToolCall(
@@ -1142,6 +1298,7 @@ private extension CodexAppServerRuntime {
             params: [String: Any],
             taskID: AgentTask.ID?
         ) async {
+            let generation = serverGeneration
             let tool = params["tool"] as? String ?? "unknown"
             let arguments = params["arguments"] as? [String: Any] ?? [:]
 
@@ -1151,11 +1308,17 @@ private extension CodexAppServerRuntime {
                     arguments: arguments,
                     taskID: taskID
                 )
+                guard !Task.isCancelled,
+                      !isShuttingDown,
+                      generation == serverGeneration else { return }
                 try sendResponse(
                     id: id,
                     result: ["contentItems": contentItems, "success": true]
                 )
             } catch {
+                guard !Task.isCancelled,
+                      !isShuttingDown,
+                      generation == serverGeneration else { return }
                 let message = error.localizedDescription
                 try? sendResponse(
                     id: id,
@@ -1446,6 +1609,17 @@ private extension CodexAppServerRuntime {
             }
         }
 
+        private func cancelDynamicToolTasks(
+            for taskID: AgentTask.ID
+        ) -> [Task<Void, Never>] {
+            let matches = dynamicToolTasks.filter { $0.value.taskID == taskID }
+            for (id, operation) in matches {
+                dynamicToolTasks.removeValue(forKey: id)
+                operation.task.cancel()
+            }
+            return matches.map(\.value.task)
+        }
+
         private func makeAccessibilitySnapshot(
             processID: Int32,
             arguments: [String: Any]
@@ -1536,6 +1710,13 @@ private extension CodexAppServerRuntime {
                 computerV2Sessions[taskID]?.accessibility = nil
                 computerV2Sessions[taskID]?.accessibilityWindowIdentity = nil
                 computerV2Sessions[taskID]?.capture = nil
+                computerV2Sessions[taskID]?.browserLifetime?.revoke()
+                if let binding = computerV2Sessions[taskID]?.browserTab {
+                    scheduleBrowserCleanup(taskID: taskID, binding: binding)
+                }
+                computerV2Sessions[taskID]?.browserLifetime = nil
+                computerV2Sessions[taskID]?.browserTab = nil
+                computerV2Sessions[taskID]?.browserSnapshot = nil
                 throw RuntimeError.serverError(
                     "The bound application changed or quit. Open it again before interacting."
                 )
@@ -1545,15 +1726,29 @@ private extension CodexAppServerRuntime {
 
         private func computerV2ApprovalDetails(
             arguments: [String: Any],
-            application: ActivatedApplication
+            application: ActivatedApplication,
+            browserTab: BrowserTabBinding? = nil,
+            observedPageURL: URL? = nil
         ) -> String {
-            prettyJSON([
+            var target: [String: Any] = [
+                "bundle_id": application.bundleIdentifier,
+                "process_id": application.processIdentifier,
+            ]
+            if let browserTab {
+                target["tab_handle"] = browserTab.handle.uuidString
+                target["document_epoch"] = browserTab.documentEpoch.uuidString
+                if let observedPageURL {
+                    target["observed_page_url"] = observedPageURL.absoluteString
+                }
+            }
+            return prettyJSON([
                 "model_arguments": arguments,
-                "resolved_target": [
-                    "bundle_id": application.bundleIdentifier,
-                    "process_id": application.processIdentifier,
-                ],
+                "resolved_target": target,
             ])
+        }
+
+        private func browserTaskKey(_ taskID: AgentTask.ID) -> String {
+            String(describing: taskID)
         }
 
         private func clearComputerV2Observation(taskID: AgentTask.ID, epoch: UUID) throws {
@@ -1561,6 +1756,7 @@ private extension CodexAppServerRuntime {
             session.accessibility = nil
             session.accessibilityWindowIdentity = nil
             session.capture = nil
+            session.browserSnapshot = nil
             computerV2Sessions[taskID] = session
         }
 
@@ -1650,6 +1846,35 @@ private extension CodexAppServerRuntime {
                     taskID: taskID,
                     epoch: epoch
                 )
+                let currentSession = try computerV2Session(
+                    taskID: taskID,
+                    epoch: epoch
+                )
+                if let browserTab = currentSession.browserTab {
+                    let observation = try await browserBroker.snapshot(
+                        taskKey: browserTaskKey(taskID),
+                        binding: browserTab,
+                        query: arguments["query"] as? String
+                    )
+                    _ = try await computerV2BoundApplication(
+                        taskID: taskID,
+                        epoch: epoch
+                    )
+                    var session = try computerV2Session(taskID: taskID, epoch: epoch)
+                    guard session.browserTab?.handle == browserTab.handle else {
+                        throw RuntimeError.serverError(
+                            "The bound browser tab changed during snapshot. Open it again."
+                        )
+                    }
+                    session.browserTab = observation.binding
+                    session.browserSnapshot = observation.snapshot
+                    session.accessibility = nil
+                    session.accessibilityWindowIdentity = nil
+                    session.capture = nil
+                    computerV2Sessions[taskID] = session
+                    return [textContent(observation.snapshot.formattedText)]
+                }
+
                 let focusedObservation = try await computerV2FocusedWindowObservation()
                 guard let focusedObservation,
                       focusedObservation.info.processIdentifier == application.processIdentifier,
@@ -1672,6 +1897,7 @@ private extension CodexAppServerRuntime {
                 session.accessibility = result.active
                 session.accessibilityWindowIdentity = focusedObservation.identity
                 session.capture = nil
+                session.browserSnapshot = nil
                 computerV2Sessions[taskID] = session
                 return [textContent(result.text)]
 
@@ -1685,6 +1911,13 @@ private extension CodexAppServerRuntime {
             case .capture:
                 return try await computerV2Capture(
                     arguments: arguments,
+                    taskID: taskID,
+                    epoch: epoch
+                )
+
+            case .groundClick:
+                return try await computerV2GroundedClickAction(
+                    call,
                     taskID: taskID,
                     epoch: epoch
                 )
@@ -1724,40 +1957,90 @@ private extension CodexAppServerRuntime {
             guard approved else {
                 throw RuntimeError.serverError("The user declined the application action.")
             }
-            _ = try computerV2Session(taskID: taskID, epoch: epoch)
-            let controller = await MainActor.run { ComputerInputController() }
-            let application = try await controller.launchOrActivateApplication(
-                bundleIdentifier: bundleID,
-                opening: url
-            )
-            _ = try computerV2Session(taskID: taskID, epoch: epoch)
-            guard application.bundleIdentifier == bundleID else {
-                throw RuntimeError.serverError(
-                    "The launched process did not match the approved application."
-                )
+
+            var pendingSession = try computerV2Session(taskID: taskID, epoch: epoch)
+            let oldBinding = pendingSession.browserTab
+            pendingSession.browserLifetime?.revoke()
+            oldBinding?.lifetime.revoke()
+            pendingSession.application = nil
+            pendingSession.accessibility = nil
+            pendingSession.accessibilityWindowIdentity = nil
+            pendingSession.capture = nil
+            pendingSession.browserTab = nil
+            pendingSession.browserSnapshot = nil
+            let lifetime = bundleID == "com.google.Chrome" && url != nil
+                ? BrowserTabLifetime() : nil
+            pendingSession.browserLifetime = lifetime
+            computerV2Sessions[taskID] = pendingSession
+            if let oldBinding {
+                await browserBroker.revoke(taskKey: browserTaskKey(taskID), binding: oldBinding)
             }
-            let running = await MainActor.run {
-                RunningApplicationCatalog().applications()
+
+            var createdBinding: BrowserTabBinding?
+            do {
+                _ = try computerV2Session(taskID: taskID, epoch: epoch)
+                let controller = await MainActor.run { ComputerInputController() }
+                _ = try computerV2Session(taskID: taskID, epoch: epoch)
+                let application: ActivatedApplication
+                if let lifetime, let url {
+                    let opened = try await browserBroker.open(
+                        taskKey: browserTaskKey(taskID), url: url, lifetime: lifetime
+                    )
+                    createdBinding = opened.binding
+                    _ = try computerV2Session(taskID: taskID, epoch: epoch)
+                    try lifetime.check()
+                    application = try await controller.activateApplication(
+                        processIdentifier: opened.application.processIdentifier
+                    )
+                } else {
+                    application = try await controller.launchOrActivateApplication(
+                        bundleIdentifier: bundleID, opening: url
+                    )
+                }
+                _ = try computerV2Session(taskID: taskID, epoch: epoch)
+                guard application.bundleIdentifier == bundleID,
+                      createdBinding == nil
+                        || createdBinding?.processIdentifier == application.processIdentifier else {
+                    throw RuntimeError.serverError(
+                        "The launched process did not match the approved application."
+                    )
+                }
+                let running = await MainActor.run {
+                    RunningApplicationCatalog().applications()
+                }
+                _ = try computerV2Session(taskID: taskID, epoch: epoch)
+                try lifetime?.check()
+                guard ComputerV2TargetContract.isRunning(application, in: running) else {
+                    throw RuntimeError.serverError("The approved application is no longer running.")
+                }
+                var session = try computerV2Session(taskID: taskID, epoch: epoch)
+                session.application = application
+                session.browserTab = createdBinding
+                session.browserLifetime = lifetime
+                computerV2Sessions[taskID] = session
+                let browserNote = createdBinding.map {
+                    "\nBROWSER_TAB tab_handle=\($0.handle.uuidString) "
+                        + "document_epoch=\($0.documentEpoch.uuidString) "
+                        + "scope=current_task semantic_background_actions=true "
+                        + "profile=isolated ordinary_profile_access=false"
+                } ?? ""
+                let navigationNote = url == nil ? "" :
+                    " URL navigation may still be loading; if the first snapshot lacks page content, take another snapshot before acting."
+                return [textContent(
+                    try encodeJSON(application)
+                        + "\nBound this app for the current turn. Observe before acting; no process ID is needed."
+                        + browserNote
+                        + navigationNote
+                )]
+            } catch {
+                lifetime?.revoke()
+                if let createdBinding {
+                    await browserBroker.revoke(
+                        taskKey: browserTaskKey(taskID), binding: createdBinding
+                    )
+                }
+                throw error
             }
-            _ = try computerV2Session(taskID: taskID, epoch: epoch)
-            guard ComputerV2TargetContract.isRunning(application, in: running) else {
-                throw RuntimeError.serverError(
-                    "The approved application is no longer running."
-                )
-            }
-            var session = try computerV2Session(taskID: taskID, epoch: epoch)
-            session.application = application
-            session.accessibility = nil
-            session.accessibilityWindowIdentity = nil
-            session.capture = nil
-            computerV2Sessions[taskID] = session
-            let navigationNote = url == nil ? "" :
-                " URL navigation may still be loading; if the first snapshot lacks page content, take another snapshot before acting."
-            return [textContent(
-                try encodeJSON(application)
-                    + "\nBound this app for the current turn. Observe before acting; no process ID is needed."
-                    + navigationNote
-            )]
         }
 
         private func computerV2SemanticAction(
@@ -1769,6 +2052,18 @@ private extension CodexAppServerRuntime {
                 taskID: taskID,
                 epoch: epoch
             )
+            let currentSession = try computerV2Session(
+                taskID: taskID,
+                epoch: epoch
+            )
+            if currentSession.browserTab != nil {
+                return try await computerV2BrowserSemanticAction(
+                    call,
+                    application: application,
+                    taskID: taskID,
+                    epoch: epoch
+                )
+            }
             guard let active = try computerV2Session(
                 taskID: taskID,
                 epoch: epoch
@@ -1858,6 +2153,104 @@ private extension CodexAppServerRuntime {
             )]
         }
 
+        private func computerV2BrowserSemanticAction(
+            _ call: ComputerV2ToolContract.ValidatedCall,
+            application: ActivatedApplication,
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> [[String: Any]] {
+            let current = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard let browserTab = current.browserTab,
+                  let browserSnapshot = current.browserSnapshot,
+                  let snapshotID = UUID(
+                      uuidString: try requiredString("snapshot_id", in: call.arguments)
+                  ),
+                  snapshotID == browserSnapshot.id,
+                  browserSnapshot.tabHandle == browserTab.handle,
+                  browserSnapshot.documentEpoch == browserTab.documentEpoch else {
+                throw RuntimeError.serverError(
+                    "The browser Accessibility snapshot is missing or stale. Capture a fresh snapshot."
+                )
+            }
+
+            let index = try requiredIndex(call.arguments)
+            guard let element = browserSnapshot.element(at: index) else {
+                throw RuntimeError.serverError(
+                    "The browser Accessibility element is no longer available."
+                )
+            }
+            let elementName = element.label.isEmpty
+                ? "\(element.role) element \(index)" : element.label
+
+            let summary: String
+            let title: String
+            let actionName: String?
+            let textValue: String?
+            if call.tool == .ax {
+                let requestedAction = try requiredString(
+                    "ax_action",
+                    in: call.arguments
+                )
+                actionName = requestedAction
+                textValue = nil
+                summary = "\(requestedAction) on \(elementName)"
+                title = "Allow a desktop action?"
+            } else {
+                actionName = nil
+                textValue = try requiredString("text", in: call.arguments)
+                summary = "Set text on \(elementName)"
+                title = "Allow text entry?"
+            }
+
+            let approved = await requestComputerUseApproval(
+                taskID: taskID,
+                title: title,
+                summary: summary,
+                details: computerV2ApprovalDetails(
+                    arguments: call.arguments,
+                    application: application,
+                    browserTab: browserTab,
+                    observedPageURL: browserSnapshot.documentURL
+                )
+            )
+            guard approved else {
+                throw RuntimeError.serverError("The user declined the browser action.")
+            }
+
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            let approvedSession = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard approvedSession.browserTab == browserTab,
+                  approvedSession.browserSnapshot == browserSnapshot else {
+                throw RuntimeError.serverError(
+                    "The approved browser target is no longer current."
+                )
+            }
+
+            try clearComputerV2Observation(taskID: taskID, epoch: epoch)
+            if let actionName {
+                try await browserBroker.perform(
+                    taskKey: browserTaskKey(taskID),
+                    binding: browserTab,
+                    snapshot: browserSnapshot,
+                    elementIndex: index,
+                    action: actionName
+                )
+            } else if let textValue {
+                try await browserBroker.setText(
+                    taskKey: browserTaskKey(taskID),
+                    binding: browserTab,
+                    snapshot: browserSnapshot,
+                    elementIndex: index,
+                    text: textValue
+                )
+            }
+
+            return [textContent(
+                "Requested \(summary) on the exact bound browser tab. "
+                    + "Capture a fresh snapshot to verify the result."
+            )]
+        }
+
         private func computerV2Capture(
             arguments: [String: Any],
             taskID: AgentTask.ID,
@@ -1868,6 +2261,15 @@ private extension CodexAppServerRuntime {
                 taskID: taskID,
                 epoch: epoch
             )
+            guard try computerV2Session(
+                taskID: taskID,
+                epoch: epoch
+            ).browserTab == nil else {
+                throw RuntimeError.serverError(
+                    "Screenshot and coordinate tools are unavailable for a brokered Chrome tab. "
+                        + "Use a semantic browser snapshot and action."
+                )
+            }
             let focusedObservation = try await computerV2FocusedWindowObservation()
             guard let focusedObservation else {
                 throw RuntimeError.serverError(
@@ -2031,6 +2433,86 @@ private extension CodexAppServerRuntime {
             return content
         }
 
+        private func computerV2GroundedClickAction(
+            _ call: ComputerV2ToolContract.ValidatedCall,
+            taskID: AgentTask.ID,
+            epoch: UUID
+        ) async throws -> [[String: Any]] {
+            guard let modelID = modelForTask[taskID],
+                  LocalModelCatalog.supportsResidentVisualGrounding(modelID) else {
+                throw RuntimeError.serverError(
+                    "Resident visual grounding is supported with the 4B and 9B models on this Mac. "
+                        + "Use Accessibility, or start a task with one of those models."
+                )
+            }
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            let observed = try computerV2Session(taskID: taskID, epoch: epoch)
+            guard observed.browserTab == nil else {
+                throw RuntimeError.serverError(
+                    "Visual grounding is unavailable for a brokered Chrome tab. "
+                        + "Use its semantic browser snapshot and action."
+                )
+            }
+            guard let capture = observed.capture else {
+                throw RuntimeError.serverError(
+                    "A current screenshot is required before visual grounding."
+                )
+            }
+            guard let suppliedCaptureID = UUID(uuidString: try requiredString(
+                "capture_id",
+                in: call.arguments
+            )), suppliedCaptureID == capture.mapper.captureID else {
+                throw RuntimeError.serverError(
+                    "The visual-grounding capture is missing or stale. Capture again."
+                )
+            }
+            let target = try requiredString("target", in: call.arguments)
+            let request = VisualGroundingRequest(
+                id: UUID(),
+                png: try pngData(capture.windowImage),
+                width: capture.mapper.imageWidth,
+                height: capture.mapper.imageHeight,
+                target: target
+            )
+            let decision = try await visualGrounder.ground(request)
+
+            _ = try await computerV2BoundApplication(taskID: taskID, epoch: epoch)
+            guard try computerV2Session(taskID: taskID, epoch: epoch)
+                .capture?.mapper.captureID == capture.mapper.captureID else {
+                throw RuntimeError.serverError(
+                    "The screenshot changed during visual grounding. Capture again."
+                )
+            }
+            // The point was inferred from the whole screenshot, so revalidate
+            // the whole window before presenting an approval for that decision.
+            try await verifyComputerV2WindowUnchanged(capture)
+            let synthesizedArguments: [String: Any] = [
+                "capture_id": capture.mapper.captureID.uuidString,
+                "x": decision.point.x,
+                "y": decision.point.y,
+            ]
+            let synthesized = try ComputerV2ToolContract.validate(
+                tool: ComputerV2ToolContract.Tool.click.rawValue,
+                arguments: synthesizedArguments
+            )
+            let evidenceData = try JSONEncoder().encode(decision)
+            guard let evidence = try JSONSerialization.jsonObject(
+                with: evidenceData
+            ) as? [String: Any] else {
+                throw RuntimeError.serverError(
+                    "The visual-grounding decision could not be encoded."
+                )
+            }
+            return try await computerV2PointerAction(
+                synthesized,
+                taskID: taskID,
+                epoch: epoch,
+                approvalModelArguments: call.arguments,
+                groundingEvidence: evidence,
+                approvalSummary: "Locate and click \(target)"
+            )
+        }
+
         private func computerV2MappedPointerAction(
             _ call: ComputerV2ToolContract.ValidatedCall,
             capture: ComputerV2Capture
@@ -2170,12 +2652,24 @@ private extension CodexAppServerRuntime {
         private func computerV2PointerAction(
             _ call: ComputerV2ToolContract.ValidatedCall,
             taskID: AgentTask.ID,
-            epoch: UUID
+            epoch: UUID,
+            approvalModelArguments: [String: Any]? = nil,
+            groundingEvidence: [String: Any]? = nil,
+            approvalSummary: String? = nil
         ) async throws -> [[String: Any]] {
             let application = try await computerV2BoundApplication(
                 taskID: taskID,
                 epoch: epoch
             )
+            guard try computerV2Session(
+                taskID: taskID,
+                epoch: epoch
+            ).browserTab == nil else {
+                throw RuntimeError.serverError(
+                    "Coordinate and keyboard input are unavailable for a brokered Chrome tab. "
+                        + "Use a semantic browser snapshot and action."
+                )
+            }
             guard let capture = try computerV2Session(
                 taskID: taskID,
                 epoch: epoch
@@ -2185,18 +2679,22 @@ private extension CodexAppServerRuntime {
                 )
             }
             let action = try computerV2MappedPointerAction(call, capture: capture)
+            var approvalDetails: [String: Any] = [
+                "model_arguments": approvalModelArguments ?? call.arguments,
+                "resolved_target": [
+                    "bundle_id": application.bundleIdentifier,
+                    "process_id": application.processIdentifier,
+                ],
+                "resolved_action": action.summary,
+            ]
+            if let groundingEvidence {
+                approvalDetails["visual_grounding"] = groundingEvidence
+            }
             let approved = await requestComputerUseApproval(
                 taskID: taskID,
                 title: "Allow computer input?",
-                summary: action.summary,
-                details: prettyJSON([
-                    "model_arguments": call.arguments,
-                    "resolved_target": [
-                        "bundle_id": application.bundleIdentifier,
-                        "process_id": application.processIdentifier,
-                    ],
-                    "resolved_action": action.summary,
-                ])
+                summary: approvalSummary ?? action.summary,
+                details: prettyJSON(approvalDetails)
             )
             guard approved else {
                 throw RuntimeError.serverError("The user declined computer input.")
@@ -2231,7 +2729,10 @@ private extension CodexAppServerRuntime {
             }
             try await verifyComputerV2WindowUnchanged(
                 capture,
-                targetPoints: action.pointerTargets
+                targetPoints: ComputerV2FreshnessPolicy.windowFingerprintTargets(
+                    action.pointerTargets,
+                    usesVisualGrounding: groundingEvidence != nil
+                )
             )
             try await verifyComputerV2DisplayTargetUnchanged(
                 capture,
@@ -2266,6 +2767,15 @@ private extension CodexAppServerRuntime {
                 taskID: taskID,
                 epoch: epoch
             )
+            guard try computerV2Session(
+                taskID: taskID,
+                epoch: epoch
+            ).browserTab == nil else {
+                throw RuntimeError.serverError(
+                    "Coordinate and keyboard input are unavailable for a brokered Chrome tab. "
+                        + "Use a semantic browser snapshot and action."
+                )
+            }
             let observation = try computerV2Session(taskID: taskID, epoch: epoch)
             guard observation.accessibility != nil || observation.capture != nil else {
                 throw RuntimeError.serverError(
@@ -2729,16 +3239,21 @@ private extension CodexAppServerRuntime {
         }
 
         private func imageContent(_ image: CGImage) throws -> [String: Any] {
+            let png = try pngData(image)
+            return [
+                "type": "inputImage",
+                "imageUrl": "data:image/png;base64,\(png.base64EncodedString())",
+            ]
+        }
+
+        private func pngData(_ image: CGImage) throws -> Data {
             guard let png = NSBitmapImageRep(cgImage: image).representation(
                 using: .png,
                 properties: [:]
             ) else {
                 throw RuntimeError.serverError("Could not encode the screenshot as PNG.")
             }
-            return [
-                "type": "inputImage",
-                "imageUrl": "data:image/png;base64,\(png.base64EncodedString())",
-            ]
+            return png
         }
 
         private func encodeJSON<T: Encodable>(_ value: T) throws -> String {
@@ -2748,6 +3263,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func request(method: String, params: [String: Any]) async throws -> Data {
+            guard !isShuttingDown else { throw RuntimeError.serverStopped }
             let id = nextRequestID
             nextRequestID += 1
 
@@ -2852,15 +3368,35 @@ private extension CodexAppServerRuntime {
             return trimmed.isEmpty ? nil : trimmed
         }
 
-        private func serverEnded() {
-            guard process != nil else { return }
+        private func serverEnded(generation: UUID) {
+            guard generation == serverGeneration, process != nil else { return }
             serverFailed(RuntimeError.serverStopped)
         }
 
         private func serverFailed(_ error: Error) {
+            serverGeneration = UUID()
+            let dynamicTasks = dynamicToolTasks.values.map(\.task)
+            dynamicToolTasks.removeAll()
+            dynamicTasks.forEach { $0.cancel() }
+            for taskID in Array(computerV2Sessions.keys) {
+                discardComputerV2Session(taskID: taskID)
+            }
+            if let child = process {
+                retiringChildren[child.processIdentifier] = child
+                Task {
+                    let stopped = await child.stop()
+                    childCleanupIssues.append(contentsOf: stopped.issues)
+                    if stopped.succeeded {
+                        retiringChildren.removeValue(forKey: child.processIdentifier)
+                    }
+                }
+            }
             isReady = false
             outputHandle?.readabilityHandler = nil
             errorHandle?.readabilityHandler = nil
+            try? outputHandle?.close()
+            try? errorHandle?.close()
+            try? input?.close()
             outputHandle = nil
             errorHandle = nil
             try? protocolTraceHandle?.close()
@@ -2894,7 +3430,9 @@ private extension CodexAppServerRuntime {
             for continuation in continuations {
                 continuation.resume(throwing: error)
             }
-            events.yield(.connectionChanged(.failed(message: error.localizedDescription)))
+            if !isShuttingDown {
+                events.yield(.connectionChanged(.failed(message: error.localizedDescription)))
+            }
         }
     }
 }

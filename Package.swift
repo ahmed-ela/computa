@@ -20,7 +20,8 @@ let package = Package(
             dependencies: ["AutomationCore"],
             path: "Sources/LocalCodex",
             resources: [
-                .copy("Resources/WebUI")
+                .copy("Resources/WebUI"),
+                .copy("Resources/VisualGrounding")
             ]
         ),
         .testTarget(

@@ -10,10 +10,11 @@ import XCTest
 @MainActor
 final class CalculatorVisualV2LiveTests: XCTestCase {
     private let bundleID = "com.apple.calculator"
+    private let groundingTarget = "Calculator digit 1 button"
     private let expectedTools = [
         ComputerV2ToolContract.Tool.open.rawValue,
         ComputerV2ToolContract.Tool.capture.rawValue,
-        ComputerV2ToolContract.Tool.click.rawValue,
+        ComputerV2ToolContract.Tool.groundClick.rawValue,
         ComputerV2ToolContract.Tool.snapshot.rawValue,
     ]
 
@@ -74,13 +75,26 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
         configuration.protocolTracePath = wirePath.path
         let state = AppState(tasks: [], runtime: CodexAppServerRuntime(configuration: configuration))
         let runtimeTask = Task { await state.startRuntime() }
-        defer { runtimeTask.cancel() }
+        addTeardownBlock { @MainActor in
+            let report = await state.shutdownRuntime()
+            runtimeTask.cancel()
+            _ = await runtimeTask.result
+            XCTAssertTrue(
+                report.succeeded,
+                "Calculator visual gate cleanup failed: \(report.issues.joined(separator: "; "))"
+            )
+        }
         try await waitForConnection(state)
 
         state.createTask()
         let taskID = try XCTUnwrap(state.selectedTaskID)
         let modelID = ProcessInfo.processInfo.environment["LOCALCODEX_LIVE_MODEL_ID"]
             ?? LocalModelCatalog.defaultModelID
+        guard LocalModelCatalog.supportsResidentVisualGrounding(modelID) else {
+            throw Failure(
+                message: "The visual Calculator gate requires the 4B or 9B model on this 24 GB Mac: \(modelID)"
+            )
+        }
         guard LocalModelCatalog.option(for: modelID) != nil,
               state.setTaskModel(modelID, taskID: taskID) else {
             throw Failure(message: "The requested local model is not in the model selector: \(modelID)")
@@ -93,7 +107,7 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
 
         let submitted = await state.submit(
             prompt: """
-            Use exactly four computer tools in this order: computer_v2_open with {"bundle_id":"com.apple.calculator"}; computer_v2_capture with {}; computer_v2_click once at the center of the visible Calculator digit 1 button, using x and y in the returned image pixels and copying its capture_id exactly; computer_v2_snapshot with {}. Do not click any other control, use a process ID, or use another tool. Read the post-click snapshot, then reply with exactly \(token). If any step fails, say so instead of claiming success.
+            Use exactly four computer tools in this order: computer_v2_open with {"bundle_id":"com.apple.calculator"}; computer_v2_capture with {}; computer_v2_ground_click with the exact returned capture_id and target "\(groundingTarget)"; computer_v2_snapshot with {}. Do not estimate coordinates, click any other control, use a process ID, or use another tool. Read the post-click snapshot, then reply with exactly \(token). If any step fails, say so instead of claiming success.
             """,
             toTaskID: taskID
         )
@@ -110,9 +124,10 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
         XCTAssertEqual(calls[0].arguments["bundle_id"] as? String, bundleID)
         XCTAssertEqual(Set(calls[0].arguments.keys), ["bundle_id"])
         XCTAssertTrue(calls[1].arguments.isEmpty)
-        XCTAssertEqual(Set(calls[2].arguments.keys), ["capture_id", "x", "y"])
+        XCTAssertEqual(Set(calls[2].arguments.keys), ["capture_id", "target"])
         XCTAssertTrue(calls[3].arguments.isEmpty)
         XCTAssertEqual(calls[2].arguments["capture_id"] as? String, audit.capture?.id.uuidString)
+        XCTAssertEqual(calls[2].arguments["target"] as? String, groundingTarget)
         XCTAssertEqual(
             completed.entries.last(where: { $0.kind == .assistant })?.body
                 .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -223,13 +238,27 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
               })
         else { return false }
         guard let details = object(request.details),
-              Set(details.keys) == ["model_arguments", "resolved_target", "resolved_action"],
+              Set(details.keys) == [
+                  "model_arguments", "resolved_target", "resolved_action", "visual_grounding",
+              ],
               let modelArguments = details["model_arguments"] as? [String: Any],
-              Set(modelArguments.keys) == ["capture_id", "x", "y"],
+              Set(modelArguments.keys) == ["capture_id", "target"],
               let modelCaptureID = modelArguments["capture_id"] as? String,
               UUID(uuidString: modelCaptureID) == capture.id,
-              let imageX = finiteNumber(modelArguments["x"]),
-              let imageY = finiteNumber(modelArguments["y"]),
+              modelArguments["target"] as? String == groundingTarget,
+              request.summary == "Locate and click \(groundingTarget)",
+              let grounding = details["visual_grounding"] as? [String: Any],
+              grounding["method_version"] as? String == VisualGroundingDecision.methodVersion,
+              grounding["used_showui"] is Bool,
+              let selectedPair = grounding["selected_pair"] as? [String],
+              selectedPair.count == 2,
+              Set(selectedPair).count == 2,
+              selectedPair.allSatisfy({ ["goclick", "gui_owl_2b", "showui"].contains($0) }),
+              (grounding["image_width"] as? NSNumber)?.intValue == capture.width,
+              (grounding["image_height"] as? NSNumber)?.intValue == capture.height,
+              let groundingPoint = grounding["point"] as? [String: Any],
+              let imageX = finiteNumber(groundingPoint["x"]),
+              let imageY = finiteNumber(groundingPoint["y"]),
               imageX >= 0, imageX < Double(capture.width),
               imageY >= 0, imageY < Double(capture.height),
               let resolved = details["resolved_target"] as? [String: Any],
@@ -237,7 +266,6 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
               resolved["bundle_id"] as? String == bundleID,
               (resolved["process_id"] as? NSNumber)?.int32Value == pid,
               let action = details["resolved_action"] as? String,
-              action == request.summary,
               let point = clickPoint(action),
               let buttonFrame = try digitOneFrame(processID: pid),
               let beforeDisplay = try calculatorDisplayValue(processID: pid),
@@ -471,8 +499,9 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
               calls[0].arguments["bundle_id"] as? String == bundleID,
               Set(calls[0].arguments.keys) == ["bundle_id"],
               calls[1].arguments.isEmpty,
-              Set(calls[2].arguments.keys) == ["capture_id", "x", "y"],
+              Set(calls[2].arguments.keys) == ["capture_id", "target"],
               calls[2].arguments["capture_id"] as? String == capture.id.uuidString,
+              calls[2].arguments["target"] as? String == groundingTarget,
               calls[3].arguments.isEmpty,
               let openOutput = trace.output(for: calls[0].callID) as? String,
               processIdentifier(openOutput) == pid,
@@ -591,9 +620,10 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
                 }) else { return "Raw capture result omitted ID or PNG image" }
             }
             if index == 2 {
-                guard Set(arguments.keys) == ["capture_id", "x", "y"],
-                      arguments["capture_id"] as? String == capture.id.uuidString else {
-                    return "Raw click arguments did not use the capture ID"
+                guard Set(arguments.keys) == ["capture_id", "target"],
+                      arguments["capture_id"] as? String == capture.id.uuidString,
+                      arguments["target"] as? String == groundingTarget else {
+                    return "Raw grounded-click arguments did not use the exact capture and target"
                 }
             }
         }

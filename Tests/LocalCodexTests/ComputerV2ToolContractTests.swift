@@ -46,6 +46,48 @@ final class ComputerV2ToolContractTests: XCTestCase {
         let captureSchema = try XCTUnwrap(capture["inputSchema"] as? [String: Any])
         let captureProperties = try XCTUnwrap(captureSchema["properties"] as? [String: Any])
         XCTAssertNotNil(captureProperties["include_accessibility"])
+        let groundClick = try spec(named: .groundClick)
+        XCTAssertEqual(Set(groundClick.required), ["capture_id", "target"])
+        XCTAssertEqual(Set(groundClick.properties.keys), ["capture_id", "target"])
+    }
+
+    func testVisualGroundingToolIsRegisteredOnlyForModelsWithMemoryHeadroom() {
+        let groundClick = ComputerV2ToolContract.Tool.groundClick.rawValue
+        for modelID in [
+            "lmstudio-community/Qwen3.5-4B-MLX-4bit",
+            "lmstudio-community/Qwen3.5-9B-MLX-4bit",
+        ] {
+            XCTAssertTrue(
+                ComputerV2ToolContract.specs(for: modelID)
+                    .contains { $0["name"] as? String == groundClick },
+                modelID
+            )
+        }
+        for modelID in [
+            LocalModelCatalog.defaultModelID,
+            "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit",
+        ] {
+            XCTAssertFalse(
+                ComputerV2ToolContract.specs(for: modelID)
+                    .contains { $0["name"] as? String == groundClick },
+                modelID
+            )
+        }
+    }
+
+    func testGroundedCoordinatesRequireWholeWindowFreshness() {
+        let points = [ScreenPoint(x: 10, y: 20)]
+        XCTAssertEqual(
+            ComputerV2FreshnessPolicy.windowFingerprintTargets(
+                points,
+                usesVisualGrounding: false
+            ),
+            points
+        )
+        XCTAssertTrue(ComputerV2FreshnessPolicy.windowFingerprintTargets(
+            points,
+            usesVisualGrounding: true
+        ).isEmpty)
     }
 
     func testCaptureMetadataIdentifiesWindowImageAndPreservesPixelContract() throws {
@@ -82,6 +124,10 @@ final class ComputerV2ToolContractTests: XCTestCase {
                 "text": "hello",
             ]),
             (.capture, [:]),
+            (.groundClick, [
+                "capture_id": captureID,
+                "target": "the blue circular button with a white star",
+            ]),
             (.click, ["capture_id": captureID, "x": 12.5, "y": 20]),
             (.pointer, ["action": "move", "capture_id": captureID, "x": 1, "y": 2]),
             (.keypress, ["key": "return"]),
@@ -144,6 +190,25 @@ final class ComputerV2ToolContractTests: XCTestCase {
             "capture_id": "stale", "x": 1, "y": 2,
         ])
         assertFailure(.missing("capture_id"), .click, ["x": 1, "y": 2])
+        assertFailure(.missing("capture_id"), .groundClick, ["target": "Save"])
+        assertFailure(.invalid("capture_id"), .groundClick, [
+            "capture_id": "stale", "target": "Save",
+        ])
+        assertFailure(.missing("target"), .groundClick, ["capture_id": captureID])
+        assertFailure(.invalid("target"), .groundClick, [
+            "capture_id": captureID, "target": "   ",
+        ])
+        assertFailure(.invalid("target"), .groundClick, [
+            "capture_id": captureID, "target": String(repeating: "x", count: 513),
+        ])
+        for target in [" Save", "Save\nCancel", "Save\tCancel", "Save\u{202E}Cancel"] {
+            assertFailure(.invalid("target"), .groundClick, [
+                "capture_id": captureID, "target": target,
+            ])
+        }
+        assertFailure(.unexpected("x"), .groundClick, [
+            "capture_id": captureID, "target": "Save", "x": 10,
+        ])
     }
 
     func testNumericValidationRejectsBooleansFractionsAndNonfiniteValues() {

@@ -23,6 +23,7 @@ enum ComputerV2ToolContract {
         case ax = "computer_v2_ax"
         case setText = "computer_v2_set_text"
         case capture = "computer_v2_capture"
+        case groundClick = "computer_v2_ground_click"
         case click = "computer_v2_click"
         case pointer = "computer_v2_pointer"
         case keypress = "computer_v2_keypress"
@@ -69,6 +70,13 @@ enum ComputerV2ToolContract {
     /// callers must run `validate` before dispatching any action.
     static var specs: [[String: Any]] {
         Tool.allCases.map(spec)
+    }
+
+    static func specs(for modelID: String) -> [[String: Any]] {
+        guard !LocalModelCatalog.supportsResidentVisualGrounding(modelID) else {
+            return specs
+        }
+        return Tool.allCases.filter { $0 != .groundClick }.map(spec)
     }
 
     static func validate(
@@ -147,6 +155,26 @@ enum ComputerV2ToolContract {
             }
             if arguments["include_accessibility"] != nil {
                 try requireBoolean("include_accessibility", in: arguments)
+            }
+
+        case .groundClick:
+            try checkKeys(
+                arguments,
+                required: ["capture_id", "target"],
+                allowed: ["capture_id", "target"]
+            )
+            try requireUUID("capture_id", in: arguments)
+            let target = try requiredString("target", in: arguments, maximum: 512)
+            guard target == target.trimmingCharacters(in: .whitespacesAndNewlines),
+                  target.unicodeScalars.allSatisfy({ scalar in
+                      switch scalar.properties.generalCategory {
+                      case .control, .format, .lineSeparator, .paragraphSeparator:
+                          false
+                      default:
+                          true
+                      }
+                  }) else {
+                throw ValidationError.invalid("target")
             }
 
         case .click:
@@ -307,28 +335,32 @@ enum ComputerV2ToolContract {
             description = "List running apps."
         case .open:
             properties = ["bundle_id": string, "url": string]; required = ["bundle_id"]
-            description = "Open and bind an app; Chrome is com.google.Chrome."
+            description = "Open and bind an app. A Chrome URL creates an exact task-scoped tab in a separate isolated profile; Chrome is com.google.Chrome."
         case .snapshot:
             properties = ["query": string]; required = []
-            description = "Read the bound app's Accessibility tree; returns snapshot_id."
+            description = "Read the bound native app or exact brokered Chrome tab Accessibility tree; returns snapshot_id."
         case .ax:
             properties = [
                 "snapshot_id": string, "element_index": integer,
                 "ax_action": ["type": "string", "enum": SemanticAXAction.allCases.map(\.rawValue)],
             ]
             required = ["snapshot_id", "element_index", "ax_action"]
-            description = "Act on a current AX snapshot element, then observe again. Approval required."
+            description = "Act on a current native or exact brokered-tab AX snapshot element, then observe again. Approval required."
         case .setText:
             properties = ["snapshot_id": string, "element_index": integer, "text": string]
             required = ["snapshot_id", "element_index", "text"]
-            description = "Set text on a current AX element, then observe again. Approval required."
+            description = "Set text on a current native or exact brokered-tab AX element, then observe again. Approval required."
         case .capture:
             properties = [
                 "display_id": integer,
                 "shows_cursor": boolean,
                 "include_accessibility": boolean,
             ]; required = []
-            description = "Capture the focused app window; returns capture_id and image dimensions for image-space actions. Set include_accessibility=true to also return a synchronized AX snapshot and snapshot_id for semantic actions."
+            description = "Capture the focused app window for native apps; brokered Chrome tabs fail closed. Returns capture_id and image dimensions. Set include_accessibility=true for synchronized native AX."
+        case .groundClick:
+            properties = ["capture_id": string, "target": string]
+            required = ["capture_id", "target"]
+            description = "For a native screenshot-only target that AX cannot identify, locate and click the target using the local GoClick + GUI-Owl agreement cascade with ShowUI only on disagreement. Requires a current capture_id, native approval, and a fresh observation afterward."
         case .click:
             properties = capturePoint; required = ["capture_id", "x", "y"]
             description = "Click x,y in the captured image of the bound app, then observe. Approval required."

@@ -11,6 +11,21 @@ protocol AgentRuntimeClient: Sendable {
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws
     func interrupt(taskID: AgentTask.ID) async throws
     func resolveApproval(requestID: String, approved: Bool) async throws
+    func shutdown() async -> RuntimeShutdownReport
+}
+
+/// An empty issue list means the runtime observed its owned cleanup complete.
+struct RuntimeShutdownReport: Equatable, Sendable {
+    let issues: [String]
+    var succeeded: Bool { issues.isEmpty }
+}
+
+extension AgentRuntimeClient {
+    /// Resource-free adapters can keep the default; the production runtime
+    /// explicitly implements shutdown for its owned processes and capabilities.
+    func shutdown() async -> RuntimeShutdownReport {
+        RuntimeShutdownReport(issues: [])
+    }
 }
 
 enum AgentRuntimeEvent: Sendable {

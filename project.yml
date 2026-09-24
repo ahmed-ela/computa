@@ -36,6 +36,9 @@ targets:
       - path: Sources/LocalCodex/Resources/WebUI
         type: folder
         buildPhase: resources
+      - path: Sources/LocalCodex/Resources/VisualGrounding
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: AutomationCore
     settings:
@@ -65,6 +68,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ahmedelamin.LocalCodexTests
         GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: MSMG8CJLB3
+        CODE_SIGN_STYLE: Automatic
 
   AutomationCoreTests:
     type: bundle.unit-test

@@ -1,0 +1,782 @@
+[
+  {
+    "variant": "base",
+    "screen": "dashboard",
+    "target": "search",
+    "instruction": "Click the Search projects field.",
+    "image": "base-dashboard.png",
+    "target_box": {
+      "x": 945,
+      "y": 13,
+      "width": 310,
+      "height": 40
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "dashboard",
+    "target": "settings",
+    "instruction": "Click Settings in the left sidebar.",
+    "image": "base-dashboard.png",
+    "target_box": {
+      "x": 15,
+      "y": 188,
+      "width": 179,
+      "height": 44
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "dashboard",
+    "target": "create",
+    "instruction": "Click Create new project.",
+    "image": "base-dashboard.png",
+    "target_box": {
+      "x": 244,
+      "y": 144,
+      "width": 180.78125,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "dashboard",
+    "target": "filter",
+    "instruction": "Click the filter funnel icon button.",
+    "image": "base-dashboard.png",
+    "target_box": {
+      "x": 434.78125,
+      "y": 146,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "dashboard",
+    "target": "roadmap",
+    "instruction": "Click the Q3 Roadmap project card.",
+    "image": "base-dashboard.png",
+    "target_box": {
+      "x": 244,
+      "y": 204,
+      "width": 323.328125,
+      "height": 130
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "dense",
+    "target": "atlas-check",
+    "instruction": "Click the checkbox next to Atlas migration.",
+    "image": "base-dense.png",
+    "target_box": {
+      "x": 264,
+      "y": 202.5,
+      "width": 17,
+      "height": 17
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "dense",
+    "target": "atlas-star",
+    "instruction": "Click the star icon on the Atlas migration row.",
+    "image": "base-dense.png",
+    "target_box": {
+      "x": 1100,
+      "y": 192,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "dense",
+    "target": "cedar-menu",
+    "instruction": "Click the three-dot menu on the Cedar delivery row.",
+    "image": "base-dense.png",
+    "target_box": {
+      "x": 1192,
+      "y": 265,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "dense",
+    "target": "harbor-trash",
+    "instruction": "Click the trash icon on the Harbor notes row.",
+    "image": "base-dense.png",
+    "target_box": {
+      "x": 1146,
+      "y": 338.5,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "preferences",
+    "target": "workspace-name",
+    "instruction": "Click the Workspace name text field.",
+    "image": "base-preferences.png",
+    "target_box": {
+      "x": 269,
+      "y": 195,
+      "width": 670,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "preferences",
+    "target": "weekly-check",
+    "instruction": "Click the checkbox next to Send weekly summary.",
+    "image": "base-preferences.png",
+    "target_box": {
+      "x": 273,
+      "y": 258,
+      "width": 18,
+      "height": 18
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "preferences",
+    "target": "cancel",
+    "instruction": "Click Cancel.",
+    "image": "base-preferences.png",
+    "target_box": {
+      "x": 722.703125,
+      "y": 349,
+      "width": 79.125,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "base",
+    "screen": "preferences",
+    "target": "save",
+    "instruction": "Click Save changes.",
+    "image": "base-preferences.png",
+    "target_box": {
+      "x": 811.828125,
+      "y": 349,
+      "width": 127.171875,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "dashboard",
+    "target": "search",
+    "instruction": "Click the Search projects field.",
+    "image": "dark-dashboard.png",
+    "target_box": {
+      "x": 945,
+      "y": 13,
+      "width": 310,
+      "height": 40
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "dashboard",
+    "target": "settings",
+    "instruction": "Click Settings in the left sidebar.",
+    "image": "dark-dashboard.png",
+    "target_box": {
+      "x": 15,
+      "y": 188,
+      "width": 179,
+      "height": 44
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "dashboard",
+    "target": "create",
+    "instruction": "Click Create new project.",
+    "image": "dark-dashboard.png",
+    "target_box": {
+      "x": 244,
+      "y": 144,
+      "width": 180.78125,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "dashboard",
+    "target": "filter",
+    "instruction": "Click the filter funnel icon button.",
+    "image": "dark-dashboard.png",
+    "target_box": {
+      "x": 434.78125,
+      "y": 146,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "dashboard",
+    "target": "roadmap",
+    "instruction": "Click the Q3 Roadmap project card.",
+    "image": "dark-dashboard.png",
+    "target_box": {
+      "x": 244,
+      "y": 204,
+      "width": 323.328125,
+      "height": 130
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "dense",
+    "target": "atlas-check",
+    "instruction": "Click the checkbox next to Atlas migration.",
+    "image": "dark-dense.png",
+    "target_box": {
+      "x": 264,
+      "y": 202.5,
+      "width": 17,
+      "height": 17
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "dense",
+    "target": "atlas-star",
+    "instruction": "Click the star icon on the Atlas migration row.",
+    "image": "dark-dense.png",
+    "target_box": {
+      "x": 1100,
+      "y": 192,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "dense",
+    "target": "cedar-menu",
+    "instruction": "Click the three-dot menu on the Cedar delivery row.",
+    "image": "dark-dense.png",
+    "target_box": {
+      "x": 1192,
+      "y": 265,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "dense",
+    "target": "harbor-trash",
+    "instruction": "Click the trash icon on the Harbor notes row.",
+    "image": "dark-dense.png",
+    "target_box": {
+      "x": 1146,
+      "y": 338.5,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "preferences",
+    "target": "workspace-name",
+    "instruction": "Click the Workspace name text field.",
+    "image": "dark-preferences.png",
+    "target_box": {
+      "x": 269,
+      "y": 195,
+      "width": 670,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "preferences",
+    "target": "weekly-check",
+    "instruction": "Click the checkbox next to Send weekly summary.",
+    "image": "dark-preferences.png",
+    "target_box": {
+      "x": 273,
+      "y": 258,
+      "width": 18,
+      "height": 18
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "preferences",
+    "target": "cancel",
+    "instruction": "Click Cancel.",
+    "image": "dark-preferences.png",
+    "target_box": {
+      "x": 722.703125,
+      "y": 349,
+      "width": 79.125,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "dark",
+    "screen": "preferences",
+    "target": "save",
+    "instruction": "Click Save changes.",
+    "image": "dark-preferences.png",
+    "target_box": {
+      "x": 811.828125,
+      "y": 349,
+      "width": 127.171875,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "dashboard",
+    "target": "search",
+    "instruction": "Click the Search projects field.",
+    "image": "mirrored-dashboard.png",
+    "target_box": {
+      "x": 945,
+      "y": 13,
+      "width": 310,
+      "height": 40
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "dashboard",
+    "target": "settings",
+    "instruction": "Click Settings in the left sidebar.",
+    "image": "mirrored-dashboard.png",
+    "target_box": {
+      "x": 1086,
+      "y": 188,
+      "width": 179,
+      "height": 44
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "dashboard",
+    "target": "create",
+    "instruction": "Click Create new project.",
+    "image": "mirrored-dashboard.png",
+    "target_box": {
+      "x": 34,
+      "y": 144,
+      "width": 180.78125,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "dashboard",
+    "target": "filter",
+    "instruction": "Click the filter funnel icon button.",
+    "image": "mirrored-dashboard.png",
+    "target_box": {
+      "x": 224.78125,
+      "y": 146,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "dashboard",
+    "target": "roadmap",
+    "instruction": "Click the Q3 Roadmap project card.",
+    "image": "mirrored-dashboard.png",
+    "target_box": {
+      "x": 34,
+      "y": 204,
+      "width": 323.328125,
+      "height": 130
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "dense",
+    "target": "atlas-check",
+    "instruction": "Click the checkbox next to Atlas migration.",
+    "image": "mirrored-dense.png",
+    "target_box": {
+      "x": 54,
+      "y": 202.5,
+      "width": 17,
+      "height": 17
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "dense",
+    "target": "atlas-star",
+    "instruction": "Click the star icon on the Atlas migration row.",
+    "image": "mirrored-dense.png",
+    "target_box": {
+      "x": 890,
+      "y": 192,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "dense",
+    "target": "cedar-menu",
+    "instruction": "Click the three-dot menu on the Cedar delivery row.",
+    "image": "mirrored-dense.png",
+    "target_box": {
+      "x": 982,
+      "y": 265,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "dense",
+    "target": "harbor-trash",
+    "instruction": "Click the trash icon on the Harbor notes row.",
+    "image": "mirrored-dense.png",
+    "target_box": {
+      "x": 936,
+      "y": 338.5,
+      "width": 38,
+      "height": 38
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "preferences",
+    "target": "workspace-name",
+    "instruction": "Click the Workspace name text field.",
+    "image": "mirrored-preferences.png",
+    "target_box": {
+      "x": 59,
+      "y": 195,
+      "width": 670,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "preferences",
+    "target": "weekly-check",
+    "instruction": "Click the checkbox next to Send weekly summary.",
+    "image": "mirrored-preferences.png",
+    "target_box": {
+      "x": 63,
+      "y": 258,
+      "width": 18,
+      "height": 18
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "preferences",
+    "target": "cancel",
+    "instruction": "Click Cancel.",
+    "image": "mirrored-preferences.png",
+    "target_box": {
+      "x": 512.703125,
+      "y": 349,
+      "width": 79.125,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "mirrored",
+    "screen": "preferences",
+    "target": "save",
+    "instruction": "Click Save changes.",
+    "image": "mirrored-preferences.png",
+    "target_box": {
+      "x": 601.828125,
+      "y": 349,
+      "width": 127.171875,
+      "height": 42
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "dashboard",
+    "target": "search",
+    "instruction": "Click the Search projects field.",
+    "image": "compact-dashboard.png",
+    "target_box": {
+      "x": 699.2999877929688,
+      "y": 9.619999885559082,
+      "width": 229.4000244140625,
+      "height": 29.600001335144043
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "dashboard",
+    "target": "settings",
+    "instruction": "Click Settings in the left sidebar.",
+    "image": "compact-dashboard.png",
+    "target_box": {
+      "x": 11.100000381469727,
+      "y": 139.1199951171875,
+      "width": 132.45999717712402,
+      "height": 32.56001281738281
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "dashboard",
+    "target": "create",
+    "instruction": "Click Create new project.",
+    "image": "compact-dashboard.png",
+    "target_box": {
+      "x": 180.55999755859375,
+      "y": 106.55999755859375,
+      "width": 133.77813720703125,
+      "height": 31.080001831054688
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "dashboard",
+    "target": "filter",
+    "instruction": "Click the filter funnel icon button.",
+    "image": "compact-dashboard.png",
+    "target_box": {
+      "x": 321.7381286621094,
+      "y": 108.04000091552734,
+      "width": 28.1199951171875,
+      "height": 28.12000274658203
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "dashboard",
+    "target": "roadmap",
+    "instruction": "Click the Q3 Roadmap project card.",
+    "image": "compact-dashboard.png",
+    "target_box": {
+      "x": 180.55999755859375,
+      "y": 150.9600067138672,
+      "width": 239.2628173828125,
+      "height": 96.19999694824219
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "dense",
+    "target": "atlas-check",
+    "instruction": "Click the checkbox next to Atlas migration.",
+    "image": "compact-dense.png",
+    "target_box": {
+      "x": 195.36000061035156,
+      "y": 149.85000610351562,
+      "width": 12.580001831054688,
+      "height": 12.580001831054688
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "dense",
+    "target": "atlas-star",
+    "instruction": "Click the star icon on the Atlas migration row.",
+    "image": "compact-dense.png",
+    "target_box": {
+      "x": 814,
+      "y": 142.0800018310547,
+      "width": 28.1199951171875,
+      "height": 28.1199951171875
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "dense",
+    "target": "cedar-menu",
+    "instruction": "Click the three-dot menu on the Cedar delivery row.",
+    "image": "compact-dense.png",
+    "target_box": {
+      "x": 882.0800170898438,
+      "y": 196.10000610351562,
+      "width": 28.1199951171875,
+      "height": 28.1199951171875
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "dense",
+    "target": "harbor-trash",
+    "instruction": "Click the trash icon on the Harbor notes row.",
+    "image": "compact-dense.png",
+    "target_box": {
+      "x": 848.0400390625,
+      "y": 250.49000549316406,
+      "width": 28.1199951171875,
+      "height": 28.120010375976562
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "preferences",
+    "target": "workspace-name",
+    "instruction": "Click the Workspace name text field.",
+    "image": "compact-preferences.png",
+    "target_box": {
+      "x": 199.05999755859375,
+      "y": 144.3000030517578,
+      "width": 495.79998779296875,
+      "height": 31.080001831054688
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "preferences",
+    "target": "weekly-check",
+    "instruction": "Click the checkbox next to Send weekly summary.",
+    "image": "compact-preferences.png",
+    "target_box": {
+      "x": 202.02000427246094,
+      "y": 190.9199981689453,
+      "width": 13.319992065429688,
+      "height": 13.32000732421875
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "preferences",
+    "target": "cancel",
+    "instruction": "Click Cancel.",
+    "image": "compact-preferences.png",
+    "target_box": {
+      "x": 534.80029296875,
+      "y": 258.260009765625,
+      "width": 58.55255126953125,
+      "height": 31.079986572265625
+    },
+    "width": 1280,
+    "height": 800
+  },
+  {
+    "variant": "compact",
+    "screen": "preferences",
+    "target": "save",
+    "instruction": "Click Save changes.",
+    "image": "compact-preferences.png",
+    "target_box": {
+      "x": 600.7528076171875,
+      "y": 258.260009765625,
+      "width": 94.107177734375,
+      "height": 31.079986572265625
+    },
+    "width": 1280,
+    "height": 800
+  }
+]

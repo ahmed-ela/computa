@@ -169,6 +169,21 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(LocalModelCatalog.defaultModelID, "mlx-community/Qwen3.8-27B-4bit")
     }
 
+    func testResidentVisualGroundingIsLimitedToModelsWithMemoryHeadroom() {
+        XCTAssertTrue(LocalModelCatalog.supportsResidentVisualGrounding(
+            "lmstudio-community/Qwen3.5-4B-MLX-4bit"
+        ))
+        XCTAssertTrue(LocalModelCatalog.supportsResidentVisualGrounding(
+            "lmstudio-community/Qwen3.5-9B-MLX-4bit"
+        ))
+        XCTAssertFalse(LocalModelCatalog.supportsResidentVisualGrounding(
+            LocalModelCatalog.defaultModelID
+        ))
+        XCTAssertFalse(LocalModelCatalog.supportsResidentVisualGrounding(
+            "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit"
+        ))
+    }
+
     @MainActor
     func testDefaultModelSelectionPersistsForNewTasks() throws {
         let suiteName = "LocalCodexTests.ModelSelection.\(UUID().uuidString)"
