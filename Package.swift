@@ -3,12 +3,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "LocalCodex",
+    name: "HeyDash",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "LocalCodex", targets: ["LocalCodex"])
+        .executable(name: "HeyDash", targets: ["HeyDash"])
     ],
     targets: [
         .target(
@@ -16,12 +16,13 @@ let package = Package(
             path: "Sources/AutomationCore"
         ),
         .executableTarget(
-            name: "LocalCodex",
+            name: "HeyDash",
             dependencies: ["AutomationCore"],
-            path: "Sources/LocalCodex",
+            path: "Sources/HeyDash",
             resources: [
                 .copy("Resources/WebUI"),
-                .copy("Resources/VisualGrounding")
+                .copy("Resources/VisualGrounding"),
+                .copy("Resources/AgentRuntime")
             ]
         ),
         .testTarget(
@@ -30,9 +31,9 @@ let package = Package(
             path: "Tests/AutomationCoreTests"
         ),
         .testTarget(
-            name: "LocalCodexTests",
-            dependencies: ["LocalCodex"],
-            path: "Tests/LocalCodexTests"
+            name: "HeyDashTests",
+            dependencies: ["HeyDash"],
+            path: "Tests/HeyDashTests"
         )
     ]
 )

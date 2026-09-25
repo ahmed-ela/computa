@@ -1,0 +1,3590 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index cdb51f2..83d5333 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -416,7 +416,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+ 
+ [[package]]
+ name = "app_test_support"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2041,7 +2041,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -2053,7 +2053,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-graph-store"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-state",
+@@ -2068,7 +2068,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-identity"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2088,7 +2088,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-roles"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-config",
+  "codex-file-system",
+@@ -2101,7 +2101,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-analytics"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-app-server-protocol",
+  "codex-git-utils",
+@@ -2122,7 +2122,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ansi-escape"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "ansi-to-tui",
+  "ratatui",
+@@ -2131,7 +2131,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-api"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -2169,7 +2169,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2276,7 +2276,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-client"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-app-server",
+  "codex-app-server-protocol",
+@@ -2303,7 +2303,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-daemon"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "blake3",
+@@ -2328,7 +2328,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol-noop-macros",
+@@ -2362,11 +2362,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol-noop-macros"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ 
+ [[package]]
+ name = "codex-app-server-test-client"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2388,7 +2388,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-transport"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2431,7 +2431,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-apply-patch"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2451,7 +2451,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-arg0"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-apply-patch",
+@@ -2473,7 +2473,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "pretty_assertions",
+  "tokio",
+@@ -2482,7 +2482,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-attachment-store"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "pretty_assertions",
+  "serde",
+@@ -2491,7 +2491,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-aws-auth"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "aws-config",
+  "aws-credential-types",
+@@ -2506,7 +2506,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-client"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-api",
+@@ -2526,7 +2526,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-openapi-models"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "serde",
+  "serde_json",
+@@ -2535,7 +2535,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-build-info"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-install-context",
+  "pretty_assertions",
+@@ -2548,7 +2548,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-bwrap"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -2557,7 +2557,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-chatgpt"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2579,7 +2579,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cli"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2673,7 +2673,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-client"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-http-client",
+  "eventsource-stream",
+@@ -2686,7 +2686,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-config"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -2711,7 +2711,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2744,7 +2744,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-client"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2759,7 +2759,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-mock-client"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "chrono",
+  "codex-cloud-tasks-client",
+@@ -2768,7 +2768,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-http-client",
+@@ -2791,7 +2791,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-host"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2819,7 +2819,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-protocol"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-protocol",
+  "glob",
+@@ -2837,7 +2837,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-runtime"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-code-mode-protocol",
+@@ -2855,11 +2855,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-collaboration-mode-templates"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ 
+ [[package]]
+ name = "codex-config"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2909,7 +2909,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-config-schema"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2918,7 +2918,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2940,7 +2940,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-connectors",
+  "codex-core-plugins",
+@@ -2954,7 +2954,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-context-fragments"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -2963,7 +2963,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3099,7 +3099,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-api"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-analytics",
+  "codex-app-server-protocol",
+@@ -3122,7 +3122,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-plugins"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3177,7 +3177,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-diagnostics"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -3185,7 +3185,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -3236,7 +3236,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3296,7 +3296,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-protocol"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-file-system",
+@@ -3312,7 +3312,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-test-support"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-exec-server",
+@@ -3327,7 +3327,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3345,7 +3345,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -3354,7 +3354,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-api"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-config",
+  "codex-context-fragments",
+@@ -3372,7 +3372,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-items"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "pretty_assertions",
+@@ -3384,7 +3384,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-external-agent-migration"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "chrono",
+  "codex-analytics",
+@@ -3414,7 +3414,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-features"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-network-proxy",
+  "codex-otel",
+@@ -3428,7 +3428,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-feedback"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -3451,7 +3451,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-search"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3467,7 +3467,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-system"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "bytes",
+  "codex-protocol",
+@@ -3479,7 +3479,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-watcher"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "notify",
+  "pretty_assertions",
+@@ -3490,7 +3490,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-attribution"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-backend-client",
+  "codex-extension-api",
+@@ -3503,7 +3503,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-utils"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3529,7 +3529,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-goal-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3553,7 +3553,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-context"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-context-fragments",
+  "codex-history",
+@@ -3564,7 +3564,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-reviewer"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -3588,7 +3588,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-v2"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -3618,7 +3618,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-history"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-protocol",
+@@ -3630,7 +3630,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-history-notes-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-analytics",
+  "codex-api",
+@@ -3655,7 +3655,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-home"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-extension-api",
+  "codex-utils-absolute-path",
+@@ -3667,7 +3667,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-hooks"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "async-channel",
+@@ -3693,7 +3693,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-http-client"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "bytes",
+  "codex-utils-cargo-bin",
+@@ -3726,7 +3726,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-image-generation-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3753,7 +3753,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-install-context"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-home-dir",
+@@ -3766,7 +3766,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-keyring-store"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "keyring",
+  "tracing",
+@@ -3774,7 +3774,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-linux-sandbox"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "clap",
+  "codex-core",
+@@ -3801,7 +3801,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-lmstudio"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-core",
+  "codex-http-client",
+@@ -3815,7 +3815,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-login"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3858,7 +3858,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3898,7 +3898,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -3929,7 +3929,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -3951,7 +3951,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-read"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -3961,7 +3961,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-write"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3998,7 +3998,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-message-history"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-config",
+  "memchr",
+@@ -4012,7 +4012,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -4042,7 +4042,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider-info"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-api",
+  "codex-protocol",
+@@ -4059,7 +4059,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-models-manager"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "chrono",
+  "codex-collaboration-mode-templates",
+@@ -4078,7 +4078,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mxc-sandbox"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "appcontainer_common",
+@@ -4100,7 +4100,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4144,7 +4144,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ollama"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "assert_matches",
+  "async-stream",
+@@ -4164,7 +4164,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "chrono",
+  "codex-api",
+@@ -4197,7 +4197,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel-trace-websocket"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4208,7 +4208,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-plugin"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-config",
+  "codex-protocol",
+@@ -4222,7 +4222,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-process-hardening"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -4230,7 +4230,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-prompts"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-context-fragments",
+@@ -4244,7 +4244,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-protocol"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "chardetng",
+@@ -4288,7 +4288,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-queue-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -4309,7 +4309,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-realtime-webrtc"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-build-info",
+@@ -4327,7 +4327,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-response-debug-context"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -4338,7 +4338,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-responses-api-proxy"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4355,7 +4355,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rmcp-client"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4403,7 +4403,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4430,7 +4430,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout-trace"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -4446,7 +4446,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-sandboxing"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-mxc-sandbox",
+@@ -4472,7 +4472,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-secrets"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "age",
+  "anyhow",
+@@ -4493,7 +4493,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4516,7 +4516,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-escalation"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4536,7 +4536,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4553,7 +4553,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "assert_matches",
+  "codex-analytics",
+@@ -4590,7 +4590,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-state"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4614,7 +4614,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-stdio-to-uds"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-uds",
+@@ -4626,7 +4626,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-terminal-detection"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "pretty_assertions",
+  "tracing",
+@@ -4634,7 +4634,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-test-binary-support"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-arg0",
+  "tempfile",
+@@ -4642,7 +4642,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-manager-sample"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4653,7 +4653,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-store"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "chrono",
+  "codex-app-server-protocol",
+@@ -4683,7 +4683,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tools"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "bitflags 2.13.1",
+  "codex-code-mode",
+@@ -4708,7 +4708,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tui"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -4829,7 +4829,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-uds"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "async-io",
+  "pretty_assertions",
+@@ -4842,7 +4842,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-user-verification"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "core-foundation 0.10.1",
+@@ -4862,7 +4862,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "dirs",
+  "dunce",
+@@ -4876,14 +4876,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-approval-presets"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-audio"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-protocol",
+@@ -4897,7 +4897,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "lru",
+  "sha1 0.10.6",
+@@ -4906,7 +4906,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cargo-bin"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "assert_cmd",
+  "runfiles",
+@@ -4915,7 +4915,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cli"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "clap",
+  "codex-protocol",
+@@ -4927,15 +4927,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-elapsed"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ 
+ [[package]]
+ name = "codex-utils-fuzzy-match"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ 
+ [[package]]
+ name = "codex-utils-git-discovery"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-git-utils",
+  "codex-utils-absolute-path",
+@@ -4948,7 +4948,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs",
+@@ -4958,7 +4958,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -4971,7 +4971,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-json-to-toml"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "pretty_assertions",
+  "serde_json",
+@@ -4980,7 +4980,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-oss"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-core",
+  "codex-lmstudio",
+@@ -4990,7 +4990,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-output-truncation"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -4999,7 +4999,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dunce",
+@@ -5010,7 +5010,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path-uri"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-absolute-path",
+@@ -5026,7 +5026,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-plugins"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-exec-server",
+  "codex-exec-server-protocol",
+@@ -5040,7 +5040,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-pty"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "filedescriptor",
+@@ -5056,7 +5056,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-readiness"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "assert_matches",
+  "thiserror 2.0.18",
+@@ -5066,7 +5066,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-redacted-string"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "schemars 0.8.22",
+  "serde",
+@@ -5074,14 +5074,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "rustls",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-sandbox-summary"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -5090,7 +5090,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-sleep-inhibitor"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "core-foundation 0.9.4",
+  "libc",
+@@ -5100,14 +5100,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-stream-parser"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "pretty_assertions",
+  "regex-lite",
+@@ -5117,14 +5117,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-template"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-v8-poc"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "pretty_assertions",
+  "v8",
+@@ -5132,7 +5132,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-voice-host"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-install-context",
+@@ -5159,7 +5159,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-web-search-extension"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-api",
+  "codex-core",
+@@ -5180,7 +5180,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-websocket-client"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-http-client",
+  "codex-utils-rustls-provider",
+@@ -5196,7 +5196,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -5222,7 +5222,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox-service"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-cloud-config",
+@@ -5239,7 +5239,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-workload-identity"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "codex-http-client",
+  "pretty_assertions",
+@@ -5254,7 +5254,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-worktree"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "codex-git-utils",
+@@ -5494,7 +5494,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "core_test_support"
+-version = "0.0.0"
++version = "0.155.0-alpha.9.2"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index c2ab78a..ca6d41f 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -59,15 +59,20 @@ pub use codex_prompts::SUMMARIZATION_PROMPT;
+ pub use codex_prompts::SUMMARY_PREFIX;
+ const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+ 
++#[path = "compact_assistant_history.rs"]
++mod assistant_history;
++#[path = "compact_tool_receipts.rs"]
++mod tool_receipts;
++
+ /// Controls whether compaction replacement history must include initial context.
+ ///
+ /// Pre-turn/manual compaction variants use `DoNotInject`: they replace history with a summary and
+ /// clear `reference_context_item`, so the next regular turn will fully reinject initial context
+ /// after compaction.
+ ///
+-/// Mid-turn compaction must use `BeforeLastUserMessage` because the model is trained to see the
+-/// compaction summary as the last item in history after mid-turn compaction; we therefore inject
+-/// initial context into the replacement history just above the last real user message.
++/// Mid-turn compaction must use `BeforeLastUserMessage` to inject initial context just above the
++/// last real user message rather than after the summary. Local mid-turn compaction additionally
++/// retains bounded genuine tool receipts after that summary so completed actions remain visible.
+ pub(crate) enum InitialContextInjection {
+     BeforeLastUserMessage {
+         world_state: Arc<WorldState>,
+@@ -240,12 +245,28 @@ async fn run_compact_task_inner_impl(
+     initial_context_injection: InitialContextInjection,
+     compaction_metadata: CompactionTurnMetadata,
+ ) -> CodexResult<String> {
++    let mut history = sess.clone_history().await;
++    // Only the local mid-turn path needs to continue an already executing turn. Preserve genuine
++    // receipts before summary sampling mutates live history; a malformed/oversized set fails closed.
++    let receipts = if matches!(compaction_metadata.phase(), CompactionPhase::MidTurn) {
++        match tool_receipts::current_turn_receipts(history.annotated_items(), &turn_context.sub_id)
++        {
++            Ok(receipts) => receipts,
++            Err(error) => {
++                sess.track_turn_codex_error(turn_context.as_ref(), &error);
++                sess.send_event(&turn_context, EventMsg::Error(error.to_error_event(None)))
++                    .await;
++                return Err(error);
++            }
++        }
++    } else {
++        Vec::new()
++    };
+     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+     sess.emit_turn_item_started(&turn_context, &compaction_item)
+         .await;
+     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+ 
+-    let mut history = sess.clone_history().await;
+     history.record_items(
+         &[initial_input_for_turn.into()],
+         turn_context.model_info().truncation_policy.into(),
+@@ -365,20 +386,49 @@ async fn run_compact_task_inner_impl(
+         // belongs to this compaction turn.
+         summary_item.set_turn_id_if_missing(&turn_context.sub_id);
+     }
+-    let (window_number, window_ids) = sess.advance_auto_compact_window().await;
+-
+     let (initial_context, world_state_baseline) =
+         build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
+     if !initial_context.is_empty() {
+         new_history =
+             insert_initial_context_before_last_real_user_or_summary(new_history, initial_context);
+     }
++    let restored_replies = if matches!(compaction_metadata.phase(), CompactionPhase::MidTurn) {
++        assistant_history::restore_prior_replies(
++            &mut new_history,
++            history.annotated_items(),
++            &turn_context.sub_id,
++        )
++    } else {
++        0
++    };
++    if !receipts.is_empty() || restored_replies > 0 {
++        // Unlike the summary, these are the actual completed call/result records, not new actions.
++        // Append after the summary so local models see the last completed work at continuation.
++        new_history.extend(receipts);
++        let mut candidate = history_snapshot.clone();
++        candidate.replace_annotated(new_history.clone());
++        let base_instructions = sess.get_prompt_base_instructions().await;
++        if !matches!((
++            candidate.estimate_token_count_with_base_instructions(&base_instructions),
++            turn_context.model_context_window(),
++        ), (Some(estimate), Some(window)) if estimate < window)
++        {
++            let error = CodexErr::InvalidRequest(
++                "Local mid-turn compaction stopped: summary and completed tool receipts cannot be verified to fit the effective context window. Start a new turn with a smaller task.".to_string(),
++            );
++            sess.track_turn_codex_error(turn_context.as_ref(), &error);
++            sess.send_event(&turn_context, EventMsg::Error(error.to_error_event(None)))
++                .await;
++            return Err(error);
++        }
++    }
+     let reference_context_item = match initial_context_injection {
+         InitialContextInjection::DoNotInject => None,
+         InitialContextInjection::BeforeLastUserMessage { step_context, .. } => {
+             Some(step_context.to_turn_context_item())
+         }
+     };
++    let (window_number, window_ids) = sess.advance_auto_compact_window().await;
+     sess.replace_compacted_history(
+         new_history,
+         reference_context_item,
+@@ -788,7 +838,21 @@ async fn drain_to_completed(
+             ));
+         };
+         match event {
+-            Ok(ResponseEvent::OutputItemDone(item)) => {
++            Ok(ResponseEvent::OutputItemDone(mut item)) => {
++                // A later fit/stream failure can leave this output in history without a
++                // checkpoint. Preserve its provenance so it cannot become a prior task answer.
++                if let ResponseItem::Message { content, .. } = &mut item {
++                    let annotated = std::mem::take(content)
++                        .into_iter()
++                        .map(|content| {
++                            AnnotatedContent::new(
++                                content,
++                                ContentItemKind("compaction.summary".to_string()),
++                            )
++                        })
++                        .collect();
++                    let _ = set_annotated_content(&mut item, annotated);
++                }
+                 sess.record_conversation_items(
+                     turn_context,
+                     turn_context.model_info(),
+diff --git a/codex-rs/core/src/compact_assistant_history.rs b/codex-rs/core/src/compact_assistant_history.rs
+new file mode 100644
+index 0000000..69c562b
+--- /dev/null
++++ b/codex-rs/core/src/compact_assistant_history.rs
+@@ -0,0 +1,121 @@
++//! Keep bounded real assistant replies beside their surviving historical user messages.
++//! Without these role boundaries, small local models can answer old requests again. These are
++//! excerpts of actual text, not fabricated acknowledgments or proof that a tool action succeeded.
++
++use std::collections::HashMap;
++use std::collections::HashSet;
++
++use codex_history::ResponseItemEnvelope;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::MessagePhase;
++use codex_protocol::models::ResponseItem;
++use codex_utils_output_truncation::TruncationPolicy;
++use codex_utils_output_truncation::truncate_text;
++
++pub(super) fn restore_prior_replies(
++    replacement: &mut Vec<ResponseItemEnvelope>,
++    original: &[ResponseItemEnvelope],
++    current_turn: &str,
++) -> usize {
++    let mut user_boundaries = HashMap::new();
++    for (index, envelope) in replacement.iter().enumerate() {
++        if let Some(turn) = envelope.turn_id()
++            && turn != current_turn
++            && !turn.is_empty()
++            && let Some(user) = super::compacted_user_message(&envelope.item, None)
++        {
++            // Rebuilt user IDs may differ. Require a unique exact text/turn match instead;
++            // a truncated or ambiguous boundary is not safe to attach an old reply to.
++            let mut matches = original.iter().enumerate().filter(|(_, prior)| {
++                prior.turn_id() == Some(turn)
++                    && super::compacted_user_message(&prior.item, None)
++                        .is_some_and(|prior| prior.message == user.message)
++            });
++            user_boundaries.remove(turn);
++            if let Some((source, _)) = matches.next()
++                && matches.next().is_none()
++            {
++                let end = original
++                    .iter()
++                    .enumerate()
++                    .skip(source + 1)
++                    .find(|(_, next)| super::compacted_user_message(&next.item, None).is_some())
++                    .map_or(original.len(), |(index, _)| index);
++                user_boundaries.insert(turn.to_string(), (index, source, end));
++            }
++        }
++    }
++    let mut seen = HashSet::new();
++    let mut retained = Vec::new();
++    let mut bytes = 0;
++    for (source_index, envelope) in original.iter().enumerate().rev() {
++        let Some(turn) = envelope.turn_id() else {
++            continue;
++        };
++        let Some(&(boundary, start, end)) = user_boundaries.get(turn) else {
++            continue;
++        };
++        let ResponseItem::Message {
++            role,
++            phase,
++            internal_chat_message_metadata_passthrough,
++            ..
++        } = &envelope.item
++        else {
++            continue;
++        };
++        if role != "assistant" || !seen.insert(turn) {
++            continue;
++        }
++        // None is the native compatibility case for local models without phase metadata.
++        // Do not substitute an older message for an unsupported latest assistant message.
++        if source_index <= start
++            || source_index >= end
++            || !matches!(phase, None | Some(MessagePhase::FinalAnswer))
++            || internal_chat_message_metadata_passthrough
++                .as_ref()
++                .and_then(|metadata| metadata.content_item_kinds.as_ref())
++                .is_some_and(|kinds| kinds.iter().any(|kind| kind.0 == "compaction.summary"))
++        {
++            continue;
++        }
++        let mut reply = envelope.clone();
++        let ResponseItem::Message { content, .. } = &mut reply.item else {
++            continue;
++        };
++        let [ContentItem::OutputText { text }] = content.as_mut_slice() else {
++            continue;
++        };
++        if text.trim().is_empty() {
++            continue;
++        }
++        if text.len() > 1024 {
++            *text = truncate_text(text, TruncationPolicy::Bytes(896));
++        }
++        if text.len() > 1024 {
++            continue;
++        }
++        let Ok(size) = serde_json::to_vec(&reply.item).map(|item| item.len()) else {
++            continue;
++        };
++        if size > 2048 || bytes + size > 4096 {
++            continue;
++        }
++        bytes += size;
++        retained.push((boundary, reply));
++        if retained.len() == 4 {
++            break;
++        }
++    }
++    // Reverse-index insertion preserves order and places replies before the current task/summary.
++    retained.sort_by_key(|(boundary, _)| std::cmp::Reverse(*boundary));
++    let count = retained.len();
++    for (boundary, reply) in retained {
++        replacement.insert(boundary + 1, reply);
++    }
++    count
++}
++
++#[cfg(test)]
++#[path = "compact_assistant_history_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/compact_assistant_history_tests.rs b/codex-rs/core/src/compact_assistant_history_tests.rs
+new file mode 100644
+index 0000000..f24d6ff
+--- /dev/null
++++ b/codex-rs/core/src/compact_assistant_history_tests.rs
+@@ -0,0 +1,159 @@
++use super::*;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++fn message(role: &str, turn: &str, text: &str) -> ResponseItemEnvelope {
++    let mut item: ResponseItem = serde_json::from_value(json!({
++        "type":"message", "id":format!("{turn}-{role}"), "role":role,
++        "content":[{"type":if role == "assistant" { "output_text" } else { "input_text" }, "text":text}]
++    })).unwrap();
++    item.set_turn_id_if_missing(turn);
++    item.into()
++}
++
++#[test]
++fn preserves_real_replies_at_their_own_user_boundaries_without_current_or_summary_replay() {
++    let user = message("user", "old", "Reply ACK");
++    let answer = message("assistant", "old", "ACK");
++    let current = message("user", "current", "Now answer a different question");
++    let summary = message(
++        "user",
++        "current",
++        &format!("{}\nSummary", super::super::SUMMARY_PREFIX),
++    );
++    let original = vec![
++        user.clone(),
++        answer.clone(),
++        current.clone(),
++        message("assistant", "current", "summary-only"),
++    ];
++    let mut replacement = vec![user.clone(), current.clone(), summary.clone()];
++    assert_eq!(
++        restore_prior_replies(&mut replacement, &original, "current"),
++        1
++    );
++    assert_eq!(replacement, vec![user, answer, current, summary]);
++}
++
++#[test]
++fn bounded_unicode_excerpts_are_stable_across_repeated_compaction() {
++    let users: Vec<_> = (0..8)
++        .map(|i| message("user", &i.to_string(), "Question"))
++        .collect();
++    let original: Vec<_> = users
++        .iter()
++        .enumerate()
++        .flat_map(|(i, user)| {
++            [
++                user.clone(),
++                message(
++                    "assistant",
++                    &i.to_string(),
++                    &format!("start:{}:end", "診断".repeat(2000)),
++                ),
++            ]
++        })
++        .collect();
++    let mut replacement = users.clone();
++    let count = restore_prior_replies(&mut replacement, &original, "current");
++    assert!(count > 0 && count <= 4);
++    let replies: Vec<_> = replacement
++        .iter()
++        .filter(
++            |item| matches!(&item.item, ResponseItem::Message { role, .. } if role == "assistant"),
++        )
++        .collect();
++    assert!(
++        replies
++            .iter()
++            .map(|item| serde_json::to_vec(&item.item).unwrap().len())
++            .sum::<usize>()
++            <= 4096
++    );
++    for reply in replies {
++        let ResponseItem::Message { content, .. } = &reply.item else {
++            unreachable!()
++        };
++        let [ContentItem::OutputText { text }] = content.as_slice() else {
++            unreachable!()
++        };
++        assert!(
++            text.len() <= 1024
++                && text.starts_with("start:")
++                && text.ends_with(":end")
++                && text.contains("truncated")
++        );
++    }
++    let mut again = users;
++    restore_prior_replies(&mut again, &replacement, "current");
++    assert_eq!(again, replacement);
++}
++
++#[test]
++fn missing_user_identity_and_latest_commentary_are_not_substituted() {
++    let user = message("user", "old", "Question");
++    let mut latest = message("assistant", "old", "incomplete commentary");
++    if let ResponseItem::Message { phase, .. } = &mut latest.item {
++        *phase = Some(MessagePhase::Commentary);
++    }
++    let original = vec![
++        message("assistant", "orphan", "no matching user"),
++        user.clone(),
++        message("assistant", "old", "earlier"),
++        latest,
++    ];
++    let mut replacement = vec![user.clone()];
++    assert_eq!(
++        restore_prior_replies(&mut replacement, &original, "current"),
++        0
++    );
++    assert_eq!(replacement, vec![user]);
++}
++
++#[test]
++fn steering_and_ambiguous_same_turn_users_cannot_inherit_an_older_reply() {
++    let first = message("user", "old", "First request");
++    let reply = message("assistant", "old", "First answer");
++    for second in [message("user", "old", "Steered request"), first.clone()] {
++        let original = vec![first.clone(), reply.clone(), second.clone()];
++        let mut replacement = vec![first.clone(), second];
++        let expected = replacement.clone();
++        assert_eq!(
++            restore_prior_replies(&mut replacement, &original, "current"),
++            0
++        );
++        assert_eq!(replacement, expected);
++    }
++}
++
++#[test]
++fn failed_compactor_output_is_never_restored_as_a_task_answer() {
++    let user = message("user", "old", "Question");
++    let mut summary = message(
++        "assistant",
++        "old",
++        "A generated summary is not the task answer",
++    );
++    if let ResponseItem::Message {
++        internal_chat_message_metadata_passthrough,
++        ..
++    } = &mut summary.item
++    {
++        internal_chat_message_metadata_passthrough
++            .get_or_insert_default()
++            .content_item_kinds = Some(vec![codex_protocol::models::ContentItemKind(
++            "compaction.summary".to_string(),
++        )]);
++    }
++    let original = vec![
++        user.clone(),
++        message("assistant", "old", "earlier text"),
++        summary,
++    ];
++    let mut replacement = vec![user.clone()];
++    assert_eq!(
++        restore_prior_replies(&mut replacement, &original, "current"),
++        0
++    );
++    assert_eq!(replacement, vec![user]);
++}
+diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
+new file mode 100644
+index 0000000..08dd47c
+--- /dev/null
++++ b/codex-rs/core/src/compact_tool_receipts.rs
+@@ -0,0 +1,348 @@
++//! Bounded, genuine current-turn receipts for local mid-turn compaction.
++//!
++//! These remain tool-role history, never instructions, authorization, or a replay queue. Capture
++//! before sampling the summary and commit them with its replacement history, before inference.
++
++use std::collections::HashMap;
++use std::collections::HashSet;
++
++use base64::Engine;
++use codex_history::ResponseItemEnvelope;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result;
++use codex_protocol::models::FunctionCallOutputBody;
++use codex_protocol::models::FunctionCallOutputContentItem;
++use codex_protocol::models::FunctionCallOutputPayload;
++use codex_protocol::models::ImageReference;
++use codex_protocol::models::ResponseItem;
++use codex_utils_output_truncation::TruncationPolicy;
++use codex_utils_output_truncation::truncate_function_output_payload;
++
++const MAX_PAIRS: usize = 32;
++const MAX_CALL_BYTES: usize = 1024;
++const MAX_OUTPUT_TEXT_BYTES: usize = 2048;
++const MAX_OUTPUT_BYTES: usize = 3072;
++const MAX_RECEIPT_BYTES: usize = 12 * 1024;
++const MAX_LATEST_IMAGE_BYTES: usize = 2 * 1024 * 1024;
++// A bounded shared cap gives every result a genuine excerpt instead of dropping older actions.
++// Exact serialized sizes below account for JSON escaping and all original envelope overhead.
++const OUTPUT_TEXT_CAPS: [usize; 7] = [MAX_OUTPUT_TEXT_BYTES, 1536, 1024, 768, 512, 384, 256];
++
++pub(super) fn current_turn_receipts(
++    history: &[ResponseItemEnvelope],
++    turn_id: &str,
++) -> Result<Vec<ResponseItemEnvelope>> {
++    if turn_id.is_empty() {
++        return Err(receipt_error("current turn identity is unavailable"));
++    }
++    let mut pending = HashMap::new();
++    let mut seen = HashSet::new();
++    let mut pairs = Vec::new();
++    for (index, envelope) in history.iter().enumerate() {
++        if envelope.turn_id() != Some(turn_id) {
++            continue;
++        }
++        match &envelope.item {
++            ResponseItem::FunctionCall { call_id, .. } => {
++                if call_id.is_empty() {
++                    return Err(receipt_error("empty function call identity"));
++                }
++                if !seen.insert(call_id) {
++                    return Err(receipt_error("duplicate function call identity"));
++                }
++                if seen.len() > MAX_PAIRS {
++                    return Err(receipt_error(
++                        "current turn exceeds the 32 completed-function-call bound",
++                    ));
++                }
++                if serde_json::to_vec(&envelope.item)?.len() > MAX_CALL_BYTES {
++                    return Err(receipt_error("function call exceeds the 1 KiB bound"));
++                }
++                pending.insert(call_id.as_str(), (index, envelope));
++            }
++            ResponseItem::FunctionCallOutput { call_id, .. } => {
++                let Some((call_index, call)) = call_id.as_deref().and_then(|id| pending.remove(id))
++                else {
++                    return Err(receipt_error(
++                        "function output has no unique preceding current-turn call",
++                    ));
++                };
++                pairs.push((call_index, call, index, envelope));
++            }
++            ResponseItem::LocalShellCall { .. }
++            | ResponseItem::CustomToolCall { .. }
++            | ResponseItem::CustomToolCallOutput { .. }
++            | ResponseItem::ToolSearchCall { .. }
++            | ResponseItem::ToolSearchOutput { .. }
++            | ResponseItem::WebSearchCall { .. }
++            | ResponseItem::ImageGenerationCall { .. } => {
++                return Err(receipt_error("unsupported tool family in the current turn"));
++            }
++            _ => {}
++        }
++    }
++    if !pending.is_empty() {
++        return Err(receipt_error(
++            "function call has no completed current-turn output",
++        ));
++    }
++    // Do not erase an observation before continuation can consume it. Only the final completed
++    // output may supply one image: a later text result invalidates this retention opportunity.
++    // This preserves model evidence, not capture freshness or authority to act on it.
++    let latest_image = pairs.last().and_then(|(_, _, index, envelope)| {
++        if let ResponseItem::FunctionCallOutput { output, .. } = &envelope.item {
++            Some((*index, output))
++        } else {
++            None
++        }
++    });
++    let latest_image = match latest_image {
++        Some((index, output)) => latest_observation_image(output)?.map(|image| (index, image)),
++        None => None,
++    };
++    for text_cap in OUTPUT_TEXT_CAPS {
++        let mut retained = Vec::new();
++        let mut retained_bytes = 0usize;
++        let mut fits = true;
++        for &(call_index, call, output_index, envelope) in &pairs {
++            let ResponseItem::FunctionCallOutput {
++                id,
++                call_id,
++                name,
++                namespace,
++                output,
++                internal_chat_message_metadata_passthrough,
++            } = &envelope.item
++            else {
++                unreachable!("validated function output");
++            };
++            // Do not clone discarded screenshots or their references. Preserve the original
++            // result envelope/identity and failure state, replacing only its bounded body.
++            let keep_image = latest_image.is_some_and(|(index, _)| index == output_index);
++            let output = bounded_output(output, text_cap, keep_image)?;
++            let text_bytes = output_text_bytes(&output.body);
++            let receipt = ResponseItemEnvelope {
++                item: ResponseItem::FunctionCallOutput {
++                    id: id.clone(),
++                    call_id: call_id.clone(),
++                    name: name.clone(),
++                    namespace: namespace.clone(),
++                    output,
++                    internal_chat_message_metadata_passthrough:
++                        internal_chat_message_metadata_passthrough.clone(),
++                },
++                metadata: envelope.metadata.clone(),
++            };
++            let output_bytes = serde_json::to_vec(&receipt.item)?.len();
++            retained_bytes += serde_json::to_vec(&call.item)?.len() + output_bytes;
++            if text_bytes > text_cap
++                || output_bytes > MAX_OUTPUT_BYTES
++                || retained_bytes > MAX_RECEIPT_BYTES
++            {
++                fits = false;
++                break;
++            }
++            retained.push((call_index, call.clone()));
++            retained.push((output_index, receipt));
++        }
++        if fits {
++            if let Some((index, image)) = latest_image {
++                let (_, receipt) = retained
++                    .iter_mut()
++                    .find(|(output_index, _)| *output_index == index)
++                    .ok_or_else(|| receipt_error("latest observation output was not retained"))?;
++                let ResponseItem::FunctionCallOutput { output, .. } = &mut receipt.item else {
++                    return Err(receipt_error("latest observation output changed shape"));
++                };
++                let FunctionCallOutputBody::ContentItems(items) = &mut output.body else {
++                    return Err(receipt_error("latest observation content changed shape"));
++                };
++                let placeholder = items
++                    .iter_mut()
++                    .find(|item| matches!(item, FunctionCallOutputContentItem::InputImage { .. }))
++                    .ok_or_else(|| {
++                        receipt_error("latest observation placeholder was not retained")
++                    })?;
++                // Clone the single validated image only after the text budget fits. Candidate
++                // history's native image token estimator still enforces the final context bound.
++                *placeholder = image.clone();
++            }
++            // Preserve actual interleaving, including parallel results completed out of order.
++            // The first fitting pass leaves already-bounded receipts unchanged on recompaction.
++            retained.sort_by_key(|(index, _)| *index);
++            return Ok(retained.into_iter().map(|(_, item)| item).collect());
++        }
++    }
++    Err(receipt_error(
++        "all genuine tool receipts cannot fit the 12 KiB serialized bound",
++    ))
++}
++
++fn bounded_output(
++    source: &FunctionCallOutputPayload,
++    text_cap: usize,
++    keep_image: bool,
++) -> Result<FunctionCallOutputPayload> {
++    let mut omitted_images = 0usize;
++    let mut image_markers = Vec::new();
++    let body = match &source.body {
++        FunctionCallOutputBody::Text(text) => FunctionCallOutputBody::Text(text.clone()),
++        FunctionCallOutputBody::ContentItems(items) => {
++            let mut text_items = Vec::new();
++            for (index, item) in items.iter().enumerate() {
++                match item {
++                    FunctionCallOutputContentItem::InputText { text }
++                        if index == 0 && is_image_omission_marker(text) =>
++                    {
++                        // Keep the previous tool-role notice verbatim if new calls require a
++                        // smaller excerpt on a later compaction. It conveys no new authority.
++                        image_markers.push(text.clone());
++                    }
++                    FunctionCallOutputContentItem::InputText { .. } => {
++                        text_items.push(item.clone())
++                    }
++                    FunctionCallOutputContentItem::InputImage { detail, .. } if keep_image => {
++                        // Native truncation preserves media ordering. A small placeholder lets it
++                        // do so without repeatedly copying pixels during the bounded budget passes.
++                        text_items.push(FunctionCallOutputContentItem::InputImage {
++                            image: ImageReference::Inline {
++                                image_url: String::new(),
++                            },
++                            detail: *detail,
++                        });
++                    }
++                    FunctionCallOutputContentItem::InputImage { .. } => omitted_images += 1,
++                    FunctionCallOutputContentItem::InputAudio { .. }
++                    | FunctionCallOutputContentItem::EncryptedContent { .. } => {
++                        return Err(receipt_error(
++                            "audio or encrypted tool output cannot be retained safely",
++                        ));
++                    }
++                }
++            }
++            FunctionCallOutputBody::ContentItems(text_items)
++        }
++    };
++    let mut output = FunctionCallOutputPayload {
++        body,
++        success: source.success,
++    };
++    if omitted_images > 0 {
++        image_markers.push(format!(
++            "[omitted {omitted_images} historical image items during context compaction; obtain a fresh capture for image-dependent actions]"
++        ));
++    }
++    let marker_bytes: usize = image_markers.iter().map(|marker| marker.len() + 1).sum();
++    // Do not truncate an already bounded receipt again: the native omission marker is added
++    // outside its supplied byte budget, so unconditional re-truncation would change its evidence.
++    if output_text_bytes(&output.body).saturating_add(marker_bytes) > text_cap {
++        truncate_function_output_payload(
++            &mut output,
++            TruncationPolicy::Bytes(text_cap.saturating_sub(128 + marker_bytes)),
++            |_| 0,
++        );
++    }
++    if let FunctionCallOutputBody::ContentItems(items) = &mut output.body {
++        // Reserve this marker before text truncation and prepend it afterwards; otherwise a late
++        // image could disappear into the native generic "omitted text items" marker. This is a
++        // lossy tool-role receipt, not a success claim, visual observation, or renewed authority.
++        for marker in image_markers.into_iter().rev() {
++            items.insert(0, FunctionCallOutputContentItem::InputText { text: marker });
++        }
++    }
++    Ok(output)
++}
++
++fn latest_observation_image(
++    output: &FunctionCallOutputPayload,
++) -> Result<Option<&FunctionCallOutputContentItem>> {
++    let FunctionCallOutputBody::ContentItems(items) = &output.body else {
++        return Ok(None);
++    };
++    let mut images = items
++        .iter()
++        .filter(|item| matches!(item, FunctionCallOutputContentItem::InputImage { .. }));
++    let Some(image) = images.next() else {
++        return Ok(None);
++    };
++    if images.next().is_some() {
++        return Err(receipt_error(
++            "latest tool output contains multiple observation images",
++        ));
++    }
++    let FunctionCallOutputContentItem::InputImage {
++        image: ImageReference::Inline { image_url },
++        ..
++    } = image
++    else {
++        return Err(receipt_error(
++            "latest observation must be an inline PNG or JPEG image",
++        ));
++    };
++    if image_url.len() > MAX_LATEST_IMAGE_BYTES
++        || serde_json::to_vec(image)?.len() > MAX_LATEST_IMAGE_BYTES
++    {
++        return Err(receipt_error(
++            "latest observation exceeds the 2 MiB image bound",
++        ));
++    }
++    let (encoded, png) = if let Some(encoded) = image_url.strip_prefix("data:image/png;base64,") {
++        (encoded, true)
++    } else if let Some(encoded) = image_url.strip_prefix("data:image/jpeg;base64,") {
++        (encoded, false)
++    } else {
++        return Err(receipt_error(
++            "latest observation must be an inline PNG or JPEG image",
++        ));
++    };
++    let decoded = base64::engine::general_purpose::STANDARD
++        .decode(encoded)
++        .map_err(|_| receipt_error("latest observation has invalid base64 image data"))?;
++    if (png && !decoded.starts_with(b"\x89PNG\r\n\x1a\n"))
++        || (!png && !decoded.starts_with(&[0xff, 0xd8, 0xff]))
++    {
++        return Err(receipt_error(
++            "latest observation has invalid PNG or JPEG image data",
++        ));
++    }
++    Ok(Some(image))
++}
++
++fn is_image_omission_marker(text: &str) -> bool {
++    let Some(count) = text.strip_prefix("[omitted ").and_then(|text| {
++        text.strip_suffix(" historical image items during context compaction; obtain a fresh capture for image-dependent actions]")
++    }) else {
++        return false;
++    };
++    count
++        .parse::<usize>()
++        .is_ok_and(|value| value > 0 && value.to_string() == count)
++}
++
++fn output_text_bytes(body: &FunctionCallOutputBody) -> usize {
++    match body {
++        FunctionCallOutputBody::Text(text) => text.len(),
++        FunctionCallOutputBody::ContentItems(items) => {
++            items
++                .iter()
++                .fold(items.len().saturating_sub(1), |bytes, item| match item {
++                    FunctionCallOutputContentItem::InputText { text } => {
++                        bytes.saturating_add(text.len())
++                    }
++                    FunctionCallOutputContentItem::InputImage { .. }
++                    | FunctionCallOutputContentItem::InputAudio { .. }
++                    | FunctionCallOutputContentItem::EncryptedContent { .. } => bytes,
++                })
++        }
++    }
++}
++
++fn receipt_error(reason: &str) -> CodexErr {
++    CodexErr::InvalidRequest(format!(
++        "Local mid-turn compaction stopped to avoid forgetting completed actions: {reason}. Start a new turn with a smaller task."
++    ))
++}
++
++#[cfg(test)]
++#[path = "compact_tool_receipts_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
+new file mode 100644
+index 0000000..483fe1a
+--- /dev/null
++++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
+@@ -0,0 +1,527 @@
++use super::*;
++use codex_history::CodexHarnessMetadata;
++use codex_protocol::models::FunctionCallOutputPayload;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++fn pair(id: &str, turn: &str, text: &str) -> Vec<ResponseItemEnvelope> {
++    [
++        json!({"type":"function_call", "id":format!("fc_{id}"), "call_id":id,
++            "name":"computer", "arguments":"{\"action\":\"status\"}"}),
++        json!({"type":"function_call_output", "id":format!("fco_{id}"),
++            "call_id":id, "output":text}),
++    ]
++    .into_iter()
++    .map(|value| {
++        let mut item: ResponseItem = serde_json::from_value(value).unwrap();
++        item.set_turn_id_if_missing(turn);
++        ResponseItemEnvelope {
++            item,
++            metadata: Some(CodexHarnessMetadata::default()),
++        }
++    })
++    .collect()
++}
++
++fn observation_image() -> FunctionCallOutputContentItem {
++    serde_json::from_value(json!({
++        "type": "input_image",
++        "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6S8sAAAAASUVORK5CYII=",
++        "detail": "high"
++    })).unwrap()
++}
++
++fn image_pair(id: &str, text: &str) -> Vec<ResponseItemEnvelope> {
++    let mut history = pair(id, "current", "unused");
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++        *output = FunctionCallOutputPayload::from_content_items(vec![
++            FunctionCallOutputContentItem::InputText {
++                text: text.to_string(),
++            },
++            observation_image(),
++            FunctionCallOutputContentItem::InputText {
++                text: "actual image suffix".to_string(),
++            },
++        ]);
++    }
++    history
++}
++
++fn assert_receipt_identity(original: &[ResponseItemEnvelope], retained: &[ResponseItemEnvelope]) {
++    let mut expected = original.to_vec();
++    assert_eq!(expected.len(), retained.len());
++    for (expected, actual) in expected.iter_mut().zip(retained) {
++        if let (
++            ResponseItem::FunctionCallOutput {
++                output: expected_output,
++                ..
++            },
++            ResponseItem::FunctionCallOutput {
++                output: actual_output,
++                ..
++            },
++        ) = (&mut expected.item, &actual.item)
++        {
++            expected_output.body = actual_output.body.clone();
++        }
++    }
++    assert_eq!(retained, expected);
++}
++
++fn assert_receipt_bounds(retained: &[ResponseItemEnvelope]) {
++    let mut text_receipts = retained.to_vec();
++    let mut images = 0;
++    for envelope in &mut text_receipts {
++        if let ResponseItem::FunctionCallOutput { output, .. } = &mut envelope.item {
++            assert!(output_text_bytes(&output.body) <= MAX_OUTPUT_TEXT_BYTES);
++            if let FunctionCallOutputBody::ContentItems(items) = &mut output.body {
++                for item in items {
++                    if matches!(item, FunctionCallOutputContentItem::InputImage { .. }) {
++                        images += 1;
++                        assert!(serde_json::to_vec(item).unwrap().len() <= MAX_LATEST_IMAGE_BYTES);
++                        if let FunctionCallOutputContentItem::InputImage { image, .. } = item {
++                            *image = ImageReference::Inline {
++                                image_url: String::new(),
++                            };
++                        }
++                    }
++                }
++            }
++            assert!(serde_json::to_vec(&envelope.item).unwrap().len() <= MAX_OUTPUT_BYTES);
++        }
++    }
++    assert!(images <= 1);
++    assert!(
++        text_receipts
++            .iter()
++            .map(|item| serde_json::to_vec(&item.item).unwrap().len())
++            .sum::<usize>()
++            <= MAX_RECEIPT_BYTES
++    );
++}
++
++#[test]
++fn preserves_original_pairs_metadata_failures_and_parallel_order_across_compactions() {
++    let a = pair("a", "current", "read-only status failed");
++    let mut b = pair("b", "current", "actual result");
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut b[1].item {
++        output.success = Some(false);
++    }
++    let expected = vec![a[0].clone(), b[0].clone(), b[1].clone(), a[1].clone()];
++    let mut history = pair("previous", "previous-turn", "not current evidence");
++    history.extend(expected.clone());
++    let retained = current_turn_receipts(&history, "current").unwrap();
++    assert_eq!(retained, expected);
++    assert_eq!(
++        current_turn_receipts(&retained, "current").unwrap(),
++        expected
++    );
++    assert_eq!(
++        current_turn_receipts(&retained, "next-turn").unwrap(),
++        vec![]
++    );
++}
++
++#[test]
++fn long_output_keeps_genuine_prefix_suffix_shape_and_failure_status() {
++    let text = format!("actual start:{}:actual end", "診断".repeat(4000));
++    let mut history = pair("a", "current", &text);
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++        *output = FunctionCallOutputPayload::from_content_items(vec![
++            FunctionCallOutputContentItem::InputText { text },
++        ]);
++        output.success = Some(false);
++    }
++    let retained = current_turn_receipts(&history, "current").unwrap();
++    assert_eq!(retained[0], history[0]);
++    assert_eq!(
++        current_turn_receipts(&retained, "current").unwrap(),
++        retained
++    );
++    let ResponseItem::FunctionCallOutput { output, .. } = &retained[1].item else {
++        panic!("expected original output role");
++    };
++    let text = output.body.to_text().unwrap();
++    assert!(text.starts_with("actual start:"));
++    assert!(text.ends_with(":actual end"));
++    assert!(text.contains("truncated"));
++    assert!(text.len() <= MAX_OUTPUT_TEXT_BYTES);
++    assert!(serde_json::to_vec(&retained[1].item).unwrap().len() <= MAX_OUTPUT_BYTES);
++    let mut expected = history[1].clone();
++    if let ResponseItem::FunctionCallOutput {
++        output: expected_output,
++        ..
++    } = &mut expected.item
++    {
++        expected_output.body = output.body.clone();
++    }
++    assert_eq!(retained[1], expected);
++}
++
++#[test]
++fn rejects_missing_duplicate_reversed_and_cross_turn_pairs() {
++    let a = pair("a", "current", "result");
++    let old = pair("a", "old", "result");
++    for malformed in [
++        vec![a[0].clone()],
++        vec![a[1].clone()],
++        vec![a[1].clone(), a[0].clone()],
++        vec![a[0].clone(), a[0].clone(), a[1].clone()],
++        vec![a[0].clone(), a[1].clone(), a[1].clone()],
++        vec![old[0].clone(), a[1].clone()],
++        vec![a[0].clone(), old[1].clone()],
++        pair("", "current", "result"),
++    ] {
++        assert!(current_turn_receipts(&malformed, "current").is_err());
++    }
++}
++
++#[test]
++fn enforces_pair_count_call_size_aggregate_and_serialized_output_bounds() {
++    let limit: Vec<_> = (0..MAX_PAIRS)
++        .flat_map(|i| pair(&i.to_string(), "current", "ok"))
++        .collect();
++    assert_eq!(current_turn_receipts(&limit, "current").unwrap(), limit);
++    let mut overflow = limit;
++    overflow.extend(pair("overflow", "current", "ok"));
++    assert!(
++        current_turn_receipts(&overflow, "current")
++            .unwrap_err()
++            .to_string()
++            .contains("32 completed-function-call bound")
++    );
++    let mut huge_call = pair("large", "current", "ok");
++    if let ResponseItem::FunctionCall { arguments, .. } = &mut huge_call[0].item {
++        *arguments = "x".repeat(MAX_CALL_BYTES);
++    }
++    assert!(current_turn_receipts(&huge_call, "current").is_err());
++    let mut too_large: Vec<_> = (0..MAX_PAIRS)
++        .flat_map(|i| pair(&i.to_string(), "current", "ok"))
++        .collect();
++    for envelope in &mut too_large {
++        if let ResponseItem::FunctionCall { arguments, .. } = &mut envelope.item {
++            *arguments = "x".repeat(800);
++        }
++    }
++    assert!(current_turn_receipts(&too_large, "current").is_err());
++    let escaped = pair("escaped", "current", &"\0".repeat(1900));
++    let retained = current_turn_receipts(&escaped, "current").unwrap();
++    assert_receipt_bounds(&retained);
++    assert_receipt_identity(&escaped, &retained);
++}
++
++#[test]
++fn rejects_audio_or_encrypted_output_instead_of_silently_discarding_it() {
++    for nontext in [
++        json!({"type":"input_audio", "audio_url":"data:audio/wav;base64,AAAA"}),
++        json!({"type":"encrypted_content", "encrypted_content":"opaque"}),
++    ] {
++        let mut history = pair("media", "current", "ok");
++        if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++            *output = FunctionCallOutputPayload::from_content_items(vec![
++                FunctionCallOutputContentItem::InputText {
++                    text: "actual text".to_string(),
++                },
++                serde_json::from_value(nontext).unwrap(),
++            ]);
++        }
++        assert!(current_turn_receipts(&history, "current").is_err());
++    }
++}
++
++#[test]
++fn mixed_and_image_only_receipts_preserve_identity_failure_and_honest_omission() {
++    for texts in [vec![], vec!["actual first", "actual last"]] {
++        let mut history = pair("image", "current", "unused");
++        let text_items: Vec<_> = texts
++            .iter()
++            .map(|text| FunctionCallOutputContentItem::InputText {
++                text: (*text).to_string(),
++            })
++            .collect();
++        if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++            let mut items = text_items.clone();
++            items.insert(
++                0,
++                serde_json::from_value(json!({
++                    "type":"input_image", "image_url":"data:image/png;base64,PRIVATE_PIXELS"
++                }))
++                .unwrap(),
++            );
++            items.push(
++                serde_json::from_value(json!({
++                    "type":"input_image", "file_id":"private_historical_image"
++                }))
++                .unwrap(),
++            );
++            *output = FunctionCallOutputPayload::from_content_items(items);
++            output.success = Some(false);
++        }
++        // These are historical images, not the next observation awaiting model consumption.
++        history.extend(pair("newer-text", "current", "actual later result"));
++        let retained = current_turn_receipts(&history, "current").unwrap();
++        let mut expected = history;
++        if let ResponseItem::FunctionCallOutput { output, .. } = &mut expected[1].item {
++            let mut items = vec![FunctionCallOutputContentItem::InputText {
++                text: "[omitted 2 historical image items during context compaction; obtain a fresh capture for image-dependent actions]".to_string(),
++            }];
++            items.extend(text_items);
++            output.body = FunctionCallOutputBody::ContentItems(items);
++        }
++        assert_eq!(retained, expected);
++        assert_eq!(
++            current_turn_receipts(&retained, "current").unwrap(),
++            expected
++        );
++    }
++}
++
++#[test]
++fn image_marker_survives_long_text_and_all_retained_outputs_are_idempotent_and_bounded() {
++    for text in [
++        " ".repeat(4000),
++        format!("actual prefix:{}:actual suffix", "診断".repeat(4000)),
++    ] {
++        let mut history = pair("bounded-image", "current", "unused");
++        if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++            *output = FunctionCallOutputPayload::from_content_items(vec![
++                FunctionCallOutputContentItem::InputText { text },
++                serde_json::from_value(json!({"type":"input_image", "image_url":"data:image/png;base64,DO_NOT_RETAIN"})).unwrap(),
++            ]);
++        }
++        history.extend(pair("newer-text", "current", "actual later result"));
++        let retained = current_turn_receipts(&history, "current").unwrap();
++        let ResponseItem::FunctionCallOutput { output, .. } = &retained[1].item else {
++            unreachable!()
++        };
++        assert!(output_text_bytes(&output.body) <= MAX_OUTPUT_TEXT_BYTES);
++        let serialized = serde_json::to_string(&retained[1].item).unwrap();
++        assert!(serialized.len() <= MAX_OUTPUT_BYTES);
++        assert!(!serialized.contains("DO_NOT_RETAIN") && !serialized.contains("input_image"));
++        assert!(
++            serialized.contains("omitted 1 historical image items")
++                && serialized.contains("truncated")
++        );
++        assert_eq!(
++            current_turn_receipts(&retained, "current").unwrap(),
++            retained
++        );
++    }
++    for text in ["x".repeat(2000), " ".repeat(2000), "x".repeat(4000)] {
++        let history = pair("already-bounded", "current", &text);
++        let retained = current_turn_receipts(&history, "current").unwrap();
++        if text.len() <= MAX_OUTPUT_TEXT_BYTES {
++            assert_eq!(retained, history);
++        }
++        assert_eq!(
++            current_turn_receipts(&retained, "current").unwrap(),
++            retained
++        );
++    }
++}
++
++#[test]
++fn unsupported_current_tool_families_fail_closed_without_blocking_prior_turns() {
++    for value in [
++        json!({"type":"local_shell_call", "status":"completed", "action":{"type":"exec", "command":["true"]}}),
++        json!({"type":"custom_tool_call", "call_id":"custom", "name":"custom", "input":"text"}),
++        json!({"type":"custom_tool_call_output", "call_id":"custom", "output":"result"}),
++        json!({"type":"tool_search_call", "execution":"client", "arguments":{}}),
++        json!({"type":"tool_search_output", "status":"completed", "execution":"client", "tools":[]}),
++        json!({"type":"web_search_call", "status":"completed"}),
++        json!({"type":"image_generation_call", "status":"completed", "result":"pixels"}),
++    ] {
++        let mut item: ResponseItem = serde_json::from_value(value).unwrap();
++        item.set_turn_id_if_missing("current");
++        let history = vec![item.into()];
++        assert!(current_turn_receipts(&history, "current").is_err());
++        assert_eq!(current_turn_receipts(&history, "next").unwrap(), vec![]);
++    }
++}
++
++#[test]
++fn nine_browser_calls_keep_every_action_and_failure_with_shared_bounded_text() {
++    let operations = [
++        "open", "open", "snapshot", "click", "capture", "click", "capture", "click", "capture",
++    ];
++    let mut history = Vec::new();
++    for (index, operation) in operations.iter().enumerate() {
++        let text = format!(
++            "actual {operation} result:{}:actual result end",
++            "x".repeat(4000)
++        );
++        let mut entries = if *operation == "capture" {
++            image_pair(&format!("call-{index}"), &text)
++        } else {
++            pair(&format!("call-{index}"), "current", &text)
++        };
++        if let ResponseItem::FunctionCall {
++            name, arguments, ..
++        } = &mut entries[0].item
++        {
++            *name = format!("computer_v2_{operation}");
++            *arguments = "{}".to_string();
++        }
++        if let ResponseItem::FunctionCallOutput { output, .. } = &mut entries[1].item {
++            output.success = Some(index != 3);
++        }
++        history.extend(entries);
++    }
++    let retained = current_turn_receipts(&history, "current").unwrap();
++    assert_receipt_identity(&history, &retained);
++    assert_receipt_bounds(&retained);
++    assert_eq!(
++        current_turn_receipts(&retained, "current").unwrap(),
++        retained
++    );
++    for index in [4, 6] {
++        let serialized = serde_json::to_string(&retained[index * 2 + 1].item).unwrap();
++        assert!(serialized.contains("omitted 1 historical image items"));
++        assert!(!serialized.contains("input_image"));
++    }
++    let ResponseItem::FunctionCallOutput { output, .. } = &retained[17].item else {
++        unreachable!()
++    };
++    assert_eq!(
++        latest_observation_image(output).unwrap(),
++        Some(&observation_image())
++    );
++}
++
++#[test]
++fn count_duplicate_and_empty_identity_errors_are_distinct() {
++    let empty = current_turn_receipts(&pair("", "current", "ok"), "current").unwrap_err();
++    assert!(empty.to_string().contains("empty function call identity"));
++    let mut duplicate = pair("same", "current", "ok");
++    duplicate.extend(pair("same", "current", "ok"));
++    let duplicate = current_turn_receipts(&duplicate, "current").unwrap_err();
++    assert!(
++        duplicate
++            .to_string()
++            .contains("duplicate function call identity")
++    );
++    // Identical operations with distinct genuine call IDs are not duplicate receipts.
++    let mut distinct = pair("first", "current", "ok");
++    distinct.extend(pair("second", "current", "ok"));
++    assert_eq!(
++        current_turn_receipts(&distinct, "current").unwrap(),
++        distinct
++    );
++}
++
++#[test]
++fn later_compaction_can_reduce_excerpts_without_erasing_prior_image_omission() {
++    let text = format!("actual prefix:{}:actual suffix", "診断".repeat(3000));
++    let mut history = image_pair("old-image", &text);
++    history.extend(pair("later", "current", "ok"));
++    let first = current_turn_receipts(&history, "current").unwrap();
++    let ResponseItem::FunctionCallOutput { output, .. } = &first[1].item else {
++        unreachable!()
++    };
++    let original_marker = output.content_items().unwrap()[0].clone();
++    let original_size = output_text_bytes(&output.body);
++    let mut extended = first;
++    for index in 0..14 {
++        extended.extend(pair(&format!("new-{index}"), "current", &text));
++    }
++    let reduced = current_turn_receipts(&extended, "current").unwrap();
++    assert_receipt_identity(&extended, &reduced);
++    assert_receipt_bounds(&reduced);
++    let ResponseItem::FunctionCallOutput { output, .. } = &reduced[1].item else {
++        unreachable!()
++    };
++    assert!(output_text_bytes(&output.body) < original_size);
++    assert_eq!(output.content_items().unwrap()[0], original_marker);
++    assert_eq!(current_turn_receipts(&reduced, "current").unwrap(), reduced);
++    assert_eq!(
++        current_turn_receipts(&reduced, "next-turn").unwrap(),
++        vec![]
++    );
++}
++
++#[test]
++fn latest_image_is_preserved_exactly_but_never_resurrected_past_a_later_output() {
++    let mut original = image_pair("latest", "actual caption");
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut original[1].item {
++        output.success = Some(false);
++    }
++    let retained = current_turn_receipts(&original, "current").unwrap();
++    assert_eq!(retained, original);
++    assert_eq!(
++        current_turn_receipts(&retained, "current").unwrap(),
++        retained
++    );
++    let mut followed = retained;
++    followed.extend(pair("newer-text", "current", "actual later result"));
++    let omitted = current_turn_receipts(&followed, "current").unwrap();
++    assert_receipt_identity(&followed, &omitted);
++    let omitted_items: Vec<_> = omitted.iter().map(|envelope| &envelope.item).collect();
++    assert!(
++        !serde_json::to_string(&omitted_items)
++            .unwrap()
++            .contains("input_image")
++    );
++    let mut next_capture = omitted;
++    next_capture.extend(image_pair("new-capture", "different current caption"));
++    let newest = current_turn_receipts(&next_capture, "current").unwrap();
++    assert_eq!(newest, next_capture);
++    assert_receipt_bounds(&newest);
++}
++
++#[test]
++fn latest_image_retains_original_media_order_when_surrounding_text_is_truncated() {
++    let original = image_pair("image-order", &"x".repeat(5000));
++    let retained = current_turn_receipts(&original, "current").unwrap();
++    let ResponseItem::FunctionCallOutput { output, .. } = &retained[1].item else {
++        unreachable!()
++    };
++    let items = output.content_items().unwrap();
++    assert!(
++        matches!(&items[0], FunctionCallOutputContentItem::InputText { text } if text.contains("truncated"))
++    );
++    assert_eq!(items[1], observation_image());
++    assert!(
++        matches!(&items[2], FunctionCallOutputContentItem::InputText { text } if text.contains("omitted 1 text items"))
++    );
++    assert_receipt_identity(&original, &retained);
++    assert_receipt_bounds(&retained);
++}
++
++#[test]
++fn unsupported_latest_images_fail_instead_of_continuing_without_observation() {
++    let image_values = [
++        json!({"type":"input_image", "file_id":"unavailable-image"}),
++        json!({"type":"input_image", "image_url":"https://example.invalid/image.png"}),
++        json!({"type":"input_image", "image_url":"data:image/gif;base64,R0lGODlh"}),
++        json!({"type":"input_image", "image_url":"data:image/png;base64,invalid!"}),
++        json!({"type":"input_image", "image_url":"data:image/png;base64,AAAA"}),
++        json!({"type":"input_image", "image_url":format!("data:image/png;base64,{}", "A".repeat(MAX_LATEST_IMAGE_BYTES))}),
++    ];
++    for value in image_values {
++        let mut history = pair("image", "current", "unused");
++        if let ResponseItem::FunctionCallOutput { output, .. } = &mut history[1].item {
++            *output = FunctionCallOutputPayload::from_content_items(vec![
++                serde_json::from_value(value).unwrap(),
++            ]);
++        }
++        assert!(
++            current_turn_receipts(&history, "current")
++                .unwrap_err()
++                .to_string()
++                .contains("latest observation")
++        );
++    }
++    let mut multiple = image_pair("multiple", "caption");
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut multiple[1].item {
++        output
++            .content_items_mut()
++            .unwrap()
++            .push(observation_image());
++    }
++    assert!(
++        current_turn_receipts(&multiple, "current")
++            .unwrap_err()
++            .to_string()
++            .contains("multiple observation images")
++    );
++}
+diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
+index d8f6bab..1b62325 100644
+--- a/codex-rs/core/tests/suite/compact.rs
++++ b/codex-rs/core/tests/suite/compact.rs
+@@ -1493,18 +1493,22 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
+     let initial_input = normalize_inputs(input);
+     let environment_message = initial_input[0]["content"][0]["text"].as_str().unwrap();
+ 
+-    // test 1: after compaction, we should have one environment message, one user message, and one user message with summary prefix
++    // After compaction, keep the environment, user, summary, and every completed current-turn call.
+     let compaction_indices = [2, 4, 6];
+     let expected_summaries = [
+         prefixed_first_summary.as_str(),
+         prefixed_second_summary.as_str(),
+         prefixed_third_summary.as_str(),
+     ];
+-    for (i, expected_summary) in compaction_indices.into_iter().zip(expected_summaries) {
++    for (pair_count, (i, expected_summary)) in compaction_indices
++        .into_iter()
++        .zip(expected_summaries)
++        .enumerate()
++    {
+         let body = requests_payloads.clone()[i].body_json();
+         let input = body.get("input").and_then(|v| v.as_array()).unwrap();
+         let input = normalize_inputs(input);
+-        assert_eq!(input.len(), 3);
++        assert_eq!(input.len(), 4 + pair_count);
+         let environment_message = input[0]["content"][0]["text"].as_str().unwrap();
+         let user_message_received = input[1]["content"][0]["text"].as_str().unwrap();
+         let summary_message = input[2]["content"][0]["text"].as_str().unwrap();
+@@ -1517,7 +1521,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
+     }
+ 
+     // test 2: the expected requests inputs should be as follows:
+-    let expected_requests_inputs = json!([
++    let mut expected_requests_inputs = json!([
+     [
+         // 0: first request of the user message.
+       {
+@@ -1833,6 +1837,28 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
+     ]
+     ]);
+ 
++    // Preserve genuine completed calls across each replacement. Outputs remain excluded by this
++    // legacy shape normalizer; assert those original receipts separately rather than fabricate them.
++    let retained_calls = [
++        expected_requests_inputs[1][3].clone(),
++        expected_requests_inputs[3][4].clone(),
++        expected_requests_inputs[5][4].clone(),
++    ];
++    for (request_index, count) in [(2, 1), (3, 1), (4, 2), (5, 2), (6, 3)] {
++        expected_requests_inputs[request_index]
++            .as_array_mut()
++            .unwrap()
++            .splice(3..3, retained_calls[..count].iter().cloned());
++        for (call_id, source_index) in [("r1-shell", 1), ("r3-shell", 3), ("r6-shell", 5)]
++            .into_iter()
++            .take(count)
++        {
++            assert_eq!(
++                requests_payloads[request_index].function_call_output(call_id),
++                requests_payloads[source_index].function_call_output(call_id),
++            );
++        }
++    }
+     for (i, request) in requests_payloads.iter().enumerate() {
+         let body = request.body_json();
+         let input = body.get("input").and_then(|v| v.as_array()).unwrap();
+@@ -4284,7 +4310,8 @@ async fn snapshot_request_shape_mid_turn_continuation_compaction() {
+ 
+     let server = start_mock_server().await;
+ 
+-    let context_window = 100;
++    // The replacement now checks its real native estimate; leave space for initial instructions.
++    let context_window = 32_768;
+     let limit = context_window * 90 / 100;
+     let over_limit_tokens = context_window * 95 / 100 + 1;
+ 
+@@ -5246,7 +5273,7 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
+         .with_home(Arc::clone(&home))
+         .with_config(move |config| {
+             config.model_provider = provider;
+-            config.model_context_window = Some(100);
++            config.model_context_window = Some(32_768);
+             config.model_auto_compact_token_limit = Some(90);
+         });
+     let test = builder.build(&server).await?;
+diff --git a/codex-rs/core/tests/suite/compact_tool_receipts.rs b/codex-rs/core/tests/suite/compact_tool_receipts.rs
+new file mode 100644
+index 0000000..6e71580
+--- /dev/null
++++ b/codex-rs/core/tests/suite/compact_tool_receipts.rs
+@@ -0,0 +1,811 @@
++use anyhow::Result;
++use base64::Engine;
++use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
++use codex_core::StartThreadOptions;
++use codex_core::TurnInputRequest;
++use codex_model_provider_info::built_in_model_providers;
++use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
++use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
++use codex_protocol::dynamic_tools::DynamicToolResponse;
++use codex_protocol::dynamic_tools::DynamicToolSpec;
++use codex_protocol::items::TurnItem;
++use codex_protocol::models::FunctionCallOutputContentItem;
++use codex_protocol::models::FunctionCallOutputPayload;
++use codex_protocol::models::ImageReference;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::openai_models::InputModality;
++use codex_protocol::openai_models::TruncationPolicyConfig;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::Op;
++use codex_protocol::user_input::UserInput;
++use codex_utils_output_truncation::TruncationPolicy;
++use codex_utils_output_truncation::truncate_function_output_payload;
++use core_test_support::responses::*;
++use core_test_support::skip_if_no_network;
++use core_test_support::test_codex::test_codex;
++use core_test_support::wait_for_event;
++use pretty_assertions::assert_eq;
++use serde_json::Value;
++use serde_json::json;
++
++enum ReceiptFixture {
++    TextOnly,
++    MixedImages,
++}
++
++#[derive(Clone, Copy)]
++enum ReceiptFailure {
++    PairOverflow,
++    SummaryTooLarge,
++}
++
++#[test_case::test_case(ReceiptFixture::TextOnly; "text_only")]
++#[test_case::test_case(ReceiptFixture::MixedImages; "mixed_images")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn local_mid_turn_compaction_atomically_preserves_real_current_turn_receipts(
++    fixture: ReceiptFixture,
++) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
++    provider.name = "Local receipt test".to_string();
++    provider.base_url = Some(format!("{}/v1", server.uri()));
++    provider.supports_websockets = false;
++    let mut builder = test_codex()
++        .with_config(move |config| {
++            config.model_provider = provider;
++            config.update_plan_enabled = true;
++            config.model_context_window = Some(32_768);
++            config.model_auto_compact_token_limit = Some(6144);
++        })
++        .with_model_info_override("gpt-5.5", |info| {
++            info.truncation_policy = TruncationPolicyConfig::tokens(/*limit*/ 10_000);
++            info.input_modalities = vec![InputModality::Text, InputModality::Image];
++        });
++    let mut test = builder.build_with_auto_env(&server).await?;
++    let started = test
++        .thread_manager
++        .start_thread(StartThreadOptions {
++            dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
++                name: "status".to_string(),
++                description: "Read-only fixture status, no desktop actions.".to_string(),
++                input_schema: json!({"type":"object", "properties":{}}),
++                defer_loading: false,
++            })],
++            ..StartThreadOptions::new(test.config.clone())
++        })
++        .await?;
++    test.codex = started.thread;
++    let plan_args = json!({"plan":[{"step":"Report status", "status":"completed"}]}).to_string();
++    let previous = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_function_call("prior-status", "status", "{}"),
++            ev_completed_with_tokens("r0", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let previous_done = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("msg_previous", "previous task done"),
++            ev_completed_with_tokens("r1", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let current = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_function_call("current-status", "status", "{}"),
++            ev_completed_with_tokens("r2", /*total_tokens*/ 7000),
++        ]),
++    )
++    .await;
++    let summary_one = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("m1", "Status finished. Report its result."),
++            ev_completed_with_tokens("r3", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let continuation = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_function_call("current-plan", "update_plan", &plan_args),
++            ev_completed_with_tokens("r4", /*total_tokens*/ 7000),
++        ]),
++    )
++    .await;
++    let summary_two = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("m2", "Status and plan finished. Answer now."),
++            ev_completed_with_tokens("r5", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let final_request = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("m3", "DONE"),
++            ev_completed_with_tokens("r6", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++
++    let long_status = format!(
++        "actual failure prefix:{}:actual failure suffix",
++        "diagnostic ".repeat(1600)
++    );
++    // Preparation validates/decode images before sending them; use an encoded PNG with valid CRCs
++    // rather than a placeholder that would legitimately become an image-preparation error string.
++    let mut png = std::io::Cursor::new(Vec::new());
++    image::DynamicImage::new_rgb8(/*w*/ 1, /*h*/ 1).write_to(&mut png, image::ImageFormat::Png)?;
++    let image_url = format!(
++        "data:image/png;base64,{}",
++        BASE64_STANDARD.encode(png.into_inner())
++    );
++    let mut dynamic_calls = Vec::new();
++    for (prompt, expected_id, output) in [
++        ("Previous task", "prior-status", "old status"),
++        (
++            "New task: status once, then update plan and report",
++            "current-status",
++            long_status.as_str(),
++        ),
++    ] {
++        test.codex
++            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++                text: prompt.to_string(),
++                text_elements: vec![],
++            }]))
++            .await?;
++        loop {
++            match wait_for_event(&test.codex, |event| {
++                matches!(
++                    event,
++                    EventMsg::DynamicToolCallRequest(_)
++                        | EventMsg::Error(_)
++                        | EventMsg::TurnComplete(_)
++                )
++            })
++            .await
++            {
++                EventMsg::DynamicToolCallRequest(request) => {
++                    assert_eq!(request.call_id, expected_id);
++                    dynamic_calls.push(request.call_id.clone());
++                    let mut content_items = vec![DynamicToolCallOutputContentItem::InputText {
++                        text: output.to_string(),
++                    }];
++                    if expected_id == "current-status"
++                        && matches!(fixture, ReceiptFixture::MixedImages)
++                    {
++                        // Genuine supplied fixture images, never desktop observation or action.
++                        let image = DynamicToolCallOutputContentItem::InputImage {
++                            image_url: image_url.clone(),
++                        };
++                        content_items.push(image);
++                    }
++                    test.codex
++                        .submit(Op::DynamicToolResponse {
++                            id: request.call_id,
++                            response: DynamicToolResponse {
++                                content_items,
++                                success: false,
++                            },
++                        })
++                        .await?;
++                }
++                EventMsg::Error(error) => panic!("unexpected turn failure: {error:?}"),
++                EventMsg::TurnComplete(_) => break,
++                _ => {}
++            }
++        }
++    }
++    assert_eq!(dynamic_calls, vec!["prior-status", "current-status"]);
++    for mock in [
++        &previous,
++        &previous_done,
++        &current,
++        &summary_one,
++        &continuation,
++        &summary_two,
++        &final_request,
++    ] {
++        assert_eq!(mock.requests().len(), 1);
++    }
++    let first_input = summary_one.single_request().input();
++    let call = first_input
++        .iter()
++        .find(|item| item["type"] == "function_call" && item["call_id"] == "current-status")
++        .expect("the genuine current status call")
++        .clone();
++    let mut output = summary_one
++        .single_request()
++        .function_call_output("current-status");
++    let mut payload: FunctionCallOutputPayload = serde_json::from_value(output["output"].clone())?;
++    let retained_image = match fixture {
++        ReceiptFixture::TextOnly => None,
++        ReceiptFixture::MixedImages => {
++            let items = payload
++                .content_items_mut()
++                .expect("structured mixed-image output");
++            assert_eq!(
++                items
++                    .iter()
++                    .filter(|item| matches!(item, FunctionCallOutputContentItem::InputImage { .. }))
++                    .count(),
++                1
++            );
++            let image = items
++                .iter()
++                .find(|item| matches!(item, FunctionCallOutputContentItem::InputImage { .. }))
++                .expect("the latest tool observation image is retained")
++                .clone();
++            items.retain(|item| matches!(item, FunctionCallOutputContentItem::InputText { .. }));
++            Some(image)
++        }
++    };
++    truncate_function_output_payload(&mut payload, TruncationPolicy::Bytes(1920), |_| 0);
++    let text = payload.body.to_text().expect("retained genuine tool text");
++    assert!(
++        text.contains("truncated")
++            && text.starts_with("actual failure prefix:")
++            && text.ends_with(":actual failure suffix")
++    );
++    assert!(text.len() <= 2048);
++    if let Some(image) = retained_image {
++        payload
++            .content_items_mut()
++            .expect("structured output after native truncation")
++            .push(image);
++    }
++    output["output"] = serde_json::to_value(payload)?;
++    let expected_first = vec![call.clone(), output.clone()];
++    assert_eq!(
++        tool_items(continuation.single_request().input()),
++        expected_first
++    );
++    let second_input = summary_two.single_request().input();
++    let plan_call = second_input
++        .iter()
++        .find(|item| item["type"] == "function_call" && item["call_id"] == "current-plan")
++        .expect("the genuine current planning call")
++        .clone();
++    let plan_output = summary_two
++        .single_request()
++        .function_call_output("current-plan");
++    assert_eq!(plan_output["output"], "Plan updated");
++    let final_receipts = tool_items(final_request.single_request().input());
++    match fixture {
++        ReceiptFixture::TextOnly => {
++            assert_eq!(final_receipts, vec![call, output, plan_call, plan_output])
++        }
++        ReceiptFixture::MixedImages => {
++            assert_eq!(final_receipts.len(), 4);
++            assert_eq!(final_receipts[0], call);
++            assert_eq!(final_receipts[2..], [plan_call, plan_output]);
++            let final_output: FunctionCallOutputPayload =
++                serde_json::from_value(final_receipts[1]["output"].clone())?;
++            let text = final_output
++                .body
++                .to_text()
++                .expect("historical text remains");
++            assert!(text.contains("[omitted 1 historical image items during context compaction; obtain a fresh capture for image-dependent actions]"));
++            assert!(
++                text.contains("actual failure prefix:") && text.ends_with(":actual failure suffix")
++            );
++            assert!(!serde_json::to_string(&final_receipts)?.contains("input_image"));
++        }
++    }
++    let original_reply = current
++        .single_request()
++        .input()
++        .into_iter()
++        // Native request construction intentionally strips unprefixed legacy IDs (e.g. "m0").
++        // Supply a valid ID and require that same genuine identity through both replacements.
++        .find(|item| item["role"] == "assistant" && item["id"] == "msg_previous")
++        .expect("the original completed prior assistant reply");
++    for request in [
++        continuation.single_request(),
++        final_request.single_request(),
++    ] {
++        let input = request.input();
++        let text_position = |text: &str| {
++            input
++                .iter()
++                .position(|item| {
++                    item["content"]
++                        .as_array()
++                        .is_some_and(|parts| parts.iter().any(|part| part["text"] == text))
++                })
++                .expect("the unchanged historical or current user message")
++        };
++        let matching_replies: Vec<_> = input
++            .iter()
++            .enumerate()
++            .filter(|(_, item)| **item == original_reply)
++            .collect();
++        assert_eq!(matching_replies.len(), 1);
++        let reply_position = matching_replies[0].0;
++        assert!(text_position("Previous task") < reply_position);
++        assert!(
++            reply_position < text_position("New task: status once, then update plan and report")
++        );
++    }
++    Ok(())
++}
++
++fn tool_items(input: Vec<Value>) -> Vec<Value> {
++    input
++        .into_iter()
++        .filter(|item| {
++            matches!(
++                item["type"].as_str(),
++                Some("function_call" | "function_call_output")
++            )
++        })
++        .collect()
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn local_mid_turn_compaction_continues_after_nine_completed_calls_without_replay()
++-> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
++    provider.name = "Local long receipt sequence test".to_string();
++    provider.base_url = Some(format!("{}/v1", server.uri()));
++    provider.supports_websockets = false;
++    let mut builder = test_codex()
++        .with_config(move |config| {
++            config.model_provider = provider;
++            config.model_context_window = Some(32_768);
++            config.model_auto_compact_token_limit = Some(6144);
++        })
++        .with_model_info_override("gpt-5.5", |info| {
++            info.truncation_policy = TruncationPolicyConfig::tokens(/*limit*/ 10_000);
++            info.input_modalities = vec![InputModality::Text, InputModality::Image];
++        });
++    let mut test = builder.build_with_auto_env(&server).await?;
++    test.codex = test
++        .thread_manager
++        .start_thread(StartThreadOptions {
++            dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
++                name: "status".to_string(),
++                description: "Read-only synthetic status; never performs desktop actions.".to_string(),
++                input_schema: json!({"type":"object","properties":{"sequence":{"type":"integer"}},"required":["sequence"]}),
++                defer_loading: false,
++            })],
++            ..StartThreadOptions::new(test.config.clone())
++        })
++        .await?
++        .thread;
++    let initial_history_version = test
++        .codex
++        .conversation_history_snapshot()
++        .await
++        .history_version();
++    // Serial responses make the latest completed output unambiguously receipt-8.
++    // Only the ninth result crosses the automatic-compaction threshold.
++    let mut first_requests = Vec::new();
++    for index in 0..9 {
++        first_requests.push(
++            mount_sse_once(
++                &server,
++                sse(vec![
++                    ev_function_call(
++                        &format!("receipt-{index}"),
++                        "status",
++                        &json!({"sequence":index}).to_string(),
++                    ),
++                    ev_completed_with_tokens(
++                        &format!("response-{index}"),
++                        if index == 8 { 7000 } else { 10 },
++                    ),
++                ]),
++            )
++            .await,
++        );
++    }
++    let summary_one = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message(
++                "msg_summary_one",
++                "Nine requests finished. Continue with request ten.",
++            ),
++            ev_completed_with_tokens("summary_one", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let continuation = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_function_call("receipt-9", "status", "{\"sequence\":9}"),
++            ev_completed_with_tokens("tenth_call", /*total_tokens*/ 7000),
++        ]),
++    )
++    .await;
++    let summary_two = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("msg_summary_two", "All ten requests finished. Answer now."),
++            ev_completed_with_tokens("summary_two", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let final_request = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("msg_final", "TEN_RECEIPTS_RETAINED"),
++            ev_completed_with_tokens("final", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let mut capture_images = std::collections::HashMap::new();
++    for index in [6usize, 8, 9] {
++        let mut png = std::io::Cursor::new(Vec::new());
++        let pixels = image::RgbImage::from_pixel(
++            /*width*/ 1,
++            /*height*/ 1,
++            image::Rgb([index as u8, 0, 0]),
++        );
++        image::DynamicImage::ImageRgb8(pixels).write_to(&mut png, image::ImageFormat::Png)?;
++        capture_images.insert(
++            index,
++            format!(
++                "data:image/png;base64,{}",
++                BASE64_STANDARD.encode(png.into_inner())
++            ),
++        );
++    }
++    assert_ne!(capture_images[&6], capture_images[&8]);
++    assert_ne!(capture_images[&8], capture_images[&9]);
++    let mut dispatched = Vec::new();
++    let mut compactions = 0;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text:
++                "Run the ten synthetic status requests once each, retaining their genuine results."
++                    .to_string(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    loop {
++        match wait_for_event(&test.codex, |event| {
++            matches!(
++                event,
++                EventMsg::DynamicToolCallRequest(_)
++                    | EventMsg::ItemCompleted(_)
++                    | EventMsg::Error(_)
++                    | EventMsg::TurnComplete(_)
++            )
++        })
++        .await
++        {
++            EventMsg::DynamicToolCallRequest(request) => {
++                let index = request.arguments["sequence"]
++                    .as_u64()
++                    .expect("fixture sequence") as usize;
++                assert_eq!(
++                    index,
++                    dispatched.len(),
++                    "serial fixture dispatch order must be exact"
++                );
++                assert!(
++                    index < 10,
++                    "no completed tool may be dispatched a second time"
++                );
++                assert!(
++                    !dispatched.contains(&request.call_id),
++                    "no completed tool may be dispatched a second time"
++                );
++                assert_eq!(request.call_id, format!("receipt-{index}"));
++                assert_eq!(request.arguments, json!({"sequence":index}));
++                dispatched.push(request.call_id.clone());
++                let text = if index == 9 {
++                    "tenth status completed".to_string()
++                } else {
++                    // Nine full results exceed 12 KiB; the compactor must budget all pairs,
++                    // never solve that bound by forgetting one or rerunning its action.
++                    format!(
++                        "status-{index}-prefix:{}:status-{index}-suffix",
++                        "diagnostic ".repeat(180)
++                    )
++                };
++                let mut content_items = vec![DynamicToolCallOutputContentItem::InputText { text }];
++                if let Some(image_url) = capture_images.get(&index) {
++                    content_items.push(DynamicToolCallOutputContentItem::InputImage {
++                        image_url: image_url.clone(),
++                    });
++                }
++                test.codex
++                    .submit(Op::DynamicToolResponse {
++                        id: request.call_id,
++                        response: DynamicToolResponse {
++                            content_items,
++                            success: index != 4,
++                        },
++                    })
++                    .await?;
++            }
++            EventMsg::ItemCompleted(event)
++                if matches!(event.item, TurnItem::ContextCompaction(_)) =>
++            {
++                compactions += 1
++            }
++            EventMsg::Error(error) => {
++                panic!("unexpected compaction or continuation failure: {error:?}")
++            }
++            EventMsg::TurnComplete(_) => break,
++            _ => {}
++        }
++    }
++    assert_eq!(
++        dispatched,
++        (0..10)
++            .map(|index| format!("receipt-{index}"))
++            .collect::<Vec<_>>()
++    );
++    assert_eq!(compactions, 2);
++    for mock in
++        first_requests
++            .iter()
++            .chain([&summary_one, &continuation, &summary_two, &final_request])
++    {
++        assert_eq!(mock.requests().len(), 1);
++    }
++    let original = tool_items(summary_one.single_request().input());
++    let first_receipts = tool_items(continuation.single_request().input());
++    let final_receipts = tool_items(final_request.single_request().input());
++    assert_eq!(original.len(), 18);
++    assert_eq!(first_receipts.len(), 18);
++    assert_eq!(final_receipts.len(), 20);
++    // All identities remain exact. The formerly-latest image changes into an explicit
++    // historical omission only after the tenth result supplies a fresh capture.
++    for item in &first_receipts {
++        if item["type"] == "function_call_output" && item["call_id"] == "receipt-8" {
++            continue;
++        }
++        let after = final_receipts
++            .iter()
++            .find(|other| other["type"] == item["type"] && other["call_id"] == item["call_id"])
++            .unwrap();
++        assert_eq!(
++            after, item,
++            "repeated compaction must not degrade unchanged receipts"
++        );
++    }
++    for index in 0..9 {
++        let id = format!("receipt-{index}");
++        let call = |items: &[Value]| {
++            items
++                .iter()
++                .find(|item| item["type"] == "function_call" && item["call_id"] == id)
++                .unwrap()
++                .clone()
++        };
++        assert_eq!(
++            call(&first_receipts),
++            call(&original),
++            "call identity and arguments must be exact"
++        );
++        let output = first_receipts
++            .iter()
++            .find(|item| item["type"] == "function_call_output" && item["call_id"] == id)
++            .unwrap();
++        let payload: FunctionCallOutputPayload = serde_json::from_value(output["output"].clone())?;
++        let text = payload.body.to_text().expect("real retained text");
++        assert!(
++            text.contains(&format!("status-{index}-prefix:"))
++                && text.ends_with(&format!(":status-{index}-suffix"))
++        );
++        assert!(
++            text.contains("truncated"),
++            "the aggregate budget must bound each long result"
++        );
++        if index == 6 {
++            assert!(text.contains("[omitted 1 historical image items during context compaction; obtain a fresh capture for image-dependent actions]"));
++        }
++    }
++    for (receipts, latest_id, expected_image) in [
++        (&first_receipts, "receipt-8", &capture_images[&8]),
++        (&final_receipts, "receipt-9", &capture_images[&9]),
++    ] {
++        let latest = receipts
++            .iter()
++            .find(|item| item["type"] == "function_call_output" && item["call_id"] == latest_id)
++            .unwrap();
++        let latest_payload: FunctionCallOutputPayload =
++            serde_json::from_value(latest["output"].clone())?;
++        let images: Vec<_> = latest_payload
++            .content_items()
++            .expect("fresh image-bearing output")
++            .iter()
++            .filter_map(|item| match item {
++                FunctionCallOutputContentItem::InputImage {
++                    image: ImageReference::Inline { image_url },
++                    ..
++                } => Some(image_url.as_str()),
++                _ => None,
++            })
++            .collect();
++        assert_eq!(
++            images,
++            vec![expected_image.as_str()],
++            "the fresh capture must reach the next model request byte-exact once"
++        );
++        let serialized = serde_json::to_string(receipts)?;
++        assert_eq!(serialized.matches("data:image/png;base64,").count(), 1);
++        assert_eq!(serialized.matches("input_image").count(), 1);
++        let mut text_receipts = (*receipts).clone();
++        for item in &mut text_receipts {
++            if let Some(parts) = item["output"].as_array_mut() {
++                for part in parts {
++                    if part["type"] == "input_image" {
++                        part["image_url"] = json!("");
++                    }
++                }
++            }
++        }
++        let bytes = text_receipts
++            .iter()
++            .map(serde_json::to_vec)
++            .collect::<std::result::Result<Vec<_>, _>>()?;
++        assert!(bytes.iter().map(Vec::len).sum::<usize>() <= 12 * 1024);
++    }
++    let retired_capture = final_receipts
++        .iter()
++        .find(|item| item["type"] == "function_call_output" && item["call_id"] == "receipt-8")
++        .unwrap();
++    assert!(serde_json::to_string(retired_capture)?.contains("[omitted 1 historical image items during context compaction; obtain a fresh capture for image-dependent actions]"));
++    let history = test.codex.conversation_history_snapshot().await;
++    assert_eq!(history.history_version(), initial_history_version + 2);
++    let failure = history
++        .items()
++        .find_map(|item| match item {
++            ResponseItem::FunctionCallOutput {
++                call_id: Some(id),
++                output,
++                ..
++            } if id == "receipt-4" => Some(output),
++            _ => None,
++        })
++        .expect("the genuine failed result remains in native history");
++    assert_eq!(failure.success, Some(false));
++    Ok(())
++}
++
++#[test_case::test_case(ReceiptFailure::PairOverflow; "pair_overflow")]
++#[test_case::test_case(ReceiptFailure::SummaryTooLarge; "summary_exceeds_window")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn receipt_bounds_stop_without_continuation_or_history_replacement(
++    failure: ReceiptFailure,
++) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
++    provider.name = "Local receipt overflow test".to_string();
++    provider.base_url = Some(format!("{}/v1", server.uri()));
++    provider.supports_websockets = false;
++    let mut builder = test_codex().with_config(move |config| {
++        config.model_provider = provider;
++        config.update_plan_enabled = true;
++        config.model_context_window = Some(match failure {
++            ReceiptFailure::PairOverflow => 32_768,
++            ReceiptFailure::SummaryTooLarge => 8192,
++        });
++        config.model_auto_compact_token_limit = Some(6144);
++    });
++    let test = builder.build_with_auto_env(&server).await?;
++    let original_version = test
++        .codex
++        .conversation_history_snapshot()
++        .await
++        .history_version();
++    let call_count = match failure {
++        ReceiptFailure::PairOverflow => 33,
++        ReceiptFailure::SummaryTooLarge => 1,
++    };
++    let mut events: Vec<_> = (0..call_count)
++        .map(|index| ev_function_call(&format!("plan-{index}"), "update_plan", "{\"plan\":[]}"))
++        .collect();
++    events.push(ev_completed_with_tokens(
++        "overflow", /*total_tokens*/ 7000,
++    ));
++    let first = mount_sse_once(&server, sse(events)).await;
++    let oversized_summary = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("msg_oversized_summary", &"S".repeat(50 * 1024)),
++            ev_completed_with_tokens("summary", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let unexpected = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("unexpected", "must not sample"),
++            ev_completed_with_tokens("unexpected", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "Run the read-only planning fixture".to_string(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let error = wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
++    let EventMsg::Error(error) = error else {
++        unreachable!()
++    };
++    let expected_error = match failure {
++        ReceiptFailure::PairOverflow => "32 completed-function-call bound",
++        ReceiptFailure::SummaryTooLarge => "effective context window",
++    };
++    assert!(
++        error.message.contains(expected_error),
++        "unexpected error: {error:?}"
++    );
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    assert_eq!(first.requests().len(), 1);
++    assert_eq!(
++        oversized_summary.requests().len(),
++        match failure {
++            ReceiptFailure::PairOverflow => 0,
++            ReceiptFailure::SummaryTooLarge => 1,
++        }
++    );
++    assert_eq!(unexpected.requests().len(), 0);
++    let history = test.codex.conversation_history_snapshot().await;
++    assert_eq!(
++        history.history_version(),
++        original_version,
++        "rejected compaction must not replace live history"
++    );
++    let history_items: Vec<_> = history
++        .items()
++        .map(serde_json::to_value)
++        .collect::<std::result::Result<_, _>>()?;
++    if matches!(failure, ReceiptFailure::SummaryTooLarge) {
++        let summary = history_items
++            .iter()
++            .find(|item| item["id"] == "msg_oversized_summary")
++            .expect("failed compactor output remains explicitly classified");
++        assert_eq!(
++            summary["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
++            json!(["compaction.summary"])
++        );
++    }
++    for index in 0..call_count {
++        let id = format!("plan-{index}");
++        for kind in ["function_call", "function_call_output"] {
++            assert_eq!(
++                history_items
++                    .iter()
++                    .filter(|item| item["type"] == kind && item["call_id"] == id)
++                    .count(),
++                1
++            );
++        }
++    }
++    test.codex.flush_rollout().await?;
++    let rollout =
++        std::fs::read_to_string(test.codex.rollout_path().expect("isolated fixture rollout"))?;
++    for line in rollout.lines() {
++        assert!(
++            !matches!(
++                codex_rollout::parse_rollout_line(line)?.item,
++                codex_history::RolloutItem::Compacted(_)
++            ),
++            "rejected compaction must not persist a replacement checkpoint"
++        );
++    }
++    Ok(())
++}
+diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
+index 59e4019..4df91c2 100644
+--- a/codex-rs/core/tests/suite/mod.rs
++++ b/codex-rs/core/tests/suite/mod.rs
+@@ -58,6 +58,7 @@ mod collaboration_instructions;
+ mod compact;
+ mod compact_remote;
+ mod compact_resume_fork;
++mod compact_tool_receipts;
+ mod context_annotations;
+ mod current_time_reminder;
+ mod cyber_access_program;
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
+index 1fbf7df..bfe7562 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
+@@ -37,3 +37,5 @@ Scenario: True mid-turn continuation compaction after tool output: compact reque
+ 03:message/user:
+     <COMPACTION_SUMMARY>
+     AUTO_SUMMARY
++04:function_call/test_tool:{}
++05:function_call_output:unsupported call: test_tool

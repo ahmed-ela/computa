@@ -1,0 +1,37 @@
+@import "tailwindcss" source(none);
+@import "@octanejs/shadcn/theme.css";
+@source "./";
+/* Scan only the component families we ship, not the entire component catalog. */
+@source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/button.tsrx";
+@source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/input.tsrx";
+@source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/textarea.tsrx";
+@source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/native-select.tsrx";
+@source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/badge.tsrx";
+@source "../node_modules/@octanejs/shadcn/src/bases/radix/ui/switch.tsrx";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}

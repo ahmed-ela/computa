@@ -1,74 +1,41 @@
-import { useEffect, useState } from 'octane';
+import { useEffect, useRef, useState } from 'octane';
+import { Button } from '@octanejs/shadcn/Button';
+import { Input } from '@octanejs/shadcn/Input';
+import { Textarea } from '@octanejs/shadcn/Textarea';
+import { NativeSelect, NativeSelectOption } from '@octanejs/shadcn/NativeSelect';
+import { Badge } from '@octanejs/shadcn/Badge';
+import { Switch } from '@octanejs/shadcn/Switch';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@octanejs/shadcn/DropdownMenu';
+import { Icon } from './Icon';
+import { ResponseMarkdown } from './ResponseMarkdown';
+import { previewSnapshot, installPreviewBridge } from './preview';
+import {
+  dropQueuedPrompt,
+  isValidPrompt,
+  moveQueuedPrompt,
+  resolvePromptReceipt,
+  shouldSubmitPromptKey,
+} from './promptQueue';
+import type { PendingPromptSubmission } from './promptQueue';
 import type {
   AppSnapshot,
   EntrySnapshot,
   NativeAction,
+  QueuedPromptSnapshot,
   TaskSnapshot,
   Tone,
 } from './types';
 
-type IconName =
-  | 'archive'
-  | 'check'
-  | 'chevron'
-  | 'computer'
-  | 'copy'
-  | 'gear'
-  | 'info'
-  | 'inspect'
-  | 'more'
-  | 'new'
-  | 'plus'
-  | 'search'
-  | 'send'
-  | 'stop'
-  | 'sparkles'
-  | 'terminal'
-  | 'user'
-  | 'x';
-
-const iconPaths: Record<IconName, string> = {
-  archive: 'M4 7h16M6 7v12h12V7M9 11h6M5 3h14l1 4H4l1-4Z',
-  check: 'm5 12 4 4L19 6',
-  chevron: 'm9 18 6-6-6-6',
-  computer: 'M4 5h16v11H4V5Zm5 15h6m-3-4v4',
-  copy: 'M8 8h11v11H8V8Zm-3 8H4V4h12v1',
-  gear: 'M12 8.7a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6Zm8 3.3-2.1-1 .1-2.3-2.1-2.1-2.3.1-1-2.1H9.4l-1 2.1-2.3-.1L4 8.7l.1 2.3L2 12l2.1 1-.1 2.3 2.1 2.1 2.3-.1 1 2.1h3.2l1-2.1 2.3.1 2.1-2.1-.1-2.3 2.1-1Z',
-  info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Zm0-9v5m0-9h.01',
-  inspect: 'M4 4h16v16H4V4Zm11 0v16M18 8h-1m1 4h-1m1 4h-1',
-  more: 'M5 12h.01M12 12h.01M19 12h.01',
-  new: 'M5 19h4L19 9l-4-4L5 15v4Zm9-13 4 4M4 4h6',
-  plus: 'M12 5v14M5 12h14',
-  search: 'm21 21-4.4-4.4m2.4-5.1a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z',
-  send: 'm5 12 14-7-4 14-3-6-7-1Zm7 1 7-8',
-  stop: 'M7 7h10v10H7z',
-  sparkles: 'm12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3ZM5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14Zm13-1 .8 2.2L21 16l-2.2.8L18 19l-.8-2.2L15 16l2.2-.8L18 13Z',
-  terminal: 'm4 7 5 5-5 5m8 0h8',
-  user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7 8a7 7 0 0 0-14 0',
-  x: 'M6 6l12 12M18 6 6 18',
-};
-
-function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
-  return (
-    <svg
-      className="icon"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d={iconPaths[name]} />
-    </svg>
-  );
-}
-
 function post(action: NativeAction) {
-  window.webkit?.messageHandlers?.localCodex?.postMessage(action);
+  const bridge = window.webkit?.messageHandlers?.localCodex;
+  if (bridge) bridge.postMessage(action);
+  else if (import.meta.env.DEV) window.dispatchEvent(new CustomEvent('localcodex-preview-action', { detail: action }));
 }
 
 function toneClass(tone: Tone) {
@@ -99,6 +66,19 @@ function clockTime(timestamp: number) {
   });
 }
 
+function modelName(model: string, snapshot: AppSnapshot) {
+  return snapshot.modelOptions.find((option) => option.id === model)?.label.split(' · ')[0] ?? model.split('/').pop() ?? model;
+}
+
+const toolNames: Record<string, string> = {
+  computer_v2_status: 'Check permissions', computer_v2_apps: 'Find applications',
+  computer_v2_open: 'Open application', computer_v2_snapshot: 'Inspect interface',
+  computer_v2_capture: 'Capture window', computer_v2_ground_click: 'Locate and click',
+  computer_v2_ax: 'Interact with interface', computer_v2_set_text: 'Enter text',
+  computer_v2_click: 'Click target', computer_v2_pointer: 'Move pointer',
+  computer_v2_keypress: 'Press keys', computer_v2_type: 'Type text',
+};
+
 function Sidebar({
   snapshot,
   search,
@@ -117,35 +97,17 @@ function Sidebar({
 
   return (
     <aside className="sidebar" aria-label="Task navigation">
-      <div className="window-drag-strip" />
+      <div className="window-drag-strip" aria-hidden="true" />
       <div className="sidebar-brand-row">
         <div className="brand-lockup">
-          <span className="brand-mark"><Icon name="sparkles" size={15} /></span>
-          <strong>LocalCodex</strong>
-          <span className="brand-chevron">⌄</span>
-        </div>
-        <div className="sidebar-utilities">
-          <button className="icon-button" aria-label="Search tasks" title="Search tasks">
-            <Icon name="search" size={16} />
-          </button>
-          <button
-            className="icon-button"
-            aria-label="Open settings"
-            title="Settings"
-            onClick={() => post({ action: 'showSettings' })}
-          >
-            <Icon name="gear" size={16} />
-          </button>
+          <strong title="Fast, Mac-optimized local AI">HeyDash</strong>
         </div>
       </div>
 
       <nav className="primary-nav" aria-label="Primary">
-        <button className="nav-button" onClick={() => post({ action: 'createTask' })}>
+        <Button variant="outline" className="nav-button new-task-button" onClick={() => { setSearch(''); post({ action: 'createTask' }); }}>
           <Icon name="new" size={17} /><span>New task</span><span className="nav-shortcut">⇧⌘N</span>
-        </button>
-        <button className="nav-button" onClick={() => post({ action: 'showSettings' })}>
-          <Icon name="computer" size={17} /><span>Computer use</span>
-        </button>
+        </Button>
         {snapshot.pendingApprovalCount > 0 ? (
           <div className="nav-button approval-nav" role="status" aria-live="polite">
             <Icon name="info" size={17} /><span>Native approval</span>
@@ -154,43 +116,39 @@ function Sidebar({
         ) : null}
       </nav>
 
-      <label className="task-search">
-        <Icon name="search" size={15} />
-        <input
+      <div className="task-search">
+        <Input
+          className="task-search-input pr-8"
+          id="task-search"
           value={search}
           onInput={(event) => setSearch((event.currentTarget as HTMLInputElement).value)}
           placeholder="Search tasks"
           aria-label="Search tasks"
         />
         {search ? (
-          <button aria-label="Clear search" onClick={() => setSearch('')}><Icon name="x" size={13} /></button>
+          <Button variant="ghost" size="icon-xs" aria-label="Clear search" onClick={() => setSearch('')}><Icon name="x" size={13} /></Button>
         ) : null}
-      </label>
-
-      <div className="sidebar-section-heading">
-        <span>{search ? 'Results' : 'Tasks'}</span>
-        <button className="icon-button" aria-label="Create new task" onClick={() => post({ action: 'createTask' })}>
-          <Icon name="plus" size={15} />
-        </button>
       </div>
 
-      <div className="task-list" role="listbox" aria-label="Tasks">
+      <div className="sidebar-section-heading">
+        <span>{search ? 'Search results' : 'Tasks'}</span>
+      </div>
+
+      <div className="task-list" aria-label="Tasks">
         {tasks.length === 0 ? (
-          <div className="sidebar-empty">No matching tasks</div>
+          <div className="sidebar-empty"><Icon name="search" size={20} /><strong>{search ? 'No tasks found' : 'A fresh start'}</strong><span>{search ? 'Try a different search.' : 'Your tasks will appear here.'}</span></div>
         ) : (
           tasks.map((task) => (
-            <button
+            <Button variant="ghost"
               key={task.id}
               className={`task-row ${snapshot.selectedTaskID === task.id ? 'selected' : ''}`}
-              role="option"
-              aria-selected={snapshot.selectedTaskID === task.id}
+              aria-current={snapshot.selectedTaskID === task.id ? 'page' : undefined}
               onClick={() => post({ action: 'selectTask', id: task.id })}
             >
               <span className="task-row-title">{task.title}</span>
-              <span className={`task-row-status ${toneClass(task.statusTone)}`} title={task.status} />
-              <span className="task-row-summary">{task.summary || 'No messages yet'}</span>
+              <span className={`task-row-status ${toneClass(task.statusTone)} ${task.status === 'Running' ? 'is-running' : ''}`} title={task.status} aria-hidden="true" /><span className="sr-only">{task.status}</span>
               <span className="task-row-time">{relativeTime(task.updatedAt)}</span>
-            </button>
+            </Button>
           ))
         )}
       </div>
@@ -198,13 +156,11 @@ function Sidebar({
       <div className="sidebar-footer">
         <div className="runtime-state">
           <span className={`connection-dot ${toneClass(snapshot.connection.tone)}`} />
-          <span title={snapshot.connection.label}>{snapshot.connection.label}</span>
+          <span title={snapshot.connection.label}>{snapshot.connection.state === 'connected' ? 'Local runtime connected' : snapshot.connection.state === 'connecting' ? 'Connecting to runtime…' : snapshot.connection.state === 'failed' ? 'Connection needs attention' : 'Runtime disconnected'}</span>
         </div>
-        <button className="profile-button" onClick={() => post({ action: 'showSettings' })}>
-          <span className="avatar">L</span>
-          <span>Local user</span>
-          <Icon name="chevron" size={14} />
-        </button>
+        <Button variant="ghost" className="profile-button" onClick={() => post({ action: 'showSettings' })}>
+          <Icon name="gear" size={17} /><span>Settings</span><kbd>⌘,</kbd>
+        </Button>
       </div>
     </aside>
   );
@@ -214,37 +170,23 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
   return (
     <header className="task-toolbar">
       <div className="toolbar-title-block">
-        <strong>{task?.title ?? 'LocalCodex'}</strong>
-        {task ? <span>{task.workspace}</span> : null}
+        <strong>{task?.title === 'Untitled task' ? 'New task' : task?.title ?? 'HeyDash'}</strong>
       </div>
       <div className="toolbar-actions">
-        {task ? (
-          <span className={`status-label ${toneClass(task.statusTone)}`}>
+        {task && task.status !== 'Draft' && task.status !== 'Completed' ? (
+          <Badge variant="secondary" className={`status-label ${toneClass(task.statusTone)}`}>
             <span className="status-dot" />{task.status}
-          </span>
+          </Badge>
         ) : null}
-        {task?.status === 'Running' ? (
-          <button
-            className="secondary-button tone-red"
-            aria-label="Stop task"
-            title="Stop task"
-            onClick={() => post({ action: 'interruptTask', taskID: task.id })}
-          >
-            <Icon name="stop" size={13} />Stop
-          </button>
-        ) : null}
-        <button className="icon-button" aria-label="More task actions" title="More"><Icon name="more" size={18} /></button>
-        <button
+        <Button variant="ghost" size="icon"
           className={`icon-button ${snapshot.isInspectorPresented ? 'active' : ''}`}
           aria-label="Toggle inspector"
+          aria-pressed={snapshot.isInspectorPresented}
           title="Toggle inspector"
           onClick={() => post({ action: 'toggleInspector' })}
         >
           <Icon name="inspect" size={18} />
-        </button>
-        <button className="icon-button" aria-label="Open settings" title="Settings" onClick={() => post({ action: 'showSettings' })}>
-          <Icon name="gear" size={18} />
-        </button>
+        </Button>
       </div>
     </header>
   );
@@ -257,12 +199,13 @@ function ToolDetails({ entry, showPayload }: { entry: EntrySnapshot; showPayload
   return (
     <details className="tool-card" open={tool.status === 'Needs approval'}>
       <summary>
-        <span className={`tool-icon ${toneClass(tool.tone)}`}><Icon name="terminal" size={15} /></span>
-        <span className="tool-title">{tool.name}</span>
-        <span className="tool-summary">{tool.summary}</span>
+        <span className={`tool-icon ${toneClass(tool.tone)}`}><Icon name={tool.status === 'Succeeded' ? 'check' : tool.status === 'Failed' ? 'info' : 'computer'} size={15} /></span>
+        <span className="tool-labels"><span className="tool-title">{toolNames[tool.name] ?? tool.name}</span><span className="tool-summary">{tool.summary}</span></span>
+        {tool.duration != null ? <span className="tool-duration">{tool.duration < 1 ? `${Math.round(tool.duration * 1000)} ms` : `${tool.duration.toFixed(1)} s`}</span> : null}
         <span className={`tool-status ${toneClass(tool.tone)}`}>{tool.status}</span>
         <Icon name="chevron" size={14} />
       </summary>
+      <div className="tool-expanded-summary"><span>{tool.name}</span><p>{tool.summary}</p></div>
       {showPayload ? (
         <div className="tool-payload">
           <div><span>Input</span><pre>{tool.input}</pre></div>
@@ -282,16 +225,17 @@ function TimelineEntry({
   selected: boolean;
   showToolPayloads: boolean;
 }) {
+  if (entry.kind === 'assistant' && !entry.body.trim()) return null;
   if (entry.kind === 'user') {
     return (
       <article className={`message-row user-message ${selected ? 'selected' : ''}`}>
-        <button
+        <Button variant="secondary"
           className="user-bubble"
           onClick={() => post({ action: 'selectEntry', id: entry.id })}
           aria-label={`You: ${entry.body}`}
         >
           {entry.body}
-        </button>
+        </Button>
       </article>
     );
   }
@@ -302,7 +246,7 @@ function TimelineEntry({
         <details>
           <summary onClick={() => post({ action: 'selectEntry', id: entry.id })}>
             <span className="activity-spark"><Icon name="sparkles" size={14} /></span>
-            <span>{entry.title || 'Working'}</span>
+            <span>{entry.title || 'Working'}</span><Icon name="chevron" size={12} />
             <span className="message-time">{clockTime(entry.timestamp)}</span>
           </summary>
           <div className="activity-body">{entry.body}</div>
@@ -339,42 +283,267 @@ function TimelineEntry({
       className={`message-row assistant-message ${selected ? 'selected' : ''}`}
       onClick={() => post({ action: 'selectEntry', id: entry.id })}
       tabIndex={0}
-      aria-label={`${entry.title}: ${entry.body}`}
+      onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); post({ action: 'selectEntry', id: entry.id }); } }}
+      aria-label={`${entry.title || 'HeyDash'} response`}
     >
       <div className="assistant-heading">
-        <span className="assistant-mark"><Icon name="sparkles" size={14} /></span>
-        <strong>{entry.title || 'LocalCodex'}</strong>
+        <span className="assistant-mark"><Icon name="terminal" size={14} /></span>
+        <strong>{entry.title || 'HeyDash'}</strong>
         <span className="message-time">{clockTime(entry.timestamp)}</span>
       </div>
-      <div className="assistant-copy">{entry.body}</div>
+      <ResponseMarkdown text={entry.body} />
     </article>
   );
 }
 
-function Composer({ task, snapshot }: { task: TaskSnapshot; snapshot: AppSnapshot }) {
-  const [value, setValue] = useState('');
-  const canSend = value.trim().length > 0 && task.modelSelectable;
+interface QueueEditDraft {
+  id: string;
+  text: string;
+}
+
+function queueStatusLabel(item: QueuedPromptSnapshot) {
+  if (item.status === 'sending') return 'Sending';
+  if (item.status === 'editing') return 'Editing';
+  if (item.status === 'failed') return 'Needs attention';
+  return 'Queued';
+}
+
+function PromptQueue({ task }: { task: TaskSnapshot }) {
+  const [editDrafts, setEditDrafts] = useState<Record<string, QueueEditDraft>>({});
+  const [draggedID, setDraggedID] = useState<string | null>(null);
+  const nativeEditingItem = task.queuedPrompts.find((item) => item.status === 'editing');
+  const editDraft = editDrafts[task.id]
+    ?? (nativeEditingItem ? { id: nativeEditingItem.id, text: nativeEditingItem.text } : undefined);
+
+  const setTaskEdit = (draft?: QueueEditDraft) => {
+    setEditDrafts((current) => {
+      const next = { ...current };
+      if (draft) next[task.id] = draft;
+      else delete next[task.id];
+      return next;
+    });
+  };
+
+  const beginEdit = (item: QueuedPromptSnapshot) => {
+    if (item.status === 'sending' || (editDraft && editDraft.id !== item.id)) return;
+    setTaskEdit({ id: item.id, text: item.text });
+    post({ action: 'beginQueueEdit', taskID: task.id, id: item.id });
+  };
+
+  const cancelEdit = (id: string) => {
+    post({ action: 'cancelQueueEdit', taskID: task.id, id });
+    setTaskEdit();
+  };
+
+  const saveEdit = (id: string) => {
+    const prompt = editDraft?.id === id ? editDraft.text.trim() : '';
+    if (!isValidPrompt(prompt)) return;
+    post({ action: 'editQueuedPrompt', taskID: task.id, id, prompt });
+    setTaskEdit();
+  };
+
+  const move = (id: string, direction: -1 | 1) => {
+    const result = moveQueuedPrompt(task.queuedPrompts, id, direction);
+    if (result) post({ action: 'moveQueuedPrompt', taskID: task.id, id, beforeID: result.beforeID });
+  };
+
+  const drop = (event: DragEvent, targetID?: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = draggedID || event.dataTransfer?.getData('text/plain');
+    const moving = task.queuedPrompts.find((item) => item.id === id);
+    if (!id || !moving || moving.status === 'sending') return;
+
+    if (!targetID) {
+      post({ action: 'moveQueuedPrompt', taskID: task.id, id, beforeID: null });
+    } else {
+      const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      const result = dropQueuedPrompt(task.queuedPrompts, id, targetID, event.clientY >= bounds.top + bounds.height / 2);
+      const beforeItem = task.queuedPrompts.find((item) => item.id === result?.beforeID);
+      if (result && beforeItem?.status !== 'sending') {
+        post({ action: 'moveQueuedPrompt', taskID: task.id, id, beforeID: result.beforeID });
+      }
+    }
+    setDraggedID(null);
+  };
+
+  if (task.queuedPrompts.length === 0) return null;
+  const hasFailure = task.queuedPrompts.some((item) => item.status === 'failed');
+
+  return (
+    <section
+      className={`prompt-queue ${task.queuePaused ? 'is-paused' : ''}`}
+      aria-label="Queued messages"
+      onDragOver={(event) => { if (draggedID) event.preventDefault(); }}
+      onDrop={(event) => drop(event)}
+    >
+      <div className="queue-header" title="Queued messages are kept while HeyDash is open">
+        <div><strong>Up next</strong><span>{task.queuedPrompts.length}</span></div>
+        {task.queuePaused ? (
+          <Button variant="outline" size="sm" className="queue-resume-button" onClick={() => post({ action: 'resumeQueue', taskID: task.id })}>
+            <Icon name="resume" size={13} /> Resume queue
+          </Button>
+        ) : null}
+      </div>
+      {task.queuePaused || hasFailure ? (
+        <div className="queue-warning" role="status">
+          <Icon name="info" size={14} />
+          <span>{hasFailure
+            ? 'Delivery is uncertain and may already have happened. Review this message before resuming or resending.'
+            : 'The queue is paused after this task stopped. Review it, then resume manually.'}</span>
+        </div>
+      ) : null}
+      <div className="queue-list">
+        {task.queuedPrompts.map((item, index) => {
+          const locked = item.status === 'sending';
+          const editing = !locked && editDraft?.id === item.id;
+          const canMoveUp = !locked && !editing && index > 0 && task.queuedPrompts[index - 1]?.status !== 'sending';
+          const canMoveDown = !locked && !editing && index < task.queuedPrompts.length - 1;
+          return (
+            <div
+              key={item.id}
+              className={`queue-item queue-item-${item.status} ${draggedID === item.id ? 'is-dragging' : ''}`}
+              draggable={!locked && !editing}
+              onDragStart={(event) => {
+                setDraggedID(item.id);
+                if (event.dataTransfer) {
+                  event.dataTransfer.effectAllowed = 'move';
+                  event.dataTransfer.setData('text/plain', item.id);
+                }
+              }}
+              onDragEnd={() => setDraggedID(null)}
+              onDragOver={(event) => { if (draggedID && draggedID !== item.id) event.preventDefault(); }}
+              onDrop={(event) => drop(event, item.id)}
+            >
+              <span className="queue-drag-handle" aria-hidden="true"><Icon name="drag" size={14} /></span>
+              {editing ? (
+                <div className="queue-edit">
+                  <Textarea
+                    value={editDraft.text}
+                    rows={2}
+                    maxLength={200000}
+                    aria-label="Edit queued message"
+                    onInput={(event) => setTaskEdit({ id: item.id, text: (event.currentTarget as HTMLTextAreaElement).value })}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape' && !event.isComposing && !event.repeat) {
+                        event.preventDefault();
+                        cancelEdit(item.id);
+                        return;
+                      }
+                      if (shouldSubmitPromptKey(event)) {
+                        event.preventDefault();
+                        saveEdit(item.id);
+                      }
+                    }}
+                  />
+                  <div className="queue-edit-actions">
+                    <Button variant="ghost" size="sm" onClick={() => cancelEdit(item.id)}>Cancel</Button>
+                    <Button size="sm" disabled={!isValidPrompt(editDraft.text)} onClick={() => saveEdit(item.id)}>Save</Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="queue-item-copy">
+                  <span className="queue-item-text">{item.text}</span>
+                  <span className={`queue-item-status ${item.status === 'failed' ? 'tone-red' : item.status === 'sending' ? 'tone-blue' : ''}`}>
+                    {queueStatusLabel(item)}
+                  </span>
+                  {item.error ? <span className="queue-item-error">{item.error}</span> : null}
+                </div>
+              )}
+              {!editing ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      className="queue-menu-trigger"
+                      disabled={locked}
+                      aria-label={`Actions for queued message ${index + 1}`}
+                    >
+                      <Icon name="more" size={15} />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="queue-menu-content">
+                    {task.canSteer && item.status === 'queued' ? (
+                      <>
+                        <DropdownMenuItem onSelect={() => post({ action: 'steerQueuedPrompt', taskID: task.id, id: item.id })}>
+                          <Icon name="steer" size={14} /> Steer into current turn
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                      </>
+                    ) : null}
+                    <DropdownMenuItem disabled={!canMoveUp} onSelect={() => move(item.id, -1)}>
+                      <Icon name="send" size={14} /> Move up
+                    </DropdownMenuItem>
+                    <DropdownMenuItem disabled={!canMoveDown} onSelect={() => move(item.id, 1)}>
+                      <Icon name="down" size={14} /> Move down
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem disabled={Boolean(editDraft && editDraft.id !== item.id)} onSelect={() => beginEdit(item)}>
+                      <Icon name="edit" size={14} /> Edit
+                    </DropdownMenuItem>
+                    <DropdownMenuItem variant="destructive" onSelect={() => post({ action: 'deleteQueuedPrompt', taskID: task.id, id: item.id })}>
+                      <Icon name="delete" size={14} /> Delete
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function Composer({
+  task,
+  snapshot,
+  value,
+  setValue,
+  pending,
+  submissionError,
+  onSubmit,
+}: {
+  task: TaskSnapshot;
+  snapshot: AppSnapshot;
+  value: string;
+  setValue: (value: string) => void;
+  pending: boolean;
+  submissionError?: string;
+  onSubmit: () => void;
+}) {
+  const textarea = useRef<HTMLTextAreaElement | null>(null);
+  const queueActive = task.queuedPrompts.length > 0;
+  const canSubmit = !pending && isValidPrompt(value) && (task.modelSelectable || task.isBusy || task.queuePaused || queueActive);
+  const willQueue = task.isBusy || task.queuePaused || queueActive;
   const selectedModel = snapshot.modelOptions.find((option) => option.id === task.model);
+  useEffect(() => {
+    if (!textarea.current) return;
+    textarea.current.style.height = 'auto';
+    textarea.current.style.height = `${Math.min(200, textarea.current.scrollHeight)}px`;
+  }, [value, task.id]);
 
   const submit = () => {
-    const prompt = value.trim();
-    if (!canSend) return;
-    post({ action: 'submitPrompt', prompt });
-    setValue('');
+    if (!canSubmit) return;
+    onSubmit();
   };
 
   return (
     <div className="composer-zone">
+      <PromptQueue task={task} />
       <div className="composer-shell">
-        <textarea
+        <Textarea
+          ref={textarea}
+          id="task-prompt"
           value={value}
           rows={2}
-          placeholder="Do anything"
+          placeholder={task.isBusy ? 'Type your next message to queue it…' : 'Ask a question or describe a task…'}
           aria-label="Task prompt"
           maxLength={200000}
           onInput={(event) => setValue((event.currentTarget as HTMLTextAreaElement).value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            if (shouldSubmitPromptKey(event)) {
               event.preventDefault();
               submit();
             }
@@ -382,55 +551,136 @@ function Composer({ task, snapshot }: { task: TaskSnapshot; snapshot: AppSnapsho
         />
         <div className="composer-controls">
           <div className="composer-left">
-            <button className="composer-icon-button" aria-label="Add context" title="Add context"><Icon name="plus" size={19} /></button>
-            <span className="access-label"><span className="access-shield">!</span> Approval gated</span>
+            <NativeSelect
+              className="model-picker"
+              aria-label="Task model"
+              title={selectedModel?.detail ?? task.model}
+              value={task.model}
+              disabled={!task.modelSelectable}
+              onChange={(event: Event) => post({ action: 'setTaskModel', taskID: task.id, modelID: (event.currentTarget as HTMLSelectElement).value })}
+            >
+              {!selectedModel && <NativeSelectOption value={task.model}>{task.model}</NativeSelectOption>}
+              {snapshot.modelOptions.map((option) => <NativeSelectOption key={option.id} value={option.id}>{option.label.split(' · ')[0]}</NativeSelectOption>)}
+            </NativeSelect>
           </div>
           <div className="composer-right">
-            <button className="voice-button" aria-label="Voice input" title="Voice input">⌁</button>
-            <button className="send-button" disabled={!canSend} aria-label="Send prompt" onClick={submit}>
-              <Icon name="send" size={16} />
-            </button>
+            <span className="send-shortcut" title="Enter sends · Shift+Enter inserts a newline"><kbd>↵</kbd></span>
+            {task.status === 'Running' ? (
+              <Button variant="outline" size="sm" className="stop-button" aria-label="Stop task" title="Stop task" onClick={() => post({ action: 'interruptTask', taskID: task.id })}>
+                <Icon name="stop" size={13} /> Stop
+              </Button>
+            ) : null}
+            {willQueue ? (
+              <Button size="sm" className="queue-send-button" disabled={!canSubmit} aria-label="Queue prompt" title="Queue message · Enter" onClick={submit}>
+                <Icon name="send" size={15} /> Queue
+              </Button>
+            ) : (
+              <Button size="icon" className="send-button" disabled={!canSubmit} aria-label="Send prompt" title="Send message · Enter" onClick={submit}>
+                <Icon name="send" size={19} />
+              </Button>
+            )}
           </div>
         </div>
-        <div className="composer-model-row">
-          <span>Model</span>
-          <select
-            className="model-picker"
-            aria-label="Task model"
-            title={selectedModel?.detail ?? task.model}
-            value={task.model}
-            disabled={!task.modelSelectable}
-            onChange={(event) => post({ action: 'setTaskModel', taskID: task.id, modelID: (event.currentTarget as HTMLSelectElement).value })}
-          >
-            {!selectedModel && <option value={task.model}>{task.model}</option>}
-            {snapshot.modelOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-          </select>
-        </div>
       </div>
-      <span className="composer-hint">⌘↩ to send · {snapshot.connection.label}</span>
+      {pending || submissionError ? (
+        <span
+          className={`composer-submit-status ${submissionError ? 'tone-red' : ''}`}
+          role="status"
+          aria-live="polite"
+        >
+          {submissionError ?? 'Submitting…'}
+        </span>
+      ) : null}
       {selectedModel?.highMemory && <span className="composer-memory-warning">35B needs a separate download and may exceed available memory on this Mac.</span>}
     </div>
   );
 }
 
 function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSnapshot }) {
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [pendingSubmissions, setPendingSubmissions] = useState<Record<string, PendingPromptSubmission>>({});
+  const [submissionErrors, setSubmissionErrors] = useState<Record<string, string>>({});
+  const setDraft = (value: string) => {
+    setDrafts((current) => ({ ...current, [task.id]: value }));
+    setSubmissionErrors((current) => {
+      if (!(task.id in current)) return current;
+      const next = { ...current };
+      delete next[task.id];
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const resolved = Object.entries(pendingSubmissions).flatMap(([taskID, pending]) => {
+      const receipts = snapshot.promptReceipts.filter((receipt) => receipt.taskID === taskID);
+      const result = resolvePromptReceipt(drafts[taskID] ?? '', pending, receipts);
+      return result ? [{ taskID, pending, result }] : [];
+    });
+    if (resolved.length === 0) return;
+
+    setPendingSubmissions((current) => {
+      const next = { ...current };
+      for (const { taskID, pending } of resolved) {
+        if (next[taskID]?.requestID === pending.requestID) delete next[taskID];
+      }
+      return next;
+    });
+    setDrafts((current) => {
+      const next = { ...current };
+      for (const { taskID, pending } of resolved) {
+        const receipts = snapshot.promptReceipts.filter((receipt) => receipt.taskID === taskID);
+        const result = resolvePromptReceipt(current[taskID] ?? '', pending, receipts);
+        if (result) next[taskID] = result.draft;
+      }
+      return next;
+    });
+    setSubmissionErrors((current) => {
+      const next = { ...current };
+      for (const { taskID, result } of resolved) {
+        if (result.error) next[taskID] = result.error;
+        else delete next[taskID];
+      }
+      return next;
+    });
+  }, [snapshot.promptReceipts, pendingSubmissions]);
+
+  const submitDraft = () => {
+    if (pendingSubmissions[task.id]) return;
+    const draft = drafts[task.id] ?? '';
+    const prompt = draft.trim();
+    const canSubmit = task.modelSelectable || task.isBusy || task.queuePaused || task.queuedPrompts.length > 0;
+    if (!canSubmit || !isValidPrompt(draft)) return;
+
+    const requestID = crypto.randomUUID();
+    setPendingSubmissions((current) => ({ ...current, [task.id]: { requestID, draft } }));
+    setSubmissionErrors((current) => {
+      if (!(task.id in current)) return current;
+      const next = { ...current };
+      delete next[task.id];
+      return next;
+    });
+    post({ action: 'submitPrompt', requestID, taskID: task.id, prompt });
+  };
+  const suggest = (prompt: string) => {
+    setDraft(prompt);
+    document.getElementById('task-prompt')?.focus();
+  };
+  const entries = task.entries.filter((entry) => entry.kind !== 'assistant' || entry.body.trim().length > 0);
   return (
-    <div className="conversation-column">
+    <div className={`conversation-column ${entries.length === 0 ? 'is-empty' : ''}`}>
       <div className="conversation-scroll" id="conversation-scroll">
         <div className="conversation-content">
-          {task.entries.length === 0 ? (
+          {entries.length === 0 ? (
             <div className="empty-conversation">
-              <span className="empty-mark"><Icon name="sparkles" size={22} /></span>
-              <h1>What should we do?</h1>
-              <p>Ask the selected local model to inspect an app, open Chrome, or perform an approved computer action.</p>
+              <h1>How can I help?</h1>
+              <p>Ask a question or give your Mac a task.</p>
               <div className="suggestion-grid">
-                <button onClick={() => post({ action: 'submitPrompt', prompt: 'Check computer-use permissions and tell me what is available.' })}>Check permissions</button>
-                <button onClick={() => post({ action: 'submitPrompt', prompt: 'List the running applications and summarize what is available.' })}>Show running apps</button>
-                <button onClick={() => post({ action: 'submitPrompt', prompt: 'Open Google Chrome and inspect its focused window.' })}>Inspect Chrome</button>
+                <Button variant="outline" size="sm" onClick={() => suggest('Check computer-use permissions and tell me what is available.')}>Check setup</Button>
+                <Button variant="outline" size="sm" onClick={() => suggest('List the running applications and summarize what is available.')}>Explore apps</Button>
               </div>
             </div>
           ) : (
-            task.entries.map((entry) => (
+            entries.map((entry) => (
               <TimelineEntry
                 key={entry.id}
                 entry={entry}
@@ -439,9 +689,18 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
               />
             ))
           )}
+          {task.status === 'Running' && entries.length > 0 ? <div className="working-indicator" role="status"><span className="working-dots"><i /><i /><i /></span><span>Working on your task</span></div> : null}
         </div>
       </div>
-      <Composer task={task} snapshot={snapshot} />
+      <Composer
+        task={task}
+        snapshot={snapshot}
+        value={drafts[task.id] ?? ''}
+        setValue={setDraft}
+        pending={Boolean(pendingSubmissions[task.id])}
+        submissionError={submissionErrors[task.id]}
+        onSubmit={submitDraft}
+      />
     </div>
   );
 }
@@ -451,21 +710,21 @@ function Inspector({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSnapsh
   return (
     <aside className="inspector" aria-label="Task inspector">
       <div className="inspector-header">
-        <div><span>Inspector</span><strong>{entry?.title ?? task.title}</strong></div>
-        <button className="icon-button" aria-label="Close inspector" onClick={() => post({ action: 'toggleInspector' })}>
+        <div><span>Details</span><strong>{entry?.tool ? toolNames[entry.tool.name] ?? entry.title : entry?.title ?? 'Task overview'}</strong></div>
+        <Button variant="ghost" size="icon" className="icon-button" aria-label="Close inspector" onClick={() => post({ action: 'toggleInspector' })}>
           <Icon name="x" size={16} />
-        </button>
+        </Button>
       </div>
       <div className="inspector-scroll">
         <section className="inspector-section">
           <h2>Task</h2>
           <dl>
             <div><dt>Status</dt><dd className={toneClass(task.statusTone)}>{task.status}</dd></div>
-            <div><dt>Model</dt><dd>{task.model}</dd></div>
+            <div><dt>Model</dt><dd title={task.model}>{modelName(task.model, snapshot)}</dd></div>
             <div><dt>Workspace</dt><dd className="mono">{task.workspace}</dd></div>
             {task.branch ? <div><dt>Branch</dt><dd className="mono">{task.branch}</dd></div> : null}
             <div><dt>Events</dt><dd>{task.entries.length}</dd></div>
-            <div><dt>Updated</dt><dd>{relativeTime(task.updatedAt)} ago</dd></div>
+            <div><dt>Updated</dt><dd>{relativeTime(task.updatedAt) === 'now' ? 'Just now' : `${relativeTime(task.updatedAt)} ago`}</dd></div>
           </dl>
         </section>
         <section className="inspector-section">
@@ -492,43 +751,69 @@ function Inspector({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSnapsh
 }
 
 function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
-  if (!snapshot.isSettingsPresented) return null;
+  const dialog = useRef<HTMLElement | null>(null);
+  const canRestoreFocus = useRef(true);
+  canRestoreFocus.current = snapshot.pendingApprovalCount === 0;
+  const isOpen = snapshot.isSettingsPresented && snapshot.pendingApprovalCount === 0;
+  useEffect(() => {
+    if (!isOpen) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const frame = requestAnimationFrame(() => dialog.current?.querySelector<HTMLButtonElement>('button')?.focus());
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); post({ action: 'dismissSettings' }); }
+      if (event.key !== 'Tab') return;
+      const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled), summary, [tabindex="0"]') ?? []);
+      const first = controls[0]; const last = controls[controls.length - 1];
+      if (!dialog.current?.contains(document.activeElement)) { event.preventDefault(); first?.focus(); }
+      else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener('keydown', handleKey);
+      // Native approval owns focus; Settings teardown must not steal it back.
+      if (canRestoreFocus.current) previous?.focus();
+    };
+  }, [isOpen]);
+  if (!isOpen) return null;
   const accessibilityGranted = snapshot.permissions.accessibility === 'Granted';
   const screenRecordingGranted = snapshot.permissions.screenRecording === 'Granted';
   const defaultModel = snapshot.modelOptions.find((option) => option.id === snapshot.defaultModel);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={() => post({ action: 'dismissSettings' })}>
-      <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
+      <section ref={dialog} className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <header>
-          <div><span>LocalCodex</span><h1 id="settings-title">Settings</h1></div>
-          <button className="icon-button" aria-label="Close settings" onClick={() => post({ action: 'dismissSettings' })}><Icon name="x" /></button>
+          <h1 id="settings-title">Settings</h1>
+          <Button variant="ghost" size="icon" className="icon-button" aria-label="Close settings" onClick={() => post({ action: 'dismissSettings' })}><Icon name="x" /></Button>
         </header>
         <div className="settings-content">
           <section>
             <h2>Appearance</h2>
             <label className="setting-row">
-              <span><strong>Color scheme</strong><small>Choose how the local client looks.</small></span>
-              <select
+              <span><strong>Color scheme</strong></span>
+              <NativeSelect
+                aria-label="Color scheme"
                 value={snapshot.appearance}
-                onChange={(event) => post({ action: 'setAppearance', value: (event.currentTarget as HTMLSelectElement).value as AppSnapshot['appearance'] })}
+                onChange={(event: Event) => post({ action: 'setAppearance', value: (event.currentTarget as HTMLSelectElement).value as AppSnapshot['appearance'] })}
               >
-                <option value="system">System</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </select>
+                <NativeSelectOption value="system">System</NativeSelectOption>
+                <NativeSelectOption value="light">Light</NativeSelectOption>
+                <NativeSelectOption value="dark">Dark</NativeSelectOption>
+              </NativeSelect>
             </label>
           </section>
           <section>
             <h2>Local runtime</h2>
             <label className="setting-row">
-              <span><strong>Default model</strong><small>Used for new tasks. Choose a model for this task beside the composer. Context depends on the model and is fixed when the task starts.</small></span>
-              <select
+              <span><strong>Default model</strong><small>Used for new tasks. You can choose another in the composer.</small></span>
+              <NativeSelect
                 aria-label="Default model for new tasks"
                 value={snapshot.defaultModel}
-                onChange={(event) => post({ action: 'setDefaultModel', modelID: (event.currentTarget as HTMLSelectElement).value })}
+                onChange={(event: Event) => post({ action: 'setDefaultModel', modelID: (event.currentTarget as HTMLSelectElement).value })}
               >
-                {snapshot.modelOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-              </select>
+                {snapshot.modelOptions.map((option) => <NativeSelectOption key={option.id} value={option.id}>{option.label.split(' · ')[0]}</NativeSelectOption>)}
+              </NativeSelect>
             </label>
             <p className={defaultModel?.highMemory ? 'model-note high-memory' : 'model-note'}>{defaultModel?.detail} Model files must be installed and loaded in LM Studio separately.</p>
             <div className="setting-row"><span><strong>Connection</strong><small>{snapshot.connection.label}</small></span><span className={`setting-state ${toneClass(snapshot.connection.tone)}`}><span />{snapshot.connection.state}</span></div>
@@ -537,14 +822,13 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
             <h2>Agent interface</h2>
             <label className="setting-row">
               <span><strong>Show tool input and output</strong><small>Expand tool payloads in the transcript and inspector.</small></span>
-              <input
-                type="checkbox"
+              <Switch
+                aria-label="Show tool input and output"
                 checked={snapshot.showToolPayloads}
-                onChange={(event) => post({ action: 'setShowToolPayloads', value: (event.currentTarget as HTMLInputElement).checked })}
+                onCheckedChange={(checked: boolean) => post({ action: 'setShowToolPayloads', value: checked })}
               />
             </label>
-            <div className="setting-row"><span><strong>Native computer tools</strong><small>New tasks use action-specific tools for app discovery, semantic inspection, focused-window captures, pointer, keyboard, and text input. Drag is unavailable in V2.</small></span><code>computer_v2_*</code></div>
-            <div className="setting-row"><span><strong>Mutating computer actions</strong><small>Native enforcement always requires an explicit decision before input or app changes.</small></span><span className="locked-setting"><Icon name="check" size={14} /> Approval on</span></div>
+            <div className="setting-row"><span><strong>Access mode</strong><small>Close Settings to change this using the native menu at the bottom of the app.</small></span><span className="locked-setting"><Icon name="check" size={14} />{snapshot.accessMode === 'fullAccess' ? 'Full access' : 'Ask every time'}</span></div>
           </section>
           <section>
             <h2>Computer use</h2>
@@ -552,33 +836,33 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
               <span><strong>Accessibility</strong><small>Required for semantic UI inspection and actions.</small></span>
               <span className="permission-controls">
                 <span className={accessibilityGranted ? 'permission-status granted' : 'permission-status'}>{snapshot.permissions.accessibility}</span>
-                <button
+                <Button variant="outline"
                   className="secondary-button permission-request-button"
                   disabled={accessibilityGranted}
                   onClick={() => post({ action: 'requestAccessibilityPermission' })}
                 >
                   {accessibilityGranted ? 'Granted' : 'Request access'}
-                </button>
+                </Button>
               </span>
             </div>
             <div className="setting-row permission-row">
               <span><strong>Screen Recording</strong><small>Required for screenshots.</small></span>
               <span className="permission-controls">
                 <span className={screenRecordingGranted ? 'permission-status granted' : 'permission-status'}>{snapshot.permissions.screenRecording}</span>
-                <button
+                <Button variant="outline"
                   className="secondary-button permission-request-button"
                   disabled={screenRecordingGranted}
                   onClick={() => post({ action: 'requestScreenRecordingPermission' })}
                 >
                   {screenRecordingGranted ? 'Granted' : 'Request access'}
-                </button>
+                </Button>
               </span>
             </div>
-            <p className="permission-note">Click Request access to ask macOS. If access remains denied, LocalCodex opens System Settings, directly to Screen &amp; System Audio Recording when available. Add and enable LocalCodex in the screen-recording list, not System Audio Recording Only; then relaunch LocalCodex and refresh here. Local models cannot grant access, but once granted they can capture screenshots without a separate approval for each capture.</p>
-            <button className="secondary-button refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</button>
+            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access automatically approves HeyDash action requests; Ask every time asks before each protected action. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. Access mode resets to Ask every time when you relaunch.</p></details>
+            <Button variant="outline" className="refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</Button>
           </section>
         </div>
-        <footer><span>Octane UI · system WebKit · native Swift runtime</span><button className="primary-button" onClick={() => post({ action: 'dismissSettings' })}>Done</button></footer>
+        <footer><Button onClick={() => post({ action: 'dismissSettings' })}>Done</Button></footer>
       </section>
     </div>
   );
@@ -588,7 +872,7 @@ function LoadingView() {
   return (
     <main className="loading-view">
       <span className="loading-mark"><Icon name="sparkles" size={22} /></span>
-      <strong>Starting LocalCodex</strong>
+      <strong>Starting HeyDash</strong>
       <span>Connecting the native runtime…</span>
     </main>
   );
@@ -599,57 +883,10 @@ function BridgeUnavailableView() {
     <main className="loading-view" role="alert">
       <span className="loading-mark"><Icon name="info" size={22} /></span>
       <strong>Native bridge unavailable</strong>
-      <span>Open this interface from the LocalCodex macOS application.</span>
+      <span>Open this interface from the HeyDash macOS application.</span>
     </main>
   );
 }
-
-const previewSnapshot: AppSnapshot | null = import.meta.env.DEV ? {
-  revision: 1,
-  selectedTaskID: 'preview',
-  selectedEntryID: 'assistant',
-  tasks: [
-    {
-      id: 'preview',
-      title: 'Inspect Chrome locally',
-      summary: 'Use Qwen and the native computer tool to inspect Chrome',
-      status: 'Running',
-      statusTone: 'blue',
-      updatedAt: Date.now() / 1000 - 82,
-      workspace: '/Users/local/Documents/LocalCodex',
-      model: 'mlx-community/Qwen3.8-27B-4bit',
-      modelSelectable: false,
-      branch: 'local',
-      entries: [
-        { id: 'user', kind: 'user', title: 'You', body: 'Open Chrome and inspect the active page.', timestamp: Date.now() / 1000 - 76 },
-        { id: 'reasoning', kind: 'reasoning', title: 'Working', body: 'Checking permissions and locating Chrome before observing its focused window.', timestamp: Date.now() / 1000 - 65 },
-        {
-          id: 'tool',
-          kind: 'tool',
-          title: 'Computer snapshot',
-          body: 'Observed the Chrome Accessibility tree.',
-          timestamp: Date.now() / 1000 - 40,
-          tool: { name: 'computer', summary: 'Captured a bounded semantic snapshot', status: 'Succeeded', tone: 'green', input: '{"action":"snapshot","parameters":{"process_id":812}}', output: 'Chrome window observed' },
-        },
-        { id: 'assistant', kind: 'assistant', title: 'LocalCodex', body: 'Chrome is open and the active page is available through the native computer-use harness.', timestamp: Date.now() / 1000 - 18 },
-      ],
-    },
-  ],
-  pendingApprovalCount: 0,
-  connection: { state: 'connected', label: 'Codex App Server · LM Studio', tone: 'green' },
-  permissions: { accessibility: 'Not granted', screenRecording: 'Not granted' },
-  appearance: 'system',
-  defaultModel: 'mlx-community/Qwen3.8-27B-4bit',
-  modelOptions: [
-    { id: 'mlx-community/Qwen3.8-27B-4bit', label: 'Qwen3.8-27B · MLX 4-bit', detail: '16.1 GB model file. Current validated LocalCodex model.', highMemory: false },
-    { id: 'lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit', label: 'Qwen3.6-35B-A3B · MLX 4-bit', detail: '20.4 GB model file. Very tight on this 24 GB Mac; download and load in LM Studio separately.', highMemory: true },
-    { id: 'lmstudio-community/Qwen3.5-9B-MLX-4bit', label: 'Qwen3.5-9B · MLX 4-bit', detail: '5.98 GB model files. Lower-memory option; download and load in LM Studio separately.', highMemory: false },
-    { id: 'lmstudio-community/Qwen3.5-4B-MLX-4bit', label: 'Qwen3.5-4B · MLX 4-bit', detail: '3.06 GB model files. Smallest option; download and load in LM Studio separately.', highMemory: false },
-  ],
-  showToolPayloads: true,
-  isInspectorPresented: true,
-  isSettingsPresented: false,
-} : null;
 
 export function App() {
   const nativeHost = Boolean(window.webkit?.messageHandlers?.localCodex);
@@ -657,6 +894,7 @@ export function App() {
   const [search, setSearch] = useState('');
 
   useEffect(() => {
+    if (import.meta.env.DEV && !nativeHost) return installPreviewBridge(setSnapshot);
     window.__localCodexReceiveState = (next) => {
       setSnapshot((current) => (!current || next.revision >= current.revision ? next : current));
     };
@@ -667,15 +905,31 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (!event.metaKey || snapshot?.isSettingsPresented) return;
+      if (event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('task-search')?.focus(); }
+      if (!nativeHost && event.key.toLowerCase() === 'n' && event.shiftKey) { event.preventDefault(); post({ action: 'createTask' }); }
+      if (!nativeHost && event.key === ',') { event.preventDefault(); post({ action: 'showSettings' }); }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [snapshot?.isSettingsPresented]);
+
+  useEffect(() => {
     const appearance = snapshot?.appearance ?? 'system';
     document.documentElement.dataset.appearance = appearance;
+    const system = window.matchMedia('(prefers-color-scheme: dark)');
+    const syncTheme = () => document.documentElement.classList.toggle('dark', appearance === 'dark' || (appearance === 'system' && system.matches));
+    syncTheme();
+    system.addEventListener('change', syncTheme);
+    return () => system.removeEventListener('change', syncTheme);
   }, [snapshot?.appearance]);
 
   useEffect(() => {
     if (!snapshot?.selectedTaskID) return;
     const frame = requestAnimationFrame(() => {
       const scroll = document.getElementById('conversation-scroll');
-      if (scroll) scroll.scrollTop = scroll.scrollHeight;
+      if (scroll) scroll.scrollTop = snapshot.tasks.find((task) => task.id === snapshot.selectedTaskID)?.entries.length ? scroll.scrollHeight : 0;
     });
     return () => cancelAnimationFrame(frame);
   }, [snapshot?.selectedTaskID, snapshot?.selectedTaskID ? snapshot.tasks.find((task) => task.id === snapshot.selectedTaskID)?.entries.length : 0]);
@@ -685,6 +939,7 @@ export function App() {
   const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
   return (
     <div className="app-shell">
+      <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
       <Sidebar snapshot={snapshot} search={search} setSearch={setSearch} />
       <main className="workspace">
         <TaskToolbar snapshot={snapshot} task={task} />
@@ -692,14 +947,14 @@ export function App() {
           <Conversation snapshot={snapshot} task={task} />
         ) : (
           <div className="no-task-view">
-            <span><Icon name="sparkles" size={24} /></span>
-            <h1>Start a local task</h1>
-            <p>Create a task to work with Codex App Server and the configured local model.</p>
-            <button className="primary-button" onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={15} /> New task</button>
+            <h1>HeyDash</h1>
+            <p>Fast, Mac-optimized local AI.</p>
+            <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={15} /> New task</Button>
           </div>
         )}
       </main>
       {task && snapshot.isInspectorPresented ? <Inspector snapshot={snapshot} task={task} /> : null}
+      </div>
       <SettingsModal snapshot={snapshot} />
     </div>
   );

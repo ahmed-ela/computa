@@ -1,12 +1,25 @@
 import { defineConfig } from 'vite';
 import { octane } from 'octane/compiler/vite';
+import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig(({ command }) => ({
   base: './',
   plugins: [
     octane(),
+    tailwindcss(),
     {
-      name: 'local-codex-production-csp',
+      name: 'heydash-production-csp',
+      generateBundle(_options, bundle) {
+        // Native shadcn ports must not silently introduce a second UI runtime.
+        for (const output of Object.values(bundle)) {
+          if (output.type !== 'chunk') continue;
+          for (const moduleID of Object.keys(output.modules)) {
+            if (/[/\\]node_modules[/\\](?:react|react-dom)[/\\]/.test(moduleID)) {
+              this.error(`Unexpected React runtime in the Octane client: ${moduleID}`);
+            }
+          }
+        }
+      },
       transformIndexHtml(html) {
         if (command !== 'build') return html;
         return html.replace(
@@ -17,7 +30,7 @@ export default defineConfig(({ command }) => ({
     },
   ],
   build: {
-    outDir: '../Sources/LocalCodex/Resources/WebUI',
+    outDir: '../Sources/HeyDash/Resources/WebUI',
     emptyOutDir: true,
     sourcemap: false,
     target: 'safari17',

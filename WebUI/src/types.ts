@@ -32,6 +32,21 @@ export interface EntrySnapshot {
   tool?: ToolSnapshot;
 }
 
+export type QueuedPromptStatus = 'queued' | 'editing' | 'sending' | 'failed';
+
+export interface QueuedPromptSnapshot {
+  id: string;
+  text: string;
+  status: QueuedPromptStatus;
+  error?: string;
+}
+
+export interface PromptReceiptSnapshot {
+  id: string;
+  taskID: string;
+  accepted: boolean;
+}
+
 export interface TaskSnapshot {
   id: string;
   title: string;
@@ -44,6 +59,10 @@ export interface TaskSnapshot {
   modelSelectable: boolean;
   branch?: string;
   entries: EntrySnapshot[];
+  queuedPrompts: QueuedPromptSnapshot[];
+  queuePaused: boolean;
+  canSteer: boolean;
+  isBusy: boolean;
 }
 
 export interface ModelOption {
@@ -58,10 +77,12 @@ export interface AppSnapshot {
   selectedTaskID?: string;
   selectedEntryID?: string;
   tasks: TaskSnapshot[];
+  promptReceipts: PromptReceiptSnapshot[];
   pendingApprovalCount: number;
   connection: ConnectionSnapshot;
   permissions: PermissionSnapshot;
   appearance: 'system' | 'light' | 'dark';
+  accessMode: 'askEveryTime' | 'fullAccess';
   defaultModel: string;
   modelOptions: ModelOption[];
   showToolPayloads: boolean;
@@ -74,8 +95,15 @@ export type NativeAction =
   | { action: 'selectTask'; id: string }
   | { action: 'selectEntry'; id: string }
   | { action: 'createTask' }
-  | { action: 'submitPrompt'; prompt: string }
+  | { action: 'submitPrompt'; requestID: string; taskID: string; prompt: string }
   | { action: 'interruptTask'; taskID: string }
+  | { action: 'beginQueueEdit'; taskID: string; id: string }
+  | { action: 'editQueuedPrompt'; taskID: string; id: string; prompt: string }
+  | { action: 'cancelQueueEdit'; taskID: string; id: string }
+  | { action: 'deleteQueuedPrompt'; taskID: string; id: string }
+  | { action: 'moveQueuedPrompt'; taskID: string; id: string; beforeID: string | null }
+  | { action: 'steerQueuedPrompt'; taskID: string; id: string }
+  | { action: 'resumeQueue'; taskID: string }
   | { action: 'toggleInspector' }
   | { action: 'showSettings' }
   | { action: 'dismissSettings' }

@@ -1,5 +1,6 @@
 import { createRoot } from 'octane';
 import { App } from './App';
+import './shadcn.css';
 import './styles.css';
 
 const root = createRoot(document.getElementById('root')!);
