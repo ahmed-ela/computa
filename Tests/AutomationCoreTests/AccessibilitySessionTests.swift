@@ -8,6 +8,7 @@ private final class FakeAccessibilityNode: NSObject {
     let role: String
     var title: String?
     var value: String?
+    var url: String?
     var reportedIdentifier: String?
     var domIdentifier: String?
     var children: [FakeAccessibilityNode]
@@ -25,12 +26,14 @@ private final class FakeAccessibilityNode: NSObject {
         children: [FakeAccessibilityNode] = [],
         actions: [String] = [],
         valueSettable: Bool = false,
-        descriptionWasTruncated: Bool = false
+        descriptionWasTruncated: Bool = false,
+        url: String? = nil
     ) {
         self.identifier = identifier
         self.role = role
         self.title = title
         self.value = value
+        self.url = url
         reportedIdentifier = identifier
         domIdentifier = nil
         self.children = children
@@ -54,6 +57,7 @@ private final class FakeAccessibilityTreeRuntime: AccessibilityTreeRuntime {
     var valueSettableRequests = [String]()
     var performedActions = [(nodeID: String, action: String)]()
     var setValues = [(nodeID: String, value: AccessibilitySetValue)]()
+    var beforeDescribe: ((FakeAccessibilityNode) throws -> Void)?
 
     init(root: FakeAccessibilityNode) {
         self.root = root
@@ -79,6 +83,10 @@ private final class FakeAccessibilityTreeRuntime: AccessibilityTreeRuntime {
     ) throws -> AccessibilityElementDescription {
         let node = try node(from: element)
         describedNodeIDs.append(node.identifier)
+        try beforeDescribe?(node)
+        let linkURL = node.role == "AXLink"
+            ? AccessibilityObservedLinkURL.validate(node.url as NSString?)
+            : (value: nil, wasTruncated: false, identity: nil)
         return AccessibilityElementDescription(
             role: node.role,
             subrole: nil,
@@ -93,7 +101,9 @@ private final class FakeAccessibilityTreeRuntime: AccessibilityTreeRuntime {
             isFocused: false,
             supportedActions: node.snapshotActions,
             isValueSettable: node.snapshotValueSettable,
-            wasTruncated: node.descriptionWasTruncated
+            wasTruncated: node.descriptionWasTruncated || linkURL.wasTruncated,
+            url: linkURL.value,
+            urlIdentity: linkURL.identity
         )
     }
 
@@ -189,6 +199,171 @@ final class AccessibilitySessionTests: XCTestCase {
         XCTAssertEqual(first.elements.map(\.childIndices), [[1, 3], [2], [], []])
         XCTAssertEqual(first.elements.map(\.depth), [0, 1, 2, 1])
         XCTAssertEqual(runtime.applicationElementRequests, [target.processIdentifier, target.processIdentifier])
+    }
+
+    func testSnapshotRetriesDetachedChildWithAnEntirelyFreshTraversalOfSameWindow() throws {
+        let discarded = FakeAccessibilityNode(identifier: "discarded", role: "AXButton", actions: ["AXPress"])
+        let detached = FakeAccessibilityNode(identifier: "detached")
+        let replacement = FakeAccessibilityNode(identifier: "replacement", role: "AXButton", actions: ["AXPress"])
+        let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [discarded, detached])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        runtime.beforeDescribe = { node in
+            if node === detached {
+                root.children = [replacement]
+                throw AutomationError.accessibilityFailure(operation: "read AXSubrole", code: AXError.invalidUIElement.rawValue)
+            }
+        }
+        let session = makeSession(runtime: runtime)
+
+        let snapshot = try session.snapshot(limits: generousLimits())
+
+        XCTAssertEqual(runtime.describedNodeIDs, ["window", "discarded", "detached", "window", "replacement"])
+        XCTAssertEqual(snapshot.elements.map(\.identifier), ["window", "replacement"])
+        XCTAssertEqual(snapshot.elements.map(\.index), [0, 1])
+        XCTAssertEqual(snapshot.elements.map(\.childIndices), [[1], []])
+        XCTAssertEqual(runtime.applicationElementRequests.count, 3)
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+        try session.perform(.press, at: 1, in: snapshot)
+        XCTAssertEqual(runtime.performedActions.map(\.nodeID), ["replacement"])
+    }
+
+    func testSnapshotStopsAfterSecondDetachedChildError() throws {
+        let child = FakeAccessibilityNode(identifier: "detached")
+        let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [child])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let expected = AutomationError.accessibilityFailure(operation: "read AXSubrole", code: AXError.invalidUIElement.rawValue)
+        runtime.beforeDescribe = { node in
+            if node === child { throw expected }
+        }
+
+        XCTAssertThrowsError(try makeSession(runtime: runtime).snapshot()) {
+            XCTAssertEqual($0 as? AutomationError, expected)
+        }
+        XCTAssertEqual(runtime.describedNodeIDs, ["window", "detached", "window", "detached"])
+        XCTAssertEqual(runtime.applicationElementRequests.count, 2)
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
+    func testSnapshotDoesNotRetryOtherAccessibilityErrors() throws {
+        for expected in [
+            AutomationError.accessibilityFailure(operation: "read AXSubrole", code: AXError.cannotComplete.rawValue),
+            .accessibilityFailure(operation: "read AXSubrole", code: AXError.apiDisabled.rawValue),
+            .permissionNotGranted(.accessibility),
+        ] {
+            let child = FakeAccessibilityNode(identifier: "child")
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [child])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            runtime.beforeDescribe = { node in
+                if node === child { throw expected }
+            }
+
+            XCTAssertThrowsError(try makeSession(runtime: runtime).snapshot()) {
+                XCTAssertEqual($0 as? AutomationError, expected)
+            }
+            XCTAssertEqual(runtime.describedNodeIDs, ["window", "child"])
+            XCTAssertEqual(runtime.applicationElementRequests.count, 1)
+        }
+    }
+
+    func testSnapshotDoesNotRetryNonWindowOrUnidentifiedRoot() throws {
+        for failureAtRoot in [false, true] {
+            let child = FakeAccessibilityNode(identifier: "child")
+            let root = FakeAccessibilityNode(
+                identifier: "root", role: failureAtRoot ? "AXWindow" : "AXApplication", children: [child]
+            )
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            let expected = AutomationError.accessibilityFailure(operation: "read AXSubrole", code: AXError.invalidUIElement.rawValue)
+            runtime.beforeDescribe = { node in
+                if node === (failureAtRoot ? root : child) { throw expected }
+            }
+
+            XCTAssertThrowsError(try makeSession(runtime: runtime).snapshot()) {
+                XCTAssertEqual($0 as? AutomationError, expected)
+            }
+            XCTAssertEqual(runtime.applicationElementRequests.count, 1)
+            XCTAssertEqual(runtime.describedNodeIDs, failureAtRoot ? ["root"] : ["root", "child"])
+        }
+    }
+
+    func testSnapshotRejectsRootChangeBeforeOrDuringRetry() throws {
+        for changeBeforeRetry in [true, false] {
+            let child = FakeAccessibilityNode(identifier: "child")
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [child])
+            let otherRoot = FakeAccessibilityNode(identifier: "other", role: "AXWindow")
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            var childReads = 0
+            runtime.beforeDescribe = { node in
+                guard node === child else { return }
+                childReads += 1
+                if childReads == 1 {
+                    if changeBeforeRetry { runtime.root = otherRoot }
+                    throw AutomationError.accessibilityFailure(operation: "read AXSubrole", code: AXError.invalidUIElement.rawValue)
+                }
+                runtime.root = otherRoot
+            }
+
+            XCTAssertThrowsError(try makeSession(runtime: runtime).snapshot()) {
+                XCTAssertEqual($0 as? AutomationError, .staleAccessibilitySnapshot)
+            }
+            XCTAssertEqual(childReads, changeBeforeRetry ? 1 : 2)
+            XCTAssertEqual(runtime.applicationElementRequests.count, changeBeforeRetry ? 2 : 3)
+            XCTAssertTrue(runtime.performedActions.isEmpty)
+        }
+    }
+
+    func testSnapshotRetryRechecksPermissionBeforeAndAfterSecondTraversal() throws {
+        for revokeBeforeRetry in [true, false] {
+            let child = FakeAccessibilityNode(identifier: "child")
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [child])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            var permissionGranted = true
+            var childReads = 0
+            runtime.beforeDescribe = { node in
+                guard node === child else { return }
+                childReads += 1
+                if childReads == 1 {
+                    if revokeBeforeRetry { permissionGranted = false }
+                    throw AutomationError.accessibilityFailure(operation: "read AXSubrole", code: AXError.invalidUIElement.rawValue)
+                }
+                permissionGranted = false
+            }
+            let session = AccessibilitySession(target: target, runtime: runtime, accessibilityCheck: { permissionGranted })
+
+            XCTAssertThrowsError(try session.snapshot()) {
+                XCTAssertEqual($0 as? AutomationError, .permissionNotGranted(.accessibility))
+            }
+            XCTAssertEqual(childReads, revokeBeforeRetry ? 1 : 2)
+            XCTAssertEqual(runtime.applicationElementRequests.count, revokeBeforeRetry ? 1 : 2)
+        }
+    }
+
+    func testSnapshotRetryInvalidatesPreviousSnapshotOnSuccessAndFailure() throws {
+        for retrySucceeds in [true, false] {
+            let child = FakeAccessibilityNode(identifier: "child", role: "AXButton", actions: ["AXPress"])
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [child])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            let session = makeSession(runtime: runtime)
+            let previous = try session.snapshot()
+            var childReads = 0
+            runtime.beforeDescribe = { node in
+                guard node === child else { return }
+                childReads += 1
+                if childReads == 1 || !retrySucceeds {
+                    throw AutomationError.accessibilityFailure(operation: "read AXSubrole", code: AXError.invalidUIElement.rawValue)
+                }
+            }
+
+            if retrySucceeds {
+                let recovered = try session.snapshot()
+                XCTAssertNotEqual(recovered.id, previous.id)
+            } else {
+                XCTAssertThrowsError(try session.snapshot())
+            }
+            XCTAssertThrowsError(try session.perform(.press, at: 1, in: previous)) {
+                XCTAssertEqual($0 as? AutomationError, .staleAccessibilitySnapshot)
+            }
+            XCTAssertTrue(runtime.performedActions.isEmpty)
+        }
     }
 
     func testSnapshotStopsAtElementLimitAndMarksTruncation() throws {
@@ -1065,6 +1240,184 @@ final class AccessibilitySessionTests: XCTestCase {
             XCTAssertEqual(error as? AutomationError, .accessibilityValueTooLong(maximum: 4, actual: 8))
         }
         XCTAssertTrue(runtime.setValues.isEmpty)
+    }
+
+    func testObservedLinkURLPreservesExactSpellingAndNativeCFURLValues() throws {
+        for value in ["https://example.com/orders?filter=open#latest", "HTTP://EXAMPLE.COM:80/a%2fb?q=a%26b"] {
+            XCTAssertEqual(AccessibilityObservedLinkURL.validated(value), value)
+            let stringResult = AccessibilityObservedLinkURL.validate(value as NSString)
+            XCTAssertEqual(stringResult.value, value)
+            XCTAssertFalse(stringResult.wasTruncated)
+        }
+        let url = try XCTUnwrap(URL(string: "https://example.com/order?id=123"))
+        let native = AccessibilityObservedLinkURL.validate(url as NSURL)
+        XCTAssertEqual(native.value, url.absoluteString)
+        XCTAssertFalse(native.wasTruncated)
+        XCTAssertNil(AccessibilityObservedLinkURL.validate(nil).value)
+        XCTAssertFalse(AccessibilityObservedLinkURL.validate(nil).wasTruncated)
+        XCTAssertNil(AccessibilityObservedLinkURL.validate(nil).identity)
+        XCTAssertTrue(AccessibilityObservedLinkURL.validate(NSNumber(value: 3)).wasTruncated)
+        XCTAssertEqual(AccessibilityObservedLinkURL.validate(NSNumber(value: 3)).identity, .unverifiable)
+    }
+
+    func testObservedLinkURLRejectsUnsupportedCredentialsControlCharactersAndRepairs() {
+        for value in ["", "/relative", "//example.com/orders", "file:///tmp/orders", "javascript:alert(1)",
+                      "https://user:secret@example.com/orders", "https://user@example.com/orders", "https://@example.com/",
+                      "https://example.com/a b", " https://example.com/", "https://example.com/\n",
+                      "https://example.com/%0a", "https://example.com/%00", "https://example.com/%7F",
+                      "https://example.com/\\other", "https://", "https://example.com/%invalid",
+                      "https://example.com:70000/", "https://example.com:0/"] {
+            XCTAssertNil(AccessibilityObservedLinkURL.validated(value), value)
+            let result = AccessibilityObservedLinkURL.validate(value as NSString)
+            XCTAssertNil(result.value, value)
+            XCTAssertTrue(result.wasTruncated, value)
+        }
+    }
+
+    func testObservedLinkURLBoundOmitsWholeDestinationAndCanBeTightened() {
+        let prefix = "https://example.com/"
+        let exact = prefix + String(repeating: "a", count: 2_048 - prefix.utf8.count)
+        XCTAssertEqual(AccessibilityObservedLinkURL.validated(exact), exact)
+        XCTAssertNil(AccessibilityObservedLinkURL.validated(exact + "b"))
+        XCTAssertNil(AccessibilityObservedLinkURL.validated(exact + "b", maximumBytes: 4_096))
+        XCTAssertNil(AccessibilityObservedLinkURL.validated(exact, maximumBytes: 512))
+        XCTAssertTrue(AccessibilityObservedLinkURL.validate((exact + "b") as NSString).wasTruncated)
+    }
+
+    func testSnapshotCopiesOnlyExactObservedLinkDestinationsAndMarksOmissions() throws {
+        let link = FakeAccessibilityNode(identifier: "link", role: "AXLink", title: "Order details",
+                                         url: "https://example.com/order?exact=a%2fb")
+        let nonLink = FakeAccessibilityNode(identifier: "button", role: "AXButton",
+                                            url: "https://example.com/not-a-link")
+        let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [link, nonLink])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let snapshot = try session.snapshot(limits: generousLimits())
+        XCTAssertEqual(snapshot.elements[1].url, link.url)
+        XCTAssertNil(snapshot.elements[2].url)
+        XCTAssertFalse(snapshot.wasTruncated)
+        link.url = "https://example.com/" + String(repeating: "x", count: 2_048)
+        let omitted = try session.snapshot(limits: generousLimits())
+        XCTAssertNil(omitted.elements[1].url)
+        XCTAssertTrue(omitted.wasTruncated)
+    }
+
+    func testChangedLinkDestinationRejectsExactIdentityAndLogicalRebind() throws {
+        let destinations = [
+            ("https://example.com/original", "https://example.com/changed"),
+            ("https://example.com/" + String(repeating: "a", count: 2_100),
+             "https://example.com/" + String(repeating: "b", count: 2_100)),
+            ("javascript:original()", "javascript:changed()"),
+        ]
+        for (originalURL, changedURL) in destinations {
+          for recreate in [false, true] {
+            let link = FakeAccessibilityNode(identifier: "link", role: "AXLink", title: "Order details",
+                actions: [SemanticAXAction.press.rawValue], url: originalURL)
+            link.domIdentifier = "stable-link"
+            let document = FakeAccessibilityNode(identifier: "document", role: "AXWebArea", children: [link])
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [document])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            let session = makeSession(runtime: runtime, application: chromeTarget)
+            let approved = try session.snapshot(limits: generousLimits())
+            if recreate {
+                let replacement = FakeAccessibilityNode(identifier: "replacement", role: "AXLink", title: "Order details",
+                    actions: [SemanticAXAction.press.rawValue], url: changedURL)
+                replacement.reportedIdentifier = link.reportedIdentifier
+                replacement.domIdentifier = link.domIdentifier
+                document.children = [replacement]
+            } else {
+                link.url = changedURL
+            }
+            XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 2, in: approved)) {
+                XCTAssertEqual($0 as? AutomationError, .staleAccessibilitySnapshot)
+            }
+            XCTAssertTrue(runtime.performedActions.isEmpty)
+          }
+        }
+    }
+
+    func testUnchangedUnsupportedDestinationCanStillUseExactAXIdentity() throws {
+        let link = FakeAccessibilityNode(identifier: "link", role: "AXLink", title: "Details",
+            actions: [SemanticAXAction.press.rawValue], url: "javascript:void(0)")
+        let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [link])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let approved = try session.snapshot(limits: generousLimits())
+        XCTAssertNil(approved.elements[1].url)
+        guard case .sha256? = approved.elements[1].urlIdentity else {
+            return XCTFail("Unsupported bounded destinations still need exact local identity")
+        }
+        try session.refreshAndPerform(.press, at: 1, in: approved)
+        XCTAssertEqual(runtime.performedActions.map(\.nodeID), ["link"])
+    }
+
+    func testOverIdentityBudgetCannotApproveEvenUnchangedExactLink() throws {
+        let prefix = "https://example.com/"
+        let atLimit = prefix + String(repeating: "a", count: 8_192 - prefix.utf8.count)
+        guard case .sha256? = AccessibilityObservedLinkURL.validate(atLimit as NSString).identity else {
+            return XCTFail("Exact identity limit should remain hashable")
+        }
+        for value in [atLimit + "b", "https://example.com/" + String(repeating: "😀", count: 2_049)] {
+            XCTAssertEqual(AccessibilityObservedLinkURL.validate(value as NSString).identity, .unverifiable)
+            let link = FakeAccessibilityNode(identifier: "link", role: "AXLink",
+                actions: [SemanticAXAction.press.rawValue], url: value)
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [link])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            let session = makeSession(runtime: runtime)
+            let approved = try session.snapshot(limits: generousLimits())
+            XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 1, in: approved)) {
+                XCTAssertEqual($0 as? AutomationError, .staleAccessibilitySnapshot)
+            }
+            XCTAssertTrue(runtime.performedActions.isEmpty)
+        }
+    }
+
+    func testAbsentDestinationLegacySnapshotStillRevalidates() throws {
+        let link = FakeAccessibilityNode(identifier: "link", role: "AXLink", actions: [SemanticAXAction.press.rawValue])
+        let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [link])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let snapshot = try session.snapshot(limits: generousLimits())
+        let legacy = try JSONDecoder().decode(AccessibilityTreeSnapshot.self, from: JSONEncoder().encode(snapshot))
+        XCTAssertNil(legacy.elements[1].url)
+        XCTAssertNil(legacy.elements[1].urlIdentity)
+        try session.refreshAndPerform(.press, at: 1, in: legacy)
+        XCTAssertEqual(runtime.performedActions.map(\.nodeID), ["link"])
+    }
+
+    func testUnchangedLinkDestinationAllowsSameDocumentLogicalRebind() throws {
+        let link = FakeAccessibilityNode(identifier: "link", role: "AXLink", title: "Order details",
+            actions: [SemanticAXAction.press.rawValue], url: "https://example.com/original")
+        let document = FakeAccessibilityNode(identifier: "document", role: "AXWebArea", children: [link])
+        let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [document])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime, application: chromeTarget)
+        let approved = try session.snapshot(limits: generousLimits())
+        let replacement = FakeAccessibilityNode(identifier: "replacement", role: "AXLink", title: "Order details",
+            actions: [SemanticAXAction.press.rawValue], url: link.url)
+        replacement.reportedIdentifier = link.reportedIdentifier
+        document.children = [replacement]
+        try session.refreshAndPerform(.press, at: 2, in: approved)
+        XCTAssertEqual(runtime.performedActions.map(\.nodeID), ["replacement"])
+    }
+
+    func testSnapshotURLCodableSupportsOlderMissingField() throws {
+        let link = FakeAccessibilityNode(identifier: "link", role: "AXLink", url: "https://example.com/order")
+        let snapshot = try makeSession(runtime: FakeAccessibilityTreeRuntime(root: link)).snapshot(limits: generousLimits())
+        let encoded = try JSONEncoder().encode(snapshot)
+        XCTAssertEqual(try JSONDecoder().decode(AccessibilityTreeSnapshot.self, from: encoded), snapshot)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var elements = try XCTUnwrap(object["elements"] as? [[String: Any]])
+        for index in elements.indices {
+            elements[index].removeValue(forKey: "url")
+            elements[index].removeValue(forKey: "urlIdentity")
+        }
+        object["elements"] = elements
+        let legacy = try JSONDecoder().decode(AccessibilityTreeSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.elements[0].url)
+        XCTAssertNil(legacy.elements[0].urlIdentity)
+        XCTAssertEqual(legacy.elements[0].role, "AXLink")
     }
 
     func testDescriptionTruncationPropagatesToSnapshot() throws {

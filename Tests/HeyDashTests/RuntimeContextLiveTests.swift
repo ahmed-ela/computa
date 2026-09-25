@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import HeyDash
 
@@ -6,6 +7,36 @@ import XCTest
 /// never clicks, types, changes permissions, or modifies an existing thread.
 @MainActor
 final class RuntimeContextLiveTests: XCTestCase {
+    func testResourceGuardDiskBoundary() {
+        let limit = FixtureResources.minimumFreeDiskBytes
+        XCTAssertNil(FixtureResources(freeDiskBytes: limit, swapUsedBytes: 0, pressure: 1).stopReason(baselineSwap: 0))
+        XCTAssertEqual(FixtureResources(freeDiskBytes: limit - 1, swapUsedBytes: 0, pressure: 1).stopReason(baselineSwap: 0),
+            "free disk below 1.5 GiB")
+    }
+
+    func testResourceGuardSwapGrowthBoundaryAndDecrease() {
+        let baseline: UInt64 = 1_024
+        let limit = baseline + FixtureResources.maximumSwapGrowthBytes
+        XCTAssertNil(FixtureResources(freeDiskBytes: .max, swapUsedBytes: limit, pressure: 1).stopReason(baselineSwap: baseline))
+        XCTAssertEqual(FixtureResources(freeDiskBytes: .max, swapUsedBytes: limit + 1, pressure: 1).stopReason(baselineSwap: baseline),
+            "swap grew by more than 2 GiB")
+        XCTAssertNil(FixtureResources(freeDiskBytes: .max, swapUsedBytes: 0, pressure: 1).stopReason(baselineSwap: baseline))
+    }
+
+    func testResourceGuardCriticalPressureAndUnknownPressureFailClosed() {
+        XCTAssertNil(FixtureResources(freeDiskBytes: .max, swapUsedBytes: 0, pressure: 2).stopReason(baselineSwap: 0))
+        XCTAssertEqual(FixtureResources(freeDiskBytes: .max, swapUsedBytes: 0, pressure: 4).stopReason(baselineSwap: 0),
+            "critical memory pressure")
+        XCTAssertEqual(FixtureResources(freeDiskBytes: .max, swapUsedBytes: 0, pressure: 0).stopReason(baselineSwap: 0),
+            "unrecognized memory pressure level")
+    }
+
+    func testResourceGuardSamplingFailureIsSanitized() {
+        XCTAssertThrowsError(try FixtureResources.read(filesystemPath: "/HeyDash-missing-filesystem-\(UUID().uuidString)")) {
+            XCTAssertEqual($0.localizedDescription, "free disk measurement unavailable")
+        }
+    }
+
     func testProductionAutoCompactionPreservesCanaryAndContinuesReadOnlyToolUse() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["HEYDASH_LIVE_AUTO_COMPACTION_TEST"] == "1",
             "Set HEYDASH_LIVE_AUTO_COMPACTION_TEST=1 to test the real production compaction threshold.")
@@ -51,7 +82,8 @@ final class RuntimeContextLiveTests: XCTestCase {
             _ = try await runtime.loadTasks()
             try await send("Reply only READY; do not use tools.", runtime: runtime, audit: audit, taskID: taskID, modelID: modelID)
             let priorCompleted = audit.completedTurns
-            let padding = String(repeating: "alpha beta gamma delta. ", count: 2_000)
+            let context = LocalThreadContext.forModel(modelID)
+            let padding = String(repeating: "alpha beta gamma delta. ", count: 2_000 * context.contextWindow / 8_192)
             try await runtime.submit(prompt: "Disposable retained-input boundary fixture: \(padding) Reply only READ. Do not use tools.",
                 toTaskID: taskID, modelID: modelID)
             try await waitUntil("oversized input first terminal", audit: audit) {
@@ -100,7 +132,7 @@ final class RuntimeContextLiveTests: XCTestCase {
         configuration.codexHomePath = root.path
         configuration.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
         // Intentionally no autoCompactLimitOverride: this proves the shipping
-        // 6,144 / 8,192 policy rather than an artificially lowered test trigger.
+        // model policy rather than an artificially lowered test trigger.
         print("contextFixtureMode=\(baseline ? "uncompacted-control" : manual ? "manual" : "production-auto")\nprotocolTrace=\(root.path)/protocol.jsonl")
         let runtime = CodexAppServerRuntime(configuration: configuration)
         let audit = Audit()
@@ -114,8 +146,16 @@ final class RuntimeContextLiveTests: XCTestCase {
                 }
             }
         }
-        defer { eventTask.cancel() }
+        var resourceGuardTask: Task<Void, Never>?
+        defer {
+            resourceGuardTask?.cancel()
+            eventTask.cancel()
+        }
         do {
+            if !manual && !baseline {
+                resourceGuardTask = try startResourceGuard(runtime: runtime, audit: audit, taskID: taskID,
+                    filesystemPath: root.deletingLastPathComponent().path)
+            }
             _ = try await runtime.loadTasks()
             let canary = "HD_KEEP_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
             try await send("Remember this important retention key for this task: \(canary). "
@@ -131,20 +171,46 @@ final class RuntimeContextLiveTests: XCTestCase {
                     audit.compactionsCompleted > 0 && audit.lastStatus == .completed
                 }
             } else {
-                for round in 1...3 where audit.compactionsCompleted == 0 {
+                let context = LocalThreadContext.forModel(modelID)
+                let maximumWarmupRounds = 3 * context.contextWindow / 8_192
+                var warmupEvidence = [String]()
+                for round in 1...maximumWarmupRounds where audit.compactionsCompleted == 0 {
                     // Keep user messages short: native compaction intentionally
                     // retains user input. Disposable assistant output can shrink.
+                    let precedingAssistantCount = audit.assistantMessages.count
                     try await send("For benchmark round \(round), generate exactly 120 numbered lines. Each line must contain ten plain words describing a fictional park. "
                         + "This generated text is disposable. Keep the original retention key in memory but do not repeat it here. Do not use tools.",
                         runtime: runtime, audit: audit, taskID: taskID, modelID: modelID)
+                    let generatedText = audit.assistantMessages.dropFirst(precedingAssistantCount).joined(separator: "\n")
+                    let numberedLines = generatedText.components(separatedBy: .newlines).filter {
+                        $0.trimmingCharacters(in: .whitespaces).range(of: "^[0-9]+[.)]\\s+", options: .regularExpression) != nil
+                    }.count
+                    let measured = audit.measurements.last
+                    let evidence = "warmupRound=\(round) requestedNumberedLines=120 generatedNumberedLines=\(numberedLines) "
+                        + "generatedCharacters=\(generatedText.count) measuredInputTokens=\(measured?.inputTokens ?? -1) "
+                        + "measuredOutputTokens=\(measured?.outputTokens ?? -1) measuredContextTokens=\(measured?.usedTokens ?? -1)"
+                    warmupEvidence.append(evidence)
+                    print(evidence)
+                    if numberedLines == 0, let measured,
+                       measured.usedTokens < context.autoCompactTokenLimit,
+                       audit.compactionsCompleted == 0 {
+                        throw Failure("Production auto-compaction was not exercised: the warmup generated none of the requested numbered lines and remains below the shipping threshold. Stop instead of repeating a nonproductive workload; inspect the saved model response. "
+                            + "shippingThreshold=\(context.autoCompactTokenLimit)\n" + evidence)
+                    }
                 }
                 // A native pre-turn trigger may begin on the following request.
                 if audit.compactionsCompleted == 0 {
                     try await send("Keep the original retention key. Reply only CONTINUE_READY; do not use tools.",
                         runtime: runtime, audit: audit, taskID: taskID, modelID: modelID)
                 }
-                XCTAssertGreaterThan(audit.compactionsCompleted, 0, "Production native auto-compaction did not trigger.")
-                guard audit.compactionsCompleted > 0 else { throw Failure("Auto-compaction was not observed.") }
+                guard audit.compactionsCompleted > 0 else {
+                    let maximumMeasured = audit.maximumBeforeCompaction ?? 0
+                    let diagnosis = maximumMeasured < context.autoCompactTokenLimit
+                        ? "Production auto-compaction was not exercised: the model-generated workload remained below the shipping threshold. An underfilled or refused workload is not evidence of a compaction failure; inspect the saved model responses."
+                        : "Production auto-compaction was not observed despite a reported context footprint at or above the shipping threshold."
+                    throw Failure(diagnosis + " maximumMeasuredContextTokens=\(maximumMeasured) shippingThreshold=\(context.autoCompactTokenLimit)\n"
+                        + warmupEvidence.joined(separator: "\n"))
+                }
             }
 
             let precedingToolCount = audit.successfulStatusTools
@@ -170,11 +236,13 @@ final class RuntimeContextLiveTests: XCTestCase {
             }
             XCTAssertTrue(audit.measurements.allSatisfy {
                 guard let window = $0.contextWindow else { return false }
-                return window > 0 && window <= 8_192
-            }, "Use the runtime's effective window; it may reserve part of the configured8K.")
+                return window > 0 && window <= LocalThreadContext.forModel(modelID).contextWindow
+            }, "Use the runtime's effective window; it may reserve part of the configured model budget.")
             XCTAssertLessThanOrEqual(audit.compactionsCompleted, 3, "Unexpected repeated compaction churn in the bounded fixture.")
             XCTAssertTrue(audit.failures.isEmpty, audit.failures.joined(separator: "\n"))
 
+            resourceGuardTask?.cancel()
+            await resourceGuardTask?.value
             let report = await runtime.shutdown()
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "\n"))
             let trace = try AppServerWireTrace.load(root.appendingPathComponent("protocol.jsonl"))
@@ -187,8 +255,9 @@ final class RuntimeContextLiveTests: XCTestCase {
             let config = (starts.first?.object["params"] as? [String: Any])?["config"] as? [String: Any]
             XCTAssertNil((starts.first?.object["params"] as? [String: Any])?["developerInstructions"])
             XCTAssertNil(config?["compact_prompt"])
-            XCTAssertEqual(config?["model_context_window"] as? Int, 8_192)
-            XCTAssertEqual(config?["model_auto_compact_token_limit"] as? Int, 6_144)
+            let context = LocalThreadContext.forModel(modelID)
+            XCTAssertEqual(config?["model_context_window"] as? Int, context.contextWindow)
+            XCTAssertEqual(config?["model_auto_compact_token_limit"] as? Int, context.autoCompactTokenLimit)
             let manualRequests = trace.messages.filter { $0.method == "thread/compact/start" }
             let preservedHistory = trace.messages.filter { $0.method == "thread/inject_items" }
             if baseline {
@@ -226,13 +295,113 @@ final class RuntimeContextLiveTests: XCTestCase {
             add(attachment)
             print(proof)
         } catch {
+            if audit.resourceGuardTripped {
+                // Let the watchdog's bounded interrupt grace finish before the
+                // same runtime's idempotent shutdown; never wait on the RPC.
+                await resourceGuardTask?.value
+            } else {
+                resourceGuardTask?.cancel()
+            }
             _ = await runtime.shutdown()
             throw error
         }
     }
 
+    private func startResourceGuard(runtime: CodexAppServerRuntime, audit: Audit, taskID: String,
+                                    filesystemPath: String) throws -> Task<Void, Never> {
+        let baseline = try FixtureResources.read(filesystemPath: filesystemPath)
+        print(baseline.metricLine(sample: 0, baselineSwap: baseline.swapUsedBytes))
+        if let reason = baseline.stopReason(baselineSwap: baseline.swapUsedBytes) {
+            throw Failure("Resource guard refused the live fixture before inference: \(reason).")
+        }
+        return Task { @MainActor in
+            var sampleIndex = 0
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard !Task.isCancelled else { return }
+                sampleIndex += 1
+                let reason: String?
+                do {
+                    let sample = try FixtureResources.read(filesystemPath: filesystemPath)
+                    reason = sample.stopReason(baselineSwap: baseline.swapUsedBytes)
+                    // Check every two seconds, but emit routine numeric metrics
+                    // only every ten seconds. A trip always prints immediately.
+                    if sampleIndex.isMultiple(of: 5) || reason != nil {
+                        print(sample.metricLine(sample: sampleIndex, baselineSwap: baseline.swapUsedBytes))
+                    }
+                } catch {
+                    reason = "resource sampling failed: \(error.localizedDescription)"
+                }
+                guard let reason else { continue }
+                audit.resourceGuardTripped = true
+                audit.failures.append("Resource guard stopped only this live fixture: \(reason).")
+                print("resourceGuardTripped=true reason=\(reason)")
+                // This unstructured RPC task may wait on an unresponsive server.
+                // It must never delay shutdown. Stop owns only this fixture's
+                // runtime and its child process group, not LM Studio or Chrome.
+                let interrupt = Task { try? await runtime.interrupt(taskID: taskID) }
+                try? await Task.sleep(for: .seconds(1))
+                let report = await runtime.shutdown()
+                interrupt.cancel()
+                print("resourceGuardOwnedRuntimeShutdownSucceeded=\(report.succeeded)")
+                return
+            }
+        }
+    }
+
+    private struct FixtureResources {
+        static let minimumFreeDiskBytes: UInt64 = 1_536 * 1_024 * 1_024
+        static let maximumSwapGrowthBytes: UInt64 = 2 * 1_024 * 1_024 * 1_024
+        let freeDiskBytes: UInt64
+        let swapUsedBytes: UInt64
+        let pressure: Int32
+
+        static func read(filesystemPath: String) throws -> Self {
+            let attributes: [FileAttributeKey: Any]
+            do {
+                attributes = try FileManager.default.attributesOfFileSystem(forPath: filesystemPath)
+            } catch {
+                throw Failure("free disk measurement unavailable")
+            }
+            guard let free = attributes[.systemFreeSize] as? NSNumber else {
+                throw Failure("free disk measurement unavailable")
+            }
+            var swap = xsw_usage()
+            var swapSize = MemoryLayout<xsw_usage>.size
+            guard sysctlbyname("vm.swapusage", &swap, &swapSize, nil, 0) == 0,
+                  swapSize == MemoryLayout<xsw_usage>.size else {
+                throw Failure("swap measurement unavailable")
+            }
+            var pressure: Int32 = 0
+            var pressureSize = MemoryLayout<Int32>.size
+            guard sysctlbyname("kern.memorystatus_vm_pressure_level", &pressure, &pressureSize, nil, 0) == 0,
+                  pressureSize == MemoryLayout<Int32>.size else {
+                throw Failure("memory pressure measurement unavailable")
+            }
+            return Self(freeDiskBytes: free.uint64Value, swapUsedBytes: swap.xsu_used, pressure: pressure)
+        }
+
+        func stopReason(baselineSwap: UInt64) -> String? {
+            if freeDiskBytes < Self.minimumFreeDiskBytes { return "free disk below 1.5 GiB" }
+            if swapUsedBytes > baselineSwap, swapUsedBytes - baselineSwap > Self.maximumSwapGrowthBytes {
+                return "swap grew by more than 2 GiB"
+            }
+            // Darwin memory-pressure levels match DISPATCH_MEMORYPRESSURE_*:
+            // 1 normal, 2 warning, 4 critical. Unknown values fail closed.
+            if pressure & 4 != 0 { return "critical memory pressure" }
+            if pressure != 1 && pressure != 2 { return "unrecognized memory pressure level" }
+            return nil
+        }
+
+        func metricLine(sample: Int, baselineSwap: UInt64) -> String {
+            "resourceGuardSample=\(sample) freeDiskBytes=\(freeDiskBytes) swapUsedBytes=\(swapUsedBytes) "
+                + "baselineSwapBytes=\(baselineSwap) pressureLevel=\(pressure)"
+        }
+    }
+
     private func send(_ prompt: String, runtime: CodexAppServerRuntime, audit: Audit,
                       taskID: String, modelID: String) async throws {
+        guard audit.failures.isEmpty else { throw Failure(audit.failures.joined(separator: "\n")) }
         let completed = audit.completedTurns
         audit.lastStatus = nil
         try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
@@ -266,6 +435,7 @@ final class RuntimeContextLiveTests: XCTestCase {
         var failures = [String]()
         var contextFailures = [String]()
         var acceptExpectedContextFailure = false
+        var resourceGuardTripped = false
         var maximumBeforeCompaction: Int?
         var measurementsAfterCompaction = [RuntimeContextUsage]()
         var lastStatus: TaskStatus?

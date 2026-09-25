@@ -1350,8 +1350,51 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "assert_cmd",
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 5957c19..76149f3 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -374,6 +374,20 @@ fn responses_request_properties_match(
+         && previous_text == current_text
+ }
+ 
++/// Apply the external-provider wire projection without changing canonical history.
++pub(crate) fn prepare_input_for_non_openai_provider(input: &mut [ResponseItem]) {
++    for item in input {
++        item.clear_internal_chat_message_metadata_passthrough();
++        if let ResponseItem::FunctionCall {
++            encrypted_function_args,
++            ..
++        } = item
++        {
++            *encrypted_function_args = None;
++        }
++    }
++}
++
+ fn response_items_equal_ignoring_internal_metadata(
+     previous: &ResponseItem,
+     current: &ResponseItem,
+@@ -865,16 +879,7 @@ impl ModelClient {
+             )
+         };
+         if !is_openai {
+-            for item in &mut input {
+-                item.clear_internal_chat_message_metadata_passthrough();
+-                if let ResponseItem::FunctionCall {
+-                    encrypted_function_args,
+-                    ..
+-                } = item
+-                {
+-                    *encrypted_function_args = None;
+-                }
+-            }
++            prepare_input_for_non_openai_provider(&mut input);
+         }
+         let reasoning = self.build_reasoning(model_info, effort, summary);
+         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index c2ab78a..ca6d41f 100644
+index c2ab78a..cc4b748 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -59,15 +59,20 @@ pub use codex_prompts::SUMMARIZATION_PROMPT;
@@ -1378,7 +1421,7 @@ index c2ab78a..ca6d41f 100644
  pub(crate) enum InitialContextInjection {
      BeforeLastUserMessage {
          world_state: Arc<WorldState>,
-@@ -240,12 +245,28 @@ async fn run_compact_task_inner_impl(
+@@ -240,12 +245,36 @@ async fn run_compact_task_inner_impl(
      initial_context_injection: InitialContextInjection,
      compaction_metadata: CompactionTurnMetadata,
  ) -> CodexResult<String> {
@@ -1386,8 +1429,16 @@ index c2ab78a..ca6d41f 100644
 +    // Only the local mid-turn path needs to continue an already executing turn. Preserve genuine
 +    // receipts before summary sampling mutates live history; a malformed/oversized set fails closed.
 +    let receipts = if matches!(compaction_metadata.phase(), CompactionPhase::MidTurn) {
-+        match tool_receipts::current_turn_receipts(history.annotated_items(), &turn_context.sub_id)
-+        {
++        let receipt_provider = if turn_context.provider.info().is_openai() {
++            tool_receipts::ReceiptProvider::OpenAI
++        } else {
++            tool_receipts::ReceiptProvider::External
++        };
++        match tool_receipts::current_turn_receipts(
++            history.annotated_items(),
++            &turn_context.sub_id,
++            receipt_provider,
++        ) {
 +            Ok(receipts) => receipts,
 +            Err(error) => {
 +                sess.track_turn_codex_error(turn_context.as_ref(), &error);
@@ -1408,7 +1459,7 @@ index c2ab78a..ca6d41f 100644
      history.record_items(
          &[initial_input_for_turn.into()],
          turn_context.model_info().truncation_policy.into(),
-@@ -365,20 +386,49 @@ async fn run_compact_task_inner_impl(
+@@ -365,20 +394,49 @@ async fn run_compact_task_inner_impl(
          // belongs to this compaction turn.
          summary_item.set_turn_id_if_missing(&turn_context.sub_id);
      }
@@ -1460,7 +1511,7 @@ index c2ab78a..ca6d41f 100644
      sess.replace_compacted_history(
          new_history,
          reference_context_item,
-@@ -788,7 +838,21 @@ async fn drain_to_completed(
+@@ -788,7 +846,21 @@ async fn drain_to_completed(
              ));
          };
          match event {
@@ -1777,10 +1828,10 @@ index 0000000..f24d6ff
 +}
 diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..08dd47c
+index 0000000..7b432b3
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts.rs
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,410 @@
 +//! Bounded, genuine current-turn receipts for local mid-turn compaction.
 +//!
 +//! These remain tool-role history, never instructions, authorization, or a replay queue. Capture
@@ -1789,6 +1840,7 @@ index 0000000..08dd47c
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +
++use crate::client::prepare_input_for_non_openai_provider;
 +use base64::Engine;
 +use codex_history::ResponseItemEnvelope;
 +use codex_protocol::error::CodexErr;
@@ -1805,15 +1857,41 @@ index 0000000..08dd47c
 +const MAX_CALL_BYTES: usize = 1024;
 +const MAX_OUTPUT_TEXT_BYTES: usize = 2048;
 +const MAX_OUTPUT_BYTES: usize = 3072;
++const MAX_LATEST_OUTPUT_TEXT_BYTES: usize = 4096;
++const MAX_LATEST_OUTPUT_BYTES: usize = 6144;
 +const MAX_RECEIPT_BYTES: usize = 12 * 1024;
++// Local-only identities and timestamps do not consume the external provider's prompt budget,
++// but they still need a separate hard bound in the canonical replacement history.
++const MAX_CANONICAL_RECEIPT_BYTES: usize = 24 * 1024;
 +const MAX_LATEST_IMAGE_BYTES: usize = 2 * 1024 * 1024;
-+// A bounded shared cap gives every result a genuine excerpt instead of dropping older actions.
-+// Exact serialized sizes below account for JSON escaping and all original envelope overhead.
++// Every result keeps a genuine excerpt rather than dropping older actions. Give the latest
++// completed observation more room before shrinking it: a uniform cap can erase the newest
++// observation's header/identity while retaining stale identifiers from older observations.
++// Text/header budgets include JSON escaping and array separators. The latest image payload is
++// separately bounded and counted by the final candidate-history context estimator.
 +const OUTPUT_TEXT_CAPS: [usize; 7] = [MAX_OUTPUT_TEXT_BYTES, 1536, 1024, 768, 512, 384, 256];
++const LATEST_OUTPUT_TEXT_CAPS: [usize; 9] = [
++    MAX_LATEST_OUTPUT_TEXT_BYTES,
++    3072,
++    MAX_OUTPUT_TEXT_BYTES,
++    1536,
++    1024,
++    768,
++    512,
++    384,
++    256,
++];
++
++#[derive(Clone, Copy)]
++pub(super) enum ReceiptProvider {
++    OpenAI,
++    External,
++}
 +
 +pub(super) fn current_turn_receipts(
 +    history: &[ResponseItemEnvelope],
 +    turn_id: &str,
++    provider: ReceiptProvider,
 +) -> Result<Vec<ResponseItemEnvelope>> {
 +    if turn_id.is_empty() {
 +        return Err(receipt_error("current turn identity is unavailable"));
@@ -1883,9 +1961,20 @@ index 0000000..08dd47c
 +        Some((index, output)) => latest_observation_image(output)?.map(|image| (index, image)),
 +        None => None,
 +    };
-+    for text_cap in OUTPUT_TEXT_CAPS {
++    let latest_output_index = pairs.last().map(|(_, _, index, _)| *index);
++    // Try all bounded historical excerpts before reducing the latest observation. No receipt
++    // is reordered, replayed, or promoted to authority, and global budgets remain unchanged.
++    for (latest_text_cap, older_text_cap) in
++        LATEST_OUTPUT_TEXT_CAPS.into_iter().flat_map(|latest| {
++            OUTPUT_TEXT_CAPS
++                .into_iter()
++                .filter(move |older| *older <= latest)
++                .map(move |older| (latest, older))
++        })
++    {
 +        let mut retained = Vec::new();
-+        let mut retained_bytes = 0usize;
++        let mut retained_bytes = 2usize; // Provider input-array brackets.
++        let mut canonical_bytes = 4usize; // Parallel persisted item/metadata-array brackets.
 +        let mut fits = true;
 +        for &(call_index, call, output_index, envelope) in &pairs {
 +            let ResponseItem::FunctionCallOutput {
@@ -1902,6 +1991,17 @@ index 0000000..08dd47c
 +            // Do not clone discarded screenshots or their references. Preserve the original
 +            // result envelope/identity and failure state, replacing only its bounded body.
 +            let keep_image = latest_image.is_some_and(|(index, _)| index == output_index);
++            let is_latest = latest_output_index == Some(output_index);
++            let text_cap = if is_latest {
++                latest_text_cap
++            } else {
++                older_text_cap
++            };
++            let serialized_cap = if is_latest {
++                MAX_LATEST_OUTPUT_BYTES
++            } else {
++                MAX_OUTPUT_BYTES
++            };
 +            let output = bounded_output(output, text_cap, keep_image)?;
 +            let text_bytes = output_text_bytes(&output.body);
 +            let receipt = ResponseItemEnvelope {
@@ -1917,10 +2017,23 @@ index 0000000..08dd47c
 +                metadata: envelope.metadata.clone(),
 +            };
 +            let output_bytes = serde_json::to_vec(&receipt.item)?.len();
-+            retained_bytes += serde_json::to_vec(&call.item)?.len() + output_bytes;
++            canonical_bytes += serde_json::to_vec(&call.item)?.len()
++                + output_bytes
++                + serde_json::to_vec(&call.metadata)?.len()
++                + serde_json::to_vec(&receipt.metadata)?.len()
++                + if retained.is_empty() { 2 } else { 4 };
++            let mut projected = [call.item.clone(), receipt.item.clone()];
++            if matches!(provider, ReceiptProvider::External) {
++                prepare_input_for_non_openai_provider(&mut projected);
++            }
++            for item in &projected {
++                retained_bytes += serde_json::to_vec(item)?.len();
++            }
++            retained_bytes += if retained.is_empty() { 1 } else { 2 };
 +            if text_bytes > text_cap
-+                || output_bytes > MAX_OUTPUT_BYTES
++                || output_bytes > serialized_cap
 +                || retained_bytes > MAX_RECEIPT_BYTES
++                || canonical_bytes > MAX_CANONICAL_RECEIPT_BYTES
 +            {
 +                fits = false;
 +                break;
@@ -1957,7 +2070,7 @@ index 0000000..08dd47c
 +        }
 +    }
 +    Err(receipt_error(
-+        "all genuine tool receipts cannot fit the 12 KiB serialized bound",
++        "all genuine tool receipts cannot fit the 12 KiB provider-input or 24 KiB canonical serialized bounds",
 +    ))
 +}
 +
@@ -2131,15 +2244,23 @@ index 0000000..08dd47c
 +mod tests;
 diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
 new file mode 100644
-index 0000000..483fe1a
+index 0000000..ca71ca0
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
-@@ -0,0 +1,527 @@
+@@ -0,0 +1,995 @@
 +use super::*;
 +use codex_history::CodexHarnessMetadata;
 +use codex_protocol::models::FunctionCallOutputPayload;
 +use pretty_assertions::assert_eq;
 +use serde_json::json;
++
++// Keep the original regressions on the strict, unprojected provider path.
++fn current_turn_receipts(
++    history: &[ResponseItemEnvelope],
++    turn_id: &str,
++) -> Result<Vec<ResponseItemEnvelope>> {
++    super::current_turn_receipts(history, turn_id, ReceiptProvider::OpenAI)
++}
 +
 +fn pair(id: &str, turn: &str, text: &str) -> Vec<ResponseItemEnvelope> {
 +    [
@@ -2158,6 +2279,225 @@ index 0000000..483fe1a
 +        }
 +    })
 +    .collect()
++}
++
++const REALISTIC_TURN: &str = "00000000-1234-5678-9abc-000000000001";
++
++fn realistic_mixed_receipts(count: usize, text: &str) -> Vec<ResponseItemEnvelope> {
++    (0..count)
++        .flat_map(|index| {
++            let id = format!("call_{index:016}");
++            let mut items = pair(&id, REALISTIC_TURN, text);
++            if let ResponseItem::FunctionCall {
++                name, arguments, ..
++            } = &mut items[0].item
++            {
++                *name = "computer_v2_snapshot".to_string();
++                *arguments = json!({"sequence":index}).to_string();
++            }
++            items[1]
++                .item
++                .set_id(Some(codex_protocol::ResponseItemId::with_suffix(
++                    "fco",
++                    format!("00000000-1234-5678-9abc-{index:012}"),
++                )));
++            items[1].item.set_create_time_if_missing(
++                serde_json::Number::from_f64(1_790_301_234.567 + index as f64).unwrap(),
++            );
++            if let ResponseItem::FunctionCallOutput { output, .. } = &mut items[1].item {
++                output.success = Some(index % 7 != 0);
++                if index == 0 || index == count - 1 {
++                    output.body = FunctionCallOutputBody::ContentItems(vec![
++                        FunctionCallOutputContentItem::InputText {
++                            text: text.to_string(),
++                        },
++                        observation_image(),
++                    ]);
++                }
++            }
++            items
++        })
++        .collect()
++}
++
++fn assert_external_receipt_bounds(retained: &[ResponseItemEnvelope]) {
++    let mut canonical = retained.to_vec();
++    let latest_output = canonical
++        .iter()
++        .rposition(|envelope| matches!(envelope.item, ResponseItem::FunctionCallOutput { .. }));
++    for (index, envelope) in canonical.iter_mut().enumerate() {
++        if let ResponseItem::FunctionCallOutput { output, .. } = &envelope.item {
++            let text_limit = if Some(index) == latest_output {
++                MAX_LATEST_OUTPUT_TEXT_BYTES
++            } else {
++                MAX_OUTPUT_TEXT_BYTES
++            };
++            assert!(output_text_bytes(&output.body) <= text_limit);
++        }
++        if let ResponseItem::FunctionCallOutput { output, .. } = &mut envelope.item
++            && let FunctionCallOutputBody::ContentItems(items) = &mut output.body
++        {
++            for item in items {
++                if let FunctionCallOutputContentItem::InputImage { image, .. } = item {
++                    *image = ImageReference::Inline {
++                        image_url: String::new(),
++                    };
++                }
++            }
++        }
++        if matches!(envelope.item, ResponseItem::FunctionCallOutput { .. }) {
++            let serialized_limit = if Some(index) == latest_output {
++                MAX_LATEST_OUTPUT_BYTES
++            } else {
++                MAX_OUTPUT_BYTES
++            };
++            assert!(serde_json::to_vec(&envelope.item).unwrap().len() <= serialized_limit);
++        }
++    }
++    let items: Vec<_> = canonical.iter().map(|envelope| &envelope.item).collect();
++    let metadata: Vec<_> = canonical
++        .iter()
++        .map(|envelope| &envelope.metadata)
++        .collect();
++    let canonical_bytes =
++        serde_json::to_vec(&items).unwrap().len() + serde_json::to_vec(&metadata).unwrap().len();
++    assert!(canonical_bytes <= MAX_CANONICAL_RECEIPT_BYTES);
++    let mut projected: Vec<_> = canonical
++        .into_iter()
++        .map(|envelope| envelope.item)
++        .collect();
++    prepare_input_for_non_openai_provider(&mut projected);
++    let wire_bytes = serde_json::to_vec(&projected).unwrap().len();
++    assert!(wire_bytes <= MAX_RECEIPT_BYTES);
++}
++
++#[test]
++fn external_provider_retains_twenty_realistic_pairs_without_charging_unsent_metadata() {
++    let original =
++        realistic_mixed_receipts(20, &format!("observed:{}:end", "diagnostic ".repeat(220)));
++    assert!(current_turn_receipts(&original, REALISTIC_TURN).is_err());
++    let retained =
++        super::current_turn_receipts(&original, REALISTIC_TURN, ReceiptProvider::External).unwrap();
++    assert_receipt_identity(&original, &retained);
++    assert_external_receipt_bounds(&retained);
++    assert_eq!(
++        super::current_turn_receipts(&retained, REALISTIC_TURN, ReceiptProvider::External).unwrap(),
++        retained
++    );
++    assert_eq!(
++        super::current_turn_receipts(&retained, "next-turn", ReceiptProvider::External).unwrap(),
++        vec![]
++    );
++    let ResponseItem::FunctionCallOutput { output, .. } = &retained.last().unwrap().item else {
++        unreachable!()
++    };
++    assert!(
++        output
++            .content_items()
++            .unwrap()
++            .contains(&observation_image())
++    );
++}
++
++#[test]
++fn external_provider_keeps_thirty_two_realistic_mixed_pairs_but_rejects_the_next() {
++    let original = realistic_mixed_receipts(MAX_PAIRS, "verified observation");
++    let retained =
++        super::current_turn_receipts(&original, REALISTIC_TURN, ReceiptProvider::External).unwrap();
++    assert_receipt_identity(&original, &retained);
++    assert_external_receipt_bounds(&retained);
++    assert_eq!(
++        super::current_turn_receipts(&retained, REALISTIC_TURN, ReceiptProvider::External).unwrap(),
++        retained
++    );
++    let mut overflow = retained;
++    overflow.extend(pair("one-more", REALISTIC_TURN, "observed"));
++    assert!(
++        super::current_turn_receipts(&overflow, REALISTIC_TURN, ReceiptProvider::External)
++            .unwrap_err()
++            .to_string()
++            .contains("32 completed-function-call bound")
++    );
++}
++
++#[test]
++fn external_projection_does_not_allow_unbounded_canonical_history_metadata() {
++    let mut original = realistic_mixed_receipts(20, "verified observation");
++    for envelope in &mut original {
++        envelope.metadata.as_mut().unwrap().compaction_model_hash = Some("x".repeat(1024));
++    }
++    assert!(
++        super::current_turn_receipts(&original, REALISTIC_TURN, ReceiptProvider::External)
++            .unwrap_err()
++            .to_string()
++            .contains("24 KiB canonical")
++    );
++}
++
++#[test]
++fn latest_capture_keeps_complete_ax_identity_and_image_before_older_excerpts() {
++    let mut original = realistic_mixed_receipts(13, &"older observation ".repeat(300));
++    let last_call = original.len() - 2;
++    if let ResponseItem::FunctionCall {
++        name, arguments, ..
++    } = &mut original[last_call].item
++    {
++        *name = "computer_v2_capture".to_string();
++        *arguments = json!({"include_accessibility":true}).to_string();
++    }
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut original.last_mut().unwrap().item
++    {
++        output.body = FunctionCallOutputBody::ContentItems(vec![
++            FunctionCallOutputContentItem::InputText {
++                text: format!("capture_id=current-capture; {}", "m".repeat(320)),
++            },
++            FunctionCallOutputContentItem::InputText {
++                text: format!(
++                    "snapshot_id=current-ax; parents=2:1;\n{}\n[2] AXStaticText value=observed",
++                    "a".repeat(3060)
++                ),
++            },
++            observation_image(),
++        ]);
++        assert!(output_text_bytes(&output.body) > MAX_OUTPUT_BYTES);
++        assert!(output_text_bytes(&output.body) < MAX_LATEST_OUTPUT_TEXT_BYTES);
++    }
++    let retained =
++        super::current_turn_receipts(&original, REALISTIC_TURN, ReceiptProvider::External).unwrap();
++    assert_eq!(retained.len(), 26);
++    assert_receipt_identity(&original, &retained);
++    assert_external_receipt_bounds(&retained);
++    assert_eq!(retained.last(), original.last());
++    assert_ne!(retained[1], original[1]);
++    assert_eq!(
++        super::current_turn_receipts(&retained, REALISTIC_TURN, ReceiptProvider::External).unwrap(),
++        retained
++    );
++    assert_eq!(
++        super::current_turn_receipts(&retained, "next-turn", ReceiptProvider::External).unwrap(),
++        vec![]
++    );
++}
++
++#[test]
++fn latest_priority_follows_completion_order_not_parallel_call_order() {
++    let first_call = pair("first-call-last-output", "current", &"latest ".repeat(480));
++    let second_call = pair("second-call-first-output", "current", &"older ".repeat(580));
++    let original = vec![
++        first_call[0].clone(),
++        second_call[0].clone(),
++        second_call[1].clone(),
++        first_call[1].clone(),
++    ];
++    let retained = current_turn_receipts(&original, "current").unwrap();
++    assert_receipt_identity(&original, &retained);
++    assert_receipt_bounds(&retained);
++    assert_eq!(retained[3], first_call[1]);
++    assert_ne!(retained[2], second_call[1]);
++    assert_eq!(
++        current_turn_receipts(&retained, "current").unwrap(),
++        retained
++    );
 +}
 +
 +fn observation_image() -> FunctionCallOutputContentItem {
@@ -2208,9 +2548,17 @@ index 0000000..483fe1a
 +fn assert_receipt_bounds(retained: &[ResponseItemEnvelope]) {
 +    let mut text_receipts = retained.to_vec();
 +    let mut images = 0;
-+    for envelope in &mut text_receipts {
++    let latest_output = text_receipts
++        .iter()
++        .rposition(|envelope| matches!(envelope.item, ResponseItem::FunctionCallOutput { .. }));
++    for (index, envelope) in text_receipts.iter_mut().enumerate() {
 +        if let ResponseItem::FunctionCallOutput { output, .. } = &mut envelope.item {
-+            assert!(output_text_bytes(&output.body) <= MAX_OUTPUT_TEXT_BYTES);
++            let text_limit = if Some(index) == latest_output {
++                MAX_LATEST_OUTPUT_TEXT_BYTES
++            } else {
++                MAX_OUTPUT_TEXT_BYTES
++            };
++            assert!(output_text_bytes(&output.body) <= text_limit);
 +            if let FunctionCallOutputBody::ContentItems(items) = &mut output.body {
 +                for item in items {
 +                    if matches!(item, FunctionCallOutputContentItem::InputImage { .. }) {
@@ -2224,7 +2572,12 @@ index 0000000..483fe1a
 +                    }
 +                }
 +            }
-+            assert!(serde_json::to_vec(&envelope.item).unwrap().len() <= MAX_OUTPUT_BYTES);
++            let serialized_limit = if Some(index) == latest_output {
++                MAX_LATEST_OUTPUT_BYTES
++            } else {
++                MAX_OUTPUT_BYTES
++            };
++            assert!(serde_json::to_vec(&envelope.item).unwrap().len() <= serialized_limit);
 +        }
 +    }
 +    assert!(images <= 1);
@@ -2282,8 +2635,8 @@ index 0000000..483fe1a
 +    assert!(text.starts_with("actual start:"));
 +    assert!(text.ends_with(":actual end"));
 +    assert!(text.contains("truncated"));
-+    assert!(text.len() <= MAX_OUTPUT_TEXT_BYTES);
-+    assert!(serde_json::to_vec(&retained[1].item).unwrap().len() <= MAX_OUTPUT_BYTES);
++    assert!(text.len() <= MAX_LATEST_OUTPUT_TEXT_BYTES);
++    assert!(serde_json::to_vec(&retained[1].item).unwrap().len() <= MAX_LATEST_OUTPUT_BYTES);
 +    let mut expected = history[1].clone();
 +    if let ResponseItem::FunctionCallOutput {
 +        output: expected_output,
@@ -2447,7 +2800,7 @@ index 0000000..483fe1a
 +    for text in ["x".repeat(2000), " ".repeat(2000), "x".repeat(4000)] {
 +        let history = pair("already-bounded", "current", &text);
 +        let retained = current_turn_receipts(&history, "current").unwrap();
-+        if text.len() <= MAX_OUTPUT_TEXT_BYTES {
++        if text.len() <= MAX_LATEST_OUTPUT_TEXT_BYTES {
 +            assert_eq!(retained, history);
 +        }
 +        assert_eq!(
@@ -2662,6 +3015,234 @@ index 0000000..483fe1a
 +            .contains("multiple observation images")
 +    );
 +}
++
++// Offline, opt-in evidence export only: no model, server, tool execution, or application state.
++// The directory must already be private; create_new prevents overwriting any prior evidence.
++#[cfg(unix)]
++#[test]
++#[ignore = "requires explicit private rollout and output paths for the recorded 13-pair regression"]
++fn export_recorded_receipts_with_latest_priority() {
++    use std::fs::File;
++    use std::fs::OpenOptions;
++    use std::io::Read;
++    use std::io::Write;
++    use std::os::unix::fs::OpenOptionsExt;
++    use std::os::unix::fs::PermissionsExt;
++    use std::path::PathBuf;
++
++    fn key(item: &ResponseItem) -> Option<(bool, &str)> {
++        match item {
++            ResponseItem::FunctionCall { call_id, .. } => Some((false, call_id)),
++            ResponseItem::FunctionCallOutput { call_id, .. } => Some((
++                true,
++                call_id
++                    .as_deref()
++                    .expect("recorded output lacks call identity"),
++            )),
++            _ => None,
++        }
++    }
++
++    fn same_except_body(original: &ResponseItem, bounded: &ResponseItem) -> bool {
++        let mut comparable = original.clone();
++        if let (
++            ResponseItem::FunctionCallOutput { output, .. },
++            ResponseItem::FunctionCallOutput {
++                output: bounded_output,
++                ..
++            },
++        ) = (&mut comparable, bounded)
++        {
++            output.body = bounded_output.body.clone();
++        }
++        comparable == *bounded
++    }
++
++    let source = PathBuf::from(
++        std::env::var_os("HEYDASH_RECEIPT_REPLAY_ROLLOUT")
++            .expect("explicit recorded rollout path required"),
++    );
++    let destination = PathBuf::from(
++        std::env::var_os("HEYDASH_RECEIPT_REPLAY_OUTPUT")
++            .expect("explicit private output path required"),
++    );
++    assert!(
++        source.is_absolute() && destination.is_absolute(),
++        "paths must be absolute"
++    );
++    let parent = destination.parent().expect("output parent required");
++    let parent_metadata =
++        std::fs::symlink_metadata(parent).expect("private output directory required");
++    assert!(
++        parent_metadata.is_dir() && parent_metadata.permissions().mode() & 0o077 == 0,
++        "output parent must be an existing private directory"
++    );
++    let source_metadata = std::fs::symlink_metadata(&source).expect("recorded rollout required");
++    const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
++    assert!(
++        source_metadata.is_file() && source_metadata.len() <= MAX_SOURCE_BYTES,
++        "recorded rollout must be a bounded regular file"
++    );
++    let mut source_text = String::new();
++    File::open(&source)
++        .expect("recorded rollout could not be opened")
++        .take(MAX_SOURCE_BYTES + 1)
++        .read_to_string(&mut source_text)
++        .expect("recorded rollout could not be read");
++    assert!(
++        source_text.len() as u64 <= MAX_SOURCE_BYTES,
++        "recorded rollout grew beyond bound"
++    );
++    let mut checkpoint = None;
++    for line in source_text.lines() {
++        let value: serde_json::Value = serde_json::from_str(line)
++            .unwrap_or_else(|_| panic!("recorded rollout contains invalid JSON"));
++        if value.get("type").and_then(serde_json::Value::as_str) == Some("compacted") {
++            assert!(
++                checkpoint.is_none(),
++                "recorded regression must have exactly one checkpoint"
++            );
++            checkpoint = Some(
++                serde_json::from_value::<codex_history::CompactedItem>(
++                    value
++                        .get("payload")
++                        .expect("checkpoint payload required")
++                        .clone(),
++                )
++                .unwrap_or_else(|_| panic!("checkpoint structure is invalid")),
++            );
++        }
++    }
++    let checkpoint = checkpoint.expect("recorded regression checkpoint required");
++    let replacement = checkpoint
++        .replacement_history
++        .expect("canonical replacement required");
++    let guardian = checkpoint
++        .guardian_history
++        .expect("original guardian history required")
++        .0;
++    let canonical: Vec<_> = replacement
++        .iter()
++        .filter(|entry| key(&entry.item).is_some())
++        .collect();
++    assert!(
++        canonical.len() == 26,
++        "expected exactly thirteen recorded pairs"
++    );
++    let turn_id = canonical[0]
++        .turn_id()
++        .expect("recorded turn identity required")
++        .to_string();
++    assert!(!turn_id.is_empty(), "recorded turn identity is empty");
++    let mut canonical_keys = HashSet::new();
++    for entry in &canonical {
++        assert!(
++            entry.turn_id() == Some(turn_id.as_str()),
++            "canonical turns differ"
++        );
++        assert!(
++            canonical_keys.insert(key(&entry.item).expect("recorded key required")),
++            "canonical receipt identity is duplicated"
++        );
++    }
++
++    // Guardian records hold original bodies, while the canonical replacement holds harness
++    // metadata. Match exact function identities and every field except the truncated body
++    // before restoring that body. Never export any message, summary, or reasoning item.
++    let mut matched = HashSet::new();
++    let mut restored = Vec::with_capacity(guardian.len());
++    for item in guardian {
++        let metadata = if let Some(item_key) = key(&item) {
++            let canonical = canonical
++                .iter()
++                .find(|entry| key(&entry.item) == Some(item_key))
++                .expect("original function has no canonical match");
++            assert!(
++                matched.insert((item_key.0, item_key.1.to_string())),
++                "original receipt identity is duplicated"
++            );
++            assert!(
++                same_except_body(&item, &canonical.item),
++                "original and canonical identity, arguments, success, or metadata differ"
++            );
++            canonical.metadata.clone()
++        } else {
++            None
++        };
++        restored.push(ResponseItemEnvelope { item, metadata });
++    }
++    assert!(matched.len() == 26, "original receipt set is incomplete");
++    let original_receipts: Vec<_> = restored
++        .iter()
++        .filter(|entry| key(&entry.item).is_some())
++        .collect();
++    assert!(
++        original_receipts
++            .iter()
++            .zip(&canonical)
++            .all(|(original, saved)| key(&original.item) == key(&saved.item)),
++        "canonical receipt order differs from original history"
++    );
++    let retained = super::current_turn_receipts(&restored, &turn_id, ReceiptProvider::External)
++        .unwrap_or_else(|_| panic!("native receipt retention rejected the recorded history"));
++    assert!(retained.len() == 26, "native receipt count changed");
++    assert!(
++        retained
++            .iter()
++            .zip(&original_receipts)
++            .all(
++                |(actual, original)| same_except_body(&original.item, &actual.item)
++                    && actual.metadata == original.metadata
++            ),
++        "native receipt identity, order, success, or metadata changed"
++    );
++    assert_external_receipt_bounds(&retained);
++    assert!(
++        retained.last() == original_receipts.last().copied(),
++        "newest recorded observation was not preserved completely"
++    );
++    let repeated = super::current_turn_receipts(&retained, &turn_id, ReceiptProvider::External)
++        .unwrap_or_else(|_| panic!("native recompaction rejected its own receipts"));
++    assert!(
++        repeated == retained,
++        "native recompaction changed already-bounded evidence"
++    );
++    let latest = retained.last().expect("latest receipt required");
++    let ResponseItem::FunctionCallOutput { output, .. } = &latest.item else {
++        panic!("latest receipt is not a function output")
++    };
++    assert!(
++        latest_observation_image(output).ok().flatten().is_some(),
++        "recorded regression requires its unchanged latest image"
++    );
++    let latest_text_bytes = output_text_bytes(&output.body);
++    let mut items: Vec<_> = retained.into_iter().map(|entry| entry.item).collect();
++    prepare_input_for_non_openai_provider(&mut items);
++    let export = json!({
++        "schema_version": 1,
++        "mode": "native_latest_priority_receipts",
++        "pair_count": 13,
++        "latest_output_preserved": true,
++        "latest_text_bytes": latest_text_bytes,
++        "recompaction_identical": true,
++        "identity_success_order_and_metadata_verified": true,
++        "provider": "external",
++        "items": items,
++    });
++    let bytes = serde_json::to_vec(&export).expect("native receipt export serialization failed");
++    let mut output_file = OpenOptions::new()
++        .write(true)
++        .create_new(true)
++        .mode(0o600)
++        .open(destination)
++        .expect("new private output file could not be created");
++    output_file
++        .write_all(&bytes)
++        .expect("private receipt export write failed");
++    output_file
++        .sync_all()
++        .expect("private receipt export sync failed");
++}
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
 index d8f6bab..1b62325 100644
 --- a/codex-rs/core/tests/suite/compact.rs
@@ -2751,10 +3332,10 @@ index d8f6bab..1b62325 100644
      let test = builder.build(&server).await?;
 diff --git a/codex-rs/core/tests/suite/compact_tool_receipts.rs b/codex-rs/core/tests/suite/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..6e71580
+index 0000000..58b383f
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/compact_tool_receipts.rs
-@@ -0,0 +1,811 @@
+@@ -0,0 +1,1111 @@
 +use anyhow::Result;
 +use base64::Engine;
 +use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -3004,14 +3585,15 @@ index 0000000..6e71580
 +            Some(image)
 +        }
 +    };
-+    truncate_function_output_payload(&mut payload, TruncationPolicy::Bytes(1920), |_| 0);
++    // The current observation receives the newest-output budget on the first compaction.
++    truncate_function_output_payload(&mut payload, TruncationPolicy::Bytes(3968), |_| 0);
 +    let text = payload.body.to_text().expect("retained genuine tool text");
 +    assert!(
 +        text.contains("truncated")
 +            && text.starts_with("actual failure prefix:")
 +            && text.ends_with(":actual failure suffix")
 +    );
-+    assert!(text.len() <= 2048);
++    assert!(text.len() <= 4096);
 +    if let Some(image) = retained_image {
 +        payload
 +            .content_items_mut()
@@ -3037,6 +3619,24 @@ index 0000000..6e71580
 +    let final_receipts = tool_items(final_request.single_request().input());
 +    match fixture {
 +        ReceiptFixture::TextOnly => {
++            // Once the planning call completes, the prior observation uses the older-output
++            // budget. Derive its exact expected excerpt from the genuine first retained receipt.
++            let mut historical_payload: FunctionCallOutputPayload =
++                serde_json::from_value(output["output"].clone())?;
++            truncate_function_output_payload(
++                &mut historical_payload,
++                TruncationPolicy::Bytes(1920),
++                |_| 0,
++            );
++            assert!(
++                historical_payload
++                    .body
++                    .to_text()
++                    .expect("historical text remains")
++                    .len()
++                    <= 2048
++            );
++            output["output"] = serde_json::to_value(historical_payload)?;
 +            assert_eq!(final_receipts, vec![call, output, plan_call, plan_output])
 +        }
 +        ReceiptFixture::MixedImages => {
@@ -3053,6 +3653,7 @@ index 0000000..6e71580
 +            assert!(
 +                text.contains("actual failure prefix:") && text.ends_with(":actual failure suffix")
 +            );
++            assert!(text.len() <= 2048);
 +            assert!(!serde_json::to_string(&final_receipts)?.contains("input_image"));
 +        }
 +    }
@@ -3104,6 +3705,284 @@ index 0000000..6e71580
 +            )
 +        })
 +        .collect()
++}
++
++#[test_case::test_case(20; "twenty_mixed_receipts")]
++#[test_case::test_case(13; "thirteen_receipts_latest_synced_ax_and_image")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn local_mid_turn_compaction_preserves_realistic_receipts_in_provider_budget(
++    pair_count: usize,
++) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
++    provider.name = "Local realistic receipt budget test".to_string();
++    provider.base_url = Some(format!("{}/v1", server.uri()));
++    provider.supports_websockets = false;
++    let mut builder = test_codex()
++        .with_config(move |config| {
++            config.model_provider = provider;
++            config.model_context_window = Some(32_768);
++            config.model_auto_compact_token_limit = Some(6144);
++        })
++        .with_model_info_override("gpt-5.5", |info| {
++            info.truncation_policy = TruncationPolicyConfig::tokens(/*limit*/ 10_000);
++            info.input_modalities = vec![InputModality::Text, InputModality::Image];
++        });
++    let mut test = builder.build_with_auto_env(&server).await?;
++    test.codex = test.thread_manager.start_thread(StartThreadOptions {
++        dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
++            name: "computer_v2_snapshot".to_string(),
++            description: "Read-only synthetic observation; no desktop access.".to_string(),
++            input_schema: json!({"type":"object","properties":{"sequence":{"type":"integer"}},"required":["sequence"]}),
++            defer_loading: false,
++        })],
++        ..StartThreadOptions::new(test.config.clone())
++    }).await?.thread;
++    let mut mocks = Vec::new();
++    for index in 0..pair_count {
++        mocks.push(
++            mount_sse_once(
++                &server,
++                sse(vec![
++                    ev_function_call(
++                        &format!("call_{index:016}"),
++                        "computer_v2_snapshot",
++                        &json!({"sequence":index}).to_string(),
++                    ),
++                    ev_completed_with_tokens(
++                        &format!("response-{index}"),
++                        if index == pair_count - 1 { 7000 } else { 10 },
++                    ),
++                ]),
++            )
++            .await,
++        );
++    }
++    let summary = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message(
++                "summary",
++                "The observations completed; answer without repeating any tool.",
++            ),
++            ev_completed_with_tokens("summary", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let continuation = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("final", "ALL_RECEIPTS_RETAINED"),
++            ev_completed_with_tokens("final", /*total_tokens*/ 10),
++        ]),
++    )
++    .await;
++    let mut png = std::io::Cursor::new(Vec::new());
++    image::DynamicImage::new_rgb8(/*w*/ 1, /*h*/ 1).write_to(&mut png, image::ImageFormat::Png)?;
++    let image_url = format!(
++        "data:image/png;base64,{}",
++        BASE64_STANDARD.encode(png.into_inner())
++    );
++    // The latest result has distinct capture metadata, a synchronized AX tree,
++    // and pixels. Its AX text alone exceeds the former shared 2 KiB cap.
++    let capture_metadata = "CAPTURE id=synthetic-capture-12 width=1280 height=900 screenshot_freshness=retained_original";
++    let latest_ax = format!(
++        "AXSNAPSHOT id=synthetic-ax-12 capture_id=synthetic-capture-12 shown=37 total=37 source_truncated=0 output_truncated=0 parents=[0:-]\n#0 role=\"AXWebArea\" label=\"Records\" actions=[] parent=-\n{}",
++        (1..=36).map(|index| format!("#{index} role=\"AXStaticText\" value=\"Record {index:02} status: pending review\" actions=[] parent=0\n")).collect::<String>()
++    );
++    assert!(latest_ax.len() > 3 * 1024);
++    assert!(capture_metadata.len() + latest_ax.len() <= 4096);
++    let mut dispatched = Vec::new();
++    let mut compactions = 0;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: format!("Perform the {pair_count} synthetic observations once, then answer."),
++            text_elements: vec![],
++        }]))
++        .await?;
++    loop {
++        match wait_for_event(&test.codex, |event| {
++            matches!(
++                event,
++                EventMsg::DynamicToolCallRequest(_)
++                    | EventMsg::ItemCompleted(_)
++                    | EventMsg::Error(_)
++                    | EventMsg::TurnComplete(_)
++            )
++        })
++        .await
++        {
++            EventMsg::DynamicToolCallRequest(request) => {
++                let index = dispatched.len();
++                assert!(index < pair_count, "no completed action may be replayed");
++                assert_eq!(request.call_id, format!("call_{index:016}"));
++                assert_eq!(request.arguments, json!({"sequence":index}));
++                dispatched.push(request.call_id.clone());
++                let mut content_items = vec![DynamicToolCallOutputContentItem::InputText {
++                    text: format!("observed-{index}:{}:end", "diagnostic ".repeat(220)),
++                }];
++                if pair_count == 13 && index == pair_count - 1 {
++                    content_items = vec![
++                        DynamicToolCallOutputContentItem::InputText {
++                            text: capture_metadata.to_string(),
++                        },
++                        DynamicToolCallOutputContentItem::InputText {
++                            text: latest_ax.clone(),
++                        },
++                    ];
++                }
++                if index == 0 || index == pair_count - 1 {
++                    content_items.push(DynamicToolCallOutputContentItem::InputImage {
++                        image_url: image_url.to_string(),
++                    });
++                }
++                test.codex
++                    .submit(Op::DynamicToolResponse {
++                        id: request.call_id,
++                        response: DynamicToolResponse {
++                            content_items,
++                            success: index != 7,
++                        },
++                    })
++                    .await?;
++            }
++            EventMsg::ItemCompleted(event)
++                if matches!(event.item, TurnItem::ContextCompaction(_)) =>
++            {
++                compactions += 1
++            }
++            EventMsg::Error(error) => panic!("unexpected receipt-budget failure: {error:?}"),
++            EventMsg::TurnComplete(_) => break,
++            _ => {}
++        }
++    }
++    assert_eq!(
++        dispatched,
++        (0..pair_count)
++            .map(|index| format!("call_{index:016}"))
++            .collect::<Vec<_>>()
++    );
++    assert_eq!(compactions, 1);
++    for mock in mocks.iter().chain([&summary, &continuation]) {
++        assert_eq!(mock.requests().len(), 1);
++    }
++    let original = tool_items(summary.single_request().input());
++    let mut retained = tool_items(continuation.single_request().input());
++    assert_eq!(original.len(), pair_count * 2);
++    assert_eq!(retained.len(), pair_count * 2);
++    for (before, after) in original.iter().zip(&retained) {
++        let mut expected = before.clone();
++        if expected["type"] == "function_call_output" {
++            expected["output"] = after["output"].clone();
++        }
++        assert_eq!(&expected, after);
++        assert!(
++            after
++                .get("internal_chat_message_metadata_passthrough")
++                .is_none()
++        );
++    }
++    assert_eq!(
++        serde_json::to_string(&retained)?
++            .matches(image_url.as_str())
++            .count(),
++        1
++    );
++    if pair_count == 13 {
++        assert_eq!(
++            retained.last(),
++            original.last(),
++            "the latest capture metadata, complete AX header/body and original image must all reach continuation unchanged"
++        );
++        let payload: FunctionCallOutputPayload =
++            serde_json::from_value(retained.last().unwrap()["output"].clone())?;
++        let texts: Vec<_> = payload
++            .content_items()
++            .unwrap()
++            .iter()
++            .filter_map(|item| match item {
++                FunctionCallOutputContentItem::InputText { text } => Some(text.as_str()),
++                _ => None,
++            })
++            .collect();
++        assert_eq!(texts, vec![capture_metadata, latest_ax.as_str()]);
++    }
++    for item in &mut retained {
++        if let Some(parts) = item["output"].as_array_mut() {
++            for part in parts {
++                if part["type"] == "input_image" {
++                    part["image_url"] = json!("");
++                }
++            }
++        }
++    }
++    let wire_bytes = serde_json::to_vec(&retained)?.len();
++    assert!(wire_bytes <= 12 * 1024);
++    let history = test.codex.conversation_history_snapshot().await;
++    let canonical: Vec<_> = history
++        .items()
++        .filter(|item| {
++            matches!(
++                item,
++                ResponseItem::FunctionCall { .. } | ResponseItem::FunctionCallOutput { .. }
++            )
++        })
++        .collect();
++    assert_eq!(canonical.len(), pair_count * 2);
++    assert!(canonical.iter().all(|item| item.turn_id().is_some()));
++    let failure = canonical.iter().find_map(|item| match item {
++        ResponseItem::FunctionCallOutput {
++            call_id: Some(id),
++            output,
++            ..
++        } if id == "call_0000000000000007" => Some(output.success),
++        _ => None,
++    });
++    assert_eq!(failure, Some(Some(false)));
++    test.codex.flush_rollout().await?;
++    let rollout =
++        std::fs::read_to_string(test.codex.rollout_path().expect("isolated fixture rollout"))?;
++    let mut checkpoints = 0;
++    for line in rollout.lines() {
++        if let codex_history::RolloutItem::Compacted(checkpoint) =
++            codex_rollout::parse_rollout_line(line)?.item
++        {
++            checkpoints += 1;
++            let mut receipts: Vec<_> = checkpoint
++                .replacement_history
++                .expect("atomic replacement history")
++                .into_iter()
++                .filter(|envelope| {
++                    matches!(
++                        envelope.item,
++                        ResponseItem::FunctionCall { .. } | ResponseItem::FunctionCallOutput { .. }
++                    )
++                })
++                .collect();
++            assert_eq!(receipts.len(), pair_count * 2);
++            for envelope in &mut receipts {
++                if let ResponseItem::FunctionCallOutput { output, .. } = &mut envelope.item
++                    && let Some(parts) = output.content_items_mut()
++                {
++                    for part in parts {
++                        if let FunctionCallOutputContentItem::InputImage { image, .. } = part {
++                            *image = ImageReference::Inline {
++                                image_url: String::new(),
++                            };
++                        }
++                    }
++                }
++            }
++            let items: Vec<_> = receipts.iter().map(|envelope| &envelope.item).collect();
++            let metadata: Vec<_> = receipts.iter().map(|envelope| &envelope.metadata).collect();
++            let canonical_bytes =
++                serde_json::to_vec(&items)?.len() + serde_json::to_vec(&metadata)?.len();
++            assert!(canonical_bytes <= 24 * 1024);
++        }
++    }
++    assert_eq!(checkpoints, 1);
++    Ok(())
 +}
 +
 +#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3359,10 +4238,12 @@ index 0000000..6e71580
 +            text.contains(&format!("status-{index}-prefix:"))
 +                && text.ends_with(&format!(":status-{index}-suffix"))
 +        );
-+        assert!(
-+            text.contains("truncated"),
-+            "the aggregate budget must bound each long result"
-+        );
++        if index < 8 {
++            assert!(
++                text.contains("truncated"),
++                "older long results must yield budget to the newest observation"
++            );
++        }
 +        if index == 6 {
 +            assert!(text.contains("[omitted 1 historical image items during context compaction; obtain a fresh capture for image-dependent actions]"));
 +        }

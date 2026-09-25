@@ -1,7 +1,7 @@
 {
-  "runtimeVersion": "heydash-2",
+  "runtimeVersion": "heydash-4",
   "sourceURL": "https://github.com/openai/codex.git",
   "sourceTag": "rust-v0.155.0-alpha.9.2",
   "sourceCommit": "4607249e430dac1c961df4dc615beae88e33cec8",
-  "patchSHA256": "ca36f16a32bd5d6b8651adea6b1d28f6054b44392e806ef370d63dba6ac83428"
+  "patchSHA256": "8f83d56ea759e3b32031244014fd22808f1f9268ae50b3e597f02674687106c6"
 }

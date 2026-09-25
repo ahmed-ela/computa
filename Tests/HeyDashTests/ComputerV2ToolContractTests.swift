@@ -7,6 +7,43 @@ final class ComputerV2ToolContractTests: XCTestCase {
     private let snapshotID = "11111111-1111-4111-8111-111111111111"
     private let captureID = "22222222-2222-4222-8222-222222222222"
 
+    func testAppInventoryIsBoundedAndQueriesDoNotExcludeBackgroundApps() throws {
+        func app(_ pid: Int32, _ name: String, _ policy: ApplicationActivationPolicy = .regular) -> RunningApplicationInfo {
+            .init(processIdentifier: pid, bundleIdentifier: "example.app.\(pid)", localizedName: name,
+                  activationPolicy: policy, isActive: false, isHidden: false, isTerminated: false)
+        }
+        let apps = (1...300).map { app(Int32($0), "Application \($0)") }
+            + [app(999, "Background Helper", .accessory), app(1_000, "StudyLock")]
+        let compact = ComputerV2ToolContract.appInventory(apps, query: nil)
+        XCTAssertLessThanOrEqual(compact.utf8.count, ComputerV2ToolContract.maximumAppInventoryBytes)
+        XCTAssertTrue(compact.contains("scope=user_facing matched=301"))
+        XCTAssertFalse(compact.contains("Background Helper"))
+        XCTAssertTrue(compact.contains("query with a name or bundle_id"))
+        for query in ["Background Helper", "EXAMPLE.APP.999", "StudyLock"] {
+            let result = ComputerV2ToolContract.appInventory(apps, query: query)
+            XCTAssertTrue(result.contains("matched=1 returned=1 omitted=0"))
+            XCTAssertTrue(result.contains(query == "StudyLock" ? "\"pid\":1000" : "\"pid\":999"))
+        }
+        _ = try ComputerV2ToolContract.validate(tool: Tool.apps.rawValue, arguments: ["query": "Chrome"])
+        for query in [" ", String(repeating: "x", count: 201)] {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: Tool.apps.rawValue, arguments: ["query": query]))
+        }
+    }
+
+    func testAppInventoryRetainsExactIdentityAndEscapesUntrustedNames() throws {
+        let app = RunningApplicationInfo(
+            processIdentifier: 42, bundleIdentifier: "example.exact.identity", localizedName: "App\n\"quoted\"",
+            activationPolicy: .regular, isActive: true, isHidden: false, isTerminated: false
+        )
+        let text = ComputerV2ToolContract.appInventory([app], query: nil)
+        let rows = text.split(separator: "\n")
+        XCTAssertEqual(rows.count, 2)
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(rows[1].utf8)) as? [String: Any])
+        XCTAssertEqual(value["pid"] as? Int, 42)
+        XCTAssertEqual(value["bundle_id"] as? String, "example.exact.identity")
+        XCTAssertEqual(value["name"] as? String, "App\n\"quoted\"")
+    }
+
     func testSpecsAreVersionedFlatAndActionSpecific() throws {
         let specs = ComputerV2ToolContract.specs
         XCTAssertEqual(specs.count, ComputerV2ToolContract.Tool.allCases.count)
@@ -50,6 +87,16 @@ final class ComputerV2ToolContractTests: XCTestCase {
         let captureSchema = try XCTUnwrap(capture["inputSchema"] as? [String: Any])
         let captureProperties = try XCTUnwrap(captureSchema["properties"] as? [String: Any])
         XCTAssertNotNil(captureProperties["include_accessibility"])
+        let displayID = try XCTUnwrap(captureProperties["display_id"] as? [String: Any])
+        XCTAssertEqual(displayID["minimum"] as? Int, 1)
+        XCTAssertEqual(displayID["maximum"] as? Int, 4_294_967_295)
+        XCTAssertTrue((displayID["description"] as? String)?.contains("Usually omit") == true)
+        _ = try ComputerV2ToolContract.validate(tool: Tool.capture.rawValue, arguments: [:])
+        XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: Tool.capture.rawValue, arguments: ["display_id": 0]))
+        let snapshot = try spec(named: .snapshot)
+        let query = try XCTUnwrap(snapshot.properties["query"] as? [String: Any])
+        XCTAssertEqual(query["maxLength"] as? Int, 200)
+        XCTAssertTrue((query["description"] as? String)?.contains("missing/truncated") == true)
         let groundClick = try spec(named: .groundClick)
         XCTAssertEqual(Set(groundClick.required), ["capture_id", "target"])
         XCTAssertEqual(Set(groundClick.properties.keys), ["capture_id", "target"])
@@ -96,14 +143,69 @@ final class ComputerV2ToolContractTests: XCTestCase {
             return try XCTUnwrap(value["description"] as? String)
         }
         let snapshot = try description(.snapshot)
-        XCTAssertTrue(snapshot.contains("computer_v2_ax with AXPress"))
+        XCTAssertTrue(snapshot.contains("AX actions for buttons and links"))
+        XCTAssertTrue(snapshot.contains("exact observed url with computer_v2_open"))
+        XCTAssertTrue(snapshot.contains("navigation link without AXPress"))
+        XCTAssertTrue(snapshot.contains("not an in-page script action"))
+        XCTAssertTrue(snapshot.contains("follow parent through the header parents map (child:parent) to group facts, never adjacency alone"))
+        XCTAssertTrue(snapshot.contains("try a short literal query before scrolling or capturing"))
+        XCTAssertTrue(snapshot.contains("make one literal query for that item before answering; never substitute another item's fact"))
+        XCTAssertTrue(snapshot.contains("sibling_heading is observed direct-sibling context, not proof of semantic ownership"))
+        XCTAssertTrue(snapshot.contains("answer and stop"))
+        XCTAssertTrue(snapshot.contains("never reconstruct url_omitted"))
+        XCTAssertTrue(snapshot.contains("text field only focuses it; it does not submit"))
+        XCTAssertTrue(try description(.ax).contains("use keypress for Enter"))
         let click = try description(.click)
         XCTAssertTrue(click.contains("fresh capture_id from computer_v2_capture"))
         XCTAssertTrue(click.contains("Never use snapshot_id or AX screen coordinates"))
+        let typing = try description(.type)
+        XCTAssertTrue(typing.contains("does not navigate or submit"))
+        XCTAssertTrue(typing.contains("computer_v2_open with url"))
+        for tool in [Tool.ax, .setText, .type, .keypress] {
+            XCTAssertTrue(try description(tool).contains("fresh AX snapshot"))
+        }
         let instructions = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
-        XCTAssertTrue(instructions.contains("snapshot_id is not capture_id"))
-        XCTAssertTrue(instructions.contains("instead of blindly repeating the click"))
+        XCTAssertTrue(instructions.contains("Computer use: bind with computer_v2_open first each turn"))
+        XCTAssertTrue(instructions.contains("Omit url for current tab"))
+        XCTAssertTrue(instructions.contains("Image input needs fresh capture_id and image pixels, not AX screen points"))
+        XCTAssertTrue(instructions.contains("If unchanged, inspect, do not repeat blindly"))
+        XCTAssertTrue(instructions.contains("Answer only the requested facts"))
         XCTAssertLessThan(instructions.utf8.count, 1_024)
+    }
+
+    func testPointerGuidanceRequiresCoordinatesForScrollWithoutRelaxingValidation() throws {
+        let pointer = try spec(named: .pointer)
+        XCTAssertEqual(Set(pointer.required), ["action", "capture_id", "x", "y"])
+        for field in ["x", "y"] {
+            let property = try XCTUnwrap(pointer.properties[field] as? [String: Any])
+            XCTAssertEqual(property["minimum"] as? Int, 0)
+            XCTAssertTrue((property["description"] as? String)?.contains("including scroll") == true)
+        }
+        let capture = try XCTUnwrap(pointer.properties["capture_id"] as? [String: Any])
+        XCTAssertTrue((capture["description"] as? String)?.contains("invalidates older captures") == true)
+        let missingPoint: [String: Any] = ["action": "scroll", "capture_id": captureID, "delta_x": 0, "delta_y": 500]
+        assertFailure(.missing("x"), .pointer, missingPoint)
+        var partialPoint = missingPoint
+        partialPoint["x"] = 100
+        assertFailure(.missing("y"), .pointer, partialPoint)
+    }
+
+    func testGroundingGuidanceCoversVisibleButNonpressableLinksWithoutRemovingTools() throws {
+        let grounded = ComputerV2ToolContract.specs(for: "lmstudio-community/Qwen3.5-4B-MLX-4bit")
+        XCTAssertEqual(Set(grounded.compactMap { $0["name"] as? String }),
+                       Set(ComputerV2ToolContract.specs.compactMap { $0["name"] as? String }))
+        let click = try XCTUnwrap(grounded.first { $0["name"] as? String == Tool.click.rawValue })
+        XCTAssertTrue((click["description"] as? String)?.contains("Prefer computer_v2_ground_click") == true)
+        XCTAssertEqual(try spec(named: .click).required, ["capture_id", "x", "y"])
+        XCTAssertTrue(ComputerV2ToolContract.visualGroundingInstructions.contains("listed link without AXPress"))
+        XCTAssertTrue(ComputerV2ToolContract.visualGroundingInstructions.contains("without an observed url"))
+        XCTAssertTrue(ComputerV2ToolContract.visualGroundingInstructions.contains("Prefer a link's supported AXPress"))
+        XCTAssertTrue(ComputerV2ToolContract.visualGroundingInstructions.contains("do not guess or reconstruct an omitted URL"))
+        XCTAssertTrue(ComputerV2ToolContract.visualGroundingInstructions.contains("verify the visible outcome"))
+        let ungrounded = ComputerV2ToolContract.specs(for: LocalModelCatalog.defaultModelID)
+        let ungroundedClick = try XCTUnwrap(ungrounded.first { $0["name"] as? String == Tool.click.rawValue })
+        XCTAssertFalse((ungroundedClick["description"] as? String)?.contains("computer_v2_ground_click") == true,
+                       "Do not recommend a tool excluded for memory headroom.")
     }
 
     func testGroundedCoordinatesRequireWholeWindowFreshness() {

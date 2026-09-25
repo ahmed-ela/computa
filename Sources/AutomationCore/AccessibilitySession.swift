@@ -1,5 +1,6 @@
 import ApplicationServices
 import CoreFoundation
+import CryptoKit
 import Foundation
 
 public struct AccessibilityApplicationTarget: Codable, Equatable, Sendable {
@@ -130,6 +131,13 @@ public enum AccessibilitySnapshotFocusState: Equatable, Sendable {
     case focused
 }
 
+/// Local approval identity for destinations that may not be safe to display.
+/// Never serialized into model-facing snapshot text or used for navigation.
+public enum AccessibilityLinkDestinationIdentity: Codable, Equatable, Sendable {
+    case sha256(String)
+    case unverifiable
+}
+
 public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
     public let index: Int
     public let parentIndex: Int?
@@ -148,6 +156,9 @@ public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
     public let isFocused: Bool?
     public let supportedActions: [String]
     public let isValueSettable: Bool
+    /// Exact observed destination, never a truncated or inferred URL.
+    public let url: String?
+    public let urlIdentity: AccessibilityLinkDestinationIdentity?
 
     init(
         index: Int,
@@ -166,7 +177,9 @@ public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
         isEnabled: Bool?,
         isFocused: Bool?,
         supportedActions: [String],
-        isValueSettable: Bool
+        isValueSettable: Bool,
+        url: String? = nil,
+        urlIdentity: AccessibilityLinkDestinationIdentity? = nil
     ) {
         self.index = index
         self.parentIndex = parentIndex
@@ -185,6 +198,8 @@ public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
         self.isFocused = isFocused
         self.supportedActions = supportedActions
         self.isValueSettable = isValueSettable
+        self.url = url
+        self.urlIdentity = urlIdentity
     }
 }
 
@@ -243,6 +258,58 @@ struct AccessibilityElementDescription {
     let supportedActions: [String]
     let isValueSettable: Bool
     let wasTruncated: Bool
+    var url: String? = nil
+    var urlIdentity: AccessibilityLinkDestinationIdentity? = nil
+}
+
+/// AXURL is observation data, not permission to navigate. Unsupported or
+/// oversized destinations are omitted whole rather than made actionable by
+/// truncating, repairing, resolving, or otherwise changing their spelling.
+enum AccessibilityObservedLinkURL {
+    static let maximumBytes = 2_048
+    static let maximumIdentityBytes = 8_192
+
+    static func validate(_ raw: AnyObject?) -> (value: String?, wasTruncated: Bool, identity: AccessibilityLinkDestinationIdentity?) {
+        guard let raw else { return (nil, false, nil) }
+        let rawText: CFString?
+        if CFGetTypeID(raw) == CFURLGetTypeID() {
+            rawText = CFURLGetString(unsafeDowncast(raw, to: CFURL.self))
+        } else if CFGetTypeID(raw) == CFStringGetTypeID() {
+            rawText = unsafeDowncast(raw, to: CFString.self)
+        } else {
+            rawText = nil
+        }
+        // Check UTF-16 length before bridging, then collect only a bounded UTF-8
+        // prefix. Never allocate Data for an unbounded destination merely to hash it.
+        guard let rawText, CFStringGetLength(rawText) <= maximumIdentityBytes else {
+            return (nil, true, .unverifiable)
+        }
+        let text = rawText as String
+        let bytes = Array(text.utf8.prefix(maximumIdentityBytes + 1))
+        guard bytes.count <= maximumIdentityBytes else { return (nil, true, .unverifiable) }
+        let digest = SHA256.hash(data: Data(bytes)).map { String(format: "%02x", $0) }.joined()
+        let identity = AccessibilityLinkDestinationIdentity.sha256(digest)
+        guard let value = validated(text) else { return (nil, true, identity) }
+        return (value, false, identity)
+    }
+
+    static func validated(_ text: String?, maximumBytes: Int = AccessibilityObservedLinkURL.maximumBytes) -> String? {
+        guard let text, !text.isEmpty, maximumBytes > 0,
+              text.utf8.count <= min(maximumBytes, Self.maximumBytes),
+              !text.contains("\\"),
+              !text.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }),
+              let decoded = text.removingPercentEncoding,
+              !decoded.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              let parsed = URL(string: text, encodingInvalidCharacters: false),
+              let components = URLComponents(url: parsed, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.port.map({ (1...65_535).contains($0) }) ?? true else {
+            return nil
+        }
+        return text
+    }
 }
 
 struct AccessibilityChildBatch {
@@ -349,6 +416,9 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
             domIdentifier = (nil, false)
         }
         let value = try boundedValue(attribute: kAXValueAttribute, from: element, limit: limits.maxTextLength)
+        let linkURL = role.value == "AXLink"
+            ? AccessibilityObservedLinkURL.validate(try copyAttribute(kAXURLAttribute, from: element))
+            : (value: nil, wasTruncated: false, identity: nil)
         let actions = try actionNames(for: element)
         let boundedActions = Array(actions.prefix(limits.maxActionsPerElement))
 
@@ -375,6 +445,9 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
                 || domIdentifier.wasTruncated
                 || value.wasTruncated
                 || actions.count > boundedActions.count
+                || linkURL.wasTruncated,
+            url: linkURL.value,
+            urlIdentity: linkURL.identity
         )
     }
 
@@ -686,6 +759,48 @@ public final class AccessibilitySession {
         }
 
         let root = try runtime.applicationElement(processIdentifier: application.processIdentifier)
+        let captured: ActiveSnapshot
+        var initialRootRole: String?
+        do {
+            captured = try captureSnapshot(root: root, limits: limits, rootRole: &initialRootRole)
+        } catch {
+            // Chromium can detach a child while a loading page rebuilds its
+            // tree. Retry the read once, never a mutation, and never publish a
+            // partial tree. Only a positively identified, unchanged window is
+            // a safe anchor; an application root or failed root description
+            // cannot establish which window the second traversal would read.
+            guard let failure = error as? AutomationError,
+                  case let .accessibilityFailure(_, code) = failure,
+                  code == AXError.invalidUIElement.rawValue,
+                  initialRootRole == kAXWindowRole as String
+            else {
+                throw error
+            }
+            try requirePermission()
+            let retryRoot = try runtime.applicationElement(processIdentifier: application.processIdentifier)
+            guard runtime.representsSameElement(root, retryRoot) else {
+                throw AutomationError.staleAccessibilitySnapshot
+            }
+            var retryRootRole: String?
+            let retried = try captureSnapshot(root: retryRoot, limits: limits, rootRole: &retryRootRole)
+            try requirePermission()
+            let finalRoot = try runtime.applicationElement(processIdentifier: application.processIdentifier)
+            guard retryRootRole == kAXWindowRole as String,
+                  runtime.representsSameElement(root, finalRoot)
+            else {
+                throw AutomationError.staleAccessibilitySnapshot
+            }
+            captured = retried
+        }
+        activeSnapshot = captured
+        return captured.snapshot
+    }
+
+    private func captureSnapshot(
+        root: AccessibilityElementHandle,
+        limits: AccessibilityTreeLimits,
+        rootRole: inout String?
+    ) throws -> ActiveSnapshot {
         var handles = [AccessibilityElementHandle]()
         var seenHandlesByHash = [Int: [AccessibilityElementHandle]]()
         var elements = [AccessibilityTreeElement]()
@@ -709,6 +824,9 @@ public final class AccessibilitySession {
             }
 
             let description = try runtime.describe(handle, limits: limits)
+            if parentIndex == nil {
+                rootRole = description.role
+            }
             let index = elements.count
             handles.append(handle)
             seenHandlesByHash[identityHash, default: []].append(handle)
@@ -730,7 +848,9 @@ public final class AccessibilitySession {
                     isEnabled: description.isEnabled,
                     isFocused: description.isFocused,
                     supportedActions: description.supportedActions,
-                    isValueSettable: description.isValueSettable
+                    isValueSettable: description.isValueSettable,
+                    url: description.url,
+                    urlIdentity: description.urlIdentity
                 )
             )
             wasTruncated = wasTruncated || description.wasTruncated
@@ -770,7 +890,9 @@ public final class AccessibilitySession {
                 isEnabled: current.isEnabled,
                 isFocused: current.isFocused,
                 supportedActions: current.supportedActions,
-                isValueSettable: current.isValueSettable
+                isValueSettable: current.isValueSettable,
+                url: current.url,
+                urlIdentity: current.urlIdentity
             )
             return index
         }
@@ -785,11 +907,10 @@ public final class AccessibilitySession {
             elements: elements,
             wasTruncated: wasTruncated
         )
-        activeSnapshot = ActiveSnapshot(
+        return ActiveSnapshot(
             snapshot: snapshot,
             handles: handles
         )
-        return snapshot
     }
 
     public func perform(
@@ -1109,6 +1230,10 @@ public final class AccessibilitySession {
             && candidate.elementDescription == approved.elementDescription
             && candidate.help == approved.help
             && candidate.value == approved.value
+            && candidate.url == approved.url
+            && candidate.urlIdentity != .unverifiable
+            && approved.urlIdentity != .unverifiable
+            && candidate.urlIdentity == approved.urlIdentity
             && candidate.isEnabled == approved.isEnabled
             && Set(candidate.supportedActions) == Set(approved.supportedActions)
             && candidate.isValueSettable == approved.isValueSettable

@@ -343,7 +343,8 @@ final class RuntimeContextContractTests: XCTestCase {
     }
 
     func testConfiguredCompactionLeavesQuarterWindowSafetyHeadroom() {
-        for model in [LocalModelCatalog.defaultModelID, "lmstudio-community/Qwen3.5-4B-MLX-4bit", "unlisted/model"] {
+        for model in [LocalModelCatalog.defaultModelID, "lmstudio-community/Qwen3.5-4B-MLX-4bit",
+                      "lmstudio-community/Qwen3.5-9B-MLX-4bit", "unlisted/model"] {
             let context = LocalThreadContext.forModel(model)
             let config = CodexAppServerRuntime.localThreadConfig(for: model)
             XCTAssertEqual(config["model_context_window"] as? Int, context.contextWindow)
@@ -359,9 +360,10 @@ final class RuntimeContextContractTests: XCTestCase {
 
     func testIsolatedFixtureOverrideCannotDisableOrExceedContextWindow() {
         let model = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
-        for value in [-1, 0, 8_192, Int.max] {
+        let context = LocalThreadContext.forModel(model)
+        for value in [-1, 0, context.contextWindow, Int.max] {
             XCTAssertEqual(CodexAppServerRuntime.localThreadConfig(for: model,
-                autoCompactLimitOverride: value)["model_auto_compact_token_limit"] as? Int, 6_144)
+                autoCompactLimitOverride: value)["model_auto_compact_token_limit"] as? Int, context.autoCompactTokenLimit)
         }
         XCTAssertEqual(CodexAppServerRuntime.localThreadConfig(for: model,
             autoCompactLimitOverride: 2_048)["model_auto_compact_token_limit"] as? Int, 2_048)

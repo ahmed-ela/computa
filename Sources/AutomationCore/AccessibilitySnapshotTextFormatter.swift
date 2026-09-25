@@ -1,5 +1,20 @@
 import Foundation
 
+/// A model-visible snapshot and the exact, unambiguous element identities
+/// represented by its retained element lines. Header and ancestry references
+/// provide context only; they do not make an element an exposed action target.
+public struct AccessibilityModelObservation: Equatable, Sendable {
+    public let text: String
+    public let exposedElementIndices: Set<Int>
+    public let snapshotID: UUID
+
+    public init(text: String, exposedElementIndices: Set<Int>, snapshotID: UUID) {
+        self.text = text
+        self.exposedElementIndices = exposedElementIndices
+        self.snapshotID = snapshotID
+    }
+}
+
 /// Produces a bounded, line-oriented accessibility snapshot for model input.
 ///
 /// The default limits are intentionally smaller than ``AccessibilityTreeLimits``
@@ -15,6 +30,7 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
     public let prioritizesRelevantElements: Bool
     public let preferredText: String?
     public let usesCompactElementLines: Bool
+    public let prioritizesFocusedDocument: Bool
 
     public init(
         elementLimit: Int = 120,
@@ -23,7 +39,8 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         outputCharacterLimit: Int = 12_000,
         prioritizesRelevantElements: Bool = false,
         preferredText: String? = nil,
-        usesCompactElementLines: Bool = false
+        usesCompactElementLines: Bool = false,
+        prioritizesFocusedDocument: Bool = false
     ) {
         self.elementLimit = min(max(elementLimit, 0), 2_000)
         self.fieldCharacterLimit = min(max(fieldCharacterLimit, 1), 4_096)
@@ -32,9 +49,14 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         self.prioritizesRelevantElements = prioritizesRelevantElements
         self.preferredText = preferredText?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.usesCompactElementLines = usesCompactElementLines
+        self.prioritizesFocusedDocument = prioritizesFocusedDocument
     }
 
     public func format(_ snapshot: AccessibilityTreeSnapshot) -> String {
+        formatObservation(snapshot).text
+    }
+
+    public func formatObservation(_ snapshot: AccessibilityTreeSnapshot) -> AccessibilityModelObservation {
         var formatWasTruncated = false
         let metadataFieldLimit = min(fieldCharacterLimit, 48)
         let app = quoted(
@@ -48,24 +70,55 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
             truncated: &formatWasTruncated
         )
 
-        var selectedElements = Array(snapshot.elements.prefix(elementLimit))
-        if prioritizesRelevantElements {
-            selectedElements.sort { lhs, rhs in
-                let lhsPriority = relevance(of: lhs, rootIndex: snapshot.rootIndex)
-                let rhsPriority = relevance(of: rhs, rootIndex: snapshot.rootIndex)
-                return lhsPriority == rhsPriority
-                    ? lhs.index < rhs.index
-                    : lhsPriority > rhsPriority
+        let boundedElements = Array(snapshot.elements.prefix(2_000))
+        let observedByIndex = uniqueElementsByIndex(in: boundedElements)
+        let documentElements = descendantIndices(in: boundedElements, observedByIndex: observedByIndex) {
+            $0.role == "AXWebArea" || $0.role == "AXDocument"
+        }
+        var headingsByParent = [Int: [AccessibilityTreeElement]]()
+        if usesCompactElementLines, snapshot.elements.count <= 2_000 {
+            for element in boundedElements where element.role == "AXHeading" {
+                if let parent = element.parentIndex { headingsByParent[parent, default: []].append(element) }
             }
         }
+        let selectedElements = selectedElements(
+            in: snapshot, bounded: boundedElements, observedByIndex: observedByIndex, documentElements: documentElements
+        )
         let elementCandidates = selectedElements.map { element in
-            elementLine(element, truncated: &formatWasTruncated)
+            let ancestry = usesCompactElementLines ? compactAncestryField(
+                for: element, rootIndex: snapshot.rootIndex, observedByIndex: observedByIndex,
+                truncated: &formatWasTruncated
+            ) : (field: "", ancestors: [])
+            let siblingHeading = usesCompactElementLines ? siblingHeadingField(
+                for: element, rootIndex: snapshot.rootIndex, observedByIndex: observedByIndex,
+                documentElements: documentElements, headingsByParent: headingsByParent, truncated: &formatWasTruncated
+            ) : ""
+            return (index: element.index,
+                    line: elementLine(element, ancestry: ancestry.field, siblingHeading: siblingHeading, truncated: &formatWasTruncated),
+                    ancestors: ancestry.ancestors)
+        }
+        var unambiguousCandidateIndices = Set(elementCandidates.compactMap { candidate in
+            candidate.index >= 0 && observedByIndex[candidate.index] != nil ? candidate.index : nil
+        })
+        // Rendering and ancestry remain bounded to the original observation cap.
+        // A duplicate beyond that cap still makes a rendered identity ambiguous;
+        // scan only its index, without retaining or formatting additional nodes.
+        for element in snapshot.elements.dropFirst(boundedElements.count) {
+            unambiguousCandidateIndices.remove(element.index)
         }
         if snapshot.elements.count > elementCandidates.count {
             formatWasTruncated = true
         }
 
-        var elementLines = Array(elementCandidates)
+        var elementLines = elementCandidates.map(\.line)
+        var ancestorUseCounts = [Int: Int]()
+        for candidate in elementCandidates {
+            for index in candidate.ancestors { ancestorUseCounts[index, default: 0] += 1 }
+        }
+        let ancestorRecords = ancestorUseCounts.keys.sorted().compactMap { index -> (index: Int, text: String)? in
+            guard let element = observedByIndex[index] else { return nil }
+            return (index, "\(index):\(element.parentIndex.map(String.init) ?? "-")")
+        }
         while true {
             let omittedByBudget = elementLines.count < elementCandidates.count
             let outputWasTruncated = formatWasTruncated || omittedByBudget
@@ -74,16 +127,171 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
                 app: app,
                 bundle: bundle,
                 shownElementCount: elementLines.count,
-                outputWasTruncated: outputWasTruncated
+                outputWasTruncated: outputWasTruncated,
+                parentMap: usesCompactElementLines
+                    ? " parents=[\(ancestorRecords.filter { ancestorUseCounts[$0.index, default: 0] > 0 }.map(\.text).joined(separator: ","))]"
+                    : ""
             )
             let output = ([header] + elementLines).joined(separator: "\n")
 
             if output.count <= outputCharacterLimit || elementLines.isEmpty {
-                return output
+                return AccessibilityModelObservation(
+                    text: output,
+                    exposedElementIndices: Set(elementCandidates.prefix(elementLines.count).compactMap { candidate in
+                        unambiguousCandidateIndices.contains(candidate.index) ? candidate.index : nil
+                    }),
+                    snapshotID: snapshot.id
+                )
             }
 
+            let removed = elementCandidates[elementLines.count - 1]
             elementLines.removeLast()
+            for index in removed.ancestors { ancestorUseCounts[index, default: 0] -= 1 }
         }
+    }
+
+    private func selectedElements(
+        in snapshot: AccessibilityTreeSnapshot,
+        bounded: [AccessibilityTreeElement],
+        observedByIndex: [Int: AccessibilityTreeElement],
+        documentElements: Set<Int>
+    ) -> [AccessibilityTreeElement] {
+        guard prioritizesRelevantElements else { return Array(snapshot.elements.prefix(elementLimit)) }
+
+        let hasQuery = preferredText?.isEmpty == false
+        // Search all bounded observations before applying the output count cap.
+        // Without a document or a query, preserve native-app selection exactly.
+        let candidates = documentElements.isEmpty && !hasQuery
+            ? Array(bounded.prefix(elementLimit)) : bounded
+        let mainElements = descendantIndices(in: bounded, observedByIndex: observedByIndex) { $0.subrole == "AXLandmarkMain" }
+        let ordered = candidates.enumerated().map { offset, element in
+            let priority = relevance(of: element, rootIndex: snapshot.rootIndex, documentElements: documentElements)
+                + (documentElements.contains(element.index) && mainElements.contains(element.index) ? 2_000 : 0)
+            return (element: element, priority: priority, offset: offset)
+        }.sorted { lhs, rhs in
+            if lhs.priority != rhs.priority { return lhs.priority > rhs.priority }
+            if lhs.element.index != rhs.element.index { return lhs.element.index < rhs.element.index }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+        guard !documentElements.isEmpty else { return Array(ordered.prefix(elementLimit)) }
+
+        let rootFrame = bounded.first { $0.index == snapshot.rootIndex && $0.role == "AXWindow" }?.frame
+        func isDeemphasized(_ element: AccessibilityTreeElement) -> Bool {
+            hasUnhelpfulGeometry(element.frame, windowFrame: rootFrame)
+        }
+        // Keep one document context in short post-action observations, not every
+        // nested document and heading. Headings must share capacity with facts
+        // and controls rather than exhaust the budget before either can appear.
+        let representativeDocumentIndex = prioritizesFocusedDocument ? ordered.first {
+            documentElements.contains($0.index) && !isDeemphasized($0)
+                && ["AXWebArea", "AXDocument"].contains($0.role ?? "")
+        }?.index : nil
+        func isPinned(_ element: AccessibilityTreeElement) -> Bool {
+            if element.index == snapshot.rootIndex || element.isFocused == true || matchesPreferredText(element) {
+                return true
+            }
+            return element.index == representativeDocumentIndex
+        }
+        let pinned = ordered.filter(isPinned)
+        let related = queryRelatedElements(
+            in: ordered, excluding: Set(pinned.map(\.index)), rootIndex: snapshot.rootIndex,
+            documentElements: documentElements, observedByIndex: observedByIndex, windowFrame: rootFrame
+        )
+        let relatedIndices = Set(related.map(\.index))
+        let remaining = ordered.filter { !isPinned($0) && !relatedIndices.contains($0.index) }
+        let document = remaining.filter { documentElements.contains($0.index) }
+        let chrome = remaining.filter { !documentElements.contains($0.index) }
+        // A flat action score lets navigation links exhaust the character budget
+        // before any readable page text. Alternate both kinds, reusing all spare
+        // capacity when one kind is absent. Never change AX identities or frames.
+        let usefulDocument = interleavedDocumentElements(document.filter { !isDeemphasized($0) })
+        let deemphasizedDocument = interleavedDocumentElements(document.filter(isDeemphasized))
+        return Array((pinned + related + usefulDocument + chrome + deemphasizedDocument).prefix(elementLimit))
+    }
+
+    /// A literal title match alone can omit its sibling status while unrelated
+    /// cards consume a short query budget. Reserve at most six related nodes:
+    /// two facts and one action from each of two validated direct groups. Never
+    /// search broader ancestors or treat a landmark/document as a card boundary.
+    private func queryRelatedElements(
+        in ordered: [AccessibilityTreeElement],
+        excluding pinnedIndices: Set<Int>,
+        rootIndex: Int?,
+        documentElements: Set<Int>,
+        observedByIndex: [Int: AccessibilityTreeElement],
+        windowFrame: WindowFrame?
+    ) -> [AccessibilityTreeElement] {
+        guard preferredText?.isEmpty == false else { return [] }
+        var groups = [Int]()
+        for element in ordered where documentElements.contains(element.index) && matchesPreferredText(element) {
+            guard let parentIndex = element.parentIndex, !groups.contains(parentIndex),
+                  let parent = observedByIndex[parentIndex], parent.role == "AXGroup",
+                  parent.subrole?.hasPrefix("AXLandmark") != true,
+                  documentElements.contains(parentIndex),
+                  case .known(_) = observedAncestry(for: element, rootIndex: rootIndex, observedByIndex: observedByIndex)
+            else { continue }
+            groups.append(parentIndex)
+            if groups.count == 2 { break }
+        }
+        var facts = [AccessibilityTreeElement]()
+        var actions = [AccessibilityTreeElement]()
+        for group in groups {
+            let siblings = ordered.filter {
+                $0.parentIndex == group && observedByIndex[$0.index] != nil && !pinnedIndices.contains($0.index)
+                    && !hasUnhelpfulGeometry($0.frame, windowFrame: windowFrame)
+            }
+            facts.append(contentsOf: siblings.filter {
+                $0.role == "AXStaticText" && (label(for: $0) != nil || nonempty($0.value) != nil)
+            }.prefix(2))
+            actions.append(contentsOf: siblings.filter { $0.role != "AXStaticText" && isInteractive($0) }.prefix(1))
+        }
+        return facts + actions
+    }
+
+    private func isInteractive(_ element: AccessibilityTreeElement) -> Bool {
+        !element.supportedActions.isEmpty || element.isValueSettable
+            || ["AXButton", "AXCheckBox", "AXComboBox", "AXLink", "AXMenuItem",
+                "AXPopUpButton", "AXRadioButton", "AXSearchField", "AXSlider",
+                "AXTextArea", "AXTextField"].contains(element.role ?? "")
+    }
+
+    private func interleavedDocumentElements(_ elements: [AccessibilityTreeElement]) -> [AccessibilityTreeElement] {
+        func isReadable(_ element: AccessibilityTreeElement) -> Bool {
+            ["AXHeading", "AXStaticText"].contains(element.role ?? "")
+                && (label(for: element) != nil || nonempty(element.value) != nil)
+        }
+        let headings = elements.filter { isReadable($0) && $0.role == "AXHeading" }
+        let facts = elements.filter { isReadable($0) && $0.role != "AXHeading" }
+        var readable = [AccessibilityTreeElement]()
+        for offset in 0..<max(headings.count, facts.count) {
+            if offset < headings.count { readable.append(headings[offset]) }
+            if offset < facts.count { readable.append(facts[offset]) }
+        }
+        let interactive = elements.filter { !isReadable($0) && isInteractive($0) }
+        let other = elements.filter { !isReadable($0) && !isInteractive($0) }
+        var result = [AccessibilityTreeElement]()
+        for offset in 0..<max(readable.count, interactive.count) {
+            if offset < readable.count { result.append(readable[offset]) }
+            if offset < interactive.count { result.append(interactive[offset]) }
+        }
+        return result + other
+    }
+
+    /// Geometry is only a ranking hint, not proof of AX visibility or occlusion.
+    /// Unknown frames stay neutral; queried/focused controls bypass this hint.
+    /// Low-ranked nodes remain selectable, including keyboard-only skip links.
+    private func hasUnhelpfulGeometry(_ frame: WindowFrame?, windowFrame: WindowFrame?) -> Bool {
+        guard let frame else { return false }
+        guard frame.x.isFinite, frame.y.isFinite, frame.width.isFinite, frame.height.isFinite,
+              frame.width > 1, frame.height > 1 else { return true }
+        guard let windowFrame, windowFrame.x.isFinite, windowFrame.y.isFinite,
+              windowFrame.width.isFinite, windowFrame.height.isFinite,
+              windowFrame.width > 0, windowFrame.height > 0 else { return false }
+        let visibleWidth = min(frame.x + frame.width, windowFrame.x + windowFrame.width)
+            - max(frame.x, windowFrame.x)
+        let visibleHeight = min(frame.y + frame.height, windowFrame.y + windowFrame.height)
+            - max(frame.y, windowFrame.y)
+        return visibleWidth <= 1 || visibleHeight <= 1
     }
 
     private func headerLine(
@@ -91,7 +299,8 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         app: String,
         bundle: String,
         shownElementCount: Int,
-        outputWasTruncated: Bool
+        outputWasTruncated: Bool,
+        parentMap: String
     ) -> String {
         let root = snapshot.rootIndex.map(String.init) ?? "-"
         return "AXSNAPSHOT id=\(snapshot.id.uuidString) "
@@ -99,23 +308,29 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
             + "app=\(app) bundle=\(bundle) root=\(root) "
             + "shown=\(shownElementCount) total=\(snapshot.elements.count) "
             + "source_truncated=\(bit(snapshot.wasTruncated)) "
-            + "output_truncated=\(bit(outputWasTruncated))"
+            + "output_truncated=\(bit(outputWasTruncated))\(parentMap)"
     }
 
     private func elementLine(
         _ element: AccessibilityTreeElement,
+        ancestry: String,
+        siblingHeading: String,
         truncated: inout Bool
     ) -> String {
         let role = quoted(roleAndSubrole(for: element), truncated: &truncated)
         let label = quoted(label(for: element), truncated: &truncated)
         let value = quoted(element.value, truncated: &truncated)
         let actions = formatActions(element.supportedActions, truncated: &truncated)
+        let linkURL = observedLinkURLField(element, truncated: &truncated)
 
         if usesCompactElementLines {
+            let labelField = label == "-" ? "" : " label=\(label)"
+            let valueField = value == "-" ? "" : " value=\(value)"
+            let settable = element.isValueSettable ? " settable=1" : ""
             let focused = element.isFocused == true ? " focused=1" : ""
             let screenFrame = element.frame.map { " screen_frame=\(format($0))" } ?? ""
-            return "#\(element.index) role=\(role) label=\(label) value=\(value) "
-                + "actions=\(actions) settable=\(bit(element.isValueSettable))\(focused)\(screenFrame)"
+            return "#\(element.index) role=\(role)\(labelField)\(valueField) actions=\(actions)"
+                + "\(settable)\(focused)\(screenFrame)\(linkURL)\(siblingHeading)\(ancestry)"
         }
 
         let parent = element.parentIndex.map(String.init) ?? "-"
@@ -126,7 +341,95 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         return "#\(element.index) parent=\(parent) role=\(role) "
             + "label=\(label) value=\(value) frame=\(frame) "
             + "enabled=\(enabled) focused=\(focused) "
-            + "actions=\(actions) settable=\(bit(element.isValueSettable))"
+            + "actions=\(actions) settable=\(bit(element.isValueSettable))\(linkURL)"
+    }
+
+    /// Expose only a direct structural sibling relationship, not an inferred
+    /// semantic owner. The heading may be absent from the emitted line budget,
+    /// but its exact ID and bounded source label remain available on the fact.
+    private func siblingHeadingField(
+        for element: AccessibilityTreeElement,
+        rootIndex: Int?,
+        observedByIndex: [Int: AccessibilityTreeElement],
+        documentElements: Set<Int>,
+        headingsByParent: [Int: [AccessibilityTreeElement]],
+        truncated: inout Bool
+    ) -> String {
+        guard element.role == "AXStaticText", let parentIndex = element.parentIndex,
+              let parent = observedByIndex[parentIndex], parent.role == "AXGroup",
+              parent.subrole?.hasPrefix("AXLandmark") != true, documentElements.contains(parentIndex),
+              case .known(_) = observedAncestry(for: element, rootIndex: rootIndex, observedByIndex: observedByIndex),
+              let headings = headingsByParent[parentIndex], headings.count == 1,
+              let heading = headings.first, observedByIndex[heading.index] != nil,
+              let headingLabel = label(for: heading)
+        else { return "" }
+        return " sibling_heading=#\(heading.index):\(quoted(headingLabel, truncated: &truncated))"
+    }
+
+    /// The compact line may outlive its group lines after ranking/budgeting.
+    /// Keep source-observed containment explicit so nearby cards cannot lend
+    /// each other facts or controls. Common ancestor edges are rendered once
+    /// in the header; an incomplete chain contributes no asserted parent path.
+    private func compactAncestryField(
+        for element: AccessibilityTreeElement,
+        rootIndex: Int?,
+        observedByIndex: [Int: AccessibilityTreeElement],
+        truncated: inout Bool
+    ) -> (field: String, ancestors: [Int]) {
+        switch observedAncestry(for: element, rootIndex: rootIndex, observedByIndex: observedByIndex) {
+        case .known(let ancestors):
+            return (" parent=\(element.parentIndex.map(String.init) ?? "-")", ancestors)
+        case .unknown:
+            return (" parent=- ancestry_unknown=1", [])
+        case .truncated:
+            truncated = true
+            return (" parent=- ancestry_truncated=1", [])
+        }
+    }
+
+    private enum ObservedAncestry {
+        case known([Int])
+        case unknown
+        case truncated
+    }
+
+    private func observedAncestry(
+        for element: AccessibilityTreeElement,
+        rootIndex: Int?,
+        observedByIndex: [Int: AccessibilityTreeElement]
+    ) -> ObservedAncestry {
+        guard let rootIndex, observedByIndex[element.index] != nil else { return .unknown }
+        var current = element
+        var ancestors = [Int]()
+        var visited: Set<Int> = [element.index]
+        while true {
+            if current.index == rootIndex {
+                guard current.parentIndex == nil else { return .unknown }
+                return .known(ancestors)
+            }
+            guard let parentIndex = current.parentIndex else { return .unknown }
+            guard ancestors.count < 32 else { return .truncated }
+            guard let parent = observedByIndex[parentIndex],
+                  visited.insert(parentIndex).inserted else { return .unknown }
+            ancestors.append(parentIndex)
+            current = parent
+        }
+    }
+
+    /// A navigation destination must remain exact. Unlike display labels, an
+    /// over-budget URL is omitted, never abbreviated into a different target.
+    private func observedLinkURLField(
+        _ element: AccessibilityTreeElement,
+        truncated: inout Bool
+    ) -> String {
+        guard element.role == "AXLink", let raw = element.url else { return "" }
+        guard let exact = AccessibilityObservedLinkURL.validated(raw, maximumBytes: 512) else {
+            truncated = true
+            return " url_omitted=1"
+        }
+        let escaped = exact.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return " url=\"\(escaped)\""
     }
 
     private func roleAndSubrole(for element: AccessibilityTreeElement) -> String? {
@@ -142,18 +445,76 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         }
     }
 
+    private func uniqueElementsByIndex(in bounded: [AccessibilityTreeElement]) -> [Int: AccessibilityTreeElement] {
+        var byIndex = [Int: AccessibilityTreeElement]()
+        var duplicateIndices = Set<Int>()
+        for element in bounded {
+            if byIndex.updateValue(element, forKey: element.index) != nil {
+                duplicateIndices.insert(element.index)
+            }
+        }
+        for index in duplicateIndices { byIndex.removeValue(forKey: index) }
+        return byIndex
+    }
+
+    /// Membership comes only from the observed parent chain, never a label or
+    /// application name. Memoization bounds work to the snapshot's 2,000-node
+    /// maximum; missing/duplicate parents and cycles do not establish ancestry.
+    private func descendantIndices(
+        in bounded: [AccessibilityTreeElement],
+        observedByIndex byIndex: [Int: AccessibilityTreeElement],
+        matching isAncestor: (AccessibilityTreeElement) -> Bool
+    ) -> Set<Int> {
+        var membership = [Int: Bool]()
+        for element in bounded {
+            var cursor = element.index
+            var path = [Int]()
+            var visited = Set<Int>()
+            var belongsToDocument = false
+            while let current = byIndex[cursor], path.count < byIndex.count {
+                if let known = membership[cursor] {
+                    belongsToDocument = known
+                    break
+                }
+                guard visited.insert(cursor).inserted else { break }
+                path.append(cursor)
+                if isAncestor(current) {
+                    belongsToDocument = true
+                    break
+                }
+                guard let parent = current.parentIndex else { break }
+                cursor = parent
+            }
+            for index in path { membership[index] = belongsToDocument }
+        }
+        return Set(membership.compactMap { $0.value ? $0.key : nil })
+    }
+
     private func relevance(
         of element: AccessibilityTreeElement,
-        rootIndex: Int?
+        rootIndex: Int?,
+        documentElements: Set<Int>
     ) -> Int {
         if element.index == rootIndex { return 10_000 }
 
-        var score = 0
-        let matchesPreferredText = preferredText.map { preferredText in
-            !preferredText.isEmpty
-                && searchableText(for: element).localizedCaseInsensitiveContains(preferredText)
-        } ?? false
-        if matchesPreferredText {
+        // Page controls must outrank tab/toolbar controls even when no query is
+        // supplied. Keep the focused control above page content (for example an
+        // omnibox after typing), and preserve native-app ranking without a
+        // document. Explicit text matches below remain the strongest signal.
+        var score = documentElements.contains(element.index) ? 3_000 : 0
+        if element.isFocused == true, prioritizesFocusedDocument || !documentElements.isEmpty {
+            score = max(score, 8_000)
+        }
+        if prioritizesFocusedDocument {
+            // Short post-action observations should verify the changed field
+            // and document before spending the budget on browser tab labels.
+            switch nonempty(element.role) {
+            case "AXHeading": score = max(score, 6_000)
+            case "AXWebArea", "AXDocument": score = max(score, 5_000)
+            default: break
+            }
+        }
+        if matchesPreferredText(element) {
             score += 20_000
             // Chrome tab labels can appear as many matching radio buttons. A
             // matching page heading should survive a short output budget, while
@@ -169,8 +530,18 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
                 break
             }
         }
-        if label(for: element) != nil { score += 400 }
-        if nonempty(element.value) != nil { score += 300 }
+        let hasLabel = label(for: element) != nil
+        let hasValue = nonempty(element.value) != nil
+        if documentElements.contains(element.index), ["AXHeading", "AXStaticText"].contains(element.role ?? "") {
+            // AX providers expose the same readable page text through different
+            // fields. Presence is one signal, not a preference for labels or a
+            // double bonus when both fields happen to be populated.
+            if hasLabel || hasValue { score += 400 }
+        } else {
+            // Preserve native-app and interactive-control relevance semantics.
+            if hasLabel { score += 400 }
+            if hasValue { score += 300 }
+        }
         if element.isFocused == true { score += 200 }
         if element.isValueSettable { score += 300 }
         if !element.supportedActions.isEmpty { score += 400 }
@@ -186,6 +557,12 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
             break
         }
         return score
+    }
+
+    private func matchesPreferredText(_ element: AccessibilityTreeElement) -> Bool {
+        preferredText.map {
+            !$0.isEmpty && searchableText(for: element).localizedCaseInsensitiveContains($0)
+        } ?? false
     }
 
     private func searchableText(for element: AccessibilityTreeElement) -> String {

@@ -46,16 +46,66 @@ private final class NativeChromeTabIdentity: ExistingChromeTabIdentity {
     }
 }
 
+/// Chrome's vertical tab strip can contain nested AXTabGroups. These belong to
+/// one strip only when they already have a tab-group ancestor. Peer strips and
+/// ungrouped radio controls remain ambiguous; neither may authorize navigation.
+struct NativeChromeTabTopology {
+    private var topLevelGroups = 0
+    private var tabs = 0
+    private var selectedTabs = 0
+    private var hasUngroupedRadio = false
+
+    mutating func observe(role: String, inTabGroup: Bool, selected: Bool = false) {
+        if role == "AXTabGroup", !inTabGroup { topLevelGroups += 1 }
+        if role == "AXRadioButton" {
+            guard inTabGroup else { hasUngroupedRadio = true; return }
+            tabs += 1
+            if selected { selectedTabs += 1 }
+        }
+    }
+
+    var isSingleCompleteStrip: Bool {
+        topLevelGroups == 1 && !hasUngroupedRadio && tabs > 0 && selectedTabs == 1
+    }
+}
+
+/// Chrome can replace a descendant AX element while its tab strip is being
+/// read. Discard that incomplete traversal and read once more from the same
+/// retained window; never repeat navigation or reuse a partial tab inventory.
+@MainActor
+enum NativeChromeTabReadRecovery {
+    static func read(
+        isSameWindow: () throws -> Bool,
+        traverse: () throws -> ExistingChromeTabInventory
+    ) throws -> ExistingChromeTabInventory {
+        guard try isSameWindow() else { throw ExistingChromeError.targetChanged }
+        let inventory: ExistingChromeTabInventory
+        do {
+            inventory = try traverse()
+        } catch {
+            guard case AutomationError.accessibilityFailure(_, let code) = error,
+                  code == AXError.invalidUIElement.rawValue else { throw error }
+            // This guard is outside the retried traversal. A focus/permission
+            // failure cannot itself authorize another read or a new target.
+            guard try isSameWindow() else { throw ExistingChromeError.targetChanged }
+            inventory = try traverse()
+        }
+        guard try isSameWindow() else { throw ExistingChromeError.targetChanged }
+        return inventory
+    }
+}
+
 @MainActor
 enum NativeChromeTabInventory {
     /// Native browser chrome only. Never read titles, URLs, labels, or web
-    /// descendants. More than one tab group or an incomplete traversal refuses.
+    /// descendants. Require one top-level strip, allowing its nested groups;
+    /// independent peer strips or an incomplete traversal still refuse.
     static func read(window: AXUIElement, processIdentifier: Int32) throws -> ExistingChromeTabInventory {
         guard AXIsProcessTrusted() else { throw AutomationError.permissionNotGranted(.accessibility) }
         var queue: [(AXUIElement, Int, Bool)] = [(window, 0, false)]
         var cursor = 0
         var visited = [AXUIElement]()
-        var groups = 0
+        var topology = NativeChromeTabTopology()
         var tabs = [NativeChromeTabIdentity]()
         var selected = [NativeChromeTabIdentity]()
         while cursor < queue.count {
@@ -71,20 +121,21 @@ enum NativeChromeTabInventory {
             }
             if role == "AXWebArea" || role == "AXDocument" { continue }
             let isGroup = role == "AXTabGroup"
-            if isGroup { groups += 1 }
+            var isSelected = false
             if inTabGroup, role == "AXRadioButton" {
                 let tab = NativeChromeTabIdentity(element)
                 tabs.append(tab)
                 if let value = try attribute(element, kAXValueAttribute) as? NSNumber,
-                   value == 1 { selected.append(tab) }
+                   value == 1 { selected.append(tab); isSelected = true }
             }
+            topology.observe(role: role, inTabGroup: inTabGroup, selected: isSelected)
             guard let children = try attribute(element, kAXChildrenAttribute) as? [AXUIElement] else { continue }
             guard children.isEmpty || depth < 20, queue.count + children.count <= 512 else {
                 throw ExistingChromeError.tabStateNotVerified
             }
             queue += children.map { ($0, depth + 1, inTabGroup || isGroup) }
         }
-        guard groups == 1, !tabs.isEmpty, selected.count == 1 else {
+        guard topology.isSingleCompleteStrip, !tabs.isEmpty, selected.count == 1 else {
             throw ExistingChromeError.tabStateNotVerified
         }
         return ExistingChromeTabInventory(tabs: tabs, selected: selected[0])

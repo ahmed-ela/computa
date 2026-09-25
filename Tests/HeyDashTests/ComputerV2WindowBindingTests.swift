@@ -1,4 +1,4 @@
-import AutomationCore
+@testable import AutomationCore
 import XCTest
 @testable import HeyDash
 
@@ -49,6 +49,123 @@ final class ComputerV2WindowBindingTests: XCTestCase {
             for: focused,
             in: candidates
         ))
+    }
+
+    func testListedNativeElementPassesObservationScopeButUnseen149DoesNot() throws {
+        let snapshotID = UUID()
+        let scope = NativeAccessibilityActionScope(observation: AccessibilityModelObservation(
+            text: "AXSNAPSHOT shown=2 total=240\n#31 role=\"AXWebArea\"\n#113 role=\"AXTextField\"",
+            exposedElementIndices: [31, 113],
+            snapshotID: snapshotID
+        ))
+
+        XCTAssertNoThrow(try scope.requireExposedElement(113, snapshotID: snapshotID))
+        XCTAssertThrowsError(try scope.requireExposedElement(149, snapshotID: snapshotID)) { error in
+            XCTAssertEqual(error as? NativeAccessibilityActionScope.ValidationError, .unexposedElement)
+            XCTAssertTrue(error.localizedDescription.contains("No input was dispatched"))
+        }
+        XCTAssertThrowsError(try scope.requireExposedElement(-1, snapshotID: snapshotID))
+        XCTAssertThrowsError(try scope.requireExposedElement(Int.max, snapshotID: snapshotID))
+    }
+
+    func testActualFormatterScopesNativeActionsToRenderedTargetsNotCachedHandles() throws {
+        let elements = (0..<150).map { index in
+            AccessibilityTreeElement(
+                index: index, parentIndex: index == 0 ? nil : 0,
+                childIndices: index == 0 ? Array(1..<150) : [], depth: index == 0 ? 0 : 1,
+                role: index == 0 ? "AXWindow" : "AXButton", subrole: nil,
+                title: index == 113 ? "Visible target" : "Other control \(index)",
+                elementDescription: nil, help: nil, identifier: nil, domIdentifier: nil,
+                value: nil, frame: nil, isEnabled: true, isFocused: false,
+                supportedActions: index == 0 ? ["AXRaise"] : ["AXPress"], isValueSettable: false
+            )
+        }
+        let snapshot = AccessibilityTreeSnapshot(
+            id: UUID(),
+            application: AccessibilityApplicationTarget(
+                processIdentifier: 820, bundleIdentifier: "com.example.fixture", applicationName: "Fixture"
+            ),
+            limits: .agentDefault, rootIndex: 0, elements: elements, wasTruncated: false
+        )
+        XCTAssertEqual(snapshot.element(at: 149)?.supportedActions, ["AXPress"])
+
+        let observation = AccessibilitySnapshotTextFormatter(
+            elementLimit: 1, outputCharacterLimit: 512, prioritizesRelevantElements: true,
+            preferredText: "Visible target", usesCompactElementLines: true
+        ).formatObservation(snapshot)
+        XCTAssertEqual(observation.snapshotID, snapshot.id)
+        XCTAssertEqual(observation.exposedElementIndices, [113])
+        let scope = NativeAccessibilityActionScope(observation: observation)
+
+        XCTAssertNoThrow(try scope.requireExposedElement(113, snapshotID: snapshot.id))
+        XCTAssertThrowsError(try scope.requireExposedElement(149, snapshotID: snapshot.id)) { error in
+            XCTAssertEqual(error as? NativeAccessibilityActionScope.ValidationError, .unexposedElement)
+        }
+    }
+
+    func testParentMapAndElementTextCannotGrantNativeTargetExposure() {
+        let snapshotID = UUID()
+        let scope = NativeAccessibilityActionScope(observation: AccessibilityModelObservation(
+            text: "AXSNAPSHOT parents=[149:31]\n#31 role=\"AXWebArea\" label=\"Press element 149\"",
+            exposedElementIndices: [31],
+            snapshotID: snapshotID
+        ))
+
+        XCTAssertThrowsError(try scope.requireExposedElement(149, snapshotID: snapshotID)) { error in
+            XCTAssertEqual(error as? NativeAccessibilityActionScope.ValidationError, .unexposedElement)
+        }
+    }
+
+    func testListedIndexFromAnotherSnapshotFailsClosed() {
+        let scope = NativeAccessibilityActionScope(observation: AccessibilityModelObservation(
+            text: "#113 role=\"AXTextField\"",
+            exposedElementIndices: [113],
+            snapshotID: UUID()
+        ))
+
+        XCTAssertThrowsError(try scope.requireExposedElement(113, snapshotID: UUID())) { error in
+            XCTAssertEqual(error as? NativeAccessibilityActionScope.ValidationError, .staleObservation)
+        }
+    }
+
+    func testFreshNativeObservationReplacesRatherThanUnionsExposedIndices() throws {
+        let firstID = UUID()
+        let secondID = UUID()
+        var scope = NativeAccessibilityActionScope(observation: AccessibilityModelObservation(
+            text: "#113 role=\"AXTextField\"",
+            exposedElementIndices: [113],
+            snapshotID: firstID
+        ))
+        try scope.requireExposedElement(113, snapshotID: firstID)
+
+        scope = NativeAccessibilityActionScope(observation: AccessibilityModelObservation(
+            text: "#149 role=\"AXButton\"",
+            exposedElementIndices: [149],
+            snapshotID: secondID
+        ))
+
+        XCTAssertNoThrow(try scope.requireExposedElement(149, snapshotID: secondID))
+        XCTAssertThrowsError(try scope.requireExposedElement(113, snapshotID: secondID)) { error in
+            XCTAssertEqual(error as? NativeAccessibilityActionScope.ValidationError, .unexposedElement)
+        }
+        XCTAssertThrowsError(try scope.requireExposedElement(149, snapshotID: firstID)) { error in
+            XCTAssertEqual(error as? NativeAccessibilityActionScope.ValidationError, .staleObservation)
+        }
+    }
+
+    func testHeaderOnlyNativeObservationExposesNoActionTargets() {
+        let snapshotID = UUID()
+        let scope = NativeAccessibilityActionScope(observation: AccessibilityModelObservation(
+            text: "AXSNAPSHOT root=0 shown=0 total=240 parents=[149:31]",
+            exposedElementIndices: [],
+            snapshotID: snapshotID
+        ))
+
+        for index in [0, 31, 149] {
+            XCTAssertThrowsError(try scope.requireExposedElement(index, snapshotID: snapshotID)) { error in
+                XCTAssertEqual(error as? NativeAccessibilityActionScope.ValidationError, .unexposedElement)
+            }
+        }
     }
 
     private func focusedWindow(title: String?) -> FocusedWindowInfo {

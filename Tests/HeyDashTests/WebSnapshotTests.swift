@@ -33,7 +33,7 @@ final class WebSnapshotTests: XCTestCase {
     @MainActor
     func testHeyDashBrandingKeepsNativeBridgeCompatibility() throws {
         XCTAssertEqual(TimelineEntryKind.assistant.label, "HeyDash")
-        XCTAssertTrue(CodexAppServerRuntime.Configuration.localQwen.baseInstructions.hasPrefix("You are HeyDash,"))
+        XCTAssertTrue(CodexAppServerRuntime.Configuration.localQwen.baseInstructions.hasPrefix("You are HeyDash."))
         XCTAssertEqual(WebBridge.handlerName, "localCodex")
         XCTAssertEqual(WebUIResourceLocator.scheme, "localcodex-app")
         let index = try XCTUnwrap(WebUIResourceLocator.indexURL)

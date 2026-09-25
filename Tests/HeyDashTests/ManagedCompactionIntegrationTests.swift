@@ -466,6 +466,11 @@ final class ManagedCompactionIntegrationTests: XCTestCase {
             configuration.codexHomePath = root.path
             configuration.workspacePath = root.path
             configuration.model = modelID
+            // This deterministic fixture emits 6,143 / 6,144 / 6,200-token
+            // receipts to test the below / at / above-threshold barriers.
+            // Keep that explicit synthetic boundary independent of the
+            // shipping model's context budget; live gates check defaults.
+            configuration.autoCompactLimitOverride = 6_144
             configuration.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
             runtime = CodexAppServerRuntime(configuration: configuration, visualGrounder: NoModelVisualGrounder())
             eventTask = Task { [weak self, runtime] in

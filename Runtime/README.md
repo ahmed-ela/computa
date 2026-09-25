@@ -48,9 +48,23 @@ independent of all three.
 Retained historical replies remain assistant-role excerpts, not new assertions
 of success. Up to four replies use at most 1 KiB of text each and 4 KiB serialized
 in total. Ambiguous, truncated, or misordered user boundaries are skipped. Tool
-receipts retain at most 32 genuine pairs and 12 KiB serialized text/headers in
-total. When needed, bounded shared excerpt sizes reduce output text rather than
-forgetting completed call identities or arguments. Empty IDs, duplicate IDs,
+receipts retain at most 32 genuine pairs and 12 KiB of serialized provider-input
+text/headers, including array punctuation. The budget uses the same external-
+provider projection as the request builder: LM Studio does not receive internal
+chat metadata or encrypted arguments. This projection is measured on a clone;
+canonical call identities, turn IDs, timestamps, failures, and ordering remain
+unchanged in history. A separate 24 KiB bound covers serialized canonical items
+and their metadata arrays. Both byte budgets use a placeholder for the separately
+bounded latest image described below, not its pixel payload. When needed,
+older excerpts shrink before the newest completed observation. The newest output
+may retain up to 4 KiB of text and 6 KiB serialized (excluding its separately
+bounded image); historical outputs remain capped at 2 KiB text/3 KiB serialized.
+If necessary the newest excerpt also shrinks. All former shared-cap candidates
+remain available, within the unchanged aggregate budgets. Completion order, not
+tool name or call order, determines priority. No call identities or arguments
+are shortened. The larger individual item has been manually reviewed; byte
+counts are not token counts, and final context-fit validation still applies.
+Empty IDs, duplicate IDs,
 count overflow, and byte overflow have distinct errors.
 
 Only the most recent completed tool output may retain one original inline

@@ -1,0 +1,2 @@
+# Unified diffs contain required space-only context lines. Check their source checkout instead.
+Runtime/patches/*.patch -whitespace

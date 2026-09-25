@@ -179,6 +179,33 @@ public final class ExistingChromeController {
         diagnostics = nil
     }
 
+    /// Restores an already-bound ordinary Chrome process without selecting a
+    /// replacement, launching Chrome, navigating, or posting keyboard input.
+    /// Callers must still verify their retained window/control after activation.
+    public func activate(
+        processIdentifier: Int32,
+        beforeMutation: @escaping @Sendable () async throws -> Void = {}
+    ) async throws -> ActivatedApplication {
+        try Task.checkCancellation()
+        guard processIdentifier > 0,
+              try ExistingChromeSelection.processIdentifier(in: runtime.candidates()) == processIdentifier else {
+            throw ExistingChromeError.targetChanged
+        }
+        try await beforeMutation()
+        try Task.checkCancellation()
+        guard try ExistingChromeSelection.processIdentifier(in: runtime.candidates()) == processIdentifier else {
+            throw ExistingChromeError.targetChanged
+        }
+        let application = try await runtime.activate(processIdentifier, beforeMutation: beforeMutation)
+        try Task.checkCancellation()
+        guard application.processIdentifier == processIdentifier,
+              application.bundleIdentifier == "com.google.Chrome",
+              try ExistingChromeSelection.processIdentifier(in: runtime.candidates()) == processIdentifier else {
+            throw ExistingChromeError.targetChanged
+        }
+        return application
+    }
+
     public func open(
         url: URL? = nil,
         beforeMutation: @escaping @Sendable () async throws -> Void = {}
@@ -523,8 +550,13 @@ private final class SystemExistingChromeRuntime: ExistingChromeRuntime {
                 }
             },
             tabs: {
-                guard let retainedWindow, try identity.isStillFocused() else { throw ExistingChromeError.targetChanged }
-                return try NativeChromeTabInventory.read(window: retainedWindow, processIdentifier: processIdentifier)
+                guard let retainedWindow else { throw ExistingChromeError.targetChanged }
+                return try NativeChromeTabReadRecovery.read(
+                    isSameWindow: { try identity.isStillFocused() },
+                    traverse: {
+                        try NativeChromeTabInventory.read(window: retainedWindow, processIdentifier: processIdentifier)
+                    }
+                )
             }
         )
     }

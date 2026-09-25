@@ -84,6 +84,105 @@ final class ExistingChromeControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testBoundActivationUsesExactOrdinaryPIDWithoutLaunchingOrPostingInput() async throws {
+        let runtime = ChromeRuntimeFixture()
+        runtime.processes.append(candidate(91, ["chrome", "--user-data-dir=/tmp/owned"]))
+        let gate = ChromeMutationGate(failAt: 99)
+        let result = try await ExistingChromeController(runtime: runtime).activate(processIdentifier: 42) {
+            try await gate.check()
+        }
+        XCTAssertEqual(result.processIdentifier, 42)
+        XCTAssertEqual(runtime.actions, ["activate:42"])
+        let checks = await gate.calls
+        XCTAssertEqual(checks, 1)
+    }
+
+    @MainActor
+    func testBoundActivationNeverLaunchesOrSubstitutesAnotherProcess() async {
+        for processes in [[], [candidate(43, ["chrome"])]] {
+            let runtime = ChromeRuntimeFixture()
+            runtime.processes = processes
+            await assertFailure(.targetChanged) {
+                try await ExistingChromeController(runtime: runtime).activate(processIdentifier: 42)
+            }
+            XCTAssertEqual(runtime.actions, [])
+        }
+    }
+
+    @MainActor
+    func testBoundActivationRejectsIsolatedAmbiguousAndUnknownProcessesBeforeMutation() async {
+        let cases: [([ExistingChromeCandidate], ExistingChromeError)] = [
+            ([candidate(42, ["chrome", "--remote-debugging-port=9222"])], .noOrdinaryBrowser),
+            ([candidate(42, ["chrome"]), candidate(43, ["chrome"])], .ambiguousOrdinaryBrowsers),
+            ([candidate(42, nil)], .processCannotBeInspected),
+        ]
+        for (processes, error) in cases {
+            let runtime = ChromeRuntimeFixture()
+            runtime.processes = processes
+            await assertFailure(error) {
+                try await ExistingChromeController(runtime: runtime).activate(processIdentifier: 42)
+            }
+            XCTAssertEqual(runtime.actions, [])
+        }
+    }
+
+    @MainActor
+    func testBoundActivationRevalidatesAfterMutationGate() async {
+        let runtime = ChromeRuntimeFixture()
+        await assertFailure(.targetChanged) {
+            try await ExistingChromeController(runtime: runtime).activate(processIdentifier: 42) {
+                await MainActor.run { runtime.processes = [] }
+            }
+        }
+        XCTAssertEqual(runtime.actions, [])
+    }
+
+    @MainActor
+    func testBoundActivationForwardsGateToRecoveryAndStopsOnRevocation() async {
+        let runtime = ChromeRuntimeFixture()
+        runtime.checkGateDuringActivation = true
+        let gate = ChromeMutationGate(failAt: 2)
+        do {
+            _ = try await ExistingChromeController(runtime: runtime).activate(processIdentifier: 42) {
+                try await gate.check()
+            }
+            XCTFail("Expected mutation gate rejection")
+        } catch is CancellationError {
+            XCTAssertEqual(runtime.actions, [])
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        let checks = await gate.calls
+        XCTAssertEqual(checks, 2)
+    }
+
+    @MainActor
+    func testBoundActivationRejectsChangedReturnedIdentityOrCandidate() async {
+        for kind in 0 ..< 3 {
+            let runtime = ChromeRuntimeFixture()
+            if kind == 0 { runtime.activatedProcessIdentifier = 43 }
+            if kind == 1 { runtime.activatedBundleIdentifier = "com.example.other" }
+            if kind == 2 { runtime.processesAfterActivation = [candidate(43, ["chrome"])] }
+            await assertFailure(.targetChanged) {
+                try await ExistingChromeController(runtime: runtime).activate(processIdentifier: 42)
+            }
+            XCTAssertEqual(runtime.actions, ["activate:42"])
+        }
+    }
+
+    @MainActor
+    func testBoundActivationCannotSucceedAfterCancellationDuringActivation() async {
+        let runtime = ChromeRuntimeFixture()
+        runtime.cancelDuringActivation = true
+        let task = Task { @MainActor in
+            try await ExistingChromeController(runtime: runtime).activate(processIdentifier: 42)
+        }
+        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        catch is CancellationError { XCTAssertEqual(runtime.actions, ["activate:42"]) }
+        catch { XCTFail("Unexpected error: \(error)") }
+    }
+
+    @MainActor
     func testNormalLaunchRevalidatesReturnedProcess() async throws {
         let runtime = ChromeRuntimeFixture()
         runtime.processes = []
@@ -405,6 +504,10 @@ private final class ChromeRuntimeFixture: ExistingChromeRuntime {
     var changeControlAfterEntry = false
     var dropEnteredText = false
     var cancelDuringActivation = false
+    var checkGateDuringActivation = false
+    var activatedProcessIdentifier: Int32 = 42
+    var activatedBundleIdentifier = "com.google.Chrome"
+    var processesAfterActivation: [ExistingChromeCandidate]?
     var loseOldTabAfterNewTab = false
     var createTwoTabs = false
     var selectOldTabAfterNewTab = false
@@ -426,9 +529,15 @@ private final class ChromeRuntimeFixture: ExistingChromeRuntime {
         return application
     }
     func activate(_ processIdentifier: Int32, beforeMutation: @escaping @Sendable () async throws -> Void) async throws -> ActivatedApplication {
+        if checkGateDuringActivation { try await beforeMutation() }
         actions.append("activate:\(processIdentifier)")
         if cancelDuringActivation { withUnsafeCurrentTask { $0?.cancel() } }
-        return application
+        if let processesAfterActivation { processes = processesAfterActivation }
+        return ActivatedApplication(
+            processIdentifier: activatedProcessIdentifier,
+            bundleIdentifier: activatedBundleIdentifier,
+            localizedName: "Google Chrome"
+        )
     }
     func focus(_ processIdentifier: Int32) throws -> ExistingChromeFocus {
         if newTabWasRequested, denyPermissionAfterNewTab { throw AutomationError.permissionNotGranted(.accessibility) }

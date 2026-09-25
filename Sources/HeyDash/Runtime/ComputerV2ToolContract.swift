@@ -7,6 +7,51 @@ import Foundation
 /// without changing old threads. A V2 executor must bind the selected app,
 /// retain snapshots/captures, and check image bounds before any mutation.
 enum ComputerV2ToolContract {
+    static let maximumAppInventoryBytes = 3_500
+    static let unboundApplicationMessage = "No application is bound in this turn. Call computer_v2_open first."
+
+    /// Keep discovery proportional to a small local model's context. The default
+    /// lists user-facing apps, not every system helper. A query searches all
+    /// running apps without any name-specific exclusions.
+    static func appInventory(_ applications: [RunningApplicationInfo], query: String?) -> String {
+        let query = query?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matches = applications.filter { app in
+            guard app.processIdentifier > 0, !app.isTerminated else { return false }
+            if let query, !query.isEmpty {
+                return [app.localizedName, app.bundleIdentifier].compactMap { $0 }
+                    .contains { $0.localizedCaseInsensitiveContains(query) }
+            }
+            return app.activationPolicy == .regular || app.isActive
+        }.sorted { left, right in
+            if let query {
+                let leftExact = left.bundleIdentifier?.caseInsensitiveCompare(query) == .orderedSame
+                let rightExact = right.bundleIdentifier?.caseInsensitiveCompare(query) == .orderedSame
+                if leftExact != rightExact { return leftExact }
+            }
+            if left.isActive != right.isActive { return left.isActive }
+            let leftName = left.localizedName ?? left.bundleIdentifier ?? ""
+            let rightName = right.localizedName ?? right.bundleIdentifier ?? ""
+            let order = leftName.localizedCaseInsensitiveCompare(rightName)
+            return order == .orderedSame ? left.processIdentifier < right.processIdentifier : order == .orderedAscending
+        }
+        var rows: [String] = []
+        var bytes = 0
+        for app in matches {
+            var row: [String: Any] = ["pid": app.processIdentifier, "active": app.isActive]
+            if let name = app.localizedName { row["name"] = String(name.prefix(72)) }
+            if let bundle = app.bundleIdentifier { row["bundle_id"] = bundle }
+            guard let data = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys, .withoutEscapingSlashes]),
+                  let text = String(data: data, encoding: .utf8),
+                  bytes + data.count + 1 <= maximumAppInventoryBytes - 400 else { continue }
+            rows.append(text)
+            bytes += data.count + 1
+        }
+        let scope = query == nil ? "user_facing" : "all_matching_running_apps"
+        return "APPS scope=\(scope) matched=\(matches.count) returned=\(rows.count) omitted=\(matches.count - rows.count). "
+            + "Use query with a name or bundle_id to find helpers or omitted apps. Known bundle_id: open directly; no listing needed.\n"
+            + rows.joined(separator: "\n")
+    }
+
     static func captureMetadata(mapper: ScreenshotCoordinateMapper) -> String {
         """
         WINDOW_CAPTURE capture_id=\(mapper.captureID.uuidString)
@@ -83,11 +128,30 @@ enum ComputerV2ToolContract {
     }
 
     static func specs(for modelID: String) -> [[String: Any]] {
-        guard !LocalModelCatalog.supportsResidentVisualGrounding(modelID) else {
-            return specs
+        guard LocalModelCatalog.supportsResidentVisualGrounding(modelID) else {
+            return Tool.allCases.filter { $0 != .groundClick }.map(spec)
         }
-        return Tool.allCases.filter { $0 != .groundClick }.map(spec)
+        return specs.map { original in
+            guard original["name"] as? String == Tool.click.rawValue else { return original }
+            var result = original
+            result["description"] = "Prefer computer_v2_ground_click with a target description for visual targets; do not guess coordinates. "
+                + (original["description"] as? String ?? "")
+            return result
+        }
     }
+
+    static let visualGroundingInstructions = """
+        Prefer a link's supported AXPress. In Chrome, a navigation link without \
+        a supported AXPress but with an observed url can be followed with \
+        computer_v2_open(bundle_id="com.google.Chrome",url=<exact observed url>); \
+        do not guess or reconstruct an omitted URL. Opening a URL is not equivalent \
+        to activating an in-page menu or script action; verify navigation. \
+        For a visible target with no supported AX action (including a listed link \
+        without AXPress and without an observed url), capture once and use computer_v2_ground_click with the \
+        exact capture_id and a concise target description. Prefer this over guessing \
+        pixel coordinates. It returns a fresh post-action screenshot with synchronized \
+        Accessibility when available; verify the visible outcome, not just dispatch.
+        """
 
     static func validate(
         tool name: String,
@@ -98,8 +162,17 @@ enum ComputerV2ToolContract {
         }
 
         switch tool {
-        case .status, .apps:
+        case .status:
             try checkKeys(arguments, required: [], allowed: [])
+
+        case .apps:
+            try checkKeys(arguments, required: [], allowed: ["query"])
+            if arguments["query"] != nil {
+                let query = try requiredString("query", in: arguments, maximum: 200)
+                guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ValidationError.invalid("query")
+                }
+            }
 
         case .open:
             try checkKeys(arguments, required: ["bundle_id"], allowed: ["bundle_id", "url", "browser_mode"])
@@ -350,8 +423,8 @@ enum ComputerV2ToolContract {
             properties = [:]; required = []
             description = "Read macOS computer-use permissions."
         case .apps:
-            properties = [:]; required = []
-            description = "List running apps."
+            properties = ["query": string]; required = []
+            description = "List user-facing running apps compactly. Optional query searches names/bundle IDs of all running apps, including helpers. If you know bundle_id, open directly without listing."
         case .open:
             properties = [
                 "bundle_id": string,
@@ -361,22 +434,24 @@ enum ComputerV2ToolContract {
             ]; required = ["bundle_id"]
             description = "Open and bind an app. Chrome (com.google.Chrome) defaults to the user's existing normal session, with its tabs and logins; omit url to inspect an already-open tab. Use browser_mode=isolated only when the user explicitly requests a separate browser profile."
         case .snapshot:
-            properties = ["query": string]; required = []
-            description = "Read the bound app/tab Accessibility tree; returns snapshot_id and element indices. For accessible targets, use computer_v2_ax with AXPress, not image-coordinate clicks."
+            properties = ["query": ["type": "string", "minLength": 1, "maxLength": 200,
+                                    "description": "Optional short literal text (case-insensitive substring), not a question. Searches a larger tree when target/page text is missing/truncated."]]; required = []
+            description = "Read the bound app/tab Accessibility tree; returns snapshot_id and element indices. For missing/truncated text, try a short literal query before scrolling or capturing. If the requested item's fact is absent or its association is uncertain in truncated output, make one literal query for that item before answering; never substitute another item's fact. If the observed facts answer the request, answer and stop. Lines are relevance-ranked, not page order: follow parent through the header parents map (child:parent) to group facts, never adjacency alone. sibling_heading is observed direct-sibling context, not proof of semantic ownership. Container lines may be omitted. Prefer supported AX actions for buttons and links. For a Chrome navigation link without AXPress, follow its exact observed url with computer_v2_open; never reconstruct url_omitted destinations. URL navigation is not an in-page script action. AXPress on a text field only focuses it; it does not submit."
         case .ax:
             properties = [
                 "snapshot_id": string, "element_index": integer,
                 "ax_action": ["type": "string", "enum": SemanticAXAction.allCases.map(\.rawValue)],
             ]
             required = ["snapshot_id", "element_index", "ax_action"]
-            description = "Act on a current native or exact brokered-tab AX snapshot element, then observe again. Approval required."
+            description = "Act on a current AX snapshot element. AXPress on a text field focuses it, not Enter/submission; use keypress for Enter. Native actions return a fresh AX snapshot when available; use its new snapshot_id. Brokered-tab actions require another snapshot. Verify the outcome. Approval required."
         case .setText:
             properties = ["snapshot_id": string, "element_index": integer, "text": string]
             required = ["snapshot_id", "element_index", "text"]
-            description = "Set text on a current native or exact brokered-tab AX element, then observe again. Approval required."
+            description = "Set text on a current AX element; does not submit. Native actions return a fresh AX snapshot when available; use its new snapshot_id. Brokered-tab actions require another snapshot. Approval required."
         case .capture:
             properties = [
-                "display_id": integer,
+                "display_id": ["type": "integer", "minimum": 1, "maximum": 4_294_967_295,
+                               "description": "Usually omit: capture uses the bound app window. Only supply an observed display ID; 0 is invalid."],
                 "shows_cursor": boolean,
                 "include_accessibility": boolean,
             ]; required = []
@@ -384,17 +459,20 @@ enum ComputerV2ToolContract {
         case .groundClick:
             properties = ["capture_id": string, "target": string]
             required = ["capture_id", "target"]
-            description = "For a native screenshot-only target that AX cannot identify, locate and click the target using the local GoClick + GUI-Owl agreement cascade with ShowUI only on disagreement. Requires a current capture_id and native approval, then returns a fresh post-action screenshot with synchronized Accessibility when available. Verify the visible outcome; the dispatch marker alone is not success."
+            description = "For a visible native target with no supported AX action, including a listed link without AXPress and without an observed url, locate and click using a target description rather than guessed coordinates. A navigation link's observed url is a Chrome fallback, not a replacement for supported AXPress or an in-page script action. Uses the local GoClick + GUI-Owl agreement cascade with ShowUI only on disagreement. Requires a current capture_id and native approval, then returns a fresh post-action screenshot with synchronized Accessibility when available. Verify the visible outcome; the dispatch marker alone is not success."
         case .click:
             properties = capturePoint; required = ["capture_id", "x", "y"]
             description = "Image-only click at x,y using a fresh capture_id from computer_v2_capture. Never use snapshot_id or AX screen coordinates here; use computer_v2_ax for AX targets. Then observe. Approval required."
         case .pointer:
-            properties = capturePoint.merging([
+            properties = [
+                "capture_id": ["type": "string", "description": "Exact ID from the latest screenshot, never from an AX snapshot. Navigation, input, or a new AX snapshot invalidates older captures."],
+                "x": ["type": "number", "minimum": 0, "description": "Required for every action, including scroll: horizontal image pixel over the intended target/scroll region."],
+                "y": ["type": "number", "minimum": 0, "description": "Required for every action, including scroll: vertical image pixel over the intended target/scroll region."],
                 "action": ["type": "string", "enum": PointerAction.allCases.map(\.rawValue)],
                 "delta_x": integer, "delta_y": integer,
-            ]) { _, new in new }
+            ]
             required = ["action", "capture_id", "x", "y"]
-            description = "Image-space move/double_click/right_click/scroll. Scroll needs delta_x,y. Approval required."
+            description = "Image-space move/double_click/right_click/scroll. Every action requires a fresh capture_id plus x and y image pixels. Scroll additionally requires delta_x and delta_y; x,y choose the scroll region. Never invent capture IDs or reuse one after navigation/input/snapshot. Approval required."
         case .keypress:
             properties = [
                 "key": string,
@@ -404,10 +482,10 @@ enum ComputerV2ToolContract {
                 ],
             ]
             required = ["key"]
-            description = "Press a key in the bound app, then observe. Approval required."
+            description = "Press a key in the already-observed focused control. Returns a fresh AX snapshot when available. Verify its result; do not repeat input if observation fails. Approval required."
         case .type:
             properties = ["text": string]; required = ["text"]
-            description = "Type text in the bound app, then observe. Approval required."
+            description = "Insert text into the already-observed focused control; this does not navigate or submit. To open a URL, use computer_v2_open with url, or an observed link via AX. Returns a fresh AX snapshot when available; verify the result. Approval required."
         }
 
         return [

@@ -37,7 +37,7 @@ final class AppStateTests: XCTestCase {
             (LocalModelCatalog.defaultModelID, 4096, 3072),
             ("lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit", 4096, 3072),
             ("lmstudio-community/Qwen3.5-9B-MLX-4bit", 8192, 6144),
-            ("lmstudio-community/Qwen3.5-4B-MLX-4bit", 8192, 6144),
+            ("lmstudio-community/Qwen3.5-4B-MLX-4bit", 16384, 12288),
             ("unlisted/model", 4096, 3072),
         ]
 
@@ -56,8 +56,14 @@ final class AppStateTests: XCTestCase {
     func testLoadedThreadCanSwitchOnlyBetweenModelsWithTheSameContextLimits() {
         let constrained = LocalThreadContext.forModel(LocalModelCatalog.defaultModelID)
         let expanded = LocalThreadContext.forModel("lmstudio-community/Qwen3.5-9B-MLX-4bit")
+        let computerUse = LocalThreadContext.forModel("lmstudio-community/Qwen3.5-4B-MLX-4bit")
 
-        XCTAssertTrue(expanded.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
+        XCTAssertTrue(expanded.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
+        XCTAssertTrue(computerUse.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
+        XCTAssertFalse(expanded.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
+        XCTAssertFalse(computerUse.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
+        XCTAssertFalse(computerUse.supportsModelSwitch(to: LocalModelCatalog.defaultModelID))
+        XCTAssertFalse(constrained.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
         XCTAssertFalse(constrained.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
         XCTAssertFalse(expanded.supportsModelSwitch(to: LocalModelCatalog.defaultModelID))
     }
