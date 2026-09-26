@@ -2,6 +2,9 @@
 
 <img width="128" height="128" alt="ChatGPT Image Sep 26, 2026, 10_26_23 AM" src="https://github.com/user-attachments/assets/869c295e-620a-4946-83aa-7785266cd289" />
 
+<img width="668" height="430" alt="Screenshot 2026-09-26 at 10 29 53 AM" src="https://github.com/user-attachments/assets/d6e483e2-118a-441c-ab0e-9727bb2dbab1" />
+
+
 
 Private repository: [ahmed8372/heydash](https://github.com/ahmed8372/heydash).
 
