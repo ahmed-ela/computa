@@ -1,4 +1,4 @@
-# Macndash - think fast
+# Macndash - Fast Local AI for Computer Use
 
 Private repository: [ahmed8372/heydash](https://github.com/ahmed8372/heydash).
 
