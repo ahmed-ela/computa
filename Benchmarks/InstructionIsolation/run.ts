@@ -32,7 +32,7 @@ function textOf(message: JSONValue): string {
 }
 export function validateTemplate(value: JSONValue) {
   if (!value || value.model !== MODEL || typeof value.instructions !== "string"
-      || !value.instructions.startsWith("You are HeyDash.") || value.instructions.length > 32_768
+      || !/^You are (?:HeyDash|Macndash)\./.test(value.instructions) || value.instructions.length > 32_768
       || !Array.isArray(value.input) || !value.input.length || value.input.length > 8
       || !Array.isArray(value.tools) || value.tools.length > 64) throw new Error("Expected a bounded production instruction template");
   let policies = 0;

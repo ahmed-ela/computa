@@ -45,7 +45,7 @@ const meta = events.find(e => e.type === "session_meta")?.payload;
 const policy = read("/Users/ahmedelamin/AGENTS.md", 64 * 1024).toString().trim();
 const inherited = events.find(e => e.type === "response_item" && e.payload.type === "message" && e.payload.role === "user"
   && e.payload.content?.some((c: any) => c.type === "input_text" && c.text.includes(policy)))?.payload;
-if (!inherited || typeof meta?.base_instructions?.text !== "string" || !meta.base_instructions.text.startsWith("You are HeyDash.")) {
+if (!inherited || typeof meta?.base_instructions?.text !== "string" || !/^You are (?:HeyDash|Macndash)\./.test(meta.base_instructions.text)) {
   throw new Error("Original production instructions and inherited policy required");
 }
 async function command(argv: string[], timeout = 12000) {

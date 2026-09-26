@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import unittest
 
-sys.path.insert(0, str(Path(__file__).parents[2] / "Sources/HeyDash/Resources/MLXServer"))
+sys.path.insert(0, str(Path(__file__).parents[2] / "Sources/Macrouse/Resources/MLXServer"))
 from response_boundary import ResponseBoundary, MAX_ERROR_BODY, is_context_overflow, is_protocol_error
 from sse_contract import ProtocolError
 

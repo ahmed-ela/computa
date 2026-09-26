@@ -7,7 +7,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { completed, exactText, SSEDecoder, type Event } from "./stream-contract";
 
 const repo = resolve(import.meta.dir, "../..");
-const server = join(repo, "Sources/HeyDash/Resources/MLXServer/server.py");
+const server = join(repo, "Sources/Macndash/Resources/MLXServer/server.py");
 const python = join(homedir(), "Library/Application Support/LocalCodex/VisualGrounding/venv/bin/python");
 const modelRoot = join(homedir(), ".lmstudio/models");
 const model = "lmstudio-community/Qwen3.5-4B-MLX-4bit";
@@ -101,7 +101,7 @@ async function loadedMarker(nonce: string, signal: AbortSignal) {
   const before = await health(nonce, signal);
   if (before.busy) throw new LifecycleFailure("Owned server is unexpectedly busy; no inference was sent");
   const policy = readFileSync(join(homedir(), "AGENTS.md"), "utf8");
-  const request = { model, instructions: "You are HeyDash. This is a read-only local memory-lifecycle test. No tools are available.",
+  const request = { model, instructions: "You are Macndash. This is a read-only local memory-lifecycle test. No tools are available.",
     input: [{ type: "message", role: "user", content: [{ type: "input_text", text: policy }] },
       { type: "message", role: "user", content: [{ type: "input_text", text: `Reply only ${marker}. Do not use tools.` }] }],
     tools: [], stream: true, store: false, reasoning: { effort: "none" }, temperature: 0.1, max_output_tokens: 1024 };
@@ -143,7 +143,7 @@ async function run(out: string, load: boolean) {
   }
   const nonce = randomUUID(), controller = new AbortController();
   const summary: any = { state: "preflight", load4BExplicitlyRequested: load, model, endpoint, nonce,
-    inferenceLaneRequirement: "Run only when HeyDash and all other inference producers are idle/stopped.",
+    inferenceLaneRequirement: "Run only when Macndash and all other inference producers are idle/stopped.",
     limitations: "Process disappearance releases its allocations; this is not a matched RAM A/B or whole-system free-memory measurement.",
     sourceHashes: Object.fromEntries([import.meta.path, server, join(resolve(server, ".."), "response_boundary.py"),
       join(resolve(server, ".."), "sse_contract.py"), join(import.meta.dir, "stream-contract.ts")]

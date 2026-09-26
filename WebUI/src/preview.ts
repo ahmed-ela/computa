@@ -23,7 +23,7 @@ const previewTasks: TaskSnapshot[] = [
     workspace: previewWorkspace, model: model4B, modelSelectable: true,
     queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false,
     entries: [{
-      id: 'preview-formatted-answer', kind: 'assistant', title: 'HeyDash', timestamp: now - 100,
+      id: 'preview-formatted-answer', kind: 'assistant', title: 'Macrouse', timestamp: now - 100,
       body: [
         '', '', '## A readable response', '',
         'Paragraphs should flow naturally, with **clear emphasis** and `inline code`.', '',
@@ -81,7 +81,7 @@ const previewTasks: TaskSnapshot[] = [
         },
       },
       {
-        id: 'preview-4b-assistant', kind: 'assistant', title: 'HeyDash',
+        id: 'preview-4b-assistant', kind: 'assistant', title: 'Macrouse',
         body: '\n\nLocal AI runs directly on your Mac instead of relying on a remote server. It can keep your data on the device and work offline.\n\nA practical setup combines a language model with carefully approved computer actions.\n\n- **Privacy:** Keep prompts and model inference local.\n- **Responsiveness:** Use a model that fits your available memory.\n- **Control:** Review clicks and typing before they happen.\n\nThis is synthetic preview content; no model or computer tool ran.\n\n',
         timestamp: now - 130,
       },
@@ -205,7 +205,7 @@ const previewTasks: TaskSnapshot[] = [
         },
       },
       {
-        id: 'preview-long-assistant', kind: 'assistant', title: 'HeyDash',
+        id: 'preview-long-assistant', kind: 'assistant', title: 'Macrouse',
         body: 'The output above is intentionally long and contains literal angle brackets. This preview did not read files or run tools.',
         timestamp: now - 3_900,
       },
@@ -226,7 +226,7 @@ return {
   accessMode: 'askEveryTime',
   defaultModel: model27B,
   modelOptions: [
-    { id: model27B, label: 'Qwen3.8-27B · MLX 4-bit', detail: '16.1 GB model file. Current validated HeyDash model.', highMemory: false },
+    { id: model27B, label: 'Qwen3.8-27B · MLX 4-bit', detail: '16.1 GB model file. Current validated Macrouse model.', highMemory: false },
     { id: model35B, label: 'Qwen3.6-35B-A3B · MLX 4-bit', detail: '20.4 GB model file. Very tight on this 24 GB Mac; download and load in LM Studio separately.', highMemory: true },
     { id: model9B, label: 'Qwen3.5-9B · MLX 4-bit', detail: '5.98 GB model files. Lower-memory option; download and load in LM Studio separately.', highMemory: false },
     { id: model4B, label: 'Qwen3.5-4B · MLX 4-bit', detail: '3.06 GB model files. Smallest option; download and load in LM Studio separately.', highMemory: false },

@@ -13,7 +13,7 @@ if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o70
     || resolve(directory).startsWith(resolve(import.meta.dir, "../..") + "/")) throw new Error("Fresh external private directory required");
 const original = JSON.parse(readFileSync(source, "utf8"));
 const model = "lmstudio-community/Qwen3.5-4B-MLX-4bit";
-if (original.model !== model || !original.instructions?.startsWith("You are HeyDash.")
+if (original.model !== model || typeof original.instructions !== "string" || !/^You are (?:HeyDash|Macndash)\./.test(original.instructions)
     || original.input?.length !== 2 || !JSON.stringify(original.input[0]).includes("StudyLock Permanent Non-Bypass Policy")) throw new Error("Frozen production request required");
 const observer = observationMode("guarded:" + nonce);
 const save = (name: string, value: unknown) => writeFileSync(join(directory, name), JSON.stringify(value, null, 2), { mode: 0o600 });

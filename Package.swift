@@ -3,12 +3,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "HeyDash",
+    name: "Macrouse",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "HeyDash", targets: ["HeyDash"])
+        .executable(name: "Macrouse", targets: ["Macrouse"])
     ],
     targets: [
         .target(
@@ -16,9 +16,9 @@ let package = Package(
             path: "Sources/AutomationCore"
         ),
         .executableTarget(
-            name: "HeyDash",
+            name: "Macrouse",
             dependencies: ["AutomationCore"],
-            path: "Sources/HeyDash",
+            path: "Sources/Macrouse",
             resources: [
                 .copy("Resources/WebUI"),
                 .copy("Resources/VisualGrounding"),
@@ -33,9 +33,9 @@ let package = Package(
             path: "Tests/AutomationCoreTests"
         ),
         .testTarget(
-            name: "HeyDashTests",
-            dependencies: ["HeyDash"],
-            path: "Tests/HeyDashTests"
+            name: "MacrouseTests",
+            dependencies: ["Macrouse"],
+            path: "Tests/MacrouseTests"
         )
     ]
 )

@@ -1,18 +1,22 @@
-# HeyDash
+# Macrouse
+
+<img width="128" height="128" alt="ChatGPT Image Sep 26, 2026, 10_26_23 AM" src="https://github.com/user-attachments/assets/869c295e-620a-4946-83aa-7785266cd289" />
+
+<img width="668" height="430" alt="Screenshot 2026-09-26 at 10 29 53 AM" src="https://github.com/user-attachments/assets/d6e483e2-118a-441c-ab0e-9727bb2dbab1" />
 
 Fast, Mac-optimized local AI.
 
-Private repository: [ahmed8372/heydash](https://github.com/ahmed8372/heydash).
+Private repository: [amebuilds/Macrouse](https://github.com/amebuilds/Macrouse).
 
-HeyDash is a clean-room macOS desktop-agent client with its own source-pinned build of the open-source Codex App Server. Its signed Swift host owns the agent runtime and macOS permissions, while a compiled Octane interface renders in the system `WKWebView`. It recreates the shape of a local Codex-style desktop experience without copying the Codex GUI, private source, or application assets. It does not modify or launch the App Server inside an installed Codex/ChatGPT app.
+Macrouse is a clean-room macOS desktop-agent client with its own source-pinned build of the open-source Codex App Server. Its signed Swift host owns the agent runtime and macOS permissions, while a compiled Octane interface renders in the system `WKWebView`. It recreates the shape of a local Codex-style desktop experience without copying the Codex GUI, private source, or application assets. It does not modify or launch the App Server inside an installed Codex/ChatGPT app.
 
 The project has moved beyond a static UI shell: it launches an isolated App Server over stdio, loads and resumes local-model threads, starts turns, streams thread/turn/item updates into the transcript, presents native approval requests, and exposes a versioned clean-room computer-use contract for desktop observation and control.
 
 ## Rename compatibility
 
-HeyDash was previously named LocalCodex. The app, executable, Swift module, Xcode project/scheme, and source/test directories now use HeyDash. To preserve existing installations, the signing team and bundle identifier (`com.ahmedelamin.LocalCodex`), Application Support directory (`~/Library/Application Support/LocalCodex`), and saved model preference (`LocalCodex.defaultModelID`) are deliberately unchanged. No settings, conversations, or downloaded visual-grounding models are moved or reset.
+Macrouse was previously named Macndash, before that HeyDash, and originally LocalCodex. The app, executable, Swift module, Xcode project/scheme, and source/test directories now use Macrouse. To preserve existing installations, the signing team and bundle identifier (`com.ahmedelamin.LocalCodex`), Application Support directory (`~/Library/Application Support/LocalCodex`), and saved preferences (`LocalCodex.defaultModelID`, `HeyDash.accessMode`, `HeyDash.rememberedChromeConnection`) are deliberately unchanged. No settings, conversations, or downloaded visual-grounding models are moved or reset.
 
-The internal `localCodex` WebKit bridge, `localcodex-app` resource scheme, `local_codex` App Server source identity, `LOCALCODEX_*` environment variables, fingerprint domains, and benchmark schema/result identifiers also remain stable. Dated verification records retain their original artifact names and hashes. These compatibility names are not current product branding.
+The internal `localCodex` WebKit bridge, `localcodex-app` resource scheme, `local_codex` App Server source identity, `LOCALCODEX_*` and `HEYDASH_*` environment variables, MLX `heydash_instance` protocol field, fingerprint domains, and benchmark schema/result identifiers also remain stable. The pinned engine remains `heydash-4`; renaming the UI does not relabel that verified binary. The Chrome bridge keeps its installed extension ID, `com.macndash.chrome_bridge` native host name, `macndashChromeBridgeV1` storage key, and existing Keychain and preferences identifiers so pairing survives the rename. Dated verification records and external experimental fixtures retain their original artifact names and hashes. These compatibility names are not current product branding.
 
 ## Current architecture
 
@@ -25,19 +29,19 @@ CodexAppServerRuntime + AutomationCore
   typed AgentRuntimeClient adapter + JSON-RPC event mapping
           │ stdio
           ▼
-HeyDash.app/Contents/Resources/AgentRuntime/codex-app-server
+Macrouse.app/Contents/Resources/AgentRuntime/codex-app-server
   --listen stdio:// (verified app-owned artifact)
           │
           ├── app-owned headless MLX-VLM process (loopback only)
           │     lmstudio-community/Qwen3.5-4B-MLX-4bit (default)
           │     lmstudio-community/Qwen3.5-9B-MLX-4bit (optional)
           │
-          └── HeyDash dynamic tools: computer_v2_*
+          └── Macrouse dynamic tools: computer_v2_*
                 ├── AutomationCore (AppKit, Accessibility, ScreenCaptureKit)
                 └── native visual fallback (external pinned MLX worker)
 ```
 
-The Octane/WebKit layer owns ordinary presentation. `CodexAppServerRuntime` translates App Server requests and notifications into the typed task, status, timeline, and connection events consumed by `AppState`. A narrow native bridge sends revisioned, data-minimized snapshots to the page and accepts only validated UI actions; it never exposes Accessibility or ScreenCaptureKit directly. Privileged approval decisions remain in native Swift: the approval overlay in Ask every time, or AppState's automatic resolver in Full access. They are never accepted from JavaScript. App Server remains responsible for the agent loop, thread state, sandbox selection, approval requests, and model-provider integration. HeyDash deliberately removes unrelated built-in tools, plugins, memories, skills, and MCP configuration from its constrained local-model turns.
+The Octane/WebKit layer owns ordinary presentation. `CodexAppServerRuntime` translates App Server requests and notifications into the typed task, status, timeline, and connection events consumed by `AppState`. A narrow native bridge sends revisioned, data-minimized snapshots to the page and accepts only validated UI actions; it never exposes Accessibility or ScreenCaptureKit directly. Privileged approval decisions remain in native Swift: the approval overlay in Ask every time, or AppState's automatic resolver in Full access. They are never accepted from JavaScript. App Server remains responsible for the agent loop, thread state, sandbox selection, approval requests, and model-provider integration. Macrouse deliberately removes unrelated built-in tools, plugins, memories, skills, and MCP configuration from its constrained local-model turns.
 
 New tasks default to `lmstudio-community/Qwen3.5-4B-MLX-4bit`. Settings can change the persisted default for new tasks, and the composer selector can change an individual idle task's model. The selected model ID is sent to App Server on thread start, resume, and turn start; existing threads keep their recorded model unless explicitly changed. Historical 27B/35B catalog entries and saved preferences are preserved, but the owned MLX backend rejects unsupported models explicitly instead of silently substituting one. Other turn defaults are:
 
@@ -50,9 +54,9 @@ New tasks default to `lmstudio-community/Qwen3.5-4B-MLX-4bit`. Settings can chan
 - isolated App Server home: `~/Library/Application Support/LocalCodex/CodexHome`;
 - persistent App Server threads (`ephemeral: false`).
 
-The private `CODEX_HOME` keeps existing HeyDash chats separate from personal Codex chats. It is not sufficient by itself to isolate configuration: a Documents workspace inside a home Git repository could previously discover the ancestor `.codex/config.toml` and `AGENTS.md`. HeyDash now launches in its private workspace with `project_root_markers=[]` at both process and thread boundaries. The engine child's `HOME` is its private `CodexHome/ProcessHome`, preventing global `.agents` skill imports; the native app and real macOS home are unchanged. It forwards only explicit home paths, a system PATH, temporary-directory/locale settings, and the selected local inference endpoint; it does not forward ambient Codex routing variables, API keys, proxies, or startup hooks. Login-shell initialization and shell snapshots are disabled for this shell-tool-free engine. Auth stores are file-backed inside the private home, not shared desktop credentials. This is application configuration isolation, not an OS sandbox.
+The private `CODEX_HOME` keeps existing Macrouse chats separate from personal Codex chats. It is not sufficient by itself to isolate configuration: a Documents workspace inside a home Git repository could previously discover the ancestor `.codex/config.toml` and `AGENTS.md`. Macrouse now launches in its private workspace with `project_root_markers=[]` at both process and thread boundaries. The engine child's `HOME` is its private `CodexHome/ProcessHome`, preventing global `.agents` skill imports; the native app and real macOS home are unchanged. It forwards only explicit home paths, a system PATH, temporary-directory/locale settings, and the selected local inference endpoint; it does not forward ambient Codex routing variables, API keys, proxies, or startup hooks. Login-shell initialization and shell snapshots are disabled for this shell-tool-free engine. Auth stores are file-backed inside the private home, not shared desktop credentials. This is application configuration isolation, not an OS sandbox.
 
-The compact base instruction is under 1 KiB. HeyDash additionally supplies its own bundled developer instructions on new and resumed chats, including the **complete unchanged StudyLock non-bypass policy**. No protected source or enforcement state is removed or altered. The policy governs StudyLock enforcement only; it does not turn HeyDash into a StudyLock-only assistant or establish that an unrelated page is blocked. Saved chats and their history remain intact; restarting the app applies the owned instruction boundary on resume. Updates to bundled instructions require a new build/restart, not live editing of another application's configuration. Machine-managed/system-wide engine policy is not bypassed by these app settings.
+The compact base instruction is under 1 KiB. Macrouse additionally supplies its own bundled developer instructions on new and resumed chats, including the **complete unchanged StudyLock non-bypass policy**. No protected source or enforcement state is removed or altered. The policy governs StudyLock enforcement only; it does not turn Macrouse into a StudyLock-only assistant or establish that an unrelated page is blocked. Saved chats and their history remain intact; restarting the app applies the owned instruction boundary on resume. Updates to bundled instructions require a new build/restart, not live editing of another application's configuration. Machine-managed/system-wide engine policy is not bypassed by these app settings.
 
 ## Application surface
 
@@ -75,7 +79,7 @@ turn completion dispatches the next message once; stopping, disconnecting, or
 failing pauses the queue. Resume is explicit, and unconfirmed delivery stays
 visible for review rather than automatically retrying. Editing holds that item
 until Save or Cancel, and a message already being sent cannot be changed.
-Queued messages are app-session-local: keep HeyDash open until they are sent.
+Queued messages are app-session-local: keep Macrouse open until they are sent.
 
 Steer delivers a queued message into the current turn using the App Server's
 [`turn/steer` contract](https://learn.chatgpt.com/docs/app-server#steer-an-active-turn).
@@ -132,11 +136,11 @@ assertions remain in `RuntimeContextLiveTests` and
 the UI. See `Benchmarks/CONTEXT-RETENTION-2026-09-24.md` for recorded outcomes.
 
 The runtime may retain user messages that exceed this local model budget.
-HeyDash interrupts the exact turn if the post-compaction estimate still exceeds
+Macrouse interrupts the exact turn if the post-compaction estimate still exceeds
 the effective window, or repeated compactions make no forward progress. It
 revokes that turn's computer capabilities immediately and keeps the task busy
 until the runtime confirms termination. The user can then shorten the input or
-start a new task; HeyDash never silently deletes retained instructions to make
+start a new task; Macrouse never silently deletes retained instructions to make
 them fit. Diagnostic estimates are not displayed as measured ring occupancy.
 
 Access is deliberately simple and is changed only through a **native macOS
@@ -154,12 +158,34 @@ undo an action already dispatched.
 An automatic approval failure is shown as “Action paused” and is not retried in
 a loop; switch to Ask every time to review or decline it.
 
-The separate native **Connect Chrome** control grants a revocable connection
+### Remembered extension bridge (local developer installation)
+
+The optional [Macrouse Browser Bridge](BrowserExtension/README.md) uses a pinned
+Manifest V3 extension, a signed Swift native-messaging helper, and authenticated
+local IPC. Explicitly install it in the intended Chrome profile, choose **Pair
+with Macrouse** in its popup, then confirm **Pair and remember** in Macrouse.
+Pairing is held in this app's Keychain namespace and that extension installation;
+live sessions and tab handles are always fresh. It does not copy browser profiles
+or use the remote-debugging WebSocket approval flow.
+
+The existing `computer_v2_tabs` / `bind_tab` / semantic snapshot and action
+contract is unchanged. Chrome's debugger indicator and Cancel remain intact.
+Cancel suspends access until the user chooses Resume in the popup. **Disconnect
+Chrome** removes the saved pairing. A different profile, reinstall, changed
+permissions, or identity conflict requires explicit setup again. There is no
+silent fallback to the direct connection below. Routine app reconnection was
+verified locally; full browser restart, sleep/wake, and sustained concurrent
+human-use qualification remain separate gates. This is an unpacked developer
+extension, not a Chrome Web Store distribution.
+
+### Direct Chrome connection (legacy alternative)
+
+The separate native **Connect existing Chrome** control grants a revocable connection
 to the already-running, ordinary Chrome session. It requires an idle runtime and
 an explicit confirmation even in Full access. Chrome Remote Debugging must be
 enabled by the user, and Chrome may show its own Allow prompt. If macOS denies
-the connection-file read, check **Files & Folders → LocalCodex (or HeyDash) →
-Google Chrome**. That OS permission covers Chrome's app-data directory; HeyDash
+the connection-file read, check **Files & Folders → LocalCodex (or Macrouse) →
+Google Chrome**. That OS permission covers Chrome's app-data directory; Macrouse
 reads only `DevToolsActivePort`, not cookies or other profile files. Full Disk
 Access is not required. Disconnect revokes consent immediately, including while
 a connection is pending; quitting ends the live connection. **Connect & Remember**
@@ -202,15 +228,15 @@ unavailable; actions still need fresh snapshots and normal native approval.
 This routing is not yet evidence of real-Qwen accuracy or concurrent-user
 non-interference; those live qualifications remain pending.
 
-Only an explicit `browser_mode: "isolated"` Chrome URL launches a project-owned profile with a random loopback DevTools port and no wildcard-origin override. It retains an opaque task-scoped handle and changes the document epoch when observation detects a changed main-frame loader or URL, including its fragment. Semantic reads and actions address that exact target without explicitly foregrounding it. The broker rejects overlapping operations for a task, consumes a valid mutation snapshot before awaiting transport, and rechecks that a revoked handle has not disappeared before publishing an observation or preparing input. The transport repeats document and element checks on its mutation connection, resolves the node into a main-frame isolated JavaScript world, and checks document membership, URL, connection, and control state in the synchronous mutation function. Revocation and the one-shot WebSocket enqueue share a lock: revocation that wins before enqueue prevents that command; a command already enqueued cannot be recalled. These checks are not an atomic lock on the browser DOM or a record of all intervening navigation events. Coordinate capture, pointer, and keyboard calls intentionally fail closed for brokered tabs; native-app AX and guarded screenshot paths remain separate. A semantic mutation requires the current snapshot UUID and element index; pointer input requires a current `capture_id` and image-space coordinates. The runtime maps those image pixels to global screen points and rejects stale or changed native windows and targets. A consumed observation must be replaced with a fresh snapshot or capture to verify the result. Window capture is read-only and does **not** present a per-screenshot native approval gate: once macOS Screen Recording access is granted, a local model turn can request native-window captures while HeyDash runs.
+Only an explicit `browser_mode: "isolated"` Chrome URL launches a project-owned profile with a random loopback DevTools port and no wildcard-origin override. It retains an opaque task-scoped handle and changes the document epoch when observation detects a changed main-frame loader or URL, including its fragment. Semantic reads and actions address that exact target without explicitly foregrounding it. The broker rejects overlapping operations for a task, consumes a valid mutation snapshot before awaiting transport, and rechecks that a revoked handle has not disappeared before publishing an observation or preparing input. The transport repeats document and element checks on its mutation connection, resolves the node into a main-frame isolated JavaScript world, and checks document membership, URL, connection, and control state in the synchronous mutation function. Revocation and the one-shot WebSocket enqueue share a lock: revocation that wins before enqueue prevents that command; a command already enqueued cannot be recalled. These checks are not an atomic lock on the browser DOM or a record of all intervening navigation events. Coordinate capture, pointer, and keyboard calls intentionally fail closed for brokered tabs; native-app AX and guarded screenshot paths remain separate. A semantic mutation requires the current snapshot UUID and element index; pointer input requires a current `capture_id` and image-space coordinates. The runtime maps those image pixels to global screen points and rejects stale or changed native windows and targets. A consumed observation must be replaced with a fresh snapshot or capture to verify the result. Window capture is read-only and does **not** present a per-screenshot native approval gate: once macOS Screen Recording access is granted, a local model turn can request native-window captures while Macrouse runs.
 
-HeyDash remains semantic-first: it uses native Accessibility or the brokered browser DOM whenever those surfaces expose the intended control. `computer_v2_ground_click` is the native-app screenshot fallback for the 4B and 9B Qwen options, which leave enough memory headroom for a resident visual sidecar on this 24 GB Mac. The runtime starts preparing that sidecar in the background when a supported-model turn begins so model planning can overlap model load and warm-up. GoClick and GUI-Owl 2B run on every request; ShowUI 2B runs only when either result is missing or the two disagree. The worker returns only parsed normalized points and diagnostics. Swift independently selects the closest pair, requires that pair to agree within 3% of the screenshot diagonal, uses their midpoint, and otherwise fails closed without presenting a click approval. The entire window is recaptured and fingerprinted after inference and again after approval, so a grounded click cannot use a capture whose surrounding context changed. After dispatch, the same tool returns a fresh verification-only screenshot with synchronized Accessibility when available. That observation intentionally has no reusable `capture_id`, so it cannot authorize another pointer action. An observation failure is reported as post-action uncertainty rather than as a failed click that might be repeated. The 27B and 35B model options do not register this resident sidecar tool on this machine.
+Macrouse remains semantic-first: it uses native Accessibility or the brokered browser DOM whenever those surfaces expose the intended control. `computer_v2_ground_click` is the native-app screenshot fallback for the 4B and 9B Qwen options, which leave enough memory headroom for a resident visual sidecar on this 24 GB Mac. The runtime starts preparing that sidecar in the background when a supported-model turn begins so model planning can overlap model load and warm-up. GoClick and GUI-Owl 2B run on every request; ShowUI 2B runs only when either result is missing or the two disagree. The worker returns only parsed normalized points and diagnostics. Swift independently selects the closest pair, requires that pair to agree within 3% of the screenshot diagonal, uses their midpoint, and otherwise fails closed without presenting a click approval. The entire window is recaptured and fingerprinted after inference and again after approval, so a grounded click cannot use a capture whose surrounding context changed. After dispatch, the same tool returns a fresh verification-only screenshot with synchronized Accessibility when available. That observation intentionally has no reusable `capture_id`, so it cannot authorize another pointer action. An observation failure is reported as post-action uncertainty rather than as a failed click that might be repeated. The 27B and 35B model options do not register this resident sidecar tool on this machine.
 
 Browser approvals include `observed_page_url` from the immutable retained browser snapshot, in addition to the bundle, PID, handle, and epoch. No title is inferred from page-controlled labels or parsed out of formatted text. URL display does not replace post-approval document and node revalidation. Runtime-owned lifetimes also cover targets still being created: terminal cleanup can synchronously revoke a pending open or mutation before scheduling network cleanup.
 
-The opt-in model-free production broker gate is `CuaV2SafeChromeSemanticLiveTests/testProductionBrokerMutatesOnlyBackgroundTabAndShutsDown`, enabled with `LOCALCODEX_LIVE_CHROME_BROKER_PRIMITIVE_TEST=1`. It uses an inline, nonce-restricted loopback fixture, same-title tabs, independent acknowledged page telemetry, a retained-snapshot reuse refusal, and process-group/profile-marker cleanup checks. It does not start App Server or LM Studio and does not request a HeyDash approval. The ordinary semantic and same-title model gates honor `LOCALCODEX_LIVE_MODEL_ID` for the supplied 4B/9B IDs. Their capability deadline is 180 seconds; the 30-second performance SLO is reported separately and does not terminate a capability trial. Every gate prints `BROWSER_GATE_ARTIFACT_DIR`; set the absolute `LOCALCODEX_LIVE_ARTIFACT_DIR` to choose a durable root. Model wire traces and result/cleanup records are retained there. Model-run JSON records use schema version 8, with separate functional, protocol, harness/model-failure, active-tab, global-application-focus, and owned-cleanup outcomes. The model gates await independent successful-press proof before the tool response and normal terminal tab closure; B can also be checked after the turn. No new gate result is claimed here.
+The opt-in model-free production broker gate is `CuaV2SafeChromeSemanticLiveTests/testProductionBrokerMutatesOnlyBackgroundTabAndShutsDown`, enabled with `LOCALCODEX_LIVE_CHROME_BROKER_PRIMITIVE_TEST=1`. It uses an inline, nonce-restricted loopback fixture, same-title tabs, independent acknowledged page telemetry, a retained-snapshot reuse refusal, and process-group/profile-marker cleanup checks. It does not start App Server or LM Studio and does not request a Macrouse approval. The ordinary semantic and same-title model gates honor `LOCALCODEX_LIVE_MODEL_ID` for the supplied 4B/9B IDs. Their capability deadline is 180 seconds; the 30-second performance SLO is reported separately and does not terminate a capability trial. Every gate prints `BROWSER_GATE_ARTIFACT_DIR`; set the absolute `LOCALCODEX_LIVE_ARTIFACT_DIR` to choose a durable root. Model wire traces and result/cleanup records are retained there. Model-run JSON records use schema version 8, with separate functional, protocol, harness/model-failure, active-tab, global-application-focus, and owned-cleanup outcomes. The model gates await independent successful-press proof before the tool response and normal terminal tab closure; B can also be checked after the turn. No new gate result is claimed here.
 
-Permission onboarding is explicit. AutomationCore can read permission state without prompting, and only the human-operated **Request access** buttons in HeyDash Settings call the macOS permission-request APIs. A button press is not proof of a grant: on this macOS 27 installation, Screen Recording returned denied without a system prompt. If the request remains denied, HeyDash opens **System Settings → Privacy & Security → Screen & System Audio Recording** when that pane link is available, or opens System Settings as a fallback, so the user can add and enable the app in the screen-recording list, not the audio-only list. Relaunch HeyDash after granting access, then refresh its Settings status. Permission-dependent tool calls fail closed when authorization is absent; the local model cannot grant or request access itself.
+Permission onboarding is explicit. AutomationCore can read permission state without prompting, and only the human-operated **Request access** buttons in Macrouse Settings call the macOS permission-request APIs. A button press is not proof of a grant: on this macOS 27 installation, Screen Recording returned denied without a system prompt. If the request remains denied, Macrouse opens **System Settings → Privacy & Security → Screen & System Audio Recording** when that pane link is available, or opens System Settings as a fallback, so the user can add and enable the app in the screen-recording list, not the audio-only list. Relaunch Macrouse after granting access, then refresh its Settings status. Permission-dependent tool calls fail closed when authorization is absent; the local model cannot grant or request access itself.
 
 ## Prerequisites
 
@@ -226,7 +252,7 @@ The default is [Qwen3.5-4B MLX 4-bit](https://huggingface.co/lmstudio-community/
 
 ## App-owned headless MLX
 
-HeyDash starts one loopback-only MLX-VLM process on `127.0.0.1:1237` and stops it with its owned runtime. The process also watches its parent so an app crash does not intentionally leave a model daemon running. There is no LM Studio GUI, extra proxy process, or cloud inference. The native App Server still handles the agent loop, tools, approvals and conversation storage; MLX handles model inference and images.
+Macrouse starts one loopback-only MLX-VLM process on `127.0.0.1:1237` and stops it with its owned runtime. The process also watches its parent so an app crash does not intentionally leave a model daemon running. There is no LM Studio GUI, extra proxy process, or cloud inference. The native App Server still handles the agent loop, tools, approvals and conversation storage; MLX handles model inference and images.
 
 This machine reuses `~/Library/Application Support/LocalCodex/VisualGrounding/venv/bin/python` (MLX 0.32.2 / MLX-VLM 0.7.1) and the existing model folders under `~/.lmstudio/models/lmstudio-community/`. No copy or re-download is performed. These legacy paths and model/provider IDs preserve saved tasks; they are not a dependency on a running LM Studio app. Startup checks the pinned environment and local weights and fails explicitly if they are missing. Do not upgrade the shared visual-grounding environment independently.
 
@@ -244,18 +270,18 @@ See [the migration validation record](Benchmarks/MLXServing/MIGRATION-VALIDATION
 
 Earlier runs served `mlx-community/Qwen3.8-27B-4bit` through LM Studio at `127.0.0.1:1234`. That model directory was about 16.08 GB; its three weight shards totaled 16,054,541,349 bytes. Those 27B runs used one parallel request and a bounded 22 GiB custom model-loading guardrail. They are historical evidence, not the current default serving path.
 
-HeyDash declares 4,096 tokens for the constrained 27B/35B profile, with auto-compaction at 3,072. The 4B and 9B computer-use profile declares 16,384 tokens with auto-compaction at 12,288, leaving more working space beyond the fixed instructions and tool definitions. These are application budgets, not the LM Studio backend's advertised or automatically fitted maximum. The shared profile permits 4B/9B switches without changing the loaded task's context class. App Server ignores context overrides for already-loaded threads; after a profile update, restarting HeyDash's owned runtime lets the same saved task resume with the new configuration. Switching a still-loaded task between the constrained and small-model classes remains guarded.
+Macrouse declares 4,096 tokens for the constrained 27B/35B profile, with auto-compaction at 3,072. The 4B and 9B computer-use profile declares 16,384 tokens with auto-compaction at 12,288, leaving more working space beyond the fixed instructions and tool definitions. These are application budgets, not the LM Studio backend's advertised or automatically fitted maximum. The shared profile permits 4B/9B switches without changing the loaded task's context class. App Server ignores context overrides for already-loaded threads; after a profile update, restarting Macrouse's owned runtime lets the same saved task resume with the new configuration. Switching a still-loaded task between the constrained and small-model classes remains guarded.
 
-One model-local compatibility patch is required on this installation. Codex exposes a `request_user_input` tool schema even though HeyDash does not implement that tool; with that schema serialized, this MLX/model path stalled. The installed model's `chat_template.jinja` skips only that schema when rendering tools. The original template is preserved beside it as `chat_template.jinja.localcodex-original` (SHA-256 `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`); the patched template hash is `c73f9ec1cfc68a6ce7e19f06b1779afa4b1a55e1da8775d498f379a09b8fae75`.
+One model-local compatibility patch is required on this installation. Codex exposes a `request_user_input` tool schema even though Macrouse does not implement that tool; with that schema serialized, this MLX/model path stalled. The installed model's `chat_template.jinja` skips only that schema when rendering tools. The original template is preserved beside it as `chat_template.jinja.localcodex-original` (SHA-256 `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`); the patched template hash is `c73f9ec1cfc68a6ce7e19f06b1779afa4b1a55e1da8775d498f379a09b8fae75`.
 
-That compatibility patch lives in LM Studio's model directory, not in either HeyDash ZIP. Redownloading the model may replace it.
+That compatibility patch lives in LM Studio's model directory, not in either Macrouse ZIP. Redownloading the model may replace it.
 
 ## Install the native visual-grounding sidecar
 
 The app bundle contains the worker, prompts, manifests, and warm-up image, but not the approximately 4.0 GB of visual model weights or its approximately 0.6 GB Python environment. Install them once into `~/Library/Application Support/LocalCodex/VisualGrounding`:
 
 ```sh
-cd HeyDash
+cd Macrouse
 Scripts/install-visual-grounding.sh
 ```
 
@@ -289,7 +315,7 @@ checks response formatting and inert-content behavior using real Octane renderin
 The checked-in browser bundle is produced with Bun and runs as static JavaScript in WebKit. Bun and Node are not included in the application:
 
 ```sh
-cd HeyDash/WebUI
+cd Macrouse/WebUI
 bun install
 bun run check
 bun run build
@@ -302,16 +328,16 @@ Octane currently declares Node.js 22.22.2 or newer for its supported development
 `project.yml` is the source of truth for the native Xcode project:
 
 ```sh
-cd HeyDash
+cd Macrouse
 bun Scripts/build-agent-runtime.ts
 xcodegen generate
 
-xcodebuild -project HeyDash.xcodeproj -scheme HeyDash \
+xcodebuild -project Macrouse.xcodeproj -scheme Macrouse \
   -configuration Debug \
   -derivedDataPath .build/DerivedData \
   build
 
-xcodebuild -project HeyDash.xcodeproj -scheme HeyDash \
+xcodebuild -project Macrouse.xcodeproj -scheme Macrouse \
   -configuration Debug \
   -derivedDataPath .build/DerivedData \
   test
@@ -320,18 +346,18 @@ xcodebuild -project HeyDash.xcodeproj -scheme HeyDash \
 The debug application is written to:
 
 ```text
-.build/DerivedData/Build/Products/Debug/HeyDash.app
+.build/DerivedData/Build/Products/Debug/Macrouse.app
 ```
 
 Run it with:
 
 ```sh
-open .build/DerivedData/Build/Products/Debug/HeyDash.app
+open .build/DerivedData/Build/Products/Debug/Macrouse.app
 ```
 
 ## Release bundle
 
-The packaged application is a universal macOS app containing both Apple Silicon and Intel slices. Extract `HeyDash-macOS.zip`, move `HeyDash.app` to Applications if desired, and open it. The archive contains the compiled Octane interface, system-WebKit Swift host, and visual-grounding worker/manifests; it does not contain Bun, Node.js, Electron, Chromium, visual or language-model weights, the external Python environment, or the LM Studio chat-template patch described above.
+The packaged application is a universal macOS app containing both Apple Silicon and Intel slices. Extract `Macrouse-macOS.zip`, move `Macrouse.app` to Applications if desired, and open it. The archive contains the compiled Octane interface, system-WebKit Swift host, and visual-grounding worker/manifests; it does not contain Bun, Node.js, Electron, Chromium, visual or language-model weights, the external Python environment, or the LM Studio chat-template patch described above.
 
 The local release is signed for this machine with Ahmed's Apple Development identity (`TeamIdentifier=MSMG8CJLB3`) and hardened runtime enabled. macOS can still bind Accessibility approval for a local development build to that build's exact code hash, so replacing the application may require requesting Accessibility again even though the signing identity is unchanged. Screen Recording can remain attached to the designated signing requirement. It is not Developer ID signed or notarized, so Gatekeeper assessment still rejects it as a distribution build; that is expected for this private local install.
 
@@ -340,7 +366,7 @@ For faster command-line iteration, the same targets are available through Swift 
 ```sh
 swift build
 swift test
-swift run HeyDash
+swift run Macrouse
 ```
 
 Run the deterministic Swift suite with warnings promoted to errors:
@@ -395,7 +421,7 @@ The historical semantic and visual Chrome fixture tests are retained as V1 evide
 
 Normal test runs compile the live cases but skip external model and desktop work. The presence of a live test is not evidence that it passed.
 
-The live gates parse the isolated App Server rollout for model-level `function_call` and matching `function_call_output`, and enable a test-only recorder for exact newline-delimited App Server frames. They check matching call IDs and successful client responses. For each call, both `item/started` and `item/tool/call` must precede that response, with `item/completed` afterward; App Server can emit the first two in either order. The shipped app leaves its recorder disabled so HeyDash does not make a second copy of prompts or tool payloads. Historical Chrome gate evidence below applies only to V1; it is not V2 proof.
+The live gates parse the isolated App Server rollout for model-level `function_call` and matching `function_call_output`, and enable a test-only recorder for exact newline-delimited App Server frames. They check matching call IDs and successful client responses. For each call, both `item/started` and `item/tool/call` must precede that response, with `item/completed` afterward; App Server can emit the first two in either order. The shipped app leaves its recorder disabled so Macrouse does not make a second copy of prompts or tool payloads. Historical Chrome gate evidence below applies only to V1; it is not V2 proof.
 
 ## Verification status
 
@@ -449,11 +475,11 @@ After overlapping visual-sidecar preparation with Qwen and embedding a fresh ver
 
 ## Current limitations
 
-- New tasks expose native `computer_v2_*` tools, not the App Server's shell or built-in coding/editing tool set. HeyDash is a local chat and desktop-automation client, not a shell-capable coding agent.
+- New tasks expose native `computer_v2_*` tools, not the App Server's shell or built-in coding/editing tool set. Macrouse is a local chat and desktop-automation client, not a shell-capable coding agent.
 - Ordinary Chrome uses native AX/capture/input unless the native user separately connects it for exact background DOM tab access. Existing-mode navigation requires a positively identified native address bar and fails closed otherwise. Explicit isolated mode uses a separate temporary profile with no imported tabs, cookies, credentials, or extensions. This is not full Codex CUA/browser parity. Owned brokered tasks within one runtime reuse that runtime's owned process/profile. Task-scoped handles restrict broker calls, not shared-profile cookies, storage, same-origin scripting, or site-triggered cross-tab effects.
 - Brokered actions use DOM click/value operations, not general trusted keyboard/pointer input. Text entry rejects read-only controls; mutations reject disabled, inert, detached, non-main-document, or unsupported controls. Browser screenshot/coordinate/keyboard support remains disabled. The visual-grounding cascade is a native-window fallback and does not add browser visual control.
 - Loader/URL comparisons detect observed document changes, not every possible intervening navigation. Same-document changes that return to the previous URL between reads and arbitrary semantic changes between the final AX read and browser execution require a persistent event/DOM invalidation design for stronger guarantees. Local DevTools clients remain inside the trust boundary; loopback, origin checks, and a private profile directory are not authentication against other local processes. Terminal task cleanup revokes its lifetime before asynchronous exact-session detachment (borrowed) or exact-target closure (owned). Explicit runtime shutdown stops its owned App Server and isolated Chrome process groups, reaps their roots, and removes owned profiles after observed group exit. Shutdown has bounded waits and reports incomplete cleanup; the app termination delegate also has a ten-second reply deadline. Force quit, host failure, or descendants escaping their created process group are not covered by an unlimited cleanup guarantee. The bootstrap blank tab is retained during use rather than closing unrelated blank or loading tabs by URL.
-- This Mac also has Codex's richer installed `cua_repl`/computer-use stack, but HeyDash does not load or copy it. Only project-owned clean-room tools are exposed to Qwen.
+- This Mac also has Codex's richer installed `cua_repl`/computer-use stack, but Macrouse does not load or copy it. Only project-owned clean-room tools are exposed to Qwen.
 - The historical semantic and visual smoke turns proved V1 model/runtime paths on the controlled Chrome fixture; they do not establish V2 performance or reliable tool selection on arbitrary interfaces.
 - The focused-window screenshot reduces visible image size, but a visual grounder is still probabilistic. The agreement threshold, whole-window freshness checks, native approval, and post-action verification reduce risk; they do not establish reliability on arbitrary apps, targets, display scales, or instructions.
 - The previously signed installed app passed separate `open → capture → snapshot` and natively approved `open → snapshot → AXPress → snapshot` Chrome turns, both ending `Completed`. Screen Recording was **Granted** for that app. The screenshot turn took 540 seconds; this capability result was not a speed benchmark. The coordinate-click path was separately validated in the V1 production-runtime test host, not repeated in that installed binary.
@@ -470,9 +496,9 @@ Sources/
 │   ├── application launch and running-app metadata
 │   ├── ScreenCaptureKit display capture and native pointer/keyboard input
 │   └── bounded Accessibility snapshots and guarded semantic actions
-└── HeyDash/
+└── Macrouse/
     ├── Assets.xcassets/    clean-room application icon
-    ├── HeyDashApp.swift
+    ├── MacrouseApp.swift
     ├── Models/             Task and timeline value types
     ├── Runtime/            App Server transport and runtime boundary
     ├── State/              Root-owned observable application state

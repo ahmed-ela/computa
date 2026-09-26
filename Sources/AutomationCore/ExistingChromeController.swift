@@ -10,6 +10,7 @@ public enum ExistingChromeError: Error, Equatable, LocalizedError {
     case targetChanged
     case addressBarNotVerified
     case tabStateNotVerified
+    case navigationRecoveryRequired
     case invalidURL
 
     public var errorDescription: String? {
@@ -26,6 +27,8 @@ public enum ExistingChromeError: Error, Equatable, LocalizedError {
             "Chrome's focused address bar could not be verified. No URL was submitted."
         case .tabStateNotVerified:
             "Chrome's exact newly selected tab could not be verified. No URL was submitted."
+        case .navigationRecoveryRequired:
+            "Chrome navigation could not be confirmed or recovered safely. Any tab already created was left open; no additional tab was opened or URL resubmitted during recovery. Stop retrying this navigation and inspect Chrome before continuing."
         case .invalidURL:
             "Chrome navigation requires a valid HTTP, HTTPS, or file URL."
         }
@@ -110,6 +113,11 @@ enum ChromeProcessArguments {
     }
 }
 
+struct ExistingChromeTextRange: Equatable, Sendable {
+    let location: Int
+    let length: Int
+}
+
 @MainActor
 struct ExistingChromeFocus {
     let processIdentifier: Int32
@@ -117,6 +125,7 @@ struct ExistingChromeFocus {
     let identifier: String?
     let label: String?
     let value: String?
+    let selectedTextRange: ExistingChromeTextRange?
     let isEditable: Bool
     let ancestorRoles: [String]
     let isSameWindow: () throws -> Bool
@@ -134,6 +143,19 @@ struct ExistingChromeFocus {
             && ancestorRoles.contains("AXToolbar")
             && !ancestorRoles.contains("AXWebArea")
             && !ancestorRoles.contains("AXDocument")
+    }
+
+    /// AX ranges use UTF-16 offsets, not Swift character counts. A selected
+    /// history completion is safe to remove only when its entire unselected
+    /// prefix is the exact requested destination and the selection ends at EOF.
+    /// A prefix match, non-suffix selection, or absent selection is insufficient.
+    func hasSelectedCompletionSuffix(after expectedValue: String) -> Bool {
+        guard let value, let selectedTextRange,
+              selectedTextRange.location == expectedValue.utf16.count,
+              selectedTextRange.length > 0,
+              selectedTextRange.location <= value.utf16.count,
+              selectedTextRange.length == value.utf16.count - selectedTextRange.location else { return false }
+        return value.utf16.prefix(selectedTextRange.location).elementsEqual(expectedValue.utf16)
     }
 }
 
@@ -169,6 +191,34 @@ public struct ExistingChromeFocusDiagnostic: Codable, Sendable {
 public final class ExistingChromeController {
     private let runtime: any ExistingChromeRuntime
     private let diagnostics: (@Sendable (ExistingChromeFocusDiagnostic) -> Void)?
+    private var pendingNavigation: PendingNavigation?
+
+    /// Retained only by this controller, never persisted or rediscovered by a
+    /// title/URL. The sentinel is recorded before Cmd+T, including when its
+    /// delivery or resulting tab cannot be verified. A retry cannot open again.
+    @MainActor
+    private final class PendingNavigation {
+        let application: ActivatedApplication
+        let destination: String
+        let originalWindow: ExistingChromeFocus
+        let baselineTabs: ExistingChromeTabInventory
+        var addressBar: ExistingChromeFocus?
+        var newTab: (any ExistingChromeTabIdentity)?
+        var didAttemptEntry = false
+        var didAttemptCompletionRemoval = false
+        var didAttemptReturn = false
+        var recoveryAttempts = 0
+
+        init(application: ActivatedApplication, destination: String,
+             originalWindow: ExistingChromeFocus, baselineTabs: ExistingChromeTabInventory) {
+            self.application = application
+            self.destination = destination
+            self.originalWindow = originalWindow
+            self.baselineTabs = baselineTabs
+        }
+    }
+
+    public var hasPendingNavigation: Bool { pendingNavigation != nil }
 
     public init(diagnostics: (@Sendable (ExistingChromeFocusDiagnostic) -> Void)? = nil) {
         runtime = SystemExistingChromeRuntime()
@@ -217,6 +267,31 @@ public final class ExistingChromeController {
                 throw ExistingChromeError.invalidURL
             }
         }
+        if let pendingNavigation {
+            // Do not reinterpret a new destination, an unverified Return, or a
+            // second retry as permission to discard the partial tab and start over.
+            guard pendingNavigation.destination == url?.absoluteString,
+                  !pendingNavigation.didAttemptReturn,
+                  pendingNavigation.addressBar != nil, pendingNavigation.newTab != nil,
+                  pendingNavigation.recoveryAttempts == 0 else {
+                throw ExistingChromeError.navigationRecoveryRequired
+            }
+            pendingNavigation.recoveryAttempts += 1
+            do {
+                // The app's approval sheet may have taken focus between calls.
+                // Restore only the retained ordinary PID, never launch or pick
+                // another window/tab. finishNavigation rechecks the old handles.
+                _ = try await activate(
+                    processIdentifier: pendingNavigation.application.processIdentifier,
+                    beforeMutation: beforeMutation
+                )
+                return try await finishNavigation(pendingNavigation, beforeMutation: beforeMutation)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw ExistingChromeError.navigationRecoveryRequired
+            }
+        }
         let selected = try ExistingChromeSelection.processIdentifier(in: runtime.candidates())
         let application: ActivatedApplication
         try Task.checkCancellation()
@@ -247,24 +322,83 @@ public final class ExistingChromeController {
         guard try original.isSameWindow(), try baselineTabs.isSame(as: beforeNewTab.tabs()) else {
             throw ExistingChromeError.targetChanged
         }
-        try runtime.press(KeyboardChord(keyCode: 17, modifiers: [.command])) // Cmd+T, never replace a user's tab.
-        let (addressBar, newTab) = try await waitForAddressBar(
-            processID, window: original, expectedValue: "", baselineTabs: baselineTabs
+        let pending = PendingNavigation(
+            application: application, destination: url.absoluteString,
+            originalWindow: original, baselineTabs: baselineTabs
         )
-        let text = url.absoluteString
+        pendingNavigation = pending
+        try runtime.press(KeyboardChord(keyCode: 17, modifiers: [.command])) // Cmd+T, never replace a user's tab.
+        return try await finishNavigation(pending, beforeMutation: beforeMutation)
+    }
+
+    private func finishNavigation(
+        _ pending: PendingNavigation,
+        beforeMutation: @escaping @Sendable () async throws -> Void
+    ) async throws -> ActivatedApplication {
+        let processID = pending.application.processIdentifier
+        if pending.addressBar == nil || pending.newTab == nil {
+            let (addressBar, newTab) = try await waitForAddressBar(
+                processID, window: pending.originalWindow, expectedValue: "", baselineTabs: pending.baselineTabs
+            )
+            pending.addressBar = addressBar
+            pending.newTab = newTab
+        }
+        guard let addressBar = pending.addressBar, let newTab = pending.newTab else {
+            throw ExistingChromeError.navigationRecoveryRequired
+        }
+        let text = pending.destination
+        if !pending.didAttemptEntry {
+            try Task.checkCancellation()
+            try await beforeMutation()
+            try Task.checkCancellation()
+            let current = try checkAddressBarStillFocused(processID, original: addressBar, tab: newTab)
+            guard current.value == "" else { throw ExistingChromeError.addressBarNotVerified }
+            pending.didAttemptEntry = true
+            try runtime.setAddressBar(addressBar, to: text)
+        }
+        try await waitForDestination(pending, beforeMutation: beforeMutation)
         try Task.checkCancellation()
         try await beforeMutation()
         try Task.checkCancellation()
-        try checkAddressBarStillFocused(processID, original: addressBar, tab: newTab)
-        try runtime.setAddressBar(addressBar, to: text)
-        _ = try await waitForAddressBar(processID, window: addressBar, expectedValue: text, requiredTab: newTab)
-        try Task.checkCancellation()
-        try await beforeMutation()
-        try Task.checkCancellation()
-        try checkAddressBarStillFocused(processID, original: addressBar, tab: newTab)
-        guard try checkedFocus(processID).value == text else { throw ExistingChromeError.addressBarNotVerified }
+        let current = try checkAddressBarStillFocused(processID, original: addressBar, tab: newTab)
+        guard current.value == text else { throw ExistingChromeError.addressBarNotVerified }
+        pending.didAttemptReturn = true
         try runtime.press(KeyboardChord(keyCode: 36, modifiers: []))
-        return application
+        pendingNavigation = nil
+        return pending.application
+    }
+
+    private func waitForDestination(
+        _ pending: PendingNavigation,
+        beforeMutation: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        guard let addressBar = pending.addressBar, let newTab = pending.newTab else {
+            throw ExistingChromeError.navigationRecoveryRequired
+        }
+        let processID = pending.application.processIdentifier
+        let text = pending.destination
+        for attempt in 0 ..< 50 {
+            try Task.checkCancellation()
+            let current = try checkAddressBarStillFocused(processID, original: addressBar, tab: newTab)
+            emitDiagnostic(current, expectedValue: text, attempt: attempt)
+            if current.value == text { return }
+            if !pending.didAttemptCompletionRemoval, current.hasSelectedCompletionSuffix(after: text) {
+                try await beforeMutation()
+                try Task.checkCancellation()
+                // Permission approval can yield. Recheck the exact value and
+                // selection as well as the original window/control/tab afterward.
+                let verified = try checkAddressBarStillFocused(processID, original: addressBar, tab: newTab)
+                guard verified.value == current.value,
+                      verified.selectedTextRange == current.selectedTextRange,
+                      verified.hasSelectedCompletionSuffix(after: text) else {
+                    throw ExistingChromeError.addressBarNotVerified
+                }
+                pending.didAttemptCompletionRemoval = true
+                try runtime.press(KeyboardChord(keyCode: 51, modifiers: [])) // Backspace only the proven selected suffix.
+            }
+            if attempt < 49 { try await runtime.pause() }
+        }
+        throw ExistingChromeError.addressBarNotVerified
     }
 
     private func checkedFocus(_ processID: Int32) throws -> ExistingChromeFocus {
@@ -278,14 +412,16 @@ public final class ExistingChromeController {
         return focus
     }
 
+    @discardableResult
     private func checkAddressBarStillFocused(
         _ processID: Int32, original: ExistingChromeFocus, tab: any ExistingChromeTabIdentity
-    ) throws {
+    ) throws -> ExistingChromeFocus {
         let current = try checkedFocus(processID)
         guard current.isAddressBar, try original.isSameWindow(), try original.isSameControl(),
               try current.tabs().hasSelected(tab) else {
             throw ExistingChromeError.addressBarNotVerified
         }
+        return current
     }
 
     private func waitForAddressBar(
@@ -301,20 +437,7 @@ public final class ExistingChromeController {
             do {
                 let current = try checkedFocus(processID)
                 guard try window.isSameWindow() else { throw ExistingChromeError.targetChanged }
-                if attempt == 0 || attempt == 49 {
-                    let knownRoles: Set<String> = ["AXTextField", "AXComboBox", "AXGroup", "AXToolbar", "AXWindow", "AXWebArea", "AXDocument", "AXApplication"]
-                    diagnostics?(ExistingChromeFocusDiagnostic(
-                        phase: expectedValue.isEmpty ? "new_tab" : "typed_url",
-                        attempt: attempt,
-                        role: current.role.flatMap { knownRoles.contains($0) ? $0 : nil } ?? "other_or_missing",
-                        labelMatchesAddressBar: current.label == "Address and search bar",
-                        isEditable: current.isEditable,
-                        ancestorRoles: current.ancestorRoles.map { knownRoles.contains($0) ? $0 : "other" },
-                        valuePresent: current.value != nil,
-                        valueEmpty: current.value?.isEmpty == true,
-                        valueMatchesExpected: current.value == expectedValue
-                    ))
-                }
+                emitDiagnostic(current, expectedValue: expectedValue, attempt: attempt)
                 let inventory = try current.tabs()
                 let tab = requiredTab ?? baselineTabs.flatMap { inventory.newlySelectedTab(since: $0) }
                 if current.isAddressBar, current.value == expectedValue,
@@ -336,6 +459,19 @@ public final class ExistingChromeController {
             if attempt < 49 { try await runtime.pause() }
         }
         throw lastObservationError ?? ExistingChromeError.addressBarNotVerified
+    }
+
+    private func emitDiagnostic(_ current: ExistingChromeFocus, expectedValue: String, attempt: Int) {
+        guard attempt == 0 || attempt == 49 else { return }
+        let knownRoles: Set<String> = ["AXTextField", "AXComboBox", "AXGroup", "AXToolbar", "AXWindow", "AXWebArea", "AXDocument", "AXApplication"]
+        diagnostics?(ExistingChromeFocusDiagnostic(
+            phase: expectedValue.isEmpty ? "new_tab" : "typed_url", attempt: attempt,
+            role: current.role.flatMap { knownRoles.contains($0) ? $0 : nil } ?? "other_or_missing",
+            labelMatchesAddressBar: current.label == "Address and search bar", isEditable: current.isEditable,
+            ancestorRoles: current.ancestorRoles.map { knownRoles.contains($0) ? $0 : "other" },
+            valuePresent: current.value != nil, valueEmpty: current.value?.isEmpty == true,
+            valueMatchesExpected: current.value == expectedValue
+        ))
     }
 }
 
@@ -523,6 +659,7 @@ private final class SystemExistingChromeRuntime: ExistingChromeRuntime {
         let identifier = string(control, kAXIdentifierAttribute)
         let label = string(control, kAXDescriptionAttribute) ?? string(control, kAXTitleAttribute)
         let value = string(control, kAXValueAttribute)
+        let selectedTextRange = textRange(control)
         guard try identity.isStillFocused(), try identity.isSameFocusedUIElement(),
               let currentControl = element(application, kAXFocusedUIElementAttribute),
               CFEqual(control, currentControl) else {
@@ -534,6 +671,7 @@ private final class SystemExistingChromeRuntime: ExistingChromeRuntime {
             identifier: identifier,
             label: label,
             value: value,
+            selectedTextRange: selectedTextRange,
             isEditable: editableResult == .success && isEditable.boolValue,
             ancestorRoles: ancestorRoles,
             isSameWindow: { try identity.isStillFocused() },
@@ -570,6 +708,17 @@ private final class SystemExistingChromeRuntime: ExistingChromeRuntime {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
         return value as? String
+    }
+
+    private func textRange(_ element: AXUIElement) -> ExistingChromeTextRange? {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &raw) == .success,
+              let raw, CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        let value = unsafeDowncast(raw, to: AXValue.self)
+        guard AXValueGetType(value) == .cfRange else { return nil }
+        var range = CFRange(location: 0, length: 0)
+        guard AXValueGetValue(value, .cfRange, &range), range.location >= 0, range.length >= 0 else { return nil }
+        return ExistingChromeTextRange(location: range.location, length: range.length)
     }
 
     private func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {

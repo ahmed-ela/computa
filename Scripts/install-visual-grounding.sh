@@ -9,8 +9,8 @@ venv_dir=${runtime_dir}/venv
 python_path=${runtime_dir}/venv/bin/python
 uv_path=${LOCALCODEX_UV:-${commands[uv]:-}}
 metadata_script=${script_dir}/visual-grounding-install-metadata.py
-model_manifest=${project_dir}/Sources/HeyDash/Resources/VisualGrounding/model-manifest.json
-runtime_manifest=${project_dir}/Sources/HeyDash/Resources/VisualGrounding/runtime-manifest.json
+model_manifest=${project_dir}/Sources/Macrouse/Resources/VisualGrounding/model-manifest.json
+runtime_manifest=${project_dir}/Sources/Macrouse/Resources/VisualGrounding/runtime-manifest.json
 requirements_lock=${script_dir}/visual-grounding-requirements.lock
 python_version=3.12.13
 
@@ -107,4 +107,4 @@ trap - EXIT
 rmdir "${stage_dir}"
 
 print "Visual grounding installed under ${runtime_dir}"
-print "Worker source: ${project_dir}/Sources/HeyDash/Resources/VisualGrounding/worker.py"
+print "Worker source: ${project_dir}/Sources/Macrouse/Resources/VisualGrounding/worker.py"

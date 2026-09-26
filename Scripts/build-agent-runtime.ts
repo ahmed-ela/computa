@@ -89,7 +89,7 @@ if (builtBytes.length < 32 || builtBytes.readUInt32LE(0) !== 0xfeedfacf
     || builtBytes.readUInt32LE(4) !== 0x0100000c || builtBytes.readUInt32LE(12) !== 2) {
   throw new Error("Cargo artifact is not a thin arm64 Mach-O executable.");
 }
-const resource = join(root, "Sources/HeyDash/Resources/AgentRuntime");
+const resource = join(root, "Sources/Macrouse/Resources/AgentRuntime");
 await mkdir(resource, { recursive: true });
 const executable = join(resource, "codex-app-server");
 await copyFile(built, executable);
@@ -103,4 +103,4 @@ await writeFile(join(resource, "manifest.json"), JSON.stringify({
 }, null, 2) + "\n");
 await copyFile(join(source, "LICENSE"), join(resource, "LICENSE"));
 await copyFile(join(source, "NOTICE"), join(resource, "NOTICE"));
-console.log(`Packaged HeyDash runtime (${profile}): ${sha256(binary)}`);
+console.log(`Packaged Macrouse runtime (${profile}): ${sha256(binary)}`);

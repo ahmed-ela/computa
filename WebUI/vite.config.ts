@@ -8,7 +8,7 @@ export default defineConfig(({ command }) => ({
     octane(),
     tailwindcss(),
     {
-      name: 'heydash-production-csp',
+      name: 'macrouse-production-csp',
       generateBundle(_options, bundle) {
         // Native shadcn ports must not silently introduce a second UI runtime.
         for (const output of Object.values(bundle)) {
@@ -30,7 +30,7 @@ export default defineConfig(({ command }) => ({
     },
   ],
   build: {
-    outDir: '../Sources/HeyDash/Resources/WebUI',
+    outDir: '../Sources/Macrouse/Resources/WebUI',
     emptyOutDir: true,
     sourcemap: false,
     target: 'safari17',

@@ -40,7 +40,7 @@ if (metas.length !== 1 || contexts.length !== 1 || users.length !== 2 || calls.l
     || meta?.model_provider !== "lmstudio" || context?.model !== model || context?.effort !== "medium"
     || context?.approval_policy !== "on-request" || context?.sandbox_policy?.type !== "workspace-write"
     || context?.sandbox_policy?.network_access !== false || meta.cwd !== context.cwd || !isAbsolute(meta.cwd)
-    || typeof meta.base_instructions?.text !== "string" || !meta.base_instructions.text.startsWith("You are HeyDash.")
+    || typeof meta.base_instructions?.text !== "string" || !/^You are (?:HeyDash|Macndash)\./.test(meta.base_instructions.text)
     || meta.dynamic_tools?.length !== 12 || users[1].content?.length !== 1
     || users[1].content[0].type !== "input_text" || typeof users[1].content[0].text !== "string") {
   throw new Error("Unexpected baseline contract; nothing launched");
@@ -77,14 +77,14 @@ function expectedWireSchema(tool: any) {
 
 // Extract the literal production config, fail closed on a new expression. No
 // copied prompt prefix, extra instructions, output cap, or sampling override.
-const swift = readBounded(join(repo, "Sources/HeyDash/Runtime/CodexAppServerRuntime.swift")).toString();
+const swift = readBounded(join(repo, "Sources/Macndash/Runtime/CodexAppServerRuntime.swift")).toString();
 const configBody = swift.split("static func localThreadConfig(")[1]?.split("struct Configuration:")[0];
 const entries = [...(configBody ?? "").matchAll(/"([a-z0-9_.]+)": ([^,\n]+),/g)];
 if (entries.length !== 22 || !swift.includes("case .smallModelComputerUse: 16384") || !swift.includes("case .smallModelComputerUse: 12288")) throw new Error("Review changed production config");
 const config: Record<string, unknown> = Object.fromEntries(entries.map(([, key, value]) => [key,
   value === "context.contextWindow" ? 16384 : value === "compactLimit" ? 12288 : JSON.parse(value)]));
 if (config["features.shell_tool"] !== false || config["features.unified_exec"] !== false || config.web_search !== "disabled") throw new Error("Unsafe production config");
-const artifactDir = join(repo, "Sources/HeyDash/Resources/AgentRuntime");
+const artifactDir = join(repo, "Sources/Macndash/Resources/AgentRuntime");
 const manifestRaw = readBounded(join(artifactDir, "manifest.json"), 16384), manifest = JSON.parse(manifestRaw.toString());
 const pin = JSON.parse(readBounded(join(repo, "Runtime/codex-source.lock.json"), 16384).toString());
 const executable = join(artifactDir, "codex-app-server"), binary = readBounded(executable, 512 * 1024 * 1024);
@@ -288,7 +288,7 @@ try {
     bytes += chunk.length; if (bytes > 2 * 1024 * 1024) throw new Error("Runtime stderr bound");
     appendFileSync(join(out, "runtime.stderr"), chunk, { mode: 0o600 });
   } })().catch(crash);
-  await rpc("initialize", { clientInfo: { name: "local_codex", title: "HeyDash", version: "0.1.0" }, capabilities: { experimentalApi: true } });
+  await rpc("initialize", { clientInfo: { name: "local_codex", title: "Macndash", version: "0.1.0" }, capabilities: { experimentalApi: true } });
   send({ method: "initialized", params: {} });
   const effective = await rpc("config/read", { cwd: meta.cwd, includeLayers: true }); save("effective-config.json", effective);
   for (const [key, value] of Object.entries(config)) {

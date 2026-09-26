@@ -100,7 +100,7 @@ function Sidebar({
       <div className="window-drag-strip" aria-hidden="true" />
       <div className="sidebar-brand-row">
         <div className="brand-lockup">
-          <strong title="Fast, Mac-optimized local AI">HeyDash</strong>
+          <strong title="Fast, Mac-optimized local AI">Macrouse</strong>
         </div>
       </div>
 
@@ -170,7 +170,7 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
   return (
     <header className="task-toolbar">
       <div className="toolbar-title-block">
-        <strong>{task?.title === 'Untitled task' ? 'New task' : task?.title ?? 'HeyDash'}</strong>
+        <strong>{task?.title === 'Untitled task' ? 'New task' : task?.title ?? 'Macrouse'}</strong>
       </div>
       <div className="toolbar-actions">
         {task && task.status !== 'Draft' && task.status !== 'Completed' ? (
@@ -284,11 +284,11 @@ function TimelineEntry({
       onClick={() => post({ action: 'selectEntry', id: entry.id })}
       tabIndex={0}
       onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); post({ action: 'selectEntry', id: entry.id }); } }}
-      aria-label={`${entry.title || 'HeyDash'} response`}
+      aria-label={`${entry.title || 'Macrouse'} response`}
     >
       <div className="assistant-heading">
         <span className="assistant-mark"><Icon name="terminal" size={14} /></span>
-        <strong>{entry.title || 'HeyDash'}</strong>
+        <strong>{entry.title || 'Macrouse'}</strong>
         <span className="message-time">{clockTime(entry.timestamp)}</span>
       </div>
       <ResponseMarkdown text={entry.body} />
@@ -377,7 +377,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
       onDragOver={(event) => { if (draggedID) event.preventDefault(); }}
       onDrop={(event) => drop(event)}
     >
-      <div className="queue-header" title="Queued messages are kept while HeyDash is open">
+      <div className="queue-header" title="Queued messages are kept while Macrouse is open">
         <div><strong>Up next</strong><span>{task.queuedPrompts.length}</span></div>
         {task.queuePaused ? (
           <Button variant="outline" size="sm" className="queue-resume-button" onClick={() => post({ action: 'resumeQueue', taskID: task.id })}>
@@ -858,7 +858,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
                 </Button>
               </span>
             </div>
-            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access automatically approves HeyDash action requests; Ask every time asks before each protected action. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. Access mode resets to Ask every time when you relaunch.</p></details>
+            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access automatically approves Macrouse action requests; Ask every time asks before each protected action. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. Access mode resets to Ask every time when you relaunch.</p></details>
             <Button variant="outline" className="refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</Button>
           </section>
         </div>
@@ -872,7 +872,7 @@ function LoadingView() {
   return (
     <main className="loading-view">
       <span className="loading-mark"><Icon name="sparkles" size={22} /></span>
-      <strong>Starting HeyDash</strong>
+      <strong>Starting Macrouse</strong>
       <span>Connecting the native runtime…</span>
     </main>
   );
@@ -883,7 +883,7 @@ function BridgeUnavailableView() {
     <main className="loading-view" role="alert">
       <span className="loading-mark"><Icon name="info" size={22} /></span>
       <strong>Native bridge unavailable</strong>
-      <span>Open this interface from the HeyDash macOS application.</span>
+      <span>Open this interface from the Macrouse macOS application.</span>
     </main>
   );
 }
@@ -947,7 +947,7 @@ export function App() {
           <Conversation snapshot={snapshot} task={task} />
         ) : (
           <div className="no-task-view">
-            <h1>HeyDash</h1>
+            <h1>Macrouse</h1>
             <p>Fast, Mac-optimized local AI.</p>
             <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={15} /> New task</Button>
           </div>

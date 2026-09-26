@@ -38,7 +38,7 @@ const model = "lmstudio-community/Qwen3.5-4B-MLX-4bit";
 const base = metadata?.base_instructions?.text;
 const policyMessage = items.find(i => i.type === "message" && i.role === "user");
 const policy = readFileSync("/Users/ahmedelamin/AGENTS.md", "utf8").trim();
-if (context?.model !== model || typeof base !== "string" || !base.startsWith("You are HeyDash.")) throw new Error("Wrong baseline");
+if (context?.model !== model || typeof base !== "string" || !/^You are (?:HeyDash|Macndash)\./.test(base)) throw new Error("Wrong baseline");
 const inheritedPolicyMessages = items.filter(i => i.type === "message" && i.role === "user"
   && i.content?.some((c: any) => c.type === "input_text" && c.text.includes(policy)));
 if (inheritedPolicyMessages.length !== 1 || inheritedPolicyMessages[0] !== policyMessage) throw new Error("Missing or ambiguous inherited policy");

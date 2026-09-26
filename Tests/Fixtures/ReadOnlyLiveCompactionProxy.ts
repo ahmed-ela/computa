@@ -1,6 +1,6 @@
 #!/Users/ahmedelamin/.bun/bin/bun
 // Test-only transport wrapper. Real Codex + real local model; no desktop tool
-// executor. All server requests are intercepted, never forwarded to HeyDash.
+// executor. All server requests are intercepted, never forwarded to Macrouse.
 import { appendFileSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { createHash } from "node:crypto";
@@ -157,7 +157,7 @@ responses.on("line", line => {
   let args = params.arguments;
   try { if (typeof args === "string") args = JSON.parse(args); } catch { args = null; }
   if (queryRecovery) {
-    // No server request in this mode reaches HeyDash, including approvals,
+    // No server request in this mode reaches Macrouse, including approvals,
     // captures, mouse/keyboard actions, or any unsupported dynamic tool.
     queryRequests += 1;
     if (queryRequests >= 8) {

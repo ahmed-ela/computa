@@ -27,7 +27,7 @@ const instructions = records.find(row => row.type === "session_meta")?.payload?.
 const policy = read("/Users/ahmedelamin/AGENTS.md", 64000).toString().trim();
 const inherited = records.find(row => row.type === "response_item" && row.payload?.type === "message" && row.payload.role === "user"
   && row.payload.content?.some((part: any) => part.type === "input_text" && part.text.includes(policy)))?.payload;
-if (typeof instructions !== "string" || !instructions.startsWith("You are HeyDash.") || !inherited) throw new Error("Original production instructions and policy required");
+if (typeof instructions !== "string" || !/^You are (?:HeyDash|Macndash)\./.test(instructions) || !inherited) throw new Error("Original production instructions and policy required");
 const image = read(fixturePath, 2 * 1024 * 1024);
 if (!fixturePath.endsWith("/untrusted-duplicate-panels.png") || !image.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) throw new Error("Expected frozen synthetic panel PNG");
 const model = "lmstudio-community/Qwen3.5-4B-MLX-4bit";

@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 import unittest
 
-path = Path(__file__).parents[2] / "Sources/HeyDash/Resources/MLXServer/server.py"
+path = Path(__file__).parents[2] / "Sources/Macrouse/Resources/MLXServer/server.py"
 sys.path.insert(0, str(path.parent))
 spec = importlib.util.spec_from_file_location("heydash_mlx", path)
 server = importlib.util.module_from_spec(spec)

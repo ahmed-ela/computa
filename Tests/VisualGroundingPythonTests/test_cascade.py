@@ -7,7 +7,7 @@ import unittest
 RESOURCE_ROOT = (
     Path(__file__).resolve().parents[2]
     / "Sources"
-    / "HeyDash"
+    / "Macrouse"
     / "Resources"
     / "VisualGrounding"
 )

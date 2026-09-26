@@ -208,6 +208,222 @@ final class ExistingChromeControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testSelectedHistorySuffixIsRemovedOnceBeforeExactDestinationIsSubmitted() async throws {
+        for destination in [
+            "https://www.youtube.com/", "https://example.com/path", "https://example.com/search?q=one",
+            "https://example.com/#section", "https://example.com/caf%C3%A9", "file:///tmp/example.html",
+        ] {
+            let runtime = ChromeRuntimeFixture()
+            runtime.enteredSuffix = "history-completion"
+            let controller = ExistingChromeController(runtime: runtime)
+            _ = try await controller.open(url: URL(string: destination)!)
+            XCTAssertEqual(runtime.value, destination)
+            XCTAssertEqual(runtime.actions, [
+                "activate:42", "key:17:command", "set-address-bar:\(destination)", "key:51:", "key:36:",
+            ])
+            XCTAssertFalse(controller.hasPendingNavigation)
+        }
+    }
+
+    @MainActor
+    func testCompletionSuffixRequiresExactUTF16PrefixAndRange() throws {
+        let runtime = ChromeRuntimeFixture()
+        let expected = "https://example.com/😀e\u{301}"
+        let suffix = "🧭history"
+        runtime.value = expected + suffix
+        runtime.selectedTextRange = ExistingChromeTextRange(location: expected.utf16.count, length: suffix.utf16.count)
+        XCTAssertTrue(try runtime.focus(42).hasSelectedCompletionSuffix(after: expected))
+        // Swift strings can compare canonically equal while AX byte offsets differ.
+        XCTAssertFalse(try runtime.focus(42).hasSelectedCompletionSuffix(after: "https://example.com/😀é"))
+        for range in [
+            ExistingChromeTextRange(location: expected.count, length: suffix.count),
+            ExistingChromeTextRange(location: -1, length: 1),
+            ExistingChromeTextRange(location: expected.utf16.count, length: Int.max),
+            ExistingChromeTextRange(location: Int.max, length: 1),
+            ExistingChromeTextRange(location: 0, length: runtime.value.utf16.count),
+        ] {
+            runtime.selectedTextRange = range
+            XCTAssertFalse(try runtime.focus(42).hasSelectedCompletionSuffix(after: expected))
+        }
+        runtime.value = "https://different.example/" + suffix
+        runtime.selectedTextRange = ExistingChromeTextRange(location: expected.utf16.count, length: suffix.utf16.count)
+        XCTAssertFalse(try runtime.focus(42).hasSelectedCompletionSuffix(after: expected))
+    }
+
+    @MainActor
+    func testCompletionIsNeverSubmittedOrDeletedWithoutExactSuffixSelection() async {
+        let destination = "https://example.com/"
+        for kind in 0 ..< 5 {
+            let runtime = ChromeRuntimeFixture()
+            runtime.enteredSuffix = "history"
+            if kind == 0 { runtime.omitCompletionSelection = true }
+            if kind == 1 { runtime.completionRangeOverride = ExistingChromeTextRange(location: 0, length: destination.utf16.count + 7) }
+            if kind == 2 { runtime.completionRangeOverride = ExistingChromeTextRange(location: destination.utf16.count, length: 0) }
+            if kind == 3 { runtime.completionRangeOverride = ExistingChromeTextRange(location: destination.utf16.count, length: 3) }
+            if kind == 4 { runtime.completionRangeOverride = ExistingChromeTextRange(location: destination.utf16.count - 1, length: 8) }
+            await assertFailure(.addressBarNotVerified) {
+                try await ExistingChromeController(runtime: runtime).open(url: URL(string: destination)!)
+            }
+            XCTAssertEqual(runtime.actions, ["activate:42", "key:17:command", "set-address-bar:\(destination)"])
+        }
+    }
+
+    @MainActor
+    func testCompletionRemovalRevalidatesSelectionValueAndIdentityAfterApproval() async {
+        for kind in 0 ..< 6 {
+            let runtime = ChromeRuntimeFixture()
+            runtime.enteredSuffix = "history"
+            do {
+                _ = try await ExistingChromeController(runtime: runtime).open(url: URL(string: "https://example.com/")!) {
+                    await MainActor.run {
+                        runtime.mutationGateCalls += 1
+                        if runtime.mutationGateCalls == 4 {
+                            switch kind {
+                            case 0: runtime.selectedTextRange = nil
+                            case 1: runtime.value += "changed"
+                            case 2: runtime.changeFocusedControl()
+                            case 3: runtime.selectOriginalTab()
+                            case 4: runtime.processes = [ExistingChromeCandidate(processIdentifier: 99, arguments: ["chrome"])]
+                            default: runtime.removeFocus()
+                            }
+                        }
+                    }
+                }
+                XCTFail("Expected changed-target refusal")
+            } catch {
+                guard let chromeError = error as? ExistingChromeError else {
+                    XCTFail("Unexpected error: \(error)")
+                    continue
+                }
+                XCTAssertTrue([ExistingChromeError.addressBarNotVerified, .targetChanged].contains(chromeError))
+            }
+            XCTAssertFalse(runtime.actions.contains("key:51:"))
+            XCTAssertFalse(runtime.actions.contains("key:36:"))
+        }
+    }
+
+    @MainActor
+    func testCancellationBeforeCompletionRemovalPreventsDeleteAndReturn() async {
+        let runtime = ChromeRuntimeFixture()
+        runtime.enteredSuffix = "history"
+        let gate = ChromeMutationGate(failAt: 4)
+        do {
+            _ = try await ExistingChromeController(runtime: runtime).open(url: URL(string: "https://example.com/")!) {
+                try await gate.check()
+            }
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+        XCTAssertFalse(runtime.actions.contains("key:51:"))
+        XCTAssertFalse(runtime.actions.contains("key:36:"))
+    }
+
+    @MainActor
+    func testFailedCompletionRemovalIsNotRepeatedAcrossBoundedRecovery() async {
+        let runtime = ChromeRuntimeFixture()
+        runtime.enteredSuffix = "history"
+        runtime.deleteLeavesCompletion = true
+        let controller = ExistingChromeController(runtime: runtime)
+        let url = URL(string: "https://example.com/")!
+        await assertFailure(.addressBarNotVerified) { try await controller.open(url: url) }
+        XCTAssertTrue(controller.hasPendingNavigation)
+        await assertFailure(.navigationRecoveryRequired) { try await controller.open(url: url) }
+        let actionsAfterRecovery = runtime.actions
+        await assertFailure(.navigationRecoveryRequired) { try await controller.open(url: url) }
+        XCTAssertEqual(runtime.actions, actionsAfterRecovery)
+        XCTAssertEqual(runtime.actions.filter { $0 == "key:17:command" }.count, 1)
+        XCTAssertEqual(runtime.actions.filter { $0 == "key:51:" }.count, 1)
+        XCTAssertFalse(runtime.actions.contains("key:36:"))
+    }
+
+    @MainActor
+    func testChangedTabOrControlAfterDeletionNeverSubmits() async {
+        for kind in 0 ..< 2 {
+            let runtime = ChromeRuntimeFixture()
+            runtime.enteredSuffix = "history"
+            runtime.changeControlAfterDelete = kind == 0
+            runtime.selectOldTabAfterDelete = kind == 1
+            await assertFailure(.addressBarNotVerified) {
+                try await ExistingChromeController(runtime: runtime).open(url: URL(string: "https://example.com/")!)
+            }
+            XCTAssertTrue(runtime.actions.contains("key:51:"))
+            XCTAssertFalse(runtime.actions.contains("key:36:"))
+        }
+    }
+
+    @MainActor
+    func testRecoveryUsesRetainedTabWithoutRepeatingEntryOrNewTab() async throws {
+        let runtime = ChromeRuntimeFixture()
+        runtime.enteredSuffix = "history"
+        runtime.omitCompletionSelection = true
+        let controller = ExistingChromeController(runtime: runtime)
+        let destination = "https://example.com/"
+        await assertFailure(.addressBarNotVerified) { try await controller.open(url: URL(string: destination)!) }
+        runtime.selectedTextRange = ExistingChromeTextRange(location: destination.utf16.count, length: 7)
+        _ = try await controller.open(url: URL(string: destination)!)
+        XCTAssertEqual(runtime.actions, [
+            "activate:42", "key:17:command", "set-address-bar:\(destination)", "activate:42", "key:51:", "key:36:",
+        ])
+        XCTAssertFalse(controller.hasPendingNavigation)
+    }
+
+    @MainActor
+    func testRecoveryRestoresRetainedPIDAfterApprovalTakesFocus() async throws {
+        let runtime = ChromeRuntimeFixture()
+        runtime.enteredSuffix = "history"
+        runtime.omitCompletionSelection = true
+        let controller = ExistingChromeController(runtime: runtime)
+        let destination = "https://example.com/"
+        await assertFailure(.addressBarNotVerified) { try await controller.open(url: URL(string: destination)!) }
+        runtime.removeFocus()
+        runtime.restoreFocusOnActivation = true
+        runtime.selectedTextRange = ExistingChromeTextRange(location: destination.utf16.count, length: 7)
+        _ = try await controller.open(url: URL(string: destination)!)
+        XCTAssertEqual(runtime.actions.filter { $0 == "activate:42" }.count, 2)
+        XCTAssertEqual(runtime.actions.filter { $0 == "key:17:command" }.count, 1)
+        XCTAssertEqual(runtime.actions.filter { $0 == "key:36:" }.count, 1)
+    }
+
+    @MainActor
+    func testAmbiguousTabCreationCannotOpenAnotherTabOnRecovery() async {
+        let runtime = ChromeRuntimeFixture()
+        runtime.createTwoTabs = true
+        let controller = ExistingChromeController(runtime: runtime)
+        let url = URL(string: "https://example.com/")!
+        await assertFailure(.addressBarNotVerified) { try await controller.open(url: url) }
+        await assertFailure(.navigationRecoveryRequired) { try await controller.open(url: url) }
+        XCTAssertEqual(runtime.actions, ["activate:42", "key:17:command"])
+    }
+
+    @MainActor
+    func testRetainedNavigationCannotRecoverOnDifferentTabWindowOrDestination() async {
+        for kind in 0 ..< 4 {
+            let runtime = ChromeRuntimeFixture()
+            runtime.dropEnteredText = true
+            let controller = ExistingChromeController(runtime: runtime)
+            let url = URL(string: "https://example.com/")!
+            await assertFailure(.addressBarNotVerified) { try await controller.open(url: url) }
+            let beforeRecovery = runtime.actions
+            if kind == 0 { runtime.selectOriginalTab() }
+            if kind == 1 { runtime.removeFocus() }
+            let recoveryURL = kind == 2 ? URL(string: "https://other.example/") : kind == 3 ? nil : url
+            await assertFailure(.navigationRecoveryRequired) { try await controller.open(url: recoveryURL) }
+            XCTAssertEqual(runtime.actions, beforeRecovery + (kind < 2 ? ["activate:42"] : []))
+        }
+    }
+
+    @MainActor
+    func testUncertainReturnDeliveryNeverSubmitsAgain() async {
+        let runtime = ChromeRuntimeFixture()
+        runtime.failAfterReturn = true
+        let controller = ExistingChromeController(runtime: runtime)
+        let url = URL(string: "https://example.com/")!
+        await assertFailure(.targetChanged) { try await controller.open(url: url) }
+        await assertFailure(.navigationRecoveryRequired) { try await controller.open(url: url) }
+        XCTAssertEqual(runtime.actions.filter { $0 == "key:17:command" }.count, 1)
+        XCTAssertEqual(runtime.actions.filter { $0 == "key:36:" }.count, 1)
+    }
+
+    @MainActor
     func testPageFieldSpoofCannotReceiveURL() async {
         let runtime = ChromeRuntimeFixture()
         runtime.ancestorRoles = ["AXWebArea", "AXGroup", "AXToolbar", "AXWindow"]
@@ -496,6 +712,16 @@ private final class ChromeRuntimeFixture: ExistingChromeRuntime {
     var launchedArguments = ["chrome"]
     var actions = [String]()
     var value = ""
+    var selectedTextRange: ExistingChromeTextRange?
+    var enteredSuffix: String?
+    var completionRangeOverride: ExistingChromeTextRange?
+    var omitCompletionSelection = false
+    var deleteLeavesCompletion = false
+    var changeControlAfterDelete = false
+    var selectOldTabAfterDelete = false
+    var failAfterReturn = false
+    var mutationGateCalls = 0
+    var restoreFocusOnActivation = false
     var label = "Address and search bar"
     var isEditable = true
     var ancestorRoles = ["AXGroup", "AXToolbar", "AXGroup", "AXWindow"]
@@ -531,6 +757,7 @@ private final class ChromeRuntimeFixture: ExistingChromeRuntime {
     func activate(_ processIdentifier: Int32, beforeMutation: @escaping @Sendable () async throws -> Void) async throws -> ActivatedApplication {
         if checkGateDuringActivation { try await beforeMutation() }
         actions.append("activate:\(processIdentifier)")
+        if restoreFocusOnActivation { focusPresent = true }
         if cancelDuringActivation { withUnsafeCurrentTask { $0?.cancel() } }
         if let processesAfterActivation { processes = processesAfterActivation }
         return ActivatedApplication(
@@ -549,6 +776,7 @@ private final class ChromeRuntimeFixture: ExistingChromeRuntime {
         return ExistingChromeFocus(
             processIdentifier: focusPresent ? processIdentifier : 99,
             role: "AXTextField", identifier: nil, label: label, value: value,
+            selectedTextRange: selectedTextRange,
             isEditable: isEditable, ancestorRoles: ancestorRoles,
             isSameWindow: { self.focusPresent },
             isSameControl: { self.controlGeneration == generation },
@@ -572,14 +800,31 @@ private final class ChromeRuntimeFixture: ExistingChromeRuntime {
             }
             if loseFocusAfterNewTab { focusPresent = false }
         }
+        if chord.keyCode == 51 {
+            if !deleteLeavesCompletion, let selectedTextRange {
+                value = String(decoding: value.utf16.prefix(selectedTextRange.location), as: UTF16.self)
+                self.selectedTextRange = nil
+            }
+            if changeControlAfterDelete { controlGeneration += 1 }
+            if selectOldTabAfterDelete { selectedTab = ChromeTabFixture(1) }
+        }
+        if chord.keyCode == 36, failAfterReturn { throw ExistingChromeError.targetChanged }
     }
     func setAddressBar(_ focus: ExistingChromeFocus, to text: String) throws {
         actions.append("set-address-bar:\(text)")
         if !dropEnteredText { value = text }
+        if let enteredSuffix {
+            value = text + enteredSuffix
+            selectedTextRange = omitCompletionSelection ? nil : completionRangeOverride
+                ?? ExistingChromeTextRange(location: text.utf16.count, length: enteredSuffix.utf16.count)
+        }
         if changeControlAfterEntry { controlGeneration += 1 }
         if selectOldTabAfterEntry { selectedTab = ChromeTabFixture(1) }
     }
     func pause() async throws { pauseCount += 1 }
+    func changeFocusedControl() { controlGeneration += 1 }
+    func selectOriginalTab() { selectedTab = ChromeTabFixture(1) }
+    func removeFocus() { focusPresent = false }
     private var application: ActivatedApplication {
         ActivatedApplication(processIdentifier: 42, bundleIdentifier: "com.google.Chrome", localizedName: "Google Chrome")
     }
