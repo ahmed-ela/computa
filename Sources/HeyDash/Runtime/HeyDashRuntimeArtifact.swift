@@ -13,8 +13,13 @@ struct HeyDashRuntimeArtifact: Sendable {
     static let maximumManifestBytes = 16 * 1_024
     static let maximumBinaryBytes = 512 * 1_024 * 1_024
 
+    enum Capability: String, Sendable, Hashable {
+        case threadDynamicToolsV1
+    }
+
     struct Manifest: Equatable, Sendable {
         let schemaVersion: Int
+        let capabilities: Set<Capability>
         let runtimeVersion: String
         let sourceCommit: String
         let patchSHA256: String
@@ -127,9 +132,10 @@ struct HeyDashRuntimeArtifact: Sendable {
     }
 
     private static func decodeManifest(_ data: Data) throws -> Manifest {
-        let required: Set<String> = ["schemaVersion", "runtimeVersion", "sourceCommit", "patchSHA256", "binarySHA256", "binarySize", "platform", "architecture", "executable"]
-        guard let value = try? JSONSerialization.jsonObject(with: data), let object = value as? [String: Any],
-              Set(object.keys) == required else { throw ValidationError.invalidManifest("unexpected, missing, or malformed fields") }
+        let baseFields: Set<String> = ["schemaVersion", "runtimeVersion", "sourceCommit", "patchSHA256", "binarySHA256", "binarySize", "platform", "architecture", "executable"]
+        guard let value = try? JSONSerialization.jsonObject(with: data), let object = value as? [String: Any] else {
+            throw ValidationError.invalidManifest("unexpected, missing, or malformed fields")
+        }
         func string(_ key: String) throws -> String {
             guard let value = object[key] as? String else { throw ValidationError.invalidManifest("\(key) must be a string") }
             return value
@@ -142,7 +148,26 @@ struct HeyDashRuntimeArtifact: Sendable {
             }
             return value.intValue
         }
-        let version = try integer("schemaVersion", minimum: 1, maximum: 1)
+        let version = try integer("schemaVersion", minimum: 1, maximum: 2)
+        let required = version == 1 ? baseFields : baseFields.union(["capabilities"])
+        guard Set(object.keys) == required else {
+            throw ValidationError.invalidManifest("unexpected, missing, or malformed fields")
+        }
+        let capabilities: Set<Capability>
+        if version == 1 {
+            capabilities = []
+        } else {
+            guard let names = object["capabilities"] as? [String] else {
+                throw ValidationError.invalidManifest("capabilities must be an array of known capability names")
+            }
+            var parsed = Set<Capability>()
+            for name in names {
+                guard let capability = Capability(rawValue: name), parsed.insert(capability).inserted else {
+                    throw ValidationError.invalidManifest("capabilities contains an unknown or duplicate name")
+                }
+            }
+            capabilities = parsed
+        }
         let runtimeVersion = try string("runtimeVersion")
         guard runtimeVersion.range(of: "\\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\\z", options: .regularExpression) != nil else {
             throw ValidationError.invalidManifest("runtimeVersion must be a bounded version token")
@@ -161,7 +186,7 @@ struct HeyDashRuntimeArtifact: Sendable {
         guard platform == "macos", architecture == "arm64", executable == executableName else {
             throw ValidationError.invalidManifest("only macos/arm64/codex-app-server is supported")
         }
-        return Manifest(schemaVersion: version, runtimeVersion: runtimeVersion, sourceCommit: commit,
+        return Manifest(schemaVersion: version, capabilities: capabilities, runtimeVersion: runtimeVersion, sourceCommit: commit,
                         patchSHA256: patch, binarySHA256: binary, binarySize: size,
                         platform: platform, architecture: architecture, executable: executable)
     }

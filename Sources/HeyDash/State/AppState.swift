@@ -9,6 +9,12 @@ final class AppState {
     @ObservationIgnored private let runtime: (any AgentRuntimeClient)?
     @ObservationIgnored private var runtimeShutdown: Task<RuntimeShutdownReport, Never>?
     @ObservationIgnored private var isShuttingDown = false
+    @ObservationIgnored private var chromeConnectionRequest: ChromeConnectionRequest?
+    @ObservationIgnored private var chromeConnectionTask: Task<Void, Never>?
+    @ObservationIgnored private var chromeCleanupTask: Task<Void, Never>?
+    @ObservationIgnored private let chromeTargetProvider: @MainActor () throws -> NativeChromeConnectionTarget
+    @ObservationIgnored private var attemptedRememberedChromeConnection = false
+    @ObservationIgnored private var chromePreferenceGeneration: UInt64 = 0
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
     @ObservationIgnored private let preferences: UserDefaults
     // Keep the persisted key across the HeyDash rename.
@@ -32,6 +38,10 @@ final class AppState {
     var defaultModel: String
     var showToolPayloads = false
     var connectionState: RuntimeConnectionState = .disconnected
+    private(set) var chromeConnectionState: ChromeConnectionState = .disconnected
+    private(set) var chromeConnectionID: UUID?
+    private(set) var chromeDisconnecting = false
+    private(set) var remembersChromeConnection = false
     var automationPermissions: AutomationPermissionSnapshot
     var contextUsageByTask: [AgentTask.ID: RuntimeContextUsage] = [:]
     var compactionStateByTask: [AgentTask.ID: RuntimeCompactionState] = [:]
@@ -64,11 +74,16 @@ final class AppState {
         tasks: [AgentTask] = SampleData.tasks,
         runtime: (any AgentRuntimeClient)? = nil,
         permissionClient: any AutomationPermissionClient = PermissionInspector(),
-        preferences: UserDefaults = .standard
+        preferences: UserDefaults = .standard,
+        chromeTargetProvider: @escaping @MainActor () throws -> NativeChromeConnectionTarget = {
+            try NativeChromeConnectionTarget.prepare()
+        }
     ) {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        self.chromeTargetProvider = chromeTargetProvider
+        remembersChromeConnection = RememberedChromeConnection.load(from: preferences) != nil
         let storedAccessMode = preferences.object(forKey: Self.accessModePreferenceKey) as? String
         accessMode = storedAccessMode.flatMap(AccessMode.init(rawValue:)) ?? .askEveryTime
         let storedModel = preferences.string(forKey: Self.defaultModelPreferenceKey)
@@ -100,6 +115,153 @@ final class AppState {
     var approvalGateBlocksInteraction: Bool {
         accessMode == .askEveryTime
             && (!pendingApprovals.isEmpty || !resolvingApprovalIDs.isEmpty)
+    }
+
+    /// Full access is deliberately absent: action approvals do not grant a
+    /// signed-in browser connection. Only the separate native confirmation can.
+    var canConnectChrome: Bool {
+        runtime != nil && !isShuttingDown && !approvalGateBlocksInteraction
+            && !chromeConnectionRequiresIdleRuntime
+            && !chromeDisconnecting && chromeConnectionID == nil
+    }
+
+    /// Native controls remain visible to Accessibility. Requiring an idle
+    /// runtime prevents an active model's own UI input from granting itself a
+    /// new browser capability, including while Full access is selected.
+    var chromeConnectionRequiresIdleRuntime: Bool {
+        !activeTurnTaskIDs.isEmpty || tasks.contains { $0.status == .running }
+            || !interruptingTaskIDs.isEmpty || !dispatchingQueueTaskIDs.isEmpty
+            || !steeringTaskIDs.isEmpty || !pendingApprovals.isEmpty
+            || !resolvingApprovalIDs.isEmpty
+            || compactionStateByTask.values.contains(.running)
+            || queuedPrompts.contains { taskID, prompts in
+                !prompts.isEmpty && !pausedQueueTaskIDs.contains(taskID)
+            }
+    }
+
+    @discardableResult
+    func connectChrome(_ request: ChromeConnectionRequest, remember: Bool = false) -> Bool {
+        guard canConnectChrome, let runtime else {
+            // A duplicate invocation must not revoke the active request itself.
+            if chromeConnectionRequest?.consent !== request.consent { request.consent.revoke() }
+            return false
+        }
+        do { try request.consent.check() }
+        catch {
+            chromeConnectionState = .failed(message: error.localizedDescription)
+            return false
+        }
+
+        if !remember { forgetRememberedChromeConnection() }
+        let preferenceGeneration = chromePreferenceGeneration
+        chromeConnectionRequest = request
+        chromeConnectionID = request.id
+        chromeConnectionState = .connecting
+        chromeConnectionTask = Task { [weak self] in
+            do {
+                try await withTaskCancellationHandler {
+                    try Task.checkCancellation()
+                    try request.consent.check()
+                    try await runtime.connectChrome(request)
+                    try Task.checkCancellation()
+                    try request.consent.check()
+                } onCancel: {
+                    request.consent.revoke()
+                }
+                guard let self, !self.isShuttingDown,
+                      self.chromeConnectionID == request.id else { return }
+                if remember, self.chromePreferenceGeneration == preferenceGeneration {
+                    try RememberedChromeConnection(request: request).save(to: self.preferences)
+                    self.remembersChromeConnection = true
+                }
+                self.chromeConnectionState = .connected
+                self.chromeConnectionTask = nil
+            } catch {
+                request.consent.revoke()
+                guard let self, self.chromeConnectionID == request.id else { return }
+                let state: ChromeConnectionState = error is CancellationError
+                    ? .disconnected : .failed(message: error.localizedDescription)
+                self.endChromeConnection(state: state)
+            }
+        }
+        return true
+    }
+
+    /// Revocation happens before this method returns, not after the runtime
+    /// actor next receives a message. Neither the model nor the web bridge calls
+    /// this connection control. Disconnect is also safe during a pending Allow.
+    func disconnectChrome() {
+        forgetRememberedChromeConnection()
+        endChromeConnection(state: .disconnected)
+    }
+
+    var canRememberChromeConnection: Bool {
+        !isShuttingDown && !chromeDisconnecting && !approvalGateBlocksInteraction
+            && !chromeConnectionRequiresIdleRuntime && chromeConnectionState == .connected
+            && chromeConnectionTask == nil && chromeConnectionRequest != nil && !remembersChromeConnection
+    }
+
+    /// Native confirmation only; the model and web bridge have no such action.
+    @discardableResult
+    func rememberChromeConnection(expectedID: UUID) -> Bool {
+        guard canRememberChromeConnection, let request = chromeConnectionRequest,
+              request.id == expectedID else { return false }
+        do {
+            try request.consent.check()
+            try RememberedChromeConnection(request: request).save(to: preferences)
+            remembersChromeConnection = true
+            return true
+        } catch { return false }
+    }
+
+    func forgetRememberedChromeConnection() {
+        chromePreferenceGeneration &+= 1
+        RememberedChromeConnection.forget(in: preferences)
+        remembersChromeConnection = false
+    }
+
+    private func restoreRememberedChromeConnectionOnLaunch() async {
+        guard !attemptedRememberedChromeConnection else { return }
+        attemptedRememberedChromeConnection = true
+        guard !Task.isCancelled, canConnectChrome,
+              let saved = RememberedChromeConnection.load(from: preferences) else { return }
+        do {
+            let target = try chromeTargetProvider()
+            guard saved.matches(target) else {
+                chromeConnectionState = .failed(message: "The running Chrome app or profile differs from the connection you remembered. Connect it manually to approve this scope. No automatic connection was made.")
+                return
+            }
+            // The saved scope is the native user's authority. Every launch
+            // still resolves a fresh process, endpoint and revocable consent.
+            if connectChrome(target.confirmedRequest(), remember: true) {
+                await chromeConnectionTask?.value
+            }
+        } catch {
+            chromeConnectionState = .failed(message: error.localizedDescription)
+        }
+    }
+
+    private func endChromeConnection(state: ChromeConnectionState) {
+        chromeConnectionRequest?.consent.revoke()
+        let pendingConnection = chromeConnectionTask
+        pendingConnection?.cancel()
+        chromeConnectionTask = nil
+        let hadConnection = chromeConnectionID != nil
+        chromeConnectionRequest = nil
+        chromeConnectionID = nil
+        chromeConnectionState = state
+        guard hadConnection, chromeCleanupTask == nil else { return }
+        chromeDisconnecting = true
+        let runtime = self.runtime
+        chromeCleanupTask = Task { [weak self] in
+            await runtime?.disconnectChrome()
+            // Do not admit a newer connection while a cancelled older connect
+            // can still finish. Its consent is already revoked above.
+            await pendingConnection?.value
+            guard let self else { return }
+            self.chromeDisconnecting = false
+            self.chromeCleanupTask = nil
+        }
     }
 
     func selectTask(_ id: AgentTask.ID?) {
@@ -518,6 +680,8 @@ final class AppState {
             let snapshot = try await runtime.loadTasks()
             guard !isShuttingDown else { return }
             replaceTasks(with: snapshot)
+            await restoreRememberedChromeConnectionOnLaunch()
+            guard !Task.isCancelled, !isShuttingDown else { return }
             connectionState = .connected(provider: runtime.providerName)
 
             for await event in runtime.events() {
@@ -535,6 +699,7 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        endChromeConnection(state: .disconnected)
         invalidatedApprovalAttemptIDs.formUnion(resolvingApprovalIDs)
         pendingApprovals.removeAll()
         automaticApprovalAttemptedRequests.removeAll()
@@ -543,8 +708,10 @@ final class AppState {
         approvalRequestsAwaitingResolvedEvents.removeAll()
         pausedQueueTaskIDs.formUnion(queuedPrompts.keys)
         let runtime = self.runtime
+        let chromeCleanup = chromeCleanupTask
         let task = Task {
-            await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
+            await chromeCleanup?.value
+            return await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
         }
         runtimeShutdown = task
         let report = await task.value
@@ -702,6 +869,7 @@ final class AppState {
         case .connectionChanged(let state):
             connectionState = state
             if case .failed = state {
+                endChromeConnection(state: .disconnected)
                 invalidateApprovalsForDisconnectedRuntime()
                 invalidateContextForDisconnectedRuntime()
                 activeTurnTaskIDs.removeAll()
@@ -709,12 +877,30 @@ final class AppState {
                 pausedQueueTaskIDs.formUnion(queuedPrompts.keys)
                 markDisconnectedTurnsWaiting()
             } else if case .disconnected = state {
+                endChromeConnection(state: .disconnected)
                 invalidateApprovalsForDisconnectedRuntime()
                 invalidateContextForDisconnectedRuntime()
                 pausedQueueTaskIDs.formUnion(queuedPrompts.keys)
                 activeTurnTaskIDs.removeAll()
                 interruptingTaskIDs.removeAll()
                 markDisconnectedTurnsWaiting()
+            }
+        case .chromeConnectionChanged(let connectionID, let state):
+            guard !isShuttingDown, chromeConnectionID == connectionID,
+                  let request = chromeConnectionRequest else { return }
+            switch state {
+            case .disconnected, .failed:
+                endChromeConnection(state: state)
+            case .connecting:
+                // A delayed progress event cannot regress a completed connect.
+                if chromeConnectionState == .connecting { chromeConnectionState = state }
+            case .connected:
+                do {
+                    try request.consent.check()
+                    chromeConnectionState = state
+                } catch {
+                    endChromeConnection(state: .disconnected)
+                }
             }
         }
     }
@@ -735,6 +921,11 @@ final class AppState {
     /// This prevents selection or composer changes from retargeting a queued turn.
     @discardableResult
     func submit(prompt rawPrompt: String, toTaskID taskID: AgentTask.ID) async -> Bool {
+        // Do not begin a turn while a remembered connection is being restored:
+        // Core correctly rejects that race, which otherwise loses first-send UX.
+        if let pendingConnection = chromeConnectionTask { await pendingConnection.value }
+        if let cleanup = chromeCleanupTask { await cleanup.value }
+        guard !Task.isCancelled else { return false }
         let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty,
               !isShuttingDown,

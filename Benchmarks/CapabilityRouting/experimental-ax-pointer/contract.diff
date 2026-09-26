@@ -1,0 +1,117 @@
+diff --git a/Sources/HeyDash/Runtime/ComputerV2ToolContract.swift b/Sources/HeyDash/Runtime/ComputerV2ToolContract.swift
+index 014f1ac..14c6880 100644
+--- a/Sources/HeyDash/Runtime/ComputerV2ToolContract.swift
++++ b/Sources/HeyDash/Runtime/ComputerV2ToolContract.swift
+@@ -73,6 +73,7 @@ enum ComputerV2ToolContract {
+         case pointer = "computer_v2_pointer"
+         case keypress = "computer_v2_keypress"
+         case type = "computer_v2_type"
++        case elementClick = "computer_v2_element_click"
+     }
+ 
+     enum PointerAction: String, CaseIterable {
+@@ -220,6 +221,15 @@ enum ComputerV2ToolContract {
+                 throw ValidationError.invalid("ax_action")
+             }
+ 
++        case .elementClick:
++            try checkKeys(arguments, required: ["snapshot_id", "element_index"], allowed: ["snapshot_id", "element_index"])
++            let snapshotID = try requiredString("snapshot_id", in: arguments)
++            guard let uuid = UUID(uuidString: snapshotID),
++                  uuid.uuidString.lowercased() == snapshotID.lowercased() else {
++                throw ValidationError.invalid("snapshot_id")
++            }
++            try requireNonnegativeInteger("element_index", in: arguments)
++
+         case .setText:
+             try checkKeys(
+                 arguments,
+@@ -486,6 +496,13 @@ enum ComputerV2ToolContract {
+         case .type:
+             properties = ["text": string]; required = ["text"]
+             description = "Insert text into the already-observed focused control; this does not navigate or submit. To open a URL, use computer_v2_open with url, or an observed link via AX. Returns a fresh AX snapshot when available; verify the result. Approval required."
++        case .elementClick:
++            properties = [
++                "snapshot_id": ["type": "string", "format": "uuid", "minLength": 36, "maxLength": 36],
++                "element_index": ["type": "integer", "minimum": 0],
++            ]
++            required = ["snapshot_id", "element_index"]
++            description = "Single left click on a current native Accessibility element using snapshot_id and element_index, not capture_id or coordinates. AXPress support is not required. Native bound apps only, including ordinary Chrome; brokered Chrome tabs are rejected. HeyDash checks target identity, frame and hit-test before dispatch. Approval required. Returns a fresh AX snapshot when available; verify the outcome, not just dispatch."
+         }
+ 
+         return [
+diff --git a/Tests/HeyDashTests/ComputerV2ToolContractTests.swift b/Tests/HeyDashTests/ComputerV2ToolContractTests.swift
+index 04dc2f3..b50f1ad 100644
+--- a/Tests/HeyDashTests/ComputerV2ToolContractTests.swift
++++ b/Tests/HeyDashTests/ComputerV2ToolContractTests.swift
+@@ -265,6 +265,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
+             (.pointer, ["action": "move", "capture_id": captureID, "x": 1, "y": 2]),
+             (.keypress, ["key": "return"]),
+             (.type, ["text": "hello"]),
++            (.elementClick, ["snapshot_id": snapshotID, "element_index": 0]),
+         ]
+         XCTAssertEqual(samples.count, ComputerV2ToolContract.Tool.allCases.count)
+         for (tool, arguments) in samples {
+@@ -293,6 +294,62 @@ final class ComputerV2ToolContractTests: XCTestCase {
+         }
+     }
+ 
++    func testElementClickHasADistinctNativeSingleClickContract() throws {
++        let schema = try spec(named: .elementClick)
++        XCTAssertEqual(schema.required, ["snapshot_id", "element_index"])
++        XCTAssertEqual(Set(schema.properties.keys), ["snapshot_id", "element_index"])
++        let snapshot = try XCTUnwrap(schema.properties["snapshot_id"] as? [String: Any])
++        XCTAssertEqual(snapshot["format"] as? String, "uuid")
++        XCTAssertEqual(snapshot["minLength"] as? Int, 36)
++        XCTAssertEqual(snapshot["maxLength"] as? Int, 36)
++        let index = try XCTUnwrap(schema.properties["element_index"] as? [String: Any])
++        XCTAssertEqual(index["type"] as? String, "integer")
++        XCTAssertEqual(index["minimum"] as? Int, 0)
++        let tool = try XCTUnwrap(ComputerV2ToolContract.specs.first { $0["name"] as? String == Tool.elementClick.rawValue })
++        let description = try XCTUnwrap(tool["description"] as? String)
++        for phrase in ["Single left click", "AXPress support is not required", "not capture_id or coordinates",
++                       "including ordinary Chrome", "brokered Chrome tabs are rejected", "Approval required", "fresh AX snapshot"] {
++            XCTAssertTrue(description.contains(phrase), phrase)
++        }
++        XCTAssertEqual(try spec(named: .click).required, ["capture_id", "x", "y"])
++        XCTAssertEqual(try spec(named: .ax).required, ["snapshot_id", "element_index", "ax_action"])
++        for modelID in ["lmstudio-community/Qwen3.5-4B-MLX-4bit", "lmstudio-community/Qwen3.5-9B-MLX-4bit", LocalModelCatalog.defaultModelID] {
++            XCTAssertTrue(ComputerV2ToolContract.specs(for: modelID).contains { $0["name"] as? String == Tool.elementClick.rawValue })
++        }
++    }
++
++    func testElementClickRejectsImageAndExpandedActionArguments() throws {
++        let valid: [String: Any] = ["snapshot_id": snapshotID, "element_index": 0]
++        for key in ["capture_id", "x", "y", "ax_action", "button", "click_count", "modifiers", "process_id", "bundle_id"] {
++            var expanded = valid; expanded[key] = "not allowed"
++            assertFailure(.unexpected(key), .elementClick, expanded)
++        }
++        assertFailure(.missing("snapshot_id"), .elementClick, ["element_index": 0])
++        assertFailure(.missing("element_index"), .elementClick, ["snapshot_id": snapshotID])
++        assertFailure(.missing("capture_id"), .click, valid)
++        assertFailure(.missing("ax_action"), .ax, valid)
++        let call = try ComputerV2ToolContract.validate(tool: Tool.elementClick.rawValue, arguments: valid)
++        XCTAssertNil(call.pointerAction)
++        XCTAssertNil(call.browserMode)
++    }
++
++    func testElementClickRequiresCanonicalUUIDAndExactNonnegativeInteger() throws {
++        let invalidSnapshotIDs: [Any] = ["", "stale", snapshotID + " ", " " + snapshotID,
++            snapshotID.replacingOccurrences(of: "-", with: ""), true, 1, NSNull()]
++        for invalid in invalidSnapshotIDs {
++            assertFailure(.invalid("snapshot_id"), .elementClick, ["snapshot_id": invalid, "element_index": 0])
++        }
++        let invalidIndices: [Any] = [-1, 0.5, true, "0", NSNull(), Double.nan, Double.infinity, NSNumber(value: UInt64.max)]
++        for invalid in invalidIndices {
++            assertFailure(.invalid("element_index"), .elementClick, ["snapshot_id": snapshotID, "element_index": invalid])
++        }
++        for index in [Int64(0), 1, Int64.max] {
++            let call = try ComputerV2ToolContract.validate(tool: Tool.elementClick.rawValue,
++                arguments: ["snapshot_id": snapshotID.lowercased(), "element_index": NSNumber(value: index)])
++            XCTAssertEqual(call.tool, .elementClick)
++        }
++    }
++
+     func testOpenAndSnapshotOptionalFieldsAreValidated() throws {
+         _ = try ComputerV2ToolContract.validate(tool: Tool.open.rawValue, arguments: [
+             "bundle_id": "com.google.Chrome",

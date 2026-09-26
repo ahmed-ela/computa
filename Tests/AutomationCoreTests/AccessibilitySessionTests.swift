@@ -1420,6 +1420,122 @@ final class AccessibilitySessionTests: XCTestCase {
         XCTAssertEqual(legacy.elements[0].role, "AXLink")
     }
 
+    func testDispatchGuardRunsOnceAfterFinalActionChecksIncludingRefresh() throws {
+        for refresh in [false, true] {
+            let button = FakeAccessibilityNode(identifier: "button", role: "AXButton", actions: [SemanticAXAction.press.rawValue])
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [button])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            let session = makeSession(runtime: runtime)
+            let approved = try session.snapshot(limits: generousLimits())
+            var dispatchChecks = 0
+            let beforeDispatch: () throws -> Void = {
+                dispatchChecks += 1
+                XCTAssertEqual(runtime.supportedActionRequests, ["button"])
+                XCTAssertTrue(runtime.performedActions.isEmpty)
+                XCTAssertEqual(runtime.applicationElementRequests.count, refresh ? 2 : 1)
+            }
+            if refresh {
+                try session.refreshAndPerform(.press, at: 1, in: approved, beforeDispatch: beforeDispatch)
+            } else {
+                try session.perform(.press, at: 1, in: approved, beforeDispatch: beforeDispatch)
+            }
+            XCTAssertEqual(dispatchChecks, 1)
+            XCTAssertEqual(runtime.performedActions.map(\.nodeID), ["button"])
+        }
+    }
+
+    func testDispatchGuardRefusalNeverPerformsOrRetriesAnAction() throws {
+        for refresh in [false, true] {
+            let button = FakeAccessibilityNode(identifier: "button", role: "AXButton", actions: [SemanticAXAction.press.rawValue])
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [button])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            let session = makeSession(runtime: runtime)
+            let approved = try session.snapshot(limits: generousLimits())
+            var dispatchChecks = 0
+            let beforeDispatch: () throws -> Void = {
+                dispatchChecks += 1
+                throw AutomationError.staleAccessibilitySnapshot
+            }
+            XCTAssertThrowsError(try {
+                if refresh {
+                    try session.refreshAndPerform(.press, at: 1, in: approved, beforeDispatch: beforeDispatch)
+                } else {
+                    try session.perform(.press, at: 1, in: approved, beforeDispatch: beforeDispatch)
+                }
+            }()) { XCTAssertEqual($0 as? AutomationError, .staleAccessibilitySnapshot) }
+            XCTAssertEqual(dispatchChecks, 1)
+            XCTAssertTrue(runtime.performedActions.isEmpty)
+            XCTAssertThrowsError(try session.perform(.press, at: 1, in: approved)) {
+                XCTAssertEqual($0 as? AutomationError, .staleAccessibilitySnapshot)
+            }
+        }
+    }
+
+    func testDispatchGuardRunsOnceAfterValueChecksIncludingRefresh() throws {
+        for refresh in [false, true] {
+            let field = FakeAccessibilityNode(identifier: "field", role: "AXTextField", valueSettable: true)
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [field])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            let session = makeSession(runtime: runtime)
+            let approved = try session.snapshot(limits: generousLimits())
+            var dispatchChecks = 0
+            let beforeDispatch: () throws -> Void = {
+                dispatchChecks += 1
+                XCTAssertEqual(runtime.valueSettableRequests, ["field"])
+                XCTAssertTrue(runtime.setValues.isEmpty)
+                XCTAssertEqual(runtime.applicationElementRequests.count, refresh ? 2 : 1)
+            }
+            if refresh {
+                try session.refreshAndSetValue(.text("fixture"), at: 1, in: approved, beforeDispatch: beforeDispatch)
+            } else {
+                try session.setValue(.text("fixture"), at: 1, in: approved, beforeDispatch: beforeDispatch)
+            }
+            XCTAssertEqual(dispatchChecks, 1)
+            XCTAssertEqual(runtime.setValues.map(\.nodeID), ["field"])
+        }
+    }
+
+    func testDispatchGuardRefusalNeverSetsOrRetriesAValue() throws {
+        for refresh in [false, true] {
+            let field = FakeAccessibilityNode(identifier: "field", role: "AXTextField", valueSettable: true)
+            let root = FakeAccessibilityNode(identifier: "window", role: "AXWindow", children: [field])
+            let runtime = FakeAccessibilityTreeRuntime(root: root)
+            let session = makeSession(runtime: runtime)
+            let approved = try session.snapshot(limits: generousLimits())
+            var dispatchChecks = 0
+            let beforeDispatch: () throws -> Void = {
+                dispatchChecks += 1
+                throw AutomationError.staleAccessibilitySnapshot
+            }
+            XCTAssertThrowsError(try {
+                if refresh {
+                    try session.refreshAndSetValue(.text("fixture"), at: 1, in: approved, beforeDispatch: beforeDispatch)
+                } else {
+                    try session.setValue(.text("fixture"), at: 1, in: approved, beforeDispatch: beforeDispatch)
+                }
+            }()) { XCTAssertEqual($0 as? AutomationError, .staleAccessibilitySnapshot) }
+            XCTAssertEqual(dispatchChecks, 1)
+            XCTAssertTrue(runtime.setValues.isEmpty)
+            XCTAssertThrowsError(try session.setValue(.text("fixture"), at: 1, in: approved)) {
+                XCTAssertEqual($0 as? AutomationError, .staleAccessibilitySnapshot)
+            }
+        }
+    }
+
+    func testDispatchGuardIsNotCalledWhenPriorCapabilityChecksFail() throws {
+        let node = FakeAccessibilityNode(identifier: "readonly", role: "AXTextField")
+        let runtime = FakeAccessibilityTreeRuntime(root: node)
+        let session = makeSession(runtime: runtime)
+        var checks = 0
+        let actionSnapshot = try session.snapshot(limits: generousLimits())
+        XCTAssertThrowsError(try session.perform(.press, at: 0, in: actionSnapshot, beforeDispatch: { checks += 1 }))
+        let valueSnapshot = try session.snapshot(limits: generousLimits())
+        XCTAssertThrowsError(try session.setValue(.text("fixture"), at: 0, in: valueSnapshot, beforeDispatch: { checks += 1 }))
+        XCTAssertEqual(checks, 0)
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+        XCTAssertTrue(runtime.setValues.isEmpty)
+    }
+
     func testDescriptionTruncationPropagatesToSnapshot() throws {
         let root = FakeAccessibilityNode(identifier: "root", descriptionWasTruncated: true)
         let runtime = FakeAccessibilityTreeRuntime(root: root)

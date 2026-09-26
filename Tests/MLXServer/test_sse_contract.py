@@ -1,0 +1,270 @@
+"""Offline fixtures only: no MLX import, models, network, or private captures."""
+import copy
+import importlib.util
+import json
+from pathlib import Path
+import unittest
+
+path = Path(__file__).parents[2] / "Sources/HeyDash/Resources/MLXServer/sse_contract.py"
+spec = importlib.util.spec_from_file_location("heydash_sse", path)
+sse = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sse)
+SSEContract, ProtocolError = sse.SSEContract, sse.ProtocolError
+
+
+def event(kind, **fields):
+    return {"type": kind, **fields}
+
+
+def wire(events, crlf=False):
+    result = b"".join(("event: " + item["type"] + "\ndata: "
+                       + json.dumps(item, ensure_ascii=False) + "\n\n").encode() for item in events)
+    return result.replace(b"\n", b"\r\n") if crlf else result
+
+
+def parse(data):
+    return [json.loads(line[6:]) for line in data.decode().split("\n") if line.startswith("data: ")]
+
+
+def fixture(public="\n\nHello 🌍\u2028there ", reasoning="", call=None, tokens=25):
+    response = {"id": "resp_fixture", "model": "qwen-fixture", "status": "in_progress", "output": []}
+    message = {"id": "msg_fixture", "type": "message", "role": "assistant", "status": "in_progress", "content": []}
+    common = {"item_id": message["id"], "output_index": 0, "content_index": 0}
+    result = [event("response.created", response=copy.deepcopy(response)),
+              event("response.in_progress", response=copy.deepcopy(response)),
+              event("response.output_item.added", output_index=0, item=copy.deepcopy(message)),
+              event("response.content_part.added", **common, part={"type": "output_text", "text": "", "annotations": []})]
+    if reasoning:
+        rcommon = {"item_id": "rs_fixture", "output_index": 0, "content_index": 0, "response_id": response["id"]}
+        result.append(event("response.reasoning_text.delta", **rcommon, delta=reasoning))
+    if public:
+        result += [event("response.output_text.delta", **common, delta=chunk) for chunk in [public[:2], public[2:]]]
+    if reasoning:
+        result.append(event("response.reasoning_text.done", **rcommon, text=reasoning))
+    # Mirrors the pinned bug: unfinished thinking leaks into final parsed text;
+    # otherwise final parser strips public whitespace.
+    reparsed = public.strip() or (reasoning if not call else "")
+    part = {"type": "output_text", "text": reparsed, "annotations": []}
+    result += [event("response.output_text.done", **common, text=reparsed),
+               event("response.content_part.done", **common, part=part)]
+    message = {**message, "status": "completed", "content": [part] if reparsed else []}
+    if reasoning and public:
+        message["reasoning"] = reasoning
+    result.append(event("response.output_item.done", output_index=0, item=message))
+    output = []
+    if reasoning and public:
+        output.append({"id": "rs_fixture", "type": "reasoning", "summary": [{"type": "summary_text", "text": reasoning.strip()}]})
+    if public or not call:
+        output.append(message)
+    if call:
+        index = len(output)
+        result += [event("response.output_item.added", output_index=index, item=copy.deepcopy(call)),
+                   event("response.function_call_arguments.done", item_id=call["id"], output_index=index,
+                         name=call["name"], call_id=call["call_id"], arguments=call["arguments"], item=copy.deepcopy(call)),
+                   event("response.output_item.done", output_index=index, item=copy.deepcopy(call))]
+        output.append(copy.deepcopy(call))
+    result.append(event("response.completed", response={**response, "status": "completed", "output": output,
+                  "output_text": reparsed, "error": None, "incomplete_details": None,
+                  "usage": {"input_tokens": 100, "output_tokens": tokens, "total_tokens": 100 + tokens}}))
+    return result
+
+
+CALL = {"id": "fc_original", "type": "function_call", "call_id": "call_exact",
+        "name": "computer_v2_status", "arguments": '{ "read_only": true }', "status": "completed"}
+
+
+class ContractTests(unittest.TestCase):
+    def process(self, events, cap=100, chunk_size=None, crlf=False):
+        contract = SSEContract(cap)
+        raw = wire(events, crlf)
+        chunk_size = chunk_size or len(raw)
+        result = b"".join(contract.feed(raw[i:i + chunk_size]) for i in range(0, len(raw), chunk_size))
+        result += contract.finish()
+        return parse(result)
+
+    def test_public_whitespace_unicode_and_final_text_agree(self):
+        public = "\n\nHello 🌍\u2028there "
+        output = self.process(fixture(public=public, reasoning="private synthetic reasoning"))
+        final = output[-1]["response"]
+        self.assertEqual(final["status"], "completed")
+        self.assertEqual(final["output_text"], public)
+        messages = [i for i in final["output"] if i["type"] == "message"]
+        self.assertEqual(messages[0]["content"][0]["text"], public)
+        self.assertNotIn("reasoning", messages[0])
+        self.assertEqual("".join(e["delta"] for e in output if e["type"] == "response.output_text.delta"), public)
+        self.assertEqual([e["text"] for e in output if e["type"] == "response.output_text.done"], [public])
+        self.assertEqual([e["sequence_number"] for e in output], list(range(len(output))))
+        for index, item in enumerate(final["output"]):
+            self.assertTrue(any(e["type"] == "response.output_item.done" and e["item"] == item
+                                and e["output_index"] == index for e in output))
+
+    def test_every_single_byte_split_and_crlf_is_safe(self):
+        expected = self.process(fixture())
+        for crlf in (False, True):
+            for chunk in (1, 2, 3, 7, 23, 1024):
+                with self.subTest(crlf=crlf, chunk=chunk):
+                    self.assertEqual(self.process(fixture(), chunk_size=chunk, crlf=crlf), expected)
+
+    def test_text_deltas_are_realtime_but_final_items_wait_for_eof(self):
+        contract = SSEContract(100)
+        events = fixture()
+        progressive = parse(contract.feed(wire(events)))
+        self.assertTrue(any(e["type"] == "response.output_text.delta" for e in progressive))
+        self.assertFalse(any(e["type"].endswith(".done") or e["type"] == "response.completed" for e in progressive))
+        final = parse(contract.finish())
+        self.assertEqual(final[-1]["type"], "response.completed")
+        with self.assertRaises(ProtocolError):
+            contract.finish()
+
+    def test_function_call_is_byte_exact_and_not_dispatched_until_eof(self):
+        contract = SSEContract(100)
+        before = parse(contract.feed(wire(fixture(public="", reasoning="synthetic", call=CALL))))
+        self.assertFalse(any(e["type"] == "response.output_item.done" for e in before))
+        after = parse(contract.finish())
+        calls = [e["item"] for e in after if e["type"] == "response.output_item.done" and e["item"]["type"] == "function_call"]
+        self.assertEqual(calls, [CALL])
+        self.assertEqual([i for i in after[-1]["response"]["output"] if i["type"] == "function_call"], [CALL])
+
+    def test_reasoning_only_is_incomplete_and_never_an_answer(self):
+        for tokens in (50, 100):
+            output = self.process(fixture(public="", reasoning="PRIVATE_SYNTHETIC_NOT_AN_ANSWER", tokens=tokens))
+            self.assertEqual(output[-1]["type"], "response.incomplete")
+            self.assertEqual(output[-1]["response"]["output_text"], "")
+            messages = [i for i in output[-1]["response"]["output"] if i["type"] == "message"]
+            self.assertEqual(messages[0]["content"], [])
+            self.assertFalse(any(e["type"] == "response.completed" for e in output))
+
+    def test_exhaustion_cannot_release_an_executable_function(self):
+        output = self.process(fixture(public="", call=CALL, tokens=100))
+        self.assertEqual(output[-1]["type"], "response.incomplete")
+        self.assertFalse(any(e["type"] == "response.output_item.done" and e["item"]["type"] == "function_call" for e in output))
+        self.assertFalse(any(i["type"] == "function_call" for i in output[-1]["response"]["output"]))
+
+    def test_partial_public_answer_at_token_cap_is_incomplete(self):
+        output = self.process(fixture(public="partial", tokens=100))
+        self.assertEqual(output[-1]["response"]["output_text"], "partial")
+        self.assertEqual(output[-1]["response"]["incomplete_details"], {"reason": "max_output_tokens"})
+        self.assertEqual(output[-1]["response"]["output"][0]["status"], "incomplete")
+
+    def test_corrupt_terminal_never_releases_tool(self):
+        mutations = [lambda r: r.update(id="wrong"), lambda r: r.update(model="wrong"),
+                     lambda r: r.update(status="incomplete"), lambda r: r.update(error={"message": "secret"}),
+                     lambda r: r["output"][-1].update(call_id="wrong"), lambda r: r.update(output=[]),
+                     lambda r: r["output"].append(copy.deepcopy(r["output"][-1])),
+                     lambda r: r["usage"].update(total_tokens=999), lambda r: r["usage"].update(output_tokens=True)]
+        for mutate in mutations:
+            contract, events = SSEContract(100), fixture(public="", call=CALL)
+            before = parse(contract.feed(wire(events[:-1])))
+            mutate(events[-1]["response"])
+            with self.subTest(mutation=mutate), self.assertRaises(ProtocolError):
+                contract.feed(wire(events[-1:]))
+            self.assertFalse(any(e["type"] == "response.output_item.done" for e in before))
+            failure = parse(contract.failure())
+            self.assertEqual(failure[-1]["type"], "response.failed")
+            self.assertNotIn("secret", json.dumps(failure))
+            self.assertEqual(contract.failure(), b"")
+
+    def test_missing_terminal_truncated_frame_and_late_data_fail_closed(self):
+        for raw, after_feed in ((wire(fixture()[:-1]), True), (wire(fixture())[:-1], True),
+                               (wire(fixture()) + wire(fixture()[:1]), False),
+                               (wire(fixture()) + b"data: [DONE]\n\ndata: {}\n\n", False)):
+            contract = SSEContract(100)
+            with self.subTest(after_feed=after_feed), self.assertRaises(ProtocolError):
+                contract.feed(raw)
+                if after_feed:
+                    contract.finish()
+            self.assertEqual(parse(contract.failure())[-1]["type"], "response.failed")
+
+    def test_clean_done_marker_comments_and_multiline_json(self):
+        contract = SSEContract(100)
+        raw = b": keepalive\r\n\r\n" + wire(fixture()).replace(b'data: {"type":', b'data: {\ndata: "type":')
+        out = contract.feed(raw + b"data: [DONE]\n\n") + contract.finish()
+        self.assertEqual(parse(out)[-1]["type"], "response.completed")
+
+    def test_malformed_structures_are_payload_free_protocol_errors(self):
+        raws = [b"data: {not-json secret}\n\n", b'data: {"type":"a","type":"b"}\n\n',
+                b'data: {"type":"a","value":NaN}\n\n', b"data: \xff\n\n",
+                b"event: wrong\ndata: {\"type\":\"response.created\"}\n\n",
+                wire(fixture()[:1]) + wire([event("response.in_progress", response=[])]),
+                wire(fixture()[:3]) + wire([event("response.content_part.added", item_id=[], part=[])]),
+                b'data: {"type":"response.created","response":[]}\n\n']
+        for raw in raws:
+            with self.subTest(length=len(raw)):
+                contract = SSEContract(100)
+                with self.assertRaises(ProtocolError) as caught:
+                    contract.feed(raw)
+                self.assertNotIn("secret", str(caught.exception))
+
+    def test_unrelated_final_text_mismatch_is_not_silently_repaired(self):
+        for target in ("response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"):
+            events = fixture()
+            changed = next(e for e in events if e["type"] == target)
+            if target == "response.output_text.done":
+                changed["text"] = "unstreamed unrelated text"
+            elif target == "response.content_part.done":
+                changed["part"] = {**changed["part"], "text": "unstreamed unrelated text"}
+            elif target == "response.output_item.done":
+                changed["item"] = {**changed["item"], "content": [{"type": "output_text", "text": "unstreamed unrelated text"}]}
+            else:
+                changed["response"]["output_text"] = "unstreamed unrelated text"
+            with self.subTest(target=target), self.assertRaises(ProtocolError):
+                self.process(events)
+
+    def test_surrogate_string_rejects_without_unicode_exception(self):
+        contract = SSEContract(100)
+        contract.feed(wire(fixture()[:4]))
+        with self.assertRaises(ProtocolError):
+            contract.feed(b'data: {"type":"response.output_text.delta","item_id":"msg_fixture","content_index":0,"delta":"\\ud800"}\n\n')
+
+    def test_unencodable_terminal_metadata_still_emits_safe_failure(self):
+        contract = SSEContract(100)
+        events = fixture(public="", call=CALL)
+        contract.feed(wire(events[:-1]))
+        events[-1]["response"]["unknown_metadata"] = "\ud800"
+        contract.feed(("data: " + json.dumps(events[-1]) + "\n\n").encode())
+        with self.assertRaises(ProtocolError):
+            contract.finish()
+        failure = parse(contract.failure())
+        self.assertEqual(failure[-1]["type"], "response.failed")
+        self.assertEqual(failure[-1]["response"]["error"]["code"], "invalid_prompt")
+
+    def test_duplicate_lifecycle_unknown_item_and_bad_argument_json_reject(self):
+        cases = []
+        base = fixture(public="", call=CALL)
+        cases.append(base[:1] + base)
+        cases.append(base[:3] + [base[2]] + base[3:])
+        bad = copy.deepcopy(base)
+        next(e for e in bad if e["type"] == "response.function_call_arguments.done")["arguments"] = "{}"
+        cases.append(bad)
+        bad = copy.deepcopy(base)
+        next(e for e in bad if e["type"] == "response.output_item.added" and e["item"]["type"] == "function_call")["item"]["arguments"] = "not json"
+        cases.append(bad)
+        bad = fixture()
+        next(e for e in bad if e["type"] == "response.output_text.delta")["item_id"] = "unknown"
+        cases.append(bad)
+        for events in cases:
+            with self.subTest(events=len(events)), self.assertRaises(ProtocolError):
+                self.process(events)
+
+    def test_byte_event_frame_and_text_bounds(self):
+        contract = SSEContract(100)
+        contract.MAX_STREAM_BYTES = 10
+        with self.assertRaises(ProtocolError):
+            contract.feed(b" " * 11)
+        contract = SSEContract(100)
+        contract.MAX_FRAME_BYTES = 10
+        with self.assertRaises(ProtocolError):
+            contract.feed(b"data: " + b" " * 11)
+        contract = SSEContract(100)
+        contract.MAX_EVENTS = 1
+        with self.assertRaises(ProtocolError):
+            contract.feed(wire(fixture()[:2]))
+        for reasoning in (False, True):
+            contract = SSEContract(100)
+            contract.MAX_TEXT_BYTES = 3
+            with self.assertRaises(ProtocolError):
+                contract.feed(wire(fixture(public="" if reasoning else "long text", reasoning="long thought" if reasoning else "")))
+
+
+if __name__ == "__main__":
+    unittest.main()

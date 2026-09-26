@@ -46,16 +46,30 @@ final class ChromeCaptureV2LiveTests: XCTestCase {
         let token = "LOCALCODEX_CHROME_CAPTURE_OK_"
             + UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = ProcessInfo.processInfo.environment["HEYDASH_LIVE_OWNED_MLX_TEST"] == "1"
+            ? CodexAppServerRuntime.Configuration.localQwen
+            : CodexAppServerRuntime.Configuration.externalLocalQwen
+        try configuration.validateSelectedModel(modelID)
         configuration.codexHomePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalCodexChromeCapture-\(UUID().uuidString)", isDirectory: true)
             .path
         let wireURL = URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
             .appendingPathComponent("app-server-wire.jsonl")
         configuration.protocolTracePath = wireURL.path
+        print("chromeCaptureBackend=\(configuration.effectiveBackend.rawValue)\nchromeCaptureProtocolTrace=\(wireURL.path)")
         let state = AppState(tasks: [], runtime: CodexAppServerRuntime(configuration: configuration), preferences: isolatedTestPreferences())
         let runtimeTask = Task { await state.startRuntime() }
         defer { runtimeTask.cancel() }
+        do {
+            try await runCapture(state: state, modelID: modelID, pageURL: pageURL, token: token, wireURL: wireURL)
+            await verifyShutdown(state, backend: configuration.effectiveBackend)
+        } catch {
+            await verifyShutdown(state, backend: configuration.effectiveBackend)
+            throw error
+        }
+    }
+
+    private func runCapture(state: AppState, modelID: String, pageURL: String, token: String, wireURL: URL) async throws {
         try await waitForConnection(state)
 
         state.createTask()
@@ -131,6 +145,27 @@ final class ChromeCaptureV2LiveTests: XCTestCase {
                 && (message.object["params"] as? [String: Any])?["tool"] as? String
                     == ComputerV2ToolContract.Tool.capture.rawValue
         })
+    }
+
+    private func verifyShutdown(_ state: AppState, backend: LocalInferenceBackend) async {
+        let report = await state.shutdownRuntime()
+        XCTAssertTrue(report.succeeded, report.issues.joined(separator: "\n"))
+        print("chromeCaptureOwnedShutdownSucceeded=\(report.succeeded) backend=\(backend.rawValue)")
+        guard backend == .headlessMLX else { return }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 1
+        configuration.timeoutIntervalForResource = 1
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        do {
+            _ = try await session.data(from: URL(string: "http://127.0.0.1:1237/health")!)
+            XCTFail("Owned MLX listener remained after runtime shutdown")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .cannotConnectToHost)
+            print("chromeCaptureOwnedMLXPortReleased=\(error.code == .cannotConnectToHost)")
+        } catch {
+            XCTFail("Could not verify owned MLX port release: \(error.localizedDescription)")
+        }
     }
 
     private func approveOnlyExactOpen(

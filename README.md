@@ -2,11 +2,11 @@
 
 Fast, Mac-optimized local AI.
 
-Private repository: [ahmedelami/heydash](https://github.com/ahmedelami/heydash).
+Private repository: [ahmed8372/heydash](https://github.com/ahmed8372/heydash).
 
 HeyDash is a clean-room macOS desktop-agent client with its own source-pinned build of the open-source Codex App Server. Its signed Swift host owns the agent runtime and macOS permissions, while a compiled Octane interface renders in the system `WKWebView`. It recreates the shape of a local Codex-style desktop experience without copying the Codex GUI, private source, or application assets. It does not modify or launch the App Server inside an installed Codex/ChatGPT app.
 
-The project has moved beyond a static UI shell: it launches an isolated App Server over stdio, loads and resumes its LM Studio threads, starts turns, streams thread/turn/item updates into the transcript, presents native approval requests, and exposes a versioned clean-room computer-use contract for desktop observation and control.
+The project has moved beyond a static UI shell: it launches an isolated App Server over stdio, loads and resumes local-model threads, starts turns, streams thread/turn/item updates into the transcript, presents native approval requests, and exposes a versioned clean-room computer-use contract for desktop observation and control.
 
 ## Rename compatibility
 
@@ -28,11 +28,9 @@ CodexAppServerRuntime + AutomationCore
 HeyDash.app/Contents/Resources/AgentRuntime/codex-app-server
   --listen stdio:// (verified app-owned artifact)
           │
-          ├── LM Studio provider
-          │     mlx-community/Qwen3.8-27B-4bit (default)
-          │     lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit (optional)
+          ├── app-owned headless MLX-VLM process (loopback only)
+          │     lmstudio-community/Qwen3.5-4B-MLX-4bit (default)
           │     lmstudio-community/Qwen3.5-9B-MLX-4bit (optional)
-          │     lmstudio-community/Qwen3.5-4B-MLX-4bit (optional)
           │
           └── HeyDash dynamic tools: computer_v2_*
                 ├── AutomationCore (AppKit, Accessibility, ScreenCaptureKit)
@@ -41,18 +39,20 @@ HeyDash.app/Contents/Resources/AgentRuntime/codex-app-server
 
 The Octane/WebKit layer owns ordinary presentation. `CodexAppServerRuntime` translates App Server requests and notifications into the typed task, status, timeline, and connection events consumed by `AppState`. A narrow native bridge sends revisioned, data-minimized snapshots to the page and accepts only validated UI actions; it never exposes Accessibility or ScreenCaptureKit directly. Privileged approval decisions remain in native Swift: the approval overlay in Ask every time, or AppState's automatic resolver in Full access. They are never accepted from JavaScript. App Server remains responsible for the agent loop, thread state, sandbox selection, approval requests, and model-provider integration. HeyDash deliberately removes unrelated built-in tools, plugins, memories, skills, and MCP configuration from its constrained local-model turns.
 
-New tasks default to `mlx-community/Qwen3.8-27B-4bit`. Settings can change the persisted default for new tasks, and the composer selector can change an individual idle task's model. The selected model ID is sent to App Server on thread start, resume, and turn start; existing threads keep their recorded model unless explicitly changed. Other turn defaults are:
+New tasks default to `lmstudio-community/Qwen3.5-4B-MLX-4bit`. Settings can change the persisted default for new tasks, and the composer selector can change an individual idle task's model. The selected model ID is sent to App Server on thread start, resume, and turn start; existing threads keep their recorded model unless explicitly changed. Historical 27B/35B catalog entries and saved preferences are preserved, but the owned MLX backend rejects unsupported models explicitly instead of silently substituting one. Other turn defaults are:
 
-- model provider: `lmstudio`;
-- workspace: the current user's Documents directory;
+- model provider identifier: `lmstudio` (retained for saved-thread compatibility; the default endpoint is now owned MLX, not LM Studio);
+- workspace: the app-owned `~/Library/Application Support/LocalCodex/CodexHome/Workspace`;
 - sandbox: `workspace-write`;
 - approval policy: `on-request`;
 - reasoning effort: `medium`;
-- declared context window: 4,096 tokens for 27B/35B (automatic compaction at 3,072), or 8,192 for 9B/4B (compaction at 6,144);
+- declared context window: 4,096 tokens for 27B/35B (automatic compaction at 3,072), or 16,384 for 9B/4B (compaction at 12,288);
 - isolated App Server home: `~/Library/Application Support/LocalCodex/CodexHome`;
 - persistent App Server threads (`ephemeral: false`).
 
-The private `CODEX_HOME` prevents personal Codex memories, plugins, MCP configuration, and task state from inflating or leaking into these local turns. The compact base instruction is under 1 KiB. Workspace policy files such as `AGENTS.md` remain authoritative and are still honored.
+The private `CODEX_HOME` keeps existing HeyDash chats separate from personal Codex chats. It is not sufficient by itself to isolate configuration: a Documents workspace inside a home Git repository could previously discover the ancestor `.codex/config.toml` and `AGENTS.md`. HeyDash now launches in its private workspace with `project_root_markers=[]` at both process and thread boundaries. The engine child's `HOME` is its private `CodexHome/ProcessHome`, preventing global `.agents` skill imports; the native app and real macOS home are unchanged. It forwards only explicit home paths, a system PATH, temporary-directory/locale settings, and the selected local inference endpoint; it does not forward ambient Codex routing variables, API keys, proxies, or startup hooks. Login-shell initialization and shell snapshots are disabled for this shell-tool-free engine. Auth stores are file-backed inside the private home, not shared desktop credentials. This is application configuration isolation, not an OS sandbox.
+
+The compact base instruction is under 1 KiB. HeyDash additionally supplies its own bundled developer instructions on new and resumed chats, including the **complete unchanged StudyLock non-bypass policy**. No protected source or enforcement state is removed or altered. The policy governs StudyLock enforcement only; it does not turn HeyDash into a StudyLock-only assistant or establish that an unrelated page is blocked. Saved chats and their history remain intact; restarting the app applies the owned instruction boundary on resume. Updates to bundled instructions require a new build/restart, not live editing of another application's configuration. Machine-managed/system-wide engine policy is not bypassed by these app settings.
 
 ## Application surface
 
@@ -94,11 +94,11 @@ post-compaction usage remain unknown until the runtime reports fresh data.
 Automatic compaction is performed by the app-owned App Server with the same local
 model and the native default summarization instructions. It does not run a second
 summarizer, add experimental summary instructions, delete transcript messages, or poll the
-conversation. The trigger is 75% of the configured context budget: 6,144 of 8,192
+conversation. The trigger is 75% of the configured context budget: 12,288 of 16,384
 tokens for Qwen 4B/9B, and 3,072 of 4,096 for the constrained model profiles. This
 leaves 25% of the nominal budget for new input, tool results, and summary
 generation. The runtime can report a smaller effective window (for example,
-7,782 for an 8,192 configuration); the ring honors that reported limit. It is a
+15,564 for a 16,384 configuration); the ring honors that reported limit. It is a
 conservative policy, not a guarantee that arbitrarily large individual inputs
 will fit. Summaries are lossy; the full transcript remains visible. Queue
 dispatch waits for the enclosing turn to finish, and failure pauses the queue.
@@ -154,6 +154,25 @@ undo an action already dispatched.
 An automatic approval failure is shown as “Action paused” and is not retried in
 a loop; switch to Ask every time to review or decline it.
 
+The separate native **Connect Chrome** control grants a revocable connection
+to the already-running, ordinary Chrome session. It requires an idle runtime and
+an explicit confirmation even in Full access. Chrome Remote Debugging must be
+enabled by the user, and Chrome may show its own Allow prompt. If macOS denies
+the connection-file read, check **Files & Folders → LocalCodex (or HeyDash) →
+Google Chrome**. That OS permission covers Chrome's app-data directory; HeyDash
+reads only `DevToolsActivePort`, not cookies or other profile files. Full Disk
+Access is not required. Disconnect revokes consent immediately, including while
+a connection is pending; quitting ends the live connection. **Connect & Remember**
+(or **Reconnect automatically…** for an already connected session) explicitly
+authorizes one reconnect attempt on each launch, when the runtime is idle and the
+same Chrome app/profile is already running. Only that approved scope is saved;
+process IDs, ports, endpoints and live consent tokens are never persisted. The
+first message waits for a pending reconnect. Chrome/macOS approval remains
+required if requested. **Disconnect Chrome** also forgets the saved choice;
+**Forget automatic connection** leaves the current session connected but disables
+future reconnection. Missing, changed, or invalid scope fails closed without
+launching Chrome, changing permissions, or retrying automatically.
+
 ## Native computer tool
 
 New tasks register action-specific `computer_v2_*` dynamic tools backed by the clean-room `AutomationCore` Swift target. The schemas describe each call, and Swift validates every field before dispatch because the local model server can accept malformed arguments despite a `required` schema. The legacy `computer` dispatcher remains only for threads that persisted its older tool schema:
@@ -161,6 +180,7 @@ New tasks register action-specific `computer_v2_*` dynamic tools backed by the c
 | V2 tools | Behavior |
 | --- | --- |
 | `computer_v2_status`, `computer_v2_apps` | Read macOS authorization state or list running applications. |
+| `computer_v2_tabs`, `computer_v2_bind_tab` | With an explicitly connected Chrome session, list a bounded page of tab metadata and bind an observed opaque candidate token. Follow `next_cursor` until null for a complete inventory. Tokens belong to this task turn and connection; binding does not activate, navigate, or close the tab. |
 | `computer_v2_open` | Launch and bind an application by bundle identifier. Chrome defaults to the user's normal session and logins; omit `url` to inspect its current tab, or supply a URL to open a new tab. `browser_mode: "isolated"` explicitly selects the separate project-owned profile and exact task-scoped tab. |
 | `computer_v2_snapshot` | Return a bounded semantic Accessibility tree for the bound native app or exact brokered Chrome tab, with snapshot-scoped element indices. |
 | `computer_v2_ax`, `computer_v2_set_text` | Perform a checked semantic action on a current inspected native element or exact brokered-tab element. |
@@ -169,7 +189,18 @@ New tasks register action-specific `computer_v2_*` dynamic tools backed by the c
 | `computer_v2_click`, `computer_v2_pointer` | For native apps, use image-pixel coordinates from that capture. The runtime maps them to screen points and checks the bound window before move, double-click, right-click, or scroll. V2 drag and brokered-tab pointer input are unavailable. |
 | `computer_v2_keypress`, `computer_v2_type` | For native apps, send approved keyboard input only while the exact observed window and focused control still match. Brokered Chrome tabs reject these tools. |
 
-All mutations use the native approval controller: Ask every time waits for a human decision; Full access automatically resolves valid requests. The V2 executor binds the launched app to its task and rechecks its process, bundle, and inspected target across approval; native input also retains the existing focus checks. The model need not repeat a process ID on every call. Normal Chrome is the default: HeyDash selects an ordinary process, excluding custom-data-directory and remote-debugging instances, and uses native foreground Accessibility, capture, and guarded input. Ambiguous or unreadable process identity fails closed instead of guessing. No cookies, credentials, or profile files are copied, and normal Chrome remains user-owned during shutdown.
+All mutations use the native approval controller: Ask every time waits for a human decision; Full access automatically resolves valid requests. The V2 executor binds the launched app to its task and rechecks its process, bundle, and inspected target across approval; native input also retains the existing focus checks. The model need not repeat a process ID on every call. `computer_v2_open` keeps its ordinary Chrome native Accessibility/capture/input route, excluding custom-data-directory and command-line remote-debugging instances. The separately approved connection exposes `tabs` → `bind_tab` → semantic snapshot/action tools for exact background tabs. It validates the selected process, connection-file generation and loopback listener at connection and wire admission. Ambiguous or unreadable identity fails closed instead of guessing. No cookies, credentials, or profile files are copied, and normal Chrome remains user-owned during shutdown.
+
+Borrowed-tab inventories are capped at 12 KiB of encoded JSON per page, with
+UTF-8-safe title truncation and explicit omission of oversized URLs; shortened
+URLs are never presented as navigable addresses. Native binding metadata stays
+intact. Two turns cannot reserve the same target concurrently. Cancellation
+revokes the original turn and detaches its original session, never closing a
+user-owned tab or browser. Borrowed semantic reads/actions do not take the global
+desktop-input lane. Browser screenshot, coordinate and keyboard tools remain
+unavailable; actions still need fresh snapshots and normal native approval.
+This routing is not yet evidence of real-Qwen accuracy or concurrent-user
+non-interference; those live qualifications remain pending.
 
 Only an explicit `browser_mode: "isolated"` Chrome URL launches a project-owned profile with a random loopback DevTools port and no wildcard-origin override. It retains an opaque task-scoped handle and changes the document epoch when observation detects a changed main-frame loader or URL, including its fragment. Semantic reads and actions address that exact target without explicitly foregrounding it. The broker rejects overlapping operations for a task, consumes a valid mutation snapshot before awaiting transport, and rechecks that a revoked handle has not disappeared before publishing an observation or preparing input. The transport repeats document and element checks on its mutation connection, resolves the node into a main-frame isolated JavaScript world, and checks document membership, URL, connection, and control state in the synchronous mutation function. Revocation and the one-shot WebSocket enqueue share a lock: revocation that wins before enqueue prevents that command; a command already enqueued cannot be recalled. These checks are not an atomic lock on the browser DOM or a record of all intervening navigation events. Coordinate capture, pointer, and keyboard calls intentionally fail closed for brokered tabs; native-app AX and guarded screenshot paths remain separate. A semantic mutation requires the current snapshot UUID and element index; pointer input requires a current `capture_id` and image-space coordinates. The runtime maps those image pixels to global screen points and rejects stale or changed native windows and targets. A consumed observation must be replaced with a fresh snapshot or capture to verify the result. Window capture is read-only and does **not** present a per-screenshot native approval gate: once macOS Screen Recording access is granted, a local model turn can request native-window captures while HeyDash runs.
 
@@ -187,17 +218,33 @@ Permission onboarding is explicit. AutomationCore can read permission state with
 - Xcode with a Swift 6.2-capable toolchain (the Swift Package manifest uses tools version 6.2);
 - XcodeGen when regenerating the Xcode project (`brew install xcodegen`);
 - the app-owned Agent Runtime built from the pinned source and patch below (Rust 1.95 and Bun are build-time requirements only);
-- for live inference, LM Studio with its local server running and the selected model downloaded and available;
+- for live inference, the pinned local MLX-VLM Python environment and existing Qwen 4B/9B MLX weights described below; LM Studio does not need to run;
 - for native visual grounding, `uv` plus approximately 4.0 GB for the three pinned model directories and 0.6 GB for their isolated Python runtime;
 - Accessibility permission for semantic inspection and native input, plus Screen Recording permission for window capture. Use **Settings → Computer use → Request access** or the applicable macOS Privacy & Security pane, relaunch after granting Screen Recording, then verify that the app reports **Granted**. On this macOS 27 installation, Screen Recording needs manual registration in System Settings.
 
-The UI and App Server transport can start without LM Studio, but a model turn cannot complete until the selected model and server are available. The optional [Qwen3.6-35B-A3B MLX 4-bit build](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit) is about 20.4 GB on disk. That leaves very little of this 24 GB Mac's unified memory for macOS, LM Studio, context, and screenshots. The smaller [Qwen3.5-9B MLX 4-bit build](https://huggingface.co/lmstudio-community/Qwen3.5-9B-MLX-4bit/tree/main) is about 5.98 GB, and [Qwen3.5-4B MLX 4-bit](https://huggingface.co/lmstudio-community/Qwen3.5-4B-MLX-4bit/tree/main) is about 3.06 GB. These figures are model-file sizes, not total running-memory requirements. LM Studio currently indexes the 27B, 9B, and 4B builds; the 35B build remains a selectable but not downloaded option. The smaller models now have production-runtime V2 read-only evidence, but their semantic and visual mutation behavior must be judged by the separate live gates below. Keep a bounded context rather than using the models' advertised maxima, and load only one large model at a time.
+The default is [Qwen3.5-4B MLX 4-bit](https://huggingface.co/lmstudio-community/Qwen3.5-4B-MLX-4bit/tree/main), about 3.06 GB of model files. [Qwen3.5-9B MLX 4-bit](https://huggingface.co/lmstudio-community/Qwen3.5-9B-MLX-4bit/tree/main), about 5.98 GB, is also supported by the headless backend. These are file sizes, not total unified-memory requirements. Saved 27B/35B choices are preserved, but explicitly require an external backend; they are never silently replaced with 4B. The optional 35B build was not downloaded. Historical LM Studio results below do not establish current headless performance or reliability.
 
-## Local LM Studio compatibility
+## App-owned headless MLX
 
-This Mac has `mlx-community/Qwen3.8-27B-4bit` installed under LM Studio and served at `127.0.0.1:1234`. The installed model directory is about 16.08 GB; its three weight shards total 16,054,541,349 bytes. The validated 27B runs used one parallel request and a bounded 22 GiB custom model-loading guardrail. The guardrail remains enabled.
+HeyDash starts one loopback-only MLX-VLM process on `127.0.0.1:1237` and stops it with its owned runtime. The process also watches its parent so an app crash does not intentionally leave a model daemon running. There is no LM Studio GUI, extra proxy process, or cloud inference. The native App Server still handles the agent loop, tools, approvals and conversation storage; MLX handles model inference and images.
 
-LM Studio is configured to request an 8,192-token default context, but the current MLX runtime auto-fits this 27B model to 4,096 tokens on the 24 GB Mac. HeyDash therefore declares 4,096 tokens for 27B, with auto-compaction at 3,072. The 4B and 9B builds fit substantially larger contexts on this Mac; HeyDash conservatively declares 8,192 tokens for them, with auto-compaction at 6,144. A loaded task cannot switch between these context classes because App Server ignores new config overrides for a loaded thread; create a new task when changing between 27B and a smaller model.
+This machine reuses `~/Library/Application Support/LocalCodex/VisualGrounding/venv/bin/python` (MLX 0.32.2 / MLX-VLM 0.7.1) and the existing model folders under `~/.lmstudio/models/lmstudio-community/`. No copy or re-download is performed. These legacy paths and model/provider IDs preserve saved tasks; they are not a dependency on a running LM Studio app. Startup checks the pinned environment and local weights and fails explicitly if they are missing. Do not upgrade the shared visual-grounding environment independently.
+
+The initial profile uses one sequence, a 16,384-token context, at most 4,096 generated tokens, a 512-token thinking allowance, 512-token prefill chunks, and one vision-cache entry. The thinking allowance bounds reasoning before the closing marker; it is not a claim of unchanged model accuracy versus unrestricted thinking. Automatic prefix/disk caches and response-history storage are disabled. MLX's reusable allocation cache is limited to 256 MiB and its allocation limit to 10 GiB; neither is a cap on whole-system RAM or the entire process. Weights load lazily and remain warm until runtime shutdown; visual grounders have a separate lifetime and memory footprint.
+
+Each inference process is pinned to its first valid model request. Changing between 4B and 9B retires and reaps that owned process before starting a fresh one, preserving the App Server and conversation. This avoids the pinned upstream loader retaining old weights while loading the replacement. A switch has cold-start cost; it is not an in-memory hot swap. Native turns, submissions, compaction and tool work must be idle before switching. The owned backend reserves one inference lane across tasks; a competing task gets an explicit busy result, not a hidden provider queue or an interrupted active task.
+
+The bundled boundary preserves streaming text, function call identities and inline image results while correcting pinned upstream final-text/unfinished-reasoning inconsistencies. It withholds executable final calls until terminal validation, reports exhausted output as incomplete, and maps only the known context-overflow error to the typed error used by App Server recovery. Inputs remain full-history `store:false`; browser origins, arbitrary model paths, remote/file image URLs and concurrent queued work are rejected. This is a local process boundary, not an OS sandbox.
+
+Deterministic tests are in `Tests/MLXServer/`; transport probes and their measured limitations are in `Benchmarks/MLXServing/`. Native live tests select this backend only when `HEYDASH_LIVE_OWNED_MLX_TEST=1` is explicitly enabled; other historical live gates retain their external-server configuration unless their source says otherwise. Use `TEST_RUNNER_` before that variable when launching tests with Xcode. A source default or a passing synthetic probe is not proof an installed app has been updated.
+
+See [the migration validation record](Benchmarks/MLXServing/MIGRATION-VALIDATION-2026-09-25.md) for measured native transport, image, compaction, cancellation and process-lifetime checks, including remaining limitations. On September 25 the unused 27B model download was removed with the user's explicit approval; 4B/9B weights and saved conversations were retained.
+
+## Historical / external LM Studio compatibility
+
+Earlier runs served `mlx-community/Qwen3.8-27B-4bit` through LM Studio at `127.0.0.1:1234`. That model directory was about 16.08 GB; its three weight shards totaled 16,054,541,349 bytes. Those 27B runs used one parallel request and a bounded 22 GiB custom model-loading guardrail. They are historical evidence, not the current default serving path.
+
+HeyDash declares 4,096 tokens for the constrained 27B/35B profile, with auto-compaction at 3,072. The 4B and 9B computer-use profile declares 16,384 tokens with auto-compaction at 12,288, leaving more working space beyond the fixed instructions and tool definitions. These are application budgets, not the LM Studio backend's advertised or automatically fitted maximum. The shared profile permits 4B/9B switches without changing the loaded task's context class. App Server ignores context overrides for already-loaded threads; after a profile update, restarting HeyDash's owned runtime lets the same saved task resume with the new configuration. Switching a still-loaded task between the constrained and small-model classes remains guarded.
 
 One model-local compatibility patch is required on this installation. Codex exposes a `request_user_input` tool schema even though HeyDash does not implement that tool; with that schema serialized, this MLX/model path stalled. The installed model's `chat_template.jinja` skips only that schema when rendering tools. The original template is preserved beside it as `chat_template.jinja.localcodex-original` (SHA-256 `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`); the patched template hash is `c73f9ec1cfc68a6ce7e19f06b1779afa4b1a55e1da8775d498f379a09b8fae75`.
 
@@ -403,14 +450,14 @@ After overlapping visual-sidecar preparation with Qwen and embedding a fresh ver
 ## Current limitations
 
 - New tasks expose native `computer_v2_*` tools, not the App Server's shell or built-in coding/editing tool set. HeyDash is a local chat and desktop-automation client, not a shell-capable coding agent.
-- Chrome defaults to the user's normal signed-in browser through native foreground AX/capture/input, not an extension or background DOM connection. Existing-mode navigation requires a positively identified native address bar and fails closed otherwise. Explicit isolated mode uses a separate temporary profile with no imported tabs, cookies, credentials, or extensions. This is not full Codex CUA/browser parity. Brokered tasks within one runtime reuse that runtime's owned process/profile. Task-scoped handles restrict broker calls, not shared-profile cookies, storage, same-origin scripting, or site-triggered cross-tab effects.
+- Ordinary Chrome uses native AX/capture/input unless the native user separately connects it for exact background DOM tab access. Existing-mode navigation requires a positively identified native address bar and fails closed otherwise. Explicit isolated mode uses a separate temporary profile with no imported tabs, cookies, credentials, or extensions. This is not full Codex CUA/browser parity. Owned brokered tasks within one runtime reuse that runtime's owned process/profile. Task-scoped handles restrict broker calls, not shared-profile cookies, storage, same-origin scripting, or site-triggered cross-tab effects.
 - Brokered actions use DOM click/value operations, not general trusted keyboard/pointer input. Text entry rejects read-only controls; mutations reject disabled, inert, detached, non-main-document, or unsupported controls. Browser screenshot/coordinate/keyboard support remains disabled. The visual-grounding cascade is a native-window fallback and does not add browser visual control.
-- Loader/URL comparisons detect observed document changes, not every possible intervening navigation. Same-document changes that return to the previous URL between reads and arbitrary semantic changes between the final AX read and browser execution require a persistent event/DOM invalidation design for stronger guarantees. Local DevTools clients remain inside the trust boundary; loopback, origin checks, and a private profile directory are not authentication against other local processes. Terminal task cleanup revokes its lifetime before asynchronous exact-target closure. Explicit runtime shutdown stops its owned App Server and isolated Chrome process groups, reaps their roots, and removes owned profiles after observed group exit. Shutdown has bounded waits and reports incomplete cleanup; the app termination delegate also has a ten-second reply deadline. Force quit, host failure, or descendants escaping their created process group are not covered by an unlimited cleanup guarantee. The bootstrap blank tab is retained during use rather than closing unrelated blank or loading tabs by URL.
+- Loader/URL comparisons detect observed document changes, not every possible intervening navigation. Same-document changes that return to the previous URL between reads and arbitrary semantic changes between the final AX read and browser execution require a persistent event/DOM invalidation design for stronger guarantees. Local DevTools clients remain inside the trust boundary; loopback, origin checks, and a private profile directory are not authentication against other local processes. Terminal task cleanup revokes its lifetime before asynchronous exact-session detachment (borrowed) or exact-target closure (owned). Explicit runtime shutdown stops its owned App Server and isolated Chrome process groups, reaps their roots, and removes owned profiles after observed group exit. Shutdown has bounded waits and reports incomplete cleanup; the app termination delegate also has a ten-second reply deadline. Force quit, host failure, or descendants escaping their created process group are not covered by an unlimited cleanup guarantee. The bootstrap blank tab is retained during use rather than closing unrelated blank or loading tabs by URL.
 - This Mac also has Codex's richer installed `cua_repl`/computer-use stack, but HeyDash does not load or copy it. Only project-owned clean-room tools are exposed to Qwen.
 - The historical semantic and visual smoke turns proved V1 model/runtime paths on the controlled Chrome fixture; they do not establish V2 performance or reliable tool selection on arbitrary interfaces.
 - The focused-window screenshot reduces visible image size, but a visual grounder is still probabilistic. The agreement threshold, whole-window freshness checks, native approval, and post-action verification reduce risk; they do not establish reliability on arbitrary apps, targets, display scales, or instructions.
 - The previously signed installed app passed separate `open → capture → snapshot` and natively approved `open → snapshot → AXPress → snapshot` Chrome turns, both ending `Completed`. Screen Recording was **Granted** for that app. The screenshot turn took 540 seconds; this capability result was not a speed benchmark. The coordinate-click path was separately validated in the V1 production-runtime test host, not repeated in that installed binary.
-- App Server persists a task's dynamic-tool schema when that task is created. Existing V1 threads retain `computer`; start a new task to receive `computer_v2_*` after upgrading.
+- App Server persists a task's dynamic-tool schema when that task is created. Existing threads can retain older schemas and lack the new tab tools. Durable in-place schema migration is unfinished; the app must not claim old chats have gained these tools or that a new chat is the intended long-term recovery mechanism.
 - The App Server is bundle-only: missing, incompatible, or corrupt runtime artifacts fail closed, without silently falling back to the installed Codex/ChatGPT application. LM Studio provider and initial workspace are fixed in code; the default model is selectable in Settings.
 - The distributed ZIP is Apple Development signed with hardened runtime enabled for Ahmed's local use. It is not Developer ID signed or notarized for public distribution.
 

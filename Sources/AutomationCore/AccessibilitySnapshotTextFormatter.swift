@@ -159,13 +159,15 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         guard prioritizesRelevantElements else { return Array(snapshot.elements.prefix(elementLimit)) }
 
         let hasQuery = preferredText?.isEmpty == false
+        let matchesPreferredText = preferredTextMatcher(in: bounded)
         // Search all bounded observations before applying the output count cap.
         // Without a document or a query, preserve native-app selection exactly.
         let candidates = documentElements.isEmpty && !hasQuery
             ? Array(bounded.prefix(elementLimit)) : bounded
         let mainElements = descendantIndices(in: bounded, observedByIndex: observedByIndex) { $0.subrole == "AXLandmarkMain" }
         let ordered = candidates.enumerated().map { offset, element in
-            let priority = relevance(of: element, rootIndex: snapshot.rootIndex, documentElements: documentElements)
+            let priority = relevance(of: element, rootIndex: snapshot.rootIndex, documentElements: documentElements,
+                                     matchesPreferredText: matchesPreferredText(element))
                 + (documentElements.contains(element.index) && mainElements.contains(element.index) ? 2_000 : 0)
             return (element: element, priority: priority, offset: offset)
         }.sorted { lhs, rhs in
@@ -195,7 +197,8 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         let pinned = ordered.filter(isPinned)
         let related = queryRelatedElements(
             in: ordered, excluding: Set(pinned.map(\.index)), rootIndex: snapshot.rootIndex,
-            documentElements: documentElements, observedByIndex: observedByIndex, windowFrame: rootFrame
+            documentElements: documentElements, observedByIndex: observedByIndex, windowFrame: rootFrame,
+            matchesPreferredText: matchesPreferredText
         )
         let relatedIndices = Set(related.map(\.index))
         let remaining = ordered.filter { !isPinned($0) && !relatedIndices.contains($0.index) }
@@ -219,7 +222,8 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         rootIndex: Int?,
         documentElements: Set<Int>,
         observedByIndex: [Int: AccessibilityTreeElement],
-        windowFrame: WindowFrame?
+        windowFrame: WindowFrame?,
+        matchesPreferredText: (AccessibilityTreeElement) -> Bool
     ) -> [AccessibilityTreeElement] {
         guard preferredText?.isEmpty == false else { return [] }
         var groups = [Int]()
@@ -493,7 +497,8 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
     private func relevance(
         of element: AccessibilityTreeElement,
         rootIndex: Int?,
-        documentElements: Set<Int>
+        documentElements: Set<Int>,
+        matchesPreferredText: Bool
     ) -> Int {
         if element.index == rootIndex { return 10_000 }
 
@@ -514,7 +519,7 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
             default: break
             }
         }
-        if matchesPreferredText(element) {
+        if matchesPreferredText {
             score += 20_000
             // Chrome tab labels can appear as many matching radio buttons. A
             // matching page heading should survive a short output budget, while
@@ -559,10 +564,45 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         return score
     }
 
-    private func matchesPreferredText(_ element: AccessibilityTreeElement) -> Bool {
-        preferredText.map {
-            !$0.isEmpty && searchableText(for: element).localizedCaseInsensitiveContains($0)
-        } ?? false
+    private func preferredTextMatcher(in elements: [AccessibilityTreeElement]) -> (AccessibilityTreeElement) -> Bool {
+        guard let query = preferredText, !query.isEmpty else { return { _ in false } }
+        let literal: (AccessibilityTreeElement) -> Bool = {
+            self.searchableText(for: $0).localizedCaseInsensitiveContains(query)
+        }
+        // A typographic variant must not displace an existing literal match,
+        // even when that match lies beyond the eventual output count/budget.
+        if elements.contains(where: literal) { return literal }
+        let key = normalizedQueryText(query)
+        guard !key.isEmpty else { return { _ in false } }
+        // Cache matching original fields, not indices: malformed duplicate IDs
+        // must not transfer a match to a different element. Never normalize
+        // identifiers, roles, URLs, or phrases assembled across separate fields.
+        let fields = Set(elements.flatMap(readableQueryFields).filter {
+            normalizedQueryText($0).localizedCaseInsensitiveContains(key)
+        })
+        return { self.readableQueryFields($0).contains(where: fields.contains) }
+    }
+
+    private func readableQueryFields(_ element: AccessibilityTreeElement) -> [String] {
+        [element.title, element.elementDescription, element.help, element.value].compactMap(nonempty)
+    }
+
+    private func normalizedQueryText(_ value: String) -> String {
+        var output = ""
+        var spacePending = false
+        for scalar in value.precomposedStringWithCanonicalMapping.unicodeScalars {
+            if scalar.properties.isWhitespace {
+                spacePending = !output.isEmpty
+                continue
+            }
+            if spacePending { output.append(" "); spacePending = false }
+            switch scalar.value {
+            case 0x2018, 0x2019: output.append("'")
+            case 0x201C, 0x201D: output.append("\"")
+            default: output.unicodeScalars.append(scalar)
+            }
+        }
+        return output
     }
 
     private func searchableText(for element: AccessibilityTreeElement) -> String {

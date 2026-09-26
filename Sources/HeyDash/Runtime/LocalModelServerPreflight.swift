@@ -14,17 +14,17 @@ enum LocalModelServerPreflight {
         var errorDescription: String? {
             switch self {
             case .unsupportedConfiguration:
-                "The local model endpoint could not be safely checked. HeyDash requires an unauthenticated loopback LM Studio endpoint. Review its provider configuration, then retry; no prompt was sent."
+                "The local model endpoint could not be safely checked. HeyDash requires an unauthenticated loopback inference endpoint. Review its provider configuration, then retry; no prompt was sent."
             case .timedOut:
-                "The local model readiness check did not finish within two seconds. Check LM Studio's server and the selected model, then retry; no prompt was sent."
+                "The local model readiness check did not finish within two seconds. Check the local inference server and selected model, then retry; no prompt was sent."
             case .unavailable:
-                "The local model server could not be reached. Start LM Studio's server and check the selected model, then retry; no prompt was sent."
+                "The local model server could not be reached. Check the selected inference backend and model, then retry; no prompt was sent."
             case .httpStatus(let status):
-                "The local model server returned HTTP \(status) during its availability check. Check LM Studio's server, then retry; no prompt was sent."
+                "The local model server returned HTTP \(status) during its availability check. Check the selected inference backend, then retry; no prompt was sent."
             case .invalidResponse:
-                "The local model server returned an invalid model list. Check the provider endpoint and LM Studio's server, then retry; no prompt was sent."
+                "The local model server returned an invalid model list. Check the selected inference endpoint, then retry; no prompt was sent."
             case .modelNotAdvertised:
-                "LM Studio's server is reachable, but it does not advertise this task's selected model. Make that exact model available, then retry; no model was switched and no prompt was sent."
+                "The local inference server is reachable, but it does not advertise this task's selected model. Make that exact model available, then retry; no model was switched and no prompt was sent."
             }
         }
     }

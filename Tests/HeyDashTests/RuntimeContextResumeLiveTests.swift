@@ -14,7 +14,7 @@ final class RuntimeContextResumeLiveTests: XCTestCase {
             .appendingPathComponent("HeyDashContextResumeLive-\(UUID().uuidString)", isDirectory: true)
         let firstTraceURL = root.appendingPathComponent("before-shutdown.jsonl")
         let resumedTraceURL = root.appendingPathComponent("after-resume.jsonl")
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
         configuration.model = model
         configuration.codexHomePath = root.path
         configuration.protocolTracePath = firstTraceURL.path

@@ -20,7 +20,7 @@ final class AppStateTests: XCTestCase {
         let configuration = CodexAppServerRuntime.Configuration.localQwen
 
         XCTAssertEqual(configuration.modelProvider, "lmstudio")
-        XCTAssertEqual(configuration.model, "mlx-community/Qwen3.8-27B-4bit")
+        XCTAssertEqual(configuration.model, "lmstudio-community/Qwen3.5-4B-MLX-4bit")
         XCTAssertEqual(configuration.reasoningEffort, "medium")
         XCTAssertLessThan(configuration.baseInstructions.utf8.count, 1_024)
         XCTAssertTrue(configuration.codexHomePath.hasSuffix("/LocalCodex/CodexHome"))
@@ -34,9 +34,9 @@ final class AppStateTests: XCTestCase {
 
     func testLocalThreadConfigUsesModelSpecificContextLimits() {
         let expectedLimits: [(modelID: String, window: Int, compactLimit: Int)] = [
-            (LocalModelCatalog.defaultModelID, 4096, 3072),
+            ("mlx-community/Qwen3.8-27B-4bit", 4096, 3072),
             ("lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit", 4096, 3072),
-            ("lmstudio-community/Qwen3.5-9B-MLX-4bit", 8192, 6144),
+            ("lmstudio-community/Qwen3.5-9B-MLX-4bit", 16384, 12288),
             ("lmstudio-community/Qwen3.5-4B-MLX-4bit", 16384, 12288),
             ("unlisted/model", 4096, 3072),
         ]
@@ -54,18 +54,25 @@ final class AppStateTests: XCTestCase {
     }
 
     func testLoadedThreadCanSwitchOnlyBetweenModelsWithTheSameContextLimits() {
-        let constrained = LocalThreadContext.forModel(LocalModelCatalog.defaultModelID)
-        let expanded = LocalThreadContext.forModel("lmstudio-community/Qwen3.5-9B-MLX-4bit")
+        let constrainedModel = "mlx-community/Qwen3.8-27B-4bit"
+        let constrained = LocalThreadContext.forModel(constrainedModel)
+        let nineB = LocalThreadContext.forModel("lmstudio-community/Qwen3.5-9B-MLX-4bit")
         let computerUse = LocalThreadContext.forModel("lmstudio-community/Qwen3.5-4B-MLX-4bit")
 
-        XCTAssertTrue(expanded.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
+        XCTAssertEqual(nineB, computerUse)
+        XCTAssertTrue(nineB.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
         XCTAssertTrue(computerUse.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
-        XCTAssertFalse(expanded.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
-        XCTAssertFalse(computerUse.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
-        XCTAssertFalse(computerUse.supportsModelSwitch(to: LocalModelCatalog.defaultModelID))
+        XCTAssertTrue(nineB.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
+        XCTAssertTrue(computerUse.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
+        XCTAssertFalse(computerUse.supportsModelSwitch(to: constrainedModel))
         XCTAssertFalse(constrained.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
         XCTAssertFalse(constrained.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
-        XCTAssertFalse(expanded.supportsModelSwitch(to: LocalModelCatalog.defaultModelID))
+        XCTAssertFalse(nineB.supportsModelSwitch(to: constrainedModel))
+        // A still-loaded legacy 8K context is not silently relabeled 16K.
+        // Cold resume after restarting the owned runtime applies the new config
+        // to the same persisted thread, without requiring a new user task.
+        XCTAssertFalse(LocalThreadContext.expanded.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-4B-MLX-4bit"))
+        XCTAssertFalse(LocalThreadContext.expanded.supportsModelSwitch(to: "lmstudio-community/Qwen3.5-9B-MLX-4bit"))
     }
 
     @MainActor
@@ -185,7 +192,7 @@ final class AppStateTests: XCTestCase {
             XCTAssertNotNil(option)
             XCTAssertFalse(option?.highMemory ?? true)
         }
-        XCTAssertEqual(LocalModelCatalog.defaultModelID, "mlx-community/Qwen3.8-27B-4bit")
+        XCTAssertEqual(LocalModelCatalog.defaultModelID, "lmstudio-community/Qwen3.5-4B-MLX-4bit")
     }
 
     func testResidentVisualGroundingIsLimitedToModelsWithMemoryHeadroom() {
@@ -196,7 +203,7 @@ final class AppStateTests: XCTestCase {
             "lmstudio-community/Qwen3.5-9B-MLX-4bit"
         ))
         XCTAssertFalse(LocalModelCatalog.supportsResidentVisualGrounding(
-            LocalModelCatalog.defaultModelID
+            "mlx-community/Qwen3.8-27B-4bit"
         ))
         XCTAssertFalse(LocalModelCatalog.supportsResidentVisualGrounding(
             "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit"
@@ -208,7 +215,7 @@ final class AppStateTests: XCTestCase {
         let suiteName = "HeyDashTests.LegacyPreference.\(UUID().uuidString)"
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { preferences.removePersistentDomain(forName: suiteName) }
-        let modelID = try XCTUnwrap(LocalModelCatalog.options.last?.id)
+        let modelID = "mlx-community/Qwen3.8-27B-4bit"
         preferences.set(modelID, forKey: "LocalCodex.defaultModelID")
 
         let state = AppState(tasks: [], preferences: preferences)
@@ -222,7 +229,7 @@ final class AppStateTests: XCTestCase {
         let suiteName = "HeyDashTests.ModelSelection.\(UUID().uuidString)"
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { preferences.removePersistentDomain(forName: suiteName) }
-        let alternateID = try XCTUnwrap(LocalModelCatalog.options.last?.id)
+        let alternateID = "lmstudio-community/Qwen3.5-9B-MLX-4bit"
 
         let state = AppState(tasks: [], preferences: preferences)
         XCTAssertTrue(state.setDefaultModel(alternateID))

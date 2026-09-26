@@ -63,14 +63,16 @@ final class ComputerToolFailureEvidenceTests: XCTestCase {
 
     func testInstructionsRequireEvidenceInBothAnswersAndCompactionSummaries() {
         let instructions = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
-        XCTAssertTrue(instructions.contains("In replies AND summaries"))
-        XCTAssertTrue(instructions.contains("Raw tool results override summary guesses"))
+        XCTAssertTrue(instructions.contains("Replies/summaries"))
+        XCTAssertTrue(instructions.contains("raw results beat guesses"))
         XCTAssertTrue(instructions.contains("StudyLock's allowed-work list is ONLY for work on StudyLock enforcement"))
         XCTAssertTrue(instructions.contains("Harmless text generation and unrelated read-only browser tasks are allowed"))
         XCTAssertTrue(instructions.contains("Never weaken enforcement"))
-        XCTAssertTrue(instructions.contains("A policy is not proof of a block"))
-        XCTAssertTrue(instructions.lowercased().contains("unknown stays unknown"))
+        XCTAssertTrue(instructions.contains("policy isn't block proof"))
+        XCTAssertTrue(instructions.contains("Keep unknowns; don't exclude unobserved causes"))
         XCTAssertLessThan(instructions.utf8.count, 1_024)
-        XCTAssertTrue(CodexAppServerRuntime.Configuration.localQwen.workspacePath.hasSuffix("/Documents"))
+        let configuration = CodexAppServerRuntime.Configuration.localQwen
+        XCTAssertEqual(configuration.workspacePath,
+                       AgentRuntimeIsolation.workspaceURL(codexHomePath: configuration.codexHomePath).path)
     }
 }

@@ -7,6 +7,14 @@ import XCTest
 /// never clicks, types, changes permissions, or modifies an existing thread.
 @MainActor
 final class RuntimeContextLiveTests: XCTestCase {
+    private var liveConfiguration: CodexAppServerRuntime.Configuration {
+        let configuration = ProcessInfo.processInfo.environment["HEYDASH_LIVE_OWNED_MLX_TEST"] == "1"
+            ? CodexAppServerRuntime.Configuration.localQwen
+            : CodexAppServerRuntime.Configuration.externalLocalQwen
+        print("contextFixtureBackend=\(configuration.effectiveBackend.rawValue)")
+        return configuration
+    }
+
     func testResourceGuardDiskBoundary() {
         let limit = FixtureResources.minimumFreeDiskBytes
         XCTAssertNil(FixtureResources(freeDiskBytes: limit, swapUsedBytes: 0, pressure: 1).stopReason(baselineSwap: 0))
@@ -60,7 +68,7 @@ final class RuntimeContextLiveTests: XCTestCase {
             "Set HEYDASH_LIVE_OVERSIZED_CONTEXT_TEST=1 to verify bounded failure on oversized retained user input.")
         let modelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("HeyDashOversizedContext-\(UUID().uuidString)")
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = liveConfiguration
         configuration.model = modelID
         configuration.codexHomePath = root.path
         configuration.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
@@ -127,7 +135,7 @@ final class RuntimeContextLiveTests: XCTestCase {
         let modelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("HeyDashContextLive-\(UUID().uuidString)", isDirectory: true)
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = liveConfiguration
         configuration.model = modelID
         configuration.codexHomePath = root.path
         configuration.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path

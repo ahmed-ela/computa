@@ -398,7 +398,7 @@ final class CuaV2SafeChromeSemanticLiveTests: XCTestCase {
         let artifacts = try artifactDirectory(caseName: kind.rawValue, runID: runID, modelID: modelID)
         let journal = BrowserModelGateJournal(artifacts: artifacts, kind: kind, modelID: modelID, runID: runID)
         let traceURL = artifacts.appendingPathComponent("app-server-wire.jsonl")
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
         configuration.model = modelID
         configuration.codexHomePath = artifacts.appendingPathComponent("codex-home").path
         configuration.protocolTracePath = traceURL.path

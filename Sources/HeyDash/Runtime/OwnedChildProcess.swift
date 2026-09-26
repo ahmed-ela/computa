@@ -97,6 +97,7 @@ actor OwnedChildProcess {
         executableURL: URL,
         arguments: [String],
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        workingDirectory: URL? = nil,
         inputDescriptor: Int32? = nil,
         outputDescriptor: Int32? = nil,
         errorDescriptor: Int32? = nil
@@ -107,6 +108,13 @@ actor OwnedChildProcess {
         defer { _ = posix_spawnattr_destroy(&attributes) }
         try Self.requireSuccess(posix_spawn_file_actions_init(&actions))
         defer { _ = posix_spawn_file_actions_destroy(&actions) }
+
+        // Set only the child's cwd, atomically at spawn. Never change the
+        // native app's process-wide cwd (other owned children may be running).
+        if let workingDirectory {
+            guard workingDirectory.isFileURL else { throw POSIXError(.EINVAL) }
+            try Self.requireSuccess(posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.path))
+        }
 
         // pgroup=0 makes the child's own PID its PGID atomically at spawn.
         // CLOEXEC_DEFAULT prevents unrelated host descriptors reaching it.

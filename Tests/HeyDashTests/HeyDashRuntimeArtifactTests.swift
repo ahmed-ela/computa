@@ -32,8 +32,107 @@ final class HeyDashRuntimeArtifactTests: XCTestCase {
             XCTAssertEqual(artifact.manifest.sourceCommit, HeyDashRuntimeArtifact.sourceCommit)
             XCTAssertEqual(artifact.manifest.binarySHA256, digest(fixture.bytes))
             XCTAssertEqual(artifact.manifest.binarySize, fixture.bytes.count)
+            XCTAssertEqual(artifact.manifest.schemaVersion, 1)
+            XCTAssertEqual(artifact.manifest.capabilities, [])
             XCTAssertEqual(artifact.manifest.runtimeVersion, "heydash-1")
             XCTAssertFalse(artifact.executableURL.path.contains("ChatGPT.app"))
+        }
+    }
+
+    func testLegacyManifestNeverInfersCapabilitiesFromRuntimeVersion() throws {
+        try withFixture { fixture in
+            var manifest = fixture.manifest
+            manifest["runtimeVersion"] = "heydash-999-threadDynamicToolsV1"
+            try fixture.writeManifest(manifest)
+            let artifact = try HeyDashRuntimeArtifact.resolve(resourcesDirectory: fixture.resources)
+            XCTAssertEqual(artifact.manifest.capabilities, [])
+        }
+    }
+
+    func testVersionTwoManifestAcceptsExplicitKnownCapabilities() throws {
+        for names in [[], ["threadDynamicToolsV1"]] {
+            try withFixture { fixture in
+                var manifest = fixture.manifest
+                manifest["schemaVersion"] = 2
+                manifest["capabilities"] = names
+                try fixture.writeManifest(manifest)
+                let artifact = try HeyDashRuntimeArtifact.resolve(resourcesDirectory: fixture.resources)
+                let expected: Set<HeyDashRuntimeArtifact.Capability> = names.isEmpty ? [] : [.threadDynamicToolsV1]
+                XCTAssertEqual(artifact.manifest.schemaVersion, 2)
+                XCTAssertEqual(artifact.manifest.capabilities, expected)
+                XCTAssertEqual(artifact.manifest.binarySHA256, digest(fixture.bytes))
+                XCTAssertEqual(artifact.executableURL, fixture.binary)
+            }
+        }
+    }
+
+    func testLegacyManifestRejectsAnyCapabilitiesField() throws {
+        let values: [Any] = [[String](), ["threadDynamicToolsV1"], NSNull()]
+        for value in values {
+            try withFixture { fixture in
+                var manifest = fixture.manifest
+                manifest["capabilities"] = value
+                try fixture.writeManifest(manifest)
+                XCTAssertThrowsError(try HeyDashRuntimeArtifact.resolve(resourcesDirectory: fixture.resources))
+            }
+        }
+    }
+
+    func testVersionTwoManifestRejectsMissingMalformedUnknownOrDuplicateCapabilities() throws {
+        let changes: [(inout [String: Any]) -> Void] = [
+            { $0.removeValue(forKey: "capabilities") },
+            { $0["capabilities"] = NSNull() },
+            { $0["capabilities"] = "threadDynamicToolsV1" },
+            { $0["capabilities"] = ["threadDynamicToolsV1": true] },
+            { $0["capabilities"] = [true] },
+            { $0["capabilities"] = [1] },
+            { $0["capabilities"] = [NSNull()] },
+            { $0["capabilities"] = ["threadDynamicToolsV1", 1] as [Any] },
+            { $0["capabilities"] = [""] },
+            { $0["capabilities"] = ["threadDynamicToolsV2"] },
+            { $0["capabilities"] = ["ThreadDynamicToolsV1"] },
+            { $0["capabilities"] = ["threadDynamicToolsV1 "] },
+            { $0["capabilities"] = ["threadDynamicToolsV1", "threadDynamicToolsV2"] },
+            { $0["capabilities"] = ["threadDynamicToolsV1", "threadDynamicToolsV1"] },
+            { $0["unrecognized"] = true },
+            { $0.removeValue(forKey: "binarySHA256") },
+        ]
+        for change in changes {
+            try withFixture { fixture in
+                var manifest = fixture.manifest
+                manifest["schemaVersion"] = 2
+                manifest["capabilities"] = ["threadDynamicToolsV1"]
+                change(&manifest)
+                try fixture.writeManifest(manifest)
+                XCTAssertThrowsError(try HeyDashRuntimeArtifact.resolve(resourcesDirectory: fixture.resources))
+            }
+        }
+    }
+
+    func testUnknownManifestVersionsCannotDeclareCapabilities() throws {
+        for version in [-1, 0, 3, Int.max] {
+            try withFixture { fixture in
+                var manifest = fixture.manifest
+                manifest["schemaVersion"] = version
+                manifest["capabilities"] = ["threadDynamicToolsV1"]
+                try fixture.writeManifest(manifest)
+                XCTAssertThrowsError(try HeyDashRuntimeArtifact.resolve(resourcesDirectory: fixture.resources))
+            }
+        }
+    }
+
+    func testVersionTwoCapabilitiesDoNotBypassBinaryChecksumVerification() throws {
+        try withFixture { fixture in
+            var manifest = fixture.manifest
+            manifest["schemaVersion"] = 2
+            manifest["capabilities"] = ["threadDynamicToolsV1"]
+            try fixture.writeManifest(manifest)
+            var altered = fixture.bytes
+            altered[altered.count - 1] ^= 0x01
+            try altered.write(to: fixture.binary)
+            XCTAssertThrowsError(try HeyDashRuntimeArtifact.resolve(resourcesDirectory: fixture.resources)) {
+                XCTAssertEqual($0 as? HeyDashRuntimeArtifact.ValidationError, .checksumMismatch)
+            }
         }
     }
 
@@ -101,7 +200,7 @@ final class HeyDashRuntimeArtifactTests: XCTestCase {
 
     func testUnpinnedSourceVersionOrPlatformCannotBeSelectedByManifest() throws {
         let invalid: [(String, Any)] = [
-            ("sourceCommit", String(repeating: "a", count: 40)), ("schemaVersion", 2),
+            ("sourceCommit", String(repeating: "a", count: 40)), ("schemaVersion", 3),
             ("platform", "linux"), ("architecture", "x86_64"), ("architecture", "universal"),
             ("executable", "codex"), ("executable", "../codex-app-server"),
             ("executable", "/Applications/ChatGPT.app/Contents/Resources/codex"),

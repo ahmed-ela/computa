@@ -13,6 +13,8 @@ protocol AgentRuntimeClient: Sendable {
     func compact(taskID: AgentTask.ID) async throws
     func interrupt(taskID: AgentTask.ID) async throws
     func resolveApproval(requestID: String, approved: Bool) async throws
+    func connectChrome(_ request: ChromeConnectionRequest) async throws
+    func disconnectChrome() async
     func shutdown() async -> RuntimeShutdownReport
 }
 
@@ -33,6 +35,12 @@ extension AgentRuntimeClient {
         throw AgentRuntimeCapabilityError.compactionUnsupported
     }
 
+    func connectChrome(_ request: ChromeConnectionRequest) async throws {
+        throw AgentRuntimeCapabilityError.chromeConnectionUnsupported
+    }
+
+    func disconnectChrome() async {}
+
     /// Resource-free adapters can keep the default; the production runtime
     /// explicitly implements shutdown for its owned processes and capabilities.
     func shutdown() async -> RuntimeShutdownReport {
@@ -43,6 +51,7 @@ extension AgentRuntimeClient {
 enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
     case steeringUnsupported
     case compactionUnsupported
+    case chromeConnectionUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -50,6 +59,8 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
             "This runtime does not support steering an active turn. Your message was not sent."
         case .compactionUnsupported:
             "This runtime does not support context compaction."
+        case .chromeConnectionUnsupported:
+            "This runtime does not support connecting to your existing Chrome session."
         }
     }
 }
@@ -64,6 +75,7 @@ enum AgentRuntimeEvent: Sendable {
     case approvalRequested(ActionApprovalRequest)
     case approvalResolved(requestID: String)
     case connectionChanged(RuntimeConnectionState)
+    case chromeConnectionChanged(connectionID: UUID, state: ChromeConnectionState)
 }
 
 enum RuntimeConnectionState: Equatable, Sendable {

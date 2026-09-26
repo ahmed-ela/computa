@@ -7,6 +7,23 @@ import XCTest
 final class OwnedChildProcessTests: XCTestCase {
     private let pid: Int32 = 89757
 
+    func testChildWorkingDirectoryDoesNotChangeParentWorkingDirectory() async throws {
+        let before = FileManager.default.currentDirectoryPath
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("HeyDashChildCWD-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let output = Pipe()
+        let child = try OwnedChildProcess(executableURL: URL(fileURLWithPath: "/bin/pwd"),
+            arguments: [], environment: [:], workingDirectory: root,
+            outputDescriptor: output.fileHandleForWriting.fileDescriptor)
+        try output.fileHandleForWriting.close()
+        let bytes = try output.fileHandleForReading.readToEnd() ?? Data()
+        let result = await child.stop()
+        XCTAssertTrue(result.succeeded)
+        let observed = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(URL(fileURLWithPath: observed).resolvingSymlinksInPath(), root.resolvingSymlinksInPath())
+        XCTAssertEqual(FileManager.default.currentDirectoryPath, before)
+    }
+
     func testObservedSIGKILLEPERMResolvesOnlyAfterReapAndFreshESRCH() async {
         let script = ScriptedStopOperations(
             killResult: failed(EPERM),

@@ -8,7 +8,7 @@ struct LocalModelOption: Codable, Equatable, Sendable {
 }
 
 enum LocalModelCatalog {
-    static let defaultModelID = "mlx-community/Qwen3.8-27B-4bit"
+    static let defaultModelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
     private static let visualGroundingModelIDs: Set<String> = [
         "lmstudio-community/Qwen3.5-9B-MLX-4bit",
         "lmstudio-community/Qwen3.5-4B-MLX-4bit",
@@ -16,27 +16,27 @@ enum LocalModelCatalog {
 
     static let options: [LocalModelOption] = [
         LocalModelOption(
-            id: defaultModelID,
+            id: "mlx-community/Qwen3.8-27B-4bit",
             label: "Qwen3.8-27B · MLX 4-bit",
-            detail: "16.1 GB model file. Current validated HeyDash model.",
+            detail: "16.1 GB model file. Requires an explicitly configured external local server; not supported by the built-in MLX backend.",
             highMemory: false
         ),
         LocalModelOption(
             id: "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit",
             label: "Qwen3.6-35B-A3B · MLX 4-bit",
-            detail: "20.4 GB model file. Very tight on this 24 GB Mac; download and load in LM Studio separately.",
+            detail: "20.4 GB model file. Very tight on this 24 GB Mac. Requires an external local server; not supported by the built-in MLX backend.",
             highMemory: true
         ),
         LocalModelOption(
             id: "lmstudio-community/Qwen3.5-9B-MLX-4bit",
             label: "Qwen3.5-9B · MLX 4-bit",
-            detail: "5.98 GB model files. Lower-memory option; download and load in LM Studio separately.",
+            detail: "5.98 GB model files. Runs in HeyDash's headless MLX backend using existing local weights.",
             highMemory: false
         ),
         LocalModelOption(
             id: "lmstudio-community/Qwen3.5-4B-MLX-4bit",
             label: "Qwen3.5-4B · MLX 4-bit",
-            detail: "3.06 GB model files. Smallest option; download and load in LM Studio separately.",
+            detail: "3.06 GB model files. Fast, lower-memory default. Runs in HeyDash's headless MLX backend using existing local weights.",
             highMemory: false
         ),
     ]
@@ -49,6 +49,10 @@ enum LocalModelCatalog {
     /// unified memory. Keep it off for the 27B and 35B language models on the
     /// supported 24 GB machine instead of relying on memory pressure or OOM.
     static func supportsResidentVisualGrounding(_ id: String) -> Bool {
+        visualGroundingModelIDs.contains(id)
+    }
+
+    static func supportsHeadlessMLX(_ id: String) -> Bool {
         visualGroundingModelIDs.contains(id)
     }
 }

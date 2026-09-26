@@ -65,7 +65,7 @@ final class CalculatorVisualV2LiveTests: XCTestCase {
             throw Failure(message: "The opted-in visual gate requires Calculator on this Mac.")
         }
 
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
         configuration.codexHomePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalCodexVisualCalculator-\(UUID().uuidString)", isDirectory: true)
             .path

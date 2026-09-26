@@ -1,0 +1,101 @@
+diff --git a/Sources/HeyDash/Runtime/CodexAppServerRuntime.swift b/Sources/HeyDash/Runtime/CodexAppServerRuntime.swift
+index 4858c0f..05ed49d 100644
+--- a/Sources/HeyDash/Runtime/CodexAppServerRuntime.swift
++++ b/Sources/HeyDash/Runtime/CodexAppServerRuntime.swift
+@@ -700,6 +700,7 @@ private extension CodexAppServerRuntime {
+ 
+         private struct ComputerV2Session {
+             let epoch: UUID
++            var explicitUserRequest: ExplicitApplicationRequest?
+             var application: ActivatedApplication?
+             var accessibility: ActiveAccessibilitySession?
+             var accessibilityWindowIdentity: FocusedWindowIdentity?
+@@ -1158,7 +1159,19 @@ private extension CodexAppServerRuntime {
+             // Bindings and screenshot coordinates are valid for one turn only.
+             // A resumed thread must observe and bind its target again.
+             discardComputerV2Session(taskID: taskID)
+-            computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID())
++            let submissionEpoch = UUID()
++            computerV2Sessions[taskID] = ComputerV2Session(epoch: submissionEpoch,
++                explicitUserRequest: .init(prompt: prompt, submissionID: claim))
++            defer {
++                // A start notification can rotate the epoch before its RPC
++                // rejects. Only retire state owned by this submission.
++                if serverGeneration == generation,
++                   !turnAccepted || Task.isCancelled || cancelledSubmissions.contains(claim),
++                   let session = computerV2Sessions[taskID],
++                   session.epoch == submissionEpoch || session.explicitUserRequest?.submissionID == claim {
++                    discardComputerV2Session(taskID: taskID)
++                }
++            }
+ 
+             let turnResponse: Data
+             let startToken = turnIdentity.beginStart(taskID: taskID)
+@@ -1216,11 +1229,24 @@ private extension CodexAppServerRuntime {
+                 threadID: threadForTask[taskID],
+                 expectedTurnID: turnIdentity.activeTurnID(for: taskID)
+             )
++            let ticket = computerV2Sessions[taskID].flatMap { session in
++                computerV2Sessions[taskID]?.explicitUserRequest?.beginSteer(scope: .init(
++                    generation: serverGeneration, turnID: steer.expectedTurnID, sessionEpoch: session.epoch
++                ))
++            }
+             let response = try await request(
+                 method: AppServerSteerRequest.method,
+                 params: steer.parameters
+             )
+             try steer.validateAcknowledgment(response)
++            if !Task.isCancelled, !isShuttingDown, let ticket,
++               let turnID = turnIdentity.activeTurnID(for: taskID),
++               let epoch = computerV2Sessions[taskID]?.epoch {
++                computerV2Sessions[taskID]?.explicitUserRequest?.acknowledgeSteer(
++                    prompt: prompt, ticket: ticket,
++                    currentScope: .init(generation: serverGeneration, turnID: turnID, sessionEpoch: epoch)
++                )
++            }
+             // No new turn/started event accompanies a steer. In particular, do
+             // not reset task bindings, approvals, model, or screenshot epochs.
+         }
+@@ -1459,6 +1485,8 @@ private extension CodexAppServerRuntime {
+ 
+         func interrupt(taskID: AgentTask.ID) async throws {
+             if let claim = turnSubmissionClaims[taskID] { cancelledSubmissions.insert(claim) }
++            // Stop also revokes a hint while turn/start has no active ID yet.
++            computerV2Sessions[taskID]?.explicitUserRequest?.invalidate()
+             finishResumingContext(taskID: taskID, usage: nil)
+             if managedCompactions[taskID] != nil { managedCompactions[taskID]?.cancelled = true }
+             guard let threadID = threadForTask[taskID],
+@@ -1700,8 +1728,14 @@ private extension CodexAppServerRuntime {
+                     events.yield(.contextCompactionChanged(taskID: taskID, state: failure))
+                     events.yield(.contextUsageUpdated(taskID: taskID, usage: nil))
+                 }
++                let pendingRequest = computerV2Sessions[taskID]?.explicitUserRequest
++                let explicitRequest = pendingRequest.flatMap { request in
++                    request.started(isUserTurn: managedCompactions[taskID] == nil
++                        && !compactionReservations.contains(taskID)
++                        && !cancelledSubmissions.contains(request.submissionID))
++                }
+                 discardComputerV2Session(taskID: taskID)
+-                computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID())
++                computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID(), explicitUserRequest: explicitRequest)
+                 lastErrorMessageForTask.removeValue(forKey: taskID)
+                 retryReportedForTurn.removeValue(forKey: taskID)
+                 events.yield(.taskStatusChanged(taskID: taskID, status: .running))
+@@ -2835,10 +2869,14 @@ private extension CodexAppServerRuntime {
+                 let applications = await MainActor.run {
+                     RunningApplicationCatalog().applications()
+                 }
+-                _ = try computerV2Session(taskID: taskID, epoch: epoch)
+-                return [textContent(ComputerV2ToolContract.appInventory(
++                let session = try computerV2Session(taskID: taskID, epoch: epoch)
++                let inventory = ComputerV2ToolContract.appInventory(
+                     applications, query: arguments["query"] as? String
+-                ))]
++                )
++                let observation = session.explicitUserRequest?.text.map {
++                    ExplicitApplicationMention.annotate(prompt: $0, inventory: inventory)
++                } ?? inventory
++                return [textContent(observation)]
+ 
+             case .open:
+                 return try await computerV2Open(

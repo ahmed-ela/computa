@@ -341,7 +341,26 @@ protocol AccessibilityTreeRuntime {
 }
 
 struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
+    private let fixedWindow: AXUIElement?
+    private let fixedProcessIdentifier: Int32?
+
+    init() {
+        fixedWindow = nil
+        fixedProcessIdentifier = nil
+    }
+
+    init(fixedWindow: AXUIElement, processIdentifier: Int32) {
+        self.fixedWindow = fixedWindow
+        fixedProcessIdentifier = processIdentifier
+    }
+
     func applicationElement(processIdentifier: Int32) throws -> AccessibilityElementHandle {
+        if let fixedWindow {
+            guard processIdentifier == fixedProcessIdentifier else {
+                throw AutomationError.staleAccessibilitySnapshot
+            }
+            return AccessibilityElementHandle(fixedWindow)
+        }
         let application = AXUIElementCreateApplication(processIdentifier)
 
         // Application children commonly begin with a very large menu bar. For
@@ -740,6 +759,21 @@ public final class AccessibilitySession {
         accessibilityCheck = { AXIsProcessTrusted() }
     }
 
+    /// An opt-in exact-window root for app-bound observation/actions. The owner
+    /// must validate windowIdentity around each operation and keep this session
+    /// on the main actor. Existing global focus and HID guards are unchanged.
+    @MainActor
+    public init(target: AccessibilityApplicationTarget, windowIdentity: ApplicationWindowIdentity) throws {
+        guard target.processIdentifier == windowIdentity.processIdentifier,
+              target.bundleIdentifier == windowIdentity.bundleIdentifier else {
+            throw ApplicationWindowReadError.applicationMismatch
+        }
+        let window = try windowIdentity.validatedWindowElement()
+        application = target
+        runtime = SystemAccessibilityTreeRuntime(fixedWindow: window, processIdentifier: target.processIdentifier)
+        accessibilityCheck = { AXIsProcessTrusted() }
+    }
+
     init(
         target: AccessibilityApplicationTarget,
         runtime: any AccessibilityTreeRuntime,
@@ -916,7 +950,8 @@ public final class AccessibilitySession {
     public func perform(
         _ action: SemanticAXAction,
         at index: Int,
-        in snapshot: AccessibilityTreeSnapshot
+        in snapshot: AccessibilityTreeSnapshot,
+        beforeDispatch: () throws -> Void = {}
     ) throws {
         try requirePermission()
         let resolved = try resolve(index: index, snapshot: snapshot)
@@ -929,6 +964,7 @@ public final class AccessibilitySession {
             throw AutomationError.unsupportedAction(action.rawValue)
         }
 
+        try beforeDispatch()
         try runtime.perform(action: action.rawValue, on: resolved.handle)
     }
 
@@ -992,10 +1028,11 @@ public final class AccessibilitySession {
     public func refreshAndPerform(
         _ action: SemanticAXAction,
         at index: Int,
-        in approvedSnapshot: AccessibilityTreeSnapshot
+        in approvedSnapshot: AccessibilityTreeSnapshot,
+        beforeDispatch: () throws -> Void = {}
     ) throws {
         let refreshed = try refreshTarget(at: index, in: approvedSnapshot)
-        try perform(action, at: refreshed.index, in: refreshed.snapshot)
+        try perform(action, at: refreshed.index, in: refreshed.snapshot, beforeDispatch: beforeDispatch)
     }
 
     /// Refreshes after an approval delay, securely rebinds the approved
@@ -1003,10 +1040,11 @@ public final class AccessibilitySession {
     public func refreshAndSetValue(
         _ value: AccessibilitySetValue,
         at index: Int,
-        in approvedSnapshot: AccessibilityTreeSnapshot
+        in approvedSnapshot: AccessibilityTreeSnapshot,
+        beforeDispatch: () throws -> Void = {}
     ) throws {
         let refreshed = try refreshTarget(at: index, in: approvedSnapshot)
-        try setValue(value, at: refreshed.index, in: refreshed.snapshot)
+        try setValue(value, at: refreshed.index, in: refreshed.snapshot, beforeDispatch: beforeDispatch)
     }
 
     /// Chromium can report success for a detached web node, so mutations must
@@ -1132,7 +1170,8 @@ public final class AccessibilitySession {
     public func setValue(
         _ value: AccessibilitySetValue,
         at index: Int,
-        in snapshot: AccessibilityTreeSnapshot
+        in snapshot: AccessibilityTreeSnapshot,
+        beforeDispatch: () throws -> Void = {}
     ) throws {
         try requirePermission()
         let resolved = try resolve(index: index, snapshot: snapshot)
@@ -1150,6 +1189,7 @@ public final class AccessibilitySession {
             throw AutomationError.attributeNotSettable(kAXValueAttribute as String)
         }
 
+        try beforeDispatch()
         try runtime.set(value: value, on: resolved.handle)
     }
 

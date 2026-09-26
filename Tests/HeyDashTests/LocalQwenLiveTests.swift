@@ -69,13 +69,80 @@ final class LocalQwenLiveTests: XCTestCase {
         var errorDescription: String? { message }
     }
 
+    /// Explicit migration acceptance gate. Unlike the historical external
+    /// gates below, this starts the app-owned backend and proves its shutdown.
+    /// It performs only text generation and the native read-only status tool.
+    func testOwnedHeadlessRuntimeTextAndReadOnlyTool() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["HEYDASH_LIVE_OWNED_MLX_TEST"] == "1",
+            "Set HEYDASH_LIVE_OWNED_MLX_TEST=1 only after reserving the local inference lane."
+        )
+        let configuration = CodexAppServerRuntime.Configuration.localQwen
+        XCTAssertEqual(configuration.effectiveBackend, .headlessMLX)
+        let (state, events, home, tracePath) = await makeLiveState(configuration: configuration)
+        defer { events.cancel() }
+        print("HEYDASH_OWNED_MLX_ARTIFACT_DIR=\(home)")
+        do {
+            try await waitForRuntimeConnection(state: state)
+            for (prompt, marker) in [
+                ("Reply with exactly HEYDASH_OWNED_MLX_TEXT_OK and do not use tools.", "HEYDASH_OWNED_MLX_TEXT_OK"),
+                ("Call computer_v2_status exactly once with empty arguments {}. After its result, reply with exactly HEYDASH_OWNED_MLX_TOOL_OK. You must use that tool and no other tool.", "HEYDASH_OWNED_MLX_TOOL_OK"),
+            ] {
+                state.createTask()
+                let taskID = try XCTUnwrap(state.selectedTaskID)
+                let modelID = try selectLiveModelIfRequested(in: state, taskID: taskID)
+                try configuration.validateSelectedModel(modelID)
+                guard await state.submit(prompt: prompt, toTaskID: taskID) else {
+                    throw LiveTestFailure(message: "Owned MLX prompt was not submitted. \(diagnostics(for: state))")
+                }
+                try await waitUntil("owned MLX \(marker)", state: state, attempts: 320) {
+                    guard let task = state.tasks.first(where: { $0.id == taskID }) else { return false }
+                    return task.status == .completed && task.entries.contains {
+                        $0.kind == .assistant && $0.body.trimmingCharacters(in: .whitespacesAndNewlines) == marker
+                    }
+                }
+                let task = try XCTUnwrap(state.tasks.first(where: { $0.id == taskID }))
+                XCTAssertEqual(task.model, modelID)
+                let tools = task.entries.compactMap(\.toolEvent)
+                if marker == "HEYDASH_OWNED_MLX_TEXT_OK" {
+                    XCTAssertTrue(tools.isEmpty)
+                } else {
+                    XCTAssertEqual(tools.map(\.name), [ComputerV2ToolContract.Tool.status.rawValue])
+                    XCTAssertEqual(tools.map(\.status), [.succeeded])
+                    _ = try await waitForRolloutPrimitiveTrace(in: home,
+                        expectedActions: [ComputerV2ToolContract.Tool.status.rawValue],
+                        completionToken: marker, v2StatusOnly: true)
+                    _ = try await waitForAppServerWireTrace(at: tracePath,
+                        expectedActions: [ComputerV2ToolContract.Tool.status.rawValue],
+                        completionToken: marker, v2StatusOnly: true)
+                }
+            }
+            let report = await state.shutdownRuntime()
+            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            let sessionConfiguration = URLSessionConfiguration.ephemeral
+            sessionConfiguration.timeoutIntervalForRequest = 1
+            let session = URLSession(configuration: sessionConfiguration)
+            defer { session.invalidateAndCancel() }
+            do {
+                _ = try await session.data(from: URL(string: "http://127.0.0.1:1237/health")!)
+                XCTFail("Owned MLX listener remained after verified shutdown")
+            } catch let error as URLError {
+                XCTAssertEqual(error.code, .cannotConnectToHost)
+            }
+        } catch {
+            let report = await state.shutdownRuntime()
+            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            throw error
+        }
+    }
+
     func testProductionRuntimeCompletesLocalQwenTurn() async throws {
         try XCTSkipUnless(
             ProcessInfo.processInfo.environment["LOCALCODEX_LIVE_MODEL_TEST"] == "1",
             "Set LOCALCODEX_LIVE_MODEL_TEST=1 to run against the loaded LM Studio model."
         )
 
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
         configuration.codexHomePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalCodexLiveTest-\(UUID().uuidString)", isDirectory: true)
             .path
@@ -301,11 +368,14 @@ final class LocalQwenLiveTests: XCTestCase {
 
     /// A transport-level cancellation gate with no computer actions.
     func testProductionRuntimeInterruptsActiveTurn() async throws {
+        let usesOwnedMLX = ProcessInfo.processInfo.environment["HEYDASH_LIVE_OWNED_MLX_TEST"] == "1"
         try XCTSkipUnless(
-            ProcessInfo.processInfo.environment["LOCALCODEX_LIVE_INTERRUPT_TEST"] == "1",
-            "Set LOCALCODEX_LIVE_INTERRUPT_TEST=1 to run the App Server interrupt gate."
+            usesOwnedMLX || ProcessInfo.processInfo.environment["LOCALCODEX_LIVE_INTERRUPT_TEST"] == "1",
+            "Set HEYDASH_LIVE_OWNED_MLX_TEST=1 for owned MLX, or LOCALCODEX_LIVE_INTERRUPT_TEST=1 for an external provider."
         )
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = usesOwnedMLX
+            ? CodexAppServerRuntime.Configuration.localQwen
+            : CodexAppServerRuntime.Configuration.externalLocalQwen
         configuration.codexHomePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalCodexInterruptTest-\(UUID().uuidString)", isDirectory: true)
             .path
@@ -316,40 +386,160 @@ final class LocalQwenLiveTests: XCTestCase {
         let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences())
         let eventTask = Task { await state.startRuntime() }
         defer { eventTask.cancel() }
-        try await waitForRuntimeConnection(state: state)
-        state.createTask()
-        let taskID = try XCTUnwrap(state.selectedTaskID)
-        _ = try selectLiveModelIfRequested(in: state, taskID: taskID)
-        let submitted = await state.submit(
-            prompt: "Write every integer from 1 to 10000, one per line. Do not use tools.",
-            toTaskID: taskID
-        )
-        XCTAssertTrue(submitted)
-        try await waitUntil("active turn", state: state, attempts: 40) {
-            state.tasks.first(where: { $0.id == taskID })?.status == .running
+        print("HEYDASH_INTERRUPT_ARTIFACT_DIR=\(configuration.codexHomePath)")
+        do {
+            try await waitForRuntimeConnection(state: state)
+            state.createTask()
+            let taskID = try XCTUnwrap(state.selectedTaskID)
+            let modelID = try selectLiveModelIfRequested(in: state, taskID: taskID)
+            try configuration.validateSelectedModel(modelID)
+            guard await state.submit(
+                prompt: "Write every integer from 1 to 10000, one per line. Do not use tools.",
+                toTaskID: taskID
+            ) else { throw LiveTestFailure(message: "Interrupt-gate prompt was not submitted.") }
+
+            let deltaMethods: Set<String> = [
+                "item/agentMessage/delta", "item/reasoning/textDelta", "item/reasoning/summaryTextDelta",
+            ]
+            let activeTrace = try await waitForInterruptGateWireTrace(
+                at: protocolTracePath, operation: "real streamed delta before interrupt", attempts: 240
+            ) { trace in
+                state.tasks.first(where: { $0.id == taskID })?.status == .running
+                    && trace.messages.contains { message in
+                        guard message.direction == .serverToClient,
+                              let method = message.method, deltaMethods.contains(method),
+                              let params = message.object["params"] as? [String: Any],
+                              let delta = params["delta"] as? String
+                        else { return false }
+                        return !delta.isEmpty
+                    }
+            }
+            let streamed = try XCTUnwrap(activeTrace.messages.first { message in
+                guard message.direction == .serverToClient,
+                      let method = message.method, deltaMethods.contains(method),
+                      let params = message.object["params"] as? [String: Any],
+                      let delta = params["delta"] as? String
+                else { return false }
+                return !delta.isEmpty
+            })
+            let streamedParams = try XCTUnwrap(streamed.object["params"] as? [String: Any])
+            let threadID = try XCTUnwrap(streamedParams["threadId"] as? String)
+            let interruptedTurnID = try XCTUnwrap(streamedParams["turnId"] as? String)
+            XCTAssertFalse(threadID.isEmpty)
+            XCTAssertFalse(interruptedTurnID.isEmpty)
+            print("HEYDASH_INTERRUPT_OBSERVED_DELTA=\(streamed.method ?? "unknown") sequence=\(streamed.sequence)")
+
+            try await runtime.interrupt(taskID: taskID)
+            let trace = try await waitForInterruptGateWireTrace(
+                at: protocolTracePath, operation: "correlated interrupted terminal", attempts: 120
+            ) { trace in
+                state.tasks.first(where: { $0.id == taskID })?.status == .waiting
+                    && trace.messages.contains { message in
+                        guard message.direction == .serverToClient, message.method == "turn/completed",
+                              let params = message.object["params"] as? [String: Any],
+                              params["threadId"] as? String == threadID,
+                              let turn = params["turn"] as? [String: Any]
+                        else { return false }
+                        return turn["id"] as? String == interruptedTurnID && turn["status"] as? String == "interrupted"
+                    }
+            }
+            XCTAssertTrue(trace.parseFailures.isEmpty)
+            let interruptRequest = try XCTUnwrap(trace.messages.first { message in
+                guard message.direction == .clientToServer, message.method == "turn/interrupt",
+                      let params = message.object["params"] as? [String: Any]
+                else { return false }
+                return params["threadId"] as? String == threadID && params["turnId"] as? String == interruptedTurnID
+            })
+            XCTAssertGreaterThan(interruptRequest.sequence, streamed.sequence)
+            let requestID = try XCTUnwrap(interruptRequest.object["id"] as? NSNumber)
+            XCTAssertTrue(trace.messages.contains { message in
+                message.direction == .serverToClient
+                    && (message.object["id"] as? NSNumber) == requestID
+                    && message.object["result"] != nil
+                    && message.sequence > interruptRequest.sequence
+            })
+            let interruptedTerminal = try XCTUnwrap(trace.messages.first { message in
+                guard message.direction == .serverToClient, message.method == "turn/completed",
+                      let params = message.object["params"] as? [String: Any],
+                      params["threadId"] as? String == threadID,
+                      let turn = params["turn"] as? [String: Any]
+                else { return false }
+                return turn["id"] as? String == interruptedTurnID && turn["status"] as? String == "interrupted"
+            })
+            XCTAssertGreaterThan(interruptedTerminal.sequence, interruptRequest.sequence)
+            XCTAssertFalse(trace.messages.contains { $0.method == "item/tool/call" })
+
+            let marker = "HEYDASH_AFTER_NATIVE_INTERRUPT_OK"
+            guard await state.submit(
+                prompt: "The previous request was cancelled. Reply with exactly \(marker) and do not use tools.",
+                toTaskID: taskID
+            ) else { throw LiveTestFailure(message: "Same-task post-interrupt prompt was not submitted.") }
+            let reuseTrace = try await waitForInterruptGateWireTrace(
+                at: protocolTracePath, operation: "same-task response after interruption", attempts: 320
+            ) { trace in
+                guard let task = state.tasks.first(where: { $0.id == taskID }), task.status == .completed,
+                      task.entries.last(where: { $0.kind == .assistant })?.body.trimmingCharacters(in: .whitespacesAndNewlines) == marker
+                else { return false }
+                return trace.messages.contains { message in
+                    guard message.direction == .serverToClient, message.method == "turn/completed",
+                          message.sequence > interruptedTerminal.sequence,
+                          let params = message.object["params"] as? [String: Any], params["threadId"] as? String == threadID,
+                          let turn = params["turn"] as? [String: Any]
+                    else { return false }
+                    return turn["id"] as? String != interruptedTurnID && turn["status"] as? String == "completed"
+                }
+            }
+            let followupStart = try XCTUnwrap(reuseTrace.messages.first { message in
+                message.direction == .clientToServer && message.method == "turn/start"
+                    && message.sequence > interruptedTerminal.sequence
+            })
+            XCTAssertEqual((followupStart.object["params"] as? [String: Any])?["threadId"] as? String, threadID)
+            let followupTerminal = try XCTUnwrap(reuseTrace.messages.last { message in
+                message.direction == .serverToClient && message.method == "turn/completed"
+                    && message.sequence > followupStart.sequence
+            })
+            let followupParams = try XCTUnwrap(followupTerminal.object["params"] as? [String: Any])
+            let followupTurn = try XCTUnwrap(followupParams["turn"] as? [String: Any])
+            let followupTurnID = try XCTUnwrap(followupTurn["id"] as? String)
+            XCTAssertNotEqual(followupTurnID, interruptedTurnID)
+            XCTAssertEqual(followupParams["threadId"] as? String, threadID)
+            XCTAssertEqual(followupTurn["status"] as? String, "completed")
+            let publicDeltas = reuseTrace.messages.compactMap { message -> String? in
+                guard message.direction == .serverToClient, message.method == "item/agentMessage/delta",
+                      let params = message.object["params"] as? [String: Any],
+                      params["threadId"] as? String == threadID, params["turnId"] as? String == followupTurnID
+                else { return nil }
+                return params["delta"] as? String
+            }.joined()
+            XCTAssertEqual(publicDeltas.trimmingCharacters(in: .whitespacesAndNewlines), marker)
+            XCTAssertFalse(reuseTrace.messages.contains { $0.method == "item/tool/call" })
+            XCTAssertEqual(state.tasks.count, 1, "The same task must remain usable; do not create a replacement task.")
+            let reusedTask = try XCTUnwrap(state.tasks.first(where: { $0.id == taskID }))
+            XCTAssertEqual(reusedTask.model, modelID)
+            XCTAssertTrue(reusedTask.entries.compactMap(\.toolEvent).isEmpty)
+
+            let report = await state.shutdownRuntime()
+            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+        } catch {
+            let report = await state.shutdownRuntime()
+            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            throw error
         }
-        try await runtime.interrupt(taskID: taskID)
-        try await waitUntil("interrupted turn", state: state, attempts: 120) {
-            state.tasks.first(where: { $0.id == taskID })?.status == .waiting
+    }
+
+    /// This gate must throw on timeout, rather than continue to an interrupt
+    /// without the observed prerequisite. Never prints raw reasoning or text.
+    private func waitForInterruptGateWireTrace(
+        at url: URL, operation: String, attempts: Int,
+        condition: (AppServerWireTrace) -> Bool
+    ) async throws -> AppServerWireTrace {
+        for _ in 0..<attempts {
+            if let trace = try? AppServerWireTrace.load(url), trace.parseFailures.isEmpty, condition(trace) {
+                return trace
+            }
+            try await Task.sleep(for: .milliseconds(250))
         }
-        let trace = try AppServerWireTrace.load(protocolTracePath)
-        XCTAssertTrue(trace.parseFailures.isEmpty)
-        let interruptRequest = try XCTUnwrap(trace.messages.first { message in
-            message.direction == .clientToServer && message.method == "turn/interrupt"
-        })
-        let requestID = interruptRequest.object["id"] as? NSNumber
-        XCTAssertTrue(trace.messages.contains { message in
-            message.direction == .serverToClient
-                && (message.object["id"] as? NSNumber) == requestID
-                && message.object["result"] != nil
-        })
-        XCTAssertTrue(trace.messages.contains { message in
-            guard message.method == "turn/completed",
-                  let turn = (message.object["params"] as? [String: Any])?["turn"] as? [String: Any]
-            else { return false }
-            return turn["status"] as? String == "interrupted"
-        })
-        XCTAssertFalse(trace.messages.contains { $0.method == "item/tool/call" })
+        throw LiveTestFailure(message: "Timed out waiting for \(operation). Private wire evidence: \(url.path)")
     }
 
     /// A combined screenshot/AX gate. The image and semantic snapshot must be
@@ -2161,8 +2351,8 @@ final class LocalQwenLiveTests: XCTestCase {
         }
     }
 
-    private func makeLiveState() async -> (AppState, Task<Void, Never>, String, String) {
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+    private func makeLiveState(configuration initial: CodexAppServerRuntime.Configuration = .externalLocalQwen) async -> (AppState, Task<Void, Never>, String, String) {
+        var configuration = initial
         configuration.codexHomePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalCodexLiveTest-\(UUID().uuidString)", isDirectory: true)
             .path

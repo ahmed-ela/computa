@@ -42,6 +42,12 @@ targets:
       - path: Sources/HeyDash/Resources/AgentRuntime
         type: folder
         buildPhase: resources
+      - path: Sources/HeyDash/Resources/MLXServer
+        type: folder
+        buildPhase: resources
+      - path: Sources/HeyDash/Resources/AgentInstructions
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: AutomationCore
     settings:

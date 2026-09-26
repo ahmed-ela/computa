@@ -27,7 +27,7 @@ final class AccessModeLiveTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("HeyDashAccessModeLive-\(UUID().uuidString)", isDirectory: true)
         let traceURL = root.appendingPathComponent("protocol.jsonl")
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
         configuration.model = modelID
         configuration.codexHomePath = root.path
         configuration.protocolTracePath = traceURL.path

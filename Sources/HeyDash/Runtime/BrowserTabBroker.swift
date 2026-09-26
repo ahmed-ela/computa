@@ -3,12 +3,37 @@ import ApplicationServices
 import AutomationCore
 import Foundation
 
+struct BrowserAttachedSession: Equatable, Sendable {
+    let connectionGeneration: UUID
+    let sessionID: String
+    let incarnation: UUID
+}
+
 struct BrowserTarget: Equatable, Sendable {
     let targetID: String
     let instanceToken: String
     let title: String
     let url: URL
-    let webSocketURL: URL
+    let webSocketURL: URL?
+    let attachedSession: BrowserAttachedSession?
+
+    init(targetID: String, instanceToken: String, title: String, url: URL, webSocketURL: URL?) {
+        self.targetID = targetID
+        self.instanceToken = instanceToken
+        self.title = title
+        self.url = url
+        self.webSocketURL = webSocketURL
+        attachedSession = nil
+    }
+
+    init(targetID: String, title: String, url: URL, attachedSession: BrowserAttachedSession) {
+        self.targetID = targetID
+        instanceToken = attachedSession.incarnation.uuidString
+        self.title = title
+        self.url = url
+        webSocketURL = nil
+        self.attachedSession = attachedSession
+    }
 }
 
 struct BrowserDocumentNode: Equatable, Sendable {
@@ -49,6 +74,13 @@ protocol BrowserTabTransport: Sendable {
     ) async throws
 }
 
+/// Target lifetime is independent of browser/process ownership. A borrowed
+/// broker must never be placed in ChromeTabBroker's owned process/profile path.
+enum BrowserTabOwnership: Equatable, Sendable {
+    case owned
+    case borrowed
+}
+
 struct BrowserTabBinding: Equatable, Sendable {
     let handle: UUID
     let taskKey: String
@@ -57,6 +89,7 @@ struct BrowserTabBinding: Equatable, Sendable {
     let targetInstanceToken: String
     let processIdentifier: Int32
     let documentEpoch: UUID
+    let ownership: BrowserTabOwnership
     let lifetime: BrowserTabLifetime
 }
 
@@ -108,6 +141,7 @@ enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
     case elementChanged
     case unsupportedAction(String)
     case mutationRejected(String)
+    case ownershipMismatch
 
     var errorDescription: String? {
         switch self {
@@ -139,11 +173,13 @@ enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
             "The browser tab broker does not support \(action) for this element."
         case .mutationRejected(let detail):
             "Chrome rejected the approved browser action: \(detail)"
+        case .ownershipMismatch:
+            "The browser tab operation does not match this broker's ownership policy."
         }
     }
 }
 
-private func requireBrowserAccessibilityPermission() throws {
+func requireBrowserAccessibilityPermission() throws {
     guard AXIsProcessTrusted() else {
         throw AutomationError.permissionNotGranted(.accessibility)
     }
@@ -216,12 +252,23 @@ final class BrowserMutationPermit: @unchecked Sendable {
 }
 
 actor BrowserTabSessionBroker {
+    private struct TargetLeaseKey: Hashable {
+        let targetID: String
+        let instanceToken: String
+    }
+
+    private struct TargetLease {
+        let taskKey: String
+        let handle: UUID
+    }
+
     private struct Entry {
         let taskKey: String
         let browserGeneration: UUID
         let targetID: String
         let targetInstanceToken: String
         let processIdentifier: Int32
+        let ownership: BrowserTabOwnership
         var loaderID: String
         var documentURL: URL
         var documentEpoch: UUID
@@ -231,16 +278,25 @@ actor BrowserTabSessionBroker {
 
     private let transport: any BrowserTabTransport
     private let browserGeneration: UUID
+    private let ownership: BrowserTabOwnership
     private var entries = [UUID: Entry]()
+    // A reservation exists before borrowed binding's first suspension and is
+    // retained by the published handle. Cleanup may only release its own UUID.
+    private var targetLeases = [TargetLeaseKey: TargetLease]()
     private var tasksInFlight = Set<String>()
     private var pendingMutations = [UUID: BrowserMutationPermit]()
     private var openingLifetimes = [String: BrowserTabLifetime]()
     private var ownedTargets = [String: BrowserTarget]()
     private var isShutDown = false
 
-    init(transport: any BrowserTabTransport, browserGeneration: UUID) {
+    init(
+        transport: any BrowserTabTransport,
+        browserGeneration: UUID,
+        ownership: BrowserTabOwnership = .owned
+    ) {
         self.transport = transport
         self.browserGeneration = browserGeneration
+        self.ownership = ownership
     }
 
     func open(
@@ -249,6 +305,7 @@ actor BrowserTabSessionBroker {
         url: URL,
         lifetime: BrowserTabLifetime = BrowserTabLifetime()
     ) async throws -> BrowserTabBinding {
+        guard ownership == .owned else { throw BrowserTabBrokerError.ownershipMismatch }
         try beginOperation(taskKey: taskKey)
         openingLifetimes[taskKey] = lifetime
         defer {
@@ -298,6 +355,7 @@ actor BrowserTabSessionBroker {
                 targetID: target.targetID,
                 targetInstanceToken: target.instanceToken,
                 processIdentifier: processIdentifier,
+                ownership: .owned,
                 loaderID: document.loaderID,
                 documentURL: document.url,
                 documentEpoch: UUID(),
@@ -309,6 +367,76 @@ actor BrowserTabSessionBroker {
         } catch {
             lifetime.revoke()
             try? await closeOwnedTarget(created)
+            throw error
+        }
+    }
+
+    /// Adapter foundation only: no current ordinary-Chrome extension is wired
+    /// here. The caller must already hold an authorized exact target identity.
+    /// Binding observes that target without activation, navigation, or ownership
+    /// transfer. Failure/cancellation only revokes the local capability.
+    func bindBorrowed(
+        taskKey: String,
+        processIdentifier: Int32,
+        target: BrowserTarget,
+        lifetime: BrowserTabLifetime = BrowserTabLifetime()
+    ) async throws -> BrowserTabBinding {
+        guard ownership == .borrowed else { throw BrowserTabBrokerError.ownershipMismatch }
+        try beginOperation(taskKey: taskKey)
+        openingLifetimes[taskKey] = lifetime
+        defer {
+            openingLifetimes.removeValue(forKey: taskKey)
+            tasksInFlight.remove(taskKey)
+        }
+        let handle = UUID()
+        let leaseKey = TargetLeaseKey(targetID: target.targetID, instanceToken: target.instanceToken)
+        do {
+            try lifetime.check()
+            if let lease = targetLeases[leaseKey], lease.taskKey != taskKey {
+                throw BrowserTabBrokerError.operationInProgress
+            }
+            // Replace a same-task reservation before revoking the old handle;
+            // its delayed cleanup must not clear this new reservation.
+            targetLeases[leaseKey] = TargetLease(taskKey: taskKey, handle: handle)
+            for (handle, prior) in entries.filter({ $0.value.taskKey == taskKey }) {
+                try await revoke(taskKey: taskKey, binding: binding(handle: handle, entry: prior))
+            }
+            try lifetime.check()
+            guard let current = try await transport.target(id: target.targetID) else {
+                throw BrowserTabBrokerError.targetClosed
+            }
+            guard current.instanceToken == target.instanceToken else {
+                throw BrowserTabBrokerError.targetReplaced
+            }
+            let document = try await transport.observe(target: current)
+            // Observation may suspend while the user closes/replaces the tab.
+            guard let refreshed = try await transport.target(id: target.targetID) else {
+                throw BrowserTabBrokerError.targetClosed
+            }
+            guard refreshed.instanceToken == target.instanceToken else {
+                throw BrowserTabBrokerError.targetReplaced
+            }
+            try Task.checkCancellation()
+            try lifetime.check()
+            guard !isShutDown, targetLeases[leaseKey]?.handle == handle else {
+                throw BrowserTabBrokerError.handleMissing
+            }
+            guard !document.loaderID.isEmpty,
+                  ["http", "https", "file"].contains(document.url.scheme ?? "") else {
+                throw BrowserTabBrokerError.staleDocument
+            }
+            let entry = Entry(
+                taskKey: taskKey, browserGeneration: browserGeneration,
+                targetID: current.targetID, targetInstanceToken: current.instanceToken,
+                processIdentifier: processIdentifier, ownership: .borrowed,
+                loaderID: document.loaderID, documentURL: document.url,
+                documentEpoch: UUID(), activeSnapshot: nil, lifetime: lifetime
+            )
+            entries[handle] = entry
+            return binding(handle: handle, entry: entry)
+        } catch {
+            lifetime.revoke()
+            releaseTargetLease(leaseKey, handle: handle)
             throw error
         }
     }
@@ -330,6 +458,15 @@ actor BrowserTabSessionBroker {
         entries[suppliedBinding.handle] = entry
         let target = try await currentTarget(for: suppliedBinding.handle, entry: entry)
         let document = try await transport.observe(target: target)
+        // The observation may have suspended across target detach/replacement.
+        // Recheck exact identity, then local validity after that extra await.
+        _ = try self.entry(
+            taskKey: taskKey,
+            binding: suppliedBinding,
+            requiresCurrentEpoch: false
+        )
+        _ = try await currentTarget(for: suppliedBinding.handle, entry: entry)
+        try Task.checkCancellation()
         _ = try self.entry(
             taskKey: taskKey,
             binding: suppliedBinding,
@@ -524,7 +661,9 @@ actor BrowserTabSessionBroker {
         current.lifetime.revoke()
         pendingMutations.removeValue(forKey: binding.handle)?.revoke()
         entries.removeValue(forKey: binding.handle)
-        if let target = ownedTargets[current.targetID],
+        releaseTargetLease(for: current, handle: binding.handle)
+        if current.ownership == .owned,
+           let target = ownedTargets[current.targetID],
            target.instanceToken == current.targetInstanceToken {
             try await closeOwnedTarget(target)
         }
@@ -539,11 +678,13 @@ actor BrowserTabSessionBroker {
         for permit in pendingMutations.values { permit.revoke() }
         entries.removeAll()
         pendingMutations.removeAll()
+        targetLeases.removeAll()
     }
 
     /// Internal fixture cleanup only. Identity still comes from created targets,
     /// never from enumeration of arbitrary Chrome tabs with matching titles.
     func closeTargets(urls: Set<URL>) async throws {
+        guard ownership == .owned else { return }
         let targets = ownedTargets.values.filter { urls.contains($0.url) }
         for target in targets {
             let handles = entries.filter { $0.value.targetID == target.targetID }
@@ -551,12 +692,17 @@ actor BrowserTabSessionBroker {
                 entry.lifetime.revoke()
                 pendingMutations.removeValue(forKey: handle)?.revoke()
                 entries.removeValue(forKey: handle)
+                releaseTargetLease(for: entry, handle: handle)
             }
             try await closeOwnedTarget(target)
         }
     }
 
     private func closeOwnedTarget(_ target: BrowserTarget) async throws {
+        guard ownership == .owned else { throw BrowserTabBrokerError.ownershipMismatch }
+        guard ownedTargets[target.targetID]?.instanceToken == target.instanceToken else {
+            throw BrowserTabBrokerError.targetReplaced
+        }
         let transport = self.transport
         // Cleanup must not inherit the revoked action's cancellation.
         let cleanup = Task { try await transport.closeTarget(target: target) }
@@ -572,6 +718,18 @@ actor BrowserTabSessionBroker {
         guard tasksInFlight.insert(taskKey).inserted else {
             throw BrowserTabBrokerError.operationInProgress
         }
+    }
+
+    private func releaseTargetLease(_ key: TargetLeaseKey, handle: UUID) {
+        guard targetLeases[key]?.handle == handle else { return }
+        targetLeases.removeValue(forKey: key)
+    }
+
+    private func releaseTargetLease(for entry: Entry, handle: UUID) {
+        releaseTargetLease(
+            TargetLeaseKey(targetID: entry.targetID, instanceToken: entry.targetInstanceToken),
+            handle: handle
+        )
     }
 
     private func entry(
@@ -593,6 +751,7 @@ actor BrowserTabSessionBroker {
               entry.targetID == binding.targetID,
               entry.targetInstanceToken == binding.targetInstanceToken,
               entry.processIdentifier == binding.processIdentifier,
+              entry.ownership == binding.ownership,
               entry.lifetime === binding.lifetime else {
             throw BrowserTabBrokerError.targetReplaced
         }
@@ -608,11 +767,17 @@ actor BrowserTabSessionBroker {
         entry: Entry
     ) async throws -> BrowserTarget {
         guard let target = try await transport.target(id: entry.targetID) else {
+            entry.lifetime.revoke()
+            pendingMutations.removeValue(forKey: handle)?.revoke()
             entries.removeValue(forKey: handle)
+            releaseTargetLease(for: entry, handle: handle)
             throw BrowserTabBrokerError.targetClosed
         }
         guard target.instanceToken == entry.targetInstanceToken else {
+            entry.lifetime.revoke()
+            pendingMutations.removeValue(forKey: handle)?.revoke()
             entries.removeValue(forKey: handle)
+            releaseTargetLease(for: entry, handle: handle)
             throw BrowserTabBrokerError.targetReplaced
         }
         return target
@@ -627,6 +792,7 @@ actor BrowserTabSessionBroker {
             targetInstanceToken: entry.targetInstanceToken,
             processIdentifier: entry.processIdentifier,
             documentEpoch: entry.documentEpoch,
+            ownership: entry.ownership,
             lifetime: entry.lifetime
         )
     }
@@ -807,36 +973,12 @@ actor SystemChromeDevToolsTransport: BrowserTabTransport {
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
         try requireBrowserAccessibilityPermission()
         let current = try await requireCurrent(target)
-        let socket = ChromeDevToolsSocket(url: current.webSocketURL)
+        guard let endpoint = current.webSocketURL, current.attachedSession == nil else {
+            throw BrowserTabBrokerError.ownershipMismatch
+        }
+        let socket = ChromeDevToolsSocket(url: endpoint)
         defer { socket.close() }
-        return try await observe(target: current, socket: socket)
-    }
-
-    private func observe(
-        target: BrowserTarget,
-        socket: ChromeDevToolsSocket
-    ) async throws -> BrowserDocumentObservation {
-        let before = try await frameIdentity(socket: socket)
-        _ = try await socket.command(method: "Accessibility.enable")
-        let axResult = try await socket.command(
-            method: "Accessibility.getFullAXTree",
-            params: ["depth": 16]
-        )
-        guard let rawNodes = axResult["nodes"] as? [[String: Any]] else {
-            throw BrowserTabBrokerError.malformedDevToolsResponse(
-                "Accessibility.getFullAXTree did not return nodes"
-            )
-        }
-        let after = try await frameIdentity(socket: socket)
-        guard after == before else {
-            throw BrowserTabBrokerError.staleDocument
-        }
-        return BrowserDocumentObservation(
-            loaderID: before.loaderID,
-            title: target.title,
-            url: before.url,
-            nodes: rawNodes.map(parseNode)
-        )
+        return try await BrowserCDPDocumentOperations().observe(target: current, socket: socket)
     }
 
     func press(
@@ -847,41 +989,15 @@ actor SystemChromeDevToolsTransport: BrowserTabTransport {
     ) async throws {
         try requireBrowserAccessibilityPermission()
         let current = try await requireCurrent(target)
-        let socket = ChromeDevToolsSocket(url: current.webSocketURL)
+        guard let endpoint = current.webSocketURL, current.attachedSession == nil else {
+            throw BrowserTabBrokerError.ownershipMismatch
+        }
+        let socket = ChromeDevToolsSocket(url: endpoint)
         defer { socket.close() }
-
-        let objectID = try await prepareMutation(
-            target: current,
-            backendNodeID: backendNodeID,
-            document: document,
-            socket: socket
+        try await BrowserCDPDocumentOperations().press(
+            target: current, backendNodeID: backendNodeID, document: document,
+            permit: permit, socket: socket
         )
-        let result = try await socket.command(
-            method: "Runtime.callFunctionOn",
-            params: [
-                "objectId": objectID,
-                "functionDeclaration": """
-                function(expectedURL) {
-                  if (!(this instanceof HTMLElement) || !this.isConnected ||
-                      this.ownerDocument !== document || window !== window.top ||
-                      document.URL !== expectedURL || this.matches(":disabled") ||
-                      this.closest('[inert], [aria-disabled="true" i]')) return false;
-                  HTMLElement.prototype.click.call(this);
-                  return true;
-                }
-                """,
-                "arguments": [["value": document.url.absoluteString]],
-                "returnByValue": true,
-                "awaitPromise": true,
-                "userGesture": true,
-            ],
-            permit: permit
-        )
-        _ = try? await socket.command(
-            method: "Runtime.releaseObject",
-            params: ["objectId": objectID]
-        )
-        try requireTrueCallResult(result, operation: "press")
     }
 
     func setText(
@@ -893,67 +1009,15 @@ actor SystemChromeDevToolsTransport: BrowserTabTransport {
     ) async throws {
         try requireBrowserAccessibilityPermission()
         let current = try await requireCurrent(target)
-        let socket = ChromeDevToolsSocket(url: current.webSocketURL)
+        guard let endpoint = current.webSocketURL, current.attachedSession == nil else {
+            throw BrowserTabBrokerError.ownershipMismatch
+        }
+        let socket = ChromeDevToolsSocket(url: endpoint)
         defer { socket.close() }
-
-        let objectID = try await prepareMutation(
-            target: current,
-            backendNodeID: backendNodeID,
-            document: document,
-            socket: socket
+        try await BrowserCDPDocumentOperations().setText(
+            target: current, backendNodeID: backendNodeID, text: text,
+            document: document, permit: permit, socket: socket
         )
-        let result = try await socket.command(
-            method: "Runtime.callFunctionOn",
-            params: [
-                "objectId": objectID,
-                "functionDeclaration": """
-                function(expectedURL, value) {
-                  if (!(this instanceof HTMLElement) || !this.isConnected ||
-                      this.ownerDocument !== document || window !== window.top ||
-                      document.URL !== expectedURL || this.matches(":disabled") ||
-                      this.closest('[inert], [aria-disabled="true" i], [aria-readonly="true" i]')) {
-                    return false;
-                  }
-                  if (this instanceof HTMLInputElement) {
-                    if (this.readOnly ||
-                        !["text", "search", "email", "url", "tel", "password"].includes(this.type)) {
-                      return false;
-                    }
-                    const setter = Object.getOwnPropertyDescriptor(
-                      HTMLInputElement.prototype, "value"
-                    ).set;
-                    setter.call(this, value);
-                  } else if (this instanceof HTMLTextAreaElement) {
-                    if (this.readOnly) return false;
-                    const setter = Object.getOwnPropertyDescriptor(
-                      HTMLTextAreaElement.prototype, "value"
-                    ).set;
-                    setter.call(this, value);
-                  } else if (this.isContentEditable) {
-                    this.textContent = value;
-                  } else {
-                    return false;
-                  }
-                  this.dispatchEvent(new Event("input", { bubbles: true }));
-                  this.dispatchEvent(new Event("change", { bubbles: true }));
-                  return true;
-                }
-                """,
-                "arguments": [
-                    ["value": document.url.absoluteString],
-                    ["value": text],
-                ],
-                "returnByValue": true,
-                "awaitPromise": true,
-                "userGesture": true,
-            ],
-            permit: permit
-        )
-        _ = try? await socket.command(
-            method: "Runtime.releaseObject",
-            params: ["objectId": objectID]
-        )
-        try requireTrueCallResult(result, operation: "set text")
     }
 
     func listTargets() async throws -> [BrowserTarget] {
@@ -1000,112 +1064,6 @@ actor SystemChromeDevToolsTransport: BrowserTabTransport {
         return current
     }
 
-    private struct FrameIdentity: Equatable, Sendable {
-        let id: String
-        let loaderID: String
-        let url: URL
-    }
-
-    private func frameIdentity(socket: ChromeDevToolsSocket) async throws -> FrameIdentity {
-        let result = try await socket.command(method: "Page.getFrameTree")
-        guard let tree = result["frameTree"] as? [String: Any],
-              let frame = tree["frame"] as? [String: Any],
-              let id = frame["id"] as? String, !id.isEmpty,
-              let loaderID = frame["loaderId"] as? String, !loaderID.isEmpty,
-              let rawURL = frame["url"] as? String,
-              let url = URL(string: rawURL + (frame["urlFragment"] as? String ?? "")) else {
-            throw BrowserTabBrokerError.malformedDevToolsResponse(
-                "Page.getFrameTree did not contain a main-frame identity"
-            )
-        }
-        return FrameIdentity(id: id, loaderID: loaderID, url: url)
-    }
-
-    private func prepareMutation(
-        target: BrowserTarget,
-        backendNodeID: Int64,
-        document: BrowserDocumentObservation,
-        socket: ChromeDevToolsSocket
-    ) async throws -> String {
-        let current = try await observe(target: target, socket: socket)
-        guard current.loaderID == document.loaderID, current.url == document.url else {
-            throw BrowserTabBrokerError.staleDocument
-        }
-        let approvedNodes = document.nodes.filter { $0.backendNodeID == backendNodeID }
-        let currentNodes = current.nodes.filter { $0.backendNodeID == backendNodeID }
-        guard approvedNodes.count == 1, currentNodes.count == 1 else {
-            throw BrowserTabBrokerError.elementNotFound
-        }
-        guard currentNodes[0] == approvedNodes[0],
-              !currentNodes[0].isDisabled, !currentNodes[0].isIgnored else {
-            throw BrowserTabBrokerError.elementChanged
-        }
-
-        let frame = try await frameIdentity(socket: socket)
-        guard frame.loaderID == document.loaderID, frame.url == document.url else {
-            throw BrowserTabBrokerError.staleDocument
-        }
-        let world = try await socket.command(
-            method: "Page.createIsolatedWorld",
-            params: [
-                "frameId": frame.id,
-                "worldName": "LocalCodexBrowserBroker",
-            ]
-        )
-        guard let contextID = (world["executionContextId"] as? NSNumber)?.int64Value,
-              contextID > 0 else {
-            throw BrowserTabBrokerError.malformedDevToolsResponse(
-                "Page.createIsolatedWorld did not return an execution context"
-            )
-        }
-        let objectID = try await resolveObject(
-            backendNodeID: backendNodeID,
-            executionContextID: contextID,
-            socket: socket
-        )
-        let after = try await frameIdentity(socket: socket)
-        guard after == frame else {
-            throw BrowserTabBrokerError.staleDocument
-        }
-        return objectID
-    }
-
-    private func resolveObject(
-        backendNodeID: Int64,
-        executionContextID: Int64,
-        socket: ChromeDevToolsSocket
-    ) async throws -> String {
-        let result = try await socket.command(
-            method: "DOM.resolveNode",
-            params: [
-                "backendNodeId": backendNodeID,
-                "executionContextId": executionContextID,
-            ]
-        )
-        guard let object = result["object"] as? [String: Any],
-              let objectID = object["objectId"] as? String,
-              !objectID.isEmpty else {
-            throw BrowserTabBrokerError.elementNotFound
-        }
-        return objectID
-    }
-
-    private func requireTrueCallResult(
-        _ result: [String: Any],
-        operation: String
-    ) throws {
-        if let exception = result["exceptionDetails"] as? [String: Any] {
-            throw BrowserTabBrokerError.mutationRejected(
-                exception["text"] as? String ?? "\(operation) raised an exception"
-            )
-        }
-        guard let remote = result["result"] as? [String: Any],
-              (remote["value"] as? Bool) == true else {
-            throw BrowserTabBrokerError.mutationRejected(
-                "\(operation) did not return true"
-            )
-        }
-    }
 
     private func parseTarget(_ object: [String: Any]) throws -> BrowserTarget {
         let allowedID = CharacterSet(
@@ -1113,7 +1071,6 @@ actor SystemChromeDevToolsTransport: BrowserTabTransport {
         )
         guard let targetID = object["id"] as? String,
               !targetID.isEmpty, targetID.utf8.count <= 128,
-              targetID.unicodeScalars.allSatisfy(allowedID.contains),
               let rawURL = object["url"] as? String,
               let url = URL(string: rawURL),
               let rawWebSocketURL = object["webSocketDebuggerUrl"] as? String,
@@ -1128,6 +1085,13 @@ actor SystemChromeDevToolsTransport: BrowserTabTransport {
                 "a page target was missing its ID, URL, or WebSocket endpoint"
             )
         }
+        // Avoid the optimized allSatisfy(bound-method) specialization shared
+        // with contains(where:); keep identifier rejection explicit.
+        for scalar in targetID.unicodeScalars {
+            if !allowedID.contains(scalar) {
+                throw BrowserTabBrokerError.malformedDevToolsResponse("a page target had an invalid ID")
+            }
+        }
         return BrowserTarget(
             targetID: targetID,
             instanceToken: webSocketURL.absoluteString,
@@ -1137,45 +1101,6 @@ actor SystemChromeDevToolsTransport: BrowserTabTransport {
         )
     }
 
-    private func parseNode(_ object: [String: Any]) -> BrowserDocumentNode {
-        let role = stringValue(object["role"]) ?? ""
-        let name = stringValue(object["name"]) ?? ""
-        let value = stringValue(object["value"])
-        let properties = object["properties"] as? [[String: Any]] ?? []
-        let disabled = properties.contains { property in
-            property["name"] as? String == "disabled"
-                && boolValue(property["value"]) == true
-        }
-        let readOnly = properties.contains { property in
-            property["name"] as? String == "readonly"
-                && boolValue(property["value"]) == true
-        }
-        return BrowserDocumentNode(
-            backendNodeID: (object["backendDOMNodeId"] as? NSNumber)?.int64Value,
-            role: role,
-            name: name,
-            value: value,
-            isDisabled: disabled,
-            isReadOnly: readOnly,
-            isIgnored: object["ignored"] as? Bool ?? false
-        )
-    }
-
-    private func stringValue(_ raw: Any?) -> String? {
-        guard let object = raw as? [String: Any] else { return nil }
-        if let value = object["value"] as? String {
-            return value
-        }
-        if let value = object["value"] as? NSNumber {
-            return value.stringValue
-        }
-        return nil
-    }
-
-    private func boolValue(_ raw: Any?) -> Bool? {
-        guard let object = raw as? [String: Any] else { return nil }
-        return object["value"] as? Bool
-    }
 
     private func requestJSONObject(
         url: URL,
@@ -1210,11 +1135,11 @@ actor SystemChromeDevToolsTransport: BrowserTabTransport {
     }
 }
 
-private final class ChromeDevToolsSocket {
+private actor ChromeDevToolsSocket: BrowserDocumentChannel {
     private let session: URLSession
     private let task: URLSessionWebSocketTask
     private var nextID = 1
-    private let deadline: DispatchWorkItem
+    private let deadline: Task<Void, Never>
 
     init(url: URL) {
         let configuration = URLSessionConfiguration.ephemeral
@@ -1223,26 +1148,26 @@ private final class ChromeDevToolsSocket {
         session = URLSession(configuration: configuration)
         let socketTask = session.webSocketTask(with: url)
         task = socketTask
-        deadline = DispatchWorkItem {
+        deadline = Task {
+            do { try await Task.sleep(for: .seconds(10)) } catch { return }
             socketTask.cancel(with: .goingAway, reason: nil)
         }
         socketTask.resume()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: deadline)
     }
 
-    nonisolated(nonsending)
-    func command(
+    func request(
         method: String,
-        params: [String: Any] = [:],
-        permit: BrowserMutationPermit? = nil
-    ) async throws -> [String: Any] {
+        params: Data,
+        permit: BrowserMutationPermit?
+    ) async throws -> Data {
         try Task.checkCancellation()
+        let parameters = try JSONSerialization.jsonObject(with: params)
         let id = nextID
         nextID += 1
         let request: [String: Any] = [
             "id": id,
             "method": method,
-            "params": params,
+            "params": parameters,
         ]
         let data = try JSONSerialization.data(withJSONObject: request)
         guard let text = String(data: data, encoding: .utf8) else {
@@ -1306,15 +1231,17 @@ private final class ChromeDevToolsSocket {
                     "\(method) returned no result"
                 )
             }
-            return result
+            return try JSONSerialization.data(withJSONObject: result)
         }
     }
 
-    func close() {
+    nonisolated func close() {
         deadline.cancel()
         task.cancel(with: .normalClosure, reason: nil)
         session.invalidateAndCancel()
     }
+
+    func invalidate() { close() }
 }
 
 /// A narrow lifecycle seam. Live ownership still comes only from OwnedChildProcess.

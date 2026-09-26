@@ -47,6 +47,8 @@ struct NativeRuntimeStatusBar: View {
             .accessibilityValue(state.accessMode.label)
             .help("Choose whether HeyDash asks before protected actions. This setting applies to all tasks and is remembered across launches.")
 
+            NativeChromeConnectionControl(state: state)
+
             if state.accessMode == .askEveryTime, !state.resolvingApprovalIDs.isEmpty {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.mini)

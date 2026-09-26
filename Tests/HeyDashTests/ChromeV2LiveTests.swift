@@ -390,7 +390,7 @@ final class ChromeV2LiveTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: ["pageURL": pageURL])
             .write(to: root.appendingPathComponent("native-focus.json"))
         let traceURL = root.appendingPathComponent("protocol.jsonl")
-        var config = CodexAppServerRuntime.Configuration.localQwen
+        var config = CodexAppServerRuntime.Configuration.externalLocalQwen
         config.executable = .fixture(path: executable.path)
         config.codexHomePath = root.path
         config.protocolTracePath = traceURL.path
@@ -842,7 +842,7 @@ final class ChromeV2LiveTests: XCTestCase {
         }
         let pageURL = "https://example.com/?localcodex_read_id=\(UUID().uuidString)"
 
-        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
         configuration.codexHomePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalCodexChromeV2-\(UUID().uuidString)", isDirectory: true)
             .path

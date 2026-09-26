@@ -1,0 +1,35 @@
+{
+  "state": "UNBUILT_UNPROMOTED_REJECTED",
+  "baseCommit": "9a19e26d74647dd857fe3f3ae27ffdb8623aac59",
+  "decision": "Fresh canonical mention-safety changed pairs: baseline 3/4, candidate 2/4; no production promotion.",
+  "sourceTypeCheck": "ExplicitApplicationMention.swift only; passed",
+  "nativeBuildPerformed": false,
+  "nativeTestsExecuted": false,
+  "archivedFiles": [
+    {
+      "file": "ExplicitApplicationMention.swift",
+      "originalPath": "Sources/HeyDash/Runtime/ExplicitApplicationMention.swift",
+      "sha256": "1f4b53bc4310b549edf69edb40daf8941255e7b6060bd749db0f2e3ce08d8b23"
+    },
+    {
+      "file": "ExplicitApplicationRequest.swift",
+      "originalPath": "Sources/HeyDash/Runtime/ExplicitApplicationRequest.swift",
+      "sha256": "b639358467b2fdb799bdf1b4cf1df52d93d409040a40f17fbda2107e7f7cbb1d"
+    },
+    {
+      "file": "ExplicitApplicationMentionTests.swift",
+      "originalPath": "Tests/HeyDashTests/ExplicitApplicationMentionTests.swift",
+      "sha256": "5d88f926cd2c5f43114cec5a0ae484efcf024401eab8aa7889fd6e58ea4e14c0"
+    },
+    {
+      "file": "ExplicitApplicationRequestTests.swift",
+      "originalPath": "Tests/HeyDashTests/ExplicitApplicationRequestTests.swift",
+      "sha256": "f8f61cf7f46cc0a94622079361849a05f84e088740249aea599072874bf8e993"
+    },
+    {
+      "file": "core-integration.diff",
+      "originalPath": "Sources/HeyDash/Runtime/CodexAppServerRuntime.swift",
+      "sha256": "378cec325a4237c58968ad90f734ccbabf98084568feacd1363df9099201fb27"
+    }
+  ]
+}

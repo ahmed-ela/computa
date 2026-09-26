@@ -8,7 +8,11 @@ import Foundation
 /// retain snapshots/captures, and check image bounds before any mutation.
 enum ComputerV2ToolContract {
     static let maximumAppInventoryBytes = 3_500
-    static let unboundApplicationMessage = "No application is bound in this turn. Call computer_v2_open first."
+    static let unboundApplicationMessage = "No application is bound in this turn. Call computer_v2_open, or use computer_v2_tabs then computer_v2_bind_tab for an existing Chrome tab through a native-user-approved connection."
+    static let existingBrowserSessionNote = browserSessionNote(activationMode: .foreground)
+    static func browserSessionNote(activationMode: ActivationMode) -> String {
+        "\nBROWSER_SESSION profile=existing ordinary_profile_access=true tab_broker=false open_activation=\(activationMode.rawValue). Existing tabs and logins are preserved. Native AX may work in background. With activation=none, capture is an observation-only image and grants no input authority. Actionable capture and global key/pointer input still require foreground and are unavailable in a non-activating binding. This is not a task-isolated browser tab."
+    }
 
     /// Keep discovery proportional to a small local model's context. The default
     /// lists user-facing apps, not every system helper. A query searches all
@@ -64,6 +68,8 @@ enum ComputerV2ToolContract {
         case status = "computer_v2_status"
         case apps = "computer_v2_apps"
         case open = "computer_v2_open"
+        case tabs = "computer_v2_tabs"
+        case bindTab = "computer_v2_bind_tab"
         case snapshot = "computer_v2_snapshot"
         case ax = "computer_v2_ax"
         case setText = "computer_v2_set_text"
@@ -73,6 +79,13 @@ enum ComputerV2ToolContract {
         case pointer = "computer_v2_pointer"
         case keypress = "computer_v2_keypress"
         case type = "computer_v2_type"
+
+        var requiresGlobalInput: Bool {
+            switch self {
+            case .groundClick, .click, .pointer, .keypress, .type: true
+            default: false
+            }
+        }
     }
 
     enum PointerAction: String, CaseIterable {
@@ -87,9 +100,22 @@ enum ComputerV2ToolContract {
         case isolated
     }
 
+    enum ActivationMode: String, CaseIterable {
+        case foreground
+        case none
+    }
+
     struct ValidatedCall {
         let tool: Tool
         let arguments: [String: Any]
+
+        var tabPageSize: Int {
+            (arguments["page_size"] as? NSNumber)?.intValue ?? 25
+        }
+
+        var activationMode: ActivationMode {
+            (arguments["activation"] as? String).flatMap(ActivationMode.init(rawValue:)) ?? .foreground
+        }
 
         var browserMode: BrowserMode? {
             guard tool == .open, arguments["bundle_id"] as? String == "com.google.Chrome" else { return nil }
@@ -175,11 +201,22 @@ enum ComputerV2ToolContract {
             }
 
         case .open:
-            try checkKeys(arguments, required: ["bundle_id"], allowed: ["bundle_id", "url", "browser_mode"])
+            try checkKeys(arguments, required: ["bundle_id"], allowed: ["bundle_id", "url", "browser_mode", "activation"])
             let bundleID = try requiredString("bundle_id", in: arguments, maximum: 255)
             let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-"))
-            guard bundleID.unicodeScalars.allSatisfy(allowed.contains) else {
-                throw ValidationError.invalid("bundle_id")
+            // Keep this explicit: the shipped optimized binary inverted the
+            // allSatisfy(bound-method) predicate and rejected valid app IDs.
+            for scalar in bundleID.unicodeScalars {
+                if !allowed.contains(scalar) {
+                    throw ValidationError.invalid("bundle_id")
+                }
+            }
+            if arguments["activation"] != nil {
+                let raw = try requiredString("activation", in: arguments)
+                guard let mode = ActivationMode(rawValue: raw) else { throw ValidationError.invalid("activation") }
+                if mode == .none, arguments["url"] != nil || arguments["browser_mode"] as? String == "isolated" {
+                    throw ValidationError.invalid("activation")
+                }
             }
             if arguments["url"] != nil {
                 let rawURL = try requiredString("url", in: arguments, maximum: 8_192)
@@ -197,6 +234,19 @@ enum ComputerV2ToolContract {
                     throw ValidationError.missing("url")
                 }
             }
+
+        case .tabs:
+            try checkKeys(arguments, required: [], allowed: ["cursor", "page_size"])
+            if arguments["cursor"] != nil { try requireUUID("cursor", in: arguments) }
+            if arguments["page_size"] != nil {
+                guard (1...100).contains(try integer("page_size", in: arguments)) else {
+                    throw ValidationError.invalid("page_size")
+                }
+            }
+
+        case .bindTab:
+            try checkKeys(arguments, required: ["candidate_token"], allowed: ["candidate_token"])
+            try requireUUID("candidate_token", in: arguments)
 
         case .snapshot:
             try checkKeys(arguments, required: [], allowed: ["query"])
@@ -410,6 +460,7 @@ enum ComputerV2ToolContract {
 
     private static func spec(_ tool: Tool) -> [String: Any] {
         let string: [String: Any] = ["type": "string"]
+        let uuid: [String: Any] = ["type": "string", "format": "uuid", "minLength": 36, "maxLength": 36]
         let integer: [String: Any] = ["type": "integer"]
         let number: [String: Any] = ["type": "number"]
         let boolean: [String: Any] = ["type": "boolean"]
@@ -428,26 +479,37 @@ enum ComputerV2ToolContract {
         case .open:
             properties = [
                 "bundle_id": string,
+                "activation": ["type": "string", "enum": ActivationMode.allCases.map(\.rawValue),
+                               "description": "none binds an already-running app's selected window without launch, activation or navigation; no url or isolated mode allowed. Use for non-interrupting background AX work. Default foreground preserves launch/navigation behavior."],
                 "url": ["type": "string", "description": "Omit to use the current window/tab. A nonempty URL opens a new tab in normal Chrome."],
                 "browser_mode": ["type": "string", "enum": BrowserMode.allCases.map(\.rawValue),
                                  "description": "Chrome only. Default existing uses the user's normal Chrome and logins. isolated requires a URL and an explicit user request for a separate profile."],
             ]; required = ["bundle_id"]
             description = "Open and bind an app. Chrome (com.google.Chrome) defaults to the user's existing normal session, with its tabs and logins; omit url to inspect an already-open tab. Use browser_mode=isolated only when the user explicitly requests a separate browser profile."
+        case .tabs:
+            properties = [
+                "cursor": uuid.merging(["description": "Opaque next_cursor from this turn's previous page. Omit to refresh; refreshing invalidates earlier cursor and candidate tokens."], uniquingKeysWith: { _, new in new }),
+                "page_size": ["type": "integer", "minimum": 1, "maximum": 100, "default": 25],
+            ]; required = []
+            description = "List existing Chrome tabs through a native-user-approved connection; this tool cannot grant access. Inventory is complete and paginated: follow next_cursor until absent, with no query filter. Candidate tokens and cursors are opaque and valid only in this turn. Select an observed candidate_token with computer_v2_bind_tab. Preserves existing tabs and logins, with no activation, navigation or closing tabs."
+        case .bindTab:
+            properties = ["candidate_token": uuid]; required = ["candidate_token"]
+            description = "Bind an existing Chrome tab using only a candidate_token observed from computer_v2_tabs in this turn. Requires a native-user-approved connection; this tool cannot grant access. Preserves existing tabs and logins, with no activation, navigation or closing tabs. Then use computer_v2_snapshot and supported computer_v2_ax/computer_v2_set_text actions. Global image, key and pointer paths are unavailable in a borrowed tab; do not fall back to capture/click/keypress/type."
         case .snapshot:
             properties = ["query": ["type": "string", "minLength": 1, "maxLength": 200,
                                     "description": "Optional short literal text (case-insensitive substring), not a question. Searches a larger tree when target/page text is missing/truncated."]]; required = []
-            description = "Read the bound app/tab Accessibility tree; returns snapshot_id and element indices. For missing/truncated text, try a short literal query before scrolling or capturing. If the requested item's fact is absent or its association is uncertain in truncated output, make one literal query for that item before answering; never substitute another item's fact. If the observed facts answer the request, answer and stop. Lines are relevance-ranked, not page order: follow parent through the header parents map (child:parent) to group facts, never adjacency alone. sibling_heading is observed direct-sibling context, not proof of semantic ownership. Container lines may be omitted. Prefer supported AX actions for buttons and links. For a Chrome navigation link without AXPress, follow its exact observed url with computer_v2_open; never reconstruct url_omitted destinations. URL navigation is not an in-page script action. AXPress on a text field only focuses it; it does not submit."
+            description = "Read the bound app/tab Accessibility tree; returns snapshot_id and element indices. For missing/truncated text, try a short literal query before scrolling or capturing. If the requested item's fact is absent or its association is uncertain in truncated output, make one literal query for that item before answering; never substitute another item's fact. If the observed facts answer the request, answer and stop. Lines are relevance-ranked, not page order: follow parent through the header parents map (child:parent) to group facts, never adjacency alone. sibling_heading is observed direct-sibling context, not proof of semantic ownership. Container lines may be omitted. Prefer supported AX actions for buttons and links. For a Chrome navigation link without AXPress, follow its exact observed url with computer_v2_open; never reconstruct url_omitted destinations. URL navigation is not an in-page script action. Use only listed actions. Browser fields with settable=true support computer_v2_set_text directly without focus, even when actions=[]. Only a native text field advertising AXPress supports that focus action; it does not submit."
         case .ax:
             properties = [
                 "snapshot_id": string, "element_index": integer,
                 "ax_action": ["type": "string", "enum": SemanticAXAction.allCases.map(\.rawValue)],
             ]
             required = ["snapshot_id", "element_index", "ax_action"]
-            description = "Act on a current AX snapshot element. AXPress on a text field focuses it, not Enter/submission; use keypress for Enter. Native actions return a fresh AX snapshot when available; use its new snapshot_id. Brokered-tab actions require another snapshot. Verify the outcome. Approval required."
+            description = "Act on a current AX snapshot element using only its listed actions; actions=[] means no AX action. NATIVE_AX scope=bound_window supports background semantic actions, not AXRaise or global input; do not reopen merely because another app is foreground. Only a native text field advertising AXPress supports focus via AXPress; use keypress for Enter when foreground input is available. Browser fields with settable=true use computer_v2_set_text directly without focus. Native actions return a fresh AX snapshot when available; use its new snapshot_id. Brokered-tab actions require another snapshot. Verify the outcome. Approval required."
         case .setText:
             properties = ["snapshot_id": string, "element_index": integer, "text": string]
             required = ["snapshot_id", "element_index", "text"]
-            description = "Set text on a current AX element; does not submit. Native actions return a fresh AX snapshot when available; use its new snapshot_id. Brokered-tab actions require another snapshot. Approval required."
+            description = "Set text on a current AX element with settable=true; does not submit. Browser fields support this directly without first focusing, pressing, clicking or typing, including when actions=[]. Native actions return a fresh AX snapshot when available; use its new snapshot_id. Brokered-tab actions require another snapshot. Approval required."
         case .capture:
             properties = [
                 "display_id": ["type": "integer", "minimum": 1, "maximum": 4_294_967_295,
@@ -455,7 +517,7 @@ enum ComputerV2ToolContract {
                 "shows_cursor": boolean,
                 "include_accessibility": boolean,
             ]; required = []
-            description = "Capture the focused app window for native apps; brokered Chrome tabs fail closed. Returns capture_id and image dimensions. Set include_accessibility=true for synchronized native AX."
+            description = "Capture the focused app window for native apps; brokered Chrome tabs fail closed. Returns capture_id and image dimensions. Set include_accessibility=true for synchronized native AX. When bound with activation=none, returns only a read-only exact-window image with observation_id, no pointer/key capability and no synchronized AX."
         case .groundClick:
             properties = ["capture_id": string, "target": string]
             required = ["capture_id", "target"]

@@ -815,7 +815,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
                 {snapshot.modelOptions.map((option) => <NativeSelectOption key={option.id} value={option.id}>{option.label.split(' · ')[0]}</NativeSelectOption>)}
               </NativeSelect>
             </label>
-            <p className={defaultModel?.highMemory ? 'model-note high-memory' : 'model-note'}>{defaultModel?.detail} Model files must be installed and loaded in LM Studio separately.</p>
+            <p className={defaultModel?.highMemory ? 'model-note high-memory' : 'model-note'}>{defaultModel?.detail}</p>
             <div className="setting-row"><span><strong>Connection</strong><small>{snapshot.connection.label}</small></span><span className={`setting-state ${toneClass(snapshot.connection.tone)}`}><span />{snapshot.connection.state}</span></div>
           </section>
           <section>

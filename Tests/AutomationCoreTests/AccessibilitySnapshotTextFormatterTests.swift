@@ -1543,6 +1543,171 @@ final class AccessibilitySnapshotTextFormatterTests: XCTestCase {
         XCTAssertFalse(formatter.usesCompactElementLines)
     }
 
+    func testTypographicQueryFindsLateNativeConnectionLabelWithoutRewritingEvidence() throws {
+        let label = "Rowan’s Mac mini"
+        let snapshot = makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow")]
+            + (1...24).map { makeElement(index: $0, parentIndex: 0, role: "AXButton", title: "Toolbar \($0)", actions: ["AXPress"]) }
+            + [makeElement(index: 25, parentIndex: 0, role: "AXStaticText", title: label)])
+        for budget in [512, 1_000] {
+            let formatter = AccessibilitySnapshotTextFormatter(
+                elementLimit: 2, fieldCharacterLimit: 72, outputCharacterLimit: budget,
+                prioritizesRelevantElements: true, preferredText: "Rowan's Mac mini", usesCompactElementLines: true
+            )
+            let result = formatter.formatObservation(snapshot)
+            XCTAssertEqual(formattedIndices(in: result.text), [25, 0])
+            XCTAssertEqual(result.exposedElementIndices, [25, 0])
+            XCTAssertEqual(result.snapshotID, snapshot.id)
+            XCTAssertTrue(result.text.contains("label=\"\(label)\""))
+            XCTAssertFalse(result.text.contains("Rowan's"), "Only search keys change, never observed labels")
+            XCTAssertTrue(result.text.contains("source_truncated=0 output_truncated=1"))
+            XCTAssertLessThanOrEqual(result.text.count, budget)
+            XCTAssertEqual(result, formatter.formatObservation(snapshot))
+            XCTAssertFalse(try formattedLine(index: 25, in: result.text).contains("AXPress"))
+        }
+    }
+
+    func testQueryNormalizationSupportsQuotesCaseCanonicalAccentsAndWhitespaceInReadableFields() throws {
+        let pairs = [
+            ("Rowan’s Desk", "Rowan's Desk"), ("Rowan's Desk", "Rowan‘s Desk"),
+            ("Project “Amber”", "Project \"Amber\""), ("Project \"Amber\"", "Project “Amber”"),
+            ("CAFÉ’s Desk", "cafe\u{301}'s desk"), ("ΔΕΛΤΑ’s Desk", "δελτα's desk"),
+            ("Desk\u{00A0}View", "Desk View"), ("Desk\u{202F}View", "Desk  View"),
+            ("Desk\t\n\r  View", "Desk View"), ("Desk View", "  Desk\u{2003}\tView  "),
+        ]
+        for (text, query) in pairs {
+            for field in 0..<4 {
+                let target = makeElement(index: 2, parentIndex: 0, role: "AXStaticText",
+                    title: field == 0 ? text : nil, value: field == 3 ? text : nil,
+                    elementDescription: field == 1 ? text : nil, help: field == 2 ? text : nil)
+                let snapshot = makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow"),
+                    makeElement(index: 1, parentIndex: 0, role: "AXButton", title: "Unrelated", actions: ["AXPress"]), target])
+                let observation = AccessibilitySnapshotTextFormatter(
+                    elementLimit: 1, outputCharacterLimit: 1_000, prioritizesRelevantElements: true,
+                    preferredText: query, usesCompactElementLines: true
+                ).formatObservation(snapshot)
+                XCTAssertEqual(observation.exposedElementIndices, [2], "field=\(field), query=\(query)")
+                XCTAssertEqual(formattedIndices(in: observation.text), [2])
+                let unchanged = AccessibilitySnapshotTextFormatter(
+                    elementLimit: 3, outputCharacterLimit: 1_000, usesCompactElementLines: true
+                ).format(snapshot)
+                XCTAssertEqual(Array(try formattedLine(index: 2, in: observation.text).utf8),
+                               Array(try formattedLine(index: 2, in: unchanged).utf8))
+            }
+        }
+    }
+
+    func testQueryNormalizationDoesNotStripAccentsConfusablesFormatCharactersOrOtherPunctuation() {
+        let pairs = [
+            ("Café’s Desk", "Cafe's Desk"), ("Rоwan’s Desk", "Rowan's Desk"), // Cyrillic o.
+            ("Ro\u{200B}wan’s Desk", "Rowan's Desk"), ("Ro\u{200D}wan’s Desk", "Rowan's Desk"),
+            ("Rowan’s Desk", "Rowans Desk"), ("Rowan—Desk", "Rowan-Desk"),
+            ("Rowan＇s Desk", "Rowan's Desk"), ("Desk Rowan’s", "Rowan's Desk"),
+            ("Rowan’s Desktop", "Rowan's laptop"), ("Rowan’s Desk", "\u{200B}"),
+            ("Rowan’s Desk", "\u{00A0}\t\n"),
+        ]
+        for (text, query) in pairs {
+            let snapshot = makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow"),
+                makeElement(index: 2, parentIndex: 0, role: "AXStaticText", title: text)])
+            let observation = AccessibilitySnapshotTextFormatter(
+                elementLimit: 1, prioritizesRelevantElements: true, preferredText: query, usesCompactElementLines: true
+            ).formatObservation(snapshot)
+            XCTAssertEqual(observation.exposedElementIndices, [0], "query=\(query), text=\(text)")
+        }
+    }
+
+    func testNormalizedQueryNeverMatchesAcrossFieldsOrNormalizesMachineIdentifiers() {
+        let text = "Rowan’s Desk"
+        let targets = [
+            makeElement(index: 2, parentIndex: 0, role: "AXStaticText", title: "Rowan’s", value: "Desk"),
+            makeElement(index: 2, parentIndex: 0, role: "AXStaticText", identifier: text),
+            makeElement(index: 2, parentIndex: 0, role: "AXStaticText", domIdentifier: text),
+            makeElement(index: 2, parentIndex: 0, role: text),
+            makeElement(index: 2, parentIndex: 0, role: "AXStaticText", subrole: text),
+            makeElement(index: 2, parentIndex: 0, role: "AXLink", url: "https://example.test/Rowan’s Desk"),
+        ]
+        for target in targets {
+            let result = AccessibilitySnapshotTextFormatter(
+                elementLimit: 1, prioritizesRelevantElements: true, preferredText: "Rowan's Desk", usesCompactElementLines: true
+            ).formatObservation(makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow"), target]))
+            XCTAssertEqual(result.exposedElementIndices, [0])
+        }
+    }
+
+    func testLiteralQueryMatchAnywhereInBoundedSourceSuppressesNormalizedFallback() {
+        for exactInIdentifier in [false, true] {
+            let snapshot = makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow"),
+                makeElement(index: 1, parentIndex: 0, role: "AXButton", title: "Rowan’s Desk", actions: ["AXPress"]),
+                makeElement(index: 149, parentIndex: 0, role: "AXStaticText",
+                    title: exactInIdentifier ? nil : "Rowan's Desk", identifier: exactInIdentifier ? "Rowan's Desk" : nil)])
+            let result = AccessibilitySnapshotTextFormatter(
+                elementLimit: 1, outputCharacterLimit: 512, prioritizesRelevantElements: true,
+                preferredText: "Rowan's Desk", usesCompactElementLines: true
+            ).formatObservation(snapshot)
+            XCTAssertEqual(result.exposedElementIndices, [149])
+            XCTAssertFalse(result.text.contains("#1 role="))
+        }
+    }
+
+    func testNormalizedVariantsRemainSeparateObservedTargetsAndDuplicateIDsStayUnexposed() {
+        let formatter = AccessibilitySnapshotTextFormatter(
+            elementLimit: 2, outputCharacterLimit: 1_000, prioritizesRelevantElements: true,
+            preferredText: "Rowan's Desk", usesCompactElementLines: true)
+        let variants = makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow"),
+            makeElement(index: 1, parentIndex: 0, role: "AXStaticText", title: "Rowan’s Desk"),
+            makeElement(index: 2, parentIndex: 0, role: "AXStaticText", title: "Rowan‘s Desk")])
+        let result = formatter.formatObservation(variants)
+        XCTAssertEqual(result.exposedElementIndices, [1, 2])
+        XCTAssertTrue(result.text.contains("Rowan’s Desk"))
+        XCTAssertTrue(result.text.contains("Rowan‘s Desk"))
+        let duplicate = makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow"),
+            makeElement(index: 3, parentIndex: 0, role: "AXStaticText", title: "Rowan’s Desk"),
+            makeElement(index: 3, parentIndex: 0, role: "AXButton", title: "Other action", actions: ["AXPress"])])
+        let duplicateResult = formatter.formatObservation(duplicate)
+        XCTAssertFalse(duplicateResult.exposedElementIndices.contains(3))
+        XCTAssertTrue(duplicateResult.text.contains("#3 role=\"AXStaticText\""))
+        XCTAssertFalse(duplicateResult.text.contains("Other action"), "A match cannot transfer through duplicate indices")
+    }
+
+    func testNormalizedQueryPreservesBoundedSourceAndTruncation() {
+        let snapshot = makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow"),
+            makeElement(index: 1, parentIndex: 0, role: "AXStaticText", title: "Rowan’s Desk")]
+            + (2..<2_000).map { makeElement(index: $0, parentIndex: 0, role: "AXGroup") }
+            + [makeElement(index: 2_000, parentIndex: 0, role: "AXStaticText", title: "Rowan's Desk")], wasTruncated: true)
+        let formatter = AccessibilitySnapshotTextFormatter(
+            elementLimit: 1, outputCharacterLimit: 512, prioritizesRelevantElements: true,
+            preferredText: "Rowan's Desk", usesCompactElementLines: true)
+        let result = formatter.formatObservation(snapshot)
+        XCTAssertEqual(result.exposedElementIndices, [1])
+        XCTAssertTrue(result.text.contains("source_truncated=1 output_truncated=1"))
+        XCTAssertLessThanOrEqual(result.text.count, 512)
+        let absent = formatter.formatObservation(makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow")], wasTruncated: true))
+        XCTAssertEqual(absent.exposedElementIndices, [0])
+        XCTAssertFalse(absent.text.contains("Rowan"))
+        XCTAssertTrue(absent.text.contains("source_truncated=1"))
+    }
+
+    func testNormalizedHeadingQueryKeepsOnlyValidatedDirectSiblingContext() {
+        let snapshot = makeSnapshot(elements: [
+            makeElement(index: 0, role: "AXWindow"), makeElement(index: 1, parentIndex: 0, role: "AXWebArea"),
+            makeElement(index: 2, parentIndex: 1, role: "AXGroup"),
+            makeElement(index: 3, parentIndex: 2, role: "AXHeading", title: "Rowan’s Desk"),
+            makeElement(index: 4, parentIndex: 2, role: "AXStaticText", value: "Ready"),
+            makeElement(index: 5, parentIndex: 2, role: "AXButton", title: "Inspect", actions: ["AXPress"]),
+            makeElement(index: 6, parentIndex: 1, role: "AXGroup"),
+            makeElement(index: 7, parentIndex: 6, role: "AXHeading", title: "Different desk"),
+            makeElement(index: 8, parentIndex: 6, role: "AXStaticText", value: "Unavailable"),
+        ])
+        let result = AccessibilitySnapshotTextFormatter(
+            elementLimit: 4, outputCharacterLimit: 1_000, prioritizesRelevantElements: true,
+            preferredText: "Rowan's Desk", usesCompactElementLines: true
+        ).formatObservation(snapshot)
+        XCTAssertEqual(formattedIndices(in: result.text), [3, 0, 4, 5])
+        XCTAssertEqual(result.exposedElementIndices, [3, 0, 4, 5])
+        XCTAssertFalse(result.text.contains("Unavailable"))
+        XCTAssertFalse(result.exposedElementIndices.contains(2), "Context-only parent indices are not action targets")
+        XCTAssertEqual(result.snapshotID, snapshot.id)
+    }
+
     private func makeSnapshot(
         id: UUID = UUID(),
         elements: [AccessibilityTreeElement],
@@ -1654,7 +1819,11 @@ final class AccessibilitySnapshotTextFormatterTests: XCTestCase {
         isFocused: Bool? = nil,
         actions: [String] = [],
         isValueSettable: Bool = false,
-        url: String? = nil
+        url: String? = nil,
+        elementDescription: String? = nil,
+        help: String? = nil,
+        identifier: String? = nil,
+        domIdentifier: String? = nil
     ) -> AccessibilityTreeElement {
         AccessibilityTreeElement(
             index: index,
@@ -1664,10 +1833,10 @@ final class AccessibilitySnapshotTextFormatterTests: XCTestCase {
             role: role,
             subrole: subrole,
             title: title,
-            elementDescription: nil,
-            help: nil,
-            identifier: nil,
-            domIdentifier: nil,
+            elementDescription: elementDescription,
+            help: help,
+            identifier: identifier,
+            domIdentifier: domIdentifier,
             value: value,
             frame: frame,
             isEnabled: isEnabled,

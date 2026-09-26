@@ -102,6 +102,13 @@ public final class FocusedWindowIdentity: @unchecked Sendable {
         }
         return CFEqual(focusedUIElement, currentFocusedUIElement)
     }
+
+    /// Internal identity bridge only. This does not validate current global
+    /// focus; callers must still use the unchanged input guards above.
+    @MainActor
+    func representsWindow(processIdentifier: Int32, window: AXUIElement) -> Bool {
+        self.processIdentifier == processIdentifier && CFEqual(self.window, window)
+    }
 }
 
 struct FocusedWindowElements {

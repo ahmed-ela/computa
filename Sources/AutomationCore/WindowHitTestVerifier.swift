@@ -7,10 +7,62 @@ import Foundation
 struct WindowHitTestDescriptor: Sendable {
     let windowID: CGWindowID?
     let frame: WindowFrame?
+    let ownerName: String?
+    let ownerPID: Int32?
 
-    init(windowID: CGWindowID?, frame: WindowFrame?) {
+    init(
+        windowID: CGWindowID?,
+        frame: WindowFrame?,
+        ownerName: String? = nil,
+        ownerPID: Int32? = nil
+    ) {
         self.windowID = windowID
         self.frame = frame
+        self.ownerName = WindowHitTestOwnerDiagnostic.sanitizeName(ownerName)
+        self.ownerPID = ownerPID.flatMap { $0 > 0 ? $0 : nil }
+    }
+}
+
+/// Observed process metadata is untrusted diagnostic text, never an input to
+/// hit-testing or authorization. Do not include window titles here.
+private enum WindowHitTestOwnerDiagnostic {
+    static func sanitizeName(_ name: String?) -> String? {
+        guard let name else { return nil }
+        var sanitized = String.UnicodeScalarView()
+        // Bound both input inspection and output, including combining marks.
+        for scalar in name.unicodeScalars.prefix(1_024) {
+            let isControl: Bool
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator:
+                isControl = true
+            default:
+                isControl = false
+            }
+            if isControl || scalar.properties.isWhitespace {
+                if !sanitized.isEmpty, sanitized.last != " " {
+                    sanitized.append(" ")
+                }
+            } else {
+                sanitized.append(scalar)
+            }
+            if sanitized.count >= 80 { break }
+        }
+        let result = String(sanitized).trimmingCharacters(in: .whitespaces)
+        return result.isEmpty ? nil : result
+    }
+
+    static func pid(_ value: Any?) -> Int32? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let value = number.doubleValue
+        guard value.isFinite, value > 0, value <= Double(Int32.max),
+              value.rounded(.towardZero) == value else { return nil }
+        return Int32(value)
+    }
+
+    static func quotedName(_ name: String) -> String {
+        guard let encoded = try? JSONEncoder().encode(name) else { return "\"unavailable\"" }
+        return String(decoding: encoded, as: UTF8.self)
     }
 }
 
@@ -23,6 +75,7 @@ public enum WindowHitTestError: Error, Equatable, LocalizedError, Sendable {
     case pointOutsideExpectedWindow(CGWindowID)
     case frontWindowGeometryUnavailable
     case obscuredByWindow(CGWindowID?)
+    case obscuredByWindowOwner(windowID: CGWindowID?, ownerName: String?, ownerPID: Int32?)
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +98,18 @@ public enum WindowHitTestError: Error, Equatable, LocalizedError, Sendable {
                 return "On-screen window \(windowID) is above the target at the action point or path."
             }
             return "An unidentified on-screen window is above the target at the action point or path."
+        case let .obscuredByWindowOwner(windowID, ownerName, ownerPID):
+            let base = Self.obscuredByWindow(windowID).localizedDescription
+            var details: [String] = []
+            // Sanitize here too: callers can construct this public error directly.
+            if let name = WindowHitTestOwnerDiagnostic.sanitizeName(ownerName) {
+                details.append("name=\(WindowHitTestOwnerDiagnostic.quotedName(name))")
+            }
+            if let ownerPID, ownerPID > 0 {
+                details.append("pid=\(ownerPID)")
+            }
+            guard !details.isEmpty else { return base }
+            return "\(base) Observed owner metadata (diagnostic only): \(details.joined(separator: ", ")). The action was not sent."
         }
     }
 }
@@ -90,6 +155,13 @@ enum WindowHitTestReducer {
                     continue
                 }
                 if pathIntersects(points, frame: frontFrame) {
+                    if frontWindow.ownerName != nil || frontWindow.ownerPID != nil {
+                        throw WindowHitTestError.obscuredByWindowOwner(
+                            windowID: frontWindow.windowID,
+                            ownerName: frontWindow.ownerName,
+                            ownerPID: frontWindow.ownerPID
+                        )
+                    }
                     throw WindowHitTestError.obscuredByWindow(frontWindow.windowID)
                 }
             }
@@ -186,7 +258,7 @@ public final class WindowHitTestVerifier {
         )
     }
 
-    private static func describe(_ values: [String: Any]) -> WindowHitTestDescriptor {
+    nonisolated static func describe(_ values: [String: Any]) -> WindowHitTestDescriptor {
         let windowID = (values[kCGWindowNumber as String] as? NSNumber).map {
             CGWindowID(truncating: $0)
         }
@@ -202,6 +274,11 @@ public final class WindowHitTestVerifier {
         } else {
             frame = nil
         }
-        return WindowHitTestDescriptor(windowID: windowID, frame: frame)
+        return WindowHitTestDescriptor(
+            windowID: windowID,
+            frame: frame,
+            ownerName: values[kCGWindowOwnerName as String] as? String,
+            ownerPID: WindowHitTestOwnerDiagnostic.pid(values[kCGWindowOwnerPID as String])
+        )
     }
 }

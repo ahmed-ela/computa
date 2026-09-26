@@ -358,6 +358,18 @@ final class RuntimeContextContractTests: XCTestCase {
         XCTAssertNil(config["compact_prompt"])
     }
 
+    func testNineBInheritsOnlyTheSharedComputerUseContextProfile() {
+        let fourB = CodexAppServerRuntime.localThreadConfig(for: "lmstudio-community/Qwen3.5-4B-MLX-4bit")
+        let nineB = CodexAppServerRuntime.localThreadConfig(for: "lmstudio-community/Qwen3.5-9B-MLX-4bit")
+        XCTAssertEqual(NSDictionary(dictionary: nineB), NSDictionary(dictionary: fourB))
+        XCTAssertEqual(nineB["model_context_window"] as? Int, 16_384)
+        XCTAssertEqual(nineB["model_auto_compact_token_limit"] as? Int, 12_288)
+        XCTAssertEqual(nineB["features.shell_tool"] as? Bool, false)
+        XCTAssertEqual(nineB["features.unified_exec"] as? Bool, false)
+        XCTAssertEqual(nineB["web_search"] as? String, "disabled")
+        XCTAssertNil(nineB["compact_prompt"])
+    }
+
     func testIsolatedFixtureOverrideCannotDisableOrExceedContextWindow() {
         let model = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
         let context = LocalThreadContext.forModel(model)

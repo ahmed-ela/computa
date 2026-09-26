@@ -1,0 +1,808 @@
+diff --git a/Sources/AutomationCore/AccessibilitySession.swift b/Sources/AutomationCore/AccessibilitySession.swift
+index 9b79210..0b28a3b 100644
+--- a/Sources/AutomationCore/AccessibilitySession.swift
++++ b/Sources/AutomationCore/AccessibilitySession.swift
+@@ -1009,6 +1009,46 @@ public final class AccessibilitySession {
+         try setValue(value, at: refreshed.index, in: refreshed.snapshot)
+     }
+ 
++    /// Retains one exact native AX target for a separately approved pointer
++    /// click. This does not infer AXPress support, rebind by label/identifier,
++    /// post input, or grant access to an index omitted from model output (the
++    /// caller must enforce its exposed-index scope). The immutable token may
++    /// cross actors; this mutable session may not. Revalidate the token at
++    /// dispatch, invalidate the session on every attempted mutation, and
++    /// obtain a fresh post-action observation before any subsequent action.
++    public func preparePointerTarget(
++        at index: Int,
++        in snapshot: AccessibilityTreeSnapshot
++    ) throws -> AccessibilityPointerTarget {
++        try AccessibilityPointerTarget(evidence: pointerTargetEvidence(at: index, in: snapshot))
++    }
++
++    func pointerTargetEvidence(
++        at index: Int,
++        in snapshot: AccessibilityTreeSnapshot
++    ) throws -> AccessibilityPointerTargetEvidence {
++        try requirePermission()
++        let target = try resolve(index: index, snapshot: snapshot)
++        guard let rootIndex = snapshot.rootIndex, rootIndex != index else {
++            throw AccessibilityPointerTargetError.unverifiedHitTarget
++        }
++        let window = try resolve(index: rootIndex, snapshot: snapshot)
++        guard window.element.role == kAXWindowRole as String,
++              target.element.role != kAXWindowRole as String,
++              target.element.role != kAXApplicationRole as String else {
++            throw AccessibilityPointerTargetError.unverifiedHitTarget
++        }
++        return AccessibilityPointerTargetEvidence(
++            snapshotID: snapshot.id,
++            processIdentifier: application.processIdentifier,
++            observedTarget: target.element,
++            observedWindow: window.element,
++            target: target.handle,
++            window: window.handle,
++            limits: target.limits
++        )
++    }
++
+     /// Chromium can report success for a detached web node, so mutations must
+     /// not use a cached child handle after native approval. Prefer exact AX
+     /// identity in the fresh tree. If Chromium rebuilt the node, permit a
+diff --git a/Sources/AutomationCore/AccessibilityPointerTarget.swift b/Sources/AutomationCore/AccessibilityPointerTarget.swift
+new file mode 100644
+index 0000000..f5cd15f
+--- /dev/null
++++ b/Sources/AutomationCore/AccessibilityPointerTarget.swift
+@@ -0,0 +1,352 @@
++import ApplicationServices
++import Foundation
++
++/// An immutable approval capability containing only retained native AX
++/// identities and value-type observation metadata. No mutable session or
++/// backend crosses actors. AX elements are opaque CF references; every AX
++/// read through this token is isolated to MainActor below. The references do
++/// not assert that the live UI is immutable: each dispatch revalidates it.
++public final class AccessibilityPointerTarget: @unchecked Sendable {
++    public let snapshotID: UUID
++    public let elementIndex: Int
++    public let processIdentifier: Int32
++    public let observedWindowFrame: WindowFrame
++
++    private let target: AXUIElement
++    private let window: AXUIElement
++    private let observedTarget: AccessibilityTreeElement
++    private let observedWindow: AccessibilityTreeElement
++    private let limits: AccessibilityTreeLimits
++
++    init(evidence: AccessibilityPointerTargetEvidence) throws {
++        guard CFGetTypeID(evidence.target.storage) == AXUIElementGetTypeID(),
++              CFGetTypeID(evidence.window.storage) == AXUIElementGetTypeID() else {
++            throw AccessibilityPointerTargetError.unavailable
++        }
++        _ = try AccessibilityPointerTargetValidator.point(
++            target: evidence.observedTarget.frame, window: evidence.observedWindow.frame
++        )
++        guard let frame = evidence.observedWindow.frame else {
++            throw AccessibilityPointerTargetError.invalidFrame
++        }
++        snapshotID = evidence.snapshotID
++        elementIndex = evidence.observedTarget.index
++        processIdentifier = evidence.processIdentifier
++        observedWindowFrame = frame
++        target = unsafeDowncast(evidence.target.storage, to: AXUIElement.self)
++        window = unsafeDowncast(evidence.window.storage, to: AXUIElement.self)
++        observedTarget = evidence.observedTarget
++        observedWindow = evidence.observedWindow
++        limits = evidence.limits
++    }
++
++    /// Returns an ephemeral screen-point target, never image coordinates.
++    /// The caller must also validate the task/approval epoch and window
++    /// z-order, then repeat this method immediately adjacent to its single
++    /// synchronous pointer dispatch. Do not retain a returned point across
++    /// an await or treat successful validation as action completion.
++    @MainActor
++    public func validatedPoint() throws -> ScreenPoint {
++        guard AXIsProcessTrusted() else {
++            throw AutomationError.permissionNotGranted(.accessibility)
++        }
++        let runtime = SystemAccessibilityTreeRuntime()
++        return try AccessibilityPointerTargetValidator.validate(
++            AccessibilityPointerTargetEvidence(
++                snapshotID: snapshotID,
++                processIdentifier: processIdentifier,
++                observedTarget: observedTarget,
++                observedWindow: observedWindow,
++                target: AccessibilityElementHandle(target),
++                window: AccessibilityElementHandle(window),
++                limits: limits
++            ),
++            runtime: runtime,
++            pointerRuntime: runtime
++        )
++    }
++}
++
++/// Internal, non-Sendable test boundary. Production tokens copy only the two
++/// verified native handles and immutable values, never this backend evidence.
++struct AccessibilityPointerTargetEvidence {
++    let snapshotID: UUID
++    let processIdentifier: Int32
++    let observedTarget: AccessibilityTreeElement
++    let observedWindow: AccessibilityTreeElement
++    let target: AccessibilityElementHandle
++    let window: AccessibilityElementHandle
++    let limits: AccessibilityTreeLimits
++}
++
++public enum AccessibilityPointerTargetError: Error, Equatable, LocalizedError, Sendable {
++    case unavailable
++    case invalidFrame
++    case changedTarget
++    case wrongWindow
++    case wrongProcess
++    case unverifiedHitTarget
++    case interactiveDescendant
++    case invalidAncestry
++
++    public var errorDescription: String? {
++        switch self {
++        case .unavailable:
++            return "Native Accessibility pointer target verification is unavailable. No input was sent."
++        case .invalidFrame:
++            return "The Accessibility target has no finite, positive frame contained in its window. No input was sent."
++        case .changedTarget:
++            return "The Accessibility target changed since observation. Observe again before clicking."
++        case .wrongWindow:
++            return "The original Accessibility window is not the focused target window. No input was sent."
++        case .wrongProcess:
++            return "The native hit target belongs to a different process. No input was sent."
++        case .unverifiedHitTarget:
++            return "The native hit target is not the observed element or its verified presentation descendant. No input was sent."
++        case .interactiveDescendant:
++            return "The native hit target contains an independently interactive descendant. Observe that target directly."
++        case .invalidAncestry:
++            return "The native hit target's bounded ancestry could not verify the original element and window. No input was sent."
++        }
++    }
++}
++
++/// Kept separate from descriptive AX reads: an unsupported backend must not
++/// accidentally inherit a permissive default for pointer target verification.
++protocol AccessibilityPointerRuntime {
++    func systemElement(at point: ScreenPoint) throws -> AccessibilityElementHandle?
++    func parent(of element: AccessibilityElementHandle) throws -> AccessibilityElementHandle?
++    func processIdentifier(of element: AccessibilityElementHandle) throws -> Int32
++    func pointerRole(of element: AccessibilityElementHandle) throws -> String
++    func hasNoninteractivePointerCapabilities(_ element: AccessibilityElementHandle) throws -> Bool
++}
++
++extension SystemAccessibilityTreeRuntime: AccessibilityPointerRuntime {
++    func systemElement(at point: ScreenPoint) throws -> AccessibilityElementHandle? {
++        var result: AXUIElement?
++        let status = AXUIElementCopyElementAtPosition(
++            AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &result
++        )
++        guard status == .success else {
++            throw AutomationError.accessibilityFailure(operation: "hit-test AX element", code: status.rawValue)
++        }
++        return result.map { AccessibilityElementHandle($0) }
++    }
++
++    func parent(of element: AccessibilityElementHandle) throws -> AccessibilityElementHandle? {
++        var result: CFTypeRef?
++        let status = AXUIElementCopyAttributeValue(
++            try pointerAXElement(element), kAXParentAttribute as CFString, &result
++        )
++        guard status == .success else {
++            throw AutomationError.accessibilityFailure(operation: "read hit-target AXParent", code: status.rawValue)
++        }
++        guard let result, CFGetTypeID(result) == AXUIElementGetTypeID() else {
++            throw AccessibilityPointerTargetError.invalidAncestry
++        }
++        return AccessibilityElementHandle(result as AnyObject)
++    }
++
++    func processIdentifier(of element: AccessibilityElementHandle) throws -> Int32 {
++        var pid: pid_t = 0
++        let status = AXUIElementGetPid(try pointerAXElement(element), &pid)
++        guard status == .success, pid > 0 else {
++            throw AccessibilityPointerTargetError.wrongProcess
++        }
++        return pid
++    }
++
++    func pointerRole(of element: AccessibilityElementHandle) throws -> String {
++        var result: CFTypeRef?
++        let status = AXUIElementCopyAttributeValue(
++            try pointerAXElement(element), kAXRoleAttribute as CFString, &result
++        )
++        guard status == .success, let role = result as? String, !role.isEmpty,
++              role.utf8.count <= 128 else {
++            throw AccessibilityPointerTargetError.invalidAncestry
++        }
++        return role
++    }
++
++    func hasNoninteractivePointerCapabilities(_ element: AccessibilityElementHandle) throws -> Bool {
++        let native = try pointerAXElement(element)
++        var actions: CFArray?
++        let actionStatus = AXUIElementCopyActionNames(native, &actions)
++        // A failed capability query is unknown, not proof of noninteractivity.
++        guard actionStatus == .success, let actions,
++              let names = actions as? [String] else {
++            throw AccessibilityPointerTargetError.unverifiedHitTarget
++        }
++        var valueSettable = DarwinBoolean(false)
++        let valueStatus = AXUIElementIsAttributeSettable(native, kAXValueAttribute as CFString, &valueSettable)
++        guard valueStatus == .success else {
++            throw AccessibilityPointerTargetError.unverifiedHitTarget
++        }
++        return names.isEmpty && !valueSettable.boolValue
++    }
++
++    private func pointerAXElement(_ element: AccessibilityElementHandle) throws -> AXUIElement {
++        guard CFGetTypeID(element.storage) == AXUIElementGetTypeID() else {
++            throw AutomationError.unexpectedAttributeType(attribute: "AXUIElement")
++        }
++        return unsafeDowncast(element.storage, to: AXUIElement.self)
++    }
++}
++
++enum AccessibilityPointerTargetValidator {
++    static let maximumAncestorCount = 32
++
++    static func validate(
++        _ evidence: AccessibilityPointerTargetEvidence,
++        runtime: any AccessibilityTreeRuntime,
++        pointerRuntime: any AccessibilityPointerRuntime
++    ) throws -> ScreenPoint {
++        guard evidence.observedWindow.role == "AXWindow",
++              !runtime.representsSameElement(evidence.target, evidence.window),
++              evidence.observedTarget.role != "AXWindow",
++              evidence.observedTarget.role != "AXApplication" else {
++            throw AccessibilityPointerTargetError.unverifiedHitTarget
++        }
++        try requireFocusedWindow(evidence, runtime: runtime)
++        guard try pointerRuntime.processIdentifier(of: evidence.window) == evidence.processIdentifier,
++              try pointerRuntime.processIdentifier(of: evidence.target) == evidence.processIdentifier else {
++            throw AccessibilityPointerTargetError.wrongProcess
++        }
++        let window = try runtime.describe(evidence.window, limits: evidence.limits)
++        let target = try runtime.describe(evidence.target, limits: evidence.limits)
++        guard window.role == "AXWindow", window.frame == evidence.observedWindow.frame else {
++            throw AccessibilityPointerTargetError.wrongWindow
++        }
++        guard sameSemantics(target, as: evidence.observedTarget) else {
++            throw AccessibilityPointerTargetError.changedTarget
++        }
++        let point = try point(target: target.frame, window: window.frame)
++        try verifyHit(
++            point: point, target: evidence.target, window: evidence.window,
++            processIdentifier: evidence.processIdentifier, limits: evidence.limits,
++            runtime: runtime, pointerRuntime: pointerRuntime
++        )
++        // Detect changes occurring during native hit-test/ancestry reads.
++        let finalTarget = try runtime.describe(evidence.target, limits: evidence.limits)
++        guard sameSemantics(finalTarget, as: evidence.observedTarget), finalTarget.frame == target.frame else {
++            throw AccessibilityPointerTargetError.changedTarget
++        }
++        let finalWindow = try runtime.describe(evidence.window, limits: evidence.limits)
++        guard finalWindow.role == "AXWindow", finalWindow.frame == window.frame else {
++            throw AccessibilityPointerTargetError.wrongWindow
++        }
++        try requireFocusedWindow(evidence, runtime: runtime)
++        return point
++    }
++
++    private static func requireFocusedWindow(
++        _ evidence: AccessibilityPointerTargetEvidence,
++        runtime: any AccessibilityTreeRuntime
++    ) throws {
++        guard try runtime.applicationIsFrontmost(processIdentifier: evidence.processIdentifier),
++              let focused = try runtime.focusedWindow(processIdentifier: evidence.processIdentifier),
++              runtime.representsSameElement(focused, evidence.window) else {
++            throw AccessibilityPointerTargetError.wrongWindow
++        }
++    }
++
++    static func point(target: WindowFrame?, window: WindowFrame?) throws -> ScreenPoint {
++        guard let target, let window, valid(target), valid(window),
++              target.x >= window.x, target.y >= window.y,
++              target.x + target.width <= window.x + window.width,
++              target.y + target.height <= window.y + window.height else {
++            throw AccessibilityPointerTargetError.invalidFrame
++        }
++        // AX hit-testing takes Float coordinates. Dispatch the exact same
++        // representable point, not a Double point on the other side of an edge.
++        let point = ScreenPoint(
++            x: Double(Float(target.x + target.width / 2)),
++            y: Double(Float(target.y + target.height / 2))
++        )
++        guard point.x.isFinite, point.y.isFinite,
++              contains(point, in: target), contains(point, in: window) else {
++            throw AccessibilityPointerTargetError.invalidFrame
++        }
++        return point
++    }
++
++    static func verifyHit(
++        point: ScreenPoint,
++        target: AccessibilityElementHandle,
++        window: AccessibilityElementHandle,
++        processIdentifier: Int32,
++        limits: AccessibilityTreeLimits,
++        runtime: any AccessibilityTreeRuntime,
++        pointerRuntime: any AccessibilityPointerRuntime
++    ) throws {
++        guard let hit = try pointerRuntime.systemElement(at: point) else {
++            throw AccessibilityPointerTargetError.unverifiedHitTarget
++        }
++        var current = hit
++        var visited = [AccessibilityElementHandle]()
++        var reachedTarget = false
++        for _ in 0 ..< maximumAncestorCount {
++            guard !visited.contains(where: { runtime.representsSameElement($0, current) }) else {
++                throw AccessibilityPointerTargetError.invalidAncestry
++            }
++            visited.append(current)
++            guard try pointerRuntime.processIdentifier(of: current) == processIdentifier else {
++                throw AccessibilityPointerTargetError.wrongProcess
++            }
++            if runtime.representsSameElement(current, target) {
++                reachedTarget = true
++            }
++            if runtime.representsSameElement(current, window) {
++                guard reachedTarget else { throw AccessibilityPointerTargetError.unverifiedHitTarget }
++                return
++            }
++            let role = try pointerRuntime.pointerRole(of: current)
++            guard role != "AXWindow", role != "AXApplication" else {
++                throw AccessibilityPointerTargetError.wrongWindow
++            }
++            if !reachedTarget {
++                // Labels and images may be presentation children of a button
++                // or row. An arbitrary group/control is not such evidence.
++                let description = try runtime.describe(current, limits: limits)
++                guard ["AXStaticText", "AXImage"].contains(description.role ?? ""),
++                      description.role == role,
++                      !description.wasTruncated,
++                      description.supportedActions.isEmpty,
++                      !description.isValueSettable,
++                      description.url == nil, description.urlIdentity == nil,
++                      try pointerRuntime.hasNoninteractivePointerCapabilities(current) else {
++                    throw AccessibilityPointerTargetError.interactiveDescendant
++                }
++            }
++            guard let parent = try pointerRuntime.parent(of: current) else {
++                throw AccessibilityPointerTargetError.invalidAncestry
++            }
++            current = parent
++        }
++        throw AccessibilityPointerTargetError.invalidAncestry
++    }
++
++    static func sameSemantics(_ current: AccessibilityElementDescription, as observed: AccessibilityTreeElement) -> Bool {
++        !current.wasTruncated
++            && current.role == observed.role && current.subrole == observed.subrole
++            && current.title == observed.title && current.elementDescription == observed.elementDescription
++            && current.help == observed.help && current.value == observed.value
++            && current.identifier == observed.identifier && current.domIdentifier == observed.domIdentifier
++            && current.url == observed.url && current.urlIdentity == observed.urlIdentity
++            && current.urlIdentity != .unverifiable && observed.urlIdentity != .unverifiable
++            && current.isEnabled == observed.isEnabled && current.isEnabled != false
++            && Set(current.supportedActions) == Set(observed.supportedActions)
++            && current.isValueSettable == observed.isValueSettable
++    }
++
++    private static func valid(_ frame: WindowFrame) -> Bool {
++        frame.x.isFinite && frame.y.isFinite && frame.width.isFinite && frame.height.isFinite
++            && frame.width > 0 && frame.height > 0
++            && (frame.x + frame.width).isFinite && (frame.y + frame.height).isFinite
++    }
++
++    private static func contains(_ point: ScreenPoint, in frame: WindowFrame) -> Bool {
++        point.x >= frame.x && point.y >= frame.y
++            && point.x < frame.x + frame.width && point.y < frame.y + frame.height
++    }
++}
+diff --git a/Tests/AutomationCoreTests/AccessibilityPointerTargetTests.swift b/Tests/AutomationCoreTests/AccessibilityPointerTargetTests.swift
+new file mode 100644
+index 0000000..fa29ec7
+--- /dev/null
++++ b/Tests/AutomationCoreTests/AccessibilityPointerTargetTests.swift
+@@ -0,0 +1,392 @@
++import Foundation
++import XCTest
++@testable import AutomationCore
++
++private final class PointerTestNode: NSObject {
++    var role: String
++    var title: String? = "Observed target"
++    var value: String?
++    var identifier: String? = "stable-id"
++    var url: String?
++    var urlIdentity: AccessibilityLinkDestinationIdentity?
++    var frame: WindowFrame?
++    var enabled: Bool? = true
++    var actions = [String]()
++    var settable = false
++    var truncated = false
++    var pid: Int32 = 42
++    weak var parent: PointerTestNode?
++    var children = [PointerTestNode]()
++
++    init(role: String = "AXStaticText", frame: WindowFrame? = WindowFrame(x: 100, y: 100, width: 200, height: 40)) {
++        self.role = role
++        self.frame = frame
++    }
++
++    func add(_ child: PointerTestNode) {
++        children.append(child)
++        child.parent = self
++    }
++}
++
++private final class PointerTestRuntime: AccessibilityTreeRuntime, AccessibilityPointerRuntime {
++    let window: PointerTestNode
++    var focused: PointerTestNode?
++    var frontmost = true
++    var hit: PointerTestNode?
++    var capabilityError = false
++    var descriptionError = false
++    var beforeHit: (() -> Void)?
++    var beforeParent: ((PointerTestNode) -> Void)?
++    var hitPoints = [ScreenPoint]()
++    var parentReads = 0
++    var applicationReads = 0
++    var mutationCount = 0
++
++    init(window: PointerTestNode, hit: PointerTestNode) {
++        self.window = window
++        self.focused = window
++        self.hit = hit
++    }
++
++    func node(_ handle: AccessibilityElementHandle) -> PointerTestNode {
++        handle.storage as! PointerTestNode
++    }
++
++    func applicationElement(processIdentifier: Int32) throws -> AccessibilityElementHandle {
++        applicationReads += 1
++        return AccessibilityElementHandle(window)
++    }
++
++    func applicationIsFrontmost(processIdentifier: Int32) throws -> Bool { frontmost }
++
++    func focusedWindow(processIdentifier: Int32) throws -> AccessibilityElementHandle? {
++        focused.map(AccessibilityElementHandle.init)
++    }
++
++    func describe(_ element: AccessibilityElementHandle, limits: AccessibilityTreeLimits) throws -> AccessibilityElementDescription {
++        if descriptionError { throw AccessibilityPointerTargetError.unavailable }
++        let node = node(element)
++        return AccessibilityElementDescription(
++            role: node.role, subrole: nil, title: node.title, elementDescription: nil,
++            help: nil, identifier: node.identifier, domIdentifier: nil, value: node.value,
++            frame: node.frame, isEnabled: node.enabled, isFocused: false,
++            supportedActions: node.actions, isValueSettable: node.settable,
++            wasTruncated: node.truncated, url: node.url, urlIdentity: node.urlIdentity
++        )
++    }
++
++    func children(of element: AccessibilityElementHandle, limit: Int) throws -> AccessibilityChildBatch {
++        let children = node(element).children
++        return AccessibilityChildBatch(
++            elements: children.prefix(limit).map(AccessibilityElementHandle.init),
++            wasTruncated: children.count > limit
++        )
++    }
++
++    func representsSameElement(_ lhs: AccessibilityElementHandle, _ rhs: AccessibilityElementHandle) -> Bool {
++        node(lhs) === node(rhs)
++    }
++
++    func identityHash(for element: AccessibilityElementHandle) -> Int { ObjectIdentifier(node(element)).hashValue }
++    func supportedActions(for element: AccessibilityElementHandle) throws -> [String] { node(element).actions }
++    func isValueSettable(on element: AccessibilityElementHandle) throws -> Bool { node(element).settable }
++    func perform(action: String, on element: AccessibilityElementHandle) throws { mutationCount += 1 }
++    func set(value: AccessibilitySetValue, on element: AccessibilityElementHandle) throws { mutationCount += 1 }
++
++    func systemElement(at point: ScreenPoint) throws -> AccessibilityElementHandle? {
++        hitPoints.append(point)
++        beforeHit?()
++        return hit.map(AccessibilityElementHandle.init)
++    }
++
++    func parent(of element: AccessibilityElementHandle) throws -> AccessibilityElementHandle? {
++        parentReads += 1
++        let current = node(element)
++        beforeParent?(current)
++        return current.parent.map(AccessibilityElementHandle.init)
++    }
++
++    func processIdentifier(of element: AccessibilityElementHandle) throws -> Int32 { node(element).pid }
++    func pointerRole(of element: AccessibilityElementHandle) throws -> String { node(element).role }
++
++    func hasNoninteractivePointerCapabilities(_ element: AccessibilityElementHandle) throws -> Bool {
++        if capabilityError { throw AccessibilityPointerTargetError.unverifiedHitTarget }
++        return node(element).actions.isEmpty && !node(element).settable
++    }
++}
++
++private final class PointerTestFixture {
++    let window = PointerTestNode(role: "AXWindow", frame: WindowFrame(x: 0, y: 0, width: 800, height: 600))
++    let target = PointerTestNode()
++    let runtime: PointerTestRuntime
++    let session: AccessibilitySession
++    let snapshot: AccessibilityTreeSnapshot
++
++    init(permission: @escaping () -> Bool = { true }) throws {
++        window.add(target)
++        runtime = PointerTestRuntime(window: window, hit: target)
++        session = AccessibilitySession(
++            target: AccessibilityApplicationTarget(processIdentifier: 42),
++            runtime: runtime, accessibilityCheck: permission
++        )
++        snapshot = try session.snapshot()
++    }
++
++    func evidence() throws -> AccessibilityPointerTargetEvidence {
++        try session.pointerTargetEvidence(at: 1, in: snapshot)
++    }
++
++    func validate(_ evidence: AccessibilityPointerTargetEvidence? = nil) throws -> ScreenPoint {
++        try AccessibilityPointerTargetValidator.validate(evidence ?? self.evidence(), runtime: runtime, pointerRuntime: runtime)
++    }
++}
++
++final class AccessibilityPointerTargetTests: XCTestCase {
++    func testExactObservedLabelWithNoAXPressUsesNativePointWithoutDispatchOrTreeRebind() throws {
++        let fixture = try PointerTestFixture()
++        XCTAssertTrue(fixture.snapshot.elements[1].supportedActions.isEmpty)
++        XCTAssertEqual(try fixture.validate(), ScreenPoint(x: 200, y: 120))
++        XCTAssertEqual(fixture.runtime.hitPoints, [ScreenPoint(x: 200, y: 120)])
++        XCTAssertEqual(fixture.runtime.applicationReads, 1, "Validation must not reacquire/rebind a different target tree")
++        XCTAssertEqual(fixture.runtime.mutationCount, 0)
++    }
++
++    func testSameIdentityMayMoveInsideUnchangedWindowAndUsesItsFreshPoint() throws {
++        let fixture = try PointerTestFixture()
++        let evidence = try fixture.evidence()
++        fixture.target.frame = WindowFrame(x: 140, y: 160, width: 200, height: 40)
++        XCTAssertEqual(try fixture.validate(evidence), ScreenPoint(x: 240, y: 180))
++    }
++
++    func testStaticTextAndImagePresentationDescendantsAreAllowed() throws {
++        for role in ["AXStaticText", "AXImage"] {
++            let fixture = try PointerTestFixture()
++            let child = PointerTestNode(role: role)
++            fixture.target.add(child)
++            fixture.runtime.hit = child
++            XCTAssertEqual(try fixture.validate(), ScreenPoint(x: 200, y: 120))
++        }
++    }
++
++    func testAncestorSiblingAndSameLabelReplacementAreNeverRetargeted() throws {
++        for kind in ["ancestor", "sibling", "replacement"] {
++            let fixture = try PointerTestFixture()
++            let evidence = try fixture.evidence()
++            let replacement = PointerTestNode()
++            fixture.window.add(replacement)
++            fixture.runtime.hit = kind == "ancestor" ? fixture.window : replacement
++            if kind == "replacement" {
++                fixture.window.children = [replacement]
++                fixture.target.parent = nil
++            }
++            XCTAssertThrowsError(try fixture.validate(evidence), kind)
++            XCTAssertEqual(fixture.runtime.mutationCount, 0)
++        }
++    }
++
++    func testInteractiveOrUnknownDescendantsAreRejectedEvenInsideTargetFrame() throws {
++        let variants: [(PointerTestNode) -> Void] = [
++            { $0.role = "AXButton" },
++            { $0.role = "AXGroup" },
++            { $0.actions = ["AXPress"] },
++            { $0.settable = true },
++            { $0.url = "https://example.test/action" },
++            { $0.truncated = true },
++        ]
++        for mutate in variants {
++            let fixture = try PointerTestFixture()
++            let child = PointerTestNode()
++            fixture.target.add(child)
++            fixture.runtime.hit = child
++            mutate(child)
++            XCTAssertThrowsError(try fixture.validate()) {
++                XCTAssertEqual($0 as? AccessibilityPointerTargetError, .interactiveDescendant)
++            }
++        }
++    }
++
++    func testFailedCapabilityReadIsNotProofOfNoninteractivity() throws {
++        let fixture = try PointerTestFixture()
++        let child = PointerTestNode()
++        fixture.target.add(child)
++        fixture.runtime.hit = child
++        fixture.runtime.capabilityError = true
++        XCTAssertThrowsError(try fixture.validate()) {
++            XCTAssertEqual($0 as? AccessibilityPointerTargetError, .unverifiedHitTarget)
++        }
++    }
++
++    func testMissingHitAndUnavailableNativeReadFailClosed() throws {
++        let fixture = try PointerTestFixture()
++        fixture.runtime.hit = nil
++        XCTAssertThrowsError(try fixture.validate()) {
++            XCTAssertEqual($0 as? AccessibilityPointerTargetError, .unverifiedHitTarget)
++        }
++        fixture.runtime.hit = fixture.target
++        fixture.runtime.descriptionError = true
++        XCTAssertThrowsError(try fixture.validate())
++    }
++
++    func testWindowReplacementAndForegroundChangeFailClosed() throws {
++        for replace in [true, false] {
++            let fixture = try PointerTestFixture()
++            if replace {
++                fixture.runtime.focused = PointerTestNode(role: "AXWindow", frame: fixture.window.frame)
++            } else {
++                fixture.runtime.frontmost = false
++            }
++            XCTAssertThrowsError(try fixture.validate()) {
++                XCTAssertEqual($0 as? AccessibilityPointerTargetError, .wrongWindow)
++            }
++            XCTAssertTrue(fixture.runtime.hitPoints.isEmpty)
++        }
++    }
++
++    func testDifferentProcessAtTargetWindowOrHitIsRejected() throws {
++        for location in ["window", "target", "hit"] {
++            let fixture = try PointerTestFixture()
++            let child = PointerTestNode()
++            if location == "window" { fixture.window.pid = 7 }
++            if location == "target" { fixture.target.pid = 7 }
++            if location == "hit" {
++                fixture.target.add(child)
++                child.pid = 7
++                fixture.runtime.hit = child
++            }
++            XCTAssertThrowsError(try fixture.validate()) {
++                XCTAssertEqual($0 as? AccessibilityPointerTargetError, .wrongProcess)
++            }
++        }
++    }
++
++    func testSameTargetReparentedIntoAnotherWindowFailsClosed() throws {
++        let fixture = try PointerTestFixture()
++        let other = PointerTestNode(role: "AXWindow", frame: fixture.window.frame)
++        other.add(fixture.target)
++        XCTAssertThrowsError(try fixture.validate()) {
++            XCTAssertEqual($0 as? AccessibilityPointerTargetError, .wrongWindow)
++        }
++    }
++
++    func testChangedSemanticsAndUnverifiableTruncationFailClosed() throws {
++        let mutations: [(PointerTestNode) -> Void] = [
++            { $0.title = "Different action" }, { $0.value = "Different value" },
++            { $0.identifier = "new-id" }, { $0.role = "AXButton" },
++            { $0.actions = ["AXPress"] }, { $0.settable = true },
++            { $0.enabled = false }, { $0.truncated = true },
++            { $0.urlIdentity = .sha256("different") },
++            { $0.urlIdentity = .unverifiable },
++        ]
++        for mutate in mutations {
++            let fixture = try PointerTestFixture()
++            let evidence = try fixture.evidence()
++            mutate(fixture.target)
++            XCTAssertThrowsError(try fixture.validate(evidence)) {
++                XCTAssertEqual($0 as? AccessibilityPointerTargetError, .changedTarget)
++            }
++            XCTAssertTrue(fixture.runtime.hitPoints.isEmpty)
++        }
++    }
++
++    func testInvalidOrPartiallyOutsideTargetFramesAreRejected() throws {
++        let invalid: [WindowFrame?] = [
++            nil, WindowFrame(x: 100, y: 100, width: 0, height: 40),
++            WindowFrame(x: 100, y: 100, width: -1, height: 40),
++            WindowFrame(x: .nan, y: 100, width: 20, height: 40),
++            WindowFrame(x: 100, y: 100, width: .infinity, height: 40),
++            WindowFrame(x: -1, y: 100, width: 20, height: 40),
++            WindowFrame(x: 790, y: 100, width: 20, height: 40),
++            WindowFrame(x: 100, y: 590, width: 20, height: 40),
++        ]
++        for frame in invalid {
++            let fixture = try PointerTestFixture()
++            fixture.target.frame = frame
++            XCTAssertThrowsError(try fixture.validate()) {
++                XCTAssertEqual($0 as? AccessibilityPointerTargetError, .invalidFrame)
++            }
++            XCTAssertTrue(fixture.runtime.hitPoints.isEmpty)
++        }
++    }
++
++    func testWindowMovementAndGeometryChangesAreRejected() throws {
++        let fixture = try PointerTestFixture()
++        fixture.window.frame = WindowFrame(x: 1, y: 0, width: 800, height: 600)
++        XCTAssertThrowsError(try fixture.validate()) {
++            XCTAssertEqual($0 as? AccessibilityPointerTargetError, .wrongWindow)
++        }
++    }
++
++    func testCyclesMissingParentsAndExcessiveDepthAreBounded() throws {
++        for kind in ["cycle", "missing", "depth"] {
++            let fixture = try PointerTestFixture()
++            var retained = [PointerTestNode]()
++            if kind == "cycle" {
++                fixture.target.parent = fixture.target
++            } else if kind == "missing" {
++                fixture.target.parent = nil
++            } else {
++                var tail = fixture.target
++                for _ in 0 ..< AccessibilityPointerTargetValidator.maximumAncestorCount {
++                    let parent = PointerTestNode(role: "AXGroup")
++                    parent.add(tail)
++                    retained.append(parent)
++                    tail = parent
++                }
++                fixture.window.add(tail)
++            }
++            XCTAssertThrowsError(try fixture.validate()) {
++                XCTAssertEqual($0 as? AccessibilityPointerTargetError, .invalidAncestry)
++            }
++            XCTAssertLessThanOrEqual(fixture.runtime.parentReads, AccessibilityPointerTargetValidator.maximumAncestorCount)
++            withExtendedLifetime(retained) {}
++        }
++    }
++
++    func testTargetOrFocusChangesDuringNativeReadAreRejected() throws {
++        for moveTarget in [true, false] {
++            let fixture = try PointerTestFixture()
++            fixture.runtime.beforeParent = { _ in
++                if moveTarget {
++                    fixture.target.frame = WindowFrame(x: 160, y: 100, width: 200, height: 40)
++                } else {
++                    fixture.runtime.frontmost = false
++                }
++            }
++            XCTAssertThrowsError(try fixture.validate())
++        }
++    }
++
++    func testExpiredSnapshotInvalidIndexRootAndRevokedPermissionCannotPrepareEvidence() throws {
++        var permitted = true
++        let fixture = try PointerTestFixture(permission: { permitted })
++        XCTAssertThrowsError(try fixture.session.pointerTargetEvidence(at: 0, in: fixture.snapshot))
++        XCTAssertThrowsError(try fixture.session.pointerTargetEvidence(at: 2, in: fixture.snapshot))
++        _ = try fixture.session.snapshot()
++        XCTAssertThrowsError(try fixture.evidence()) {
++            XCTAssertEqual($0 as? AutomationError, .staleAccessibilitySnapshot)
++        }
++        permitted = false
++        XCTAssertThrowsError(try fixture.evidence()) {
++            XCTAssertEqual($0 as? AutomationError, .permissionNotGranted(.accessibility))
++        }
++    }
++
++    func testTransferableTokenRejectsMockOrOtherNonNativeObjects() throws {
++        let fixture = try PointerTestFixture()
++        XCTAssertThrowsError(try fixture.session.preparePointerTarget(at: 1, in: fixture.snapshot)) {
++            XCTAssertEqual($0 as? AccessibilityPointerTargetError, .unavailable)
++        }
++    }
++
++    func testFiniteDoubleThatCannotBeAXFloatPointAndUnderflowedCenterAreRejected() throws {
++        for target in [
++            WindowFrame(x: 1e100, y: 0, width: 1e100, height: 10),
++            WindowFrame(x: 1e-100, y: 1e-100, width: 1e-100, height: 1e-100),
++        ] {
++            XCTAssertThrowsError(try AccessibilityPointerTargetValidator.point(
++                target: target, window: WindowFrame(x: 0, y: 0, width: 1e101, height: 100)
++            ))
++        }
++    }
++}
+

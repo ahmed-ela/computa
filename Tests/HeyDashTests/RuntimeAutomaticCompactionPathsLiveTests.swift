@@ -119,7 +119,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             let tools = try XCTUnwrap(params["dynamicTools"] as? [[String: Any]])
             try require(NSArray(array: tools).isEqual(to: ComputerV2ToolContract.specs(for: model)),
                 "Use all current production model tools, not a narrowed fixture contract.")
-            try require(params["baseInstructions"] as? String == CodexAppServerRuntime.Configuration.localQwen.baseInstructions
+            try require(params["baseInstructions"] as? String == CodexAppServerRuntime.Configuration.externalLocalQwen.baseInstructions
                 + "\n" + ComputerV2ToolContract.visualGroundingInstructions,
                 "The diagnostic must not add strategy hints to production base instructions.")
             let submitted = try exactlyOne("turn/start", in: trace)
@@ -167,7 +167,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             let raw = String(decoding: try Data(contentsOf: rollout.rolloutURL), as: UTF8.self).split(separator: "\n")
             let saved = try raw.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
             let session = try XCTUnwrap(saved.first { $0["type"] as? String == "session_meta" }?["payload"] as? [String: Any])
-            try require(session["cwd"] as? String == CodexAppServerRuntime.Configuration.localQwen.workspacePath,
+            try require(session["cwd"] as? String == CodexAppServerRuntime.Configuration.externalLocalQwen.workspacePath,
                 "The production workspace must be unchanged.")
             let contextItems = saved.filter { $0["type"] as? String == "response_item" }
                 .compactMap { $0["payload"] as? [String: Any] }
@@ -284,7 +284,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
         let application = ActivatedApplication(processIdentifier: 4242, bundleIdentifier: "com.google.Chrome", localizedName: "Google Chrome")
         let open = String(decoding: try JSONEncoder().encode(application), as: UTF8.self)
             + "\nBound this app for the current turn. Observe before acting; no process ID is needed."
-            + "\nBROWSER_SESSION profile=existing ordinary_profile_access=true foreground_only=true. Existing tabs and logins are preserved. Use native Accessibility or capture; this is not a task-isolated background tab."
+            + ComputerV2ToolContract.existingBrowserSessionNote
         let unbound = ComputerToolFailureEvidence.text(
             for: Failure(ComputerV2ToolContract.unboundApplicationMessage), tool: "computer_v2_snapshot")
         let syntheticApps = [RunningApplicationInfo(processIdentifier: 4242,
@@ -763,7 +763,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             let lines = String(decoding: try Data(contentsOf: rollout.rolloutURL), as: UTF8.self).split(separator: "\n")
             let records = try lines.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
             let session = try XCTUnwrap(records.first { $0["type"] as? String == "session_meta" }?["payload"] as? [String: Any])
-            try require(session["cwd"] as? String == CodexAppServerRuntime.Configuration.localQwen.workspacePath,
+            try require(session["cwd"] as? String == CodexAppServerRuntime.Configuration.externalLocalQwen.workspacePath,
                 "The diagnostic fixture must use the unchanged production workspace.")
             let initial = records.filter { $0["type"] as? String == "response_item" }
                 .compactMap { $0["payload"] as? [String: Any] }.filter { $0["role"] as? String == "user" }
@@ -872,7 +872,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
                                        "payload": payload, "auditName": phase]
         if let failureText { fixture["failureText"] = failureText }
         try JSONSerialization.data(withJSONObject: fixture).write(to: root.appendingPathComponent("read-only-proxy.json"))
-        var config = CodexAppServerRuntime.Configuration.localQwen
+        var config = CodexAppServerRuntime.Configuration.externalLocalQwen
         config.executable = .fixture(path: root.appendingPathComponent("read-only-live-proxy.ts").path)
         config.codexHomePath = root.path
         config.protocolTracePath = root.appendingPathComponent("\(phase)-protocol.jsonl").path
