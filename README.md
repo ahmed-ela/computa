@@ -1,5 +1,8 @@
 # Macndash - Fast Local AI for Computer Use
 
+<img width="512" height="512" alt="ChatGPT Image Sep 26, 2026, 10_26_23 AM" src="https://github.com/user-attachments/assets/869c295e-620a-4946-83aa-7785266cd289" />
+
+
 Private repository: [ahmed8372/heydash](https://github.com/ahmed8372/heydash).
 
 HeyDash is a clean-room macOS desktop-agent client with its own source-pinned build of the open-source Codex App Server. Its signed Swift host owns the agent runtime and macOS permissions, while a compiled Octane interface renders in the system `WKWebView`. It recreates the shape of a local Codex-style desktop experience without copying the Codex GUI, private source, or application assets. It does not modify or launch the App Server inside an installed Codex/ChatGPT app.
