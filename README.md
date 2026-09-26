@@ -1,4 +1,4 @@
-# Macndash - you deserve faster mac use 
+# Macndash - like jesus but for mac
 
 Private repository: [ahmed8372/heydash](https://github.com/ahmed8372/heydash).
 
