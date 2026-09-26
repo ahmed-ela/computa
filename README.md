@@ -1,6 +1,4 @@
-# HeyDash
-
-Fast, Mac-optimized local AI.
+# Macndash - you deserve faster mac use 
 
 Private repository: [ahmed8372/heydash](https://github.com/ahmed8372/heydash).
 
