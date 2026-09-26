@@ -1,6 +1,6 @@
 # Macndash - Fast Local AI for Computer Use
 
-<img width="256" height="256" alt="ChatGPT Image Sep 26, 2026, 10_26_23 AM" src="https://github.com/user-attachments/assets/869c295e-620a-4946-83aa-7785266cd289" />
+<img width="128" height="128" alt="ChatGPT Image Sep 26, 2026, 10_26_23 AM" src="https://github.com/user-attachments/assets/869c295e-620a-4946-83aa-7785266cd289" />
 
 
 Private repository: [ahmed8372/heydash](https://github.com/ahmed8372/heydash).
