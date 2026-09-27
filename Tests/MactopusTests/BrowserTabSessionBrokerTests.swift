@@ -307,6 +307,101 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertTrue(observation.snapshot.formattedText.contains("visibility=unknown"))
     }
 
+    func testContentScopeDistinguishesIdenticalLabelsByObservedAncestry() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let label = "The same observed phrase"
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "RootWebArea", name: "", children: ["n1", "n3", "n8"]),
+            semanticNode(1, role: "navigation", name: "", parent: "n0", children: ["n2"]),
+            semanticNode(2, role: "link", name: label, parent: "n1"),
+            semanticNode(3, role: "main", name: "", parent: "n0", children: ["n4", "n5", "n6"]),
+            semanticNode(4, role: "StaticText", name: label, parent: "n3"),
+            semanticNode(5, role: "article", name: label, parent: "n3"),
+            semanticNode(6, role: "navigation", name: "", parent: "n3", children: ["n7"]),
+            semanticNode(7, role: "link", name: label, parent: "n6"),
+            semanticNode(8, role: "complementary", name: "", parent: "n0", children: ["n9"]),
+            semanticNode(9, role: "article", name: label, parent: "n8"),
+        ])
+        let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(view: .content))
+        XCTAssertEqual(observation.snapshot.elements.map(\.label), Array(repeating: label, count: 5))
+        XCTAssertEqual(observation.snapshot.elements.map(\.contentScope), [.navigation, .main, .article, .navigation, .complementary])
+        XCTAssertEqual(observation.snapshot.elements.map(\.supportsPress), [true, false, false, true, false],
+                       "Provenance must not add or remove action authority.")
+        for scope in ["navigation", "main", "article", "complementary"] {
+            XCTAssertTrue(observation.snapshot.formattedText.contains("content_scope=\(scope)"))
+        }
+        XCTAssertTrue(observation.snapshot.formattedText.contains("document_content_shown=2 navigation_shown=2 complementary_shown=1"))
+        XCTAssertTrue(observation.snapshot.formattedText.contains("subject_relevance=not_verified"))
+        await fixture.assertNoInput()
+    }
+
+    func testMissingAmbiguousOrCyclicContentAncestryRemainsUnknown() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "StaticText", name: "No parent"),
+            semanticNode(1, role: "StaticText", name: "Missing parent", parent: "missing"),
+            semanticNode(2, role: "main", name: "Main with incomplete ancestry", parent: "missing"),
+            semanticNode(3, role: "StaticText", name: "Cyclic parent", parent: "n4"),
+            semanticNode(4, role: "generic", name: "", parent: "n3"),
+            semanticNode(5, role: "main", name: ""),
+            semanticNode(5, role: "navigation", name: ""),
+            semanticNode(6, role: "StaticText", name: "Ambiguous parent", parent: "n5"),
+        ], sourceTruncated: true)
+        let observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(view: .content))
+        XCTAssertEqual(observation.snapshot.elements.count, 5)
+        XCTAssertTrue(observation.snapshot.elements.allSatisfy { $0.contentScope == .unknown })
+        XCTAssertTrue(observation.snapshot.formattedText.contains("document_content_shown=0"))
+        XCTAssertTrue(observation.snapshot.formattedText.contains("unknown_shown=5"))
+        XCTAssertTrue(observation.snapshot.formattedText.contains("source_truncated=1"))
+        XCTAssertTrue(observation.snapshot.formattedText.contains("Unknown scope is not proof that content is absent."))
+        await fixture.assertNoInput()
+    }
+
+    func testContentProvenanceCountsOnlyTheExposedPageOfTruncatedObservations() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        var nodes = [
+            semanticNode(0, role: "RootWebArea", name: ""),
+            semanticNode(1, role: "navigation", name: "", parent: "n0"),
+            semanticNode(2, role: "main", name: "", parent: "n0"),
+        ]
+        nodes += (3..<73).map { semanticNode($0, role: "StaticText", name: "Navigation label \($0)", parent: "n1") }
+        nodes += (73..<143).map { semanticNode($0, role: "StaticText", name: "Document text \($0)", parent: "n2") }
+        nodes += (143..<146).map { semanticNode($0, role: "StaticText", name: "Unknown text \($0)", parent: "missing") }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+                                                 nodes: nodes, sourceTruncated: true)
+        var observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(view: .content))
+        var allElements = [BrowserTabElement]()
+        var pages = 0
+        while true {
+            let elements = observation.snapshot.elements
+            let content = elements.filter { $0.contentScope.isDocumentContent }.count
+            let navigation = elements.filter { $0.contentScope == .navigation }.count
+            let unknown = elements.filter { $0.contentScope == .unknown }.count
+            let header = try XCTUnwrap(observation.snapshot.formattedText.split(separator: "\n")
+                .first { $0.hasPrefix("CONTENT_EVIDENCE ") })
+            XCTAssertTrue(header.contains("document_content_shown=\(content) "))
+            XCTAssertTrue(header.contains("navigation_shown=\(navigation) "))
+            XCTAssertTrue(header.contains("unknown_shown=\(unknown) "))
+            XCTAssertEqual(content + navigation + unknown, elements.count)
+            XCTAssertTrue(observation.snapshot.sourceTruncated)
+            XCTAssertTrue(header.contains("subject_relevance=not_verified"))
+            allElements += elements
+            pages += 1
+            guard let cursor = observation.snapshot.nextCursor else { break }
+            observation = try await fixture.broker.snapshot(taskKey: "task-a", binding: observation.binding,
+                bundleIdentifier: "com.google.Chrome", read: SemanticReadRequest(cursor: cursor))
+        }
+        XCTAssertGreaterThan(pages, 2)
+        XCTAssertEqual(allElements.count, 143)
+        XCTAssertEqual(allElements.filter { $0.contentScope == .main }.count, 70)
+        XCTAssertEqual(allElements.filter { $0.contentScope == .navigation }.count, 70)
+        XCTAssertEqual(allElements.filter { $0.contentScope == .unknown }.count, 3)
+        await fixture.assertNoInput()
+    }
+
     func testNoMatchReturnsNoUnrelatedFallbackAndReportsIncompleteSource() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         try await fixture.transport.replaceNodes(

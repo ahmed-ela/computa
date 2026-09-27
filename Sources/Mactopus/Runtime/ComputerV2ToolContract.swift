@@ -69,6 +69,7 @@ enum ComputerV2ToolContract {
         case apps = "computer_v2_apps"
         case open = "computer_v2_open"
         case tabs = "computer_v2_tabs"
+        case continueRead = "computer_v2_continue"
         case bindTab = "computer_v2_bind_tab"
         case snapshot = "computer_v2_snapshot"
         case ax = "computer_v2_ax"
@@ -283,6 +284,10 @@ enum ComputerV2ToolContract {
                     throw ValidationError.invalid("page_size")
                 }
             }
+
+        case .continueRead:
+            try checkKeys(arguments, required: ["cursor"], allowed: ["cursor"])
+            try requireUUID("cursor", in: arguments)
 
         case .bindTab:
             try checkKeys(arguments, required: ["candidate_token"], allowed: ["candidate_token"])
@@ -609,7 +614,10 @@ enum ComputerV2ToolContract {
                 "cursor": uuid.merging(["description": "Opaque next_cursor from this turn's previous page. Omit to refresh; refreshing invalidates earlier cursor and candidate tokens."], uniquingKeysWith: { _, new in new }),
                 "page_size": ["type": "integer", "minimum": 1, "maximum": 100, "default": 25],
             ]; required = []
-            description = "List existing Chrome tabs through a native-user-approved connection; this tool cannot grant access. Inventory is complete and paginated: follow next_cursor until absent, with no query filter. Candidate tokens and cursors are opaque and valid only in this turn. Select an observed candidate_token with computer_v2_bind_tab. Preserves existing tabs and logins, with no activation, navigation or closing tabs."
+            description = "List existing Chrome tabs through a native-user-approved connection; this tool cannot grant access. Use computer_v2_continue(cursor=next_cursor) until absent to exhaust the inventory. Omit cursor here to refresh. Candidate tokens and cursors are opaque and valid only in this turn. Tab titles/URLs are candidate metadata, not evidence of page contents or relevance. Select an observed candidate_token with computer_v2_bind_tab and inspect its content before making a content claim. Preserves existing tabs and logins, with no activation, navigation or closing tabs."
+        case .continueRead:
+            properties = ["cursor": uuid]; required = ["cursor"]
+            description = "Read the next page using an observed next_cursor from THIS turn. The host remembers whether it belongs to Chrome inventory or a page/native read and routes it safely. Send cursor alone; do not guess its type or reuse previous-turn cursors. Does not refresh, bind, reconnect, navigate or grant permissions. If stale, start a fresh inventory or snapshot of the intended source."
         case .bindTab:
             properties = ["candidate_token": uuid]; required = ["candidate_token"]
             description = "Bind an existing Chrome tab using only a candidate_token observed from computer_v2_tabs in this turn. Requires a native-user-approved connection; this tool cannot grant access. Preserves existing tabs and logins, with no activation, navigation or closing tabs. Then use computer_v2_snapshot and supported computer_v2_ax/computer_v2_set_text actions. Global image, key and pointer paths are unavailable in a borrowed tab; do not fall back to capture/click/keypress/type."
@@ -619,7 +627,7 @@ enum ComputerV2ToolContract {
                           "description": "Optional literal text to find known missing/truncated text, not a question or extraction instruction. To discover unknown titles use view=headings or content."],
                 "view": ["type": "string", "enum": ["all", "content", "headings", "links"],
                          "description": "all: controls and context; content: readable document; headings/links: enumerate unknown labels."],
-                "cursor": ["type": "string", "description": "Opaque next_cursor from the latest read. Send cursor alone to read the next page."],
+                "cursor": ["type": "string", "description": "Legacy page-read continuation only. Prefer computer_v2_continue(cursor=next_cursor); never supply a tab-inventory cursor here."],
                 "snapshot_id": ["type": "string", "description": "With element_index, expand a container from the current snapshot."],
                 "element_index": ["type": "integer", "minimum": 0, "description": "Observed current element to read below; not a guessed index."],
             ]; required = []

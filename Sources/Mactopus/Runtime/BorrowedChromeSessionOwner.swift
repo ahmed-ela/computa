@@ -81,7 +81,7 @@ struct BorrowedChromeInventoryPage: Equatable, Sendable {
     let totalCount: Int
 }
 
-enum BorrowedChromeSessionOwnerError: Error, Equatable {
+enum BorrowedChromeSessionOwnerError: Error, LocalizedError, Equatable {
     case disconnected
     case invalidApplication
     case invalidTurn
@@ -92,6 +92,31 @@ enum BorrowedChromeSessionOwnerError: Error, Equatable {
     case invalidInventory
     case runtimeRecoveryInProgress
     case runtimeRecoveryFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .disconnected:
+            return "The authorized Chrome connection is no longer available. Restore it through the existing connection flow before requesting tabs."
+        case .invalidApplication:
+            return "The Chrome application identity could not be validated. Use the native Chrome connection flow; do not substitute another application."
+        case .invalidTurn:
+            return "This browser capability does not belong to the active turn. Obtain a fresh tab inventory in the current turn."
+        case .invalidCandidate:
+            return "That candidate_token does not belong to this turn's current tab inventory. Refresh computer_v2_tabs and select an observed candidate_token."
+        case .invalidCursor:
+            return "Invalid tab-inventory cursor. Use only a next_cursor returned by computer_v2_tabs in the current turn's current inventory, not a page-content cursor from computer_v2_snapshot or a prior-turn cursor. Call computer_v2_tabs without cursor for a fresh inventory, then use its returned next_cursor. No tab was attached or changed by this rejected read."
+        case .invalidPageSize:
+            return "Invalid tab-inventory page_size. Use an integer from 1 through 100."
+        case .capacityExceeded:
+            return "The browser session's bounded inventory or operation capacity was exceeded. No complete inventory is established by this failure; do not claim that unreturned tabs are absent."
+        case .invalidInventory:
+            return "Chrome returned a tab inventory that failed validation. Refresh the inventory before selecting a tab; do not invent a replacement candidate token."
+        case .runtimeRecoveryInProgress:
+            return "The browser runtime is recovering. Wait for recovery to complete before requesting a fresh tab inventory; do not replay input."
+        case .runtimeRecoveryFailed:
+            return "The browser runtime could not recover safely. Restore the authorized Chrome connection before requesting a fresh tab inventory; do not replay input."
+        }
+    }
 }
 
 /// This fence is deliberately not actor-isolated: runtime failure must revoke

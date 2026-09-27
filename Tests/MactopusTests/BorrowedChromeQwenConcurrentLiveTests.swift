@@ -446,7 +446,7 @@ private final class QwenBorrowedApprovalAudit {
         let text = (object["contentItems"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
         tools.append(tool.name)
         transcript.append(["tool": tool.name, "status": tool.status.rawValue, "text": text])
-        if !["computer_v2_status", "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_snapshot", "computer_v2_ax", "computer_v2_set_text"].contains(tool.name) {
+        if !["computer_v2_status", "computer_v2_tabs", "computer_v2_continue", "computer_v2_bind_tab", "computer_v2_snapshot", "computer_v2_ax", "computer_v2_set_text"].contains(tool.name) {
             unexpectedTools.append(tool.name)
         }
         guard tool.name == "computer_v2_snapshot", tool.status == .succeeded,

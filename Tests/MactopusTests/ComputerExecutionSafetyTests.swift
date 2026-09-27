@@ -3,6 +3,13 @@ import XCTest
 @testable import Mactopus
 
 final class ComputerExecutionSafetyTests: XCTestCase {
+    func testInventoryCursorOrPageSizeChangesCannotResetRetryIdentity() {
+        let first = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_tabs", arguments: ["cursor": UUID().uuidString])
+        for size in [1, 25, 100] {
+            XCTAssertEqual(first, ComputerUnchangedAttemptGuard.key(tool: "computer_v2_tabs",
+                arguments: ["cursor": UUID().uuidString, "page_size": size]))
+        }
+    }
     func testVerificationAcceptsOnlyFiniteObservedPropertyContract() throws {
         var arguments = fixture()
         let value = try ComputerOutcomeToolContract.validate(arguments)

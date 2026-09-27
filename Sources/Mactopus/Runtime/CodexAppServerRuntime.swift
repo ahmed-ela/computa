@@ -807,6 +807,11 @@ private extension CodexAppServerRuntime {
             // and never substitutes a new tab for an uncertain prior mutation.
             var existingChromeController: ExistingChromeController?
             var semanticProgress = SemanticObservationProgressTracker()
+            // Capabilities are local to this turn, never copied from model
+            // history or reconstituted from a compacted transcript.
+            var readContinuations = ComputerReadContinuation()
+            var inventoryObservationID: String?
+            var inventoryObservationIsFresh = false
             #if DEBUG
             var fixtureNativeBinding = false
             #endif
@@ -2873,11 +2878,30 @@ private extension CodexAppServerRuntime {
         }
 
         private func computerEvidenceTarget(taskID: AgentTask.ID, tool: String) -> String {
-            if ["computer_v2_tabs", "computer_v2_bind_tab"].contains(tool) { return "browser-inventory" }
+            if tool == "computer_v2_tabs" {
+                return "browser-inventory:\(chromeConnection?.request.id.uuidString ?? "disconnected"):\(computerV2Sessions[taskID]?.epoch.uuidString ?? "inactive")"
+            }
+            if tool == "computer_v2_bind_tab" { return "browser-inventory" }
             if tool == "computer_v2_apps" || tool == "computer_v2_status" { return "computer-discovery" }
             let session = computerV2Sessions[taskID]
             if let tab = session?.browserTab { return "browser:\(tab.browserGeneration):\(tab.targetID)" }
             return "native:\(session?.nativeEvidenceID.uuidString ?? "inactive"):\(session?.application?.processIdentifier ?? 0)"
+        }
+
+        private func computerReadPageScope(taskID: AgentTask.ID) -> String? {
+            guard let session = computerV2Sessions[taskID] else { return nil }
+            if let tab = session.browserTab {
+                return "\(session.epoch):\(tab.browserGeneration):\(tab.handle):\(tab.documentEpoch)"
+            }
+            guard session.application != nil else { return nil }
+            return "\(session.epoch):\(session.nativeEvidenceID)"
+        }
+
+        private func registerReadContinuation(taskID: AgentTask.ID, text: String, replacing: Bool,
+                                              browserCursor: String? = nil) throws {
+            guard let scope = computerReadPageScope(taskID: taskID) else { return }
+            let next = browserCursor.flatMap(UUID.init(uuidString:)) ?? ComputerReadContinuation.nextPageCursor(from: text)
+            try computerV2Sessions[taskID]?.readContinuations.recordPage(nextCursor: next, scope: scope, replacing: replacing)
         }
 
         private func browserEvidenceProperties(_ snapshot: BrowserTabSnapshot) -> [String: String] {
@@ -2941,6 +2965,11 @@ private extension CodexAppServerRuntime {
                let observation = ledger.latestLiveObservationIdentity(targetID: operation.targetID) {
                 _ = try? computerEvidence[taskID]?.recoverPreflightRejections(afterSuccessfulOperationID: successor,
                     correction: .freshBoundObservation(observationID: observation.id, targetID: observation.targetID))
+            }
+            if operation.tool == "computer_v2_tabs",
+               let observation = ledger.latestLiveObservationIdentity(targetID: operation.targetID) {
+                _ = try? computerEvidence[taskID]?.recoverPreflightRejections(afterSuccessfulOperationID: successor,
+                    correction: .freshInventory(observationID: observation.id, targetID: observation.targetID))
             }
         }
 
@@ -3194,11 +3223,36 @@ private extension CodexAppServerRuntime {
             taskID: AgentTask.ID?
         ) async {
             let generation = serverGeneration
-            let tool = params["tool"] as? String ?? "unknown"
-            let arguments = params["arguments"] as? [String: Any] ?? [:]
+            var tool = params["tool"] as? String ?? "unknown"
+            var arguments = params["arguments"] as? [String: Any] ?? [:]
+            var continuationError: Error?
+            if tool == "computer_v2_continue", let taskID {
+                do {
+                    _ = try ComputerV2ToolContract.validate(tool: tool, arguments: arguments)
+                    guard let cursor = (arguments["cursor"] as? String).flatMap(UUID.init(uuidString:)),
+                          let session = computerV2Sessions[taskID] else {
+                        throw ComputerV2ToolContract.ValidationError.invalid("cursor")
+                    }
+                    let route = try session.readContinuations.resolve(cursor: cursor,
+                        inventoryScope: chromeConnection?.owner == nil ? nil : computerEvidenceTarget(taskID: taskID, tool: "computer_v2_tabs"),
+                        pageScope: computerReadPageScope(taskID: taskID))
+                    tool = route.toolName
+                    arguments = route.arguments
+                } catch {
+                    let inventory = (error as? ComputerReadContinuation.Failure) == .inventoryScopeChanged
+                        || computerReadPageScope(taskID: taskID) == nil
+                    // This operation can only read. A stale continuation is
+                    // never an uncertain click or a reason to reconnect.
+                    continuationError = ComputerPreflightFailure(
+                        kind: inventory ? .freshInventoryRequired : .freshObservationRequired,
+                        message: error.localizedDescription)
+                }
+            }
             let callID = params["callId"] as? String ?? UUID().uuidString
             let isComputer = tool.hasPrefix("computer_v2_") || tool == "computer" || tool.hasPrefix("desktop_")
-            let tracked = isComputer && tool != ComputerOutcomeToolContract.name
+            // Routing rejection occurs before a backend read is admitted.
+            // Keep the tool error/retry budget, not a fictitious action debt.
+            let tracked = isComputer && tool != ComputerOutcomeToolContract.name && continuationError == nil
             let bindIdentity = tool == "computer_v2_bind_tab"
                 ? await observedBrowserBindIdentity(taskID: taskID, arguments: arguments) : nil
             guard generation == serverGeneration, !Task.isCancelled, !isShuttingDown else { return }
@@ -3235,13 +3289,15 @@ private extension CodexAppServerRuntime {
                 if tracked, let taskID {
                     guard computerEvidence[taskID] != nil else { throw ComputerExecutionFailure(message: "No active computer-use evidence context exists.", stop: true) }
                     try computerEvidence[taskID]?.begin(operationID: callID, tool: tool,
-                        targetID: bindIdentity ?? computerEvidenceTarget(taskID: taskID, tool: tool),
+                        targetID: bindIdentity ?? computerEvidenceTarget(taskID: taskID,
+                            tool: tool == "computer_v2_continue" && computerReadPageScope(taskID: taskID) == nil ? "computer_v2_tabs" : tool),
                         recoveryKey: recoveryKey, requiresVerification: needsProof)
                     guard computerActiveOperation[taskID] == nil, computerV2InFlight[taskID] == nil else {
                         throw ComputerExecutionFailure(message: "Another computer action is pending. Wait for its result before issuing the next action.")
                     }
                     computerActiveOperation[taskID] = callID
                 }
+                if let continuationError { throw continuationError }
                 #if DEBUG
                 if case .fixture = configuration.executable,
                    configuration.fixtureChromeNavigationRecoveryFailure,
@@ -3271,10 +3327,20 @@ private extension CodexAppServerRuntime {
                         if operation.dispatch == .notDispatched {
                             try computerEvidence[taskID]?.recordDispatch(operationID: callID, state: .dispatched)
                         }
-                        try await registerComputerObservation(taskID: taskID)
+                        if tool == "computer_v2_tabs", let observationID = computerV2Sessions[taskID]?.inventoryObservationID {
+                            try computerEvidence[taskID]?.recordObservation(id: observationID,
+                                targetID: computerEvidenceTarget(taskID: taskID, tool: tool),
+                                properties: ["inventory_read": "observed"],
+                                isLive: computerV2Sessions[taskID]?.inventoryObservationIsFresh == true)
+                        } else {
+                            try await registerComputerObservation(taskID: taskID)
+                        }
                     }
                     recoverComputerOperations(taskID: taskID, successor: callID)
                     computerAttempts[taskID]?.succeeded(key: intentKey)
+                    if ["computer_v2_tabs", "computer_v2_snapshot"].contains(tool) {
+                        computerAttempts[taskID]?.succeeded(key: "read-continuation-routing")
+                    }
                     if let receipt = computerEvidence[taskID]?.operations.first(where: { $0.id == callID }), receipt.requiresVerification {
                         let instruction = receipt.alreadySatisfied != nil
                             ? "The intended state was already present and checked with a fresh read. No input was sent; do not repeat it. This is not whole-task proof."
@@ -3334,10 +3400,11 @@ private extension CodexAppServerRuntime {
                     if computerActiveOperation[taskID] == callID { computerActiveOperation.removeValue(forKey: taskID) }
                     // Model rephrasing or switching between click/key/open is
                     // not recovery from a fixed host capability restriction.
-                    let failureKey = error is ComputerInteractionPolicy.Violation
-                        ? "host-background-capability" : intentKey
+                    let failureKey = continuationError != nil ? "read-continuation-routing"
+                        : error is ComputerInteractionPolicy.Violation ? "host-background-capability" : intentKey
                     exhausted = computerAttempts[taskID, default: ComputerUnchangedAttemptGuard()].failed(key: failureKey)
-                    if let checkpoint = try? computerEvidence[taskID]?.checkpointText() { message += "\n" + checkpoint }
+                    if tracked || computerEvidence[taskID]?.unresolvedOperations.isEmpty == false,
+                       let checkpoint = try? computerEvidence[taskID]?.checkpointText() { message += "\n" + checkpoint }
                 }
                 let terminal = ComputerToolFailureEvidence.terminalMessage(for: error)
                     ?? ((error as? NativeBackgroundAccessibility.Failure) == .focusChangedDuringAction ? error.localizedDescription : nil)
@@ -3378,6 +3445,7 @@ private extension CodexAppServerRuntime {
         private func computerPreflightKind(_ error: Error) -> ComputerActionEvidence.PreflightRejection? {
             if let failure = error as? ComputerPreflightFailure { return failure.kind }
             if error is ComputerV2ToolContract.ValidationError { return .invalidArguments }
+            if (error as? BorrowedChromeSessionOwnerError) == .invalidCursor { return .freshInventoryRequired }
             if case BrowserTabBrokerError.invalidRead = error { return .invalidArguments }
             if case BrowserTabBrokerError.staleSnapshot = error { return .freshObservationRequired }
             if case BrowserActionVerification.Failure.baselineChanged = error { return .freshObservationRequired }
@@ -4119,6 +4187,11 @@ private extension CodexAppServerRuntime {
             case .tabs:
                 return try await computerV2Tabs(call, taskID: taskID, epoch: epoch)
 
+            case .continueRead:
+                // Continuations must be resolved before ledger admission so
+                // proof/retry accounting records the actual read primitive.
+                throw ComputerV2ToolContract.ValidationError.invalid("cursor: refresh the intended source")
+
             case .bindTab:
                 return try await computerV2BindTab(call, taskID: taskID, epoch: epoch)
 
@@ -4265,6 +4338,12 @@ private extension CodexAppServerRuntime {
                 let cursor = (call.arguments["cursor"] as? String).flatMap(UUID.init(uuidString:))
                 let page = try await context.owner.listTabs(turn: context.turn, cursor: cursor, pageSize: call.tabPageSize)
                 _ = try requireBorrowedChromeContext(taskID: taskID, epoch: epoch)
+                let inventoryScope = computerEvidenceTarget(taskID: taskID, tool: "computer_v2_tabs")
+                try computerV2Sessions[taskID]?.readContinuations.recordInventory(
+                    nextCursor: page.nextCursor, pageSize: call.tabPageSize,
+                    scope: inventoryScope, replacing: cursor == nil)
+                computerV2Sessions[taskID]?.inventoryObservationID = UUID().uuidString
+                computerV2Sessions[taskID]?.inventoryObservationIsFresh = cursor == nil
                 if cursor == nil {
                     let available = try await context.owner.availableTargetIDs(turn: context.turn)
                     computerRecovery[taskID]?.inventoryRefreshed(connectionGeneration: context.connectionID, availableTargets: available)
@@ -4353,8 +4432,8 @@ private extension CodexAppServerRuntime {
                 return [textContent(
                     "BROWSER_TAB tab_handle=\(binding.handle.uuidString) document_epoch=\(binding.documentEpoch.uuidString) "
                     + "ownership=borrowed scope=current_turn semantic_background_actions=true. "
-                    + "Bound the exact observed tab without activation, navigation or closing tabs. "
-                    + "Read webpage content with computer_v2_snapshot(view=content); use view=headings or links to discover unknown labels. Follow next_cursor for more. Then ax or set_text with its fresh snapshot_id; global input and capture are unavailable."
+                    + "Bound the exact observed tab without activation, navigation or closing tabs. CONTENT_EVIDENCE=metadata_only; attachment does not verify page contents or relevance. "
+                    + "Read webpage content with computer_v2_snapshot(view=content); use view=headings or links to discover unknown labels. Use computer_v2_continue(cursor=next_cursor) for more. Cite observed document text and its URL before asserting a content match; sidebar/title matches alone are not proof. Then ax or set_text with its fresh snapshot_id; global input and capture are unavailable."
                 )]
             } catch {
                 context.turn.lifetime.revoke()
@@ -4429,6 +4508,7 @@ private extension CodexAppServerRuntime {
                let background = currentSession.backgroundAccessibility {
                 let observation = try await background.read(read: read)
                 try validateComputerV2Turn(taskID: taskID, epoch: epoch)
+                try registerReadContinuation(taskID: taskID, text: observation.text, replacing: read.cursor == nil)
                 return [textContent(observation.text)]
             }
             #endif
@@ -4486,6 +4566,8 @@ private extension CodexAppServerRuntime {
                 session.capture = nil
                 let text = session.semanticProgress.observe(text: observation.snapshot.formattedText)
                 computerV2Sessions[taskID] = session
+                try registerReadContinuation(taskID: taskID, text: text, replacing: read.cursor == nil,
+                    browserCursor: observation.snapshot.nextCursor)
                 return [textContent(text)]
             }
 
@@ -4542,6 +4624,7 @@ private extension CodexAppServerRuntime {
                 session.backgroundAccessibility = background
                 let text = session.semanticProgress.observe(text: observation.text)
                 computerV2Sessions[taskID] = session
+                try registerReadContinuation(taskID: taskID, text: text, replacing: read.cursor == nil)
                 return [textContent(text)]
             }
             let focusedObservation = try await computerV2FocusedWindowObservation()
@@ -4589,6 +4672,7 @@ private extension CodexAppServerRuntime {
             session.browserSnapshot = nil
             let text = session.semanticProgress.observe(text: result.observation.text)
             computerV2Sessions[taskID] = session
+            try registerReadContinuation(taskID: taskID, text: text, replacing: read.cursor == nil)
             return [textContent(text)]
         }
 
@@ -4937,6 +5021,7 @@ private extension CodexAppServerRuntime {
                 let observation = try await background.verificationObservation()
                 _ = try computerEvidence[taskID]?.recordNativeAlreadySatisfied(operationID: operationID,
                     scope: scope, observation: observation)
+                try registerReadContinuation(taskID: taskID, text: content.text, replacing: true)
                 return [textContent("ALREADY_SATISFIED operation_id=\(operationID). The requested native property was already present and remained present in a fresh read. No approval or input was dispatched. Read the current content; this is not proof of message sender or ordering.\n" + content.text)]
             }
             guard await requestComputerUseApproval(
@@ -5027,6 +5112,7 @@ private extension CodexAppServerRuntime {
                     try validateComputerV2Turn(taskID: taskID, epoch: epoch)
                     guard generation == serverGeneration, !isShuttingDown else { throw CancellationError() }
                     latestContent = [textContent(content.text)]
+                    try registerReadContinuation(taskID: taskID, text: content.text, replacing: true)
                     try await registerComputerObservation(taskID: taskID)
                     let observation = try await background.verificationObservation()
                     let scope = NativeActionVerification.Scope(
@@ -5094,6 +5180,7 @@ private extension CodexAppServerRuntime {
             session.capture = nil
             session.browserSnapshot = nil
             computerV2Sessions[taskID] = session
+            try registerReadContinuation(taskID: taskID, text: observed.text, replacing: true)
             return observed.text
         }
 

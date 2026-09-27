@@ -138,6 +138,14 @@ struct BrowserTabBinding: Equatable, Sendable {
     let lifetime: BrowserTabLifetime
 }
 
+/// Structural provenance, not a judgment that text answers the user's request.
+/// Unknown includes missing, ambiguous, cyclic, or excessively deep ancestry.
+enum BrowserContentScope: String, Equatable, Sendable {
+    case main, article, navigation, complementary, banner, contentinfo, unknown
+
+    var isDocumentContent: Bool { self == .main || self == .article }
+}
+
 struct BrowserTabElement: Equatable, Sendable {
     let index: Int
     let backendNodeID: Int64
@@ -157,6 +165,7 @@ struct BrowserTabElement: Equatable, Sendable {
     /// presentation. searchbox/textbox and region/status/listitem otherwise
     /// collapse to the same display roles and lose evidence-relevant meaning.
     var semanticRole: String? = nil
+    var contentScope: BrowserContentScope = .unknown
 }
 
 struct BrowserTabSnapshot: Equatable, Sendable {
@@ -978,6 +987,9 @@ actor BrowserTabSessionBroker {
         read: SemanticReadRequest,
         scopeNodeID: String?
     ) -> [BrowserTabElement] {
+        let sourceNodes = Dictionary(grouping: document.nodes.compactMap { node in
+            node.nodeID.map { ($0, node) }
+        }, by: { $0.0 }).filter { !$0.key.isEmpty && $0.value.count == 1 }.mapValues { $0[0].1 }
         let scopeIDs: Set<String>?
         if let scopeNodeID {
             var included: Set<String> = [scopeNodeID]
@@ -1012,7 +1024,8 @@ actor BrowserTabSessionBroker {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
         return document.nodes.compactMap { node in
             if let scopeIDs, !scopeIDs.contains(node.nodeID ?? "") { return nil }
-            guard let element = browserElement(from: node, index: 0) else { return nil }
+            guard var element = browserElement(from: node, index: 0) else { return nil }
+            element.contentScope = contentScope(of: node, nodes: sourceNodes)
             switch read.view {
             case .all:
                 break
@@ -1037,6 +1050,33 @@ actor BrowserTabSessionBroker {
         }
     }
 
+    private func contentScope(of node: BrowserDocumentNode,
+                              nodes: [String: BrowserDocumentNode]) -> BrowserContentScope {
+        var current = node
+        var seen = Set<String>()
+        var content: BrowserContentScope?
+        for _ in 0..<128 {
+            if let id = current.nodeID {
+                guard nodes[id] == current, seen.insert(id).inserted else { return .unknown }
+            }
+            let observedScope = BrowserContentScope(rawValue: current.role.lowercased())
+            switch observedScope {
+            case .navigation, .complementary, .banner, .contentinfo:
+                // A card/article inside a sidebar remains sidebar evidence.
+                // Conversely, navigation inside main is not document content.
+                return observedScope ?? .unknown
+            case .main, .article:
+                if content == nil { content = observedScope }
+            default:
+                break
+            }
+            guard let parentID = current.parentNodeID else { return content ?? .unknown }
+            guard let parent = nodes[parentID] else { return .unknown }
+            current = parent
+        }
+        return .unknown
+    }
+
     private func makePage(
         selected: [BrowserTabElement], offset: Int
     ) -> (elements: [BrowserTabElement], fieldsTruncated: Bool) {
@@ -1054,7 +1094,8 @@ actor BrowserTabSessionBroker {
                 isFocusablePointer: element.isFocusablePointer,
                 nodeID: element.nodeID, parentNodeID: element.parentNodeID,
                 childNodeIDs: element.childNodeIDs, linkURL: element.linkURL,
-                semanticRole: element.semanticRole
+                semanticRole: element.semanticRole,
+                contentScope: element.contentScope
             )
             let row = formatElement(indexed)
             if !elements.isEmpty, characters + row.count > 10_000 { break }
@@ -1084,6 +1125,7 @@ actor BrowserTabSessionBroker {
         } ?? ""
         return "#\(element.index) role=\(quote(element.role)) "
             + "label=\(quote(String(element.label.prefix(512))))\(value)\(identity)\(parent)\(children)\(link) "
+            + "content_scope=\(element.contentScope.rawValue) "
             + "enabled=\(element.isEnabled ? "true" : "false") "
             + "settable=\(element.supportsSetText ? "true" : "false") actions=\(actions)\(pressSource)"
     }
@@ -1205,8 +1247,16 @@ actor BrowserTabSessionBroker {
                 + "output_truncated=\(nextCursor == nil ? 0 : 1) field_truncated=\(fieldsTruncated ? 1 : 0) "
                 + "no_matches=\(totalMatches == 0 ? 1 : 0) visibility=unknown "
                 + "next_cursor=\(nextCursor ?? "none") observation=\(retainedObservation ? "retained" : "live")",
+            "CONTENT_EVIDENCE document_content_shown=\(elements.filter { $0.contentScope.isDocumentContent }.count) "
+                + "navigation_shown=\(elements.filter { $0.contentScope == .navigation }.count) "
+                + "complementary_shown=\(elements.filter { $0.contentScope == .complementary }.count) "
+                + "banner_shown=\(elements.filter { $0.contentScope == .banner }.count) "
+                + "contentinfo_shown=\(elements.filter { $0.contentScope == .contentinfo }.count) "
+                + "unknown_shown=\(elements.filter { $0.contentScope == .unknown }.count) "
+                + "scope_basis=observed_ancestry subject_relevance=not_verified",
         ]
         lines.append(contentsOf: elements.map(formatElement))
+        lines.append("Content scopes and counts describe only this exposed page's observed structure; subject relevance is not verified. Tab titles and navigation/sidebar labels alone do not establish the document's contents. Unknown scope is not proof that content is absent.")
         if nextCursor != nil {
             lines.append("Continue with cursor only. Indices apply only to this snapshot; use snapshot_id + element_index to read an observed subtree.")
         }

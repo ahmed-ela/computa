@@ -296,6 +296,154 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         }
     }
 
+    func testUnknownGenericContinuationBeforeInventoryRecoversWithoutFictitiousActionDebt() async throws {
+        try await withHarness(mode: "pagination-alias-recovery") { runtime, root, audit, connector in
+            let request = self.request()
+            try await runtime.connectChrome(request)
+            try await runtime.submit(prompt: "Use background Chrome tab tools only. Read the existing tab inventory without changing any tabs.",
+                                     toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+            let rows = try self.results(root)
+            XCTAssertEqual(rows.compactMap { $0["tool"] as? String },
+                           ["computer_v2_continue", "computer_v2_tabs", "computer_v2_continue"])
+            XCTAssertEqual(rows.compactMap { $0["success"] as? Bool }, [false, true, true])
+            let rejection = try XCTUnwrap(rows.first?["text"] as? String)
+            XCTAssertFalse(rejection.contains("RUNTIME_ACTION_EVIDENCE"),
+                           "Unknown routing is rejected before any backend read or input is admitted.")
+            XCTAssertTrue(rejection.contains("fresh inventory") || rejection.contains("cursor"))
+            XCTAssertEqual(audit.status, .completed)
+            XCTAssertTrue(audit.entries.contains { $0.kind == .assistant && $0.body == "UNKNOWN_CONTINUATION_RECOVERY_COMPLETE" })
+            XCTAssertFalse(audit.entries.contains { $0.title == "Outcome not verified" })
+            let entry = try await connector.entry(request.id)
+            let counts = await entry.transport.counts()
+            XCTAssertEqual(counts.attachIDs, [])
+            XCTAssertEqual(counts.presses, 0)
+            XCTAssertEqual(counts.text, "")
+            XCTAssertEqual(counts.forbidden, 0)
+            XCTAssertEqual(counts.shutdowns, 0)
+            XCTAssertEqual(audit.approvals, 0)
+            let connections = await connector.count
+            XCTAssertEqual(connections, 1)
+            XCTAssertNoThrow(try request.consent.check())
+        }
+    }
+
+    func testPreviousTurnInventoryCursorRecoversWithFreshReadAndGenericContinuation() async throws {
+        try await withHarness(mode: "pagination-followup") { runtime, root, audit, connector in
+            let request = self.request()
+            try await runtime.connectChrome(request)
+            try await runtime.submit(prompt: "Use background Chrome tab tools only. Inspect one page of the existing tab inventory without changing anything.",
+                                     toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+            XCTAssertEqual(audit.status, .completed)
+            XCTAssertEqual(try self.results(root).count, 1)
+            XCTAssertTrue(audit.entries.contains { $0.kind == .assistant && $0.body == "FIRST_INVENTORY_PAGE_OBSERVED" })
+            audit.status = nil
+            try await runtime.submit(prompt: "Continue reading the existing tab inventory without changing any tabs.",
+                                     toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+            let rows = try self.results(root)
+            XCTAssertEqual(rows.compactMap { $0["tool"] as? String },
+                           ["computer_v2_tabs", "computer_v2_tabs", "computer_v2_tabs", "computer_v2_continue"])
+            XCTAssertEqual(rows.compactMap { $0["success"] as? Bool }, [true, false, true, true])
+            guard rows.count == 4 else { return }
+            XCTAssertTrue((rows[1]["text"] as? String)?.contains("preflight_rejection=freshInventoryRequired") == true)
+            XCTAssertFalse((rows[1]["text"] as? String)?.contains("BorrowedChromeSessionOwnerError error") == true)
+            XCTAssertEqual(audit.status, .completed, "Refreshing a stale inventory read must not leave unresolved action debt.")
+            XCTAssertTrue(audit.entries.contains { $0.kind == .assistant && $0.body == "FOLLOWUP_INVENTORY_RECOVERY_COMPLETE" })
+            XCTAssertFalse(audit.entries.contains { $0.title == "Outcome not verified" })
+            let entry = try await connector.entry(request.id)
+            let counts = await entry.transport.counts()
+            XCTAssertEqual(counts.attachIDs, [])
+            XCTAssertEqual(counts.presses, 0)
+            XCTAssertEqual(counts.text, "")
+            XCTAssertEqual(counts.forbidden, 0)
+            XCTAssertEqual(counts.shutdowns, 0)
+            XCTAssertEqual(audit.approvals, 0)
+            let connections = await connector.count
+            XCTAssertEqual(connections, 1, "Cursor recovery reuses consent; it must not reconnect Chrome.")
+            XCTAssertNoThrow(try request.consent.check())
+        }
+    }
+
+    func testMixedPageAndInventoryCursorsRecoverWithoutRebindingOrInput() async throws {
+        try await withHarness(mode: "pagination-mixed-sources") { runtime, root, audit, connector in
+            let request = self.request()
+            try await runtime.connectChrome(request)
+            let entry = try await connector.entry(request.id)
+            await entry.transport.useLongDocument()
+            try await runtime.submit(prompt: "Use background Chrome tab tools only. Read the synthetic document and tab inventory without changing anything; partial page observations are enough.",
+                                     toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+            let rows = try self.results(root)
+            XCTAssertEqual(rows.compactMap { $0["tool"] as? String }, [
+                "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_snapshot", "computer_v2_continue",
+                "computer_v2_tabs", "computer_v2_tabs", "computer_v2_continue", "computer_v2_continue",
+            ])
+            XCTAssertEqual(rows.compactMap { $0["success"] as? Bool }, [true, true, true, true, false, true, true, true])
+            guard rows.count == 8 else { return }
+            XCTAssertTrue((rows[4]["text"] as? String)?.contains("preflight_rejection=freshInventoryRequired") == true)
+            let firstPage = try XCTUnwrap(rows[2]["text"] as? String)
+            let secondPage = try XCTUnwrap(rows[3]["text"] as? String)
+            let thirdPage = try XCTUnwrap(rows[7]["text"] as? String)
+            let firstOffset = Int(try XCTUnwrap(OutcomeGateAudit.match(" offset=([0-9]+)", firstPage)))
+            let secondOffset = Int(try XCTUnwrap(OutcomeGateAudit.match(" offset=([0-9]+)", secondPage)))
+            let thirdOffset = Int(try XCTUnwrap(OutcomeGateAudit.match(" offset=([0-9]+)", thirdPage)))
+            XCTAssertEqual(firstOffset, 0)
+            XCTAssertGreaterThan(try XCTUnwrap(secondOffset), try XCTUnwrap(firstOffset))
+            XCTAssertGreaterThan(try XCTUnwrap(thirdOffset), try XCTUnwrap(secondOffset),
+                                 "Repairing inventory must not reset the independent page continuation.")
+            XCTAssertEqual(audit.status, .completed)
+            XCTAssertTrue(audit.entries.contains { $0.kind == .assistant && $0.body == "PAGINATION_SOURCES_RECOVERED" })
+            XCTAssertFalse(audit.entries.contains { $0.title == "Outcome not verified" })
+            let counts = await entry.transport.counts()
+            XCTAssertEqual(counts.attachIDs, ["target-0"])
+            XCTAssertEqual(counts.presses, 0)
+            XCTAssertEqual(counts.text, "")
+            XCTAssertEqual(counts.forbidden, 0)
+            XCTAssertEqual(counts.shutdowns, 0)
+            XCTAssertEqual(audit.approvals, 0)
+            let connections = await connector.count
+            XCTAssertEqual(connections, 1)
+            XCTAssertNoThrow(try request.consent.check())
+        }
+    }
+
+    func testRepeatedInvalidInventoryCursorStopsWithoutReconnectAndChatRemainsUsable() async throws {
+        try await withHarness(mode: "pagination-repeat-invalid") { runtime, root, audit, connector in
+            let request = self.request()
+            try await runtime.connectChrome(request)
+            try await runtime.submit(prompt: "Use background Chrome tab tools only. Inspect the existing tab inventory without changing anything.",
+                                     toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { FileManager.default.fileExists(atPath: root.appendingPathComponent("interrupted").path)
+                && audit.status == .waiting }
+            let attempted = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("attempted-tools.json"))) as? [String])
+            XCTAssertGreaterThanOrEqual(attempted.count, 3)
+            XCTAssertLessThanOrEqual(attempted.count, 4, "Unchanged rejected cursors must not produce an unbounded retry loop.")
+            XCTAssertTrue(attempted.allSatisfy { $0 == "computer_v2_tabs" })
+            let rows = try self.results(root)
+            XCTAssertEqual(rows.first?["success"] as? Bool, true)
+            XCTAssertTrue(rows.dropFirst().allSatisfy { $0["success"] as? Bool == false })
+            XCTAssertTrue(rows.dropFirst().contains { ($0["text"] as? String)?.contains("preflight_rejection=freshInventoryRequired") == true })
+            XCTAssertFalse(audit.entries.contains { $0.body.contains("LATE_INVENTORY_SUCCESS_MUST_NOT_APPEAR") })
+            let entry = try await connector.entry(request.id)
+            let counts = await entry.transport.counts()
+            XCTAssertEqual(counts.attachIDs, [])
+            XCTAssertEqual(counts.presses, 0)
+            XCTAssertEqual(counts.text, "")
+            XCTAssertEqual(counts.forbidden, 0)
+            XCTAssertEqual(counts.shutdowns, 0)
+            XCTAssertEqual(audit.approvals, 0)
+            let connections = await connector.count
+            XCTAssertEqual(connections, 1)
+            XCTAssertNoThrow(try request.consent.check())
+            audit.status = nil
+            try await runtime.submit(prompt: "Reply without computer tools.", toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed && audit.entries.contains { $0.body == "NEXT_TURN_OK" } }
+            XCTAssertEqual(audit.status, .completed)
+        }
+    }
+
     func testFollowupRestoresExactConnectedTabButRejectsOldAXBeforeOneVerifiedFreshAction() async throws {
         try await withHarness(mode: "followup-binding-recovery") { runtime, root, audit, connector in
             let request = self.request()
@@ -1013,7 +1161,7 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
             let text = (object?["contentItems"] as? [[String: Any]] ?? [])
                 .compactMap { $0["text"] as? String }.joined(separator: "\n")
             transcript.append(["tool": tool.name, "status": tool.status.rawValue, "text": text])
-            if !["computer_v2_status", "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_snapshot", "computer_v2_ax", ComputerOutcomeToolContract.name].contains(tool.name) {
+            if !["computer_v2_status", "computer_v2_tabs", "computer_v2_continue", "computer_v2_bind_tab", "computer_v2_snapshot", "computer_v2_ax", ComputerOutcomeToolContract.name].contains(tool.name) {
                 unexpectedTools.append(tool.name)
             }
             guard tool.status == .succeeded, text.contains("url=\"https://example.com/inert\""),
@@ -1404,6 +1552,7 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
     private var observedValues = [String]()
     private var firstReadGate: BorrowedRuntimeConnectGate?
     private var dispatchMarker: URL?
+    private var longDocument = false
     init(consent: ChromeDebuggingConsent, url: URL = URL(string: "https://example.com/inert")!, candidateTitle: String = "Identical fixture tabs", textRole: String = "textbox") {
         self.consent = consent
         self.url = url
@@ -1423,6 +1572,7 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
         self.firstReadGate = firstReadGate
         self.dispatchMarker = dispatchMarker
     }
+    func useLongDocument() { longDocument = true }
     func validateConnection() throws {
         try consent.check()
         if closed { throw BrowserTabBrokerError.browserGenerationChanged }
@@ -1460,14 +1610,22 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
             if wrongResult || postPressObservations <= delayedReads { renderedCount = "0" }
             observedValues.append(renderedCount)
         }
-        return BrowserDocumentObservation(loaderID: "inert-loader", title: "Fixture", url: url, nodes: [
+        var nodes: [BrowserDocumentNode] = [
             .init(backendNodeID: 1, role: "button", name: navigatedOnAttach ? "DIFFERENT_ORIGIN_PRIVATE_CONTENT" : "Increment", value: nil, isDisabled: false, isReadOnly: false, isIgnored: false),
             .init(backendNodeID: 2, role: textRole, name: "Text", value: text, isDisabled: false, isReadOnly: false, isIgnored: false),
             .init(backendNodeID: 3, role: "StaticText", name: "Count", value: renderedCount, isDisabled: false, isReadOnly: true, isIgnored: false),
             .init(backendNodeID: 4, role: "button", name: "Disabled button", value: nil, isDisabled: true, isReadOnly: false, isIgnored: false),
             .init(backendNodeID: 5, role: "textbox", name: "Disabled text", value: "", isDisabled: true, isReadOnly: false, isIgnored: false),
             .init(backendNodeID: 6, role: "textbox", name: "Read only text", value: "", isDisabled: false, isReadOnly: true, isIgnored: false)
-        ])
+        ]
+        if longDocument {
+            nodes += (0 ..< 180).map { index in
+                .init(backendNodeID: Int64(100 + index), role: "StaticText",
+                      name: "Synthetic fixture paragraph \(index). " + String(repeating: "Read-only bounded pagination content. ", count: 4),
+                      value: nil, isDisabled: false, isReadOnly: true, isIgnored: false)
+            }
+        }
+        return BrowserDocumentObservation(loaderID: "inert-loader", title: "Fixture", url: url, nodes: nodes)
     }
     func press(target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation,
                permit: BrowserMutationPermit) throws {

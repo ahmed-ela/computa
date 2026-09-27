@@ -12,6 +12,7 @@ const emit = (value: unknown) => process.stdout.write(JSON.stringify(value) + "\
 const result = (id: unknown, value: unknown = {}) => emit({ id, result: value });
 const notify = (method: string, params: Record<string, unknown>) => emit({ method, params: { threadId, ...params } });
 let step = 0, finished = false, snapshot = "", staleSnapshot = "", firstCandidate = "", actionOperation = "";
+let oldInventoryCursor = "", pageContinuationCursor = "";
 const results: { tool: string; success: boolean; text: string }[] = [];
 const attemptedTools: string[] = [];
 let lastTool = "";
@@ -55,6 +56,7 @@ function received(message: any) {
     snapshot = /AXSNAPSHOT id=([0-9A-F-]+)/i.exec(text)?.[1] ?? "";
     if (!snapshot) return finish(false);
   }
+  if (mode.startsWith("pagination-")) return paginationWorkflow(success, text);
   if (mode.startsWith("followup-")) return followupBinding(success, text);
   if (mode.startsWith("runtime-verify-")) return runtimeVerification(success, text);
   if (mode === "unsupported-actions") return unsupportedActions(success, text);
@@ -162,6 +164,106 @@ function received(message: any) {
       case 14:
         call("computer_v2_click", { capture_id: "11111111-1111-4111-8111-111111111111", x: 1, y: 1 }); break;
       case 15: finish(true); break;
+      default: finish(false);
+    }
+  } catch { finish(false); }
+}
+function paginationWorkflow(success: boolean, text: string) {
+  try {
+    if (mode === "pagination-alias-recovery") {
+      switch (step++) {
+        case 0:
+          if (success || text.includes("RUNTIME_ACTION_EVIDENCE")) return finish(false);
+          call("computer_v2_tabs", { page_size: 1 }); break;
+        case 1: {
+          if (!success) return finish(false);
+          const page = JSON.parse(text);
+          if (!page.next_cursor || page.returned !== 1 || page.total_count !== 2) return finish(false);
+          call("computer_v2_continue", { cursor: page.next_cursor }); break;
+        }
+        case 2: {
+          if (!success) return finish(false);
+          const page = JSON.parse(text);
+          if (page.total_count !== 2 || page.returned !== 1 || page.next_cursor) return finish(false);
+          finalAnswer("UNKNOWN_CONTINUATION_RECOVERY_COMPLETE");
+          finish(true); break;
+        }
+        default: finish(false);
+      }
+      return;
+    }
+    if (mode === "pagination-followup") {
+      if (turnCount === 1) {
+        if (step !== 0 || !success) return finish(false);
+        const page = JSON.parse(text);
+        oldInventoryCursor = page.next_cursor;
+        if (page.returned !== 1 || page.total_count !== 2 || !oldInventoryCursor) return finish(false);
+        finalAnswer("FIRST_INVENTORY_PAGE_OBSERVED");
+        return finish(true);
+      }
+      switch (step++) {
+        case 100:
+          if (success || !text.includes("preflight_rejection=freshInventoryRequired")) return finish(false);
+          call("computer_v2_tabs", { page_size: 1 }); break;
+        case 101: {
+          if (!success) return finish(false);
+          const page = JSON.parse(text);
+          if (!page.next_cursor || page.next_cursor === oldInventoryCursor) return finish(false);
+          firstCandidate = page.items[0].candidate_token;
+          call("computer_v2_continue", { cursor: page.next_cursor }); break;
+        }
+        case 102: {
+          if (!success) return finish(false);
+          const page = JSON.parse(text);
+          if (page.total_count !== 2 || page.returned !== 1 || page.next_cursor
+              || page.items[0].candidate_token === firstCandidate) return finish(false);
+          finalAnswer("FOLLOWUP_INVENTORY_RECOVERY_COMPLETE");
+          finish(true); break;
+        }
+        default: finish(false);
+      }
+      return;
+    }
+    if (mode === "pagination-repeat-invalid") {
+      if (step === 0) {
+        if (!success) return finish(false);
+      } else if (success || !text.includes("preflight_rejection=freshInventoryRequired")) return finish(false);
+      if (step++ >= 5) return finish(false);
+      return call("computer_v2_tabs", { cursor: "99999999-9999-4999-8999-999999999999" });
+    }
+    if (mode !== "pagination-mixed-sources") return finish(false);
+    if (step === 4) {
+      if (success || !text.includes("preflight_rejection=freshInventoryRequired")) return finish(false);
+    } else if (!success) return finish(false);
+    switch (step++) {
+      case 0:
+        call("computer_v2_bind_tab", { candidate_token: JSON.parse(text).items[0].candidate_token }); break;
+      case 1: call("computer_v2_snapshot", { view: "content" }); break;
+      case 2:
+        pageContinuationCursor = /next_cursor=([0-9a-f-]+)/i.exec(text)?.[1] ?? "";
+        if (!pageContinuationCursor || !text.includes("output_truncated=1")) return finish(false);
+        call("computer_v2_continue", { cursor: pageContinuationCursor }); break;
+      case 3:
+        pageContinuationCursor = /next_cursor=([0-9a-f-]+)/i.exec(text)?.[1] ?? "";
+        if (!pageContinuationCursor || !text.includes("READ view=content")) return finish(false);
+        // Deliberately send a page cursor to the legacy inventory operation.
+        // Rejection must preserve the page cursor and authorized connection.
+        call("computer_v2_tabs", { cursor: pageContinuationCursor }); break;
+      case 4: call("computer_v2_tabs", { page_size: 1 }); break;
+      case 5: {
+        const page = JSON.parse(text);
+        if (!page.next_cursor) return finish(false);
+        call("computer_v2_continue", { cursor: page.next_cursor }); break;
+      }
+      case 6: {
+        const page = JSON.parse(text);
+        if (page.total_count !== 2 || page.next_cursor) return finish(false);
+        call("computer_v2_continue", { cursor: pageContinuationCursor }); break;
+      }
+      case 7:
+        if (!text.includes("READ view=content") || !text.includes("Synthetic fixture paragraph")) return finish(false);
+        finalAnswer("PAGINATION_SOURCES_RECOVERED");
+        finish(true); break;
       default: finish(false);
     }
   } catch { finish(false); }
@@ -418,7 +520,10 @@ createInterface({ input: process.stdin }).on("line", line => {
       finished = false;
       result(message.id, { turn: { id: turnId, status: "inProgress", items: [] } });
       notify("turn/started", { turn: { id: turnId, status: "inProgress", items: [] } });
-      if (turnCount > 1 && mode.startsWith("followup-")) {
+      if (turnCount > 1 && mode === "pagination-followup") {
+        step = 100;
+        setTimeout(() => call("computer_v2_tabs", { cursor: oldInventoryCursor }), 10);
+      } else if (turnCount > 1 && mode.startsWith("followup-")) {
         step = 100;
         setTimeout(() => {
           if (mode === "followup-unbound-schema") call("computer_v2_snapshot", { view: "not-a-valid-view" });
@@ -430,12 +535,15 @@ createInterface({ input: process.stdin }).on("line", line => {
         finish(true);
       } else if (mode === "background-open") {
         setTimeout(() => call("computer_v2_open", { bundle_id: "com.google.Chrome" }), 10);
+      } else if (mode === "pagination-alias-recovery") {
+        setTimeout(() => call("computer_v2_continue", { cursor: "99999999-9999-4999-8999-999999999999" }), 10);
       } else setTimeout(() => call("computer_v2_tabs", { page_size: 1 }), 10);
       break;
     case "turn/interrupt":
       writeFileSync(join(root, "interrupted"), "yes");
       result(message.id);
       if (mode === "repeated-bind") finalAnswer("LATE_SEARCH_SUCCESS_MUST_NOT_APPEAR");
+      if (mode === "pagination-repeat-invalid") finalAnswer("LATE_INVENTORY_SUCCESS_MUST_NOT_APPEAR");
       if (mode === "runtime-verify-cancel") finalAnswer("CANCELLED_VERIFICATION_FALSE_SUCCESS_MUST_NOT_APPEAR");
       finish(true); break;
     default: emit({ id: message.id, error: { code: -32601, message: "Unexpected borrowed fixture method" } });

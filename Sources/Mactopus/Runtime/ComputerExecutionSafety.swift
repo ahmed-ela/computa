@@ -14,6 +14,9 @@ struct ComputerUnchangedAttemptGuard {
         // Capability refresh is not a new intent. Keep action/text/element,
         // but do not let fresh opaque IDs evade the no-progress budget.
         var stable = arguments.filter { !["snapshot_id", "capture_id", "candidate_token", "cursor", "postcondition"].contains($0.key) }
+        // Page sizing (including an omitted default) cannot make another bad
+        // inventory cursor a distinct recovery attempt.
+        if tool == "computer_v2_tabs" { stable.removeValue(forKey: "page_size") }
         if let observedElementIdentity {
             stable.removeValue(forKey: "element_index")
             stable["observed_element_identity"] = observedElementIdentity

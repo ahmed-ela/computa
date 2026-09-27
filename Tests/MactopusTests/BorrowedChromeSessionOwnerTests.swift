@@ -4,6 +4,26 @@ import XCTest
 
 /// Inert protocol fixtures only. These do not authorize or access user Chrome.
 final class BorrowedChromeSessionOwnerTests: XCTestCase {
+    func testOwnerErrorsHaveTypedLocalizedDescriptions() {
+        let errors: [BorrowedChromeSessionOwnerError] = [
+            .disconnected, .invalidApplication, .invalidTurn, .invalidCandidate, .invalidCursor,
+            .invalidPageSize, .capacityExceeded, .invalidInventory,
+            .runtimeRecoveryInProgress, .runtimeRecoveryFailed,
+        ]
+        for error in errors {
+            XCTAssertEqual((error as NSError).localizedDescription, error.errorDescription)
+            XCTAssertFalse(error.localizedDescription.contains("BorrowedChromeSessionOwnerError error"))
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
+        let cursor = BorrowedChromeSessionOwnerError.invalidCursor.localizedDescription
+        for phrase in ["tab-inventory cursor", "computer_v2_tabs", "current turn", "page-content cursor",
+                       "computer_v2_snapshot", "prior-turn cursor", "fresh inventory", "No tab was attached or changed"] {
+            XCTAssertTrue(cursor.contains(phrase), "Missing actionable cursor context: \(phrase)")
+        }
+        XCTAssertFalse(cursor.lowercased().contains("expired"), "Invalid identity is not evidence of a timed expiry.")
+        XCTAssertFalse(cursor.lowercased().contains("permission"), "An invalid cursor is not a permission diagnosis.")
+    }
+
     func testAdmissionRequiresConsentAndExactChromeApplicationLabel() throws {
         let transport = OwnerTestTransport()
         XCTAssertThrowsError(try BorrowedChromeSessionOwner(
@@ -29,6 +49,55 @@ final class BorrowedChromeSessionOwnerTests: XCTestCase {
         XCTAssertEqual(Set((first.items + second.items + third.items).map(\.candidateToken)).count, 63)
         let counts = await fixture.transport.counts()
         XCTAssertEqual(counts.lists, 1)
+        XCTAssertEqual(counts.attaches, 0)
+        XCTAssertEqual(counts.forbidden, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testUnknownCursorPreservesValidPaginationAndStableNextCursor() async throws {
+        let fixture = try OwnerFixture(count: 63)
+        let turn = try await fixture.turn()
+        let first = try await fixture.owner.listTabs(turn: turn)
+        await expectOwnerError(.invalidCursor) {
+            _ = try await fixture.owner.listTabs(turn: turn, cursor: UUID())
+        }
+        let second = try await fixture.owner.listTabs(turn: turn, cursor: XCTUnwrap(first.nextCursor))
+        let replay = try await fixture.owner.listTabs(turn: turn, cursor: XCTUnwrap(first.nextCursor))
+        XCTAssertEqual(second, replay, "A repeated valid page must retain its exact items and next_cursor.")
+        let third = try await fixture.owner.listTabs(turn: turn, cursor: XCTUnwrap(second.nextCursor))
+        XCTAssertNil(third.nextCursor)
+        XCTAssertEqual(Set((first.items + second.items + third.items).map(\.candidateToken)).count, 63)
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.lists, 1, "A rejected cursor must not silently refresh and invalidate valid tokens.")
+        XCTAssertEqual(counts.attaches, 0)
+        XCTAssertEqual(counts.forbidden, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testPriorTurnCursorCanRecoverWithFreshInventoryWithoutReusingAuthority() async throws {
+        let fixture = try OwnerFixture(count: 63)
+        let oldTurn = try await fixture.turn()
+        let oldPage = try await fixture.owner.listTabs(turn: oldTurn)
+        let oldCursor = try XCTUnwrap(oldPage.nextCursor)
+        await fixture.owner.revoke(turn: oldTurn)
+        let turn = try await fixture.turn()
+        await expectOwnerError(.invalidCursor) {
+            _ = try await fixture.owner.listTabs(turn: turn, cursor: oldCursor)
+        }
+        let first = try await fixture.owner.listTabs(turn: turn)
+        XCTAssertNotEqual(first.nextCursor, oldCursor)
+        await expectOwnerError(.invalidCursor) {
+            _ = try await fixture.owner.listTabs(turn: turn, cursor: oldCursor)
+        }
+        await expectOwnerError(.invalidCandidate) {
+            _ = try await fixture.owner.bind(turn: turn, candidateToken: oldPage.items[0].candidateToken)
+        }
+        let second = try await fixture.owner.listTabs(turn: turn, cursor: XCTUnwrap(first.nextCursor))
+        let third = try await fixture.owner.listTabs(turn: turn, cursor: XCTUnwrap(second.nextCursor))
+        XCTAssertNil(third.nextCursor)
+        XCTAssertEqual(Set((first.items + second.items + third.items).map(\.candidateToken)).count, 63)
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.lists, 2)
         XCTAssertEqual(counts.attaches, 0)
         XCTAssertEqual(counts.forbidden, 0)
         await fixture.owner.disconnect()

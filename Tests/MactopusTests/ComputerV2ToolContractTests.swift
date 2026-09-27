@@ -9,6 +9,19 @@ final class ComputerV2ToolContractTests: XCTestCase {
     private let candidateToken = "33333333-3333-4333-8333-333333333333"
     private let inventoryCursor = "44444444-4444-4444-8444-444444444444"
 
+    func testContinuationIsReadOnlyAndRequiresOnlyOpaqueCursor() throws {
+        let call = try ComputerV2ToolContract.validate(tool: "computer_v2_continue", arguments: ["cursor": inventoryCursor])
+        XCTAssertEqual(call.tool, .continueRead)
+        XCTAssertFalse(call.tool.requiresGlobalInput)
+        for args: [String: Any] in [[:], ["cursor": "invented"], ["cursor": inventoryCursor, "view": "content"],
+                                    ["cursor": inventoryCursor, "page_size": 10], ["cursor": inventoryCursor, "tool": "computer_v2_ax"]] {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: "computer_v2_continue", arguments: args))
+        }
+        let spec = try XCTUnwrap(ComputerV2ToolContract.specs(for: "test-model", interactionPolicy: .backgroundOnly)
+            .first { $0["name"] as? String == "computer_v2_continue" })
+        XCTAssertTrue((spec["description"] as? String ?? "").localizedCaseInsensitiveContains("does not"))
+    }
+
     func testBrowserPostconditionsAreTypedBoundedAndCannotSupplyEvidence() throws {
         let base: [String: Any] = ["snapshot_id": snapshotID, "element_index": 1, "ax_action": "AXPress"]
         for kind in ["value", "region_text", "document_url", "detail_view"] {
@@ -177,7 +190,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
 
     func testSpecsAreVersionedFlatAndActionSpecific() throws {
         let specs = ComputerV2ToolContract.specs
-        XCTAssertEqual(specs.count, 14)
+        XCTAssertEqual(specs.count, 15)
         XCTAssertEqual(specs.count, ComputerV2ToolContract.Tool.allCases.count)
         XCTAssertEqual(Set(specs.compactMap { $0["name"] as? String }).count, specs.count)
 
@@ -249,7 +262,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             "lmstudio-community/Qwen3.5-4B-MLX-4bit",
             "lmstudio-community/Qwen3.5-9B-MLX-4bit",
         ] {
-            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 14)
+            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 15)
             XCTAssertTrue(
                 ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed)
                     .contains { $0["name"] as? String == groundClick },
@@ -260,7 +273,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             "mlx-community/Qwen3.8-27B-4bit",
             "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit",
         ] {
-            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 13)
+            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 14)
             XCTAssertFalse(
                 ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed)
                     .contains { $0["name"] as? String == groundClick },
@@ -274,7 +287,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             let specs = ComputerV2ToolContract.specs(for: model)
             let names = Set(specs.compactMap { $0["name"] as? String })
             XCTAssertEqual(names, Set(Tool.allCases.filter { !$0.requiresGlobalInput }.map(\.rawValue)))
-            XCTAssertEqual(specs.count, 9)
+            XCTAssertEqual(specs.count, 10)
             for spec in specs {
                 let name = try XCTUnwrap(spec["name"] as? String)
                 let schema = try XCTUnwrap(spec["inputSchema"] as? [String: Any])
@@ -480,6 +493,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             (.apps, [:]),
             (.open, ["bundle_id": "com.google.Chrome"]),
             (.tabs, [:]),
+            (.continueRead, ["cursor": inventoryCursor]),
             (.bindTab, ["candidate_token": candidateToken]),
             (.snapshot, [:]),
             (.ax, [
@@ -626,9 +640,9 @@ final class ComputerV2ToolContractTests: XCTestCase {
             XCTAssertTrue(description.contains("no activation, navigation or closing tabs"))
         }
         let tabs = try XCTUnwrap(descriptions[.tabs])
-        XCTAssertTrue(tabs.contains("complete and paginated"))
-        XCTAssertTrue(tabs.contains("follow next_cursor until absent"))
-        XCTAssertTrue(tabs.contains("no query filter"))
+        XCTAssertTrue(tabs.contains("computer_v2_continue(cursor=next_cursor) until absent"))
+        XCTAssertTrue(tabs.contains("exhaust the inventory"))
+        XCTAssertTrue(tabs.contains("not evidence of page contents or relevance"))
         let bind = try XCTUnwrap(descriptions[.bindTab])
         for tool in ["computer_v2_snapshot", "computer_v2_ax", "computer_v2_set_text"] {
             XCTAssertTrue(bind.contains(tool))

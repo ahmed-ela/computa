@@ -25,16 +25,18 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         case invalidArguments
         case bindingRequired
         case freshObservationRequired
+        case freshInventoryRequired
         case pendingAction
     }
 
     enum PreflightCorrection: Sendable {
         case validatedArguments
         case freshBoundObservation(observationID: String, targetID: String)
+        case freshInventory(observationID: String, targetID: String)
     }
 
     struct PreflightCorrectionReceipt: Codable, Equatable, Sendable {
-        enum Kind: String, Codable, Sendable { case validatedArguments, freshBoundObservation }
+        enum Kind: String, Codable, Sendable { case validatedArguments, freshBoundObservation, freshInventory }
         let successorOperationID: String
         let kind: Kind
         let observationID: String?
@@ -472,6 +474,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
               operations[index].foregroundEffect == nil,
               operations[index].preflightRejection == nil,
               kind != .pendingAction,
+              kind != .freshInventoryRequired || !operations[index].requiresVerification,
               !targetWasUnbound || kind == .invalidArguments else { throw Failure.invalidTransition }
         operations[index].preflightRejection = kind
         operations[index].preflightTargetWasUnbound = targetWasUnbound ? true : nil
@@ -513,6 +516,21 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                 throw Failure.wrongTarget
             }
             receipt = .init(successorOperationID: successorID, kind: .freshBoundObservation,
+                            observationID: observationID, observationTargetID: targetID,
+                            observationSequence: observation.sequence)
+        case .freshInventory(let observationID, let targetID):
+            guard successor.tool == "computer_v2_tabs", !successor.requiresVerification,
+                  successor.foregroundEffect == nil else { throw Failure.invalidRecovery }
+            guard let observation = observations.first(where: { $0.id == observationID }) else {
+                throw Failure.missingObservation
+            }
+            guard observation.isLive, observation.sequence > successor.observationAfter else {
+                throw Failure.staleObservation
+            }
+            guard targetID == successor.targetID, observation.targetID == targetID else {
+                throw Failure.wrongTarget
+            }
+            receipt = .init(successorOperationID: successorID, kind: .freshInventory,
                             observationID: observationID, observationTargetID: targetID,
                             observationSequence: observation.sequence)
         }
@@ -765,7 +783,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
               isDirectSuccessfulOperation(successor) else { return false }
         switch receipt.kind {
         case .validatedArguments:
-            guard failed.tool == successor.tool else { return false }
+            guard rejection != .freshInventoryRequired, failed.tool == successor.tool else { return false }
             let hasObservedTarget = receipt.observationID?.isEmpty == false
                 && receipt.observationTargetID == successor.targetID
                 && (receipt.observationSequence ?? 0) > successor.observationAfter
@@ -793,6 +811,19 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                   let sequence = receipt.observationSequence, sequence > successor.observationAfter else { return false }
             return rejection == .bindingRequired
                 || (rejection == .freshObservationRequired && failed.targetID == successor.targetID)
+        case .freshInventory:
+            // Inventory identity includes the runtime's connection and turn.
+            // Refreshing another inventory, observing page content, or merely
+            // correcting call arguments cannot repair this read prerequisite.
+            return rejection == .freshInventoryRequired && !failed.requiresVerification
+                && failed.foregroundEffect == nil
+                && successor.tool == "computer_v2_tabs" && !successor.requiresVerification
+                && successor.foregroundEffect == nil
+                && failed.targetID == successor.targetID
+                && successor.observationAfter > failed.observationAfter
+                && receipt.observationID?.isEmpty == false
+                && receipt.observationTargetID == successor.targetID
+                && (receipt.observationSequence ?? 0) > successor.observationAfter
         }
     }
 
@@ -902,6 +933,9 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                       operation.foregroundEffect == nil,
                       operation.verification == nil, operation.recoveredBy == nil,
                       operation.alreadySatisfied == nil else { throw Failure.invalidCheckpoint }
+                if operation.preflightRejection == .freshInventoryRequired {
+                    guard !operation.requiresVerification else { throw Failure.invalidCheckpoint }
+                }
             }
             if let receipt = operation.pendingActionRejection {
                 guard let index = operations.firstIndex(where: { $0.id == operation.id }),
@@ -952,6 +986,12 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                         guard retained.isLive, retained.sequence == observationSequence, retained.targetID == targetID else {
                             throw Failure.invalidCheckpoint
                         }
+                    } else if correction.kind == .freshInventory {
+                        // A durable correction may outlive the bounded read
+                        // cache, but a supposedly recent missing observation
+                        // cannot be explained by normal oldest-first eviction.
+                        guard let oldestRetainedSequence = observations.map(\.sequence).min(),
+                              observationSequence < oldestRetainedSequence else { throw Failure.invalidCheckpoint }
                     }
                 }
             }

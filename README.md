@@ -8,6 +8,8 @@ Fast, Mac-optimized local AI.
 
 Private personal repository: [ahmed-wlb/mactopus](https://github.com/ahmed-wlb/mactopus). Repository access is required; this is not an anonymous public download.
 
+Next work: [Chrome/Mactopus lookup comparison and generalized evidence handling](TODO.md).
+
 ## Build, install, and run from GitHub
 
 On an Apple Silicon Mac, first install the [documented prerequisites](docs/BUILDING.md#requirements): full Xcode with Swift 6.2+, Git, XcodeGen, Bun, Rustup with Rust 1.95.0, and `uv`. Then:
