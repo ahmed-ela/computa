@@ -71,10 +71,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
     private func runAXQueryRecoveryCase(_ scenario: AXQueryRecoveryCase) async throws {
         let root = try fixtureRoot("AXQueryRecovery-\(scenario.id)")
         print("HEYDASH_AX_QUERY_RECOVERY_CASE_STARTED case=\(scenario.id) targetSourcePosition=\(scenario.targetSecond ? 2 : 1) fixture=\(root.path)")
-        let policyURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("AGENTS.md")
-        let policyBytes = try Data(contentsOf: policyURL)
-        let policy = String(decoding: policyBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        try require(policy.contains("StudyLock Permanent Non-Bypass Policy"), "The unchanged inherited policy is required.")
+        let developerInstructions = MactopusAgentInstructions.developerInstructions()
         let expected = scenario.expectedStatus
         let fixture: [String: String]
         do {
@@ -171,12 +168,11 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
                 "The production workspace must be unchanged.")
             let contextItems = saved.filter { $0["type"] as? String == "response_item" }
                 .compactMap { $0["payload"] as? [String: Any] }
-            try require(contextItems.contains { containsString(policy, in: $0) },
-                "The inherited policy must remain in actual model context.")
-            try require(try Data(contentsOf: policyURL) == policyBytes, "The inherited policy must not change.")
-            print("HEYDASH_AX_QUERY_RECOVERY_PROVENANCE_VERIFIED case=\(scenario.id) synthetic=true desktopExecuted=false terminalCompleted=true exactToolReceipts=true inheritedPolicyUnchanged=true answerQualityNotYetVerified=true fixture=\(root.path)")
+            try require(containsDeveloperInstructions(developerInstructions, in: contextItems),
+                "The app-owned developer instructions must be present in actual model context with their developer role.")
+            print("HEYDASH_AX_QUERY_RECOVERY_PROVENANCE_VERIFIED case=\(scenario.id) synthetic=true desktopExecuted=false terminalCompleted=true exactToolReceipts=true appOwnedInstructionsVerified=true answerQualityNotYetVerified=true fixture=\(root.path)")
             // Validate integrity before answer quality so failed answers retain
-            // a proven terminal, exact synthetic results, and policy provenance.
+            // a proven terminal, exact synthetic results, and instruction provenance.
             let prefix = stages.prefix { ["status", "apps", "apps-default", "unbound"].contains($0) }
             let expectedStages = missingTextRecovery ? ["open", "initial", "query"] : ["open", "direct-query"]
             try require(Array(stages.dropFirst(prefix.count)) == expectedStages && calls.count <= 8
@@ -647,16 +643,13 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
     }
 
     /// The question specifies the one diagnostic call, not a cause or expected answer. Only
-    /// the intercepted native diagnostic is synthetic; inherited instructions,
+    /// the intercepted native diagnostic is synthetic; app-owned instructions,
     /// the model and runtime path remain production ones. The forced-compaction
     /// variant uses an explicit fixture threshold, not a shipping-capacity gate.
     private func runActivationEvidenceGate(forceCompaction: Bool) async throws {
         let root = try fixtureRoot(forceCompaction ? "CompactActivationEvidence" : "ActivationEvidence")
-        let policyURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("AGENTS.md")
-        let policyBytes = try Data(contentsOf: policyURL)
-        let policy = String(decoding: policyBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        try require(policy.contains("StudyLock Permanent Non-Bypass Policy"), "This regression requires the real inherited policy.")
-        let policyHash = SHA256.hash(data: policyBytes).map { String(format: "%02x", $0) }.joined()
+        let developerInstructions = MactopusAgentInstructions.developerInstructions()
+        let instructionsHash = SHA256.hash(data: Data(developerInstructions.utf8)).map { String(format: "%02x", $0) }.joined()
         let failureText = ComputerToolFailureEvidence.text(for:
             ComputerInputError.applicationActivationFailed(processIdentifier: 52339))
         let runtime = try makeRuntime(root: root, phase: "within",
@@ -766,14 +759,16 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             try require(session["cwd"] as? String == CodexAppServerRuntime.Configuration.externalLocalQwen.workspacePath,
                 "The diagnostic fixture must use the unchanged production workspace.")
             let initial = records.filter { $0["type"] as? String == "response_item" }
-                .compactMap { $0["payload"] as? [String: Any] }.filter { $0["role"] as? String == "user" }
-            try require(initial.contains { containsString(policy, in: $0) }, "The real inherited policy is missing from model context.")
+                .compactMap { $0["payload"] as? [String: Any] }
+            try require(containsDeveloperInstructions(developerInstructions, in: initial),
+                "The app-owned developer instructions are missing from model context or have the wrong role.")
             let checkpoints = records.filter { $0["type"] as? String == "compacted" }
                 .compactMap { $0["payload"] as? [String: Any] }
             try require(checkpoints.count == (forceCompaction ? 1 : 0), "The durable checkpoint count must match the native lifecycle.")
             for checkpoint in checkpoints {
                 let history = try XCTUnwrap(checkpoint["replacement_history"] as? [[String: Any]])
-                try require(containsString(policy, in: history), "Compaction must preserve the inherited policy verbatim.")
+                try require(containsDeveloperInstructions(developerInstructions, in: history),
+                    "Mid-turn compaction must preserve the app-owned instructions verbatim with their developer role.")
                 let outputs = history.filter { $0["type"] as? String == "function_call_output" }
                 let retainedIDs = outputs.compactMap { $0["call_id"] as? String }
                 let retainedFailure = try XCTUnwrap(outputs.first { $0["call_id"] as? String == failedCall.callID })
@@ -781,9 +776,8 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
                     && containsString("application_activation_failed", in: retainedFailure),
                     "The genuine failed diagnostic and optional preflight must survive with their exact identities and order.")
             }
-            try require(try Data(contentsOf: policyURL) == policyBytes, "The standing policy changed during the fixture.")
             let summaries = checkpoints.compactMap { $0["message"] as? String }
-            let evidence = "forcedCompaction=\(forceCompaction)\npolicySHA256=\(policyHash)\n"
+            let evidence = "forcedCompaction=\(forceCompaction)\nappOwnedInstructionsSHA256=\(instructionsHash)\n"
                 + "syntheticFailedOpenCalls=1\nsyntheticPermissionPreflights=\(statusCompletions.count)\nfixtureRoot=\(root.path)\n"
                 + "Manual review required; automated checks are conservative language checks, not a semantic correctness proof.\n"
                 + "SUMMARIES:\n\(summaries.joined(separator: "\n---\n"))\nFINAL:\n\(final)"
@@ -802,6 +796,25 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
         } catch {
             _ = await runtime.shutdown()
             throw error
+        }
+    }
+
+    func testInstructionProvenanceRequiresExactDeveloperContentRatherThanQuotedHistory() {
+        let instructions = "App-owned instruction fixture: retain exact content."
+        func message(_ role: String, _ text: String) -> [String: Any] {
+            ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
+        }
+        XCTAssertTrue(containsDeveloperInstructions(instructions, in: [message("developer", instructions)]))
+        XCTAssertFalse(containsDeveloperInstructions(instructions, in: [message("user", instructions)]))
+        XCTAssertFalse(containsDeveloperInstructions(instructions, in: [message("assistant", instructions)]))
+        XCTAssertFalse(containsDeveloperInstructions(instructions, in: [message("developer", "Summarized instructions")]))
+        XCTAssertFalse(containsDeveloperInstructions(instructions, in: [["type": "function_call_output", "output": instructions]]))
+    }
+
+    private func containsDeveloperInstructions(_ instructions: String, in items: [[String: Any]]) -> Bool {
+        items.contains { item in
+            item["type"] as? String == "message" && item["role"] as? String == "developer"
+                && containsString(instructions, in: item["content"] ?? [])
         }
     }
 
@@ -951,7 +964,9 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             try require(config["model_context_window"] as? Int == shippingContext.contextWindow
                 && config["model_auto_compact_token_limit"] as? Int == expectedLimit,
                 "The live path must use the shipping window and its declared production or forced-fixture threshold.")
-            try require(config["compact_prompt"] == nil && params["developerInstructions"] == nil,
+            let developerInstructions = MactopusAgentInstructions.developerInstructions()
+            try require(config["compact_prompt"] == nil
+                && params["developerInstructions"] as? String == developerInstructions,
                 "Experimental instructions cannot substitute for the shipping native compactor.")
         }
         print("contextWindow=\(shippingContext.contextWindow) compactLimit=\(expectedLimit) forcedFixtureThreshold=\(forced) usesShippingCompactionThreshold=\(!forced)")

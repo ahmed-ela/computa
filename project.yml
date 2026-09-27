@@ -45,9 +45,6 @@ targets:
       - path: Sources/Mactopus/Resources/MLXServer
         type: folder
         buildPhase: resources
-      - path: Sources/Mactopus/Resources/AgentInstructions
-        type: folder
-        buildPhase: resources
       - path: BrowserExtension
         type: folder
         buildPhase: resources

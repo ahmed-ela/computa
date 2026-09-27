@@ -77,7 +77,7 @@ final class WebSnapshotTests: XCTestCase {
     @MainActor
     func testMactopusBrandingKeepsNativeBridgeCompatibility() throws {
         XCTAssertEqual(TimelineEntryKind.assistant.label, "Mactopus")
-        XCTAssertTrue(CodexAppServerRuntime.Configuration.localQwen.baseInstructions.hasPrefix("You are Mactopus."))
+        XCTAssertTrue(CodexAppServerRuntime.Configuration.localQwen.baseInstructions.hasPrefix("You are Mactopus, a general-purpose local assistant."))
         XCTAssertEqual(WebBridge.handlerName, "localCodex")
         XCTAssertEqual(WebUIResourceLocator.scheme, "localcodex-app")
         let index = try XCTUnwrap(WebUIResourceLocator.indexURL)

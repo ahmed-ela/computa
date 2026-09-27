@@ -26,8 +26,7 @@ enum AgentRuntimeIsolation {
         return result
     }
 
-    /// The caller must preserve and verify the complete protected StudyLock policy
-    /// in its app-owned instruction resources before restricting ancestor discovery.
+    /// Keep app-owned instructions independent of ancestor project discovery.
     /// File-backed credentials stay in the explicitly supplied private CODEX_HOME.
     static let configurationArguments = [
         "-c", "project_root_markers=[]",
@@ -39,7 +38,7 @@ enum AgentRuntimeIsolation {
     ]
 
     /// A deterministic child of the private home, not the parent application's cwd.
-    /// Directory creation and protected-policy verification belong to the caller.
+    /// Directory creation belongs to the caller.
     static func workspaceURL(codexHomePath: String) -> URL {
         URL(fileURLWithPath: codexHomePath, isDirectory: true)
             .appendingPathComponent("Workspace", isDirectory: true)

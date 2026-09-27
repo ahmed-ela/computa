@@ -104,9 +104,9 @@ final class ComputerToolFailureEvidenceTests: XCTestCase {
         let instructions = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
         XCTAssertTrue(instructions.contains("Replies/summaries"))
         XCTAssertTrue(instructions.contains("raw results beat guesses"))
-        XCTAssertTrue(instructions.contains("StudyLock's allowed-work list is ONLY for work on StudyLock enforcement"))
-        XCTAssertTrue(instructions.contains("Harmless text generation and unrelated read-only browser tasks are allowed"))
-        XCTAssertTrue(instructions.contains("Never weaken enforcement"))
+        XCTAssertFalse(instructions.localizedCaseInsensitiveContains("StudyLock"))
+        XCTAssertTrue(instructions.contains("Help with authorized tasks"))
+        XCTAssertTrue(instructions.contains("Respect approvals and access controls"))
         XCTAssertTrue(instructions.contains("policy isn't block proof"))
         XCTAssertTrue(instructions.contains("Keep unknowns; don't exclude unobserved causes"))
         XCTAssertLessThan(instructions.utf8.count, 1_024)

@@ -1,5 +1,4 @@
 import AutomationCore
-import CryptoKit
 import Foundation
 import XCTest
 @testable import Mactopus
@@ -18,11 +17,11 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         func shutdown() async -> [String] { [] }
     }
 
-    func testNewThreadReceivesExplicitProtectedInstructionsAndPrivateChildState() async throws {
+    func testNewThreadReceivesOnlyAppOwnedInstructionsAndPrivateChildState() async throws {
         try await checkSubmission(mode: "new", expectedThreadMethod: "thread/start")
     }
 
-    func testColdExistingThreadReceivesExplicitProtectedInstructionsAndPrivateChildState() async throws {
+    func testColdExistingThreadReceivesOnlyAppOwnedInstructionsAndPrivateChildState() async throws {
         try await checkSubmission(mode: "resume", expectedThreadMethod: "thread/resume")
     }
 
@@ -111,16 +110,15 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         XCTAssertEqual(threadRequests.map { $0["method"] as? String }, [threadMethod])
         let params = try XCTUnwrap(threadRequests.first?["params"] as? [String: Any])
         XCTAssertEqual(params["cwd"] as? String, configuration.workspacePath)
-        XCTAssertEqual(params["developerInstructions"] as? String, try MactopusAgentInstructions.developerInstructions())
+        XCTAssertEqual(params["developerInstructions"] as? String, MactopusAgentInstructions.developerInstructions())
         let config = try XCTUnwrap(params["config"] as? [String: Any])
         XCTAssertEqual(config["project_root_markers"] as? [String], [])
         XCTAssertNil(config["project_doc_max_bytes"])
-        let policyURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("Sources/Mactopus/Resources/AgentInstructions/StudyLock.md")
-        let policy = try Data(contentsOf: policyURL)
-        XCTAssertEqual(SHA256.hash(data: policy).map { String(format: "%02x", $0) }.joined(),
-                       "47ebd203f659b71526cf412119e716042b9cb80c647f643cf089a20203f65509")
-        XCTAssertTrue(try XCTUnwrap(params["developerInstructions"] as? String).contains(String(decoding: policy, as: UTF8.self)))
+        for key in ["developerInstructions", "baseInstructions"] {
+            let instructions = try XCTUnwrap(params[key] as? String)
+            XCTAssertFalse(instructions.localizedCaseInsensitiveContains("StudyLock"))
+            XCTAssertFalse(instructions.contains("Permanent Non-Bypass Policy"))
+        }
         let turnRequests = requests.filter { $0["method"] as? String == "turn/start" }
         XCTAssertEqual(turnRequests.count, 1)
         let turn = try XCTUnwrap(turnRequests.first?["params"] as? [String: Any])

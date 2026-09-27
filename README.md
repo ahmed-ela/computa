@@ -90,7 +90,7 @@ New tasks default to `lmstudio-community/Qwen3.5-4B-MLX-4bit`. Settings can chan
 
 The private `CODEX_HOME` keeps existing Mactopus chats separate from personal Codex chats. It is not sufficient by itself to isolate configuration: a Documents workspace inside a home Git repository could previously discover the ancestor `.codex/config.toml` and `AGENTS.md`. Mactopus now launches in its private workspace with `project_root_markers=[]` at both process and thread boundaries. The engine child's `HOME` is its private `CodexHome/ProcessHome`, preventing global `.agents` skill imports; the native app and real macOS home are unchanged. It forwards only explicit home paths, a system PATH, temporary-directory/locale settings, and the selected local inference endpoint; it does not forward ambient Codex routing variables, API keys, proxies, or startup hooks. Login-shell initialization and shell snapshots are disabled for this shell-tool-free engine. Auth stores are file-backed inside the private home, not shared desktop credentials. This is application configuration isolation, not an OS sandbox.
 
-The compact base instruction is under 1 KiB. Mactopus additionally supplies its own bundled developer instructions on new and resumed chats, including the **complete unchanged StudyLock non-bypass policy**. No protected source or enforcement state is removed or altered. The policy governs StudyLock enforcement only; it does not turn Mactopus into a StudyLock-only assistant or establish that an unrelated page is blocked. Saved chats and their history remain intact; restarting the app applies the owned instruction boundary on resume. Updates to bundled instructions require a new build/restart, not live editing of another application's configuration. Machine-managed/system-wide engine policy is not bypassed by these app settings.
+The compact base instruction is under 1 KiB. Mactopus supplies self-contained, general-purpose developer instructions on new and resumed chats. It does not bundle StudyLock instructions or read another application's prompts. Native permissions, access controls, untrusted-page boundaries, and evidence-based error reporting remain enforced. This separation does not change StudyLock or any other application's settings or enforcement. Saved chats and their history remain intact; earlier messages can still mention instructions from an older build, but are not current policy. Restarting the app applies updated owned instructions on resume. Machine-managed/system-wide engine policy is not bypassed by these app settings.
 
 ## Application surface
 
@@ -184,7 +184,7 @@ menu**, not a web bridge action or model tool:
   approval. Read-only inspection does not prompt.
 - **Full access**: native action-approval requests are approved automatically.
   Tool validation, stale-target checks, sandbox rules, macOS permissions, and
-  StudyLock restrictions are unchanged. This is not a grant of macOS permissions.
+  external access controls are unchanged. This is not a grant of macOS permissions.
 
 The mode applies to all tasks and is remembered across app launches. A missing
 or invalid saved preference defaults to Ask every time. Switching back cannot

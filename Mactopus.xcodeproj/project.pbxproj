@@ -144,7 +144,6 @@
 		A77977979A42756C92BA218C /* ComputerV2ToolContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B3A54FAECA2620FB0DD5AEF /* ComputerV2ToolContractTests.swift */; };
 		A8C014B1A50027686C5A42DC /* NativeMessageEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = D88538AF0FD7E43F23042BB4 /* NativeMessageEvidence.swift */; };
 		A8E366BF8A72F7FF326BEE8D /* BorrowedChromeQwenConcurrentLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C7F546A0E7EC72418429C2A /* BorrowedChromeQwenConcurrentLiveTests.swift */; };
-		A9444971675A80C250E477D4 /* AgentInstructions in Resources */ = {isa = PBXBuildFile; fileRef = A79DC39997ED1B5B6B89603C /* AgentInstructions */; };
 		A9B5B6F22A84336BE8811851 /* ApplicationWindowReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B646D5AADC950C23121DF3B /* ApplicationWindowReaderTests.swift */; };
 		AA53422F3779F80ECA45A396 /* ChromeDebuggingProcessBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2604A1FE000A66BB32B5ED8 /* ChromeDebuggingProcessBinding.swift */; };
 		AACC61F535F306CE32EBE7FC /* ApprovedFocusHandoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26FAF116C3B739186A5BDE6A /* ApprovedFocusHandoffTests.swift */; };
@@ -406,7 +405,6 @@
 		A23140FFC3EF1232B734ABC6 /* NativeFailureEvidenceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeFailureEvidenceStore.swift; sourceTree = "<group>"; };
 		A524BF66A2DC8ABDEBE73E96 /* OwnedChildProcessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnedChildProcessTests.swift; sourceTree = "<group>"; };
 		A6CD479822869385C269A418 /* SafeFixtureTelemetryQuery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeFixtureTelemetryQuery.swift; sourceTree = "<group>"; };
-		A79DC39997ED1B5B6B89603C /* AgentInstructions */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AgentInstructions; path = Sources/Mactopus/Resources/AgentInstructions; sourceTree = SOURCE_ROOT; };
 		A9E514AB6289848FB9D94A76 /* RememberedChromeConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RememberedChromeConnection.swift; sourceTree = "<group>"; };
 		AA0E65629B62DEE47B52746B /* VisualGroundingClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualGroundingClientTests.swift; sourceTree = "<group>"; };
 		AA1AE714EFA435E7C1F95F74 /* NativeApprovalGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeApprovalGate.swift; sourceTree = "<group>"; };
@@ -577,7 +575,6 @@
 		88D2FD63B3A750DE75FEAE67 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				A79DC39997ED1B5B6B89603C /* AgentInstructions */,
 				1D7ABF1EB2D2ECB3C60CF5FB /* AgentRuntime */,
 				46755BCAEE4E45B6C04370B5 /* MLXServer */,
 				837601B4C392C2FDA7ED5A19 /* VisualGrounding */,
@@ -962,7 +959,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A9444971675A80C250E477D4 /* AgentInstructions in Resources */,
 				13A9DA10330AEF3C5E88C0C7 /* AgentRuntime in Resources */,
 				26AE69961BEFFFD41B344415 /* Assets.xcassets in Resources */,
 				4BD73648C292024248A15DA7 /* BrowserExtension in Resources */,

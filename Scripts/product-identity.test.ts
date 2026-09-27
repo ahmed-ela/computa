@@ -37,7 +37,7 @@ describe("Mactopus product identity", () => {
     expect(app).toContain("MactopusAppDelegate.self");
     expect(source("Runtime/MactopusAgentInstructions.swift")).toContain("MactopusAgentInstructions");
     expect(source("Runtime/MactopusRuntimeArtifact.swift")).toContain("struct MactopusRuntimeArtifact");
-    expect(source("Runtime/CodexAppServerRuntime.swift")).toContain("You are Mactopus.");
+    expect(source("Runtime/CodexAppServerRuntime.swift")).toMatch(/You are Mactopus[.,]/);
   });
 
   test("native and web display branding agrees", () => {
@@ -52,6 +52,14 @@ describe("Mactopus product identity", () => {
     expect(JSON.parse(read("WebUI/package.json")).name).toBe("mactopus-web-ui");
     expect(read("WebUI/src/App.tsx")).not.toContain("HeyDash");
     expect(read("WebUI/vite.config.ts")).toContain("../Sources/Mactopus/Resources/WebUI");
+  });
+
+  test("the app ships its own instructions without another app's policy resource", () => {
+    expect(existsSync(resolve(root, "Sources/Mactopus/Resources/AgentInstructions/StudyLock.md"))).toBe(false);
+    expect(source("Runtime/MactopusAgentInstructions.swift")).not.toContain("StudyLock");
+    expect(source("Runtime/CodexAppServerRuntime.swift")).not.toContain("StudyLock");
+    expect(read("Package.swift")).not.toContain('Resources/AgentInstructions');
+    expect(read("project.yml")).not.toContain('Resources/AgentInstructions');
   });
 
   test("the packaged UI includes the unified timer without the legacy working footer", () => {
