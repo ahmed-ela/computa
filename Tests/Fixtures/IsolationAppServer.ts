@@ -1,4 +1,4 @@
-#!/Users/ahmedelamin/.bun/bin/bun
+#!/usr/bin/env bun
 // Owned transport fixture only: no inference, tools, shell, or desktop actions.
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

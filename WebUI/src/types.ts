@@ -29,6 +29,10 @@ export interface EntrySnapshot {
   title: string;
   body: string;
   timestamp: number;
+  workedForSeconds?: number;
+  isStreaming?: boolean;
+  activityGroupID?: string;
+  assistantPhase?: 'commentary' | 'final_answer';
   tool?: ToolSnapshot;
 }
 
@@ -54,6 +58,8 @@ export interface TaskSnapshot {
   status: string;
   statusTone: Tone;
   updatedAt: number;
+  activeTurnStartedAt?: number;
+  activeActivityGroupID?: string;
   workspace: string;
   model: string;
   modelSelectable: boolean;

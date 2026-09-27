@@ -15,6 +15,7 @@ private final class FakeApplicationWindowRuntime: ApplicationWindowRuntime {
     var windows: [AXUIElement] = []
     var focused: AXUIElement?
     var main: AXUIElement?
+    var availabilityCodes: (windows: Int32, focused: Int32, main: Int32)?
     var applicationOwner: Int32 = 77
     var windowOwner: Int32 = 77
     var windowRole: String? = "AXWindow"
@@ -42,7 +43,8 @@ private final class FakeApplicationWindowRuntime: ApplicationWindowRuntime {
         elementsReads += 1
         if let failure { throw failure }
         beforeElementsRead?()
-        return ApplicationWindowElements(application: application, windows: windows, focusedWindow: focused, mainWindow: main)
+        return ApplicationWindowElements(application: application, windows: windows, focusedWindow: focused,
+                                         mainWindow: main, availabilityCodes: availabilityCodes)
     }
 
     func processIdentifier(of element: AXUIElement) throws -> Int32 {
@@ -175,7 +177,14 @@ final class ApplicationWindowReaderTests: XCTestCase {
         runtime.main = nil
         runtime.windows = []
         XCTAssertThrowsError(try runtime.observation()) {
-            XCTAssertEqual($0 as? ApplicationWindowReadError, .windowUnavailable)
+            guard case let .windowSelectionUnavailable(diagnostic) = $0 as? ApplicationWindowReadError else {
+                return XCTFail("Expected structural window availability diagnostic")
+            }
+            XCTAssertEqual(diagnostic.reason, .noSelectedWindow)
+            XCTAssertEqual(diagnostic.windowCount, 0)
+            XCTAssertNil(diagnostic.windowsCode)
+            XCTAssertFalse(diagnostic.focusedPresent)
+            XCTAssertFalse(diagnostic.mainPresent)
         }
         runtime.windows = [runtime.first, AXUIElementCreateApplication(51_001)]
         XCTAssertThrowsError(try runtime.observation()) {
@@ -344,5 +353,164 @@ final class ApplicationWindowReaderTests: XCTestCase {
             }
         }
         XCTAssertEqual(runtime.processReads, 0)
+    }
+
+    @MainActor
+    func testRawMissingWindowAttributePreservesEachCodeAndQueriesSelectionWithoutBinding() {
+        let selected = AXUIElementCreateApplication(51_001)
+        let cases: [(AXError, ApplicationWindowAvailabilityDiagnostic.Reason, Bool)] = [
+            (.noValue, .windowsNoValue, true),
+            (.attributeUnsupported, .windowsUnsupported, false),
+            (.success, .windowsReturnedNoValue, true),
+        ]
+        for (code, reason, retryable) in cases {
+            var reads: [String] = []
+            let runtime = SystemApplicationWindowRuntime { _, attribute in
+                reads.append(attribute as String)
+                switch attribute as String {
+                case kAXWindowsAttribute: return (code, nil)
+                case kAXFocusedWindowAttribute: return (.success, selected)
+                case kAXMainWindowAttribute: return (.noValue, nil)
+                default: return (.attributeUnsupported, nil)
+                }
+            }
+            XCTAssertThrowsError(try runtime.elements(processIdentifier: 77)) { error in
+                guard let typed = error as? ApplicationWindowReadError,
+                      case .windowSelectionUnavailable(let diagnostic) = typed else {
+                    return XCTFail("Expected exact missing-window diagnostic")
+                }
+                XCTAssertEqual(diagnostic.reason, reason)
+                XCTAssertEqual(diagnostic.windowsCode, code.rawValue)
+                XCTAssertNil(diagnostic.windowCount)
+                XCTAssertEqual(diagnostic.focusedCode, AXError.success.rawValue)
+                XCTAssertTrue(diagnostic.focusedPresent)
+                XCTAssertEqual(diagnostic.mainCode, AXError.noValue.rawValue)
+                XCTAssertFalse(diagnostic.mainPresent)
+                XCTAssertEqual(typed.permitsInitialReadRetry, retryable)
+                XCTAssertTrue(typed.localizedDescription.contains("AXWindows_code=\(code.rawValue)"))
+                XCTAssertFalse(typed.localizedDescription.contains("AXTitle"))
+                XCTAssertFalse(typed.localizedDescription.contains("AXValue"))
+            }
+            XCTAssertEqual(reads, [kAXWindowsAttribute, kAXFocusedWindowAttribute, kAXMainWindowAttribute])
+        }
+    }
+
+    @MainActor
+    func testRawWindowAttributeWrongTypesNeverFallBackToValidFocusedWindow() {
+        let selected = AXUIElementCreateApplication(51_001)
+        let malformedValues: [CFTypeRef] = ["private window title" as CFString, ["private window title"] as CFArray]
+        for malformed in malformedValues {
+            var reads: [String] = []
+            let runtime = SystemApplicationWindowRuntime { _, attribute in
+                reads.append(attribute as String)
+                return attribute as String == kAXWindowsAttribute ? (.success, malformed) : (.success, selected)
+            }
+            XCTAssertThrowsError(try runtime.elements(processIdentifier: 77)) { error in
+                XCTAssertEqual(error as? AutomationError,
+                    .unexpectedAttributeType(attribute: kAXWindowsAttribute))
+                XCTAssertFalse(error.localizedDescription.contains("private window title"))
+            }
+            XCTAssertEqual(reads, [kAXWindowsAttribute, kAXFocusedWindowAttribute, kAXMainWindowAttribute])
+        }
+    }
+
+    @MainActor
+    func testRawSelectionWrongTypeRemainsAnErrorInsteadOfFallingBack() {
+        let selected = AXUIElementCreateApplication(51_001)
+        for malformedAttribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
+            let runtime = SystemApplicationWindowRuntime { _, attribute in
+                if attribute as String == kAXWindowsAttribute { return (.success, [selected] as CFArray) }
+                if attribute as String == malformedAttribute { return (.success, "private text" as CFString) }
+                return (.success, selected)
+            }
+            XCTAssertThrowsError(try runtime.elements(processIdentifier: 77)) { error in
+                XCTAssertEqual(error as? AutomationError, .unexpectedAttributeType(attribute: malformedAttribute))
+                XCTAssertFalse(error.localizedDescription.contains("private text"))
+            }
+        }
+    }
+
+    @MainActor
+    func testRawAXFailureRetainsOriginalCodeWithoutTreatingItAsMissingWindows() {
+        for failedAttribute in [kAXWindowsAttribute, kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
+            let selected = AXUIElementCreateApplication(51_001)
+            let runtime = SystemApplicationWindowRuntime { _, attribute in
+                if attribute as String == failedAttribute { return (.cannotComplete, nil) }
+                if attribute as String == kAXWindowsAttribute { return (.success, [selected] as CFArray) }
+                return (.success, selected)
+            }
+            XCTAssertThrowsError(try runtime.elements(processIdentifier: 77)) {
+                XCTAssertEqual($0 as? AutomationError,
+                    .accessibilityFailure(operation: "read app-bound \(failedAttribute)", code: AXError.cannotComplete.rawValue))
+            }
+        }
+    }
+
+    @MainActor
+    func testRawEmptyWindowListDiagnosticPreservesSelectionStatuses() throws {
+        let runtime = SystemApplicationWindowRuntime { _, attribute in
+            switch attribute as String {
+            case kAXWindowsAttribute: return (.success, [] as CFArray)
+            case kAXFocusedWindowAttribute: return (.noValue, nil)
+            default: return (.attributeUnsupported, nil)
+            }
+        }
+        let elements = try runtime.elements(processIdentifier: 77)
+        XCTAssertTrue(elements.windows.isEmpty)
+        XCTAssertNil(elements.focusedWindow)
+        XCTAssertNil(elements.mainWindow)
+        let selection = FakeApplicationWindowRuntime()
+        selection.windows = elements.windows
+        selection.focused = elements.focusedWindow
+        selection.main = elements.mainWindow
+        selection.availabilityCodes = elements.availabilityCodes
+        XCTAssertThrowsError(try selection.observation()) { error in
+            guard let typed = error as? ApplicationWindowReadError,
+                  case .windowSelectionUnavailable(let diagnostic) = typed else {
+                return XCTFail("Expected an empty-list diagnostic")
+            }
+            XCTAssertEqual(diagnostic.reason, .noSelectedWindow)
+            XCTAssertEqual(diagnostic.windowsCode, AXError.success.rawValue)
+            XCTAssertEqual(diagnostic.windowCount, 0)
+            XCTAssertEqual(diagnostic.focusedCode, AXError.noValue.rawValue)
+            XCTAssertEqual(diagnostic.mainCode, AXError.attributeUnsupported.rawValue)
+            XCTAssertFalse(diagnostic.focusedPresent)
+            XCTAssertFalse(diagnostic.mainPresent)
+            XCTAssertTrue(typed.permitsInitialReadRetry)
+        }
+    }
+
+    @MainActor
+    func testRawValidSelectionPreservesTheExactWindowAndStrictList() throws {
+        let first = AXUIElementCreateApplication(51_001)
+        let second = AXUIElementCreateApplication(51_002)
+        let runtime = SystemApplicationWindowRuntime { _, attribute in
+            switch attribute as String {
+            case kAXWindowsAttribute: return (.success, [first] as CFArray)
+            case kAXFocusedWindowAttribute: return (.success, second)
+            default: return (.noValue, nil)
+            }
+        }
+        let elements = try runtime.elements(processIdentifier: 77)
+        XCTAssertEqual(elements.windows.count, 1)
+        XCTAssertTrue(CFEqual(elements.windows[0], first))
+        XCTAssertTrue(CFEqual(try XCTUnwrap(elements.focusedWindow), second))
+        let selection = FakeApplicationWindowRuntime()
+        selection.windows = elements.windows
+        selection.focused = elements.focusedWindow
+        selection.main = elements.mainWindow
+        selection.availabilityCodes = elements.availabilityCodes
+        XCTAssertThrowsError(try selection.observation()) {
+            XCTAssertEqual($0 as? ApplicationWindowReadError, .windowOwnershipMismatch)
+        }
+    }
+
+    func testOnlyInitialWindowAvailabilityErrorsPermitBoundedReadRetry() {
+        XCTAssertTrue(ApplicationWindowReadError.windowUnavailable.permitsInitialReadRetry)
+        for error in [ApplicationWindowReadError.applicationUnavailable, .applicationMismatch,
+                      .applicationIdentityUnavailable, .ambiguousWindows(2), .windowOwnershipMismatch,
+                      .invalidWindowRole, .observationChanged, .invalidTarget] {
+            XCTAssertFalse(error.permitsInitialReadRetry)
+        }
     }
 }

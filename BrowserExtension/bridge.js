@@ -1,4 +1,4 @@
-import { BridgeError, requireValue, record, text, keys, allowedURL, validateCommand } from "./commands.js";
+import { BridgeError, requireValue, record, text, keys, allowedURL, validateCommand, projectAccessibilityResult, projectClickabilityResult } from "./commands.js";
 
 export const HOST_NAME = "com.macndash.chrome_bridge";
 export const MAX_MESSAGE_BYTES = 512 * 1024;
@@ -233,14 +233,16 @@ export class ChromeBridge {
       case "inventory": {
         requireValue(keys(params, []));
         return { generation, candidates: (await this.targets(generation, revision)).map(target => ({ targetID: target.id,
-          title: typeof target.title === "string" ? target.title.slice(0, 4096) : "", url: target.url })) };
+          title: typeof target.title === "string" ? target.title.slice(0, 4096) : "", url: target.url,
+          availability: target.attached === false ? "available" : target.attached === true ? "busy" : "unknown" })) };
       }
       case "attach": {
         requireValue(keys(params, ["targetID"]) && text(params.targetID));
         requireValue(this.attachments.size < 16, "capacity_exceeded", "Too many attached tabs.");
         requireValue(![...this.attachments.values()].some(item => item.targetID === params.targetID), "already_attached", "This tab already has a bridge attachment.");
         const target = (await this.targets(generation, revision)).find(target => target.id === params.targetID);
-        requireValue(!!target && !target.attached, "target_unavailable", "The exact tab is unavailable or already being debugged.");
+        requireValue(!!target, "target_unavailable", "The exact tab is unavailable or restricted.");
+        requireValue(!target.attached, "target_busy", "The exact tab already has an automation or debugger attachment.");
         this.check(generation, revision);
         const attachment = this.chrome.debugger.attach({ targetId: target.id }, "1.3");
         // An attach can finish after its deadline. Clean it up on its original exact target.
@@ -272,6 +274,7 @@ export class ChromeBridge {
         requireValue(!!item, "stale_attachment", "The tab attachment is no longer current.");
         await this.current(item, generation, revision);
         const command = params.params;
+        if (params.method === "DOMSnapshot.captureSnapshot") requireValue(!!item.frame, "stale_frame", "Observe the current main frame first.");
         if (params.method === "Page.createIsolatedWorld") requireValue(item.frame?.id === command.frameId, "stale_frame", "Observe the current main frame first.");
         if (params.method === "DOM.resolveNode") requireValue(item.contexts.has(command.executionContextId), "stale_context", "The execution context is not owned by this attachment.");
         if (params.method === "Runtime.callFunctionOn") requireValue(item.objects.has(command.objectId)
@@ -302,6 +305,8 @@ export class ChromeBridge {
         if (params.method === "Runtime.releaseObjectGroup") {
           for (const [id, group] of item.objects) if (group === command.objectGroup) item.objects.delete(id);
         }
+        if (params.method === "Accessibility.getFullAXTree") return projectAccessibilityResult(result, MAX_MESSAGE_BYTES - 4096);
+        if (params.method === "DOMSnapshot.captureSnapshot") return projectClickabilityResult(result, MAX_MESSAGE_BYTES - 4096, item.frame);
         return result;
       }
       case "disconnect":

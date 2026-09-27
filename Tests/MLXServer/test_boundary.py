@@ -6,9 +6,10 @@ import io
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
-path = Path(__file__).parents[2] / "Sources/Macrouse/Resources/MLXServer/server.py"
+path = Path(__file__).parents[2] / "Sources/Mactopus/Resources/MLXServer/server.py"
 sys.path.insert(0, str(path.parent))
 spec = importlib.util.spec_from_file_location("heydash_mlx", path)
 server = importlib.util.module_from_spec(spec)
@@ -17,6 +18,21 @@ MODEL = server.MODEL_IDS[0]
 
 
 class RequestTests(unittest.TestCase):
+    def test_model_discovery_preserves_legacy_9b_beside_owned_4b(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owned, legacy = Path(temporary) / "owned", Path(temporary) / "legacy"
+            for root, model in [(owned, MODEL), (legacy, MODEL), (legacy, server.MODEL_IDS[1])]:
+                directory = root / model
+                directory.mkdir(parents=True)
+                (directory / "config.json").write_text("{}")
+            paths = server.discover_model_paths(owned, legacy)
+            self.assertEqual(paths[MODEL], (owned / MODEL).resolve())
+            self.assertEqual(paths[server.MODEL_IDS[1]], (legacy / server.MODEL_IDS[1]).resolve())
+            self.assertEqual(server.discover_model_paths(owned), {MODEL: (owned / MODEL).resolve()})
+            self.assertEqual(server.discover_model_paths(Path(temporary) / "missing", legacy)[MODEL],
+                             (legacy / MODEL).resolve())
+            self.assertEqual(server.discover_model_paths(Path(temporary) / "missing"), {})
+
     def test_parent_exit_releases_process_instead_of_leaving_resident_weights(self):
         parents = iter([42, 42, 1])
         waits, exits = [], []
@@ -84,6 +100,21 @@ class RequestTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_public_model_ids_are_accepted_and_resolved_internally(self):
+        self.boundary.model_paths = {MODEL: Path("/fixture/owned/models") / MODEL}
+        await self.invoke()
+        self.assertEqual(len(self.calls), 1)
+        scope, message = self.calls[0]
+        value = json.loads(message["body"])
+        self.assertEqual(value["model"], str(self.boundary.model_paths[MODEL]))
+        self.assertEqual(self.boundary.selected_model, MODEL)
+        self.assertEqual(dict(scope["headers"])[b"content-length"], str(len(message["body"])).encode())
+        self.calls.clear()
+        output = await self.invoke(raw=json.dumps({"model": str(self.boundary.model_paths[MODEL]),
+            "store": False, "stream": True, "input": "Hello"}).encode())
+        self.assertEqual(output[0]["status"], 400)
+        self.assertEqual(self.calls, [])
+
     async def asyncSetUp(self):
         self.calls = []
         async def upstream(scope, receive, send):

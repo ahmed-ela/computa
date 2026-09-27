@@ -14,6 +14,9 @@ import {
 } from '@octanejs/shadcn/DropdownMenu';
 import { Icon } from './Icon';
 import { ResponseMarkdown } from './ResponseMarkdown';
+import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
+import { activityTimeline, type ActivityGroup } from './activityTimeline';
+import { formatWorkedFor } from './duration';
 import { previewSnapshot, installPreviewBridge } from './preview';
 import {
   dropQueuedPrompt,
@@ -100,7 +103,7 @@ function Sidebar({
       <div className="window-drag-strip" aria-hidden="true" />
       <div className="sidebar-brand-row">
         <div className="brand-lockup">
-          <strong title="Fast, Mac-optimized local AI">Macrouse</strong>
+          <strong title="Fast, Mac-optimized local AI">Mactopus</strong>
         </div>
       </div>
 
@@ -170,7 +173,7 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
   return (
     <header className="task-toolbar">
       <div className="toolbar-title-block">
-        <strong>{task?.title === 'Untitled task' ? 'New task' : task?.title ?? 'Macrouse'}</strong>
+        <strong>{task?.title === 'Untitled task' ? 'New task' : task?.title ?? 'Mactopus'}</strong>
       </div>
       <div className="toolbar-actions">
         {task && task.status !== 'Draft' && task.status !== 'Completed' ? (
@@ -220,10 +223,12 @@ function TimelineEntry({
   entry,
   selected,
   showToolPayloads,
+  hideAnswerDuration = false,
 }: {
   entry: EntrySnapshot;
   selected: boolean;
   showToolPayloads: boolean;
+  hideAnswerDuration?: boolean;
 }) {
   if (entry.kind === 'assistant' && !entry.body.trim()) return null;
   if (entry.kind === 'user') {
@@ -236,21 +241,6 @@ function TimelineEntry({
         >
           {entry.body}
         </Button>
-      </article>
-    );
-  }
-
-  if (entry.kind === 'reasoning') {
-    return (
-      <article className={`message-row activity-message ${selected ? 'selected' : ''}`}>
-        <details>
-          <summary onClick={() => post({ action: 'selectEntry', id: entry.id })}>
-            <span className="activity-spark"><Icon name="sparkles" size={14} /></span>
-            <span>{entry.title || 'Working'}</span><Icon name="chevron" size={12} />
-            <span className="message-time">{clockTime(entry.timestamp)}</span>
-          </summary>
-          <div className="activity-body">{entry.body}</div>
-        </details>
       </article>
     );
   }
@@ -284,13 +274,14 @@ function TimelineEntry({
       onClick={() => post({ action: 'selectEntry', id: entry.id })}
       tabIndex={0}
       onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); post({ action: 'selectEntry', id: entry.id }); } }}
-      aria-label={`${entry.title || 'Macrouse'} response`}
+      aria-label="Assistant response"
     >
-      <div className="assistant-heading">
-        <span className="assistant-mark"><Icon name="terminal" size={14} /></span>
-        <strong>{entry.title || 'Macrouse'}</strong>
+      {!hideAnswerDuration ? <div className="assistant-metadata">
+        {entry.workedForSeconds != null && Number.isFinite(entry.workedForSeconds) && entry.workedForSeconds >= 0 ? (
+          <span>Worked for {formatWorkedFor(entry.workedForSeconds)}</span>
+        ) : null}
         <span className="message-time">{clockTime(entry.timestamp)}</span>
-      </div>
+      </div> : null}
       <ResponseMarkdown text={entry.body} />
     </article>
   );
@@ -377,7 +368,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
       onDragOver={(event) => { if (draggedID) event.preventDefault(); }}
       onDrop={(event) => drop(event)}
     >
-      <div className="queue-header" title="Queued messages are kept while Macrouse is open">
+      <div className="queue-header" title="Queued messages are kept while Mactopus is open">
         <div><strong>Up next</strong><span>{task.queuedPrompts.length}</span></div>
         {task.queuePaused ? (
           <Button variant="outline" size="sm" className="queue-resume-button" onClick={() => post({ action: 'resumeQueue', taskID: task.id })}>
@@ -596,10 +587,42 @@ function Composer({
   );
 }
 
+function ActivityClock({ group }: { group: ActivityGroup }) {
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    if (!group.isRunning) return;
+    setNow(Date.now() / 1000);
+    const interval = window.setInterval(() => setNow(Date.now() / 1000), 1000);
+    return () => window.clearInterval(interval);
+  }, [group.isRunning, group.startedAt]);
+  return <span className="reasoning-label">{activityLabel(group, now)}</span>;
+}
+
 function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSnapshot }) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const followingOutput = useRef(true);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [pendingSubmissions, setPendingSubmissions] = useState<Record<string, PendingPromptSubmission>>({});
   const [submissionErrors, setSubmissionErrors] = useState<Record<string, string>>({});
+  const [activityOpenOverrides, setActivityOpenOverrides] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const scroll = scrollRef.current;
+    const content = contentRef.current;
+    if (!scroll || !content) return;
+    followingOutput.current = true;
+    const follow = () => {
+      if (followingOutput.current) scroll.scrollTop = scroll.scrollHeight;
+    };
+    // A streaming reply grows without adding another entry. Observe its
+    // rendered size, but leave the reader alone when they scroll up.
+    const observer = new ResizeObserver(follow);
+    observer.observe(content);
+    observer.observe(scroll);
+    follow();
+    return () => observer.disconnect();
+  }, [task.id]);
   const setDraft = (value: string) => {
     setDrafts((current) => ({ ...current, [task.id]: value }));
     setSubmissionErrors((current) => {
@@ -651,6 +674,7 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
     const canSubmit = task.modelSelectable || task.isBusy || task.queuePaused || task.queuedPrompts.length > 0;
     if (!canSubmit || !isValidPrompt(draft)) return;
 
+    followingOutput.current = true;
     const requestID = crypto.randomUUID();
     setPendingSubmissions((current) => ({ ...current, [task.id]: { requestID, draft } }));
     setSubmissionErrors((current) => {
@@ -665,12 +689,16 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
     setDraft(prompt);
     document.getElementById('task-prompt')?.focus();
   };
-  const entries = task.entries.filter((entry) => entry.kind !== 'assistant' || entry.body.trim().length > 0);
+  const rows = activityTimeline(task);
   return (
-    <div className={`conversation-column ${entries.length === 0 ? 'is-empty' : ''}`}>
-      <div className="conversation-scroll" id="conversation-scroll">
-        <div className="conversation-content">
-          {entries.length === 0 ? (
+    <div className={`conversation-column ${rows.length === 0 ? 'is-empty' : ''}`}>
+      <div className="conversation-scroll" id="conversation-scroll" ref={scrollRef}
+        onScroll={(event) => {
+          const scroll = event.currentTarget as HTMLDivElement;
+          followingOutput.current = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 48;
+        }}>
+        <div className="conversation-content" ref={contentRef}>
+          {rows.length === 0 ? (
             <div className="empty-conversation">
               <h1>How can I help?</h1>
               <p>Ask a question or give your Mac a task.</p>
@@ -680,16 +708,26 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
               </div>
             </div>
           ) : (
-            entries.map((entry) => (
-              <TimelineEntry
-                key={entry.id}
-                entry={entry}
-                selected={snapshot.selectedEntryID === entry.id}
-                showToolPayloads={snapshot.showToolPayloads}
-              />
-            ))
+            rows.map((row) => {
+              if (row.kind === 'entry') return <TimelineEntry key={row.entry.id} entry={row.entry}
+                selected={snapshot.selectedEntryID === row.entry.id} showToolPayloads={snapshot.showToolPayloads}
+                hideAnswerDuration={row.hideAnswerMetadata} />;
+              const group = row.group;
+              const key = `${task.id}:${group.id}`;
+              return <ActivityDisclosure key={`activity:${key}`} group={group} time={clockTime(group.timestamp)}
+                label={<ActivityClock group={group} />}
+                manualOpen={activityOpenOverrides[key]}
+                onOpenChange={(open) => setActivityOpenOverrides((current) => ({ ...current, [key]: open }))}>
+                {group.entries.map((entry) => <div key={entry.id}
+                  className={`activity-step ${entry.kind === 'tool' ? 'activity-tool' : 'activity-reasoning'} ${snapshot.selectedEntryID === entry.id ? 'selected' : ''}`}
+                  onClick={() => post({ action: 'selectEntry', id: entry.id })}>
+                  {entry.kind === 'tool'
+                    ? <ToolDetails entry={entry} showPayload={snapshot.showToolPayloads} />
+                    : <ResponseMarkdown text={entry.body} />}
+                </div>)}
+              </ActivityDisclosure>;
+            })
           )}
-          {task.status === 'Running' && entries.length > 0 ? <div className="working-indicator" role="status"><span className="working-dots"><i /><i /><i /></span><span>Working on your task</span></div> : null}
         </div>
       </div>
       <Composer
@@ -832,6 +870,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
           </section>
           <section>
             <h2>Computer use</h2>
+            <p className="permission-note">New tasks use the latest computer tools. Older tasks may keep an earlier tool version; start a new task to use updated capabilities. Your existing task history is kept.</p>
             <div className="setting-row permission-row">
               <span><strong>Accessibility</strong><small>Required for semantic UI inspection and actions.</small></span>
               <span className="permission-controls">
@@ -858,7 +897,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
                 </Button>
               </span>
             </div>
-            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access automatically approves Macrouse action requests; Ask every time asks before each protected action. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. Access mode resets to Ask every time when you relaunch.</p></details>
+            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access automatically approves Mactopus action requests; Ask every time asks before each protected action. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. Access mode resets to Ask every time when you relaunch.</p></details>
             <Button variant="outline" className="refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</Button>
           </section>
         </div>
@@ -872,7 +911,7 @@ function LoadingView() {
   return (
     <main className="loading-view">
       <span className="loading-mark"><Icon name="sparkles" size={22} /></span>
-      <strong>Starting Macrouse</strong>
+      <strong>Starting Mactopus</strong>
       <span>Connecting the native runtime…</span>
     </main>
   );
@@ -883,7 +922,7 @@ function BridgeUnavailableView() {
     <main className="loading-view" role="alert">
       <span className="loading-mark"><Icon name="info" size={22} /></span>
       <strong>Native bridge unavailable</strong>
-      <span>Open this interface from the Macrouse macOS application.</span>
+      <span>Open this interface from the Mactopus macOS application.</span>
     </main>
   );
 }
@@ -925,15 +964,6 @@ export function App() {
     return () => system.removeEventListener('change', syncTheme);
   }, [snapshot?.appearance]);
 
-  useEffect(() => {
-    if (!snapshot?.selectedTaskID) return;
-    const frame = requestAnimationFrame(() => {
-      const scroll = document.getElementById('conversation-scroll');
-      if (scroll) scroll.scrollTop = snapshot.tasks.find((task) => task.id === snapshot.selectedTaskID)?.entries.length ? scroll.scrollHeight : 0;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [snapshot?.selectedTaskID, snapshot?.selectedTaskID ? snapshot.tasks.find((task) => task.id === snapshot.selectedTaskID)?.entries.length : 0]);
-
   if (!snapshot) return nativeHost ? <LoadingView /> : <BridgeUnavailableView />;
 
   const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
@@ -947,7 +977,7 @@ export function App() {
           <Conversation snapshot={snapshot} task={task} />
         ) : (
           <div className="no-task-view">
-            <h1>Macrouse</h1>
+            <h1>Mactopus</h1>
             <p>Fast, Mac-optimized local AI.</p>
             <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={15} /> New task</Button>
           </div>

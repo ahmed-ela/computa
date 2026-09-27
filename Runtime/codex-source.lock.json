@@ -1,7 +1,7 @@
 {
-  "runtimeVersion": "heydash-4",
+  "runtimeVersion": "mactopus-5",
   "sourceURL": "https://github.com/openai/codex.git",
   "sourceTag": "rust-v0.155.0-alpha.9.2",
   "sourceCommit": "4607249e430dac1c961df4dc615beae88e33cec8",
-  "patchSHA256": "8f83d56ea759e3b32031244014fd22808f1f9268ae50b3e597f02674687106c6"
+  "patchSHA256": "0116caa8f6f1c7960c851c00621551ce03351bd6cdba86cf8753a052390d43d2"
 }

@@ -17,6 +17,7 @@ private final class FakeAccessibilityNode: NSObject {
     var snapshotValueSettable: Bool
     var currentValueSettable: Bool
     var descriptionWasTruncated: Bool
+    var isSelected: Bool? = nil
 
     init(
         identifier: String,
@@ -103,7 +104,8 @@ private final class FakeAccessibilityTreeRuntime: AccessibilityTreeRuntime {
             isValueSettable: node.snapshotValueSettable,
             wasTruncated: node.descriptionWasTruncated || linkURL.wasTruncated,
             url: linkURL.value,
-            urlIdentity: linkURL.identity
+            urlIdentity: linkURL.identity,
+            isSelected: node.isSelected
         )
     }
 
@@ -169,6 +171,48 @@ private final class FakeAccessibilityTreeRuntime: AccessibilityTreeRuntime {
 }
 
 final class AccessibilitySessionTests: XCTestCase {
+    func testExactEvidenceIdentitySurvivesReorderingButNeverRebindsReplacementOrAnotherSession() throws {
+        let one = FakeAccessibilityNode(identifier: "first", role: "AXRow", title: "Same label", actions: ["AXPress"])
+        one.reportedIdentifier = nil; one.isSelected = false
+        let two = FakeAccessibilityNode(identifier: "second", role: "AXRow", title: "Same label", actions: ["AXPress"])
+        two.reportedIdentifier = nil
+        let root = FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: [one, two])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let first = try session.snapshot(limits: generousLimits())
+        let token = try XCTUnwrap(first.elements[1].evidenceIdentity)
+        XCTAssertEqual(first.elements[1].isSelected, false)
+        root.children = [two, one]; one.isSelected = true
+        let reordered = try session.snapshot(limits: generousLimits())
+        XCTAssertEqual(reordered.elements[2].evidenceIdentity, token)
+        XCTAssertEqual(reordered.elements[2].isSelected, true)
+        XCTAssertNotEqual(reordered.elements[1].evidenceIdentity, token)
+        let replacement = FakeAccessibilityNode(identifier: "replacement", role: "AXRow", title: "Same label", actions: ["AXPress"])
+        replacement.reportedIdentifier = nil
+        root.children = [two, replacement]
+        let replaced = try session.snapshot(limits: generousLimits())
+        XCTAssertNotEqual(replaced.elements[2].evidenceIdentity, token)
+        let otherSession = makeSession(runtime: runtime)
+        XCTAssertNotEqual(try otherSession.snapshot(limits: generousLimits()).elements[2].evidenceIdentity,
+                          replaced.elements[2].evidenceIdentity)
+        let formatted = reordered.formattedForModel()
+        XCTAssertTrue(formatted.contains("selected=1"))
+        XCTAssertFalse(formatted.contains(token.uuidString), "Host identity must never be a model-facing action address")
+    }
+
+    func testSelectedStateChangingAcrossApprovalInvalidatesRefreshedAXDispatch() throws {
+        let row = FakeAccessibilityNode(identifier: "row", role: "AXRow", actions: ["AXPress"])
+        row.isSelected = false
+        let runtime = FakeAccessibilityTreeRuntime(root: FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: [row]))
+        let session = makeSession(runtime: runtime)
+        let before = try session.snapshot(limits: generousLimits())
+        row.isSelected = true
+        // The native background backend uses the approval-refresh API. The
+        // lower-level perform API expects its caller to do that refresh.
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: 1, in: before))
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+    }
+
     private let target = AccessibilityApplicationTarget(
         processIdentifier: 4_242,
         bundleIdentifier: "example.fake",
@@ -1584,6 +1628,208 @@ final class AccessibilitySessionTests: XCTestCase {
             from: JSONEncoder().encode(expected)
         )
         XCTAssertEqual(roundTripped, expected)
+    }
+
+    func testProgressiveHeadingsFindsUnknownTitleBelowThirtyTwoWrappers() throws {
+        let title = FakeAccessibilityNode(identifier: "unknown", role: "AXStaticText", title: "An unfamiliar title")
+        var child = FakeAccessibilityNode(identifier: "heading", role: "AXHeading", children: [title])
+        for depth in 0..<40 { child = FakeAccessibilityNode(identifier: "wrapper-\(depth)", children: [child]) }
+        let root = FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: [child])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        XCTAssertFalse(try session.snapshot().elements.contains { $0.title == "An unfamiliar title" })
+        let read = try session.read(read: .init(view: .headings))
+        XCTAssertTrue(read.observation.text.contains("An unfamiliar title"))
+        XCTAssertTrue(read.observation.text.contains("source_truncated=0"))
+        XCTAssertTrue(read.observation.text.contains("next_cursor=-"))
+        XCTAssertEqual(read.observation.exposedElementIndices.count, 2)
+        XCTAssertFalse(read.observation.text.contains("ancestry_truncated=1"))
+        XCTAssertTrue(read.observation.text.contains("parent=41"))
+    }
+
+    func testProgressiveWideSourceAndOutputPagesNeverSkipOrDuplicateLinks() throws {
+        let links = (0..<315).map { FakeAccessibilityNode(identifier: "link-\($0)", role: "AXLink", title: "Unknown article \($0)", actions: ["AXPress"], url: "https://example.com/article/\($0)") }
+        let runtime = FakeAccessibilityTreeRuntime(root: FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: links))
+        let session = makeSession(runtime: runtime)
+        var read = try session.read(read: .init(view: .links), outputCharacterLimit: 2_500)
+        var seen = Set<String>()
+        var pages = 0
+        while true {
+            pages += 1
+            XCTAssertLessThan(pages, 100)
+            for index in read.observation.exposedElementIndices {
+                let label = try XCTUnwrap(read.snapshot.element(at: index)?.title)
+                XCTAssertTrue(seen.insert(label).inserted)
+            }
+            guard let cursor = semanticCursor(read.observation.text) else { break }
+            read = try session.read(read: .init(cursor: cursor), outputCharacterLimit: 2_500)
+        }
+        XCTAssertEqual(seen.count, 315)
+        XCTAssertTrue(seen.contains("Unknown article 314"))
+        XCTAssertGreaterThan(pages, 2)
+        XCTAssertFalse(read.snapshot.wasTruncated)
+        XCTAssertTrue(runtime.childRequests.contains { $0.limit > 80 })
+    }
+
+    func testProgressiveCursorRejectsForeignReplayedChangedOptionsAndNavigation() throws {
+        let children = (0..<100).map { FakeAccessibilityNode(identifier: "item-\($0)", role: "AXLink", title: "Article \($0)") }
+        let root = FakeAccessibilityNode(identifier: "root", role: "AXWindow", title: "Original", children: children)
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        var first = try session.read(read: .init(view: .links), outputCharacterLimit: 1_800)
+        let cursor = try XCTUnwrap(semanticCursor(first.observation.text))
+        _ = try session.read(read: .init(cursor: cursor))
+        XCTAssertThrowsError(try session.read(read: .init(cursor: cursor)))
+        first = try session.read(read: .init(view: .links), outputCharacterLimit: 1_800)
+        let foreignSession = makeSession(runtime: runtime)
+        XCTAssertThrowsError(try foreignSession.read(read: .init(cursor: semanticCursor(first.observation.text))))
+        XCTAssertThrowsError(try session.read(read: .init(view: .content, cursor: semanticCursor(first.observation.text))))
+        first = try session.read(read: .init(view: .links), outputCharacterLimit: 1_800)
+        root.title = "Different document"
+        XCTAssertThrowsError(try session.read(read: .init(cursor: semanticCursor(first.observation.text))))
+    }
+
+    func testProgressiveCursorAcceptsRepeatedMatchingFiltersWithoutSkippingOrDuplicating() throws {
+        for options in ["none", "view", "query", "both"] {
+            let children = (0..<100).map {
+                FakeAccessibilityNode(identifier: "item-\($0)", role: "AXLink", title: "Article \($0)")
+            }
+            let session = makeSession(runtime: FakeAccessibilityTreeRuntime(root:
+                FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: children)))
+            var read = try session.read(read: .init(query: "Article", view: .links), outputCharacterLimit: 1_800)
+            let firstCursor = try XCTUnwrap(semanticCursor(read.observation.text))
+            var seen = Set<String>()
+            var pages = 0
+            while true {
+                pages += 1
+                guard pages < 100 else { XCTFail("Continuation made insufficient bounded progress"); break }
+                XCTAssertTrue(read.observation.text.contains("view=links"))
+                for index in read.observation.exposedElementIndices {
+                    let label = try XCTUnwrap(read.snapshot.element(at: index)?.title)
+                    XCTAssertTrue(seen.insert(label).inserted, "Duplicate \(label) for \(options)")
+                }
+                guard let cursor = semanticCursor(read.observation.text) else { break }
+                read = try session.read(read: .init(
+                    query: options == "query" || options == "both" ? "  Article\n" : nil,
+                    view: options == "view" || options == "both" ? .links : nil,
+                    cursor: cursor), outputCharacterLimit: 1_800)
+            }
+            XCTAssertEqual(seen.count, 100)
+            XCTAssertGreaterThan(pages, 1)
+            XCTAssertThrowsError(try session.read(read: .init(query: "Article", view: .links, cursor: firstCursor)))
+        }
+    }
+
+    func testProgressiveCursorStillRejectsConflictingFiltersAndAddedSubtree() throws {
+        for change in ["view", "query", "snapshot", "index", "subtree"] {
+            let children = (0..<100).map {
+                FakeAccessibilityNode(identifier: "item-\($0)", role: "AXLink", title: "Article \($0)")
+            }
+            let session = makeSession(runtime: FakeAccessibilityTreeRuntime(root:
+                FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: children)))
+            let first = try session.read(read: .init(query: "Article", view: .links), outputCharacterLimit: 1_800)
+            let cursor = try XCTUnwrap(semanticCursor(first.observation.text))
+            let request = SemanticReadRequest(query: change == "query" ? "Different" : "Article",
+                view: change == "view" ? .content : .links, cursor: cursor,
+                snapshotID: change == "snapshot" || change == "subtree" ? first.snapshot.id : nil,
+                elementIndex: change == "index" || change == "subtree" ? 1 : nil)
+            XCTAssertThrowsError(try session.read(read: request)) { error in
+                guard let semantic = error as? SemanticReadError, case .invalidRequest = semantic else {
+                    return XCTFail("Expected conflicting continuation rejection, got \(error)")
+                }
+            }
+        }
+    }
+
+    func testProgressiveSubtreeRequiresExposedCurrentAttachedElement() throws {
+        let card = FakeAccessibilityNode(identifier: "card", role: "AXGroup", title: "Card", children: [
+            FakeAccessibilityNode(identifier: "title", role: "AXHeading", title: "Unknown nested heading")
+        ])
+        let root = FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: [card])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        var initial = try session.read()
+        let expanded = try session.read(read: .init(view: .headings, snapshotID: initial.snapshot.id, elementIndex: 1))
+        XCTAssertTrue(expanded.observation.text.contains("Unknown nested heading"))
+        XCTAssertThrowsError(try session.read(read: .init(snapshotID: initial.snapshot.id, elementIndex: 1)))
+        initial = try session.read(read: .init(view: .headings))
+        XCTAssertThrowsError(try session.read(read: .init(snapshotID: initial.snapshot.id, elementIndex: 1)))
+        initial = try session.read()
+        root.children = [] // the AX object still exists but is no longer attached
+        XCTAssertThrowsError(try session.read(read: .init(snapshotID: initial.snapshot.id, elementIndex: 1)))
+    }
+
+    func testProgressiveCursorRejectsDetachedPendingNodesWithoutNavigation() throws {
+        let children = (0..<100).map { FakeAccessibilityNode(identifier: "item-\($0)", role: "AXLink", title: "Article \($0)") }
+        let root = FakeAccessibilityNode(identifier: "root", role: "AXWindow", title: "Same SPA", children: children)
+        let session = makeSession(runtime: FakeAccessibilityTreeRuntime(root: root))
+        let read = try session.read(read: .init(view: .links), outputCharacterLimit: 1_800)
+        root.children = Array(children.prefix(1))
+        XCTAssertThrowsError(try session.read(read: .init(cursor: semanticCursor(read.observation.text))))
+    }
+
+    func testProgressiveNoMatchReportsCoverageWithoutInventingContent() throws {
+        let root = FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: [
+            FakeAccessibilityNode(identifier: "item", role: "AXHeading", title: "Unrelated heading")
+        ])
+        let result = try makeSession(runtime: FakeAccessibilityTreeRuntime(root: root)).read(read: .init(query: "video title", view: .content))
+        XCTAssertTrue(result.observation.exposedElementIndices.isEmpty)
+        XCTAssertTrue(result.observation.text.contains("query_status=no_matches_in_visited_source"))
+        XCTAssertTrue(result.observation.text.contains("matched=0"))
+        XCTAssertTrue(result.observation.text.contains("next_cursor=-"))
+        XCTAssertFalse(result.observation.text.contains("Unrelated heading"))
+    }
+
+    func testProgressiveDeepActionRefreshesExactIdentityAndRejectsDetachedTarget() throws {
+        let button = FakeAccessibilityNode(identifier: "button", role: "AXButton", title: "Confirm", actions: ["AXPress"])
+        var child = button
+        for depth in 0..<35 { child = FakeAccessibilityNode(identifier: "wrapper-\(depth)", children: [child]) }
+        let root = FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: [child])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let result = try session.read(read: .init(view: .content))
+        let index = try XCTUnwrap(result.observation.exposedElementIndices.first)
+        try session.refreshAndPerform(.press, at: index, in: result.snapshot)
+        XCTAssertEqual(runtime.performedActions.count, 1)
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: index, in: result.snapshot))
+        let second = try session.read(read: .init(view: .content))
+        root.children = []
+        XCTAssertThrowsError(try session.refreshAndPerform(.press, at: index, in: second.snapshot))
+        XCTAssertEqual(runtime.performedActions.count, 1)
+    }
+
+    func testProgressiveReadAdvertisesOnlyExecutableActionsAndRespectsBackgroundRaise() throws {
+        let root = FakeAccessibilityNode(identifier: "root", role: "AXWindow", title: "Window", actions: ["AXRaise", "AXScrollToVisible", "AXPress", "FutureAXAction"])
+        let session = makeSession(runtime: FakeAccessibilityTreeRuntime(root: root))
+        let read = try session.read(allowsRaise: false)
+        XCTAssertTrue(read.observation.text.contains("AXPress"))
+        XCTAssertFalse(read.observation.text.contains("AXRaise"))
+        XCTAssertFalse(read.observation.text.contains("AXScrollToVisible"))
+        XCTAssertFalse(read.observation.text.contains("FutureAXAction"))
+    }
+
+    func testProgressiveHardSourceCapIsExplicitAndDoesNotInventCompletion() throws {
+        let children = (0..<2_050).map { FakeAccessibilityNode(identifier: "node-\($0)", role: "AXStaticText", title: "Text \($0)") }
+        let session = makeSession(runtime: FakeAccessibilityTreeRuntime(root:
+            FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: children)))
+        // A no-match query isolates source pagination from output pagination.
+        var read = try session.read(read: .init(query: "not present"))
+        var pages = 1
+        while let cursor = semanticCursor(read.observation.text) {
+            read = try session.read(read: .init(cursor: cursor))
+            pages += 1
+            XCTAssertLessThan(pages, 12)
+        }
+        XCTAssertEqual(read.snapshot.elements.count, 2_000)
+        XCTAssertTrue(read.observation.text.contains("source_limit_reached=1"))
+        XCTAssertTrue(read.observation.text.contains("source_truncated=1"))
+        XCTAssertTrue(read.observation.text.contains("no_matches_in_visited_source"))
+        XCTAssertTrue(read.observation.exposedElementIndices.isEmpty)
+    }
+
+    private func semanticCursor(_ text: String) -> String? {
+        text.split(whereSeparator: \.isWhitespace).first { $0.hasPrefix("next_cursor=") }
+            .map { String($0.dropFirst("next_cursor=".count)) }.flatMap { $0 == "-" ? nil : $0 }
     }
 
     private var chromeTarget: AccessibilityApplicationTarget {

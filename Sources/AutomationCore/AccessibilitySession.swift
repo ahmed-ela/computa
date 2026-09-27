@@ -159,6 +159,11 @@ public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
     /// Exact observed destination, never a truncated or inferred URL.
     public let url: String?
     public let urlIdentity: AccessibilityLinkDestinationIdentity?
+    public let isSelected: Bool?
+    /// Host-only identity for the exact retained AX object in one session.
+    /// It is not an element address and is omitted from model-facing text.
+    public let evidenceIdentity: UUID?
+    public let evidenceFieldsTruncated: Bool?
 
     init(
         index: Int,
@@ -179,7 +184,10 @@ public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
         supportedActions: [String],
         isValueSettable: Bool,
         url: String? = nil,
-        urlIdentity: AccessibilityLinkDestinationIdentity? = nil
+        urlIdentity: AccessibilityLinkDestinationIdentity? = nil,
+        isSelected: Bool? = nil,
+        evidenceIdentity: UUID? = nil,
+        evidenceFieldsTruncated: Bool? = nil
     ) {
         self.index = index
         self.parentIndex = parentIndex
@@ -200,6 +208,9 @@ public struct AccessibilityTreeElement: Codable, Equatable, Sendable {
         self.isValueSettable = isValueSettable
         self.url = url
         self.urlIdentity = urlIdentity
+        self.isSelected = isSelected
+        self.evidenceIdentity = evidenceIdentity
+        self.evidenceFieldsTruncated = evidenceFieldsTruncated
     }
 }
 
@@ -260,6 +271,7 @@ struct AccessibilityElementDescription {
     let wasTruncated: Bool
     var url: String? = nil
     var urlIdentity: AccessibilityLinkDestinationIdentity? = nil
+    var isSelected: Bool? = nil
 }
 
 /// AXURL is observation data, not permission to navigate. Unsupported or
@@ -329,6 +341,7 @@ protocol AccessibilityTreeRuntime {
         of element: AccessibilityElementHandle,
         limit: Int
     ) throws -> AccessibilityChildBatch
+    func children(of element: AccessibilityElementHandle, offset: Int, limit: Int) throws -> AccessibilityChildBatch
     func representsSameElement(
         _ lhs: AccessibilityElementHandle,
         _ rhs: AccessibilityElementHandle
@@ -338,6 +351,15 @@ protocol AccessibilityTreeRuntime {
     func perform(action: String, on element: AccessibilityElementHandle) throws
     func isValueSettable(on element: AccessibilityElementHandle) throws -> Bool
     func set(value: AccessibilitySetValue, on element: AccessibilityElementHandle) throws
+}
+
+extension AccessibilityTreeRuntime {
+    // Existing test/backends remain source compatible. The system runtime
+    // overrides this to fetch an offset directly without copying a prefix.
+    func children(of element: AccessibilityElementHandle, offset: Int, limit: Int) throws -> AccessibilityChildBatch {
+        let batch = try children(of: element, limit: offset + limit)
+        return AccessibilityChildBatch(elements: Array(batch.elements.dropFirst(offset)), wasTruncated: batch.wasTruncated)
+    }
 }
 
 struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
@@ -466,7 +488,8 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
                 || actions.count > boundedActions.count
                 || linkURL.wasTruncated,
             url: linkURL.value,
-            urlIdentity: linkURL.identity
+            urlIdentity: linkURL.identity,
+            isSelected: try bool(attribute: kAXSelectedAttribute, from: element)
         )
     }
 
@@ -474,6 +497,10 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
         of element: AccessibilityElementHandle,
         limit: Int
     ) throws -> AccessibilityChildBatch {
+        try children(of: element, offset: 0, limit: limit)
+    }
+
+    func children(of element: AccessibilityElementHandle, offset: Int, limit: Int) throws -> AccessibilityChildBatch {
         let element = try axElement(from: element)
         var count: CFIndex = 0
         let countResult = AXUIElementGetAttributeValueCount(
@@ -490,16 +517,16 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
             throw axFailure(countResult, operation: "count AXChildren")
         }
 
-        let requestedCount = min(max(0, limit), count)
+        let requestedCount = min(max(0, limit), max(0, count - offset))
         guard requestedCount > 0 else {
-            return AccessibilityChildBatch(elements: [], wasTruncated: count > 0)
+            return AccessibilityChildBatch(elements: [], wasTruncated: count > offset)
         }
 
         var values: CFArray?
         let copyResult = AXUIElementCopyAttributeValues(
             element,
             kAXChildrenAttribute as CFString,
-            0,
+            offset,
             requestedCount,
             &values
         )
@@ -513,7 +540,7 @@ struct SystemAccessibilityTreeRuntime: AccessibilityTreeRuntime {
         }
         return AccessibilityChildBatch(
             elements: handles,
-            wasTruncated: count > requestedCount || handles.count < requestedCount
+            wasTruncated: count > offset + requestedCount || handles.count < requestedCount
         )
     }
 
@@ -734,6 +761,43 @@ public final class AccessibilitySession {
     private let runtime: any AccessibilityTreeRuntime
     private let accessibilityCheck: () -> Bool
     private var activeSnapshot: ActiveSnapshot?
+    private var progressiveRead: ProgressiveRead?
+    private struct EvidenceHandle {
+        let handle: AccessibilityElementHandle
+        let identity: UUID
+        var lastUse: UInt64
+    }
+    private var evidenceHandles: [Int: [EvidenceHandle]] = [:]
+    private var evidenceHandleCount = 0
+    private var evidenceSequence: UInt64 = 0
+    private static let maximumEvidenceHandles = 4_096
+
+    private func evidenceIdentity(for handle: AccessibilityElementHandle) -> UUID {
+        if evidenceSequence == UInt64.max {
+            // Exhaustion discards identity evidence; it never reuses a token.
+            evidenceHandles.removeAll(); evidenceHandleCount = 0; evidenceSequence = 0
+        }
+        evidenceSequence += 1
+        let hash = runtime.identityHash(for: handle)
+        if let index = evidenceHandles[hash]?.firstIndex(where: { runtime.representsSameElement($0.handle, handle) }) {
+            evidenceHandles[hash]![index].lastUse = evidenceSequence
+            return evidenceHandles[hash]![index].identity
+        }
+        if evidenceHandleCount >= Self.maximumEvidenceHandles {
+            let stale = Set(evidenceHandles.values.flatMap { $0 }.sorted { $0.lastUse < $1.lastUse }
+                .prefix(Self.maximumEvidenceHandles / 4).map(\.identity))
+            for key in Array(evidenceHandles.keys) {
+                let retained = evidenceHandles[key]!.filter { !stale.contains($0.identity) }
+                evidenceHandleCount -= evidenceHandles[key]!.count - retained.count
+                if retained.isEmpty { evidenceHandles.removeValue(forKey: key) }
+                else { evidenceHandles[key] = retained }
+            }
+        }
+        let token = UUID()
+        evidenceHandles[hash, default: []].append(.init(handle: handle, identity: token, lastUse: evidenceSequence))
+        evidenceHandleCount += 1
+        return token
+    }
 
     public convenience init(application: RunningApplicationInfo) {
         self.init(target: AccessibilityApplicationTarget(application: application))
@@ -788,6 +852,7 @@ public final class AccessibilitySession {
         limits: AccessibilityTreeLimits = .agentDefault
     ) throws -> AccessibilityTreeSnapshot {
         activeSnapshot = nil
+        progressiveRead = nil
         guard accessibilityCheck() else {
             throw AutomationError.permissionNotGranted(.accessibility)
         }
@@ -884,7 +949,10 @@ public final class AccessibilitySession {
                     supportedActions: description.supportedActions,
                     isValueSettable: description.isValueSettable,
                     url: description.url,
-                    urlIdentity: description.urlIdentity
+                    urlIdentity: description.urlIdentity,
+                    isSelected: description.isSelected,
+                    evidenceIdentity: evidenceIdentity(for: handle),
+                    evidenceFieldsTruncated: description.wasTruncated
                 )
             )
             wasTruncated = wasTruncated || description.wasTruncated
@@ -926,7 +994,10 @@ public final class AccessibilitySession {
                 supportedActions: current.supportedActions,
                 isValueSettable: current.isValueSettable,
                 url: current.url,
-                urlIdentity: current.urlIdentity
+                urlIdentity: current.urlIdentity,
+                isSelected: current.isSelected,
+                evidenceIdentity: current.evidenceIdentity,
+                evidenceFieldsTruncated: current.evidenceFieldsTruncated
             )
             return index
         }
@@ -1059,6 +1130,9 @@ public final class AccessibilitySession {
     ) throws -> (snapshot: AccessibilityTreeSnapshot, index: Int) {
         try requirePermission()
         let approved = try resolve(index: index, snapshot: approvedSnapshot)
+        if progressiveRead != nil {
+            return try refreshProgressiveTarget(at: index, in: approvedSnapshot)
+        }
         guard let retainedSnapshot = activeSnapshot,
               let rootIndex = approvedSnapshot.rootIndex,
               retainedSnapshot.handles.indices.contains(rootIndex)
@@ -1195,6 +1269,7 @@ public final class AccessibilitySession {
 
     public func invalidateSnapshot() {
         activeSnapshot = nil
+        progressiveRead = nil
     }
 
     private func resolve(
@@ -1275,6 +1350,7 @@ public final class AccessibilitySession {
             && approved.urlIdentity != .unverifiable
             && candidate.urlIdentity == approved.urlIdentity
             && candidate.isEnabled == approved.isEnabled
+            && candidate.isSelected == approved.isSelected
             && Set(candidate.supportedActions) == Set(approved.supportedActions)
             && candidate.isValueSettable == approved.isValueSettable
     }
@@ -1284,5 +1360,342 @@ public final class AccessibilitySession {
             activeSnapshot = nil
             throw AutomationError.permissionNotGranted(.accessibility)
         }
+    }
+}
+
+extension AccessibilitySession {
+    private enum ReadWork {
+        case node(AccessibilityElementHandle, parent: Int?, depth: Int)
+        case children(parent: Int, offset: Int)
+    }
+
+    private final class ProgressiveRead {
+        let request: SemanticReadRequest
+        let window: AccessibilityElementHandle
+        var cursorIssuedAt = Date()
+        var work = [ReadWork]()
+        var elements = [AccessibilityTreeElement]()
+        var handles = [AccessibilityElementHandle]()
+        var seen = [Int: [AccessibilityElementHandle]]()
+        var pending = [Int]()
+        var exposed = Set<Int>()
+        var cursor: String?
+        var snapshotID: UUID?
+        var fieldsTruncated = false
+        var sourceLimitReached = false
+        var matched = 0
+        var emittedCount = 0
+
+        init(request: SemanticReadRequest, window: AccessibilityElementHandle) {
+            self.request = request
+            self.window = window
+        }
+    }
+
+    /// Bounded source discovery plus bounded rendering. Unlike snapshot(), the
+    /// read frontier survives a page: depth does not consume a fixed budget of
+    /// meaningful content, and wide child collections can be enumerated. All
+    /// retained data belongs to this exact window and is capped at 2,000 nodes.
+    /// Only emitted lines authorize subtree expansion or a semantic action.
+    public func read(read request: SemanticReadRequest = .init(), outputCharacterLimit: Int = 6_000,
+                     allowsRaise: Bool = true) throws -> AccessibilitySemanticReadResult {
+        do {
+            try requirePermission()
+            let state: ProgressiveRead
+            if let cursor = request.cursor {
+                guard let retained = progressiveRead, retained.cursor == cursor,
+                      retained.snapshotID == activeSnapshot?.snapshot.id,
+                      Date().timeIntervalSince(retained.cursorIssuedAt) <= 120 else { throw SemanticReadError.staleCursor }
+                guard request.continues(retained.request) else { throw SemanticReadError.invalidRequest }
+                try validateReadAnchor(retained)
+                retained.cursor = nil // one-use, including a failed continuation
+                state = retained
+            } else {
+                guard (request.snapshotID == nil) == (request.elementIndex == nil) else { throw SemanticReadError.invalidRequest }
+                let window = try runtime.applicationElement(processIdentifier: application.processIdentifier)
+                state = ProgressiveRead(request: request, window: window)
+                if let id = request.snapshotID, let index = request.elementIndex {
+                    guard let old = progressiveRead, old.snapshotID == id,
+                          old.exposed.contains(index), let active = activeSnapshot,
+                          active.snapshot.id == id, active.handles.indices.contains(index) else {
+                        throw SemanticReadError.unexposedSubtree
+                    }
+                    try validateReadAnchor(old)
+                    try validateReadMembership(indices: [index], state: old)
+                    let path = try ancestorPath(to: index, in: active.snapshot)
+                    // Preserve the source-observed ancestry so approval and
+                    // descendant ownership cannot be borrowed from another card.
+                    for oldIndex in path {
+                        let parent = state.elements.isEmpty ? nil : state.elements.count - 1
+                        let handle = active.handles[oldIndex]
+                        let description = try runtime.describe(handle, limits: Self.progressiveLimits)
+                        let inserted = appendReadElement(description, handle: handle, parent: parent,
+                                                         depth: state.elements.count, state: state)
+                        if oldIndex == index, matchesRead(state.elements[inserted], state: state) {
+                            state.pending.append(inserted); state.matched += 1
+                        }
+                    }
+                    state.work = [.children(parent: state.elements.count - 1, offset: 0)]
+                } else {
+                    state.work = [.node(window, parent: nil, depth: 0)]
+                }
+                progressiveRead = state
+            }
+            // Drain retained output before doing more OS work. A large source
+            // can never silently skip records just because one output is short.
+            let firstNewIndex = state.elements.count
+            if state.pending.isEmpty {
+                try advanceRead(state)
+                try validateReadMembership(indices: Array(firstNewIndex..<state.elements.count), state: state,
+                                           validateDescriptions: false)
+            }
+            try validateReadAnchor(state)
+            // New nodes were just described and their attachment checked;
+            // retained output needs a fresh description before being emitted.
+            try validateReadMembership(indices: state.pending.prefix(120).filter { $0 < firstNewIndex }, state: state)
+            let id = UUID()
+            let snapshot = AccessibilityTreeSnapshot(id: id, application: application, limits: Self.progressiveLimits,
+                rootIndex: state.elements.isEmpty ? nil : 0, elements: state.elements,
+                wasTruncated: !state.work.isEmpty || state.fieldsTruncated || state.sourceLimitReached)
+            let rendered = AccessibilitySnapshotTextFormatter(elementLimit: 120, fieldCharacterLimit: 256,
+                actionLimit: 8, outputCharacterLimit: max(1_024, outputCharacterLimit - 500),
+                usesCompactElementLines: true, includedElementIndices: Set(state.pending.prefix(120)),
+                allowsRaise: allowsRaise, maximumAncestorDepth: 128).formatObservation(snapshot)
+            let emitted = rendered.exposedElementIndices
+            guard !emitted.isEmpty || state.pending.isEmpty else {
+                // A pathological ancestry/field record must not produce an
+                // endlessly reusable cursor that never emits a single node.
+                throw SemanticReadError.outputBudgetTooSmall
+            }
+            let outputOffset = state.emittedCount
+            state.emittedCount += emitted.count
+            state.pending.removeAll { emitted.contains($0) }
+            state.exposed = emitted
+            state.snapshotID = id
+            let hasMore = !state.pending.isEmpty || !state.work.isEmpty
+            state.cursor = hasMore ? UUID().uuidString : nil
+            state.cursorIssuedAt = Date()
+            let queryStatus = state.request.query?.isEmpty == false
+                ? (state.matched == 0 ? "no_matches_in_visited_source" : "matched") : "not_requested"
+            let header = "SEMANTIC_READ view=\(state.request.view.rawValue) visited=\(state.elements.count) matched=\(state.matched) offset=\(outputOffset) shown=\(emitted.count) "
+                + "source_truncated=\(snapshot.wasTruncated ? 1 : 0) output_truncated=\(state.pending.isEmpty ? 0 : 1) "
+                + "source_limit_reached=\(state.sourceLimitReached ? 1 : 0) next_cursor=\(state.cursor ?? "-") query_status=\(queryStatus) consistency=live_validated_page\n"
+            let observation = AccessibilityModelObservation(text: header + rendered.text,
+                exposedElementIndices: emitted, snapshotID: id)
+            activeSnapshot = ActiveSnapshot(snapshot: snapshot, handles: state.handles)
+            return AccessibilitySemanticReadResult(snapshot: snapshot, observation: observation)
+        } catch {
+            invalidateSnapshot()
+            throw error
+        }
+    }
+
+    private static var progressiveLimits: AccessibilityTreeLimits {
+        // The depth field describes legacy refresh bounds only; progressive
+        // traversal is iterative and bounded by visits, not recursive stack depth.
+        try! AccessibilityTreeLimits(maxDepth: 32, maxElements: 2_000, maxChildrenPerElement: 80,
+                                    maxActionsPerElement: 32, maxTextLength: 1_024)
+    }
+
+    private func advanceRead(_ state: ProgressiveRead) throws {
+        var visited = 0
+        var workCount = 0
+        while !state.work.isEmpty, visited < 240, workCount < 1_000 {
+            try Task.checkCancellation()
+            try requirePermission()
+            guard state.elements.count < 2_000 else {
+                state.sourceLimitReached = true
+                state.work.removeAll()
+                break
+            }
+            workCount += 1
+            switch state.work.removeLast() {
+            case let .node(handle, parent, depth):
+                let hash = runtime.identityHash(for: handle)
+                if state.seen[hash, default: []].contains(where: { runtime.representsSameElement($0, handle) }) { continue }
+                let description = try runtime.describe(handle, limits: Self.progressiveLimits)
+                let index = appendReadElement(description, handle: handle, parent: parent, depth: depth, state: state)
+                visited += 1
+                if matchesRead(state.elements[index], state: state) {
+                    state.pending.append(index); state.matched += 1
+                }
+                state.work.append(.children(parent: index, offset: 0))
+            case let .children(parent, offset):
+                let batch = try runtime.children(of: state.handles[parent], offset: offset, limit: 80)
+                guard state.work.count + batch.elements.count + (batch.wasTruncated ? 1 : 0) <= 4_000 else {
+                    state.sourceLimitReached = true
+                    state.work.removeAll()
+                    break
+                }
+                if batch.wasTruncated {
+                    // An inconsistent AX provider must not produce an endless
+                    // cursor returning no progress.
+                    guard !batch.elements.isEmpty, offset < 2_000 else {
+                        state.sourceLimitReached = true
+                        continue
+                    }
+                    state.work.append(.children(parent: parent, offset: offset + batch.elements.count))
+                }
+                for child in batch.elements.reversed() {
+                    state.work.append(.node(child, parent: parent, depth: state.elements[parent].depth + 1))
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    private func appendReadElement(_ description: AccessibilityElementDescription,
+                                   handle: AccessibilityElementHandle, parent: Int?, depth: Int,
+                                   state: ProgressiveRead) -> Int {
+        let index = state.elements.count
+        state.handles.append(handle)
+        state.seen[runtime.identityHash(for: handle), default: []].append(handle)
+        state.fieldsTruncated = state.fieldsTruncated || description.wasTruncated
+        state.elements.append(AccessibilityTreeElement(index: index, parentIndex: parent, childIndices: [], depth: depth,
+            role: description.role, subrole: description.subrole, title: description.title,
+            elementDescription: description.elementDescription, help: description.help, identifier: description.identifier,
+            domIdentifier: description.domIdentifier, value: description.value, frame: description.frame,
+            isEnabled: description.isEnabled, isFocused: description.isFocused, supportedActions: description.supportedActions,
+            isValueSettable: description.isValueSettable, url: description.url, urlIdentity: description.urlIdentity,
+            isSelected: description.isSelected, evidenceIdentity: evidenceIdentity(for: handle),
+            evidenceFieldsTruncated: description.wasTruncated))
+        if let parent { state.elements[parent] = replacingChildren(state.elements[parent], with: state.elements[parent].childIndices + [index]) }
+        return index
+    }
+
+    private func replacingChildren(_ element: AccessibilityTreeElement, with children: [Int]) -> AccessibilityTreeElement {
+        AccessibilityTreeElement(index: element.index, parentIndex: element.parentIndex, childIndices: children, depth: element.depth,
+            role: element.role, subrole: element.subrole, title: element.title, elementDescription: element.elementDescription,
+            help: element.help, identifier: element.identifier, domIdentifier: element.domIdentifier, value: element.value,
+            frame: element.frame, isEnabled: element.isEnabled, isFocused: element.isFocused,
+            supportedActions: element.supportedActions, isValueSettable: element.isValueSettable,
+            url: element.url, urlIdentity: element.urlIdentity,
+            isSelected: element.isSelected, evidenceIdentity: element.evidenceIdentity,
+            evidenceFieldsTruncated: element.evidenceFieldsTruncated)
+    }
+
+    private func matchesRead(_ element: AccessibilityTreeElement, state: ProgressiveRead) -> Bool {
+        let texts = [element.title, element.elementDescription, element.value, element.help, element.url].compactMap { $0 }
+        let hasText = texts.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let role = element.role ?? ""
+        func hasAncestor(_ role: String) -> Bool {
+            var parent = element.parentIndex
+            var remaining = state.elements.count
+            while let index = parent, state.elements.indices.contains(index), remaining > 0 {
+                if state.elements[index].role == role { return true }
+                parent = state.elements[index].parentIndex
+                remaining -= 1
+            }
+            return false
+        }
+        let viewMatch: Bool
+        switch state.request.view {
+        case .all: viewMatch = true
+        case .content: viewMatch = hasText && !["AXWindow", "AXApplication"].contains(role)
+        case .headings: viewMatch = role == "AXHeading" || (hasText && hasAncestor("AXHeading"))
+        case .links: viewMatch = role == "AXLink" || (hasText && hasAncestor("AXLink"))
+        }
+        guard viewMatch else { return false }
+        guard let query = state.request.query, !query.isEmpty else { return true }
+        return texts.contains { $0.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
+
+    private func validateReadAnchor(_ state: ProgressiveRead) throws {
+        let current = try runtime.applicationElement(processIdentifier: application.processIdentifier)
+        guard runtime.representsSameElement(current, state.window) else { throw SemanticReadError.staleCursor }
+        // Detect navigation/window replacement instead of mixing one page's
+        // retained output with a different page's unvisited descendants.
+        for element in state.elements where element.index == 0 || ["AXWebArea", "AXDocument"].contains(element.role ?? "") {
+            let current = try runtime.describe(state.handles[element.index], limits: Self.progressiveLimits)
+            guard current.role == element.role, current.title == element.title,
+                  current.value == element.value, current.url == element.url else { throw SemanticReadError.staleCursor }
+        }
+    }
+
+    private func ancestorPath(to index: Int, in snapshot: AccessibilityTreeSnapshot) throws -> [Int] {
+        var path = [Int]()
+        var cursor: Int? = index
+        while let next = cursor {
+            guard let element = snapshot.element(at: next), !path.contains(next) else { throw AutomationError.staleAccessibilitySnapshot }
+            path.append(next); cursor = element.parentIndex
+        }
+        guard path.last == snapshot.rootIndex else { throw AutomationError.staleAccessibilitySnapshot }
+        return path.reversed()
+    }
+
+    /// Read capabilities are not permission to inspect detached AX handles.
+    /// Validate shared ancestry edges once per parent, fetching only enough of
+    /// each live child list to find the exact identities used by this page.
+    private func validateReadMembership(indices: [Int], state: ProgressiveRead, validateDescriptions: Bool = true) throws {
+        var required = [Int: Set<Int>]()
+        var visited = Set<Int>()
+        for index in indices {
+            var current = index
+            while state.elements.indices.contains(current), visited.insert(current).inserted,
+                  let parent = state.elements[current].parentIndex {
+                required[parent, default: []].insert(current)
+                current = parent
+            }
+        }
+        var inspected = 0
+        for parent in required.keys.sorted() {
+            var missing = required[parent] ?? []
+            var offset = 0
+            while !missing.isEmpty, inspected < 4_000 {
+                let batch = try runtime.children(of: state.handles[parent], offset: offset, limit: 80)
+                inspected += batch.elements.count
+                missing = missing.filter { child in
+                    !batch.elements.contains { runtime.representsSameElement($0, state.handles[child]) }
+                }
+                guard batch.wasTruncated, !batch.elements.isEmpty else { break }
+                offset += batch.elements.count
+            }
+            guard missing.isEmpty else { throw SemanticReadError.staleCursor }
+        }
+        guard validateDescriptions else { return }
+        for index in indices {
+            let old = state.elements[index]
+            let current = try runtime.describe(state.handles[index], limits: Self.progressiveLimits)
+            guard current.role == old.role, current.title == old.title, current.value == old.value,
+                  current.elementDescription == old.elementDescription, current.url == old.url else {
+                throw SemanticReadError.staleCursor
+            }
+        }
+    }
+
+    private func refreshProgressiveTarget(at index: Int, in approved: AccessibilityTreeSnapshot) throws -> (snapshot: AccessibilityTreeSnapshot, index: Int) {
+        guard let state = progressiveRead, state.snapshotID == approved.id, state.exposed.contains(index),
+              let active = activeSnapshot else { throw AutomationError.staleAccessibilitySnapshot }
+        try validateReadAnchor(state)
+        let path = try ancestorPath(to: index, in: approved)
+        // Revalidate exact membership down the retained path. Detached handles
+        // or same-labelled controls in a different document cannot be rebound.
+        var inspected = 0
+        for (parent, child) in zip(path, path.dropFirst()) {
+            var offset = 0
+            var found = false
+            while inspected < 2_000 {
+                let batch = try runtime.children(of: active.handles[parent], offset: offset, limit: 80)
+                inspected += batch.elements.count
+                if batch.elements.contains(where: { runtime.representsSameElement($0, active.handles[child]) }) { found = true; break }
+                guard batch.wasTruncated, !batch.elements.isEmpty else { break }
+                offset += batch.elements.count
+            }
+            guard found else { invalidateSnapshot(); throw AutomationError.staleAccessibilitySnapshot }
+        }
+        let description = try runtime.describe(active.handles[index], limits: approved.limits)
+        let old = approved.elements[index]
+        let current = AccessibilityTreeElement(index: index, parentIndex: old.parentIndex, childIndices: old.childIndices, depth: old.depth,
+            role: description.role, subrole: description.subrole, title: description.title, elementDescription: description.elementDescription,
+            help: description.help, identifier: description.identifier, domIdentifier: description.domIdentifier, value: description.value,
+            frame: description.frame, isEnabled: description.isEnabled, isFocused: description.isFocused,
+            supportedActions: description.supportedActions, isValueSettable: description.isValueSettable,
+            url: description.url, urlIdentity: description.urlIdentity,
+            isSelected: description.isSelected, evidenceIdentity: evidenceIdentity(for: active.handles[index]),
+            evidenceFieldsTruncated: description.wasTruncated)
+        guard hasSameApprovedSemantics(current, as: old) else { invalidateSnapshot(); throw AutomationError.staleAccessibilitySnapshot }
+        // The identity is exact and still attached. Never logically rebind a
+        // progressive/partial tree, even when a stable label happens to match.
+        return (approved, index)
     }
 }

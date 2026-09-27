@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Isolated browser region verification</title>
+<h1>Isolated browser region verification</h1>
+<button id="child" type="button">Replace result text child</button>
+<button id="container" type="button">Replace named result container</button>
+<main aria-label="Verification region">
+  <p role="status" aria-label="Fixture result" id="result">Count: 0</p>
+</main>
+<label>Input dispatch count <input id="dispatches" value="0" readonly></label>
+<script>
+  let count = 0;
+  function increment() {
+    count += 1;
+    document.getElementById('dispatches').value = String(count);
+    return `Count: ${count}`;
+  }
+  document.getElementById('child').addEventListener('click', () => {
+    document.getElementById('result').textContent = increment();
+  });
+  document.getElementById('container').addEventListener('click', () => {
+    const result = document.createElement('p');
+    result.id = 'result';
+    result.setAttribute('role', 'status');
+    result.setAttribute('aria-label', 'Fixture result');
+    result.textContent = increment();
+    document.getElementById('result').replaceWith(result);
+  });
+</script>
+</html>

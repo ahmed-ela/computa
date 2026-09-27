@@ -1,6 +1,6 @@
-# Macrouse Browser Bridge
+# Mactopus Browser Bridge
 
-Manifest V3 companion for Macrouse's existing signed-in Chrome support. This is
+Manifest V3 companion for Mactopus's existing signed-in Chrome support. This is
 an alternate transport behind the existing native tab broker, not a new model
 tool surface and not a general-purpose CDP proxy.
 
@@ -30,7 +30,7 @@ Reconnection never retries a previous action or silently switches browser tabs.
 
 ## Initial developer setup
 
-1. Build/package Macrouse with its signed native host. Register the host for this
+1. Build/package Mactopus with its signed native host. Register the host for this
    user in Chrome's `NativeMessagingHosts` directory using a manifest with the
    exact `com.macndash.chrome_bridge` name, `stdio` type, signed helper path, and
    only the pinned extension origin below. Registration is currently an explicit
@@ -39,8 +39,8 @@ Reconnection never retries a previous action or silently switches browser tabs.
    developer extension. Do not install it via a policy override or change
    unrelated Chrome settings. Packaged consumer distribution requires Chrome
    Web Store delivery and a corresponding pinned identity migration.
-3. Keep Macrouse open. Open the extension popup and choose **Pair with Macrouse**.
-4. Confirm the separate, explicit pairing proposal in Macrouse. Only this step
+3. Keep Mactopus open. Open the extension popup and choose **Pair with Mactopus**.
+4. Confirm the separate, explicit pairing proposal in Mactopus. Only this step
    issues the shared pairing token. Previously remembered remote-debugging
    consent does not automatically authorize the extension.
 5. Run the integration gates before claiming installed-browser qualification.
@@ -48,9 +48,9 @@ Reconnection never retries a previous action or silently switches browser tabs.
 Development extension ID: `gdghbmoiibghgkfmhjlckipjjlclnlbk`.
 Native host: `com.macndash.chrome_bridge`.
 Both identifiers remain unchanged from Macndash so the installed Chrome profile
-and its saved pairing continue to work with Macrouse. Keep the existing unpacked
+and its saved pairing continue to work with Mactopus. Keep the existing unpacked
 extension installation and update the native-host manifest's helper path if the
-application bundle moves to `/Applications/Macrouse.app`.
+application bundle moves to `/Applications/Mactopus.app`.
 
 The manifest includes a public development key solely to stabilize the unpacked
 extension ID. There is no private key in this directory; this is not a Chrome
@@ -86,7 +86,7 @@ Responses:
 | `inventory` | `{}` | `{generation,candidates:[{targetID,title,url}]}` |
 | `attach` | `targetID` | `{attachmentToken,targetID,title,url}` |
 | `detach` | `attachmentToken` | `{detached:true}` |
-| `command` | `attachmentToken`, `method`, `params` | Raw CDP result object |
+| `command` | `attachmentToken`, `method`, `params` | Allowlisted CDP result or bounded semantic projection |
 | `disconnect` | `forgetPairing` (Boolean) | `{disconnected:true}` |
 
 Setup requests require a fresh request generation but do not grant an active
@@ -126,6 +126,35 @@ Host-only control events:
 An existing native port can remain while the app is closed; its relay performs
 no browser actions. Fresh app authentication is required before further
 commands. No browser/profile identities are inferred from page titles or URLs.
+
+### Exact-node clickability observation
+
+`DOMSnapshot.captureSnapshot` admits only the ordered styles
+`{"computedStyles":["cursor","visibility","display","pointer-events"]}` after
+the attachment has observed its main frame. The bridge selects the unique
+matching frame and requires its complete document URL, including any fragment,
+to match. It sends this projection instead of DOM text, attributes, styles,
+geometry, or child-frame contents:
+
+```json
+{"mactopusClickability":{"frameId":"observed-main-frame","documentURL":"https://example.com/","clickableBackendNodeIds":[42],"pointerBackendNodeIds":[43],"sourceTruncated":false,"sourceNodeCount":120}}
+```
+
+`clickableBackendNodeIds` contains only exact backend IDs marked clickable by
+Chrome. `pointerBackendNodeIds` is a separate **affordance heuristic**, not
+event-handler proof: exact-node layout has `cursor:pointer`, `visibility:visible`,
+non-`none` display and pointer events, and positive finite bounds. Native must
+also require the same node's AX focusability before using this second route.
+Multiple layout fragments are deduplicated; empty text styles grant nothing.
+No ancestor or descendant inherits another node's capability. The source is
+limited to 256 documents, 100,000 main-document nodes and 100,000 layout entries;
+duplicate DOM identities, malformed indices and mismatched provenance fail
+closed. At most 12,000 IDs per list fit the shared byte-bounded projection;
+omissions set `sourceTruncated`. Missing optional `isClickable` data supplies no
+positive evidence. The native broker must still revalidate the selected node
+and document before its fixed semantic click and verify the resulting page
+separately. An older bridge can reject the command; the native caller must not
+infer clickability from that failure.
 
 ## Validation
 

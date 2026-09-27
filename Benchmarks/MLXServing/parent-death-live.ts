@@ -7,7 +7,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { completed, exactText, SSEDecoder, type Event } from "./stream-contract";
 
 const repo = resolve(import.meta.dir, "../..");
-const server = join(repo, "Sources/Macndash/Resources/MLXServer/server.py");
+const server = join(repo, "Sources/Mactopus/Resources/MLXServer/server.py");
 const python = join(homedir(), "Library/Application Support/LocalCodex/VisualGrounding/venv/bin/python");
 const modelRoot = join(homedir(), ".lmstudio/models");
 const model = "lmstudio-community/Qwen3.5-4B-MLX-4bit";

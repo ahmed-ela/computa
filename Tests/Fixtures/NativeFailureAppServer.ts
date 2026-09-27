@@ -1,4 +1,4 @@
-#!/Users/ahmedelamin/.bun/bin/bun
+#!/usr/bin/env bun
 // Deterministic transport only. No desktop or model operations occur here.
 import { createInterface } from 'node:readline';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -36,6 +36,8 @@ input.on('line', line => {
         emit({ id: 'stale-tool-after-resume', method: 'item/tool/call', params: {
           threadId, turnId: 'native-failure-turn', callId: 'stale-call', tool: 'computer_v2_status', arguments: {},
         } });
+        notify('item/agentMessage/delta', { turnId: 'native-failure-turn', itemId: 'stale-answer',
+          delta: 'STALE_EXPLANATION_MUST_NOT_STREAM' });
         notify('item/completed', { turnId: 'native-failure-turn', item: {
           id: 'stale-answer', type: 'agentMessage', phase: 'final_answer', text: 'STALE_EXPLANATION_MUST_NOT_APPEAR',
         } });
@@ -50,6 +52,8 @@ input.on('line', line => {
       emit({ id: 'late-tool', method: 'item/tool/call', params: {
         threadId, turnId: 'native-failure-turn', callId: 'late-call', tool: 'computer_v2_status', arguments: {},
       } });
+      notify('item/agentMessage/delta', { turnId: 'native-failure-turn', itemId: 'late-answer',
+        delta: 'UNSUPPORTED_CAUSE_MUST_NOT_STREAM' });
       notify('item/completed', { turnId: 'native-failure-turn', item: {
         id: 'late-answer', type: 'agentMessage', phase: 'final_answer', text: 'UNSUPPORTED_CAUSE_MUST_NOT_APPEAR',
       } });

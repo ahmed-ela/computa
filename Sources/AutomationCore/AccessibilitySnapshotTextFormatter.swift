@@ -31,6 +31,9 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
     public let preferredText: String?
     public let usesCompactElementLines: Bool
     public let prioritizesFocusedDocument: Bool
+    public let includedElementIndices: Set<Int>?
+    public let allowsRaise: Bool
+    public let maximumAncestorDepth: Int
 
     public init(
         elementLimit: Int = 120,
@@ -40,7 +43,10 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         prioritizesRelevantElements: Bool = false,
         preferredText: String? = nil,
         usesCompactElementLines: Bool = false,
-        prioritizesFocusedDocument: Bool = false
+        prioritizesFocusedDocument: Bool = false,
+        includedElementIndices: Set<Int>? = nil,
+        allowsRaise: Bool = true,
+        maximumAncestorDepth: Int = 32
     ) {
         self.elementLimit = min(max(elementLimit, 0), 2_000)
         self.fieldCharacterLimit = min(max(fieldCharacterLimit, 1), 4_096)
@@ -50,6 +56,9 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         self.preferredText = preferredText?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.usesCompactElementLines = usesCompactElementLines
         self.prioritizesFocusedDocument = prioritizesFocusedDocument
+        self.includedElementIndices = includedElementIndices
+        self.allowsRaise = allowsRaise
+        self.maximumAncestorDepth = min(max(maximumAncestorDepth, 1), 128)
     }
 
     public func format(_ snapshot: AccessibilityTreeSnapshot) -> String {
@@ -106,7 +115,7 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         for element in snapshot.elements.dropFirst(boundedElements.count) {
             unambiguousCandidateIndices.remove(element.index)
         }
-        if snapshot.elements.count > elementCandidates.count {
+        if includedElementIndices == nil && snapshot.elements.count > elementCandidates.count {
             formatWasTruncated = true
         }
 
@@ -156,6 +165,9 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         observedByIndex: [Int: AccessibilityTreeElement],
         documentElements: Set<Int>
     ) -> [AccessibilityTreeElement] {
+        if let includedElementIndices {
+            return Array(bounded.filter { includedElementIndices.contains($0.index) }.prefix(elementLimit))
+        }
         guard prioritizesRelevantElements else { return Array(snapshot.elements.prefix(elementLimit)) }
 
         let hasQuery = preferredText?.isEmpty == false
@@ -332,19 +344,21 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
             let valueField = value == "-" ? "" : " value=\(value)"
             let settable = element.isValueSettable ? " settable=1" : ""
             let focused = element.isFocused == true ? " focused=1" : ""
+            let selected = element.isSelected.map { " selected=\(bit($0))" } ?? ""
             let screenFrame = element.frame.map { " screen_frame=\(format($0))" } ?? ""
             return "#\(element.index) role=\(role)\(labelField)\(valueField) actions=\(actions)"
-                + "\(settable)\(focused)\(screenFrame)\(linkURL)\(siblingHeading)\(ancestry)"
+                + "\(settable)\(focused)\(selected)\(screenFrame)\(linkURL)\(siblingHeading)\(ancestry)"
         }
 
         let parent = element.parentIndex.map(String.init) ?? "-"
         let frame = element.frame.map(format) ?? "-"
         let enabled = element.isEnabled.map(bit) ?? "-"
         let focused = element.isFocused.map(bit) ?? "-"
+        let selected = element.isSelected.map { " selected=\(bit($0))" } ?? ""
 
         return "#\(element.index) parent=\(parent) role=\(role) "
             + "label=\(label) value=\(value) frame=\(frame) "
-            + "enabled=\(enabled) focused=\(focused) "
+            + "enabled=\(enabled) focused=\(focused)\(selected) "
             + "actions=\(actions) settable=\(bit(element.isValueSettable))\(linkURL)"
     }
 
@@ -412,7 +426,7 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
                 return .known(ancestors)
             }
             guard let parentIndex = current.parentIndex else { return .unknown }
-            guard ancestors.count < 32 else { return .truncated }
+            guard ancestors.count < maximumAncestorDepth else { return .truncated }
             guard let parent = observedByIndex[parentIndex],
                   visited.insert(parentIndex).inserted else { return .unknown }
             ancestors.append(parentIndex)
@@ -636,8 +650,12 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         _ actions: [String],
         truncated: inout Bool
     ) -> String {
-        let shownActions = actions.prefix(actionLimit)
-        if actions.count > shownActions.count {
+        let executableActions = actions.filter {
+            guard let action = SemanticAXAction(rawValue: $0) else { return false }
+            return allowsRaise || action != .raise
+        }
+        let shownActions = executableActions.prefix(actionLimit)
+        if executableActions.count > shownActions.count {
             truncated = true
         }
 

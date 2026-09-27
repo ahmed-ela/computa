@@ -4,8 +4,9 @@ from pathlib import Path
 import sys
 import unittest
 
-sys.path.insert(0, str(Path(__file__).parents[2] / "Sources/Macrouse/Resources/MLXServer"))
-from response_boundary import ResponseBoundary, MAX_ERROR_BODY, is_context_overflow, is_protocol_error
+sys.path.insert(0, str(Path(__file__).parents[2] / "Sources/Mactopus/Resources/MLXServer"))
+from response_boundary import (ResponseBoundary, MAX_ERROR_BODY, context_overflow_budget,
+                               is_context_overflow, is_protocol_error)
 from sse_contract import ProtocolError
 
 
@@ -26,6 +27,16 @@ class ErrorShapeTests(unittest.TestCase):
     def test_only_protocol_exception_groups_are_translated(self):
         self.assertTrue(is_protocol_error(ExceptionGroup("asgi", [ProtocolError("invalid")])) )
         self.assertFalse(is_protocol_error(ExceptionGroup("asgi", [ProtocolError("invalid"), ValueError("other")])))
+
+    def test_budget_metadata_is_numeric_and_matches_the_actual_output_allowance(self):
+        raw = body({"detail": "Request needs 16400 context tokens (12304 prompt + 4096 max generation), but MAX_KV_SIZE is 16384."})
+        self.assertEqual(context_overflow_budget(raw, max_output_tokens=4096), {
+            "input_tokens": 12304, "max_output_tokens": 4096, "context_limit": 16384,
+            "required_tokens": 16400, "available_input_tokens": 12288})
+        self.assertIsNone(context_overflow_budget(raw, max_output_tokens=2048))
+        for prompt, generation in ((16385, 0), (1, 16384), (0, 20000)):
+            raw = body({"detail": f"Request needs {prompt + generation} context tokens ({prompt} prompt + {generation} max generation), but MAX_KV_SIZE is 16384."})
+            self.assertIsNone(context_overflow_budget(raw))
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -53,6 +64,24 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value["type"], "response.failed")
         self.assertEqual(value["response"]["error"]["code"], "context_length_exceeded")
         self.assertEqual(value["response"]["output"], [])
+        self.assertEqual(value["response"]["context_budget"], {
+            "input_tokens": 16384, "max_output_tokens": 4096, "context_limit": 16384,
+            "required_tokens": 20480, "available_input_tokens": 12288})
+
+    async def test_wrong_upstream_output_reserve_does_not_trigger_compaction(self):
+        raw = body({"detail": "Request needs 17000 context tokens (14952 prompt + 2048 max generation), but MAX_KV_SIZE is 16384."})
+        await self.start()
+        await self.chunk(raw)
+        self.assertEqual(self.output[0]["status"], 400)
+        self.assertEqual(self.output[1]["body"], raw)
+
+    async def test_smaller_explicit_output_allowance_is_preserved(self):
+        self.adapter = ResponseBoundary(self.adapter.send, 256)
+        await self.start()
+        await self.chunk(body({"detail": "Request needs 16400 context tokens (16144 prompt + 256 max generation), but MAX_KV_SIZE is 16384."}))
+        value = json.loads(self.output[1]["body"].split(b"data: ")[1])
+        self.assertEqual(value["response"]["context_budget"]["max_output_tokens"], 256)
+        self.assertEqual(value["response"]["context_budget"]["available_input_tokens"], 16128)
 
     async def test_unrelated_400_is_preserved_byte_for_byte(self):
         raw = b'{ "detail" : "Unknown model" }'

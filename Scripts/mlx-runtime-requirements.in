@@ -1,0 +1,4 @@
+# Base serving package only: no UI/train/realtime extras or grounder models.
+# The hash-locked transitive versions retain the tested serving environment.
+mlx==0.32.2
+mlx-vlm==0.7.1

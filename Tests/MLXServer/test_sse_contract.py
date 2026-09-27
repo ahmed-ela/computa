@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import unittest
 
-path = Path(__file__).parents[2] / "Sources/Macrouse/Resources/MLXServer/sse_contract.py"
+path = Path(__file__).parents[2] / "Sources/Mactopus/Resources/MLXServer/sse_contract.py"
 spec = importlib.util.spec_from_file_location("heydash_sse", path)
 sse = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sse)
@@ -115,6 +115,137 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(final[-1]["type"], "response.completed")
         with self.assertRaises(ProtocolError):
             contract.finish()
+
+    def test_empty_message_headers_wait_until_public_text_after_reasoning(self):
+        contract = SSEContract(100)
+        events = fixture(public="Hello 🌍", reasoning="synthetic private reasoning")
+        prefix = parse(contract.feed(wire(events[:4])))
+        self.assertEqual([e["type"] for e in prefix], ["response.created", "response.in_progress"])
+        thinking = parse(contract.feed(wire(events[4:5])))
+        self.assertEqual([e["type"] for e in thinking], [
+            "response.output_item.added", "response.reasoning_text.delta",
+        ])
+        self.assertEqual(thinking[0]["item"]["id"], "rs_fixture")
+        self.assertEqual(thinking[0]["output_index"], 0)
+
+        public = parse(contract.feed(wire(events[5:6])))
+        self.assertEqual([e["type"] for e in public], [
+            "response.output_item.added", "response.content_part.added", "response.output_text.delta",
+        ])
+        self.assertEqual(public[0]["item"]["id"], "msg_fixture")
+        self.assertEqual([e["output_index"] for e in public], [1, 1, 1])
+        self.assertEqual(public[2]["item_id"], public[0]["item"]["id"])
+        self.assertEqual(public[2]["delta"], "He")
+        remaining = parse(contract.feed(wire(events[6:])))
+        self.assertFalse(any(e["type"].endswith(".done") for e in prefix + thinking + public + remaining))
+        final = parse(contract.finish())
+        self.assertEqual(final[-1]["response"]["output_text"], "Hello 🌍")
+        self.assertEqual([e["item"]["id"] for e in prefix + thinking + public + remaining + final
+                          if e["type"] == "response.output_item.added"], ["rs_fixture", "msg_fixture"])
+
+    def test_every_public_delta_uses_latest_announced_item_and_preserves_utf8_chunks(self):
+        # The pinned Rust consumer routes output_text.delta by its most recent
+        # output_item.added, not by the item_id carried by the SSE text event.
+        public = "\n\nHello 🌍\u2028there\t東京 "
+        source = fixture(public=public, reasoning="private 🧭 reasoning")
+        expected_chunks = [e["delta"].encode("utf-8") for e in source if e["type"] == "response.output_text.delta"]
+        for crlf in (False, True):
+            for chunk_size in (1, 3, 7, 257):
+                with self.subTest(crlf=crlf, chunk_size=chunk_size):
+                    output = self.process(source, chunk_size=chunk_size, crlf=crlf)
+                    active = None
+                    chunks = []
+                    for emitted in output:
+                        if emitted["type"] == "response.output_item.added":
+                            active = emitted["item"]["id"]
+                        if emitted["type"] == "response.output_text.delta":
+                            self.assertEqual(emitted["item_id"], active)
+                            self.assertEqual(active, "msg_fixture")
+                            chunks.append(emitted["delta"].encode("utf-8"))
+                    self.assertEqual(chunks, expected_chunks)
+                    self.assertEqual(b"".join(chunks), public.encode("utf-8"))
+                    self.assertEqual(output[-1]["response"]["output_text"].encode("utf-8"), b"".join(chunks))
+
+    def test_deferred_message_indices_stay_stable_when_terminal_omits_capped_tool(self):
+        cases = [
+            ("tool-only", fixture(public="", call=CALL), "completed", ["fc_original", "msg_fixture"]),
+            ("reasoning-tool", fixture(public="", reasoning="private", call=CALL), "completed",
+             ["rs_fixture", "fc_original", "msg_fixture"]),
+            ("reasoning-only", fixture(public="", reasoning="private"), "incomplete", ["rs_fixture", "msg_fixture"]),
+            ("capped-tool", fixture(public="", call=CALL, tokens=100), "incomplete", ["msg_fixture"]),
+            ("capped-reasoning-tool", fixture(public="", reasoning="private", call=CALL, tokens=100),
+             "incomplete", ["rs_fixture", "msg_fixture"]),
+        ]
+        for name, source, status, final_ids in cases:
+            with self.subTest(name=name):
+                output = self.process(source)
+                announced = {}
+                completed = {}
+                for emitted in output:
+                    if emitted["type"] == "response.output_item.added":
+                        identity = emitted["item"]["id"]
+                        self.assertNotIn(identity, announced)
+                        self.assertNotIn(emitted["output_index"], announced.values())
+                        announced[identity] = emitted["output_index"]
+                    elif "output_index" in emitted:
+                        identity = emitted["item"]["id"] if "item" in emitted else emitted["item_id"]
+                        self.assertIn(identity, announced)
+                        self.assertEqual(emitted["output_index"], announced[identity])
+                        if emitted["type"] == "response.output_item.done":
+                            completed[identity] = emitted["output_index"]
+                final = output[-1]["response"]
+                self.assertEqual(final["status"], status)
+                self.assertEqual([item["id"] for item in final["output"]], final_ids)
+                self.assertEqual(set(completed), set(final_ids))
+                self.assertEqual([e["sequence_number"] for e in output], list(range(len(output))))
+                if name.startswith("capped"):
+                    self.assertIn("fc_original", announced)
+                    self.assertNotIn("fc_original", completed)
+                    self.assertGreater(announced["msg_fixture"], announced["fc_original"],
+                                       "An omitted function must not renumber an already emitted item.")
+
+    def test_deferred_headers_do_not_release_invalid_final_text(self):
+        events = fixture(public="Visible incremental text", reasoning="private")
+        contract = SSEContract(100)
+        before = parse(contract.feed(wire(events[:-1])))
+        self.assertTrue(any(e["type"] == "response.output_text.delta" for e in before))
+        self.assertFalse(any(e["type"].endswith(".done") for e in before))
+        events[-1]["response"]["output_text"] = "Unrelated final text"
+        with self.assertRaises(ProtocolError):
+            contract.feed(wire(events[-1:]))
+        with self.assertRaises(ProtocolError):
+            contract.finish()
+        failure = parse(contract.failure())
+        self.assertEqual(failure[-1]["type"], "response.failed")
+        self.assertEqual(failure[-1]["response"]["output"], [])
+        self.assertNotIn("Unrelated final text", json.dumps(failure))
+
+    def test_unsupported_interleaving_never_misattributes_resumed_public_text(self):
+        source = fixture(public="Hello again", reasoning="private")
+        first_public = next(i for i, e in enumerate(source) if e["type"] == "response.output_text.delta")
+        common = {"item_id": "rs_fixture", "output_index": 0, "content_index": 0}
+        cases = [
+            ("resume-existing-reasoning", [event("response.reasoning_text.delta", **common, delta="late private")]),
+            ("new-reasoning-then-public", [
+                event("response.reasoning_text.delta", item_id="rs_new", output_index=2,
+                      content_index=0, delta="late private"), source[first_public + 1],
+            ]),
+            ("function-then-public", [
+                event("response.output_item.added", output_index=2, item=copy.deepcopy(CALL)),
+                source[first_public + 1],
+            ]),
+        ]
+        for name, interleaved in cases:
+            with self.subTest(name=name):
+                contract = SSEContract(100)
+                before = parse(contract.feed(wire(source[:first_public + 1])))
+                self.assertEqual([e["item_id"] for e in before if e["type"] == "response.output_text.delta"],
+                                 ["msg_fixture"])
+                with self.assertRaises(ProtocolError):
+                    contract.feed(wire(interleaved))
+                failure = parse(contract.failure())
+                self.assertEqual(failure[-1]["type"], "response.failed")
+                self.assertFalse(any(e["type"] == "response.output_item.done" for e in before + failure))
 
     def test_function_call_is_byte_exact_and_not_dispatched_until_eof(self):
         contract = SSEContract(100)

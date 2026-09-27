@@ -16,9 +16,13 @@ private final class RunningBindingFixture: RunningApplicationBindingRuntime, App
     var windowReads = 0
     var argumentReads = [Int32]()
     var afterWindow: (() -> Void)?
+    var beforeWindow: (() -> Void)?
     var onDiscovery: (() -> Void)?
     var windowFailure: Error?
+    var elementsFailure: Error?
     var cancellation: (() throws -> Void)?
+    var retryWaits: [Duration] = []
+    var onRetryWait: ((Duration) async throws -> Void)?
 
     static func state(pid: Int32 = 77, bundle: String = ordinaryBundle, launch: Double? = 100, terminated: Bool = false) -> ApplicationWindowProcessState {
         ApplicationWindowProcessState(
@@ -46,8 +50,13 @@ private final class RunningBindingFixture: RunningApplicationBindingRuntime, App
                 try Task.checkCancellation()
                 try self.cancellation?()
             },
+            waitForWindowRetry: { delay in
+                self.retryWaits.append(delay)
+                try await self.onRetryWait?(delay)
+            },
             resolveWindow: { pid, bundle in
                 self.windowReads += 1
+                self.beforeWindow?()
                 if let error = self.windowFailure { throw error }
                 self.boundPID = pid
                 let observation = try self.windowObservation(pid: pid, bundle: bundle)
@@ -68,7 +77,8 @@ private final class RunningBindingFixture: RunningApplicationBindingRuntime, App
     }
 
     func elements(processIdentifier: Int32) throws -> ApplicationWindowElements {
-        ApplicationWindowElements(application: application, windows: [window], focusedWindow: window, mainWindow: window)
+        if let error = elementsFailure { throw error }
+        return ApplicationWindowElements(application: application, windows: [window], focusedWindow: window, mainWindow: window)
     }
 
     func processIdentifier(of element: AXUIElement) throws -> Int32 { boundPID }
@@ -269,5 +279,221 @@ final class RunningApplicationBindingTests: XCTestCase {
             XCTAssertEqual($0 as? ExistingChromeError, .noOrdinaryBrowser)
         }
         XCTAssertEqual(fixture.windowReads, 1)
+    }
+
+    @MainActor
+    func testReadyBindingSucceedsImmediatelyWithoutWaiting() async throws {
+        let fixture = RunningBindingFixture()
+        let binding = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+        XCTAssertEqual(binding.application.processIdentifier, 77)
+        XCTAssertTrue(try binding.window.identity.isStillSelected())
+        XCTAssertEqual(fixture.windowReads, 1)
+        XCTAssertEqual(fixture.discoveryReads, 2)
+        XCTAssertTrue(fixture.retryWaits.isEmpty)
+    }
+
+    @MainActor
+    func testInitialWindowUnavailableSettlesWithoutActivationOrInput() async throws {
+        let fixture = RunningBindingFixture()
+        fixture.windowFailure = ApplicationWindowReadError.windowUnavailable
+        fixture.onRetryWait = { _ in fixture.windowFailure = nil }
+        let binding = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+        XCTAssertEqual(binding.application.processIdentifier, 77)
+        XCTAssertEqual(fixture.windowReads, 2)
+        XCTAssertEqual(fixture.retryWaits, [.milliseconds(150)])
+        XCTAssertEqual(fixture.discoveryReads, 3)
+        XCTAssertTrue(fixture.argumentReads.isEmpty)
+    }
+
+    @MainActor
+    func testInitialAXCannotCompleteCanSucceedOnThirdRead() async throws {
+        let fixture = RunningBindingFixture()
+        fixture.windowFailure = AutomationError.accessibilityFailure(operation: "fixture", code: AXError.cannotComplete.rawValue)
+        fixture.onRetryWait = { _ in
+            if fixture.retryWaits.count == 2 { fixture.windowFailure = nil }
+        }
+        _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+        XCTAssertEqual(fixture.windowReads, 3)
+        XCTAssertEqual(fixture.retryWaits, [.milliseconds(150), .milliseconds(300)])
+        XCTAssertEqual(fixture.discoveryReads, 4)
+    }
+
+    @MainActor
+    func testInitialTransientDiagnosticsAreRetried() async throws {
+        for reason: ApplicationWindowAvailabilityDiagnostic.Reason in [.windowsNoValue, .windowsReturnedNoValue, .noSelectedWindow] {
+            let fixture = RunningBindingFixture()
+            fixture.windowFailure = ApplicationWindowReadError.windowSelectionUnavailable(.init(
+                reason: reason, windowsCode: AXError.noValue.rawValue, windowCount: 0,
+                focusedCode: AXError.noValue.rawValue, focusedPresent: false,
+                mainCode: AXError.noValue.rawValue, mainPresent: false
+            ))
+            fixture.onRetryWait = { _ in fixture.windowFailure = nil }
+            _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+            XCTAssertEqual(fixture.windowReads, 2)
+            XCTAssertEqual(fixture.retryWaits, [.milliseconds(150)])
+        }
+    }
+
+    @MainActor
+    func testInitialRetryExhaustionReturnsOriginalErrorAfterExactlyThreeReads() async {
+        let fixture = RunningBindingFixture()
+        fixture.windowFailure = ApplicationWindowReadError.windowUnavailable
+        do {
+            _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+            XCTFail("Persistent unavailability must not produce a binding")
+        } catch {
+            XCTAssertEqual(error as? ApplicationWindowReadError, .windowUnavailable)
+        }
+        XCTAssertEqual(fixture.windowReads, 3)
+        XCTAssertEqual(fixture.retryWaits, [.milliseconds(150), .milliseconds(300)])
+        XCTAssertEqual(fixture.discoveryReads, 3)
+    }
+
+    @MainActor
+    func testCancelledRetryWaitStopsWithoutAnotherRead() async {
+        let fixture = RunningBindingFixture()
+        fixture.windowFailure = ApplicationWindowReadError.windowUnavailable
+        fixture.onRetryWait = { _ in throw CancellationError() }
+        do {
+            _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+            XCTFail("Cancellation must stop binding")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(fixture.windowReads, 1)
+        XCTAssertEqual(fixture.discoveryReads, 1)
+        XCTAssertEqual(fixture.retryWaits, [.milliseconds(150)])
+    }
+
+    @MainActor
+    func testPermissionRevokedDuringRetryWaitStopsBeforeDiscoveryOrRead() async {
+        let fixture = RunningBindingFixture()
+        fixture.windowFailure = ApplicationWindowReadError.windowUnavailable
+        fixture.onRetryWait = { _ in fixture.permission = false }
+        do {
+            _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+            XCTFail("Revoked Accessibility permission must stop binding")
+        } catch {
+            XCTAssertEqual(error as? AutomationError, .permissionNotGranted(.accessibility))
+        }
+        XCTAssertEqual(fixture.windowReads, 1)
+        XCTAssertEqual(fixture.discoveryReads, 1)
+        XCTAssertEqual(fixture.retryWaits, [.milliseconds(150)])
+    }
+
+    @MainActor
+    func testCancellationRecheckedAfterRetryWait() async {
+        let fixture = RunningBindingFixture()
+        var canceled = false
+        fixture.windowFailure = ApplicationWindowReadError.windowUnavailable
+        fixture.cancellation = { if canceled { throw CancellationError() } }
+        fixture.onRetryWait = { _ in canceled = true }
+        do {
+            _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+            XCTFail("Cancellation must be rechecked even when the wait returns")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(fixture.windowReads, 1)
+        XCTAssertEqual(fixture.discoveryReads, 1)
+    }
+
+    @MainActor
+    func testPIDReuseOrReplacementDuringRetryCannotRebindNewProcess() async {
+        for replacement in [RunningBindingFixture.state(launch: 200), RunningBindingFixture.state(pid: 78)] {
+            let fixture = RunningBindingFixture()
+            fixture.windowFailure = ApplicationWindowReadError.windowUnavailable
+            fixture.onRetryWait = { _ in fixture.candidates = [replacement] }
+            do {
+                _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+                XCTFail("A retry must preserve the initial process generation")
+            } catch {
+                XCTAssertEqual(error as? RunningApplicationBindingError, .targetChanged)
+            }
+            XCTAssertEqual(fixture.windowReads, 1)
+            XCTAssertEqual(fixture.discoveryReads, 2)
+            XCTAssertEqual(fixture.retryWaits, [.milliseconds(150)])
+        }
+    }
+
+    @MainActor
+    func testNewAmbiguityDuringRetryStopsWithoutChoosingAnApplication() async {
+        let fixture = RunningBindingFixture()
+        fixture.windowFailure = ApplicationWindowReadError.windowUnavailable
+        fixture.onRetryWait = { _ in fixture.candidates.append(RunningBindingFixture.state(pid: 78)) }
+        do {
+            _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+            XCTFail("An ambiguous target must not be guessed")
+        } catch {
+            XCTAssertEqual(error as? RunningApplicationBindingError, .ambiguousApplications(2))
+        }
+        XCTAssertEqual(fixture.windowReads, 1)
+        XCTAssertEqual(fixture.retryWaits, [.milliseconds(150)])
+    }
+
+    @MainActor
+    func testInitialUnsupportedMalformedAndIdentityErrorsDoNotRetry() async {
+        let diagnostic = ApplicationWindowAvailabilityDiagnostic(
+            reason: .windowsUnsupported, windowsCode: AXError.attributeUnsupported.rawValue,
+            windowCount: nil, focusedCode: nil, focusedPresent: false, mainCode: nil, mainPresent: false
+        )
+        for failure in [
+            ApplicationWindowReadError.windowSelectionUnavailable(diagnostic), .invalidTarget,
+            .applicationUnavailable, .applicationIdentityUnavailable, .applicationMismatch,
+            .ambiguousWindows(2), .windowOwnershipMismatch, .invalidWindowRole, .observationChanged,
+        ] {
+            let fixture = RunningBindingFixture()
+            fixture.windowFailure = failure
+            do {
+                _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+                XCTFail("Non-transient errors must not retry: \(failure)")
+            } catch { XCTAssertEqual(error as? ApplicationWindowReadError, failure) }
+            XCTAssertEqual(fixture.windowReads, 1)
+            XCTAssertTrue(fixture.retryWaits.isEmpty)
+        }
+        for code in [AXError.attributeUnsupported, .illegalArgument, .invalidUIElement] {
+            let fixture = RunningBindingFixture()
+            let failure = AutomationError.accessibilityFailure(operation: "fixture", code: code.rawValue)
+            fixture.windowFailure = failure
+            do {
+                _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+                XCTFail("Only AX cannotComplete is retryable")
+            } catch { XCTAssertEqual(error as? AutomationError, failure) }
+            XCTAssertEqual(fixture.windowReads, 1)
+            XCTAssertTrue(fixture.retryWaits.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testUnavailableFinalIdentityAfterObservationNeverStartsRetry() async {
+        let fixture = RunningBindingFixture()
+        fixture.afterWindow = { fixture.elementsFailure = ApplicationWindowReadError.windowUnavailable }
+        do {
+            _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+            XCTFail("Once an observation exists, loss of its identity is terminal")
+        } catch { XCTAssertEqual(error as? ApplicationWindowReadError, .windowUnavailable) }
+        XCTAssertEqual(fixture.windowReads, 1)
+        XCTAssertTrue(fixture.retryWaits.isEmpty)
+    }
+
+    @MainActor
+    func testTransientAXFailureAfterObservationNeverStartsRetry() async {
+        let fixture = RunningBindingFixture()
+        let failure = AutomationError.accessibilityFailure(operation: "fixture", code: AXError.cannotComplete.rawValue)
+        fixture.afterWindow = { fixture.elementsFailure = failure }
+        do {
+            _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+            XCTFail("A final identity guard must not be bypassed by retrying")
+        } catch { XCTAssertEqual(error as? AutomationError, failure) }
+        XCTAssertEqual(fixture.windowReads, 1)
+        XCTAssertTrue(fixture.retryWaits.isEmpty)
+    }
+
+    @MainActor
+    func testChangedSelectedWindowAfterObservationNeverStartsRetry() async {
+        let fixture = RunningBindingFixture()
+        fixture.afterWindow = { fixture.window = AXUIElementCreateApplication(61_002) }
+        do {
+            _ = try await fixture.binder().bindWhenReady(bundleIdentifier: RunningBindingFixture.ordinaryBundle)
+            XCTFail("Retry must never select a replacement window after observation")
+        } catch { XCTAssertEqual(error as? RunningApplicationBindingError, .targetChanged) }
+        XCTAssertEqual(fixture.windowReads, 1)
+        XCTAssertTrue(fixture.retryWaits.isEmpty)
     }
 }

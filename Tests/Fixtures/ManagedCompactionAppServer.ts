@@ -1,4 +1,4 @@
-#!/Users/ahmedelamin/.bun/bin/bun
+#!/usr/bin/env bun
 // Deterministic JSON-RPC fixture only. No model, tool execution, or desktop use.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

@@ -1,4 +1,4 @@
-#!/Users/ahmedelamin/.bun/bin/bun
+#!/usr/bin/env bun
 // Isolated deterministic transport only; no model or desktop operation.
 import { join } from "node:path";
 const root = process.env.CODEX_HOME!;

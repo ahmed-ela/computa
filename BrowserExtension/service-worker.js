@@ -68,7 +68,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return bridge.status();
     }
     throw new Error("Unknown popup action");
-  }).then(result => sendResponse({ ok: true, result }), () => sendResponse({ ok: false, error: "The bridge could not complete that request. Open Macrouse and try again." }));
+  }).then(result => sendResponse({ ok: true, result }), () => sendResponse({ ok: false, error: "The bridge could not complete that request. Open Mactopus and try again." }));
   return true;
 });
 void ready.then(() => { if (bridge.status().paired && !bridge.status().suspended) connect(); });

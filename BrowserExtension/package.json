@@ -1,5 +1,5 @@
 {
-  "name": "macrouse-chrome-bridge",
+  "name": "mactopus-chrome-bridge",
   "private": true,
   "type": "module",
   "scripts": { "test": "bun test" }

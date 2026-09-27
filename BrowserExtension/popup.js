@@ -7,11 +7,11 @@ async function refresh(action = "status") {
   for (const button of [pair, resume, forget]) button.disabled = true;
   try {
     const response = await chrome.runtime.sendMessage({ action });
-    if (!response?.ok) throw new Error(response?.error ?? "Open Macrouse to finish connecting.");
+    if (!response?.ok) throw new Error(response?.error ?? "Open Mactopus to finish connecting.");
     const state = response.result;
-    status.textContent = action === "pair" ? "Confirm the pairing in Macrouse."
+    status.textContent = action === "pair" ? "Confirm the pairing in Mactopus."
       : !state.paired ? "Not paired" : state.suspended ? "Access paused"
-      : state.connected ? "Connected to Macrouse" : "Paired · waiting for Macrouse";
+      : state.connected ? "Connected to Mactopus" : "Paired · waiting for Mactopus";
     pair.hidden = state.paired;
     resume.hidden = !state.paired || (state.connected && !state.suspended);
     forget.hidden = !state.paired;

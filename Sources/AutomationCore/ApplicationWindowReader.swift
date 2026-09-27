@@ -9,12 +9,40 @@ public enum ApplicationWindowSelectionSource: String, Sendable {
     case onlyWindow
 }
 
+/// Structural AX availability only. Never contains window titles, text, or
+/// attributes from the contents of a personal application.
+public struct ApplicationWindowAvailabilityDiagnostic: Equatable, Sendable {
+    public enum Reason: String, Sendable {
+        case windowsNoValue = "windows_no_value"
+        case windowsUnsupported = "windows_unsupported"
+        case windowsReturnedNoValue = "windows_success_without_value"
+        case noSelectedWindow = "empty_windows_without_selection"
+    }
+
+    public let reason: Reason
+    public let windowsCode: Int32?
+    public let windowCount: Int?
+    public let focusedCode: Int32?
+    public let focusedPresent: Bool
+    public let mainCode: Int32?
+    public let mainPresent: Bool
+
+    var summary: String {
+        func value(_ number: Int32?) -> String { number.map(String.init) ?? "unknown" }
+        return "reason=\(reason.rawValue); AXWindows_code=\(value(windowsCode)); "
+            + "window_count=\(windowCount.map(String.init) ?? "unknown"); "
+            + "focused_code=\(value(focusedCode)); focused_present=\(focusedPresent); "
+            + "main_code=\(value(mainCode)); main_present=\(mainPresent)"
+    }
+}
+
 public enum ApplicationWindowReadError: Error, Equatable, LocalizedError, Sendable {
     case invalidTarget
     case applicationUnavailable
     case applicationIdentityUnavailable
     case applicationMismatch
     case windowUnavailable
+    case windowSelectionUnavailable(ApplicationWindowAvailabilityDiagnostic)
     case ambiguousWindows(Int)
     case windowOwnershipMismatch
     case invalidWindowRole
@@ -27,10 +55,22 @@ public enum ApplicationWindowReadError: Error, Equatable, LocalizedError, Sendab
         case .applicationIdentityUnavailable: "The selected application's launch identity cannot be verified."
         case .applicationMismatch: "The running application does not match the selected target."
         case .windowUnavailable: "The selected application has no verifiable selected window."
+        case let .windowSelectionUnavailable(diagnostic):
+            "The selected application has no verifiable selected window (\(diagnostic.summary)). No activation or input was sent."
         case let .ambiguousWindows(count): "The selected application's window is ambiguous (\(count) windows)."
         case .windowOwnershipMismatch: "The selected window does not belong to the exact application window list."
         case .invalidWindowRole: "The selected Accessibility element is not a window."
         case .observationChanged: "The application or selected window changed during observation."
+        }
+    }
+
+    /// Applies only to bounded initial discovery, never input replay or a
+    /// retained binding's revalidation. Unsupported attributes are not transient.
+    public var permitsInitialReadRetry: Bool {
+        switch self {
+        case .windowUnavailable: true
+        case .windowSelectionUnavailable(let diagnostic): diagnostic.reason != .windowsUnsupported
+        default: false
         }
     }
 }
@@ -116,6 +156,17 @@ struct ApplicationWindowElements {
     let windows: [AXUIElement]
     let focusedWindow: AXUIElement?
     let mainWindow: AXUIElement?
+    let availabilityCodes: (windows: Int32, focused: Int32, main: Int32)?
+
+    init(application: AXUIElement, windows: [AXUIElement], focusedWindow: AXUIElement?,
+         mainWindow: AXUIElement?,
+         availabilityCodes: (windows: Int32, focused: Int32, main: Int32)? = nil) {
+        self.application = application
+        self.windows = windows
+        self.focusedWindow = focusedWindow
+        self.mainWindow = mainWindow
+        self.availabilityCodes = availabilityCodes
+    }
 }
 
 struct ApplicationWindowMetadata {
@@ -230,7 +281,13 @@ public final class ApplicationWindowReader {
             window = main
             source = .mainWindow
         } else {
-            guard !elements.windows.isEmpty else { throw ApplicationWindowReadError.windowUnavailable }
+            guard !elements.windows.isEmpty else {
+                throw ApplicationWindowReadError.windowSelectionUnavailable(.init(
+                    reason: .noSelectedWindow, windowsCode: elements.availabilityCodes?.windows,
+                    windowCount: 0, focusedCode: elements.availabilityCodes?.focused,
+                    focusedPresent: false, mainCode: elements.availabilityCodes?.main, mainPresent: false
+                ))
+            }
             guard elements.windows.count == 1 else {
                 throw ApplicationWindowReadError.ambiguousWindows(elements.windows.count)
             }
@@ -273,7 +330,18 @@ public final class ApplicationWindowReader {
 }
 
 @MainActor
-private struct SystemApplicationWindowRuntime: ApplicationWindowRuntime {
+struct SystemApplicationWindowRuntime: ApplicationWindowRuntime {
+    typealias AttributeReader = (AXUIElement, CFString) -> (code: AXError, value: CFTypeRef?)
+    private let readAttribute: AttributeReader
+
+    init(readAttribute: @escaping AttributeReader = { element, attribute in
+        var value: CFTypeRef?
+        let code = AXUIElementCopyAttributeValue(element, attribute, &value)
+        return (code, value)
+    }) {
+        self.readAttribute = readAttribute
+    }
+
     func runningApplication(processIdentifier: Int32) throws -> ApplicationWindowProcessState? {
         guard let app = NSRunningApplication(processIdentifier: processIdentifier) else { return nil }
         return ApplicationWindowProcessState(
@@ -284,8 +352,24 @@ private struct SystemApplicationWindowRuntime: ApplicationWindowRuntime {
 
     func elements(processIdentifier: Int32) throws -> ApplicationWindowElements {
         let application = AXUIElementCreateApplication(processIdentifier)
-        guard let rawWindows = try copyAttribute(kAXWindowsAttribute as CFString, from: application) else {
-            throw ApplicationWindowReadError.windowUnavailable
+        // Read the three structural selection attributes independently so a
+        // missing window list does not hide whether focused/main were exposed.
+        // This is diagnostic only: a missing list still cannot bind a window.
+        let windowsRead = readAttribute(application, kAXWindowsAttribute as CFString)
+        let focusedRead = readAttribute(application, kAXFocusedWindowAttribute as CFString)
+        let mainRead = readAttribute(application, kAXMainWindowAttribute as CFString)
+        guard let rawWindows = try attributeValue(windowsRead, attribute: kAXWindowsAttribute as CFString) else {
+            let reason: ApplicationWindowAvailabilityDiagnostic.Reason
+            switch windowsRead.code {
+            case .noValue: reason = .windowsNoValue
+            case .attributeUnsupported: reason = .windowsUnsupported
+            default: reason = .windowsReturnedNoValue
+            }
+            throw ApplicationWindowReadError.windowSelectionUnavailable(.init(
+                reason: reason, windowsCode: windowsRead.code.rawValue, windowCount: nil,
+                focusedCode: focusedRead.code.rawValue, focusedPresent: focusedRead.value != nil,
+                mainCode: mainRead.code.rawValue, mainPresent: mainRead.value != nil
+            ))
         }
         guard CFGetTypeID(rawWindows) == CFArrayGetTypeID(), let values = rawWindows as? [AnyObject] else {
             throw AutomationError.unexpectedAttributeType(attribute: kAXWindowsAttribute as String)
@@ -299,8 +383,9 @@ private struct SystemApplicationWindowRuntime: ApplicationWindowRuntime {
         return ApplicationWindowElements(
             application: application,
             windows: windows,
-            focusedWindow: try copyElement(kAXFocusedWindowAttribute as CFString, from: application),
-            mainWindow: try copyElement(kAXMainWindowAttribute as CFString, from: application)
+            focusedWindow: try elementValue(focusedRead, attribute: kAXFocusedWindowAttribute as CFString),
+            mainWindow: try elementValue(mainRead, attribute: kAXMainWindowAttribute as CFString),
+            availabilityCodes: (windowsRead.code.rawValue, focusedRead.code.rawValue, mainRead.code.rawValue)
         )
     }
 
@@ -353,8 +438,8 @@ private struct SystemApplicationWindowRuntime: ApplicationWindowRuntime {
         )
     }
 
-    private func copyElement(_ attribute: CFString, from element: AXUIElement) throws -> AXUIElement? {
-        guard let value = try copyAttribute(attribute, from: element) else { return nil }
+    private func elementValue(_ result: (code: AXError, value: CFTypeRef?), attribute: CFString) throws -> AXUIElement? {
+        guard let value = try attributeValue(result, attribute: attribute) else { return nil }
         guard CFGetTypeID(value) == AXUIElementGetTypeID() else {
             throw AutomationError.unexpectedAttributeType(attribute: attribute as String)
         }
@@ -370,12 +455,14 @@ private struct SystemApplicationWindowRuntime: ApplicationWindowRuntime {
     }
 
     private func copyAttribute(_ attribute: CFString, from element: AXUIElement) throws -> CFTypeRef? {
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, attribute, &value)
-        switch result {
-        case .success: return value
+        try attributeValue(readAttribute(element, attribute), attribute: attribute)
+    }
+
+    private func attributeValue(_ result: (code: AXError, value: CFTypeRef?), attribute: CFString) throws -> CFTypeRef? {
+        switch result.code {
+        case .success: return result.value
         case .noValue, .attributeUnsupported: return nil
-        default: throw AutomationError.accessibilityFailure(operation: "read app-bound \(attribute)", code: result.rawValue)
+        default: throw AutomationError.accessibilityFailure(operation: "read app-bound \(attribute)", code: result.code.rawValue)
         }
     }
 }

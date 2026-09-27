@@ -42,11 +42,13 @@ public final class RunningApplicationBinder {
     private let accessibilityCheck: () -> Bool
     private let cancellationCheck: () throws -> Void
     private let resolveWindow: (Int32, String) throws -> ApplicationWindowObservation
+    private let waitForWindowRetry: (Duration) async throws -> Void
 
     public init() {
         runtime = SystemRunningApplicationBindingRuntime()
         accessibilityCheck = { AXIsProcessTrusted() }
         cancellationCheck = { try Task.checkCancellation() }
+        waitForWindowRetry = { try await Task.sleep(for: $0) }
         resolveWindow = { pid, bundle in
             try ApplicationWindowReader().selectedWindowObservation(
                 processIdentifier: pid, expectedBundleIdentifier: bundle
@@ -58,15 +60,63 @@ public final class RunningApplicationBinder {
         runtime: any RunningApplicationBindingRuntime,
         accessibilityCheck: @escaping () -> Bool,
         cancellationCheck: @escaping () throws -> Void = { try Task.checkCancellation() },
+        waitForWindowRetry: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         resolveWindow: @escaping (Int32, String) throws -> ApplicationWindowObservation
     ) {
         self.runtime = runtime
         self.accessibilityCheck = accessibilityCheck
         self.cancellationCheck = cancellationCheck
+        self.waitForWindowRetry = waitForWindowRetry
         self.resolveWindow = resolveWindow
     }
 
     public func bind(bundleIdentifier: String) throws -> RunningApplicationBinding {
+        let before = try initialTarget(bundleIdentifier: bundleIdentifier)
+        let window = try resolveWindow(before.processIdentifier, bundleIdentifier)
+        return try finishBinding(before: before, window: window, bundleIdentifier: bundleIdentifier)
+    }
+
+    /// Initial binding only: allow a briefly unavailable AX provider to settle.
+    /// No activation, input, window guessing, or post-dispatch retargeting occurs.
+    /// The original process generation is pinned across all three read attempts.
+    public func bindWhenReady(bundleIdentifier: String) async throws -> RunningApplicationBinding {
+        let before = try initialTarget(bundleIdentifier: bundleIdentifier)
+        let delays: [Duration] = [.milliseconds(150), .milliseconds(300)]
+        for attempt in 0...delays.count {
+            try requireReadAccess()
+            let window: ApplicationWindowObservation
+            do {
+                window = try resolveWindow(before.processIdentifier, bundleIdentifier)
+            } catch {
+                guard attempt < delays.count, Self.permitsInitialReadRetry(error) else { throw error }
+                try requireReadAccess()
+                try await waitForWindowRetry(delays[attempt])
+                try requireReadAccess()
+                let current = try select(bundleIdentifier: bundleIdentifier)
+                guard sameProcess(before, current) else { throw RunningApplicationBindingError.targetChanged }
+                continue
+            }
+            // Once an observation exists, any validation failure is terminal.
+            // In particular, never retry into a different selected window.
+            return try finishBinding(before: before, window: window, bundleIdentifier: bundleIdentifier)
+        }
+        preconditionFailure("The final read attempt must return or throw")
+    }
+
+    private static func permitsInitialReadRetry(_ error: Error) -> Bool {
+        if let error = error as? ApplicationWindowReadError { return error.permitsInitialReadRetry }
+        if case let AutomationError.accessibilityFailure(_, code) = error {
+            return code == AXError.cannotComplete.rawValue
+        }
+        return false
+    }
+
+    private func sameProcess(_ lhs: ApplicationWindowProcessState, _ rhs: ApplicationWindowProcessState) -> Bool {
+        lhs.processIdentifier == rhs.processIdentifier
+            && lhs.bundleIdentifier == rhs.bundleIdentifier && lhs.launchDate == rhs.launchDate
+    }
+
+    private func initialTarget(bundleIdentifier: String) throws -> ApplicationWindowProcessState {
         try cancellationCheck()
         guard !bundleIdentifier.isEmpty, bundleIdentifier.utf8.count <= 255,
               !bundleIdentifier.unicodeScalars.contains(where: {
@@ -75,12 +125,14 @@ public final class RunningApplicationBinder {
         try requireReadAccess()
         let before = try select(bundleIdentifier: bundleIdentifier)
         try requireReadAccess()
-        let window = try resolveWindow(before.processIdentifier, bundleIdentifier)
+        return before
+    }
+
+    private func finishBinding(before: ApplicationWindowProcessState, window: ApplicationWindowObservation,
+                               bundleIdentifier: String) throws -> RunningApplicationBinding {
         try requireReadAccess()
         let after = try select(bundleIdentifier: bundleIdentifier)
-        guard before.processIdentifier == after.processIdentifier,
-              before.bundleIdentifier == after.bundleIdentifier,
-              before.launchDate == after.launchDate,
+        guard sameProcess(before, after),
               window.info.processIdentifier == before.processIdentifier,
               window.info.bundleIdentifier == bundleIdentifier,
               window.identity.processIdentifier == before.processIdentifier,

@@ -7,44 +7,63 @@ import { resolve } from "node:path";
 // not. These checks read source only and never start the app or touch user data.
 const root = resolve(import.meta.dir, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
-const source = (path: string) => read(`Sources/Macrouse/${path}`);
+const source = (path: string) => read(`Sources/Mactopus/${path}`);
 
-describe("Macrouse product identity", () => {
+describe("Mactopus product identity", () => {
   test("the Swift package and Xcode project use the renamed product", () => {
     const packageFile = read("Package.swift");
-    expect(packageFile).toContain('name: "Macrouse"');
-    expect(packageFile).toContain('.executable(name: "Macrouse", targets: ["Macrouse"])');
-    expect(packageFile).toContain('path: "Sources/Macrouse"');
-    expect(packageFile).toContain('path: "Tests/MacrouseTests"');
+    expect(packageFile).toContain('name: "Mactopus"');
+    expect(packageFile).toContain('.executable(name: "Mactopus", targets: ["Mactopus"])');
+    expect(packageFile).toContain('path: "Sources/Mactopus"');
+    expect(packageFile).toContain('path: "Tests/MactopusTests"');
     expect(packageFile).not.toContain('name: "HeyDash"');
 
     const project = read("project.yml");
-    expect(project).toMatch(/^name: Macrouse\s*$/m);
-    expect(project).toMatch(/^\s+PRODUCT_NAME: Macrouse\s*$/m);
-    expect(project).toContain("path: Sources/Macrouse");
-    expect(project).toContain("INFOPLIST_FILE: Config/Macrouse-Info.plist");
-    expect(existsSync(resolve(root, "Macrouse.xcodeproj/project.pbxproj"))).toBe(true);
+    expect(project).toMatch(/^name: Mactopus\s*$/m);
+    expect(project).toMatch(/^\s+PRODUCT_NAME: Mactopus\s*$/m);
+    expect(project).toContain("path: Sources/Mactopus");
+    expect(project).toContain("INFOPLIST_FILE: Config/Mactopus-Info.plist");
+    const generatedProject = read("Mactopus.xcodeproj/project.pbxproj");
+    expect(generatedProject).toContain("Mactopus.app");
+    expect(generatedProject).toContain("Config/Mactopus-Info.plist");
+    expect(generatedProject).toContain("MactopusTests.xctest");
+    expect(generatedProject).not.toContain("Macrouse.app");
   });
 
-  test("the application entry point and owned instruction classes use Macrouse", () => {
-    const app = source("MacrouseApp.swift");
-    expect(app).toContain("struct MacrouseApp: App");
-    expect(app).toContain("enum MacrouseLaunchMode");
-    expect(app).toContain("MacrouseAppDelegate.self");
-    expect(source("Runtime/MacrouseAgentInstructions.swift")).toContain("MacrouseAgentInstructions");
-    expect(source("Runtime/MacrouseRuntimeArtifact.swift")).toContain("struct MacrouseRuntimeArtifact");
-    expect(source("Runtime/CodexAppServerRuntime.swift")).toContain("You are Macrouse.");
+  test("the application entry point and owned instruction classes use Mactopus", () => {
+    const app = source("MactopusApp.swift");
+    expect(app).toContain("struct MactopusApp: App");
+    expect(app).toContain("enum MactopusLaunchMode");
+    expect(app).toContain("MactopusAppDelegate.self");
+    expect(source("Runtime/MactopusAgentInstructions.swift")).toContain("MactopusAgentInstructions");
+    expect(source("Runtime/MactopusRuntimeArtifact.swift")).toContain("struct MactopusRuntimeArtifact");
+    expect(source("Runtime/CodexAppServerRuntime.swift")).toContain("You are Mactopus.");
   });
 
   test("native and web display branding agrees", () => {
-    const info = read("Config/Macrouse-Info.plist");
-    expect(info).toMatch(/<key>CFBundleDisplayName<\/key>\s*<string>Macrouse<\/string>/);
-    expect(info).toContain("Macrouse captures your display");
-    expect(source("Web/WebViewHost.swift")).toContain('window.title = "Macrouse"');
-    expect(read("WebUI/index.html")).toContain("<title>Macrouse</title>");
-    expect(JSON.parse(read("WebUI/package.json")).name).toBe("macrouse-web-ui");
+    const info = read("Config/Mactopus-Info.plist");
+    expect(info).toMatch(/<key>CFBundleDisplayName<\/key>\s*<string>Mactopus<\/string>/);
+    expect(info).toContain("Mactopus captures your display");
+    expect(source("Web/WebViewHost.swift")).toContain('window.title = "Mactopus"');
+    expect(read("WebUI/index.html")).toContain("<title>Mactopus</title>");
+    const bundledUI = source("Resources/WebUI/index.html");
+    expect(bundledUI).toContain("<title>Mactopus</title>");
+    expect(bundledUI).not.toContain("<title>Macrouse</title>");
+    expect(JSON.parse(read("WebUI/package.json")).name).toBe("mactopus-web-ui");
     expect(read("WebUI/src/App.tsx")).not.toContain("HeyDash");
-    expect(read("WebUI/vite.config.ts")).toContain("../Sources/Macrouse/Resources/WebUI");
+    expect(read("WebUI/vite.config.ts")).toContain("../Sources/Mactopus/Resources/WebUI");
+  });
+
+  test("the packaged UI includes the unified timer without the legacy working footer", () => {
+    const html = source("Resources/WebUI/index.html");
+    const script = html.match(/<script\b[^>]*\bsrc="\.\/([^"?]+\.js)"/);
+    expect(script).not.toBeNull();
+    const client = source(`Resources/WebUI/${script![1]}`);
+    expect(client).toContain('reasoning-disclosure');
+    expect(client).toContain('Working for ');
+    expect(client).toContain('Worked for ');
+    expect(client).not.toContain('working-indicator');
+    expect(client).not.toContain('Working on your task');
   });
 });
 
@@ -100,7 +119,7 @@ describe("rename compatibility contracts", () => {
     const manifest = JSON.parse(read("BrowserExtension/manifest.json"));
     const id = [...createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest("hex").slice(0, 32)]
       .map(digit => String.fromCharCode(97 + Number.parseInt(digit, 16))).join("");
-    expect(manifest.name).toBe("Macrouse Browser Bridge");
+    expect(manifest.name).toBe("Mactopus Browser Bridge");
     expect(id).toBe("gdghbmoiibghgkfmhjlckipjjlclnlbk");
     expect(read("BrowserExtension/bridge.js")).toContain('HOST_NAME = "com.macndash.chrome_bridge"');
     expect(read("BrowserExtension/bridge.js")).toContain('STORAGE_KEY = "macndashChromeBridgeV1"');
@@ -112,12 +131,12 @@ describe("rename compatibility contracts", () => {
 
   test("a product rename does not relabel or replace the pinned agent runtime", () => {
     const pin = JSON.parse(read("Runtime/codex-source.lock.json"));
-    expect(pin.runtimeVersion).toBe("heydash-4");
+    expect(pin.runtimeVersion).toBe("mactopus-5");
     // The verified binary/manifest are intentionally not committed. Also check
     // an already-built artifact when present, without making it a test prerequisite.
-    if (existsSync(resolve(root, "Sources/Macrouse/Resources/AgentRuntime/manifest.json"))) {
+    if (existsSync(resolve(root, "Sources/Mactopus/Resources/AgentRuntime/manifest.json"))) {
       const manifest = JSON.parse(source("Resources/AgentRuntime/manifest.json"));
-      expect(manifest.runtimeVersion).toBe("heydash-4");
+      expect(manifest.runtimeVersion).toBe("mactopus-5");
       expect(manifest.sourceCommit).toBe(pin.sourceCommit);
       expect(manifest.patchSHA256).toBe(pin.patchSHA256);
     }

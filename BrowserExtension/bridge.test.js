@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { ChromeBridge, MAX_MESSAGE_BYTES } from "./bridge.js";
-import { PRESS_FUNCTION, SET_TEXT_FUNCTION, validateCommand } from "./commands.js";
+import { CLICKABILITY_STYLES, PRESS_FUNCTION, SET_TEXT_FUNCTION, validateCommand } from "./commands.js";
 
 const token = "a".repeat(64);
 const group = "heydash-mutation-12345678-1234-1234-1234-123456789abc";
@@ -144,10 +144,27 @@ describe("bounded tab and command contract", () => {
   test("attach binds exact target, never duplicate URL, and denies existing debuggers", async () => {
     const f = fixture(); await f.setup();
     f.targets[0].attached = true;
-    expect((await f.request("attach", { targetID: "target-one" })).error.code).toBe("target_unavailable");
+    expect((await f.request("attach", { targetID: "target-one" })).error.code).toBe("target_busy");
     expect((await f.request("attach", { targetID: "restricted" })).error.code).toBe("target_unavailable");
+    expect((await f.request("attach", { targetID: "no-longer-present" })).error.code).toBe("target_unavailable");
+    expect(f.calls).toEqual([]);
+    expect(f.bridge.status().paired).toBe(true);
+    expect((await f.request("ping")).ok).toBe(true);
     expect((await f.request("attach", { targetID: "target-two" })).ok).toBe(true);
     expect(f.calls[0]).toEqual(["attach", { targetId: "target-two" }, "1.3"]);
+  });
+  test("inventory reports fresh finite availability without adopting or releasing another debugger", async () => {
+    const f = fixture(); await f.setup();
+    f.targets[0].attached = true;
+    let reply = await f.request("inventory");
+    expect(reply.result.candidates.map(item => item.availability)).toEqual(["busy", "available"]);
+    delete f.targets[0].attached;
+    reply = await f.request("inventory");
+    expect(reply.result.candidates[0].availability).toBe("unknown");
+    f.targets[0].attached = false;
+    reply = await f.request("inventory");
+    expect(reply.result.candidates[0].availability).toBe("available");
+    expect(f.calls).toEqual([]);
   });
   test("an ordinary semantic click uses the fixed function and owned handles", async () => {
     const f = fixture(); await f.setup(); const attachmentToken = await f.attach();
@@ -177,6 +194,9 @@ describe("bounded tab and command contract", () => {
       arguments: [{ value: "https://example.com/" }], returnByValue: true, awaitPromise: true, userGesture: true })).toThrow();
     expect(() => validateCommand("Page.createIsolatedWorld", { frameId: "f", worldName: "LocalCodexBrowserBroker", grantUniveralAccess: true })).toThrow();
     expect(() => validateCommand("Accessibility.getFullAXTree", { depth: 999 })).toThrow();
+    expect(() => validateCommand("Accessibility.getFullAXTree", { depth: 65 })).toThrow();
+    expect(() => validateCommand("Accessibility.getFullAXTree", { depth: 16 })).not.toThrow();
+    expect(() => validateCommand("Accessibility.getFullAXTree", { depth: 64 })).not.toThrow();
   });
   test("duplicate request ID is rejected before a second operation", async () => {
     const f = fixture(); await f.setup();
@@ -199,12 +219,92 @@ describe("bounded tab and command contract", () => {
     expect(f.bridge.status().suspended).toBe(true);
     expect(f.calls).toEqual([]);
   });
-  test("oversized result becomes a bounded error", async () => {
+  test("oversized non-AX result remains a bounded error", async () => {
     const f = fixture(); await f.setup(); const attachmentToken = await f.attach();
-    f.chrome.debugger.sendCommand = async () => ({ nodes: [{ name: "x".repeat(MAX_MESSAGE_BYTES) }] });
-    const reply = await f.command(attachmentToken, "Accessibility.getFullAXTree", { depth: 16 });
+    f.chrome.debugger.sendCommand = async () => ({ unexpected: "x".repeat(MAX_MESSAGE_BYTES) });
+    const reply = await f.command(attachmentToken, "Accessibility.enable");
     expect(reply.error.code).toBe("response_too_large");
     expect(JSON.stringify(reply).length).toBeLessThan(1024);
+  });
+  test("AX projection removes name-computation sources without losing semantic or action identity", async () => {
+    const f = fixture(); await f.setup(); const attachmentToken = await f.attach();
+    const node = { nodeId: "node-1", parentId: "parent-1", childIds: ["child-1"], backendDOMNodeId: 42,
+      ignored: false, role: { type: "role", value: "textbox" },
+      name: { type: "computedString", value: "Exact Unicode 🧪 title", sources: [{ value: "x".repeat(MAX_MESSAGE_BYTES) }] },
+      value: { type: "string", value: "Unchanged input" },
+      properties: [
+        { name: "disabled", value: { type: "boolean", value: false } },
+        { name: "readonly", value: { type: "boolean", value: true } },
+        { name: "focusable", value: { type: "boolean", value: true } },
+        { name: "editable", value: { type: "token", value: "plaintext" } },
+        { name: "url", value: { type: "string", value: "https://example.com/read?x=1" } },
+      ] };
+    f.chrome.debugger.sendCommand = async () => ({ nodes: [node] });
+    const reply = await f.command(attachmentToken, "Accessibility.getFullAXTree", { depth: 64 });
+    expect(reply.ok).toBe(true);
+    expect(reply.result.nodes[0]).toEqual({ ...node, name: { type: "computedString", value: "Exact Unicode 🧪 title" } });
+    expect(reply.result.macrouseSourceTruncated).toBe(false);
+    expect(reply.result.macrouseSourceNodeCount).toBe(1);
+    expect(JSON.stringify(reply).length).toBeLessThan(2048);
+  });
+  test("wide AX projection keeps a byte-bounded prefix and explicitly marks unreturned nodes", async () => {
+    const f = fixture(); await f.setup(); const attachmentToken = await f.attach();
+    const nodes = Array.from({ length: 5000 }, (_, index) => ({ nodeId: `node-${index}`,
+      backendDOMNodeId: index + 1, ignored: false, role: { value: "heading" }, name: { value: `Title ${index} 🧪`.repeat(10) } }));
+    f.chrome.debugger.sendCommand = async () => ({ nodes });
+    const reply = await f.command(attachmentToken, "Accessibility.getFullAXTree", { depth: 64 });
+    expect(reply.ok).toBe(true);
+    expect(reply.result.macrouseSourceTruncated).toBe(true);
+    expect(reply.result.macrouseSourceNodeCount).toBe(5000);
+    expect(reply.result.nodes.length).toBeGreaterThan(200);
+    expect(reply.result.nodes.length).toBeLessThan(5000);
+    expect(reply.result.nodes.at(-1)).toEqual(nodes[reply.result.nodes.length - 1]);
+    expect(new TextEncoder().encode(JSON.stringify(reply)).byteLength).toBeLessThan(MAX_MESSAGE_BYTES);
+  });
+  test("one oversized semantic node is omitted whole, never text-truncated into an actionable identity", async () => {
+    const f = fixture(); await f.setup(); const attachmentToken = await f.attach();
+    f.chrome.debugger.sendCommand = async () => ({ nodes: [{ backendDOMNodeId: 1, name: { value: "x".repeat(MAX_MESSAGE_BYTES) } }] });
+    const reply = await f.command(attachmentToken, "Accessibility.getFullAXTree", { depth: 64 });
+    expect(reply.ok).toBe(true);
+    expect(reply.result.nodes).toEqual([]);
+    expect(reply.result.macrouseSourceTruncated).toBe(true);
+  });
+  test("DOM clickability requires an observed main frame before dispatch", async () => {
+    const f = fixture(); await f.setup(); const attachmentToken = await f.attach();
+    const reply = await f.command(attachmentToken, "DOMSnapshot.captureSnapshot", { computedStyles: [...CLICKABILITY_STYLES] });
+    expect(reply.error.code).toBe("stale_frame");
+    expect(f.calls.filter(call => call[0] === "command")).toHaveLength(0);
+  });
+  test("DOM clickability crosses the bridge only as a bounded main-document projection", async () => {
+    const f = fixture(); await f.setup(); const attachmentToken = await f.attach();
+    await f.command(attachmentToken, "Page.getFrameTree");
+    f.chrome.debugger.sendCommand = async (target, method, params) => {
+      f.calls.push(["command", target, method, params]);
+      return { strings: ["frame-1", "https://example.com/", "Private document body"], documents: [{
+        frameId: 0, documentURL: 1, nodes: { backendNodeId: [1, 2, 3],
+          isClickable: { index: [1] }, nodeValue: [2], attributes: [[2, 2]] },
+        layout: { nodeIndex: [], styles: [], bounds: [] },
+      }] };
+    };
+    const reply = await f.command(attachmentToken, "DOMSnapshot.captureSnapshot", { computedStyles: [...CLICKABILITY_STYLES] });
+    expect(reply.ok).toBe(true);
+    expect(reply.result).toEqual({ mactopusClickability: { frameId: "frame-1",
+      documentURL: "https://example.com/", clickableBackendNodeIds: [2],
+      pointerBackendNodeIds: [], sourceTruncated: false, sourceNodeCount: 3 } });
+    expect(JSON.stringify(reply)).not.toContain("Private document");
+    expect(f.calls.filter(call => call[0] === "command").map(call => call[2]))
+      .toEqual(["Page.getFrameTree", "DOMSnapshot.captureSnapshot"]);
+  });
+  test("DOM provenance failure is redacted and does not escalate or revoke pairing", async () => {
+    const f = fixture(); await f.setup(); const attachmentToken = await f.attach();
+    await f.command(attachmentToken, "Page.getFrameTree");
+    f.chrome.debugger.sendCommand = async () => ({ strings: ["frame-1", "https://private.example/"],
+      documents: [{ frameId: 0, documentURL: 1, nodes: { backendNodeId: [1], isClickable: { index: [0] } } }] });
+    const reply = await f.command(attachmentToken, "DOMSnapshot.captureSnapshot", { computedStyles: [...CLICKABILITY_STYLES] });
+    expect(reply.error.code).toBe("invalid_document");
+    expect(JSON.stringify(reply)).not.toContain("private.example");
+    expect(f.bridge.status().paired).toBe(true);
+    expect((await f.request("ping")).ok).toBe(true);
   });
 });
 
@@ -304,7 +404,7 @@ describe("shipping surface contracts", () => {
     expect(manifest.minimum_chrome_version).toBe("125");
   });
   test("fixed functions match current Swift native broker byte for byte", async () => {
-    const source = await readFile(new URL("../Sources/Macrouse/Runtime/BrowserCDPDocumentOperations.swift", import.meta.url), "utf8");
+    const source = await readFile(new URL("../Sources/Mactopus/Runtime/BrowserCDPDocumentOperations.swift", import.meta.url), "utf8");
     const templates = [...source.matchAll(/"functionDeclaration": """\n([\s\S]*?)\n(\s*)"""/g)]
       .map(match => match[1].split("\n").map(line => line.slice(match[2].length)).join("\n"));
     expect(templates).toEqual([PRESS_FUNCTION, SET_TEXT_FUNCTION]);

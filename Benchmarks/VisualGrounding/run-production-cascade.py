@@ -90,7 +90,7 @@ def main():
     parser.add_argument(
         "--worker",
         type=Path,
-        default=PROJECT / "Sources/HeyDash/Resources/VisualGrounding/worker.py",
+        default=PROJECT / "Sources/Mactopus/Resources/VisualGrounding/worker.py",
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--expected-hits", type=int, default=90)

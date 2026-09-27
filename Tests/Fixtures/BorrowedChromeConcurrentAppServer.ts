@@ -1,4 +1,4 @@
-#!/Users/ahmedelamin/.bun/bin/bun
+#!/usr/bin/env bun
 // Scripted App Server, NOT Qwen. Actual production Swift Core performs every
 // tool. The test owns both headless tabs and injects one document navigation.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";

@@ -1,4 +1,4 @@
-Macrouse Third-Party Notices
+Mactopus Third-Party Notices
 ==============================
 
 The interface uses @octanejs/shadcn (shadcn/ui adapted to Octane),
@@ -6,7 +6,7 @@ The interface uses @octanejs/shadcn (shadcn/ui adapted to Octane),
 Tailwind CSS, Marked (Markdown tokenization), and entities (text reference
 decoding). Their upstream license texts
 are retained under licenses/.
-The Octane adaptations retain the Octane MIT terms below. Macrouse uses
+The Octane adaptations retain the Octane MIT terms below. Mactopus uses
 the components without modifying their package source; application styles
 and native action bindings are separate.
 

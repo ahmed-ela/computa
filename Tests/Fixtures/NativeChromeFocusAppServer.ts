@@ -1,5 +1,5 @@
-#!/Users/ahmedelamin/.bun/bin/bun
-// Opt-in deterministic transport for real Macrouse V2 desktop execution.
+#!/usr/bin/env bun
+// Opt-in deterministic transport for real Mactopus V2 desktop execution.
 // No LLM or owned Codex App Server is used. Only three fixed calls can be sent.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

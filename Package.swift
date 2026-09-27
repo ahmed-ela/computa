@@ -3,12 +3,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "Macrouse",
+    name: "Mactopus",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "Macrouse", targets: ["Macrouse"])
+        .executable(name: "Mactopus", targets: ["Mactopus"])
     ],
     targets: [
         .target(
@@ -16,9 +16,9 @@ let package = Package(
             path: "Sources/AutomationCore"
         ),
         .executableTarget(
-            name: "Macrouse",
+            name: "Mactopus",
             dependencies: ["AutomationCore"],
-            path: "Sources/Macrouse",
+            path: "Sources/Mactopus",
             resources: [
                 .copy("Resources/WebUI"),
                 .copy("Resources/VisualGrounding"),
@@ -33,9 +33,9 @@ let package = Package(
             path: "Tests/AutomationCoreTests"
         ),
         .testTarget(
-            name: "MacrouseTests",
-            dependencies: ["Macrouse"],
-            path: "Tests/MacrouseTests"
+            name: "MactopusTests",
+            dependencies: ["Mactopus"],
+            path: "Tests/MactopusTests"
         )
     ]
 )

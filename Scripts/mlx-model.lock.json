@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "repo": "lmstudio-community/Qwen3.5-4B-MLX-4bit",
+  "revision": "c43ee1d65576a5d98de1e8405cac93c371a655c1",
+  "totalBytes": 3061140963,
+  "files": [
+    {"path": ".gitattributes", "size": 1570, "gitBlobSHA1": "52373fe24473b1aa44333d318f578ae6bf04b49b"},
+    {"path": "README.md", "size": 2253, "gitBlobSHA1": "76b09d566439f90b3fc8c03b79b328983a938281"},
+    {"path": "chat_template.jinja", "size": 7756, "gitBlobSHA1": "a585dec894e63da457d9440ec6aa7caa16d20860"},
+    {"path": "config.json", "size": 3366, "gitBlobSHA1": "cb3e1a878a5c4a0505e0c9967da45820b2ca6bd3"},
+    {"path": "model.safetensors", "size": 3034301037, "sha256": "52dc943eaf6093a2313271a7a0abc36d127b2a16609a0a7c54ee1b4e4ed06cb8"},
+    {"path": "model.safetensors.index.json", "size": 101944, "gitBlobSHA1": "40196ba58595ef9b3fad25a8a6daf3288b953c19"},
+    {"path": "preprocessor_config.json", "size": 390, "gitBlobSHA1": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64"},
+    {"path": "processor_config.json", "size": 991, "gitBlobSHA1": "8f29fe38a79a9d8367009ebebd25c35b1f3c4e40"},
+    {"path": "tokenizer.json", "size": 19989325, "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"},
+    {"path": "tokenizer_config.json", "size": 9187, "gitBlobSHA1": "803283d87369d6d9ff8d970a8a49a602ca306544"},
+    {"path": "video_preprocessor_config.json", "size": 385, "gitBlobSHA1": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe"},
+    {"path": "vocab.json", "size": 6722759, "gitBlobSHA1": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176"}
+  ]
+}

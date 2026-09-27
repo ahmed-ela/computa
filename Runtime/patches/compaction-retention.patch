@@ -3243,6 +3243,179 @@ index 0000000..ca71ca0
 +        .sync_all()
 +        .expect("private receipt export sync failed");
 +}
+diff --git a/codex-rs/core/src/session/local_context_overflow.rs b/codex-rs/core/src/session/local_context_overflow.rs
+new file mode 100644
+index 0000000..a4d0d6d
+--- /dev/null
++++ b/codex-rs/core/src/session/local_context_overflow.rs
+@@ -0,0 +1,96 @@
++//! One summarizing recovery for an exact loopback-provider context rejection.
++//! The turn loop owns the per-model-step attempt bound; this module never runs tools.
++
++use std::sync::Arc;
++
++use crate::client::ModelClientSession;
++use crate::compact::InitialContextInjection;
++use crate::context::world_state::WorldState;
++use crate::session::session::Session;
++use crate::session::step_context::StepContext;
++use codex_analytics::CompactionPhase;
++use codex_analytics::CompactionReason;
++use codex_features::Feature;
++use codex_model_provider::RemoteCompactionSupport;
++use codex_protocol::error::Result as CodexResult;
++
++pub(super) enum Recovery {
++    Reduced,
++    Unavailable,
++}
++
++pub(super) async fn compact_for_retry(
++    sess: &Arc<Session>,
++    step_context: &Arc<StepContext>,
++    client_session: &mut ModelClientSession,
++    world_state: &Arc<WorldState>,
++) -> CodexResult<Recovery> {
++    let turn_context = &step_context.turn;
++    if turn_context.config.features.enabled(Feature::TokenBudget)
++        || turn_context.provider.info().is_openai()
++        || !matches!(
++            turn_context.provider.capabilities().remote_compaction,
++            RemoteCompactionSupport::Unsupported
++        )
++        || crate::guardian::is_basic_session_source(&turn_context.session_source)
++    {
++        return Ok(Recovery::Unavailable);
++    }
++    let Some(endpoint) = turn_context
++        .provider
++        .info()
++        .base_url
++        .as_deref()
++        .and_then(|value| url::Url::parse(value).ok())
++    else {
++        return Ok(Recovery::Unavailable);
++    };
++    let loopback = matches!(endpoint.scheme(), "http" | "https")
++        && match endpoint.host() {
++            Some(url::Host::Ipv4(address)) => address.is_loopback(),
++            Some(url::Host::Ipv6(address)) => address.is_loopback(),
++            Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
++            None => false,
++        };
++    if !loopback {
++        return Ok(Recovery::Unavailable);
++    }
++    // Cached usage was marked full by the overflow path. Compare actual provider
++    // projections instead. This is only a progress guard, not a tokenizer: MLX
++    // must still check the complete retry plus output allowance before generation.
++    let Some(before) = input_bytes(sess, step_context).await else {
++        return Ok(Recovery::Unavailable);
++    };
++    super::run_auto_compact(
++        sess,
++        Arc::clone(step_context),
++        /*fallback_step_context*/ None,
++        client_session,
++        InitialContextInjection::BeforeLastUserMessage {
++            world_state: Arc::clone(world_state),
++            step_context: Arc::clone(step_context),
++        },
++        CompactionReason::ContextLimit,
++        CompactionPhase::MidTurn,
++    )
++    .await?;
++    Ok(
++        if input_bytes(sess, step_context)
++            .await
++            .is_some_and(|after| after < before)
++        {
++            Recovery::Reduced
++        } else {
++            Recovery::Unavailable
++        },
++    )
++}
++
++async fn input_bytes(sess: &Session, step_context: &StepContext) -> Option<usize> {
++    let mut input = sess
++        .clone_history()
++        .await
++        .for_prompt(&step_context.settings.model_info.input_modalities);
++    crate::client::prepare_input_for_non_openai_provider(&mut input);
++    serde_json::to_vec(&input).ok().map(|bytes| bytes.len())
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 1f80548..14226d7 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -140,6 +140,9 @@ use tracing::warn;
+ 
+ const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
+ 
++#[path = "local_context_overflow.rs"]
++mod local_context_overflow;
++
+ /// Explicit MCP startup requirements retained across restarts within one user turn.
+ #[derive(Default)]
+ pub(crate) struct McpStartupRequirements {
+@@ -421,6 +424,10 @@ pub(crate) async fn run_turn(
+ 
+     let mut next_step_context = Some(first_step_context);
+     let mut guardian_budget_compacted = false;
++    // The provider may reject an exact tokenized request even when the local
++    // bytes-based estimate is below the compaction threshold. Give one model
++    // step one summarizing recovery, not an unbounded retry of an unchanged request.
++    let mut local_context_overflow_compacted = false;
+     loop {
+         // Note that pending_input would be something like a message the user
+         // submitted through the UI while the model was running. Though the UI
+@@ -494,7 +501,7 @@ pub(crate) async fn run_turn(
+                 .await?
+             }
+         };
+-        let sampling_request_result: CodexResult<_> = async {
++        let mut sampling_request_result: CodexResult<_> = async {
+             super::time_reminder::maybe_record_current_time_reminder(
+                 sess.as_ref(),
+                 turn_context.as_ref(),
+@@ -535,9 +542,36 @@ pub(crate) async fn run_turn(
+             .await
+         }
+         .await;
++        if sampling_request_result
++            .as_ref()
++            .is_err_and(|error| matches!(error.details(), CodexErrorDetails::ContextWindowExceeded))
++            && !local_context_overflow_compacted
++        {
++            local_context_overflow_compacted = true;
++            match local_context_overflow::compact_for_retry(
++                &sess,
++                &step_context,
++                &mut client_session,
++                &world_state,
++            )
++            .await
++            {
++                Ok(local_context_overflow::Recovery::Reduced) => {
++                    // Continue from the atomically retained real call/output
++                    // receipts. Never resubmit input or replay completed tools.
++                    can_drain_pending_input = false;
++                    continue;
++                }
++                Ok(local_context_overflow::Recovery::Unavailable) => {}
++                Err(error) => sampling_request_result = Err(error),
++            }
++            // Ineffective compaction or a second overflow uses the ordinary
++            // terminal error path. No model text can claim the task succeeded.
++        }
+         match sampling_request_result {
+             Ok((sampling_request_output, sampling_request_input)) => {
+                 guardian_budget_compacted = false;
++                local_context_overflow_compacted = false;
+                 let SamplingRequestResult {
+                     needs_follow_up: model_needs_follow_up,
+                     last_agent_message: sampling_request_last_agent_message,
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
 index d8f6bab..1b62325 100644
 --- a/codex-rs/core/tests/suite/compact.rs
@@ -3332,10 +3505,10 @@ index d8f6bab..1b62325 100644
      let test = builder.build(&server).await?;
 diff --git a/codex-rs/core/tests/suite/compact_tool_receipts.rs b/codex-rs/core/tests/suite/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..58b383f
+index 0000000..432d6d0
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/compact_tool_receipts.rs
-@@ -0,0 +1,1111 @@
+@@ -0,0 +1,1326 @@
 +use anyhow::Result;
 +use base64::Engine;
 +use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -3375,6 +3548,221 @@ index 0000000..58b383f
 +enum ReceiptFailure {
 +    PairOverflow,
 +    SummaryTooLarge,
++}
++
++#[derive(Clone, Copy)]
++enum OverflowRecoveryFixture {
++    Recovered,
++    SecondStep,
++    RetryStillTooLarge,
++    NoReduction,
++    UnrelatedError,
++}
++
++#[test_case::test_case(OverflowRecoveryFixture::Recovered; "preserves_completed_action")]
++#[test_case::test_case(OverflowRecoveryFixture::SecondStep; "resets_only_after_successful_step")]
++#[test_case::test_case(OverflowRecoveryFixture::RetryStillTooLarge; "one_retry_only")]
++#[test_case::test_case(OverflowRecoveryFixture::NoReduction; "requires_smaller_history")]
++#[test_case::test_case(OverflowRecoveryFixture::UnrelatedError; "typed_overflow_only")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn local_context_overflow_recovery(fixture: OverflowRecoveryFixture) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let mut provider = built_in_model_providers(None)["openai"].clone();
++    provider.name = "Local exact context fixture".to_string();
++    provider.base_url = Some(format!("{}/v1", server.uri()));
++    provider.supports_websockets = false;
++    provider.stream_max_retries = Some(0);
++    provider.request_max_retries = Some(0);
++    let mut builder = test_codex()
++        .with_config(move |config| {
++            config.model_provider = provider;
++            config.model_context_window = Some(32_768);
++            // Reported usage and the new result's coarse estimate remain below
++            // this limit; only the provider's exact preflight detects overflow.
++            config.model_auto_compact_token_limit = Some(12_288);
++        })
++        .with_model_info_override("gpt-5.5", |info| {
++            info.truncation_policy = TruncationPolicyConfig::tokens(10_000);
++        });
++    let mut test = builder.build_with_auto_env(&server).await?;
++    test.codex = test
++        .thread_manager
++        .start_thread(StartThreadOptions {
++            dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
++                name: "status".to_string(),
++                description: "Synthetic fixture action, must execute only once per call."
++                    .to_string(),
++                input_schema: json!({"type":"object", "properties":{}}),
++                defer_loading: false,
++            })],
++            ..StartThreadOptions::new(test.config.clone())
++        })
++        .await?
++        .thread;
++    let overflow = || {
++        sse_failed(
++            "too-large",
++            "context_length_exceeded",
++            "Exact request does not fit.",
++        )
++    };
++    let mut responses = vec![
++        sse(vec![
++            ev_function_call("action-0", "status", "{}"),
++            ev_completed_with_tokens("first", 100),
++        ]),
++        if matches!(fixture, OverflowRecoveryFixture::UnrelatedError) {
++            sse_failed("unrelated", "invalid_request", "Unrelated provider error.")
++        } else {
++            overflow()
++        },
++    ];
++    if !matches!(fixture, OverflowRecoveryFixture::UnrelatedError) {
++        let summary = if matches!(fixture, OverflowRecoveryFixture::NoReduction) {
++            "Unhelpful oversized summary. ".repeat(1800)
++        } else {
++            "The synthetic action completed. Use its retained receipt; do not repeat it."
++                .to_string()
++        };
++        responses.push(sse(vec![
++            ev_assistant_message("summary-0", &summary),
++            ev_completed_with_tokens("compact-0", 100),
++        ]));
++        if !matches!(fixture, OverflowRecoveryFixture::NoReduction) {
++            responses.push(
++                if matches!(fixture, OverflowRecoveryFixture::RetryStillTooLarge) {
++                    overflow()
++                } else if matches!(fixture, OverflowRecoveryFixture::SecondStep) {
++                    sse(vec![
++                        ev_function_call("action-1", "status", "{}"),
++                        ev_completed_with_tokens("second", 100),
++                    ])
++                } else {
++                    sse(vec![
++                        ev_assistant_message("answer", "RECEIPT_VERIFIED"),
++                        ev_completed_with_tokens("done", 100),
++                    ])
++                },
++            );
++        }
++        if matches!(fixture, OverflowRecoveryFixture::SecondStep) {
++            responses.extend([
++                overflow(),
++                sse(vec![
++                    ev_assistant_message(
++                        "summary-1",
++                        "Both synthetic actions completed. Answer from the two receipts.",
++                    ),
++                    ev_completed_with_tokens("compact-1", 100),
++                ]),
++                sse(vec![
++                    ev_assistant_message("answer", "RECEIPTS_VERIFIED"),
++                    ev_completed_with_tokens("done", 100),
++                ]),
++            ]);
++        }
++    }
++    let expected_requests = responses.len();
++    let request_log = mount_sse_sequence(&server, responses).await;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "Perform each requested synthetic action once and report verified results."
++                .to_string(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let mut calls = Vec::new();
++    let mut compactions = 0;
++    let mut errors = 0;
++    loop {
++        match wait_for_event(&test.codex, |event| {
++            matches!(
++                event,
++                EventMsg::DynamicToolCallRequest(_)
++                    | EventMsg::ItemCompleted(_)
++                    | EventMsg::Error(_)
++                    | EventMsg::TurnComplete(_)
++            )
++        })
++        .await
++        {
++            EventMsg::DynamicToolCallRequest(request) => {
++                assert_eq!(
++                    request.call_id,
++                    format!("action-{}", calls.len()),
++                    "completed actions must never replay"
++                );
++                calls.push(request.call_id.clone());
++                test.codex
++                    .submit(Op::DynamicToolResponse {
++                        id: request.call_id,
++                        response: DynamicToolResponse {
++                            content_items: vec![DynamicToolCallOutputContentItem::InputText {
++                                text: format!(
++                                    "verified-prefix:{}:verified-suffix",
++                                    "observation ".repeat(1400)
++                                ),
++                            }],
++                            success: true,
++                        },
++                    })
++                    .await?;
++            }
++            EventMsg::ItemCompleted(event)
++                if matches!(event.item, TurnItem::ContextCompaction(_)) =>
++            {
++                compactions += 1
++            }
++            EventMsg::Error(_) => errors += 1,
++            EventMsg::TurnComplete(_) => break,
++            _ => {}
++        }
++    }
++    let second_step = matches!(fixture, OverflowRecoveryFixture::SecondStep);
++    let succeeded = matches!(
++        fixture,
++        OverflowRecoveryFixture::Recovered | OverflowRecoveryFixture::SecondStep
++    );
++    assert_eq!(calls.len(), if second_step { 2 } else { 1 });
++    assert_eq!(errors, if succeeded { 0 } else { 1 });
++    assert_eq!(
++        compactions,
++        if second_step {
++            2
++        } else if matches!(fixture, OverflowRecoveryFixture::UnrelatedError) {
++            0
++        } else {
++            1
++        }
++    );
++    let requests = request_log.requests();
++    assert_eq!(
++        requests.len(),
++        expected_requests,
++        "no extra sampling or compaction retries"
++    );
++    if !matches!(
++        fixture,
++        OverflowRecoveryFixture::NoReduction | OverflowRecoveryFixture::UnrelatedError
++    ) {
++        // Request 1 failed; request 2 summarizes; request 3 continues with the
++        // exact original call ID and arguments, and its genuine bounded result.
++        let original = tool_items(requests[1].input());
++        let retained = tool_items(requests[3].input());
++        assert_eq!(original.len(), 2);
++        assert_eq!(retained.len(), 2);
++        assert_eq!(retained[0], original[0]);
++        assert_eq!(retained[1]["call_id"], original[1]["call_id"]);
++        let output = retained[1]["output"].to_string();
++        assert!(output.contains("verified-prefix"));
++        assert!(output.contains("verified-suffix"));
++        assert!(
++            serde_json::to_vec(&requests[3].input())?.len()
++                < serde_json::to_vec(&requests[1].input())?.len()
++        );
++    }
++    Ok(())
 +}
 +
 +#[test_case::test_case(ReceiptFixture::TextOnly; "text_only")]
