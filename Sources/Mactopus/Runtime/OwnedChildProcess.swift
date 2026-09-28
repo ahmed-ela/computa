@@ -116,10 +116,22 @@ actor OwnedChildProcess {
             try Self.requireSuccess(posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.path))
         }
 
+        // Swift concurrency workers block signals. Inheriting that thread mask
+        // prevents an async child runtime from receiving SIGCHLD and reaping its
+        // own commands. Set only the child's mask/dispositions; never mutate the
+        // application's process-wide handlers or the spawning thread's mask.
+        var signalMask = sigset_t()
+        sigemptyset(&signalMask)
+        try Self.requireSuccess(posix_spawnattr_setsigmask(&attributes, &signalMask))
+        var signalDefaults = sigset_t()
+        sigemptyset(&signalDefaults)
+        for signal in [SIGCHLD, SIGTERM, SIGINT, SIGPIPE] { sigaddset(&signalDefaults, signal) }
+        try Self.requireSuccess(posix_spawnattr_setsigdefault(&attributes, &signalDefaults))
         // pgroup=0 makes the child's own PID its PGID atomically at spawn.
         // CLOEXEC_DEFAULT prevents unrelated host descriptors reaching it.
         try Self.requireSuccess(posix_spawnattr_setflags(
-            &attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
+            &attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT
+                | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF)
         ))
         try Self.requireSuccess(posix_spawnattr_setpgroup(&attributes, 0))
         let descriptors: [(Int32, Int32?)] = [

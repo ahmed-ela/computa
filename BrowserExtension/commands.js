@@ -101,8 +101,9 @@ export function projectAccessibilityResult(result, maximumBytes) {
 }
 
 // DOMSnapshot contains document text, attributes and child-frame data. None of
-// that crosses the native bridge: only Chrome's exact-node clickability and the
-// already-observed main-document identity are retained. Pointer affordances are
+// that crosses the native bridge: only Chrome's exact-node clickability,
+// eligible native fields explicitly observed empty, and document identity are
+// retained. Nonempty input values never cross this projection. Pointer affordances are
 // a separate heuristic, not event-handler proof; native must intersect them with
 // the same node's AX focusability. No ancestor/descendant inherits capability.
 export function projectClickabilityResult(result, maximumBytes, expectedFrame) {
@@ -147,6 +148,54 @@ export function projectClickabilityResult(result, maximumBytes, expectedFrame) {
     indices.add(index);
   }
 
+  // Chromium SetRare emits an explicit native input/textarea value entry, and
+  // AddString represents empty strings with -1. Missing entries stay unknown.
+  // https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/core/inspector/inspector_dom_snapshot_agent.cc
+  const emptyStringAt = index => index === -1 ? "" : stringAt(index);
+  const emptyTextValueIDs = [];
+  const valueIndices = new Set();
+  for (const [field, tag] of [["inputValue", "INPUT"], ["textValue", "TEXTAREA"]]) {
+    if (!Object.hasOwn(main.nodes, field)) continue;
+    const rare = main.nodes[field];
+    malformed(keys(rare, ["index", "value"]) && Array.isArray(rare.index) && Array.isArray(rare.value)
+      && rare.index.length === rare.value.length && rare.index.length <= backendIDs.length);
+    for (let offset = 0; offset < rare.index.length; offset++) {
+      const index = rare.index[offset];
+      malformed(Number.isSafeInteger(index) && index >= 0 && index < backendIDs.length && !valueIndices.has(index));
+      valueIndices.add(index);
+      const value = emptyStringAt(rare.value[offset]);
+      const { nodeName, nodeType, attributes, parentIndex } = main.nodes;
+      malformed(Array.isArray(nodeName) && nodeName.length === backendIDs.length
+        && Array.isArray(nodeType) && nodeType.length === backendIDs.length
+        && Array.isArray(attributes) && attributes.length === backendIDs.length
+        && Array.isArray(parentIndex) && parentIndex.length === backendIDs.length
+        && nodeType[index] === 1 && stringAt(nodeName[index]) === tag);
+      if (value !== "") continue;
+      let current = index, allowed = true;
+      const visited = new Set();
+      while (current >= 0) {
+        malformed(!visited.has(current)); visited.add(current);
+        if (visited.size > 128) { allowed = false; break; }
+        const rawAttributes = attributes[current];
+        malformed(Array.isArray(rawAttributes) && rawAttributes.length % 2 === 0 && rawAttributes.length <= 4096);
+        const attrs = new Map();
+        for (let position = 0; position < rawAttributes.length; position += 2) {
+          const key = stringAt(rawAttributes[position]).toLowerCase();
+          malformed(key.length > 0 && !attrs.has(key));
+          attrs.set(key, emptyStringAt(rawAttributes[position + 1]));
+        }
+        if (attrs.has("disabled") || attrs.has("readonly") || attrs.has("inert")
+          || attrs.get("aria-disabled")?.toLowerCase() === "true" || attrs.get("aria-readonly")?.toLowerCase() === "true") allowed = false;
+        if (current === index && tag === "INPUT"
+          && !["", "text", "search", "email", "url", "tel"].includes((attrs.get("type") ?? "text").toLowerCase())) allowed = false;
+        const parent = parentIndex[current];
+        malformed(Number.isSafeInteger(parent) && parent >= -1 && parent < backendIDs.length);
+        current = parent;
+      }
+      if (allowed) emptyTextValueIDs.push(backendIDs[index]);
+    }
+  }
+
   const layout = main.layout;
   malformed(record(layout) && Array.isArray(layout.nodeIndex)
     && layout.nodeIndex.length <= 100_000 && Array.isArray(layout.styles)
@@ -170,6 +219,8 @@ export function projectClickabilityResult(result, maximumBytes, expectedFrame) {
 
   const evidence = { frameId: expectedFrame.id, documentURL, clickableBackendNodeIds: [],
     pointerBackendNodeIds: [], sourceTruncated: false, sourceNodeCount: backendIDs.length };
+  // Optional for compatibility with older paired apps/extensions.
+  if (emptyTextValueIDs.length) evidence.emptyTextValueBackendNodeIds = [];
   const projected = { mactopusClickability: evidence };
   const encoder = new TextEncoder();
   let bytes = encoder.encode(JSON.stringify(projected)).byteLength;
@@ -188,6 +239,7 @@ export function projectClickabilityResult(result, maximumBytes, expectedFrame) {
   };
   appendBounded(clickable.index.map(index => backendIDs[index]), evidence.clickableBackendNodeIds);
   appendBounded(pointerIDs, evidence.pointerBackendNodeIds);
+  if (evidence.emptyTextValueBackendNodeIds) appendBounded(emptyTextValueIDs, evidence.emptyTextValueBackendNodeIds);
   return projected;
 }
 

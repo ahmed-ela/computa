@@ -1,0 +1,237 @@
+{
+  "schemaVersion": 1,
+  "description": "Synthetic deterministic evaluation inputs only; no model evaluation results.",
+  "tasks": [
+    {
+      "id": "exact-title",
+      "surface": "browser",
+      "prompt": "Find the existing browser tab titled exactly \"Copper Atlas - Archive index\" and give its URL.",
+      "initialPages": [
+        "sidebar.html",
+        "archive.html"
+      ],
+      "coverageNote": "Tab metadata can support this exact-title lookup."
+    },
+    {
+      "id": "document-content",
+      "surface": "browser",
+      "prompt": "Find the displayed completion report stating how many field samples the Meadow Survey accepted and on what date. Give a short supporting document excerpt and its source URL.",
+      "initialPages": [
+        "sidebar.html",
+        "toolbar.html",
+        "document.html"
+      ],
+      "coverageNote": "Navigation titles and toolbar controls are candidates, not supporting document content."
+    },
+    {
+      "id": "email-details",
+      "surface": "browser",
+      "prompt": "In the field workshop message, find the sender, arrival date and time, room, and reservation code from the message details. Give the source URL.",
+      "initialPages": [
+        "email.html"
+      ],
+      "coverageNote": "The earlier preview differs from the displayed message body."
+    },
+    {
+      "id": "absent-landmarks",
+      "surface": "browser",
+      "prompt": "Find the inspection interval stated in the Tideglass service note. Give a short excerpt and its source URL.",
+      "initialPages": [
+        "no-landmarks.html"
+      ],
+      "coverageNote": "Missing main/article landmarks must not imply unreadable or absent text."
+    },
+    {
+      "id": "long-field",
+      "surface": "browser",
+      "prompt": "Find the final seal identifier for the Larkspur batch in its record. Give the supporting excerpt and source URL.",
+      "initialPages": [
+        "long-field.html"
+      ],
+      "coverageNote": "The answer begins beyond character 512 of one paragraph text node."
+    },
+    {
+      "id": "virtualized-records",
+      "surface": "browser",
+      "prompt": "Find the delivered box count for Moss Lantern in the delivery ledger. Cite the observed record and source URL.",
+      "initialPages": [
+        "virtualized.html"
+      ],
+      "coverageNote": "Only the first two records are initially mounted. A fresh read follows each observed pager action; do not combine different DOM captures into immutable coverage."
+    },
+    {
+      "id": "continued-field",
+      "surface": "browser",
+      "prompt": "Find the final seal identifier for the Hazel batch in its record. Give the supporting excerpt and source URL.",
+      "initialPages": [
+        "continued-field.html"
+      ],
+      "coverageNote": "One uninterrupted ASCII field places the answer beyond 10,000 UTF-8 bytes and below 16,384 bytes. The 4096-byte field slice requires retained continuation; verify source/output/field bounds from actual host receipts."
+    },
+    {
+      "id": "search-discovery",
+      "surface": "browser",
+      "prompt": "Find the accepted crate count and handoff date in the Juniper Veil survey return in the Meridian Desk records. Give a supporting excerpt and source URL.",
+      "initialPages": [
+        "meridian-home.html"
+      ],
+      "supportPages": [
+        "meridian-search.html",
+        "meridian-results.html",
+        "meridian-record.html"
+      ],
+      "coverageNote": "Only a neutral workspace is initially mounted. An observed search route and query/results interface precede a separate supporting record body. The task provides no control names, route, answer, or tool sequence."
+    },
+    {
+      "id": "dialog-search-discovery",
+      "surface": "browser",
+      "prompt": "Find the accepted bundle count and delivery date in the Orchid Basin intake note in the Lumen Registry. Give a supporting excerpt and source URL.",
+      "initialPages": [
+        "lumen-home.html"
+      ],
+      "supportPages": [
+        "lumen-results.html",
+        "lumen-record.html"
+      ],
+      "coverageNote": "Only a neutral workspace is initially mounted. An observed button opens a same-document dialog containing the query interface, followed by separate results and supporting record pages. The task provides no control names, route, answer, or tool sequence."
+    },
+    {
+      "id": "native-read",
+      "surface": "native",
+      "prompt": "Read the separate synthetic document open in TextEdit and report the Bracken calibration value and fixture owner.",
+      "initialFiles": [
+        "native-read.txt"
+      ],
+      "coverageNote": "Pending until actually opened and read through the native app path; HTML or file-source inspection is not native evidence."
+    }
+  ],
+  "oracles": {
+    "exact-title": {
+      "sourceFiles": [
+        "archive.html"
+      ],
+      "requiredValues": [
+        "Copper Atlas - Archive index"
+      ],
+      "sufficientEvidence": "Exact observed tab title and corresponding URL; document content is not required."
+    },
+    "document-content": {
+      "sourceFiles": [
+        "document.html"
+      ],
+      "requiredValues": [
+        "17 field samples",
+        "16 October 2032"
+      ],
+      "supportingExcerpt": "The Meadow Survey accepted 17 field samples on 16 October 2032.",
+      "insufficientSources": [
+        "sidebar.html",
+        "toolbar.html"
+      ]
+    },
+    "email-details": {
+      "sourceFiles": [
+        "email.html"
+      ],
+      "requiredValues": [
+        "Mira Vale",
+        "mira.vale@example.invalid",
+        "18 October 2032",
+        "08:40",
+        "Cedar Annex, Room 204",
+        "CEDAR-482"
+      ],
+      "contradictedPreviewValues": [
+        "09:30",
+        "North Annex"
+      ]
+    },
+    "absent-landmarks": {
+      "sourceFiles": [
+        "no-landmarks.html"
+      ],
+      "requiredValues": [
+        "23 days"
+      ],
+      "supportingExcerpt": "The Tideglass inspection interval is 23 days."
+    },
+    "long-field": {
+      "sourceFiles": [
+        "long-field.html"
+      ],
+      "requiredValues": [
+        "LARK-7392"
+      ],
+      "supportingExcerpt": "The final seal identifier for the Larkspur batch is LARK-7392.",
+      "answerFieldId": "long-record",
+      "minimumAnswerCharacterOffset": 512
+    },
+    "virtualized-records": {
+      "sourceFiles": [
+        "virtualized.html"
+      ],
+      "requiredValues": [
+        "Moss Lantern: 46 boxes"
+      ],
+      "initialMountedRecords": [
+        "Amber Kite: 12 boxes",
+        "Birch Pebble: 31 boxes"
+      ],
+      "targetSet": 3,
+      "totalRecords": 6,
+      "sufficientEvidence": "Read the displayed target row after reaching its mounted set. Initial absence is not a verified negative."
+    },
+    "native-read": {
+      "sourceFiles": [
+        "native-read.txt"
+      ],
+      "requiredValues": [
+        "64 millimeters",
+        "Sample Workshop"
+      ],
+      "evaluationStatus": "pending_native_app_read"
+    },
+    "continued-field": {
+      "sourceFiles": [
+        "continued-field.html"
+      ],
+      "requiredValues": [
+        "HAZEL-8641"
+      ],
+      "supportingExcerpt": "The final seal identifier for the Hazel batch is HAZEL-8641.",
+      "answerFieldId": "continued-record",
+      "minimumAnswerUTF8Offset": 10000,
+      "maximumRetainedFieldUTF8Bytes": 16384,
+      "expectedFieldFragmentUTF8Limit": 4096,
+      "sufficientEvidence": "Read the actual supporting tail from the same retained immutable source. A fresh read or a cursor alone does not establish the missing field bytes were exposed."
+    },
+    "search-discovery": {
+      "sourceFiles": [
+        "meridian-record.html"
+      ],
+      "requiredValues": [
+        "29 crates",
+        "21 November 2034"
+      ],
+      "supportingExcerpt": "The Juniper Veil survey return accepted 29 crates. Handoff took place on 21 November 2034.",
+      "recordTitle": "Juniper Veil survey return",
+      "recordKey": "r17",
+      "initialAnswerPresent": false,
+      "sufficientEvidence": "The actual displayed record body after independently discovering and operating the site search, plus its observed source URL. A search control, query fill, result title, or result count alone does not support the requested facts."
+    },
+    "dialog-search-discovery": {
+      "sourceFiles": [
+        "lumen-record.html"
+      ],
+      "requiredValues": [
+        "42 bundles",
+        "6 February 2037"
+      ],
+      "supportingExcerpt": "The Orchid Basin intake note accepted 42 bundles. Delivery took place on 6 February 2037.",
+      "recordTitle": "Orchid Basin intake note",
+      "recordKey": "l24",
+      "initialAnswerPresent": false,
+      "sufficientEvidence": "The actual displayed record body after independently discovering and operating the same-document search dialog, plus its observed source URL. Opening a dialog, query fill, result title, or result count alone does not support the requested facts."
+    }
+  }
+}

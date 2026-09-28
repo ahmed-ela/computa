@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "version": "0.12.19",
+  "architecture": "aarch64-apple-darwin",
+  "url": "https://github.com/astral-sh/uv/releases/download/0.12.19/uv-aarch64-apple-darwin.tar.gz",
+  "sha256": "a9a8df1eedeb192f2e47e40e2faabfb387db4b850209118786d42f89dde3e0ba",
+  "releaseURL": "https://github.com/astral-sh/uv/releases/tag/0.12.19",
+  "pythonVersion": "3.12.13"
+}

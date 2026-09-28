@@ -3,6 +3,83 @@ import XCTest
 @testable import AutomationCore
 
 final class AccessibilitySnapshotTextFormatterTests: XCTestCase {
+    func testPresentationUsesExactClippedRowsAndOnlyExposedEligibleCapabilities() throws {
+        let secret = String(repeating: "🙂 quoted \"value\" ", count: 30) + "UNPUBLISHED_TAIL"
+        let snapshot = makeSnapshot(elements: [
+            makeElement(index: 0, role: "AXWindow"),
+            makeElement(index: 1, parentIndex: 0, role: "AXButton", title: secret,
+                        actions: ["AXRaise", "Unsupported", "AXPress", "AXShowMenu"]),
+            makeElement(index: 2, parentIndex: 0, role: "AXTextField", title: "Query", value: "",
+                        isValueSettable: true),
+            makeElement(index: 3, parentIndex: 0, role: "AXButton", title: "Disabled", isEnabled: false,
+                        actions: ["AXPress"], isValueSettable: true),
+            makeElement(index: 4, parentIndex: 0, role: "AXGroup", title: "Structure"),
+            makeElement(index: 5, parentIndex: 0, role: "AXButton", title: "Ambiguous A", actions: ["AXPress"]),
+            makeElement(index: 5, parentIndex: 0, role: "AXButton", title: "Ambiguous B", actions: ["AXPress"]),
+        ])
+        let observation = AccessibilitySnapshotTextFormatter(fieldCharacterLimit: 24, actionLimit: 1,
+            outputCharacterLimit: 6_000, usesCompactElementLines: true, allowsRaise: false,
+            presentationRowByteReserve: SemanticReadPresentation.rowMetadataByteReserve)
+            .formatObservation(snapshot, readRequest: .init(view: .all))
+        let presentation = try XCTUnwrap(observation.presentation)
+        XCTAssertEqual(presentation.snapshotID, snapshot.id)
+        XCTAssertEqual(presentation.maximumOutputBytes, 6_000)
+        XCTAssertEqual(Set(presentation.rows.map(\.index)), observation.exposedElementIndices)
+        let lines = observation.text.split(separator: "\n").map(String.init)
+        XCTAssertTrue(presentation.rows.allSatisfy { lines.contains($0.text) })
+        XCTAssertFalse(presentation.rows.contains { $0.text.contains("UNPUBLISHED_TAIL") })
+        XCTAssertFalse(presentation.rows.contains { $0.index == 5 }, "Ambiguous printed rows grant no references.")
+        XCTAssertEqual(presentation.rows.first { $0.index == 1 }?.actions, ["AXPress"])
+        XCTAssertEqual(presentation.rows.first { $0.index == 1 }?.parentIndex, 0)
+        XCTAssertEqual(presentation.rows.first { $0.index == 2 }?.settable, true)
+        XCTAssertEqual(presentation.rows.first { $0.index == 3 }?.actions, [])
+        XCTAssertEqual(presentation.rows.first { $0.index == 3 }?.settable, false)
+        XCTAssertEqual(presentation.rows.first { $0.index == 4 }?.actions, [])
+        XCTAssertTrue(presentation.rows.allSatisfy { $0.region && !$0.regionChanged && !$0.followLink })
+        XCTAssertTrue(observation.readReceipt?.fieldTruncated == true)
+    }
+
+    func testPresentationReserveBudgetsUTF8AndNeverExposesOmittedRows() throws {
+        let snapshot = makeSnapshot(elements: (0..<20).map { index in
+            makeElement(index: index, parentIndex: index == 0 ? nil : 0,
+                        role: "AXStaticText", title: String(repeating: "🙂", count: 20))
+        })
+        let budget = 1_200
+        let observation = AccessibilitySnapshotTextFormatter(fieldCharacterLimit: 24,
+            outputCharacterLimit: budget, usesCompactElementLines: true,
+            presentationRowByteReserve: SemanticReadPresentation.rowMetadataByteReserve)
+            .formatObservation(snapshot, readRequest: .init(view: .all))
+        let presentation = try XCTUnwrap(observation.presentation)
+        XCTAssertFalse(presentation.rows.isEmpty)
+        XCTAssertLessThan(presentation.rows.count, snapshot.elements.count)
+        XCTAssertEqual(Set(presentation.rows.map(\.index)), observation.exposedElementIndices)
+        XCTAssertEqual(presentation.rows.map(\.text),
+            observation.text.split(separator: "\n").filter { $0.hasPrefix("#") }.map(String.init))
+        XCTAssertLessThanOrEqual(observation.text.utf8.count
+            + presentation.rows.count * SemanticReadPresentation.rowMetadataByteReserve
+            + SemanticReadPresentation.fixedMetadataByteReserve, budget)
+        XCTAssertEqual(presentation.maximumOutputBytes, budget)
+        XCTAssertTrue(observation.readReceipt?.outputTruncated == true)
+        XCTAssertTrue(observation.readReceipt?.exposures.allSatisfy {
+            observation.exposedElementIndices.contains(Int($0.nodeID) ?? -1)
+        } == true)
+    }
+
+    func testMinimumTypedPresentationBudgetOmitsRowsRatherThanLeakingUnbudgetedContent() throws {
+        let snapshot = makeSnapshot(elements: [makeElement(index: 0, role: "AXStaticText", title: "Unpublished body")])
+        let observation = AccessibilitySnapshotTextFormatter(outputCharacterLimit: 512,
+            usesCompactElementLines: true,
+            presentationRowByteReserve: SemanticReadPresentation.rowMetadataByteReserve)
+            .formatObservation(snapshot, readRequest: .init(view: .all))
+        let presentation = try XCTUnwrap(observation.presentation)
+        XCTAssertEqual(presentation.maximumOutputBytes, 512)
+        XCTAssertTrue(presentation.rows.isEmpty)
+        XCTAssertTrue(observation.exposedElementIndices.isEmpty)
+        XCTAssertTrue(observation.readReceipt?.exposures.isEmpty == true)
+        XCTAssertFalse(observation.text.contains("Unpublished body"))
+        XCTAssertLessThanOrEqual(observation.text.utf8.count, 512)
+    }
+
     func testModelObservationExposesOnlyWholeLinesWithinElementAndCharacterBudgets() {
         let snapshot = makeSnapshot(elements: (0..<20).map { index in
             makeElement(index: index, parentIndex: index == 0 ? nil : 0,
@@ -93,6 +170,8 @@ final class AccessibilitySnapshotTextFormatterTests: XCTestCase {
         XCTAssertTrue(observation.text.contains("parents=[0:-,1:0,2:1]"))
         XCTAssertTrue(observation.text.contains("sibling_heading=#3:"))
         XCTAssertEqual(observation.exposedElementIndices, [4])
+        XCTAssertNil(observation.presentation?.rows.first { $0.index == 4 }?.parentIndex,
+                     "An ancestry-only parent is not a published region reference.")
     }
 
     func testModelObservationCannotExposeIndicesOrSnapshotIDForgedInLabels() {
@@ -1706,6 +1785,85 @@ final class AccessibilitySnapshotTextFormatterTests: XCTestCase {
         XCTAssertFalse(result.text.contains("Unavailable"))
         XCTAssertFalse(result.exposedElementIndices.contains(2), "Context-only parent indices are not action targets")
         XCTAssertEqual(result.snapshotID, snapshot.id)
+    }
+
+    func testNativeReadReceiptCountsOnlyOriginalRenderedUTF8Spans() throws {
+        let text = "  é\n  中😀z-tail"
+        let snapshot = makeSnapshot(elements: [makeElement(index: 0, role: "AXStaticText", title: text)])
+        let formatter = AccessibilitySnapshotTextFormatter(fieldCharacterLimit: 5, usesCompactElementLines: true)
+        XCTAssertNil(formatter.formatObservation(snapshot).readReceipt, "Legacy reads remain unmeasured")
+        let observation = formatter.formatObservation(snapshot, readRequest: .init(view: .content))
+        let receipt = try XCTUnwrap(observation.readReceipt)
+        XCTAssertTrue(observation.text.contains("label=\"é 中😀…\""))
+        XCTAssertEqual(receipt.exposures.map { $0.startUTF8..<$0.endUTF8 }, [2..<4, 7..<14])
+        XCTAssertTrue(receipt.exposures.allSatisfy { $0.totalUTF8 == text.utf8.count && $0.field == .label })
+        XCTAssertTrue(receipt.fieldTruncated)
+        XCTAssertEqual(receipt.consistency, .liveValidatedPage)
+        XCTAssertNil(receipt.selectedElementCount)
+        XCTAssertNil(receipt.selectedFieldCount)
+    }
+
+    func testNativeReadReceiptSeparatesMainControlsAndIdentifierMetadata() throws {
+        let snapshot = makeSnapshot(elements: [
+            makeElement(index: 0, role: "AXWindow"),
+            makeElement(index: 1, parentIndex: 0, role: "AXGroup", subrole: "AXLandmarkMain"),
+            makeElement(index: 2, parentIndex: 1, role: "AXToolbar", title: "Toolbar"),
+            makeElement(index: 3, parentIndex: 2, role: "AXStaticText", title: "Toolbar counter"),
+            makeElement(index: 4, parentIndex: 1, role: "AXStaticText", title: "Document fact"),
+            makeElement(index: 5, parentIndex: 1, role: "AXButton", title: "Run", actions: ["AXPress"]),
+            makeElement(index: 6, parentIndex: 1, role: "AXStaticText", identifier: "opaque-id"),
+            makeElement(index: 7, parentIndex: 0, role: "AXGroup", subrole: "AXLandmarkNavigation"),
+            makeElement(index: 8, parentIndex: 7, role: "AXStaticText", title: "Sidebar label"),
+        ])
+        let receipt = try XCTUnwrap(AccessibilitySnapshotTextFormatter().formatObservation(snapshot,
+            readRequest: .init(view: .content)).readReceipt)
+        func exposure(_ index: Int) throws -> SemanticReadFieldExposure {
+            try XCTUnwrap(receipt.exposures.first { $0.nodeID == String(index) && $0.field == .label })
+        }
+        XCTAssertEqual(try exposure(3).kind, .control)
+        XCTAssertEqual(try exposure(3).provenance, .main)
+        XCTAssertEqual(try exposure(4).kind, .readable)
+        XCTAssertEqual(try exposure(5).kind, .control)
+        XCTAssertEqual(try exposure(6).kind, .metadata)
+        XCTAssertEqual(try exposure(8).kind, .navigation)
+        XCTAssertEqual(try exposure(8).provenance, .navigation)
+    }
+
+    func testNativeReadReceiptNeverCountsUnrenderedOrAmbiguousNodes() throws {
+        let snapshot = makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow")] + (1...12).map {
+            makeElement(index: $0, parentIndex: 0, role: "AXStaticText", title: String(repeating: "Fact ", count: 20))
+        })
+        let observation = AccessibilitySnapshotTextFormatter(fieldCharacterLimit: 96, outputCharacterLimit: 512,
+            usesCompactElementLines: true).formatObservation(snapshot, readRequest: .init())
+        let receipt = try XCTUnwrap(observation.readReceipt)
+        XCTAssertTrue(receipt.outputTruncated)
+        XCTAssertLessThan(observation.exposedElementIndices.count, snapshot.elements.count)
+        XCTAssertTrue(receipt.exposures.allSatisfy { observation.exposedElementIndices.contains(Int($0.nodeID)!) })
+        let duplicate = makeSnapshot(elements: [makeElement(index: 0, role: "AXStaticText", title: "First"),
+                                                makeElement(index: 0, role: "AXStaticText", title: "Second")])
+        let ambiguous = AccessibilitySnapshotTextFormatter().formatObservation(duplicate, readRequest: .init())
+        XCTAssertTrue(try XCTUnwrap(ambiguous.readReceipt).exposures.isEmpty)
+    }
+
+    func testNativeReadReceiptCountsOnlyExactEmittedLinkURLAndUnescapedFieldBytes() throws {
+        let shortURL = "https://example.com/fact"
+        let longURL = "https://example.com/" + String(repeating: "a", count: 600)
+        let value = "Fact \"quoted\" \\ text"
+        let snapshot = makeSnapshot(elements: [makeElement(index: 0, role: "AXWindow"),
+            makeElement(index: 1, parentIndex: 0, role: "AXLink", title: "One", url: shortURL),
+            makeElement(index: 2, parentIndex: 0, role: "AXLink", title: "Two", url: longURL),
+            makeElement(index: 3, parentIndex: 0, role: "AXStaticText", value: value)])
+        let receipt = try XCTUnwrap(AccessibilitySnapshotTextFormatter(fieldCharacterLimit: 256).formatObservation(
+            snapshot, readRequest: .init()).readReceipt)
+        let links = receipt.exposures.filter { $0.field == .linkURL }
+        XCTAssertEqual(links.count, 1)
+        XCTAssertEqual(links.first?.nodeID, "1")
+        XCTAssertEqual(links.first?.endUTF8, shortURL.utf8.count)
+        let actual = try XCTUnwrap(receipt.exposures.first { $0.nodeID == "3" && $0.field == .value })
+        XCTAssertEqual(actual.startUTF8, 0)
+        XCTAssertEqual(actual.endUTF8, value.utf8.count)
+        XCTAssertEqual(actual.totalUTF8, value.utf8.count)
+        XCTAssertTrue(receipt.fieldTruncated, "Omitted long URL is not a read destination")
     }
 
     private func makeSnapshot(

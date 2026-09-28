@@ -24,6 +24,63 @@ final class OwnedChildProcessTests: XCTestCase {
         XCTAssertEqual(FileManager.default.currentDirectoryPath, before)
     }
 
+    func testSpawnClearsChildSignalMaskWithoutChangingTheSpawningThread() async throws {
+        let probe = try await compileSignalProbe()
+        let output = Pipe()
+        let (child, unchanged) = try await Task.detached {
+            var blocked = sigset_t(), original = sigset_t(), before = sigset_t(), after = sigset_t()
+            sigemptyset(&blocked)
+            for signal in [SIGCHLD, SIGTERM, SIGINT, SIGPIPE] { sigaddset(&blocked, signal) }
+            guard pthread_sigmask(SIG_BLOCK, &blocked, &original) == 0 else { throw POSIXError(.EINVAL) }
+            defer { pthread_sigmask(SIG_SETMASK, &original, nil) }
+            pthread_sigmask(SIG_BLOCK, nil, &before)
+            let child = try OwnedChildProcess(executableURL: probe, arguments: ["mask"], environment: [:],
+                outputDescriptor: output.fileHandleForWriting.fileDescriptor)
+            pthread_sigmask(SIG_BLOCK, nil, &after)
+            return (child, before == after)
+        }.value
+        try output.fileHandleForWriting.close()
+        try await waitForExit(child)
+        let text = String(decoding: try output.fileHandleForReading.readToEnd() ?? Data(), as: UTF8.self)
+        XCTAssertTrue(unchanged)
+        XCTAssertEqual(text, "blocked=0 nondefault=0\n")
+    }
+
+    func testSpawnedRuntimeCanReceiveSIGCHLDAndReapItsOwnChild() async throws {
+        let probe = try await compileSignalProbe()
+        let output = Pipe()
+        let child = try await Task.detached {
+            try OwnedChildProcess(executableURL: probe, arguments: ["wait"], environment: [:],
+                outputDescriptor: output.fileHandleForWriting.fileDescriptor)
+        }.value
+        try output.fileHandleForWriting.close()
+        try await waitForExit(child)
+        let text = String(decoding: try output.fileHandleForReading.readToEnd() ?? Data(), as: UTF8.self)
+        XCTAssertEqual(text, "blocked=0 nondefault=0\nobserved_sigchld=1 child_exit=23\n")
+    }
+
+    private func compileSignalProbe() async throws -> URL {
+        let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/OwnedChildSignalProbe.c")
+        let binary = FileManager.default.temporaryDirectory.appendingPathComponent("MactopusSignalProbe-\(UUID().uuidString)")
+        let compiler = try OwnedChildProcess(executableURL: URL(fileURLWithPath: "/usr/bin/clang"),
+            arguments: [source.path, "-o", binary.path])
+        try await waitForExit(compiler)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: binary.path))
+        return binary
+    }
+
+    private func waitForExit(_ child: OwnedChildProcess) async throws {
+        for _ in 0..<400 {
+            if !child.isRunning { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let exited = !child.isRunning
+        let cleanup = await child.stop()
+        XCTAssertTrue(exited, "The owned signal fixture did not exit within its bound.")
+        XCTAssertTrue(cleanup.succeeded, cleanup.issues.joined(separator: "; "))
+    }
+
     func testObservedSIGKILLEPERMResolvesOnlyAfterReapAndFreshESRCH() async {
         let script = ScriptedStopOperations(
             killResult: failed(EPERM),

@@ -20,7 +20,77 @@ function pointerSnapshot() {
   return value;
 }
 
+function emptyForm() {
+  const value = snapshot([11, 12, 13], []);
+  value.strings.push("#document", "INPUT", "TEXTAREA", "type", "search", "", "password", "readonly", "inert", "disabled");
+  value.documents[0].nodes = { backendNodeId: [11, 12, 13], nodeType: [9, 1, 1],
+    nodeName: [4, 5, 6], attributes: [[], [7, 8], []], parentIndex: [-1, 0, 0],
+    inputValue: { index: [1], value: [-1] }, textValue: { index: [2], value: [9] } };
+  return value;
+}
+
 describe("exact-node clickability command boundary", () => {
+  test("preserves only explicit empty native field identities without exposing DOM values", () => {
+    const value = emptyForm(), result = project(value);
+    expect(result.mactopusClickability.emptyTextValueBackendNodeIds).toEqual([12, 13]);
+    const encoded = JSON.stringify(result);
+    for (const secret of ["Private message body", "attributes", "inputValue", "nodeName"]) expect(encoded).not.toContain(secret);
+    delete value.documents[0].nodes.inputValue;
+    expect(project(value).mactopusClickability.emptyTextValueBackendNodeIds).toEqual([13]);
+    value.documents[0].nodes.inputValue = { index: [1], value: [2] };
+    expect(project(value).mactopusClickability.emptyTextValueBackendNodeIds).toEqual([13]);
+    expect(JSON.stringify(project(value))).not.toContain("Private message body");
+    delete value.documents[0].nodes.textValue;
+    expect(project(value).mactopusClickability.emptyTextValueBackendNodeIds).toBeUndefined();
+  });
+
+  test("protected readonly disabled and inert native fields never supply an empty baseline", () => {
+    for (const attrs of [[[], [7, 10], []], [[], [7, 8, 11, -1], []],
+      [[], [7, 8, 13, -1], []], [[12, -1], [7, 8], []]]) {
+      const value = emptyForm(); value.documents[0].nodes.attributes = attrs;
+      expect(project(value).mactopusClickability.emptyTextValueBackendNodeIds ?? []).not.toContain(12);
+    }
+    const value = emptyForm(); value.strings.push("aria-readonly", "TRUE");
+    value.documents[0].nodes.attributes[0] = [14, 15];
+    expect(project(value).mactopusClickability.emptyTextValueBackendNodeIds).toBeUndefined();
+  });
+
+  test("rejects malformed or ambiguous empty-value mappings and native ancestry", () => {
+    const modifications = [
+      nodes => { nodes.inputValue = { index: [1, 1], value: [-1, -1] }; },
+      nodes => { nodes.inputValue = { index: [3], value: [-1] }; },
+      nodes => { nodes.inputValue = { index: [1], value: [-2] }; },
+      nodes => { nodes.inputValue = { index: [1], value: [true] }; },
+      nodes => { nodes.inputValue = { index: [1], value: [999] }; },
+      nodes => { nodes.inputValue = { index: [1], value: [] }; },
+      nodes => { nodes.textValue = { index: [1], value: [-1] }; },
+      nodes => { nodes.nodeName[1] = 6; }, nodes => { delete nodes.nodeType; },
+      nodes => { nodes.attributes[1] = [7, 8, 7, 10]; }, nodes => { nodes.attributes[1] = [7]; },
+      nodes => { nodes.parentIndex[1] = 1; }, nodes => { nodes.parentIndex[1] = 3; },
+      nodes => { nodes.backendNodeId[2] = 12; },
+    ];
+    for (const modify of modifications) {
+      const value = emptyForm(); modify(value.documents[0].nodes);
+      expect(() => project(value)).toThrow();
+    }
+  });
+
+  test("empty-field identities share the exact byte budget and never leak a partial value", () => {
+    const value = emptyForm(), nodes = value.documents[0].nodes;
+    const count = 100;
+    nodes.backendNodeId = Array.from({ length: count }, (_, index) => 100000 + index);
+    nodes.nodeType = Array(count).fill(1); nodes.nodeName = Array(count).fill(5);
+    nodes.attributes = Array.from({ length: count }, () => [7, 8]); nodes.parentIndex = Array(count).fill(-1);
+    nodes.inputValue = { index: Array.from({ length: count }, (_, index) => index), value: Array(count).fill(-1) };
+    nodes.textValue = { index: [], value: [] };
+    const result = project(value, 350);
+    expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBeLessThanOrEqual(350);
+    expect(result.mactopusClickability.sourceTruncated).toBe(true);
+    expect(result.mactopusClickability.emptyTextValueBackendNodeIds.length).toBeGreaterThan(0);
+    expect(result.mactopusClickability.emptyTextValueBackendNodeIds.length).toBeLessThan(count);
+    expect(result.mactopusClickability.emptyTextValueBackendNodeIds.every(Number.isSafeInteger)).toBe(true);
+  });
+
   test("admits only four fixed ordered styles, no optional capture capabilities", () => {
     expect(() => validateCommand("DOMSnapshot.captureSnapshot", { computedStyles: [...CLICKABILITY_STYLES] })).not.toThrow();
     for (const params of [{}, { computedStyles: [] }, { computedStyles: [...CLICKABILITY_STYLES].reverse() },

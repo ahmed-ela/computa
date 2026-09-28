@@ -16,6 +16,7 @@ const notify = (method: string, params: object) => emit({ method, params: { thre
 const mark = (name: string) => writeFileSync(join(root, name), 'ready');
 let turnCount = 0;
 let currentTurn = '';
+const commandProcesses = new Set(['4321', '4322', '9999']);
 const timers = new Set<ReturnType<typeof setInterval>>();
 
 function afterMarker(name: string, action: () => void) {
@@ -64,9 +65,35 @@ function lateOutput(turnId: string) {
   fence(turnId, 1_001);
 }
 
+function command(turnId: string, status = 'inProgress', extra: object = {}, id = 'command-item') {
+  notify(status === 'inProgress' ? 'item/started' : 'item/completed', { turnId, item: {
+    id, type: 'commandExecution', command: 'printf fixture', cwd: '/private/fixture',
+    processId: '4321', status, ...extra,
+  } });
+}
+function commandDelta(turnId: string, text: string, itemId = 'command-item') {
+  notify('item/commandExecution/outputDelta', { turnId, itemId, delta: text });
+}
+function approval(id: string, turnId: string, extra: object = {}) {
+  emit({ id, method: 'item/commandExecution/requestApproval', params: {
+    threadId, turnId, itemId: 'command-item', command: 'printf fixture', cwd: '/private/fixture', ...extra,
+  } });
+}
+
 const input = createInterface({ input: process.stdin });
 input.on('line', line => {
   const request = JSON.parse(line);
+  if (Object.hasOwn(request, 'id') && !request.method && typeof request.id === 'string') {
+    writeFileSync(join(root, `response-${request.id}`), JSON.stringify(request));
+    if (request.id === 'command-current') {
+      if (request.result?.decision === 'accept') {
+        command(currentTurn); commandDelta(currentTurn, 'approved output');
+        command(currentTurn, 'completed', { aggregatedOutput: 'approved output', exitCode: 0, durationMs: 10 });
+      } else command(currentTurn, 'declined', { aggregatedOutput: '', exitCode: null });
+      completeTurn(currentTurn); fence(currentTurn, 1_001);
+    }
+    return;
+  }
   if (!Object.hasOwn(request, 'id') || !request.method) return;
   switch (request.method) {
     case 'initialize': result(request.id, { userAgent: 'streaming-fixture' }); break;
@@ -88,6 +115,44 @@ input.on('line', line => {
         completeItem(turnId, 'New turn completed.');
         completeTurn(turnId);
         fence(turnId, 1_002);
+      } else if (scenario.startsWith('command-')) {
+        if (scenario === 'command-approval') {
+          approval('command-wrong-turn', 'wrong-turn');
+          approval('command-wrong-thread', turnId, { threadId: 'unknown-thread' });
+          approval('command-missing-turn', turnId, { turnId: null });
+          approval('command-current', turnId);
+        } else {
+          command('wrong-turn');
+          notify('item/started', { threadId: 'unknown-thread', turnId, item: {
+            id: 'wrong-command', type: 'commandExecution', command: 'wrong', cwd: '/', status: 'inProgress',
+          } });
+          command(turnId); commandDelta(turnId, 'first output');
+          if (scenario === 'command-stop' || scenario === 'command-shutdown') command(turnId, 'inProgress', { processId: '4322' }, 'command-item-two');
+          commandDelta('wrong-turn', 'WRONG_TURN'); commandDelta(turnId, 'UNKNOWN_ITEM', 'unknown');
+          command(turnId); // Duplicate start must not erase accumulated output.
+          fence(turnId, 1_000);
+          if (scenario === 'command-progress') afterMarker('release-command', () => {
+            commandDelta(turnId, ' second output');
+            command(turnId, 'completed', { aggregatedOutput: 'authoritative output', exitCode: 0, durationMs: 125 });
+            command(turnId, 'completed', { aggregatedOutput: 'DUPLICATE_FINAL', exitCode: 1 });
+            commandDelta(turnId, 'AFTER_COMPLETION');
+            completeTurn(turnId);
+            commandDelta(turnId, 'AFTER_TURN');
+            command(turnId, 'completed', { aggregatedOutput: 'LATE_FINAL', exitCode: 1 });
+            fence(turnId, 1_001);
+          });
+          else if (scenario === 'command-disconnect') afterMarker('release-command', () => process.exit(0));
+          else if (scenario === 'command-background' || scenario.startsWith('command-late-') || scenario === 'command-compaction') {
+            completeTurn(turnId); fence(turnId, 1_001);
+            if (scenario.startsWith('command-late-')) afterMarker('release-late-command', () => {
+              commandDelta('wrong-turn', 'UNOWNED_LATE_OUTPUT');
+              command('wrong-turn', 'completed', { aggregatedOutput: 'UNOWNED_LATE_FINAL', exitCode: 0 });
+              commandDelta(turnId, ' delayed output');
+              command(turnId, 'completed', { aggregatedOutput: 'delayed authoritative output', exitCode: 7 });
+              commandProcesses.delete('4321');
+            });
+          }
+        }
       } else if (scenario === 'phase-contract') {
         startItem('wrong-turn', 'wrong-turn-phase');
         notify('item/started', { threadId: 'wrong-thread', turnId, item: {
@@ -246,7 +311,18 @@ input.on('line', line => {
       break;
     }
     case 'turn/interrupt': {
+      if (scenario === 'command-raced-stop') {
+        completeTurn(currentTurn);
+        emit({ id: request.id, error: { code: -32600, message: 'No active turn to interrupt.' } });
+        fence(currentTurn, 1_001);
+        break;
+      }
       result(request.id);
+      if (scenario.startsWith('command-')) {
+        commandDelta(currentTurn, 'AFTER_STOP');
+        command(currentTurn, 'completed', { aggregatedOutput: 'AFTER_STOP_FINAL', exitCode: 0 });
+        approval('command-after-stop', currentTurn);
+      }
       completeTurn(currentTurn, 'interrupted');
       lateOutput(currentTurn);
       break;
@@ -259,12 +335,34 @@ input.on('line', line => {
       startItem(turnId, 'maintenance-assistant', 'final_answer');
       reasoningDelta(turnId, 'PRIVATE_MAINTENANCE_REASONING_MUST_NOT_APPEAR', 'maintenance-reasoning');
       delta(turnId, 'PRIVATE_MAINTENANCE_TEXT_MUST_NOT_APPEAR', 'maintenance-prose');
+      approval('command-maintenance', turnId);
+      if (scenario === 'command-compaction') {
+        commandDelta('streaming-turn-1', ' while compacting');
+        command('streaming-turn-1', 'completed', { aggregatedOutput: 'compaction-time output', exitCode: 0 });
+        commandProcesses.delete('4321');
+      }
       mark('maintenance-delta-sent');
       afterMarker('release-maintenance', () => {
         notify('item/completed', { turnId, item });
         completeTurn(turnId);
         result(request.id);
       });
+      break;
+    }
+    case 'thread/backgroundTerminals/list': {
+      if (request.params.threadId !== threadId) throw new Error('Cross-thread command cleanup');
+      const ids = [...commandProcesses].sort();
+      const selected = request.params.cursor ? ids.slice(1) : ids.slice(0, 1);
+      result(request.id, { data: selected.map(processId => ({ processId, itemId: processId === '4321' ? 'command-item' : processId === '4322' ? 'command-item-two' : 'unrelated-item',
+        command: 'fixture background process', cwd: '/private/fixture' })),
+        nextCursor: !request.params.cursor && ids.length > 1 ? 'page-two' : null });
+      break;
+    }
+    case 'thread/backgroundTerminals/terminate': {
+      if (request.params.threadId !== threadId) throw new Error('Cross-thread command cleanup');
+      const terminated = commandProcesses.delete(request.params.processId);
+      mark(`terminated-${request.params.processId}`);
+      result(request.id, { terminated });
       break;
     }
     case 'thread/inject_items': result(request.id); break;

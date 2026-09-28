@@ -213,6 +213,34 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         }
     }
 
+    func testDefaultBrowserOverviewExposesControlsWithoutClaimingBodyRead() async throws {
+        try await withHarness(mode: "overview-default") { runtime, root, audit, connector in
+            let request = self.request()
+            try await runtime.connectChrome(request)
+            try await runtime.submit(prompt: "Inspect the current browser page", toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+            XCTAssertEqual(audit.status, .completed)
+            let rows = try self.results(root)
+            XCTAssertEqual(rows.count, 4)
+            XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+            let reads = rows.filter { $0["tool"] as? String == "computer_v2_snapshot" }
+            XCTAssertEqual(reads.count, 2)
+            let overview = try XCTUnwrap(reads.first?["text"] as? String)
+            XCTAssertTrue(overview.contains("READ view=overview"))
+            XCTAssertTrue(overview.contains("Increment"))
+            XCTAssertFalse(overview.contains("label=\"Count\""), "The interface overview must not masquerade as body reading.")
+            let content = try XCTUnwrap(reads.last?["text"] as? String)
+            XCTAssertTrue(content.contains("READ view=content"))
+            XCTAssertTrue(content.contains("Count"))
+            XCTAssertFalse(content.contains("Increment"))
+            let entry = try await connector.entry(request.id)
+            let counts = await entry.transport.counts()
+            XCTAssertEqual(counts.presses, 0)
+            XCTAssertEqual(counts.text, "")
+            XCTAssertEqual(audit.approvals, 0)
+        }
+    }
+
     func testToolsWithoutNativeConnectionFailWithoutCallingConnector() async throws {
         try await withHarness(mode: "no-connection") { runtime, root, audit, connector in
             try await runtime.submit(prompt: "List tabs without consent", toTaskID: "task", modelID: self.modelID)
@@ -244,6 +272,14 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
             XCTAssertEqual(rows.count, 2)
             XCTAssertEqual(rows.last?["success"] as? Bool, false)
             XCTAssertTrue((rows.last?["text"] as? String)?.contains("does not match the requested Gmail site") == true)
+            let inventoryText = try XCTUnwrap(rows.first?["text"] as? String)
+            let inventory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(inventoryText.utf8)) as? [String: Any])
+            XCTAssertEqual(inventory["inventory_order"] as? String, "requested_scope_first")
+            XCTAssertEqual(inventory["total_count"] as? Int, 2)
+            let candidates = try XCTUnwrap(inventory["items"] as? [[String: Any]])
+            XCTAssertEqual(candidates.count, 1, "The fixture requests page_size=1; a mismatch remains visible.")
+            XCTAssertNotNil(inventory["next_cursor"] as? String, "The second mismatching tab remains in the full inventory.")
+            XCTAssertTrue(candidates.allSatisfy { $0["request_scope_match"] as? Bool == false })
             let entry = try await connector.entry(request.id)
             let counts = await entry.transport.counts()
             XCTAssertEqual(counts.attachIDs, [], "The unrelated site's page must not be attached or read.")
@@ -366,6 +402,77 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         }
     }
 
+    func testManagedCompactionRestoresPartialReadCoverageBeforeReleasingNextPrompt() async throws {
+        try await withHarness(mode: "managed-read-coverage") { runtime, root, audit, connector in
+            let request = self.request()
+            try await runtime.connectChrome(request)
+            let entry = try await connector.entry(request.id)
+            await entry.transport.useLongDocument()
+            try await runtime.submit(prompt: "Use background Chrome tab tools only. Read one partial page of the synthetic document without changing anything.",
+                                     toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+            XCTAssertEqual(audit.status, .completed)
+            let initialRows = try self.results(root)
+            XCTAssertEqual(initialRows.compactMap { $0["tool"] as? String }, [
+                "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_snapshot",
+            ])
+            let readText = try XCTUnwrap(initialRows.last?["text"] as? String)
+            XCTAssertTrue(readText.hasPrefix("READ_COVERAGE scopes=1 captured=0 partial=1"))
+            XCTAssertTrue(readText.contains("output_truncated=1"))
+            XCTAssertFalse(readText.contains("_hostSemanticReadReceipt"))
+
+            let release = root.appendingPathComponent("release-coverage-injection")
+            // Always release the fixture if an assertion helper throws while
+            // the next submission is waiting at the history-append barrier.
+            defer { try? Data("ready".utf8).write(to: release) }
+            audit.status = nil
+            let submission = Task {
+                try await runtime.submit(prompt: "Acknowledge the earlier partial read; do not read again or send any input.",
+                                         toTaskID: "task", modelID: self.modelID)
+            }
+            try await self.waitFor {
+                FileManager.default.fileExists(atPath: root.appendingPathComponent("coverage-injection-waiting").path)
+            }
+            XCTAssertTrue(audit.compactions.contains(.running))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("coverage-second-turn-started").path),
+                           "A queued user turn must remain held until the historical read checkpoint is acknowledged.")
+            let injectedData = try Data(contentsOf: root.appendingPathComponent("coverage-injected-items.json"))
+            let items = try XCTUnwrap(JSONSerialization.jsonObject(with: injectedData) as? [[String: Any]])
+            XCTAssertEqual(items.count, 2, "Preserve the actual prior answer and the separate host coverage checkpoint.")
+            XCTAssertTrue(items.allSatisfy { $0["type"] as? String == "message" && $0["role"] as? String == "assistant" })
+            let texts = items.flatMap { $0["content"] as? [[String: Any]] ?? [] }.compactMap { $0["text"] as? String }
+            XCTAssertTrue(texts.contains("PARTIAL_READ_OBSERVED"))
+            let checkpoint = try XCTUnwrap(texts.first { $0.hasPrefix("[Historical host read coverage;") })
+            XCTAssertTrue(checkpoint.contains("READ_COVERAGE scopes=1 captured=0 partial=1"))
+            XCTAssertTrue(checkpoint.contains("output_cut=1"))
+            XCTAssertTrue(checkpoint.contains("no current references or action authority"))
+            for forbidden in ["snapshot_id", "AXSNAPSHOT", "next_cursor", "function_call", "candidate_token", "tab_handle", "https://"] {
+                XCTAssertFalse(String(decoding: injectedData, as: UTF8.self).contains(forbidden), forbidden)
+            }
+            XCTAssertEqual(try self.results(root).count, 3)
+            let before = await entry.transport.counts()
+            XCTAssertEqual(before.presses, 0)
+            XCTAssertEqual(before.text, "")
+
+            try Data("ready".utf8).write(to: release)
+            try await submission.value
+            try await self.waitFor { audit.entries.contains { $0.kind == .assistant && $0.body == "NEXT_TURN_OK" } && audit.status == .completed }
+            let order = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("coverage-protocol-order.json"))) as? [String])
+            XCTAssertEqual(order, ["coverage-compaction-started", "coverage-injection-waiting", "coverage-injection-acknowledged", "coverage-second-turn-started"])
+            XCTAssertEqual(audit.compactions.last, .completed)
+            XCTAssertEqual(audit.compactions.filter { $0 == .completed }.count, 1)
+            XCTAssertTrue(audit.compactions.dropLast().allSatisfy { $0 == .running },
+                          "The host reservation and native item may both report running; completion must follow injection acknowledgement.")
+            XCTAssertEqual(try self.results(root).count, 3, "Compaction must not replay a read or browser action.")
+            let after = await entry.transport.counts()
+            XCTAssertEqual(after.attachIDs, ["target-0"])
+            XCTAssertEqual(after.presses, 0)
+            XCTAssertEqual(after.text, "")
+            XCTAssertEqual(after.forbidden, 0)
+            XCTAssertEqual(audit.approvals, 0)
+        }
+    }
+
     func testMixedPageAndInventoryCursorsRecoverWithoutRebindingOrInput() async throws {
         try await withHarness(mode: "pagination-mixed-sources") { runtime, root, audit, connector in
             let request = self.request()
@@ -472,7 +579,7 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
             XCTAssertTrue((followup[2]["text"] as? String)?.contains("preflight_corrected_not_performed") == true,
                           "Automatic post-action proof must resolve the prior rejection before any optional model verification.")
             XCTAssertTrue((followup[2]["text"] as? String)?.contains("No unresolved action receipts.") == true)
-            XCTAssertTrue((followup.last?["text"] as? String)?.contains("VERIFIED_PROPERTY operation_id=borrowed-call-102") == true)
+            XCTAssertTrue((followup.last?["text"] as? String)?.contains("HISTORICAL_ACTION_STATUS operation_id=borrowed-call-102 status=original_property_verified") == true)
             XCTAssertEqual(audit.status, .completed, "The recovered preflight failure must not poison the final answer.")
             XCTAssertTrue(audit.entries.contains { $0.kind == .assistant && $0.body == "FOLLOWUP_RECOVERY_COMPLETE" })
             XCTAssertFalse(audit.entries.contains { $0.title == "Outcome not verified" })
@@ -622,6 +729,149 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         }
     }
 
+    func testCapturedSearchHierarchyAndHistoricalReceiptAllowOnlySupportedDetailCompletion() async throws {
+        for variant in ["complete", "wrong-query", "truncated"] {
+            try await withHarness(mode: "search-detail-\(variant)") { runtime, root, audit, connector in
+                let request = self.request()
+                try await runtime.connectChrome(request)
+                let entry = try await connector.entry(request.id)
+                await entry.transport.useSearchNavigation(variant)
+                try await runtime.submit(prompt: "Use the background browser to find the synthetic catalog record and read its crate count.",
+                    toTaskID: "task", modelID: self.modelID)
+                try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+                let rows = try self.results(root)
+                XCTAssertEqual(rows.count, 7, variant)
+                XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true }, variant)
+                let results = try XCTUnwrap(rows.first { ($0["text"] as? String)?.contains("url=\"https://example.com/results?q=") == true })
+                let resultText = try XCTUnwrap(results["text"] as? String)
+                XCTAssertTrue(resultText.contains("READ view=overview"), variant)
+                XCTAssertFalse(resultText.contains("semantic_role=\"listitem\""), "Host result recognition must not pretend the model read omitted rows")
+                let body = try XCTUnwrap(rows.last?["text"] as? String)
+                XCTAssertTrue(body.contains("READ view=content"), variant)
+                XCTAssertTrue(body.contains("Observed crate count: 17."), variant)
+                let counts = await entry.transport.counts()
+                XCTAssertEqual(counts.presses, 2, variant)
+                XCTAssertEqual(counts.text, "Catalog entry", variant)
+                XCTAssertEqual(counts.forbidden, 0, variant)
+                XCTAssertEqual(audit.approvals, 3, variant)
+                if variant == "complete" {
+                    XCTAssertEqual(audit.status, .completed)
+                    XCTAssertTrue(audit.entries.contains { $0.kind == .assistant && $0.body == "SUPPORTED_RECORD_ANSWER: Observed crate count: 17." })
+                    XCTAssertFalse(audit.entries.contains { $0.title == "Outcome not verified" })
+                    XCTAssertFalse(body.contains("Search outcome not verified"))
+                } else {
+                    XCTAssertEqual(audit.status, .waiting, variant)
+                    XCTAssertFalse(audit.entries.contains { $0.body == "UNSUPPORTED_SEARCH_NEGATIVE: No matching records exist." }, variant)
+                    XCTAssertTrue(audit.entries.contains { $0.title == "Outcome not verified" && $0.body.contains("Search outcome not verified") }, variant)
+                }
+            }
+        }
+    }
+
+    func testInterimMessagesDoNotLatchFinalPublicationAfterVerifiedRecovery() async throws {
+        for variant in ["whitespace", "premature", "unresolved"] {
+            try await withHarness(mode: "publication-recovery-\(variant)") { runtime, root, audit, connector in
+                let request = self.request()
+                try await runtime.connectChrome(request)
+                let entry = try await connector.entry(request.id)
+                try await runtime.submit(prompt: "Increase the observed counter once and report its verified value.",
+                    toTaskID: "task", modelID: self.modelID)
+                try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+                let rows = try self.results(root)
+                XCTAssertEqual(rows.count, variant == "unresolved" ? 4 : 6, variant)
+                XCTAssertEqual(rows.filter { $0["success"] as? Bool == false }.count, 1, variant)
+                XCTAssertTrue((rows[3]["text"] as? String)?.contains("No approval or input occurred") == true)
+                let counts = await entry.transport.counts()
+                XCTAssertEqual(counts.presses, variant == "unresolved" ? 0 : 1, variant)
+                XCTAssertEqual(audit.approvals, variant == "unresolved" ? 0 : 1, variant)
+                XCTAssertEqual(counts.forbidden, 0, variant)
+                let assistants = audit.entries.filter { $0.kind == .assistant }
+                for rejected in ["PREMATURE_ANSWER_MUST_STAY_HIDDEN", "REPLAYED_REJECTED_ITEM_MUST_STAY_HIDDEN",
+                                 "LATCHED_ANSWER_MUST_STAY_HIDDEN", "REPLAYED_LATCHED_ITEM_MUST_STAY_HIDDEN",
+                                 "REPLAYED_PENDING_ITEM_MUST_STAY_HIDDEN", "UNRESOLVED_FINAL_MUST_STAY_HIDDEN"] {
+                    XCTAssertFalse(assistants.contains { $0.body == rejected }, variant)
+                }
+                let diagnostics = audit.entries.filter { $0.title == "Outcome not verified" }
+                XCTAssertEqual(diagnostics.count, variant == "whitespace" ? 0 : 1, variant)
+                if variant == "unresolved" {
+                    XCTAssertEqual(audit.status, .waiting)
+                    XCTAssertFalse(assistants.contains { $0.body == "RECOVERED_SUPPORTED_FINAL" })
+                } else {
+                    XCTAssertEqual(audit.status, .completed, variant)
+                    XCTAssertEqual(assistants.filter { $0.body == "RECOVERED_SUPPORTED_FINAL" }.count, 1, variant)
+                    XCTAssertTrue((rows.last?["text"] as? String)?.contains("VERIFIED_PROPERTY") == true)
+                }
+            }
+        }
+    }
+
+    func testTypedInterfaceRoutesReadsActionsAndOneBoundedRecoveryWithoutRetargeting() async throws {
+        for variant in ["success", "recovery", "malformed", "follow"] {
+            try await withHarness(mode: "reference-interface-\(variant)") { runtime, root, audit, connector in
+                let request = self.request()
+                try await runtime.connectChrome(request)
+                let entry = try await connector.entry(request.id)
+                await entry.transport.useReferenceHierarchy()
+                if variant == "follow" { await entry.transport.useNavigationLink() }
+                try await runtime.submit(prompt: "Use the observed controls to edit the test field and counter, or follow the observed record link.",
+                    toTaskID: "task", modelID: self.modelID)
+                try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+                let rows = try self.results(root)
+                let text = rows.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                let counts = await entry.transport.counts()
+                let specs = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("specs.json"))) as? [[String: Any]]
+                let names = Set((specs ?? []).compactMap { $0["name"] as? String })
+                XCTAssertTrue(names.contains("computer_v2_read_page"), variant)
+                XCTAssertTrue(names.contains("computer_v2_press"), variant)
+                XCTAssertFalse(names.contains("computer_v2_snapshot"), variant)
+                XCTAssertFalse(names.contains("computer_v2_ax"), variant)
+                XCTAssertFalse(text.contains("_hostSemanticRead"), variant)
+                XCTAssertEqual(counts.forbidden, 0, variant)
+                let recoveries = rows.filter { ($0["text"] as? String)?.contains("HOST_READ_RECOVERY") == true }
+                XCTAssertEqual(recoveries.count, ["recovery", "malformed"].contains(variant) ? 1 : 0, variant)
+                switch variant {
+                case "success":
+                    XCTAssertEqual(rows.count, 8)
+                    XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+                    XCTAssertEqual(counts.presses, 1)
+                    XCTAssertEqual(counts.text, "Typed field")
+                    XCTAssertEqual(audit.approvals, 2)
+                    XCTAssertEqual(audit.status, .completed)
+                    XCTAssertTrue(audit.entries.contains { $0.body == "TYPED_ACTION_COMPLETE" })
+                case "recovery":
+                    XCTAssertEqual(rows.count, 5)
+                    XCTAssertEqual(rows.filter { $0["success"] as? Bool == false }.count, 1)
+                    XCTAssertEqual(counts.presses, 0, "Wrong-kind region reference must never be retargeted to a control.")
+                    XCTAssertEqual(counts.text, "Recovered typed field")
+                    XCTAssertEqual(audit.approvals, 1)
+                    XCTAssertEqual(audit.status, .completed)
+                    XCTAssertTrue(audit.entries.contains { $0.body == "TYPED_RECOVERY_COMPLETE" })
+                    XCTAssertTrue(text.contains("corrected_not_performed"))
+                    XCTAssertTrue((rows[3]["text"] as? String)?.hasPrefix("READ_COVERAGE scopes=2 ") == true,
+                        "The independently published host read contributes its own coverage receipt.")
+                    let recoveredReply = try XCTUnwrap(rows[3]["text"] as? String)
+                    XCTAssertEqual(recoveredReply.components(separatedBy: "RUNTIME_ACTION_EVIDENCE").count - 1, 1)
+                    XCTAssertTrue(recoveredReply.contains("preflight_corrected_not_performed"))
+                    XCTAssertTrue(recoveredReply.contains("No unresolved action receipts."))
+                    XCTAssertFalse(recoveredReply.contains("1 operation(s) remain unresolved"),
+                        "Publish only the current checkpoint after the independent recovery read.")
+                case "malformed":
+                    XCTAssertEqual(counts.observations, 3, "One binding identity observation, one initial page read and one host recovery; malformed retries cannot cause more reads.")
+                    XCTAssertEqual(counts.presses, 0)
+                    XCTAssertEqual(audit.approvals, 0)
+                    XCTAssertEqual(audit.status, .waiting)
+                    XCTAssertFalse(audit.entries.contains { $0.body == "TYPED_UNRESOLVED_MUST_STAY_HIDDEN" })
+                default:
+                    XCTAssertEqual(rows.count, 4)
+                    XCTAssertEqual(counts.presses, 1)
+                    XCTAssertEqual(audit.approvals, 1)
+                    XCTAssertEqual(audit.status, .completed)
+                    XCTAssertTrue(audit.entries.contains { $0.body == "TYPED_LINK_COMPLETE" })
+                }
+            }
+        }
+    }
+
     func testObservedReadAndVerifiedPressCompleteWithoutAnUnrelatedFailure() async throws {
         try await withHarness(mode: "positive-read-press") { runtime, root, audit, connector in
             let request = self.request()
@@ -641,6 +891,48 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
             XCTAssertEqual(audit.status, .completed)
             XCTAssertTrue(audit.entries.contains { $0.kind == .assistant && $0.body == "VERIFIED_ACTION_COMPLETE" })
             XCTAssertFalse(audit.entries.contains { $0.title == "Outcome not verified" })
+        }
+    }
+
+    func testMissingExposedBrowserIndexIsCorrectedWithoutInferringOrReplayingAnAction() async throws {
+        try await withHarness(mode: "scoped-reference-recovery") { runtime, root, audit, connector in
+            let request = self.request()
+            try await runtime.connectChrome(request)
+            let entry = try await connector.entry(request.id)
+            try await runtime.submit(prompt: "Use the background Chrome tab tools only. Increase the counter once and read it.",
+                toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+            XCTAssertEqual(audit.status, .completed)
+            let rows = try self.results(root)
+            XCTAssertEqual(rows.count, 10)
+            XCTAssertEqual(rows[3]["success"] as? Bool, false)
+            XCTAssertTrue((rows[3]["text"] as? String)?.contains("dispatch=not_dispatched") == true)
+            XCTAssertTrue((rows[6]["text"] as? String)?.contains("preflight_corrected_not_performed") == true)
+            XCTAssertTrue((rows[7]["text"] as? String)?.contains("VERIFIED_PROPERTY operation_id=borrowed-call-7") == true)
+            for index in [4, 6, 8] {
+                let text = try XCTUnwrap(rows[index]["text"] as? String)
+                XCTAssertEqual(rows[index]["success"] as? Bool, true)
+                XCTAssertTrue(text.contains("HISTORICAL_ACTION_STATUS"))
+                XCTAssertTrue(text.contains("live_observation=false"))
+                XCTAssertFalse(text.contains("AXSNAPSHOT"))
+                XCTAssertFalse(text.contains("VERIFIED_PROPERTY"))
+            }
+            let counts = await entry.transport.counts()
+            XCTAssertEqual(counts.presses, 1, "Only the independently approved valid action may dispatch.")
+            XCTAssertEqual(counts.postPressObservations, 1, "A redundant historical verification performs no read.")
+            XCTAssertEqual(audit.approvals, 1)
+            XCTAssertEqual(counts.forbidden, 0)
+            XCTAssertFalse(audit.entries.contains { $0.title == "Outcome not verified" })
+            XCTAssertTrue(audit.entries.contains { $0.kind == .assistant && $0.body == "SCOPED_REFERENCE_RECOVERY_COMPLETE" })
+            audit.status = nil
+            try await runtime.submit(prompt: "Inspect only the previous operation receipt, without input.", toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+            XCTAssertEqual(audit.status, .completed)
+            XCTAssertTrue(audit.entries.contains { $0.kind == .assistant && $0.body == "HISTORICAL_RECEIPT_NOT_CARRIED_INTO_NEXT_TURN" })
+            let finalCounts = await entry.transport.counts()
+            XCTAssertEqual(finalCounts.presses, 1)
+            XCTAssertEqual(finalCounts.postPressObservations, 2, "The explicit next-turn binding may capture once; rejected receipt lookup must not read.")
+            XCTAssertEqual(audit.approvals, 1)
         }
     }
 
@@ -736,6 +1028,37 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         }
     }
 
+    func testFollowLinkUsesHostNavigationPlanAndRetainsRejectionBoundaries() async throws {
+        for mode in ["follow-link-success", "follow-link-ax-correction", "follow-link-stale", "follow-link-nonlink", "follow-link-override"] {
+            try await withHarness(mode: mode) { runtime, root, audit, connector in
+                let request = self.request()
+                try await runtime.connectChrome(request)
+                let entry = try await connector.entry(request.id)
+                await entry.transport.useNavigationLink()
+                try await runtime.submit(prompt: "Use background Chrome tab tools only. Follow the record link.",
+                                         toTaskID: "task", modelID: self.modelID)
+                try await self.waitFor { audit.status == .completed || audit.status == .waiting }
+                let rows = try self.results(root)
+                let counts = await entry.transport.counts()
+                let rejected = ["follow-link-nonlink", "follow-link-override"].contains(mode)
+                XCTAssertEqual(counts.presses, rejected ? 0 : 1, mode)
+                XCTAssertEqual(audit.approvals, rejected ? 0 : 1, mode)
+                XCTAssertEqual(counts.forbidden, 0, mode)
+                XCTAssertTrue(rows[2]["text"] as? String != nil)
+                XCTAssertTrue((rows[2]["text"] as? String)?.contains("follow_link=true") == true)
+                if rejected {
+                    XCTAssertEqual(rows.last?["success"] as? Bool, false, mode)
+                    XCTAssertFalse((rows.last?["text"] as? String ?? "").contains("VERIFIED_PROPERTY"), mode)
+                } else {
+                    XCTAssertEqual(rows.last?["success"] as? Bool, true, mode)
+                    XCTAssertTrue((rows.last?["text"] as? String)?.contains("VERIFIED_PROPERTY") == true, mode)
+                    XCTAssertTrue((rows.last?["text"] as? String)?.contains("No unresolved action receipts.") == true, mode)
+                    XCTAssertTrue(audit.entries.contains { $0.body == "FOLLOW_LINK_VERIFIED" }, mode)
+                }
+            }
+        }
+    }
+
     private func runAutomaticVerification(
         mode: String, delayedReads: Int = 0, wrongResult: Bool = false,
         unknownReply: Bool = false, observedValues: [String], injectCompaction: Bool = false
@@ -784,6 +1107,11 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
             XCTAssertEqual(audit.approvals, noPlan ? 0 : 1)
             XCTAssertEqual(counts.attachIDs, ["target-0"])
             let resultText = rows.last?["text"] as? String ?? ""
+            let initialReadText = try XCTUnwrap(rows[2]["text"] as? String)
+            XCTAssertTrue(initialReadText.hasPrefix("READ_COVERAGE scopes=1 "))
+            XCTAssertTrue(resultText.hasPrefix("READ_COVERAGE scopes=\(noPlan ? 1 : 2) "),
+                          "Only the initial and returned verification reads count, even after compaction or several internal polls.")
+            XCTAssertFalse(resultText.contains("_hostSemanticReadReceipt"))
             if succeeds {
                 XCTAssertEqual(rows.last?["success"] as? Bool, true)
                 XCTAssertTrue(resultText.contains("VERIFIED_PROPERTY operation_id=borrowed-call-3"))
@@ -1364,6 +1692,11 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         config.executable = .fixture(path: executable.path)
         config.codexHomePath = root.path
         config.computerInteractionPolicy = interactionPolicy
+        if mode == "managed-read-coverage" {
+            // Match the fixture's synthetic 6,200-token usage receipt without
+            // coupling this barrier test to the shipping model's context size.
+            config.autoCompactLimitOverride = 6_144
+        }
         let connector = BorrowedRuntimeConnector()
         let runtime = CodexAppServerRuntime(configuration: config, browserBroker: browserBroker, visualGrounder: NoModelGrounder(),
                                            borrowedChromeConnector: { try await connector.connect($0) })
@@ -1535,6 +1868,7 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
         let text: String
         let postPressObservations: Int
         let observedValues: [String]
+        let observations: Int
     }
     nonisolated let generation = UUID()
     private let consent: ChromeDebuggingConsent
@@ -1548,11 +1882,15 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
     private let candidateTitle: String
     private let textRole: String
     private var delayedReads = 0, postPressObservations = 0
+    private var observations = 0
     private var wrongResult = false, unknownReply = false
     private var observedValues = [String]()
     private var firstReadGate: BorrowedRuntimeConnectGate?
     private var dispatchMarker: URL?
     private var longDocument = false
+    private var navigationLink = false
+    private var referenceHierarchy = false
+    private var searchNavigation: String?
     init(consent: ChromeDebuggingConsent, url: URL = URL(string: "https://example.com/inert")!, candidateTitle: String = "Identical fixture tabs", textRole: String = "textbox") {
         self.consent = consent
         self.url = url
@@ -1562,7 +1900,7 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
     func counts() -> Counts {
         Counts(attachIDs: attachIDs, detaches: detaches, shutdowns: shutdowns,
                presses: presses, forbidden: forbidden, text: text,
-               postPressObservations: postPressObservations, observedValues: observedValues)
+               postPressObservations: postPressObservations, observedValues: observedValues, observations: observations)
     }
     func configureVerification(delayedReads: Int, wrongResult: Bool, unknownReply: Bool,
                                firstReadGate: BorrowedRuntimeConnectGate?, dispatchMarker: URL?) {
@@ -1573,6 +1911,12 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
         self.dispatchMarker = dispatchMarker
     }
     func useLongDocument() { longDocument = true }
+    func useNavigationLink() { navigationLink = true }
+    func useReferenceHierarchy() { referenceHierarchy = true }
+    func useSearchNavigation(_ variant: String) {
+        searchNavigation = variant
+        url = URL(string: "https://example.com/search")!
+    }
     func validateConnection() throws {
         try consent.check()
         if closed { throw BrowserTabBrokerError.browserGenerationChanged }
@@ -1600,6 +1944,8 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
     func target(id: String) throws -> BrowserTarget? { try validateConnection(); return targets[id] }
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
         try validateConnection()
+        observations += 1
+        if let searchNavigation { return searchDocument(variant: searchNavigation) }
         var renderedCount = String(presses)
         if presses > 0 {
             postPressObservations += 1
@@ -1618,6 +1964,11 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
             .init(backendNodeID: 5, role: "textbox", name: "Disabled text", value: "", isDisabled: true, isReadOnly: false, isIgnored: false),
             .init(backendNodeID: 6, role: "textbox", name: "Read only text", value: "", isDisabled: false, isReadOnly: true, isIgnored: false)
         ]
+        if navigationLink {
+            nodes.append(.init(backendNodeID: 7, role: "link", name: "Follow record", value: nil,
+                               isDisabled: false, isReadOnly: true, isIgnored: false,
+                               linkURL: "https://example.com/record"))
+        }
         if longDocument {
             nodes += (0 ..< 180).map { index in
                 .init(backendNodeID: Int64(100 + index), role: "StaticText",
@@ -1625,12 +1976,65 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
                       value: nil, isDisabled: false, isReadOnly: true, isIgnored: false)
             }
         }
+        if referenceHierarchy {
+            nodes = nodes.map { node in
+                .init(backendNodeID: node.backendNodeID, role: node.role, name: node.name, value: node.value,
+                    isDisabled: node.isDisabled, isReadOnly: node.isReadOnly, isIgnored: node.isIgnored,
+                    nodeID: node.backendNodeID.map(String.init), parentNodeID: "99", linkURL: node.linkURL,
+                    isEditable: node.role == "textbox")
+            }
+            nodes.append(.init(backendNodeID: 99, role: "RootWebArea", name: "Fixture", value: nil,
+                isDisabled: false, isReadOnly: true, isIgnored: false, nodeID: "99",
+                childNodeIDs: nodes.compactMap(\.nodeID)))
+        }
         return BrowserDocumentObservation(loaderID: "inert-loader", title: "Fixture", url: url, nodes: nodes)
+    }
+
+    private func searchDocument(variant: String) -> BrowserDocumentObservation {
+        func node(_ id: Int64, role: String, name: String = "", value: String? = nil, parent: Int64? = nil,
+                  children: [Int64] = [], link: String? = nil) -> BrowserDocumentNode {
+            .init(backendNodeID: id, role: role, name: name, value: value, isDisabled: false,
+                isReadOnly: role != "searchbox", isIgnored: false, nodeID: String(id),
+                parentNodeID: parent.map(String.init), childNodeIDs: children.map(String.init), linkURL: link,
+                isEditable: role == "searchbox")
+        }
+        var nodes = [node(100, role: "RootWebArea", children: [101]), node(101, role: "main", parent: 100)]
+        switch url.path {
+        case "/results":
+            nodes[1] = node(101, role: "main", parent: 100, children: [102])
+            nodes += [node(102, role: "region", name: "Search results", parent: 101, children: [103]),
+                node(103, role: "list", parent: 102, children: [104]),
+                node(104, role: "listitem", name: "Catalog entry", parent: 103, children: [7]),
+                node(7, role: "link", name: "Catalog entry", parent: 104, link: "https://example.com/record")]
+        case "/record":
+            nodes[1] = node(101, role: "main", parent: 100, children: [105])
+            nodes += [node(105, role: "article", parent: 101, children: [106, 107]),
+                node(106, role: "heading", name: "Catalog entry", parent: 105),
+                node(107, role: "StaticText", name: "Observed crate count: 17.", parent: 105)]
+        default:
+            nodes[1] = node(101, role: "main", parent: 100, children: text.isEmpty ? [2] : [2, 7])
+            nodes.append(node(2, role: "searchbox", name: "Search records", value: text, parent: 101))
+            if !text.isEmpty { nodes.append(node(7, role: "link", name: "Show results", parent: 101, link: searchResultsURL(variant: variant).absoluteString)) }
+        }
+        return .init(loaderID: "search-loader-" + url.path, title: "Synthetic catalog", url: url, nodes: nodes,
+            sourceTruncated: variant == "truncated" && url.path == "/results")
+    }
+
+    private func searchResultsURL(variant: String) -> URL {
+        var components = URLComponents(string: "https://example.com/results")!
+        components.queryItems = [URLQueryItem(name: "q", value: variant == "wrong-query" ? "Other entry" : text)]
+        return components.url!
     }
     func press(target: BrowserTarget, backendNodeID: Int64, document: BrowserDocumentObservation,
                permit: BrowserMutationPermit) throws {
         try validateConnection()
-        try permit.commit { presses += 1 }
+        try permit.commit {
+            presses += 1
+            if navigationLink && backendNodeID == 7 { url = URL(string: "https://example.com/record")! }
+            if let searchNavigation, backendNodeID == 7 {
+                url = url.path == "/search" ? searchResultsURL(variant: searchNavigation) : URL(string: "https://example.com/record")!
+            }
+        }
         if let dispatchMarker { try Data("yes".utf8).write(to: dispatchMarker) }
         if unknownReply {
             throw BrowserMutationFailure(dispatchState: .unknown,

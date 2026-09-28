@@ -1,5 +1,6 @@
 """Offline fixtures only: no MLX import, models, network, or private captures."""
 import copy
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -74,6 +75,54 @@ CALL = {"id": "fc_original", "type": "function_call", "call_id": "call_exact",
 
 
 class ContractTests(unittest.TestCase):
+    def test_every_host_protocol_condition_has_an_allowlisted_diagnostic(self):
+        for name in ("sse_contract.py", "response_boundary.py"):
+            tree = ast.parse(path.with_name(name).read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                    continue
+                if node.func.id not in ("_require", "ProtocolError"):
+                    continue
+                index = 1 if node.func.id == "_require" else 0
+                if node.func.id == "ProtocolError" and isinstance(node.args[index], ast.Name):
+                    self.assertEqual(node.args[index].id, "message")  # _require forwards its fixed call-site condition.
+                    continue
+                self.assertIsInstance(node.args[index], ast.Constant)
+                self.assertIn(node.args[index].value, sse._PROTOCOL_MESSAGES)
+
+    def test_diagnostic_never_formats_exception_group_or_unknown_payload(self):
+        private = "private prompt, tool arguments, or provider exception"
+        failure = ExceptionGroup(private, [ProtocolError("Missing terminal response"),
+                                          ExceptionGroup(private, [ProtocolError(private)])])
+        self.assertEqual(sse.protocol_error_diagnostic(failure), ("missing_terminal_response", 2, False))
+        self.assertEqual(sse.protocol_error_diagnostic(ProtocolError(private)),
+                         ("unknown_protocol_error", 1, False))
+        failure = ExceptionGroup(private, [ProtocolError("Missing terminal response")] * 1000)
+        self.assertEqual(sse.protocol_error_diagnostic(failure), ("missing_terminal_response", 31, True))
+        for _ in range(40):
+            failure = ExceptionGroup(private, [failure])
+        self.assertEqual(sse.protocol_error_diagnostic(failure), ("unknown_protocol_error", 0, True))
+
+    def test_json_diagnostics_preserve_duplicate_and_nonfinite_conditions(self):
+        for text, reason in [("{\"x\":1,\"x\":2}", "duplicate_json_field"),
+                             ("{\"x\":NaN}", "nonfinite_json"),
+                             ("{not JSON}", "malformed_stream_json")]:
+            with self.subTest(reason=reason), self.assertRaises(ProtocolError) as failure:
+                sse._json(text)
+            self.assertEqual(sse.protocol_error_diagnostic(failure.exception), (reason, 1, False))
+
+    def test_diagnostic_counters_are_bounded_and_event_names_are_allowlisted(self):
+        contract = SSEContract(100)
+        events = fixture()[:1] + [event("provider-private-event-name", private="private content")]
+        with self.assertRaises(ProtocolError):
+            contract.feed(wire(events))
+        self.assertEqual(contract.diagnostic_counters(), {
+            "bytes": len(wire(events)), "events": 2, "items": 0, "last": "unsupported", "terminal": 0})
+        contract = SSEContract(100)
+        with self.assertRaises(ProtocolError):
+            contract.feed(b"x" * (contract.MAX_STREAM_BYTES + 4096))
+        self.assertEqual(contract.diagnostic_counters()["bytes"], contract.MAX_STREAM_BYTES + 1)
+
     def process(self, events, cap=100, chunk_size=None, crlf=False):
         contract = SSEContract(cap)
         raw = wire(events, crlf)

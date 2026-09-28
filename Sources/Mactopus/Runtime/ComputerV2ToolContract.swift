@@ -7,6 +7,10 @@ import Foundation
 /// without changing old threads. A V2 executor must bind the selected app,
 /// retain snapshots/captures, and check image bounds before any mutation.
 enum ComputerV2ToolContract {
+    /// A complete argument shape, not fabricated IDs or dispatch authority.
+    /// Replace every placeholder only with values exposed in one current read.
+    static let regionChangedPressArgumentShape = #"{"snapshot_id":"<observed snapshot_id>","element_index":<observed button index>,"ax_action":"AXPress","postcondition":{"kind":"region_changed","element_index":<observed container index>}}"#
+    static let regionChangedIndexGuidance = "Top-level element_index is the button to press; postcondition.element_index is the separate observed result container. Complete region_changed argument shape (replace placeholders with observed values from the same snapshot): " + regionChangedPressArgumentShape
     static let maximumAppInventoryBytes = 3_500
     static let unboundApplicationMessage = "No application is bound in this turn. Call computer_v2_open, or use computer_v2_tabs then computer_v2_bind_tab for an existing Chrome tab through a native-user-approved connection."
     static let existingBrowserSessionNote = browserSessionNote(activationMode: .none)
@@ -72,6 +76,7 @@ enum ComputerV2ToolContract {
         case continueRead = "computer_v2_continue"
         case bindTab = "computer_v2_bind_tab"
         case snapshot = "computer_v2_snapshot"
+        case followLink = "computer_v2_follow_link"
         case ax = "computer_v2_ax"
         case setText = "computer_v2_set_text"
         case capture = "computer_v2_capture"
@@ -87,6 +92,23 @@ enum ComputerV2ToolContract {
             default: false
             }
         }
+    }
+
+    /// The advertised reference interface is separate from legacy execution.
+    /// Validation checks shape only; the host must resolve each opaque token
+    /// against its current published snapshot before validating/dispatching the
+    /// corresponding legacy call. A token is never a model-supplied index.
+    enum Alias: String, CaseIterable {
+        case readPage = "computer_v2_read_page"
+        case readRegion = "computer_v2_read_region"
+        case press = "computer_v2_press"
+        case follow = "computer_v2_follow"
+        case fill = "computer_v2_fill"
+    }
+
+    struct ValidatedAliasCall {
+        let tool: Alias
+        let arguments: [String: Any]
     }
 
     enum PointerAction: String, CaseIterable {
@@ -146,12 +168,17 @@ enum ComputerV2ToolContract {
         case missing(String)
         case unexpected(String)
         case invalid(String)
+        case incompleteReadSubtree
 
         var errorDescription: String? {
             switch self {
             case .unknownTool(let name): "Unknown computer V2 tool: \(name)"
-            case .missing(let name): "Missing computer V2 argument: \(name)"
+            case .missing(let name):
+                "Missing computer V2 argument: \(name)"
+                    + (name == "postcondition.element_index" ? ". " + ComputerV2ToolContract.regionChangedIndexGuidance : "")
             case .unexpected(let name): "Unexpected computer V2 argument: \(name)"
+            case .incompleteReadSubtree:
+                "A subtree read needs BOTH snapshot_id and an observed element_index. For a fresh whole-page read, omit both: {\"view\":\"content\"}. To continue a partial read, call computer_v2_continue with its observed next_cursor."
             case .invalid(let name):
                 if name == "ax_action" {
                     "Invalid computer V2 argument: ax_action. Use only an action listed on the current element AND supported by this tool: "
@@ -190,6 +217,35 @@ enum ComputerV2ToolContract {
         }
     }
 
+    /// New thread definitions advertise one reference interface, never both
+    /// aliases and their legacy counterparts. Keep specs/validate unchanged
+    /// for restored threads and canonicalized calls.
+    static func referenceSpecs(
+        for modelID: String,
+        interactionPolicy: ComputerInteractionPolicy = .backgroundOnly
+    ) -> [[String: Any]] {
+        specs(for: modelID, interactionPolicy: interactionPolicy).flatMap { original -> [[String: Any]] in
+            switch original["name"] as? String {
+            case Tool.snapshot.rawValue: return [referenceSpec(.readPage), referenceSpec(.readRegion)]
+            case Tool.ax.rawValue: return [referenceSpec(.press)]
+            case Tool.followLink.rawValue: return [referenceSpec(.follow)]
+            case Tool.setText.rawValue: return [referenceSpec(.fill)]
+            default:
+                var result = original
+                if original["name"] as? String == Tool.bindTab.rawValue {
+                    result["description"] = "Bind an existing Chrome tab with an observed candidate_token from this turn's inventory. Requires the user's existing approved connection; preserves tabs and logins without activation. Start with computer_v2_read_page(view=overview), then read content when needed. Use only the returned action menu references. Borrowed tabs have no capture, pointer, global keyboard or foreground fallback."
+                } else {
+                    result["description"] = (original["description"] as? String ?? "")
+                        .replacingOccurrences(of: "computer_v2_snapshot", with: Alias.readPage.rawValue)
+                        .replacingOccurrences(of: "computer_v2_ax", with: Alias.press.rawValue)
+                        .replacingOccurrences(of: "computer_v2_set_text", with: Alias.fill.rawValue)
+                        .replacingOccurrences(of: "computer_v2_follow_link", with: Alias.follow.rawValue)
+                }
+                return [result]
+            }
+        }
+    }
+
     static func instructions(for interactionPolicy: ComputerInteractionPolicy) -> String {
         interactionPolicy == .backgroundOnly ? backgroundInstructions : visualGroundingInstructions
     }
@@ -219,6 +275,82 @@ enum ComputerV2ToolContract {
         pixel coordinates. It returns a fresh post-action screenshot with synchronized \
         Accessibility when available; verify the visible outcome, not just dispatch.
         """
+
+    static func validateAlias(tool name: String, arguments: [String: Any]) throws -> ValidatedAliasCall {
+        guard let tool = Alias(rawValue: name) else { throw ValidationError.unknownTool(name) }
+        switch tool {
+        case .readPage:
+            try checkKeys(arguments, required: [], allowed: ["view", "query"])
+            try validateAliasRead(arguments)
+        case .readRegion:
+            try checkKeys(arguments, required: ["region_ref"], allowed: ["region_ref", "view", "query"])
+            try requireReference("region_ref", in: arguments)
+            try validateAliasRead(arguments)
+        case .press:
+            try checkKeys(arguments, required: ["action_ref"], allowed: ["action_ref", "postcondition"])
+            try requireReference("action_ref", in: arguments)
+            if arguments["postcondition"] != nil { try validateAliasPostcondition(arguments["postcondition"]) }
+        case .follow:
+            try checkKeys(arguments, required: ["link_ref"], allowed: ["link_ref"])
+            try requireReference("link_ref", in: arguments)
+        case .fill:
+            try checkKeys(arguments, required: ["field_ref", "text"], allowed: ["field_ref", "text"])
+            try requireReference("field_ref", in: arguments)
+            _ = try requiredString("text", in: arguments, maximum: 4_096)
+        }
+        return .init(tool: tool, arguments: arguments)
+    }
+
+    private static func validateAliasRead(_ arguments: [String: Any]) throws {
+        if arguments["view"] != nil {
+            guard SemanticReadView(rawValue: try requiredString("view", in: arguments)) != nil else {
+                throw ValidationError.invalid("view")
+            }
+        }
+        if arguments["query"] != nil {
+            let query = try requiredString("query", in: arguments, maximum: 200)
+            guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ValidationError.invalid("query") }
+        }
+    }
+
+    private static func requireReference(_ key: String, in arguments: [String: Any], path: String? = nil) throws {
+        let path = path ?? key
+        guard let raw = arguments[key] else { throw ValidationError.missing(path) }
+        guard let value = raw as? String, !value.isEmpty, value.utf8.count <= 256,
+              value == value.trimmingCharacters(in: .whitespacesAndNewlines) else { throw ValidationError.invalid(path) }
+    }
+
+    private static func validateAliasPostcondition(_ raw: Any?) throws {
+        guard let object = raw as? [String: Any],
+              Set(object.keys).isSubset(of: ["kind", "region_ref", "detail_ref", "expected"]),
+              let kind = object["kind"] as? String,
+              ["document_url", "value", "region_text", "region_changed", "dialog_opened", "detail_view", "selection"].contains(kind)
+        else { throw ValidationError.invalid("postcondition") }
+        if kind == "region_changed" || kind == "dialog_opened" {
+            guard object["expected"] == nil else { throw ValidationError.invalid("postcondition.expected") }
+        } else {
+            guard let expected = object["expected"] as? String, expected.utf8.count <= 4_096,
+                  kind == "value" || !expected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ValidationError.invalid("postcondition.expected")
+            }
+            if kind == "selection", expected != "true" { throw ValidationError.invalid("postcondition.expected") }
+        }
+        switch kind {
+        case "value", "region_text", "region_changed":
+            try requireReference("region_ref", in: object, path: "postcondition.region_ref")
+            guard object["detail_ref"] == nil else { throw ValidationError.invalid("postcondition.detail_ref") }
+        case "selection":
+            if object["region_ref"] != nil { try requireReference("region_ref", in: object, path: "postcondition.region_ref") }
+            guard object["detail_ref"] == nil else { throw ValidationError.invalid("postcondition.detail_ref") }
+        case "detail_view":
+            // Browser detail_view uses the observed heading; native detail_view
+            // additionally requires a separately observed pane at dispatch.
+            if object["detail_ref"] != nil { try requireReference("detail_ref", in: object, path: "postcondition.detail_ref") }
+            guard object["region_ref"] == nil else { throw ValidationError.invalid("postcondition.region_ref") }
+        default:
+            guard object["region_ref"] == nil, object["detail_ref"] == nil else { throw ValidationError.invalid("postcondition") }
+        }
+    }
 
     static func validate(
         tool name: String,
@@ -306,6 +438,9 @@ enum ComputerV2ToolContract {
                 guard SemanticReadView(rawValue: view) != nil else { throw ValidationError.invalid("view") }
             }
             if arguments["snapshot_id"] != nil || arguments["element_index"] != nil {
+                guard arguments["snapshot_id"] != nil, arguments["element_index"] != nil else {
+                    throw ValidationError.incompleteReadSubtree
+                }
                 try requireUUID("snapshot_id", in: arguments)
                 try requireNonnegativeInteger("element_index", in: arguments)
             }
@@ -315,6 +450,12 @@ enum ComputerV2ToolContract {
                     throw ValidationError.invalid("query")
                 }
             }
+
+        case .followLink:
+            try checkKeys(arguments, required: ["snapshot_id", "element_index"],
+                          allowed: ["snapshot_id", "element_index"])
+            try requireUUID("snapshot_id", in: arguments)
+            try requireNonnegativeInteger("element_index", in: arguments)
 
         case .ax:
             try checkKeys(
@@ -421,15 +562,25 @@ enum ComputerV2ToolContract {
         guard let object = raw as? [String: Any],
               Set(object.keys).isSubset(of: ["kind", "element_index", "expected"]),
               let kindText = object["kind"] as? String,
-              let kind = BrowserActionVerification.Kind(rawValue: kindText),
-              let expected = object["expected"] as? String,
-              expected.utf8.count <= 4_096,
-              kind == .value || !expected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              let kind = BrowserActionVerification.Kind(rawValue: kindText) else {
             throw ValidationError.invalid("postcondition")
         }
+        let expected: String
+        if kind == .regionChanged || kind == .dialogOpened {
+            // The host owns the change predicate and its pre-input baseline;
+            // callers cannot submit a fabricated future result or baseline.
+            guard object["expected"] == nil else { throw ValidationError.invalid("postcondition.expected") }
+            expected = kind == .dialogOpened ? "opened" : "changed"
+        } else {
+            guard let value = object["expected"] as? String, value.utf8.count <= 4_096,
+                  kind == .value || !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ValidationError.invalid("postcondition")
+            }
+            expected = value
+        }
         let index: Int?
-        if kind == .value || kind == .regionText {
-            let value = try integer("element_index", in: object)
+        if kind == .value || kind == .regionText || kind == .regionChanged {
+            let value = try integer("element_index", in: object, path: "postcondition.element_index")
             guard value >= 0, value <= Int64(Int.max) else { throw ValidationError.invalid("postcondition.element_index") }
             index = Int(value)
         } else {
@@ -453,7 +604,7 @@ enum ComputerV2ToolContract {
         }
         func index(_ key: String) throws -> Int? {
             guard object[key] != nil else { return nil }
-            let value = try integer(key, in: object)
+            let value = try integer(key, in: object, path: "postcondition.\(key)")
             guard value >= 0, value <= Int64(Int.max) else { throw ValidationError.invalid("postcondition.\(key)") }
             return Int(value)
         }
@@ -553,15 +704,16 @@ enum ComputerV2ToolContract {
         }
     }
 
-    private static func integer(_ key: String, in arguments: [String: Any]) throws -> Int64 {
-        guard let raw = arguments[key] else { throw ValidationError.missing(key) }
+    private static func integer(_ key: String, in arguments: [String: Any], path: String? = nil) throws -> Int64 {
+        let argumentPath = path ?? key
+        guard let raw = arguments[key] else { throw ValidationError.missing(argumentPath) }
         guard let number = raw as? NSNumber,
               CFGetTypeID(number) != CFBooleanGetTypeID(),
               number.doubleValue.isFinite
-        else { throw ValidationError.invalid(key) }
+        else { throw ValidationError.invalid(argumentPath) }
         let value = number.int64Value
         guard number.compare(NSNumber(value: value)) == .orderedSame else {
-            throw ValidationError.invalid(key)
+            throw ValidationError.invalid(argumentPath)
         }
         return value
     }
@@ -579,6 +731,66 @@ enum ComputerV2ToolContract {
         guard let number = arguments[key] as? NSNumber,
               CFGetTypeID(number) == CFBooleanGetTypeID()
         else { throw ValidationError.invalid(key) }
+    }
+
+    private static func referenceSpec(_ tool: Alias) -> [String: Any] {
+        let reference: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 256,
+            "description": "Copy the exact typed reference from the current host action/region menu; never construct one. The host checks its type, target and snapshot."]
+        let view: [String: Any] = ["type": "string", "enum": ["all", "overview", "content", "headings", "links"],
+            "description": "Browser overview locates controls/headings/navigation; it is not complete content. Use content for the body, all for structure. Native apps use all or content."]
+        let query: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 200,
+            "description": "Optional literal text filter, not a question or instruction. No filtered matches does not prove absence."]
+        let properties: [String: [String: Any]]
+        let required: [String]
+        let description: String
+        switch tool {
+        case .readPage:
+            properties = ["view": view, "query": query]; required = []
+            description = "Take a fresh read of the bound app/tab. An unfiltered browser read defaults to overview; use content when the body is needed. Native: all or content. Returns content, coverage and a host action/region menu. Read-only structure is not an action target. For a stale reference, read_page once and use only newly returned references. For partial text, use computer_v2_continue(cursor=next_cursor); do not restart unchanged reads. This tool accepts no reference, snapshot or cursor."
+        case .readRegion:
+            properties = ["region_ref": reference, "view": view, "query": query]; required = ["region_ref"]
+            description = "Read below a currently published region_ref, including a readable result element. Defaults to all within that region. This is read-only and does not activate it. To refresh the whole page or change views without a region, use computer_v2_read_page. Continue partial text with computer_v2_continue and its next_cursor. A region reference alone does not authorize an action or prove a region_changed postcondition."
+        case .follow:
+            properties = ["link_ref": reference]; required = ["link_ref"]
+            description = "Follow a browser navigation link from the current action menu. Send only link_ref. The host uses its exact observed destination, obtains required approval, dispatches once and verifies navigation. Do not provide a URL or postcondition. Then inspect the destination before making a content claim."
+        case .fill:
+            properties = ["field_ref": reference, "text": ["type": "string", "minLength": 1, "maxLength": 4_096]]
+            required = ["field_ref", "text"]
+            description = "Set a currently published editable field to text, without pressing or focusing it first. Does not submit or search. The host checks the reference, obtains required approval and verifies the requested value. Do not repeat VERIFIED_PROPERTY or ALREADY_SATISFIED."
+        case .press:
+            properties = ["action_ref": reference, "postcondition": referencePostconditionSchema(reference: reference)]
+            required = ["action_ref"]
+            description = "Perform the exact supported action bound to a current action_ref; no action-name or element-index guessing. Browser non-link presses require an intended postcondition, including search/pagination buttons. Native selected controls may have an automatic plan. For browser links with link_ref use computer_v2_follow; for editable fields use computer_v2_fill. The host obtains required approval, dispatches at most once and checks bounded fresh observations. VERIFIED_PROPERTY proves only that property; ALREADY_SATISFIED sent no input. VERIFICATION_PENDING permits bounded read-only recovery, never replaying the action."
+        }
+        return ["type": "function", "name": tool.rawValue, "description": description,
+                "inputSchema": ["type": "object", "properties": properties, "required": required, "additionalProperties": false]]
+    }
+
+    private static func referencePostconditionSchema(reference: [String: Any]) -> [String: Any] {
+        ["type": "object", "additionalProperties": false,
+         "properties": [
+            "kind": ["type": "string", "enum": ["document_url", "value", "region_text", "region_changed", "dialog_opened", "detail_view", "selection"]],
+            "region_ref": reference,
+            "detail_ref": reference.merging(["description": "Native detail_view only: copy the region_ref of the separate observed detail pane."], uniquingKeysWith: { _, new in new }),
+            "expected": ["type": "string", "maxLength": 4_096],
+         ], "required": ["kind"],
+         "oneOf": [
+            ["properties": ["kind": ["enum": ["region_changed"]]], "required": ["region_ref"],
+             "not": ["anyOf": [["required": ["expected"]], ["required": ["detail_ref"]]]]],
+            ["properties": ["kind": ["enum": ["dialog_opened"]]],
+             "not": ["anyOf": [["required": ["expected"]], ["required": ["region_ref"]], ["required": ["detail_ref"]]]]],
+            ["properties": ["kind": ["enum": ["value"]]], "required": ["region_ref", "expected"],
+             "not": ["required": ["detail_ref"]]],
+            ["properties": ["kind": ["enum": ["region_text"]], "expected": ["minLength": 1, "pattern": "\\S"]], "required": ["region_ref", "expected"],
+             "not": ["required": ["detail_ref"]]],
+            ["properties": ["kind": ["enum": ["selection"]], "expected": ["enum": ["true"]]], "required": ["expected"],
+             "not": ["required": ["detail_ref"]]],
+            ["properties": ["kind": ["enum": ["detail_view"]], "expected": ["minLength": 1, "pattern": "\\S"]], "required": ["expected"],
+             "not": ["required": ["region_ref"]]],
+            ["properties": ["kind": ["enum": ["document_url"]], "expected": ["minLength": 1, "pattern": "\\S"]], "required": ["expected"],
+             "not": ["anyOf": [["required": ["region_ref"]], ["required": ["detail_ref"]]]]],
+         ],
+         "description": "Declare before input. region_changed: use an observed eligible region_ref and omit expected; proves changed text only, so read it afterward. dialog_opened: kind alone, no refs/expected. value/region_text: region_ref plus exact intended expected. Native selection: expected=\"true\", optional region_ref; proves selection only. Native detail_view: separate detail_ref plus exact expected; browser detail_view: exact observed heading, no detail_ref. document_url: exact observed link destination. The host enforces target-specific eligibility; references and schema never supply proof or authority."]
     }
 
     private static func spec(_ tool: Tool) -> [String: Any] {
@@ -614,42 +826,55 @@ enum ComputerV2ToolContract {
                 "cursor": uuid.merging(["description": "Opaque next_cursor from this turn's previous page. Omit to refresh; refreshing invalidates earlier cursor and candidate tokens."], uniquingKeysWith: { _, new in new }),
                 "page_size": ["type": "integer", "minimum": 1, "maximum": 100, "default": 25],
             ]; required = []
-            description = "List existing Chrome tabs through a native-user-approved connection; this tool cannot grant access. Use computer_v2_continue(cursor=next_cursor) until absent to exhaust the inventory. Omit cursor here to refresh. Candidate tokens and cursors are opaque and valid only in this turn. Tab titles/URLs are candidate metadata, not evidence of page contents or relevance. Select an observed candidate_token with computer_v2_bind_tab and inspect its content before making a content claim. Preserves existing tabs and logins, with no activation, navigation or closing tabs."
+            description = "List existing Chrome tabs through a native-user-approved connection; this tool cannot grant access. Use computer_v2_continue(cursor=next_cursor) until absent to exhaust the inventory. Omit cursor here to refresh. When inventory_order=requested_scope_first, start with request_scope_match=true: this checks requested target metadata only, not authorization or content relevance. All tabs remain included; unknown or ambiguous requests retain transport order with null matches. Candidate tokens and cursors are opaque and valid only in this turn. Tab titles/URLs are candidate metadata, not evidence of page contents or relevance. Select an observed candidate_token with computer_v2_bind_tab and inspect its content before making a content claim. Preserves existing tabs and logins, with no activation, navigation or closing tabs."
         case .continueRead:
             properties = ["cursor": uuid]; required = ["cursor"]
             description = "Read the next page using an observed next_cursor from THIS turn. The host remembers whether it belongs to Chrome inventory or a page/native read and routes it safely. Send cursor alone; do not guess its type or reuse previous-turn cursors. Does not refresh, bind, reconnect, navigate or grant permissions. If stale, start a fresh inventory or snapshot of the intended source."
         case .bindTab:
             properties = ["candidate_token": uuid]; required = ["candidate_token"]
-            description = "Bind an existing Chrome tab using only a candidate_token observed from computer_v2_tabs in this turn. Requires a native-user-approved connection; this tool cannot grant access. Preserves existing tabs and logins, with no activation, navigation or closing tabs. Then use computer_v2_snapshot and supported computer_v2_ax/computer_v2_set_text actions. Global image, key and pointer paths are unavailable in a borrowed tab; do not fall back to capture/click/keypress/type."
+            description = "Bind an existing Chrome tab using only a candidate_token observed from computer_v2_tabs in this turn. Requires a native-user-approved connection; this tool cannot grant access. Preserves existing tabs and logins, with no activation, navigation or closing tabs. Start with computer_v2_snapshot(view=overview) to locate observed controls, headings and navigation, then view=content to read the document body. The overview is not exhaustive content. Use supported computer_v2_ax/computer_v2_set_text actions. Global image, key and pointer paths are unavailable in a borrowed tab; do not fall back to capture/click/keypress/type."
         case .snapshot:
             properties = [
                 "query": ["type": "string", "minLength": 1, "maxLength": 200,
                           "description": "Optional literal text to find known missing/truncated text, not a question or extraction instruction. To discover unknown titles use view=headings or content."],
-                "view": ["type": "string", "enum": ["all", "content", "headings", "links"],
-                         "description": "all: controls and context; content: readable document; headings/links: enumerate unknown labels."],
+                "view": ["type": "string", "enum": ["all", "overview", "content", "headings", "links"],
+                         "description": "overview: browser-only bounded controls, headings and navigation, not exhaustive content; all: full structural context; content: readable document; headings/links: enumerate unknown labels. Browser default with no query/subtree is overview; native default remains all."],
                 "cursor": ["type": "string", "description": "Legacy page-read continuation only. Prefer computer_v2_continue(cursor=next_cursor); never supply a tab-inventory cursor here."],
-                "snapshot_id": ["type": "string", "description": "With element_index, expand a container from the current snapshot."],
+                "snapshot_id": ["type": "string", "description": "Subtree read only: BOTH snapshot_id and element_index are required. Omit both for a fresh whole-page read or a different view."],
                 "element_index": ["type": "integer", "minimum": 0, "description": "Observed current element to read below; not a guessed index."],
             ]; required = []
-            description = "Read the bound app/tab; returns snapshot_id, element indices and coverage. For unknown page content start view=content or headings. Follow next_cursor using cursor alone; expand an observed container with snapshot_id+element_index. A truncated read is not proof content is absent. Do not repeat unchanged reads: change view, expand, or continue. For a known missing item try a short literal query before scrolling or capturing; never substitute another item's fact. If the observed facts answer the request, answer and stop. Group facts by parent, never adjacency alone. sibling_heading is observed direct-sibling context, not proof of semantic ownership. Prefer supported AX actions for buttons and links. For a Chrome navigation link without AXPress, follow its exact observed url with computer_v2_open; never reconstruct url_omitted destinations. URL navigation is not an in-page script action. Use only listed actions. Browser fields with settable=true support computer_v2_set_text directly without focus, even when actions=[]. Only a native text field advertising AXPress supports that focus action; it does not submit."
+            description = "Read the bound app/tab; returns snapshot_id, element indices and coverage. Start a browser page with {\"view\":\"overview\"} for observed controls, headings and navigation; this bounded selection is not exhaustive document content. Read {\"view\":\"content\"} when the body is needed; act on an observed navigation control directly when appropriate. Native apps use all or content, not overview. Fresh reads omit snapshot_id and element_index. A different view is also a fresh read. Continue: computer_v2_continue with an observed next_cursor. Subtree: BOTH snapshot_id and an observed element_index. content_kind distinguishes readable text from controls and navigation; content_scope is only structural. Continued fields include original UTF8 offsets. A truncated read is not proof content is absent. Do not repeat unchanged reads: change view, expand, or continue. For a known missing item try a short literal query before scrolling or capturing; never substitute another item's fact. If the observed facts answer the request, answer and stop. Group facts by parent, never adjacency alone. sibling_heading is observed direct-sibling context, not proof of semantic ownership. Use computer_v2_follow_link for browser links marked follow_link=true; its destination verification is automatic. Use supported AX actions for other controls. For a Chrome navigation link without AXPress, follow its exact observed url with computer_v2_open; never reconstruct url_omitted destinations. URL navigation is not an in-page script action. Use only listed actions. Browser fields with settable=true support computer_v2_set_text directly without focus, even when actions=[]. Only a native text field advertising AXPress supports that focus action; it does not submit."
+        case .followLink:
+            properties = ["snapshot_id": string, "element_index": integer]
+            required = ["snapshot_id", "element_index"]
+            description = "Follow an observed browser navigation link marked follow_link=true. Supply only the current snapshot_id and its element_index. The host presses the exact link once and verifies its observed destination automatically; do not supply ax_action, URL, or postcondition. This is browser-only and still requires the user's action approval. A stale reference sends no input: take a fresh overview, then select the link from that snapshot. Navigation proof is not task completion; inspect the returned page."
         case .ax:
             properties = [
-                "snapshot_id": string, "element_index": integer,
+                "snapshot_id": string,
+                "element_index": ["type": "integer", "minimum": 0, "description": "Top-level action target: the observed button/control to press. Keep the result container index inside postcondition.element_index."],
                 "ax_action": ["type": "string", "enum": SemanticAXAction.allCases.map(\.rawValue)],
                 "postcondition": [
                     "type": "object", "additionalProperties": false,
                     "properties": [
-                        "kind": ["type": "string", "enum": ["document_url", "value", "region_text", "detail_view", "selection"]],
-                        "element_index": ["type": "integer", "minimum": 0],
+                        "kind": ["type": "string", "enum": ["document_url", "value", "region_text", "region_changed", "dialog_opened", "detail_view", "selection"]],
+                        "element_index": ["type": "integer", "minimum": 0, "description": "Nested postcondition.element_index: the observed result element/container from this same snapshot. For region_changed use the candidate container, not the pressed button or a text child; keep the button index at the top level."],
                         "detail_element_index": ["type": "integer", "minimum": 0],
-                        "expected": ["type": "string", "maxLength": 4096],
+                        "expected": ["type": "string", "maxLength": 4096, "description": "Required exact intended result except region_changed and dialog_opened, which must omit expected."],
                     ],
-                    "required": ["kind", "expected"],
-                    "description": "Declare the intended result BEFORE input. value/region_text: observed result element_index and exact expected value/region text. Browser detail_view: exact heading already observed in target; no detail_element_index. Native detail_view: supply observed detail_element_index for the separate detail pane and no element_index. Native selection: expected=true; selected= state is checked automatically when available, with no detail_element_index. Selection proves selection only; use detail_view to verify the separate detail content. Browser document_url must match the observed link. Runtime checks bounded fresh reads without replaying input. Never reuse old indices with a new snapshot_id.",
+                    "required": ["kind"],
+                    "oneOf": [
+                        ["properties": ["kind": ["enum": ["region_changed"]]],
+                         "required": ["element_index"], "not": ["anyOf": [["required": ["expected"]], ["required": ["detail_element_index"]]]]],
+                        ["properties": ["kind": ["enum": ["dialog_opened"]]],
+                         "not": ["anyOf": [["required": ["expected"]], ["required": ["element_index"]], ["required": ["detail_element_index"]]]]],
+                        ["properties": ["kind": ["enum": ["document_url", "value", "region_text", "detail_view", "selection"]]],
+                         "required": ["expected"]],
+                    ],
+                    "description": "REQUIRED for a browser press without an observed link destination, including pagination. For an observed control intended to open a dialog on the same page, use only {kind:dialog_opened}: no expected text or result index. The host requires a complete baseline without a dialog and verifies one newly exposed dialog in the same document; read it before claiming any result. Browser region_changed: choose the observed container marked region_changed_candidate=true (semantic_role identifies its browser role), never its StaticText child; parent_index links a child to its visible container. Provide that container element_index and OMIT expected; the host verifies only changed displayed text in that exact region, not page/task success. Use it when future result text is unknown, then read the returned content. Declare the intended result BEFORE input. value/region_text: observed result element_index and exact expected value/region text. Browser detail_view: exact heading already observed in target; no detail_element_index. Native detail_view: supply observed detail_element_index for the separate detail pane and no element_index. Native selection: expected=true; selected= state is checked automatically when available, with no detail_element_index. Selection proves selection only; use detail_view to verify the separate detail content. Browser document_url must match the observed link. Runtime checks bounded fresh reads without replaying input. Never reuse old indices with a new snapshot_id.",
                 ],
             ]
             required = ["snapshot_id", "element_index", "ax_action"]
-            description = "Act on a currently exposed element using only a listed action. Browser links and native selected= controls have automatic verification plans; other presses require postcondition. Native detail views require an observed separate detail pane. Runtime dispatches at most once and verifies with fresh reads. VERIFIED_PROPERTY proves that property; ALREADY_SATISFIED means the desired state already held and no input occurred. Do not repeat either. VERIFICATION_PENDING allows only read-only recovery. A new snapshot_id never makes an old element_index valid. Background native AX cannot raise windows or post global input. Use set_text directly for settable fields. Approval follows the user's access mode."
+            description = "Act on a currently exposed element using only a listed action. For links marked follow_link=true, prefer computer_v2_follow_link with no postcondition. For a control intended to open a same-page dialog, declare postcondition={kind:dialog_opened} without expected or element_index. Before pressing a browser button without a link destination, include postcondition; inspection/pagination buttons still require it. For unknown next-page text, first observe view=all and select the container marked region_changed_candidate=true, not its StaticText child (follow parent_index), then provide a complete press request without expected. \(regionChangedIndexGuidance) The candidate is not authorization. This proves changed region text only: read the new content before claiming progress or success. Browser links and native selected= controls have automatic verification plans; other presses require postcondition. Native detail views require an observed separate detail pane. Runtime dispatches at most once and verifies with fresh reads. VERIFIED_PROPERTY proves that property; ALREADY_SATISFIED means the desired state already held and no input occurred. Do not repeat either. VERIFICATION_PENDING allows only read-only recovery. A new snapshot_id never makes an old element_index valid. Background native AX cannot raise windows or post global input. Use set_text directly for settable fields. Approval follows the user's access mode."
         case .setText:
             properties = ["snapshot_id": string, "element_index": integer, "text": string]
             required = ["snapshot_id", "element_index", "text"]

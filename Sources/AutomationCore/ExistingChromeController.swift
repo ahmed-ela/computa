@@ -131,7 +131,8 @@ struct ExistingChromeFocus {
     let isSameWindow: () throws -> Bool
     let isSameControl: () throws -> Bool
     let setValue: (String) throws -> Void
-    let tabs: () throws -> ExistingChromeTabInventory
+    // The retained AX window must stay on the same actor as its traversal.
+    let tabs: @MainActor () throws -> ExistingChromeTabInventory
 
     var isAddressBar: Bool {
         // The browser chrome must contain the text field, not web content.
@@ -687,7 +688,7 @@ private final class SystemExistingChromeRuntime: ExistingChromeRuntime {
                     throw ExistingChromeError.addressBarNotVerified
                 }
             },
-            tabs: {
+            tabs: { @MainActor [retainedWindow] in
                 guard let retainedWindow else { throw ExistingChromeError.targetChanged }
                 return try NativeChromeTabReadRecovery.read(
                     isSameWindow: { try identity.isStillFocused() },

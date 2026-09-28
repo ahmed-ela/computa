@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Meridian Desk - Search</title><style>body{font:17px/1.6 system-ui,sans-serif;max-width:900px;margin:3rem auto;padding:0 1rem;color:#172338;background:#f7f9fc}header,main,section,article{margin:1rem 0;padding:1rem;border:1px solid #b7c6d8;background:white}a{margin:.3rem}input{font:inherit;padding:.5rem;width:75%}label{display:block;font-weight:600}</style></head><body>
+<header><a href="meridian-home.html">Records desk</a></header>
+<main><h1>Search records</h1><label for="record-query">Search records</label><input id="record-query" type="search" autocomplete="off" value="">
+<p id="query-status" role="status">Enter a record name or phrase.</p><a id="show-results" hidden>Show results</a></main>
+<script>
+const query = document.getElementById("record-query");
+const submit = document.getElementById("show-results");
+const status = document.getElementById("query-status");
+query.addEventListener("input", () => {
+  const value = query.value.trim();
+  submit.hidden = value.length === 0;
+  if (value) submit.setAttribute("href", "meridian-results.html?q=" + encodeURIComponent(value));
+  else submit.removeAttribute("href");
+  status.textContent = value ? "Query ready. Open results to view matching records." : "Enter a record name or phrase.";
+});
+</script>
+</body></html>

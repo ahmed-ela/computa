@@ -42,6 +42,8 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         let observationID: String?
         let observationTargetID: String?
         let observationSequence: UInt64?
+        let observationReadScope: String?
+        let observationSourceComplete: Bool?
     }
 
     struct Verification: Codable, Equatable, Sendable {
@@ -106,6 +108,9 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         /// Host-classified schema rejection occurred before any application
         /// was bound. Optional for compatibility with earlier saved receipts.
         var preflightTargetWasUnbound: Bool?
+        /// Host-owned hash of the exact browser read selection. A replacement
+        /// read corrects this prerequisite only when that source is complete.
+        var requiredReadScope: String?
         var preflightCorrection: PreflightCorrectionReceipt?
         /// Armed from a fresh observation before dispatch. It owns its bounded
         /// baseline independently of the progressive 128-property cache above.
@@ -130,6 +135,8 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         let sequence: UInt64
         let properties: [String: String]
         let isLive: Bool
+        let readScope: String?
+        let sourceComplete: Bool?
     }
 
     enum Failure: Error, LocalizedError, Equatable {
@@ -223,10 +230,11 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         let index = try unresolvedIndex(operationID)
         let operation = operations[index]
         guard operation.requiresVerification,
-              ["computer_v2_ax", "computer_v2_set_text"].contains(operation.tool),
+              ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(operation.tool),
               operation.dispatch == .notDispatched, operation.foregroundEffect == nil,
               operation.failureCode == nil, operation.preflightRejection == nil,
               !operation.hasVerificationPlan else { throw Failure.invalidTransition }
+        guard operation.tool != "computer_v2_follow_link" || plan.kind == .documentURL else { throw Failure.invalidTransition }
         try plan.validate()
         guard plan.scope.evidenceTargetID == operation.targetID else { throw Failure.wrongTarget }
         operations[index].verificationPlan = plan
@@ -467,17 +475,21 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
     /// established; approval refusal, connection loss and unclassified failures
     /// must use recordFailure instead.
     mutating func recordPreflightRejection(operationID: String, kind: PreflightRejection,
-                                          code: String, message: String, targetWasUnbound: Bool = false) throws {
+                                          code: String, message: String, targetWasUnbound: Bool = false,
+                                          requiredReadScope: String? = nil) throws {
         try Self.identity(code)
+        if let requiredReadScope { try Self.readScopeIdentity(requiredReadScope) }
         let index = try unresolvedIndex(operationID)
         guard operations[index].dispatch == .notDispatched,
               operations[index].foregroundEffect == nil,
               operations[index].preflightRejection == nil,
               kind != .pendingAction,
               kind != .freshInventoryRequired || !operations[index].requiresVerification,
-              !targetWasUnbound || kind == .invalidArguments else { throw Failure.invalidTransition }
+              !targetWasUnbound || kind == .invalidArguments,
+              requiredReadScope == nil || kind == .freshObservationRequired else { throw Failure.invalidTransition }
         operations[index].preflightRejection = kind
         operations[index].preflightTargetWasUnbound = targetWasUnbound ? true : nil
+        operations[index].requiredReadScope = requiredReadScope
         operations[index].failureCode = code
         operations[index].failureMessage = String(message.prefix(512))
         operations[index].observationAfter = try nextSequence()
@@ -501,7 +513,8 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                 && $0.sequence > successor.observationAfter }
             receipt = .init(successorOperationID: successorID, kind: .validatedArguments,
                             observationID: observed?.id, observationTargetID: observed?.targetID,
-                            observationSequence: observed?.sequence)
+                            observationSequence: observed?.sequence, observationReadScope: observed?.readScope,
+                            observationSourceComplete: observed?.sourceComplete)
         case .freshBoundObservation(let observationID, let targetID):
             guard successor.tool == "computer_v2_snapshot", !successor.requiresVerification else {
                 throw Failure.invalidRecovery
@@ -517,7 +530,8 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
             }
             receipt = .init(successorOperationID: successorID, kind: .freshBoundObservation,
                             observationID: observationID, observationTargetID: targetID,
-                            observationSequence: observation.sequence)
+                            observationSequence: observation.sequence, observationReadScope: observation.readScope,
+                            observationSourceComplete: observation.sourceComplete)
         case .freshInventory(let observationID, let targetID):
             guard successor.tool == "computer_v2_tabs", !successor.requiresVerification,
                   successor.foregroundEffect == nil else { throw Failure.invalidRecovery }
@@ -532,7 +546,8 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
             }
             receipt = .init(successorOperationID: successorID, kind: .freshInventory,
                             observationID: observationID, observationTargetID: targetID,
-                            observationSequence: observation.sequence)
+                            observationSequence: observation.sequence, observationReadScope: observation.readScope,
+                            observationSourceComplete: observation.sourceComplete)
         }
         var corrected = 0
         for index in operations.indices where index < successorIndex && !operations[index].isResolved {
@@ -547,9 +562,10 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
     /// model's assertion. Bounding the retained properties can prevent a proof
     /// from being available; it cannot turn an absent property into a match.
     mutating func recordObservation(id: String, targetID: String, properties: [String: String],
-                                    isLive: Bool = true) throws {
+                                    isLive: Bool = true, readScope: String? = nil, sourceComplete: Bool = false) throws {
         try Self.identity(id)
         try Self.identity(targetID)
+        if let readScope { try Self.readScopeIdentity(readScope) }
         // Reusing an ID must not make an old snapshot appear freshly captured.
         guard !observations.contains(where: { $0.id == id }) else { throw Failure.staleObservation }
         var retained: [String: String] = [:]
@@ -563,7 +579,8 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
             bytes += additional
         }
         observations.append(Observation(id: id, targetID: targetID, sequence: try nextSequence(),
-                                        properties: retained, isLive: isLive))
+                                        properties: retained, isLive: isLive, readScope: readScope,
+                                        sourceComplete: sourceComplete ? true : nil))
         if observations.count > Self.maximumObservations {
             observations.removeFirst(observations.count - Self.maximumObservations)
         }
@@ -750,6 +767,12 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         }
     }
 
+    private static func readScopeIdentity(_ value: String) throws {
+        guard value.utf8.count == 64, value.utf8.allSatisfy({ (48 ... 57).contains($0) || (97 ... 102).contains($0) }) else {
+            throw Failure.invalidIdentity
+        }
+    }
+
     private static func fingerprint(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
@@ -781,9 +804,26 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
               rejection != .pendingAction,
               receipt.successorOperationID == successor.id,
               isDirectSuccessfulOperation(successor) else { return false }
+        if let requiredReadScope = failed.requiredReadScope {
+            guard rejection == .freshObservationRequired, receipt.kind == .freshBoundObservation,
+                  receipt.observationReadScope == requiredReadScope, receipt.observationSourceComplete == true,
+                  successor.observationAfter > failed.observationAfter else { return false }
+        }
         switch receipt.kind {
         case .validatedArguments:
-            guard rejection != .freshInventoryRequired, failed.tool == successor.tool else { return false }
+            guard rejection != .freshInventoryRequired else { return false }
+            if failed.tool != successor.tool {
+                // Two tool names may express the same observed link press.
+                // Only a verified host-owned URL plan can correct the other
+                // spelling's undispatched argument rejection, on the exact
+                // target and observed input identity. Never clear unrelated debt.
+                guard rejection == .invalidArguments,
+                      Set([failed.tool, successor.tool]) == Set(["computer_v2_ax", "computer_v2_follow_link"]),
+                      failed.targetID == successor.targetID,
+                      let key = failed.recoveryKey, key == successor.recoveryKey,
+                      successor.verificationPlan?.kind == .documentURL,
+                      successor.verification != nil else { return false }
+            }
             let hasObservedTarget = receipt.observationID?.isEmpty == false
                 && receipt.observationTargetID == successor.targetID
                 && (receipt.observationSequence ?? 0) > successor.observationAfter
@@ -846,6 +886,10 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         for operation in operations {
             for id in [operation.id, operation.tool, operation.targetID] { try Self.identity(id) }
             if let key = operation.recoveryKey { try Self.identity(key) }
+            if let scope = operation.requiredReadScope {
+                try Self.readScopeIdentity(scope)
+                guard operation.preflightRejection == .freshObservationRequired else { throw Failure.invalidCheckpoint }
+            }
             if let baseline = operation.baselineProperties {
                 guard baseline.count <= Self.maximumProperties,
                       baseline.allSatisfy({ !$0.key.isEmpty && $0.key.utf8.count <= 256
@@ -858,13 +902,17 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
             guard (operation.failureMessage?.count ?? 0) <= 512 else { throw Failure.invalidCheckpoint }
             guard operation.verificationPlan == nil || operation.nativeVerificationPlan == nil else { throw Failure.invalidCheckpoint }
             if let plan = operation.verificationPlan { try plan.validate() }
+            if operation.tool == "computer_v2_follow_link", operation.hasVerificationPlan {
+                guard operation.verificationPlan?.kind == .documentURL,
+                      operation.nativeVerificationPlan == nil else { throw Failure.invalidCheckpoint }
+            }
             if let plan = operation.nativeVerificationPlan { try plan.validate() }
             let plannedTarget = operation.verificationPlan?.scope.evidenceTargetID ?? operation.nativeVerificationPlan?.scope.evidenceTargetID
             let plannedProperty = operation.verificationPlan?.property ?? operation.nativeVerificationPlan?.property
             let plannedExpected = operation.verificationPlan?.expected ?? operation.nativeVerificationPlan?.expected
             if let plannedTarget {
                 guard operation.requiresVerification,
-                      ["computer_v2_ax", "computer_v2_set_text"].contains(operation.tool),
+                      ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(operation.tool),
                       plannedTarget == operation.targetID,
                       let progress = operation.plannedVerificationProgress,
                       (0 ... Self.maximumPlannedVerificationAttempts).contains(progress.attempts) else {
@@ -972,6 +1020,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                       operation.preflightRejection == .invalidArguments else { throw Failure.invalidCheckpoint }
             }
             if let correction = operation.preflightCorrection {
+                if let scope = correction.observationReadScope { try Self.readScopeIdentity(scope) }
                 guard let index = operations.firstIndex(where: { $0.id == operation.id }),
                       let later = operations.dropFirst(index + 1).first(where: { $0.id == correction.successorOperationID }),
                       Self.isValidPreflightCorrection(failed: operation, successor: later, receipt: correction) else {
@@ -983,10 +1032,12 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                           let targetID = correction.observationTargetID else { throw Failure.invalidCheckpoint }
                     try Self.identity(targetID)
                     if let retained = observations.first(where: { $0.id == id }) {
-                        guard retained.isLive, retained.sequence == observationSequence, retained.targetID == targetID else {
+                        guard retained.isLive, retained.sequence == observationSequence, retained.targetID == targetID,
+                              retained.readScope == correction.observationReadScope,
+                              retained.sourceComplete == correction.observationSourceComplete else {
                             throw Failure.invalidCheckpoint
                         }
-                    } else if correction.kind == .freshInventory {
+                    } else if correction.kind == .freshInventory || operation.requiredReadScope != nil {
                         // A durable correction may outlive the bounded read
                         // cache, but a supposedly recent missing observation
                         // cannot be explained by normal oldest-first eviction.
@@ -1012,6 +1063,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         for observation in observations {
             try Self.identity(observation.id)
             try Self.identity(observation.targetID)
+            if let scope = observation.readScope { try Self.readScopeIdentity(scope) }
             guard observation.sequence <= sequence, observation.properties.count <= Self.maximumProperties,
                   observation.properties.allSatisfy({ !$0.key.isEmpty && $0.key.utf8.count <= 256 && $0.value.utf8.count <= 8_192 }),
                   observation.properties.reduce(0, { $0 + $1.key.utf8.count + $1.value.utf8.count }) <= Self.maximumPropertyBytes else {

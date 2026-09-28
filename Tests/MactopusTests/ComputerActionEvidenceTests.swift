@@ -654,6 +654,135 @@ final class ComputerActionEvidenceTests: XCTestCase {
         }
     }
 
+
+    func testScopedReadCorrectionRequiresCompleteLiveReadAndPreservesUndispatchedReceipt() throws {
+        let scope = String(repeating: "a", count: 64)
+        var ledger = try preflight(kind: .freshObservationRequired, requiredReadScope: scope)
+        ledger = try ComputerActionEvidence.restore(ledger.checkpointData(), turnID: "turn")
+        XCTAssertNotNil(ledger.completionDiagnostic)
+        try freshRead(&ledger, readScope: scope, sourceComplete: true)
+        XCTAssertEqual(try ledger.recoverPreflightRejections(afterSuccessfulOperationID: "read",
+            correction: .freshBoundObservation(observationID: "observed", targetID: "tab")), 1)
+        let rejected = try XCTUnwrap(ledger.operations.first)
+        XCTAssertEqual(rejected.dispatch, .notDispatched)
+        XCTAssertEqual(rejected.failureCode, "preflight_rejected")
+        XCTAssertNil(rejected.verification)
+        XCTAssertEqual(rejected.requiredReadScope, scope)
+        XCTAssertEqual(rejected.preflightCorrection?.observationReadScope, scope)
+        XCTAssertEqual(rejected.preflightCorrection?.observationSourceComplete, true)
+        XCTAssertNil(ledger.completionDiagnostic)
+        let checkpoint = try ledger.checkpointText()
+        XCTAssertTrue(checkpoint.contains("preflight_corrected_not_performed"))
+        XCTAssertFalse(checkpoint.contains(scope))
+        XCTAssertEqual(try ComputerActionEvidence.restore(ledger.checkpointData(), turnID: "turn"), ledger)
+    }
+
+    func testScopedReadCorrectionRejectsOtherMissingPartialAndRetainedScopes() throws {
+        let scope = String(repeating: "a", count: 64)
+        for scenario in ["other-scope", "missing-scope", "partial", "retained", "other-target"] {
+            var ledger = try preflight(kind: .freshObservationRequired, requiredReadScope: scope)
+            let target = scenario == "other-target" ? "other-tab" : "tab"
+            try freshRead(&ledger, target: target, isLive: scenario != "retained",
+                          readScope: scenario == "missing-scope" ? nil : scenario == "other-scope" ? String(repeating: "b", count: 64) : scope,
+                          sourceComplete: scenario != "partial")
+            if scenario == "retained" {
+                XCTAssertThrowsError(try ledger.recoverPreflightRejections(afterSuccessfulOperationID: "read",
+                    correction: .freshBoundObservation(observationID: "observed", targetID: target)))
+            } else {
+                XCTAssertEqual(try ledger.recoverPreflightRejections(afterSuccessfulOperationID: "read",
+                    correction: .freshBoundObservation(observationID: "observed", targetID: target)), 0, scenario)
+            }
+            XCTAssertEqual(ledger.unresolvedOperations.map(\.id), ["rejected"], scenario)
+            XCTAssertEqual(try ComputerActionEvidence.restore(ledger.checkpointData(), turnID: "turn"), ledger)
+        }
+    }
+
+    func testScopedReadCannotBeReplacedByVerifiedSameIntentAction() throws {
+        let scope = String(repeating: "a", count: 64)
+        var ledger = try preflight(kind: .freshObservationRequired, key: "same-intent", requiredReadScope: scope)
+        try ledger.begin(operationID: "replacement", tool: "computer_v2_ax", targetID: "tab",
+                         recoveryKey: "same-intent", baselineProperties: ["node:17:value": ""])
+        try ledger.recordDispatch(operationID: "replacement", state: .dispatched)
+        try ledger.recordObservation(id: "changed", targetID: "tab", properties: ["node:17:value": "query"],
+                                     readScope: scope, sourceComplete: true)
+        try ledger.verify(operationID: "replacement", observationID: "changed", property: "node:17:value", expectedValue: "query")
+        XCTAssertEqual(try ledger.recoverPreflightRejections(afterSuccessfulOperationID: "replacement", correction: .validatedArguments), 0)
+        XCTAssertEqual(ledger.unresolvedOperations.map(\.id), ["rejected"])
+    }
+
+    func testScopedCompleteReadCannotClearUnclassifiedOrUncertainFailure() throws {
+        let scope = String(repeating: "a", count: 64)
+        for dispatch in [ComputerActionEvidence.DispatchState.notDispatched, .unknown, .dispatched] {
+            var ledger = try mutation()
+            try ledger.recordFailure(operationID: "input", code: "failed", message: "Unclassified failure", dispatch: dispatch)
+            try freshRead(&ledger, readScope: scope, sourceComplete: true)
+            XCTAssertEqual(try ledger.recoverPreflightRejections(afterSuccessfulOperationID: "read",
+                correction: .freshBoundObservation(observationID: "observed", targetID: "tab")), 0)
+            XCTAssertEqual(ledger.unresolvedOperations.map(\.id), ["input"])
+            XCTAssertEqual(ledger.operations.first?.dispatch, dispatch)
+        }
+    }
+
+    func testScopedCorrectionCheckpointRechecksScopeAndCompletenessAfterObservationEviction() throws {
+        let scope = String(repeating: "a", count: 64)
+        for evict in [false, true] {
+            var ledger = try preflight(kind: .freshObservationRequired, requiredReadScope: scope)
+            try freshRead(&ledger, readScope: scope, sourceComplete: true)
+            try ledger.recoverPreflightRejections(afterSuccessfulOperationID: "read",
+                correction: .freshBoundObservation(observationID: "observed", targetID: "tab"))
+            if evict {
+                for index in 0 ..< ComputerActionEvidence.maximumObservations {
+                    try ledger.recordObservation(id: "later-\(index)", targetID: "tab", properties: [:])
+                }
+            }
+            XCTAssertEqual(try ComputerActionEvidence.restore(ledger.checkpointData(), turnID: "turn"), ledger)
+            let original = try XCTUnwrap(JSONSerialization.jsonObject(with: ledger.checkpointData()) as? [String: Any])
+            for scenario in ["wrong-required", "invalid-required", "wrong-kind", "receipt-scope", "receipt-scope-missing", "receipt-partial", "receipt-complete-missing", "receipt-kind", "receipt-sequence"] {
+                var object = original
+                var operations = try XCTUnwrap(object["operations"] as? [[String: Any]])
+                if scenario == "wrong-required" { operations[0]["requiredReadScope"] = String(repeating: "b", count: 64) }
+                else if scenario == "invalid-required" { operations[0]["requiredReadScope"] = "PRIVATE_SCOPE" }
+                else if scenario == "wrong-kind" { operations[0]["preflightRejection"] = "invalidArguments" }
+                else {
+                    var receipt = try XCTUnwrap(operations[0]["preflightCorrection"] as? [String: Any])
+                    if scenario == "receipt-scope" { receipt["observationReadScope"] = String(repeating: "b", count: 64) }
+                    if scenario == "receipt-scope-missing" { receipt.removeValue(forKey: "observationReadScope") }
+                    if scenario == "receipt-partial" { receipt["observationSourceComplete"] = false }
+                    if scenario == "receipt-complete-missing" { receipt.removeValue(forKey: "observationSourceComplete") }
+                    if scenario == "receipt-kind" { receipt["kind"] = "validatedArguments" }
+                    if scenario == "receipt-sequence" { receipt["observationSequence"] = 99999 }
+                    operations[0]["preflightCorrection"] = receipt
+                }
+                object["operations"] = operations
+                XCTAssertThrowsError(try ComputerActionEvidence.restore(JSONSerialization.data(withJSONObject: object), turnID: "turn"), "\(scenario), evicted=\(evict)")
+            }
+            if !evict {
+                for scenario in ["scope", "partial", "retained", "missing"] {
+                    var object = original
+                    var observations = try XCTUnwrap(object["observations"] as? [[String: Any]])
+                    if scenario == "scope" { observations[0]["readScope"] = String(repeating: "b", count: 64) }
+                    if scenario == "partial" { observations[0]["sourceComplete"] = false }
+                    if scenario == "retained" { observations[0]["isLive"] = false }
+                    object["observations"] = scenario == "missing" ? [] : observations
+                    XCTAssertThrowsError(try ComputerActionEvidence.restore(JSONSerialization.data(withJSONObject: object), turnID: "turn"), scenario)
+                }
+            }
+        }
+    }
+
+    func testReadScopeRequiresHostHashAndFreshObservationRejection() throws {
+        for scope in ["", "PRIVATE_SCOPE", String(repeating: "a", count: 63), String(repeating: "A", count: 64), String(repeating: "g", count: 64)] {
+            XCTAssertThrowsError(try preflight(kind: .freshObservationRequired, requiredReadScope: scope))
+            var ledger = ComputerActionEvidence(turnID: "turn")
+            let before = ledger
+            XCTAssertThrowsError(try ledger.recordObservation(id: "read", targetID: "tab", properties: [:], readScope: scope, sourceComplete: true))
+            XCTAssertEqual(ledger, before)
+        }
+        for kind in [ComputerActionEvidence.PreflightRejection.invalidArguments, .bindingRequired, .freshInventoryRequired, .pendingAction] {
+            XCTAssertThrowsError(try preflight(kind: kind, requiredReadScope: String(repeating: "a", count: 64)))
+        }
+    }
+
     func testUnknownAndDispatchedEffectsCannotBeReclassifiedOrClearedByPreflightRecovery() throws {
         for dispatch in [ComputerActionEvidence.DispatchState.dispatched, .unknown] {
             var ledger = try mutation()
@@ -1404,6 +1533,44 @@ final class ComputerActionEvidenceTests: XCTestCase {
         return (ledger, scope, plan, token, before)
     }
 
+    func testVerifiedFollowLinkCorrectsOnlySameObservedUndispatchedAXIntent() throws {
+        for scenario in ["same", "different-target", "different-key", "missing-key", "unverified", "wrong-tool"] {
+            let binding = plannedBinding()
+            let target = "browser:\(binding.browserGeneration):\(binding.targetID)"
+            let before = BrowserTabSnapshot(id: UUID(), tabHandle: binding.handle,
+                documentEpoch: binding.documentEpoch, loaderID: "loader",
+                documentURL: URL(string: "https://example.test/home")!, elements: [
+                    .init(index: 0, backendNodeID: 17, role: "AXLink", label: "Record", value: nil,
+                          isEnabled: true, supportsPress: true, supportsSetText: false,
+                          linkURL: "https://example.test/record", semanticRole: "link")], formattedText: "")
+            let plan = try XCTUnwrap(BrowserActionVerification.compile(action: .press, elementIndex: 0,
+                snapshot: before, binding: binding))
+            var ledger = try preflight(kind: .invalidArguments,
+                tool: scenario == "wrong-tool" ? "computer_v2_set_text" : "computer_v2_ax",
+                target: scenario == "different-target" ? "other" : target,
+                key: scenario == "missing-key" ? nil : "press-node17")
+            try ledger.begin(operationID: "follow", tool: "computer_v2_follow_link", targetID: target,
+                             recoveryKey: scenario == "different-key" ? "press-node18" : "press-node17")
+            try ledger.armVerification(operationID: "follow", plan: plan)
+            try ledger.recordDispatch(operationID: "follow", state: .dispatched)
+            if scenario != "unverified" {
+                try ledger.beginPlannedVerificationAttempt(operationID: "follow")
+                let after = BrowserTabSnapshot(id: UUID(), tabHandle: binding.handle,
+                    documentEpoch: binding.documentEpoch, loaderID: "record-loader",
+                    documentURL: URL(string: "https://example.test/record")!, elements: [], formattedText: "")
+                try ledger.recordObservation(id: after.id.uuidString, targetID: target, properties: [:])
+                try ledger.verifyPlanned(operationID: "follow", observationID: after.id.uuidString,
+                                         binding: binding, snapshot: after)
+                XCTAssertEqual(try ledger.recoverPreflightRejections(afterSuccessfulOperationID: "follow",
+                    correction: .validatedArguments), scenario == "same" ? 1 : 0, scenario)
+            } else {
+                XCTAssertThrowsError(try ledger.recoverPreflightRejections(afterSuccessfulOperationID: "follow",
+                    correction: .validatedArguments))
+            }
+            XCTAssertEqual(try ComputerActionEvidence.restore(ledger.checkpointData(), turnID: "turn"), ledger, scenario)
+        }
+    }
+
     private func plannedBinding() -> BrowserTabBinding {
         BrowserTabBinding(handle: UUID(), taskKey: "task", browserGeneration: UUID(), targetID: "tab",
                           targetInstanceToken: "instance", processIdentifier: 123, documentEpoch: UUID(),
@@ -1434,20 +1601,21 @@ final class ComputerActionEvidenceTests: XCTestCase {
 
     private func preflight(kind: ComputerActionEvidence.PreflightRejection, tool: String = "computer_v2_ax",
                            target: String = "tab", key: String? = nil, requiresVerification: Bool = true,
-                           targetWasUnbound: Bool = false) throws -> ComputerActionEvidence {
+                           targetWasUnbound: Bool = false, requiredReadScope: String? = nil) throws -> ComputerActionEvidence {
         var ledger = ComputerActionEvidence(turnID: "turn")
         try ledger.begin(operationID: "rejected", tool: tool, targetID: target, recoveryKey: key,
                          requiresVerification: requiresVerification)
         try ledger.recordPreflightRejection(operationID: "rejected", kind: kind, code: "preflight_rejected",
-                                           message: "Rejected before dispatch", targetWasUnbound: targetWasUnbound)
+                                           message: "Rejected before dispatch", targetWasUnbound: targetWasUnbound, requiredReadScope: requiredReadScope)
         return ledger
     }
 
     private func freshRead(_ ledger: inout ComputerActionEvidence, target: String = "tab", tool: String = "computer_v2_snapshot",
-                           key: String? = nil, isLive: Bool = true) throws {
+                           key: String? = nil, isLive: Bool = true, readScope: String? = nil, sourceComplete: Bool = false) throws {
         try ledger.begin(operationID: "read", tool: tool, targetID: target, recoveryKey: key, requiresVerification: false)
         try ledger.recordDispatch(operationID: "read", state: .dispatched)
-        try ledger.recordObservation(id: "observed", targetID: target, properties: ["node:17:value": ""], isLive: isLive)
+        try ledger.recordObservation(id: "observed", targetID: target, properties: ["node:17:value": ""], isLive: isLive,
+                                     readScope: readScope, sourceComplete: sourceComplete)
     }
 
     private func mutation() throws -> ComputerActionEvidence {

@@ -65,13 +65,16 @@ struct BorrowedChromeInventoryItem: Equatable, Sendable {
     let title: String
     let url: URL
     let availability: BorrowedChromeTabCandidate.Availability
+    let requestScopeMatch: Bool?
 
     init(candidateToken: UUID, title: String, url: URL,
-         availability: BorrowedChromeTabCandidate.Availability = .unknown) {
+         availability: BorrowedChromeTabCandidate.Availability = .unknown,
+         requestScopeMatch: Bool? = nil) {
         self.candidateToken = candidateToken
         self.title = title
         self.url = url
         self.availability = availability
+        self.requestScopeMatch = requestScopeMatch
     }
 }
 
@@ -79,6 +82,15 @@ struct BorrowedChromeInventoryPage: Equatable, Sendable {
     let items: [BorrowedChromeInventoryItem]
     let nextCursor: UUID?
     let totalCount: Int
+    let requestedScopeFirst: Bool
+
+    init(items: [BorrowedChromeInventoryItem], nextCursor: UUID?, totalCount: Int,
+         requestedScopeFirst: Bool = false) {
+        self.items = items
+        self.nextCursor = nextCursor
+        self.totalCount = totalCount
+        self.requestedScopeFirst = requestedScopeFirst
+    }
 }
 
 enum BorrowedChromeSessionOwnerError: Error, LocalizedError, Equatable {
@@ -188,11 +200,13 @@ actor BorrowedChromeSessionOwner {
         let token: UUID
         let candidate: BorrowedChromeTabCandidate
         let bytes: Int
+        let requestScopeMatch: Bool?
     }
 
     private struct Inventory {
         let entries: [InventoryEntry]
         let bytes: Int
+        let requestedScopeFirst: Bool
         var cursors: [UUID: Int] = [:]
     }
 
@@ -310,7 +324,8 @@ actor BorrowedChromeSessionOwner {
     /// No cursor refreshes the inventory and invalidates all prior candidate
     /// and cursor tokens for this turn. Overflow rejects the whole inventory.
     func listTabs(
-        turn: BorrowedChromeTurn, cursor: UUID? = nil, pageSize: Int = 25
+        turn: BorrowedChromeTurn, cursor: UUID? = nil, pageSize: Int = 25,
+        requestScope: ComputerTaskScope? = nil
     ) async throws -> BorrowedChromeInventoryPage {
         guard (1...100).contains(pageSize) else { throw BorrowedChromeSessionOwnerError.invalidPageSize }
         let operation = try beginOperation(turn)
@@ -343,12 +358,21 @@ actor BorrowedChromeSessionOwner {
                 guard bytes + retainedMetadataBytes <= 1_048_576 else {
                     throw BorrowedChromeSessionOwnerError.capacityExceeded
                 }
-                entries.append(InventoryEntry(token: UUID(), candidate: candidate, bytes: entryBytes))
+                entries.append(InventoryEntry(token: UUID(), candidate: candidate, bytes: entryBytes,
+                    requestScopeMatch: requestScope?.candidateMatch(url: candidate.url, title: candidate.title)))
             }
             guard candidates.count + retainedTargetCount <= 2_048 else {
                 throw BorrowedChromeSessionOwnerError.capacityExceeded
             }
-            inventories[turn.nonce] = Inventory(entries: entries, bytes: bytes)
+            // Freeze full-metadata scope labels and a stable partition BEFORE
+            // pagination. Every candidate remains present; cursors never rerank.
+            let requestedScopeFirst = requestScope?.hasCandidateRestriction == true
+            if requestedScopeFirst {
+                entries = entries.filter { $0.requestScopeMatch == true }
+                    + entries.filter { $0.requestScopeMatch != true }
+            }
+            inventories[turn.nonce] = Inventory(entries: entries, bytes: bytes,
+                                                requestedScopeFirst: requestedScopeFirst)
             return try page(turn, start: 0, size: pageSize)
         } catch {
             await discardIfConnectionFailed(error)
@@ -373,7 +397,7 @@ actor BorrowedChromeSessionOwner {
         guard let inventory = inventories[turn.nonce] else { throw BorrowedChromeSessionOwnerError.invalidCursor }
         guard let entry = inventory.entries.first(where: { $0.candidate.targetID == targetID }) else { return nil }
         return .init(candidateToken: entry.token, title: entry.candidate.title, url: entry.candidate.url,
-                     availability: entry.candidate.availability)
+                     availability: entry.candidate.availability, requestScopeMatch: entry.requestScopeMatch)
     }
 
     /// Use only with a newly completed listTabs refresh, not as a live probe.
@@ -675,11 +699,11 @@ actor BorrowedChromeSessionOwner {
             let entry = inventory.entries[end]
             let item = BorrowedChromeInventoryItem(
                 candidateToken: entry.token, title: entry.candidate.title, url: entry.candidate.url,
-                availability: entry.candidate.availability
+                availability: entry.candidate.availability, requestScopeMatch: entry.requestScopeMatch
             )
             let proposed = BorrowedChromeInventoryPage(
                 items: items + [item], nextCursor: end + 1 < inventory.entries.count ? sizingCursor : nil,
-                totalCount: inventory.entries.count
+                totalCount: inventory.entries.count, requestedScopeFirst: inventory.requestedScopeFirst
             )
             guard try BorrowedChromeInventoryPresentation.fits(proposed) else { break }
             items.append(item)
@@ -693,7 +717,8 @@ actor BorrowedChromeSessionOwner {
             cursor = inventory.cursors.first(where: { $0.value == end })?.key ?? UUID()
             inventory.cursors[cursor!] = end
         } else { cursor = nil }
-        let result = BorrowedChromeInventoryPage(items: items, nextCursor: cursor, totalCount: inventory.entries.count)
+        let result = BorrowedChromeInventoryPage(items: items, nextCursor: cursor, totalCount: inventory.entries.count,
+                                                requestedScopeFirst: inventory.requestedScopeFirst)
         guard try BorrowedChromeInventoryPresentation.fits(result) else {
             throw BorrowedChromeSessionOwnerError.capacityExceeded
         }

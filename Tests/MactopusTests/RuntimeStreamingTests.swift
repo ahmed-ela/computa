@@ -238,6 +238,10 @@ final class RuntimeStreamingTests: XCTestCase {
                 try await self.waitFor("maintenance completed event") { harness.audit.compactionsCompleted == 1 }
                 XCTAssertEqual(harness.audit.deltas.map(\.text), ["Baseline"])
                 XCTAssertEqual(harness.audit.assistant.map(\.body), ["Baseline."])
+                XCTAssertTrue(harness.audit.approvals.isEmpty)
+                let deniedData = try Data(contentsOf: harness.root.appendingPathComponent("response-command-maintenance"))
+                let denied = try XCTUnwrap(JSONSerialization.jsonObject(with: deniedData) as? [String: Any])
+                XCTAssertEqual((denied["result"] as? [String: Any])?["decision"] as? String, "decline")
                 XCTAssertTrue(harness.audit.reasoningUpdates.isEmpty)
                 XCTAssertTrue(harness.audit.reasoning.isEmpty)
                 XCTAssertEqual(harness.audit.phases.map { "\($0.itemID):\($0.text)" }, ["streamed-answer:final_answer"])
@@ -245,6 +249,174 @@ final class RuntimeStreamingTests: XCTestCase {
                 maintenance.cancel()
                 throw error
             }
+        }
+    }
+
+    func testCommandOutputStreamsIntoOneToolRowAndAuthoritativeExitCompletesIt() async throws {
+        try await withHarness(scenario: "command-progress") { harness in
+            let state = AppState(tasks: [AgentTask(id: harness.taskID, title: "CLI", summary: "",
+                status: .draft, workspace: harness.root.path, model: harness.modelID)], runtime: harness.runtime,
+                preferences: isolatedTestPreferences(), enableChromeExtensionBridge: false)
+            harness.audit.state = state
+            try await harness.submit()
+            try await self.waitFor("command output fence") { harness.audit.measuredTokens == 1_000 }
+            let running = try XCTUnwrap(harness.audit.commands.last)
+            XCTAssertEqual(running.toolEvent?.status, .running)
+            XCTAssertTrue(running.toolEvent?.output?.contains("first output") == true)
+            XCTAssertTrue(running.toolEvent?.input.contains("/private/fixture") == true)
+            XCTAssertEqual(state.tasks.first?.entries.filter { $0.toolEvent?.name == "commandExecution" }.count, 1)
+            try harness.release("release-command")
+            try await self.waitFor("command completion fence") { harness.audit.measuredTokens == 1_001 }
+            let final = try XCTUnwrap(harness.audit.commands.last)
+            XCTAssertEqual(final.toolEvent?.status, .succeeded)
+            XCTAssertEqual(final.toolEvent?.output, "authoritative output\nExit code: 0")
+            XCTAssertEqual(final.toolEvent?.duration, 0.125)
+            XCTAssertEqual(state.tasks.first?.entries.filter { $0.toolEvent?.name == "commandExecution" }.count, 1)
+            XCTAssertFalse(harness.audit.commands.contains { $0.toolEvent?.output?.contains("WRONG_TURN") == true
+                || $0.toolEvent?.output?.contains("UNKNOWN_ITEM") == true
+                || $0.toolEvent?.output?.contains("DUPLICATE_FINAL") == true
+                || $0.toolEvent?.output?.contains("AFTER_") == true })
+        }
+    }
+
+    func testCommandApprovalsRequireExactActiveTurnAndRetainAcceptDeclineDecisions() async throws {
+        for approved in [false, true] {
+            try await withHarness(scenario: "command-approval") { harness in
+                try await harness.submit()
+                try await self.waitFor("only current command approval") { harness.audit.approvals.count == 1 }
+                XCTAssertEqual(harness.audit.approvals[0].kind, .command)
+                XCTAssertEqual(harness.audit.approvals[0].summary, "printf fixture")
+                try await harness.runtime.resolveApproval(requestID: harness.audit.approvals[0].id, approved: approved)
+                try await self.waitFor("command approval completion") { harness.audit.measuredTokens == 1_001 }
+                for name in ["command-wrong-turn", "command-wrong-thread", "command-missing-turn"] {
+                    let data = try Data(contentsOf: harness.root.appendingPathComponent("response-" + name))
+                    let response = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                    XCTAssertEqual((response["result"] as? [String: Any])?["decision"] as? String, "decline")
+                }
+                let final = try XCTUnwrap(harness.audit.commands.last)
+                XCTAssertEqual(final.toolEvent?.status, approved ? .succeeded : .failed)
+                XCTAssertTrue(final.toolEvent?.output?.contains(approved ? "Exit code: 0" : "Declined") == true)
+                XCTAssertEqual(harness.audit.approvals.count, 1)
+            }
+        }
+    }
+
+    func testStopAndDisconnectRetireCommandOutputWithoutInventingAnExitCode() async throws {
+        for scenario in ["command-stop", "command-disconnect"] {
+            try await withHarness(scenario: scenario) { harness in
+                try await harness.submit()
+                try await self.waitFor("running command") { harness.audit.measuredTokens == 1_000 }
+                if scenario == "command-stop" {
+                    try await harness.runtime.interrupt(taskID: harness.taskID)
+                    try await self.waitFor("stopped command fence") { harness.audit.measuredTokens == 1_001 }
+                    XCTAssertTrue(harness.markerExists("terminated-4321"))
+                    XCTAssertTrue(harness.markerExists("terminated-4322"))
+                    XCTAssertFalse(harness.markerExists("terminated-9999"))
+                    try await self.waitFor("host cleanup confirmation") { harness.audit.systemTitles.contains("Command cleanup") }
+                } else {
+                    try harness.release("release-command")
+                    try await self.waitFor("disconnected command") {
+                        harness.audit.commands.last?.toolEvent?.output?.contains("Runtime disconnected") == true
+                    }
+                }
+                let final = try XCTUnwrap(harness.audit.commands.last)
+                XCTAssertEqual(final.toolEvent?.status, .failed)
+                XCTAssertTrue(final.toolEvent?.output?.contains("unconfirmed") == true)
+                XCTAssertFalse(final.toolEvent?.output?.contains("Exit code: 0") == true)
+                XCTAssertFalse(harness.audit.commands.contains { $0.toolEvent?.output?.contains("AFTER_STOP") == true })
+                XCTAssertTrue(harness.audit.approvals.isEmpty)
+            }
+        }
+    }
+
+    func testGracefulShutdownCleansOnlyOwnedCommandSessionsAcrossInventoryPages() async throws {
+        try await withHarness(scenario: "command-shutdown") { harness in
+            try await harness.submit()
+            try await self.waitFor("running shutdown commands") { harness.audit.measuredTokens == 1_000 }
+            let report = await harness.runtime.shutdown()
+            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            XCTAssertTrue(harness.markerExists("terminated-4321"))
+            XCTAssertTrue(harness.markerExists("terminated-4322"))
+            XCTAssertFalse(harness.markerExists("terminated-9999"))
+            XCTAssertTrue(harness.audit.approvals.isEmpty)
+            XCTAssertFalse(harness.audit.commands.contains { $0.toolEvent?.output?.contains("AFTER_STOP") == true })
+        }
+    }
+
+    func testCompletedTurnPreservesOwnedBackgroundCommandForLaterStop() async throws {
+        try await withHarness(scenario: "command-background") { harness in
+            try await harness.submit()
+            try await self.waitFor("completed background turn") { harness.audit.measuredTokens == 1_001 }
+            XCTAssertEqual(harness.audit.commands.last?.toolEvent?.status, .running)
+            try await harness.runtime.interrupt(taskID: harness.taskID)
+            try await self.waitFor("completed-turn cleanup presentation") { harness.audit.systemTitles.contains("Command cleanup") }
+            XCTAssertEqual(harness.audit.commands.last?.toolEvent?.status, .failed)
+            XCTAssertTrue(harness.audit.commands.last?.toolEvent?.output?.contains("final exit status unconfirmed") == true)
+            XCTAssertTrue(harness.markerExists("terminated-4321"))
+            XCTAssertFalse(harness.markerExists("terminated-4322"))
+            XCTAssertFalse(harness.markerExists("terminated-9999"))
+        }
+    }
+
+    func testOwnedCommandCompletionSurvivesTurnEndNewTurnAndCompaction() async throws {
+        for scenario in ["command-late-completion", "command-late-new-turn", "command-compaction"] {
+            try await withHarness(scenario: scenario) { harness in
+                try await harness.submit()
+                try await self.waitFor("background turn completed") { harness.audit.measuredTokens == 1_001 }
+                if scenario == "command-late-new-turn" {
+                    try await harness.submit()
+                    try await self.waitFor("successor turn completed") { harness.audit.measuredTokens == 1_002 }
+                }
+                if scenario == "command-compaction" {
+                    let maintenance = Task { try await harness.runtime.compact(taskID: harness.taskID) }
+                    try await self.waitFor("owned exit during compaction") { harness.audit.commands.last?.toolEvent?.status == .succeeded }
+                    try harness.release("release-maintenance")
+                    try await maintenance.value
+                    XCTAssertTrue(harness.audit.commands.last?.toolEvent?.output?.contains("compaction-time output") == true)
+                    XCTAssertTrue(harness.audit.approvals.isEmpty)
+                } else {
+                    try harness.release("release-late-command")
+                    try await self.waitFor("delayed owned completion") { harness.audit.commands.last?.toolEvent?.output?.contains("Exit code: 7") == true }
+                    XCTAssertEqual(harness.audit.commands.last?.toolEvent?.status, .failed)
+                    XCTAssertFalse(harness.audit.commands.contains { $0.toolEvent?.output?.contains("UNOWNED_LATE") == true })
+                }
+                XCTAssertEqual(Set(harness.audit.commands.map(\.id)), ["command-item"])
+            }
+        }
+    }
+
+    func testStopCleansOwnedSessionsWhenTurnFinishesBeforeInterruptReply() async throws {
+        try await withHarness(scenario: "command-raced-stop") { harness in
+            try await harness.submit()
+            try await self.waitFor("racing running command") { harness.audit.measuredTokens == 1_000 }
+            try await harness.runtime.interrupt(taskID: harness.taskID)
+            XCTAssertTrue(harness.markerExists("terminated-4321"))
+            XCTAssertFalse(harness.markerExists("terminated-4322"))
+            XCTAssertFalse(harness.markerExists("terminated-9999"))
+            XCTAssertFalse(harness.audit.commands.contains { $0.toolEvent?.status == .succeeded })
+        }
+    }
+
+    func testCommandTranscriptBoundsUTF8AndNeverTreatsUnknownExitAsSuccess() throws {
+        var transcript = AppServerCommandTranscript()
+        let item: [String: Any] = ["id": "command", "type": "commandExecution", "command": "fixture",
+                                   "cwd": "/tmp", "status": "inProgress"]
+        XCTAssertEqual(transcript.receive(item: item, completed: false)?.toolEvent?.status, .running)
+        let output = String(repeating: "é", count: 20_000)
+        let clipped = try XCTUnwrap(transcript.append(itemID: "command", delta: output))
+        XCTAssertTrue(clipped.toolEvent?.output?.contains("Output truncated") == true)
+        XCTAssertLessThan(clipped.toolEvent!.output!.utf8.count, AppServerCommandTranscript.maximumOutputBytes + 128)
+        XCTAssertNil(transcript.append(itemID: "command", delta: "discarded"))
+        var done = item; done["status"] = "completed"; done["exitCode"] = true
+        let final = try XCTUnwrap(transcript.receive(item: done, completed: true))
+        XCTAssertEqual(final.toolEvent?.status, .failed)
+        XCTAssertTrue(final.toolEvent?.output?.contains("Exit status unavailable") == true)
+        XCTAssertNil(transcript.receive(item: done, completed: true))
+        XCTAssertNil(transcript.append(itemID: "command", delta: "late"))
+        for (status, exit) in [("completed", 7), ("failed", 0), ("unknown", 0)] {
+            var other = AppServerCommandTranscript(); var failed = item
+            failed["status"] = status; failed["exitCode"] = exit
+            XCTAssertEqual(other.receive(item: failed, completed: true)?.toolEvent?.status, .failed)
         }
     }
 
@@ -257,6 +429,8 @@ final class RuntimeStreamingTests: XCTestCase {
         var deltas = [Delta]()
         var phases = [Delta]()
         var assistant = [TimelineEntry]()
+        var commands = [TimelineEntry]()
+        var approvals = [ActionApprovalRequest]()
         var reasoning = [TimelineEntry]()
         var reasoningUpdates = [Delta]()
         var reasoningDiscardCount = 0
@@ -285,8 +459,11 @@ final class RuntimeStreamingTests: XCTestCase {
                 streamingEvents.append("discard")
             case .timelineEntryAppended(let id, let entry) where id == taskID:
                 if entry.kind == .assistant { assistant.append(entry) }
+                if entry.toolEvent?.name == "commandExecution" { commands.append(entry) }
                 if entry.kind == .reasoning { reasoning.append(entry) }
                 if entry.kind == .system { systemTitles.append(entry.title) }
+            case .approvalRequested(let request) where request.taskID == taskID:
+                approvals.append(request)
             case .taskStatusChanged(let id, let value) where id == taskID:
                 status = value
             case .contextUsageUpdated(let id, let usage) where id == taskID:

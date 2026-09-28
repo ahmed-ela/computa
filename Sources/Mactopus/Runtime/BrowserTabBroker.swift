@@ -55,13 +55,17 @@ struct BrowserDocumentNode: Equatable, Sendable {
     /// focusability plus visible positive rendered bounds and pointer cursor.
     /// This is not proof that pressing it completes any user-requested action.
     let isFocusablePointer: Bool
+    /// Chrome AX editable metadata, independent of role names. Used to keep
+    /// contenteditable groups out of read-only result verification regions.
+    let isEditable: Bool
 
     init(
         backendNodeID: Int64?, role: String, name: String, value: String?,
         isDisabled: Bool, isReadOnly: Bool, isIgnored: Bool,
         nodeID: String? = nil, parentNodeID: String? = nil,
         childNodeIDs: [String] = [], linkURL: String? = nil,
-        isDOMClickable: Bool = false, isFocusablePointer: Bool = false
+        isDOMClickable: Bool = false, isFocusablePointer: Bool = false,
+        isEditable: Bool = false
     ) {
         self.backendNodeID = backendNodeID
         self.role = role
@@ -76,6 +80,7 @@ struct BrowserDocumentNode: Equatable, Sendable {
         self.linkURL = linkURL
         self.isDOMClickable = isDOMClickable
         self.isFocusablePointer = isFocusablePointer
+        self.isEditable = isEditable
     }
 }
 
@@ -166,6 +171,7 @@ struct BrowserTabElement: Equatable, Sendable {
     /// collapse to the same display roles and lose evidence-relevant meaning.
     var semanticRole: String? = nil
     var contentScope: BrowserContentScope = .unknown
+    var contentKind: SemanticReadContentKind = .unknown
 }
 
 struct BrowserTabSnapshot: Equatable, Sendable {
@@ -183,6 +189,11 @@ struct BrowserTabSnapshot: Equatable, Sendable {
     /// Internal source evidence, independent of the model-facing pagination.
     /// This is not a capability and never authorizes an unexposed element.
     var evidenceDocument: BrowserDocumentObservation? = nil
+    /// Exact emitted body spans; the retained source and action fields are not read coverage.
+    var readReceipt: SemanticReadReceipt? = nil
+    /// Exact published row text; full retained fields above must not be used
+    /// to reconstruct a model-facing reference menu.
+    var presentation: SemanticReadPresentation? = nil
 
     func element(at index: Int) -> BrowserTabElement? {
         guard elements.indices.contains(index), elements[index].index == index else {
@@ -359,9 +370,33 @@ actor BrowserTabSessionBroker {
         let selected: [BrowserTabElement]
         let request: SemanticReadRequest
         let scopeNodeID: String?
-        let nextOffset: Int
+        let sourceID: UUID
+        let nextPosition: ReadPosition
         let nextCursor: String?
         let snapshotID: UUID
+    }
+
+    private struct ReadPosition {
+        var element = 0
+        var field = 0
+        var utf8Offset = 0
+    }
+
+    private struct FieldFragment {
+        let field: SemanticReadField
+        let text: String
+        let start: Int
+        let end: Int
+        let total: Int
+    }
+
+    private struct ReadPage {
+        var elements: [BrowserTabElement] = []
+        var rows: [String] = []
+        var presentedRows: [SemanticReadPresentedRow] = []
+        var exposures: [SemanticReadFieldExposure] = []
+        var nextPosition: ReadPosition
+        var fieldsTruncated: Bool { nextPosition.field > 0 || nextPosition.utf8Offset > 0 }
     }
 
     private let transport: any BrowserTabTransport
@@ -632,28 +667,55 @@ actor BrowserTabSessionBroker {
         let selected = read.cursor == nil
             ? makeElements(from: document, read: effectiveRead, scopeNodeID: scopeNodeID)
             : priorRead!.selected
-        let offset = read.cursor == nil ? 0 : priorRead!.nextOffset
-        let page = makePage(selected: selected, offset: offset)
-        let elements = page.elements
-        let nextOffset = offset + elements.count
-        let nextCursor = nextOffset < selected.count ? UUID().uuidString : nil
+        let position = read.cursor == nil ? ReadPosition() : priorRead!.nextPosition
         let snapshotID = UUID()
         let currentBinding = binding(handle: suppliedBinding.handle, entry: entry)
+        // At most the next page can be exposed. The validator uses the full
+        // immutable source, without another browser read or any input authority.
+        let candidateSnapshot = BrowserTabSnapshot(id: snapshotID, tabHandle: currentBinding.handle,
+            documentEpoch: currentBinding.documentEpoch, loaderID: document.loaderID, documentURL: document.url,
+            elements: Array(selected.dropFirst(position.element).prefix(60)), formattedText: "",
+            sourceTruncated: document.sourceTruncated, isLiveObservation: !retainingObservation,
+            evidenceDocument: document)
+        let candidates = BrowserActionVerification.regionChangedCandidateBackendIDs(
+            snapshot: candidateSnapshot, binding: currentBinding)
+        let navigationCandidates = Set(candidateSnapshot.elements.filter {
+            BrowserActionVerification.observedLinkDestination($0, at: document.url) != nil
+        }.map(\.backendNodeID))
+        let page = try makePage(selected: selected, position: position, regionCandidates: candidates,
+                                navigationCandidates: navigationCandidates,
+                                overview: effectiveRead.view == .overview)
+        let elements = page.elements
+        let nextCursor = page.nextPosition.element < selected.count ? UUID().uuidString : nil
+        let sourceID = retainingObservation ? priorRead!.sourceID : UUID()
+        let receipt = SemanticReadReceipt(
+            id: snapshotID, sourceID: sourceID,
+            targetGeneration: "\(browserGeneration):\(currentBinding.handle):\(currentBinding.documentEpoch)",
+            consistency: .immutableCapture, view: effectiveRead.view, query: effectiveRead.query,
+            subtreeNodeID: scopeNodeID, selectedElementCount: selected.count,
+            selectedFieldCount: selected.reduce(0) { $0 + readFields($1).count },
+            sourceTruncated: document.sourceTruncated, fieldTruncated: page.fieldsTruncated,
+            outputTruncated: nextCursor != nil, exposures: page.exposures
+        )
         let formatted = formatSnapshot(
             snapshotID: snapshotID,
             binding: currentBinding,
             bundleIdentifier: bundleIdentifier,
             document: document,
             elements: elements,
+            rows: page.rows,
+            sourceID: sourceID,
             read: effectiveRead,
             scopeNodeID: scopeNodeID,
             totalMatches: selected.count,
-            offset: offset,
+            offset: position.element,
             nextCursor: nextCursor,
-            fieldsTruncated: page.fieldsTruncated || document.title.count > 512
-                || document.url.absoluteString.count > 2048,
+            fieldsTruncated: page.fieldsTruncated,
             retainedObservation: retainingObservation
         )
+        guard formatted.utf8.count <= 16_384 else {
+            throw BrowserTabBrokerError.invalidRead("the observed snapshot metadata exceeds the bounded read output")
+        }
         let snapshot = BrowserTabSnapshot(
             id: snapshotID,
             tabHandle: currentBinding.handle,
@@ -666,12 +728,14 @@ actor BrowserTabSessionBroker {
             sourceTruncated: document.sourceTruncated,
             totalMatches: selected.count,
             isLiveObservation: !retainingObservation,
-            evidenceDocument: document
+            evidenceDocument: document,
+            readReceipt: receipt,
+            presentation: .init(snapshotID: snapshotID, rows: page.presentedRows)
         )
         entry.activeSnapshot = snapshot
         entry.readState = ReadState(
             document: document, capturedAt: capturedAt, selected: selected, request: effectiveRead, scopeNodeID: scopeNodeID,
-            nextOffset: nextOffset, nextCursor: nextCursor, snapshotID: snapshotID
+            sourceID: sourceID, nextPosition: page.nextPosition, nextCursor: nextCursor, snapshotID: snapshotID
         )
         entries[suppliedBinding.handle] = entry
         return BrowserTabObservation(binding: currentBinding, snapshot: snapshot)
@@ -1022,20 +1086,24 @@ actor BrowserTabSessionBroker {
         let trimmedQuery = read.query?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        return document.nodes.compactMap { node in
+        let elements: [BrowserTabElement] = document.nodes.compactMap { node in
             if let scopeIDs, !scopeIDs.contains(node.nodeID ?? "") { return nil }
             guard var element = browserElement(from: node, index: 0) else { return nil }
             element.contentScope = contentScope(of: node, nodes: sourceNodes)
+            element.contentKind = contentKind(of: node, nodes: sourceNodes)
             switch read.view {
             case .all:
                 break
+            case .overview:
+                guard overviewCategory(element) != nil else { return nil }
             case .headings:
                 guard node.role.lowercased() == "heading" else { return nil }
             case .links:
                 guard node.role.lowercased() == "link" else { return nil }
             case .content:
-                guard !element.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || !(element.value ?? "").isEmpty else { return nil }
+                guard element.contentKind == .readable,
+                      !element.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || !(element.value ?? "").isEmpty else { return nil }
             }
             if let trimmedQuery, !trimmedQuery.isEmpty {
                 let matches = [element.role, element.label, element.value, element.linkURL]
@@ -1048,6 +1116,39 @@ actor BrowserTabSessionBroker {
             }
             return element
         }
+        guard read.view == .overview else { return elements }
+        // Interleave observed controls, headings, and navigation so a long
+        // sidebar cannot consume the first page before controls are exposed.
+        // Preserve source order within headings/navigation and each control
+        // strength group, then freeze this selection for continuations.
+        // Ordinary body text is read separately.
+        // CDP clickability can also mark roots and empty layout wrappers.
+        // Keep those custom candidates, but never let them precede observed
+        // semantic controls in the control lane. No label text is ranked.
+        let controls = elements.filter { overviewCategory($0) == 0 }
+            + elements.filter { overviewCategory($0) == 3 }
+        let groups = [controls, elements.filter { overviewCategory($0) == 1 },
+                      elements.filter { overviewCategory($0) == 2 }]
+        var ordered = [BrowserTabElement]()
+        for offset in 0..<(groups.map(\.count).max() ?? 0) {
+            for group in groups where offset < group.count { ordered.append(group[offset]) }
+        }
+        return ordered
+    }
+
+    private func overviewCategory(_ element: BrowserTabElement) -> Int? {
+        let role = element.semanticRole?.lowercased() ?? ""
+        if role == "heading" { return 1 }
+        if ["link", "navigation", "complementary", "banner", "contentinfo"].contains(role) { return 2 }
+        // Capabilities include custom semantic controls. Inherited content_kind
+        // is deliberately insufficient: a button's StaticText child is not a
+        // second control and a sidebar's ordinary text is not navigation.
+        if element.supportsSetText
+            || ["button", "checkbox", "combobox", "searchbox", "textbox", "menu", "menubar", "menuitem",
+                "menuitemcheckbox", "menuitemradio", "radio", "radiogroup", "switch", "tab", "tablist",
+                "toolbar", "slider", "spinbutton", "listbox", "option", "treeitem"].contains(role) { return 0 }
+        if element.supportsPress || element.isDOMClickable || element.isFocusablePointer { return 3 }
+        return nil
     }
 
     private func contentScope(of node: BrowserDocumentNode,
@@ -1077,55 +1178,202 @@ actor BrowserTabSessionBroker {
         return .unknown
     }
 
-    private func makePage(
-        selected: [BrowserTabElement], offset: Int
-    ) -> (elements: [BrowserTabElement], fieldsTruncated: Bool) {
-        var elements: [BrowserTabElement] = []
-        var characters = 0
-        var fieldsTruncated = false
-        // Bound output, not discovery: later nodes remain reachable via the
-        // opaque cursor rather than silently disappearing after the first page.
-        for element in selected.dropFirst(offset).prefix(60) {
-            let indexed = BrowserTabElement(
-                index: elements.count, backendNodeID: element.backendNodeID, role: element.role,
-                label: element.label, value: element.value, isEnabled: element.isEnabled,
-                supportsPress: element.supportsPress, supportsSetText: element.supportsSetText,
-                isDOMClickable: element.isDOMClickable,
-                isFocusablePointer: element.isFocusablePointer,
-                nodeID: element.nodeID, parentNodeID: element.parentNodeID,
-                childNodeIDs: element.childNodeIDs, linkURL: element.linkURL,
-                semanticRole: element.semanticRole,
-                contentScope: element.contentScope
-            )
-            let row = formatElement(indexed)
-            if !elements.isEmpty, characters + row.count > 10_000 { break }
-            elements.append(indexed)
-            characters += row.count
-            fieldsTruncated = fieldsTruncated || element.label.count > 512
-                || (element.value?.count ?? 0) > 512 || (element.linkURL?.count ?? 0) > 2048
+    /// Readability and provenance are separate observations. In particular a
+    /// toolbar inside main stays a control, while text without landmarks is
+    /// still readable. DOM clickability never changes this classification.
+    private func contentKind(of node: BrowserDocumentNode,
+                             nodes: [String: BrowserDocumentNode]) -> SemanticReadContentKind {
+        let controls: Set<String> = ["button", "checkbox", "combobox", "searchbox", "textbox",
+            "menu", "menubar", "menuitem", "menuitemcheckbox", "menuitemradio", "radio", "radiogroup",
+            "switch", "tab", "tablist", "toolbar", "slider", "spinbutton", "listbox", "option", "treeitem"]
+        var current = node
+        var seen = Set<String>()
+        var navigation = false
+        for _ in 0..<128 {
+            let role = current.role.lowercased()
+            if controls.contains(role) { return .control }
+            if ["link", "navigation", "complementary", "banner", "contentinfo"].contains(role) {
+                navigation = true
+            }
+            if let id = current.nodeID {
+                guard nodes[id] == current, seen.insert(id).inserted else { break }
+            }
+            guard let parentID = current.parentNodeID, let parent = nodes[parentID] else { break }
+            current = parent
         }
-        return (elements, fieldsTruncated)
+        if navigation { return .navigation }
+        switch node.role.lowercased() {
+        case "statictext", "inlinetextbox", "text", "heading", "paragraph", "listitem", "term",
+             "definition", "code", "blockquote", "cell", "gridcell", "rowheader", "columnheader", "caption", "label":
+            return .readable
+        case "rootwebarea", "webarea", "main", "article", "region", "document", "image":
+            return .metadata
+        default:
+            return .unknown
+        }
     }
 
-    private func formatElement(_ element: BrowserTabElement) -> String {
+    private func readFields(_ element: BrowserTabElement) -> [(field: SemanticReadField, text: String)] {
+        var fields: [(field: SemanticReadField, text: String)] = [(.label, element.label)]
+        if let value = element.value { fields.append((.value, value)) }
+        if let link = element.linkURL { fields.append((.linkURL, link)) }
+        return fields
+    }
+
+    private func makePage(selected: [BrowserTabElement], position: ReadPosition,
+                          regionCandidates: Set<Int64>, navigationCandidates: Set<Int64>, overview: Bool = false) throws -> ReadPage {
+        let maximumElements = overview ? 18 : 60
+        let bodyByteLimit = overview ? 6_000 : 10_000
+        var page = ReadPage(nextPosition: position)
+        var pageFragments = [[FieldFragment]]()
+        var bytes = 0
+        // The immutable action element is never replaced by its displayed
+        // fragment. Only the current page's original elements authorize input.
+        while page.nextPosition.element < selected.count, page.elements.count < maximumElements {
+            let original = selected[page.nextPosition.element]
+            let element = BrowserTabElement(
+                index: page.elements.count, backendNodeID: original.backendNodeID, role: original.role,
+                label: original.label, value: original.value, isEnabled: original.isEnabled,
+                supportsPress: original.supportsPress, supportsSetText: original.supportsSetText,
+                isDOMClickable: original.isDOMClickable, isFocusablePointer: original.isFocusablePointer,
+                nodeID: original.nodeID, parentNodeID: original.parentNodeID,
+                childNodeIDs: original.childNodeIDs, linkURL: original.linkURL,
+                semanticRole: original.semanticRole, contentScope: original.contentScope, contentKind: original.contentKind
+            )
+            // A parent can occur later on this page. Reserve the largest
+            // possible page index now, then resolve actual page membership.
+            let reservedParentIndex = element.parentNodeID == nil ? nil : maximumElements - 1
+            let regionCandidate = regionCandidates.contains(element.backendNodeID)
+            let fields = readFields(element)
+            var next = page.nextPosition
+            var fragments = [FieldFragment]()
+            let available = bodyByteLimit - bytes - 1 - SemanticReadPresentation.rowMetadataByteReserve
+            while next.field < fields.count {
+                let field = fields[next.field]
+                // Links are never presented as a syntactically valid clipped
+                // destination: their continued portions use href_fragment.
+                var budget = min(field.field == .linkURL ? 2048 : 4096, available)
+                var accepted: FieldFragment?
+                while budget >= 0 {
+                    let part = fieldPrefix(field.text, startUTF8: next.utf8Offset, escapedByteLimit: budget)
+                    let fragment = FieldFragment(field: field.field, text: part.text,
+                        start: next.utf8Offset, end: part.end, total: field.text.utf8.count)
+                    guard fragment.end > fragment.start || fragment.total == 0 else { break }
+                    let rowBytes = formatElement(element, fragments: fragments + [fragment],
+                        parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID)).utf8.count
+                    if rowBytes <= available { accepted = fragment; break }
+                    budget -= max(1, rowBytes - available)
+                }
+                guard let fragment = accepted else { break }
+                fragments.append(fragment)
+                if fragment.end < fragment.total {
+                    next.utf8Offset = fragment.end
+                    break
+                }
+                next.field += 1
+                next.utf8Offset = 0
+            }
+            guard !fragments.isEmpty else {
+                if page.elements.isEmpty {
+                    throw BrowserTabBrokerError.invalidRead("the observed element metadata exceeds the bounded read output")
+                }
+                break
+            }
+            let row = formatElement(element, fragments: fragments,
+                parentIndex: reservedParentIndex, regionCandidate: regionCandidate, navigationCandidate: navigationCandidates.contains(element.backendNodeID))
+            page.elements.append(element)
+            pageFragments.append(fragments)
+            bytes += row.utf8.count + 1 + SemanticReadPresentation.rowMetadataByteReserve
+            page.exposures += fragments.map {
+                SemanticReadFieldExposure(nodeID: "backend:\(element.backendNodeID)", field: $0.field,
+                    startUTF8: $0.start, endUTF8: $0.end, totalUTF8: $0.total,
+                    kind: element.contentKind,
+                    provenance: SemanticReadProvenance(rawValue: element.contentScope.rawValue) ?? .unknown)
+            }
+            if next.field == fields.count {
+                next.element += 1
+                next.field = 0
+                next.utf8Offset = 0
+            }
+            page.nextPosition = next
+            // A split field is continued before later nodes. Every cursor
+            // advances actual bytes, including a single unusually long field.
+            if next.field > 0 || next.utf8Offset > 0 { break }
+        }
+        let visibleNodes = Dictionary(grouping: page.elements.compactMap { element in
+            element.nodeID.map { ($0, element.index) }
+        }, by: { $0.0 }).filter { !$0.key.isEmpty && $0.value.count == 1 }.mapValues { $0[0].1 }
+        page.rows = zip(page.elements, pageFragments).map { element, fragments in
+            let parentIndex = element.parentNodeID.flatMap { visibleNodes[$0] }
+            return formatElement(element, fragments: fragments,
+                parentIndex: parentIndex == element.index ? nil : parentIndex,
+                regionCandidate: regionCandidates.contains(element.backendNodeID), navigationCandidate: navigationCandidates.contains(element.backendNodeID))
+        }
+        page.presentedRows = zip(page.elements, page.rows).map { element, row in
+            let parentIndex = element.parentNodeID.flatMap { visibleNodes[$0] }
+            let presentsTextEntry = element.isEnabled && element.supportsSetText
+                && ["textbox", "searchbox"].contains((element.semanticRole ?? "").lowercased())
+            // Prefer filling editable text fields in the model menu. Keep
+            // combobox presses and the underlying legacy press capability.
+            return SemanticReadPresentedRow(index: element.index, text: row,
+                actions: element.isEnabled && element.supportsPress && !presentsTextEntry ? ["AXPress"] : [],
+                settable: element.isEnabled && element.supportsSetText,
+                followLink: navigationCandidates.contains(element.backendNodeID),
+                region: true, regionChanged: regionCandidates.contains(element.backendNodeID),
+                parentIndex: parentIndex == element.index ? nil : parentIndex)
+        }
+        return page
+    }
+
+    /// Offsets refer to raw UTF-8, while the budget includes escaping. Splitting
+    /// on scalar boundaries preserves valid Unicode without copying a tail.
+    private func fieldPrefix(_ value: String, startUTF8: Int, escapedByteLimit: Int) -> (text: String, end: Int) {
+        let utf8 = value.utf8
+        guard let byteIndex = utf8.index(utf8.startIndex, offsetBy: startUTF8, limitedBy: utf8.endIndex),
+              let index = byteIndex.samePosition(in: value.unicodeScalars) else { return ("", startUTF8) }
+        var text = ""
+        var rawBytes = startUTF8
+        var escapedBytes = 0
+        for scalar in value.unicodeScalars[index...] {
+            let piece = String(scalar)
+            let cost = quote(piece).utf8.count - 2
+            guard escapedBytes + cost <= escapedByteLimit else { break }
+            text += piece
+            rawBytes += piece.utf8.count
+            escapedBytes += cost
+        }
+        return (text, rawBytes)
+    }
+
+    private func formatElement(_ element: BrowserTabElement, fragments: [FieldFragment],
+                               parentIndex: Int?, regionCandidate: Bool, navigationCandidate: Bool) -> String {
         let actions = element.supportsPress ? "[\"AXPress\"]" : "[]"
         let pressSource: String
         if element.supportsPress && !supportsSemanticPress(role: element.semanticRole ?? element.role) {
             pressSource = element.isDOMClickable ? " press_source=browser_clickability"
                 : (element.isFocusablePointer ? " press_source=focusable_pointer" : "")
-        } else {
-            pressSource = ""
-        }
-        let value = element.value.map { " value=\(quote(String($0.prefix(512))))" } ?? ""
-        let identity = element.nodeID.map { " node=\(quote($0))" } ?? ""
-        let parent = element.parentNodeID.map { " parent_node=\(quote($0))" } ?? ""
+        } else { pressSource = "" }
+        let fields = fragments.map { fragment in
+            let partial = fragment.start != 0 || fragment.end != fragment.total
+            let name = fragment.field == .linkURL ? (partial ? "href_fragment" : "href") : fragment.field.rawValue
+            let range = partial ? " \(name)_utf8=\(fragment.start):\(fragment.end)/\(fragment.total)" : ""
+            let omitted = fragment.field == .linkURL && partial ? " href_omitted=1" : ""
+            return "\(name)=\(quote(fragment.text))\(range)\(omitted)"
+        }.joined(separator: " ")
+        let semanticRole: String
+        if let role = element.semanticRole {
+            let bounded = fieldPrefix(role, startUTF8: 0, escapedByteLimit: 256)
+            semanticRole = " semantic_role=\(quote(bounded.text))"
+                + (bounded.end < role.utf8.count ? " semantic_role_truncated=1" : "")
+        } else { semanticRole = "" }
+        let candidate = (regionCandidate ? " region_changed_candidate=true" : "")
+            + (navigationCandidate ? " follow_link=true" : "")
+        // Raw AX node IDs remain host identity, never model-facing element
+        // indices. Only #index and an exposed parent's index address this page.
+        let parent = parentIndex.map { " parent_index=\($0)" } ?? ""
         let children = element.childNodeIDs.isEmpty ? "" : " child_count=\(element.childNodeIDs.count) expandable=true"
-        let link = element.linkURL.map {
-            $0.count <= 2048 ? " href=\(quote($0))" : " href_omitted=1"
-        } ?? ""
-        return "#\(element.index) role=\(quote(element.role)) "
-            + "label=\(quote(String(element.label.prefix(512))))\(value)\(identity)\(parent)\(children)\(link) "
-            + "content_scope=\(element.contentScope.rawValue) "
+        return "#\(element.index) role=\(quote(element.role))\(semanticRole)\(candidate) \(fields)\(parent)\(children) "
+            + "content_scope=\(element.contentScope.rawValue) content_kind=\(element.contentKind.rawValue) "
             + "enabled=\(element.isEnabled ? "true" : "false") "
             + "settable=\(element.supportsSetText ? "true" : "false") actions=\(actions)\(pressSource)"
     }
@@ -1133,6 +1381,7 @@ actor BrowserTabSessionBroker {
     private func readViewName(_ view: SemanticReadView) -> String {
         switch view {
         case .all: "all"
+        case .overview: "overview"
         case .content: "content"
         case .headings: "headings"
         case .links: "links"
@@ -1224,6 +1473,8 @@ actor BrowserTabSessionBroker {
         bundleIdentifier: String,
         document: BrowserDocumentObservation,
         elements: [BrowserTabElement],
+        rows: [String],
+        sourceID: UUID,
         read: SemanticReadRequest,
         scopeNodeID: String?,
         totalMatches: Int,
@@ -1233,32 +1484,46 @@ actor BrowserTabSessionBroker {
         retainedObservation: Bool
     ) -> String {
         let documentURL = document.url.absoluteString
-        let formattedURL = documentURL.count <= 2048
+        let formattedURL = documentURL.utf8.count <= 2048
             ? "url=\(quote(documentURL))" : "url_omitted=1"
+        let title = fieldPrefix(document.title, startUTF8: 0, escapedByteLimit: 512)
+        let metadataTruncated = title.end < document.title.utf8.count || documentURL.utf8.count > 2048
         var lines = [
             "AXSNAPSHOT id=\(snapshotID.uuidString) pid=\(binding.processIdentifier) "
                 + "bundle=\(quote(bundleIdentifier)) tab_handle=\(binding.handle.uuidString) "
                 + "document_epoch=\(binding.documentEpoch.uuidString) source=chrome_devtools "
                 + "\(formattedURL) "
-                + "title=\(quote(String(document.title.prefix(512))))",
-            "READ view=\(readViewName(read.view)) scope_node=\(scopeNodeID.map(quote) ?? "document") "
+                + "title=\(quote(title.text))",
+            "READ view=\(readViewName(read.view)) scope=\(scopeNodeID == nil ? "document" : "subtree") "
+                + "source_observation=\(sourceID) consistency=immutable_capture "
                 + "source_nodes=\(document.nodes.count) source_truncated=\(document.sourceTruncated ? 1 : 0) "
                 + "matches=\(totalMatches) shown=\(elements.count) offset=\(offset) "
                 + "output_truncated=\(nextCursor == nil ? 0 : 1) field_truncated=\(fieldsTruncated ? 1 : 0) "
+                + "metadata_truncated=\(metadataTruncated ? 1 : 0) "
                 + "no_matches=\(totalMatches == 0 ? 1 : 0) visibility=unknown "
                 + "next_cursor=\(nextCursor ?? "none") observation=\(retainedObservation ? "retained" : "live")",
-            "CONTENT_EVIDENCE document_content_shown=\(elements.filter { $0.contentScope.isDocumentContent }.count) "
+            "CONTENT_EVIDENCE document_content_shown=\(elements.filter { $0.contentKind == .readable && $0.contentScope.isDocumentContent }.count) "
                 + "navigation_shown=\(elements.filter { $0.contentScope == .navigation }.count) "
                 + "complementary_shown=\(elements.filter { $0.contentScope == .complementary }.count) "
                 + "banner_shown=\(elements.filter { $0.contentScope == .banner }.count) "
                 + "contentinfo_shown=\(elements.filter { $0.contentScope == .contentinfo }.count) "
                 + "unknown_shown=\(elements.filter { $0.contentScope == .unknown }.count) "
+                + "readable_shown=\(elements.filter { $0.contentKind == .readable }.count) "
+                + "controls_shown=\(elements.filter { $0.contentKind == .control }.count) "
+                + "metadata_shown=\(elements.filter { $0.contentKind == .metadata }.count) "
                 + "scope_basis=observed_ancestry subject_relevance=not_verified",
         ]
-        lines.append(contentsOf: elements.map(formatElement))
+        if read.view == .overview {
+            lines.append("OVERVIEW selection=observed_controls_headings_navigation ordering=interleaved_categories document_content_exhaustive=false. Read view=content for the document body; view=all retains full structural context for action planning.")
+        }
+        lines.append(contentsOf: rows)
         lines.append("Content scopes and counts describe only this exposed page's observed structure; subject relevance is not verified. Tab titles and navigation/sidebar labels alone do not establish the document's contents. Unknown scope is not proof that content is absent.")
+        lines.append("Readable fields are distinct from controls and metadata. Use view=all or links for navigation/controls. Exhausting a captured selection does not establish that virtualized or uncaptured content is absent.")
+        if rows.contains(where: { $0.contains(" region_changed_candidate=true ") }) {
+            lines.append("region_changed_candidate marks a captured noneditable text container, not authorization or success. For region_changed use that container's index, not its StaticText child; parent_index refers only to this snapshot. Fresh preflight still applies.")
+        }
         if nextCursor != nil {
-            lines.append("Continue with cursor only. Indices apply only to this snapshot; use snapshot_id + element_index to read an observed subtree.")
+            lines.append("Continue with cursor only, including remaining field fragments. UTF-8 ranges refer to the original captured field; href_fragment is not a complete destination. Indices apply only to this snapshot; use snapshot_id + element_index to read an observed subtree.")
         }
         if retainedObservation {
             lines.append("This is a page/subtree of the retained observation (maximum age 120 seconds), not a new live tree. Actions revalidate the exact target before input.")
@@ -1273,14 +1538,21 @@ actor BrowserTabSessionBroker {
     }
 
     private func quote(_ value: String) -> String {
-        "\""
-            + value
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-                .replacingOccurrences(of: "\n", with: "\\n")
-                .replacingOccurrences(of: "\r", with: "\\r")
-            + "\""
+        var result = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 34: result += "\\\""
+            case 92: result += "\\\\"
+            case 10: result += "\\n"
+            case 13: result += "\\r"
+            case 9: result += "\\t"
+            case 0..<32: result += String(format: "\\u%04x", scalar.value)
+            default: result.unicodeScalars.append(scalar)
+            }
+        }
+        return result + "\""
     }
+
 }
 
 actor SystemChromeDevToolsTransport: BrowserTabTransport {

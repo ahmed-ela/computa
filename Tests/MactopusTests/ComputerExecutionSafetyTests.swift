@@ -3,6 +3,50 @@ import XCTest
 @testable import Mactopus
 
 final class ComputerExecutionSafetyTests: XCTestCase {
+    func testHistoricalReceiptLookupIsBoundedAndSeparateFromLiveVerification() throws {
+        XCTAssertEqual(try ComputerOutcomeToolContract.validateOperationID(["operation_id": "action"]), "action")
+        XCTAssertThrowsError(try ComputerOutcomeToolContract.validate(["operation_id": "action"]))
+        for invalid in [["operation_id": ""], ["operation_id": "\nforged"],
+            ["operation_id": String(repeating: "x", count: 257)], ["operation_id": "action", "verified": true]] as [[String: Any]] {
+            XCTAssertThrowsError(try ComputerOutcomeToolContract.validateOperationID(invalid))
+        }
+        var ledger = ComputerActionEvidence(turnID: "current-turn")
+        try ledger.recordObservation(id: "before", targetID: "tab", properties: ["value": "before"])
+        try ledger.begin(operationID: "verified", tool: "computer_v2_ax", targetID: "tab", requiresVerification: true)
+        try ledger.recordDispatch(operationID: "verified", state: .dispatched)
+        try ledger.recordObservation(id: "after", targetID: "tab", properties: ["value": "after"])
+        _ = try ledger.verify(operationID: "verified", observationID: "after", property: "value", expectedValue: "after")
+        let frozen = ledger
+        let status = try XCTUnwrap(ComputerOutcomeToolContract.historicalStatus(operationID: "verified", evidence: ledger, activeTurnID: "current-turn"))
+        XCTAssertTrue(status.contains("status=original_property_verified live_observation=false"))
+        XCTAssertFalse(status.contains("VERIFIED_PROPERTY"))
+        XCTAssertFalse(status.contains("snapshot_id="))
+        XCTAssertLessThan(status.utf8.count, 1_024)
+        XCTAssertEqual(ledger, frozen, "A lookup cannot rewrite the receipt or ledger.")
+        XCTAssertNil(ComputerOutcomeToolContract.historicalStatus(operationID: "verified", evidence: ledger, activeTurnID: "other-turn"))
+        XCTAssertNil(ComputerOutcomeToolContract.historicalStatus(operationID: "unknown", evidence: ledger, activeTurnID: "current-turn"))
+        let unrelatedTaskLedger = ComputerActionEvidence(turnID: "current-turn")
+        XCTAssertNil(ComputerOutcomeToolContract.historicalStatus(operationID: "verified", evidence: unrelatedTaskLedger, activeTurnID: "current-turn"))
+    }
+
+    func testHistoricalNotPerformedRequiresTypedPredispatchEvidenceWithoutEffects() throws {
+        var ledger = ComputerActionEvidence(turnID: "turn")
+        try ledger.begin(operationID: "rejected", tool: "computer_v2_ax", targetID: "tab", requiresVerification: true)
+        try ledger.recordPreflightRejection(operationID: "rejected", kind: .freshObservationRequired,
+            code: "missing_reference", message: "Not performed")
+        let frozen = ledger
+        let status = try XCTUnwrap(ComputerOutcomeToolContract.historicalStatus(operationID: "rejected", evidence: ledger, activeTurnID: "turn"))
+        XCTAssertTrue(status.contains("status=not_performed live_observation=false"))
+        XCTAssertEqual(ledger, frozen)
+        XCTAssertNotNil(ledger.completionDiagnostic, "Historical status alone does not correct the prerequisite.")
+        for (id, dispatch) in [("ordinary", ComputerActionEvidence.DispatchState.notDispatched),
+                               ("uncertain", .unknown), ("dispatched", .dispatched)] {
+            try ledger.begin(operationID: id, tool: "computer_v2_ax", targetID: "tab", requiresVerification: true)
+            try ledger.recordFailure(operationID: id, code: "ordinary_failure", message: "No typed rejection", dispatch: dispatch)
+            XCTAssertNil(ComputerOutcomeToolContract.historicalStatus(operationID: id, evidence: ledger, activeTurnID: "turn"))
+        }
+    }
+
     func testInventoryCursorOrPageSizeChangesCannotResetRetryIdentity() {
         let first = ComputerUnchangedAttemptGuard.key(tool: "computer_v2_tabs", arguments: ["cursor": UUID().uuidString])
         for size in [1, 25, 100] {

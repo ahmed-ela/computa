@@ -8,7 +8,7 @@ import { receiptText } from "../OpaqueSurfacePerception/receipt-text";
 type Json = Record<string, any>;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const tools = new Set(["computer_v2_status", "computer_v2_apps", "computer_v2_open", "computer_v2_tabs",
-  "computer_v2_bind_tab", "computer_v2_snapshot", "computer_v2_ax", "computer_v2_set_text",
+  "computer_v2_bind_tab", "computer_v2_snapshot", "computer_v2_continue", "computer_v2_ax", "computer_v2_set_text",
   "computer_v2_capture", "computer_v2_ground_click", "computer_v2_click", "computer_v2_pointer",
   "computer_v2_keypress", "computer_v2_type", "computer_v2_verify"]);
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");

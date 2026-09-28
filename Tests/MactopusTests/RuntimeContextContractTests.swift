@@ -314,12 +314,61 @@ final class RuntimeContextContractTests: XCTestCase {
         XCTAssertTrue(tracker.isRunning(taskID: "task"))
     }
 
-    func testEnclosingFailureOverridesCompletedCompactionItem() {
+    func testExplicitCompactionRequestStillRequiresEnclosingTurnSuccess() {
         var tracker = AppServerCompactionTracker()
         _ = tracker.started(taskID: "task", turnID: "turn", itemID: "item", activeTurnID: "turn")
         _ = tracker.completed(taskID: "task", turnID: "turn", itemID: "item", activeTurnID: "turn")
-        XCTAssertEqual(tracker.finishTurn(taskID: "task", turnID: "turn", succeeded: false, message: "Provider failed"),
+        XCTAssertEqual(tracker.finishTurn(taskID: "task", turnID: "turn", succeeded: false,
+                       message: "Provider failed", expectedCompaction: true),
                        .failed(message: "Provider failed"))
+    }
+
+    func testLaterOrdinaryTerminalErrorDoesNotRelabelCompletedCompaction() {
+        var tracker = AppServerCompactionTracker()
+        XCTAssertTrue(tracker.started(taskID: "task", turnID: "turn", itemID: "item", activeTurnID: "turn"))
+        XCTAssertTrue(tracker.completed(taskID: "task", turnID: "turn", itemID: "item", activeTurnID: "turn"))
+        var stale = errorPayload(willRetry: false)
+        stale["turnId"] = "old-turn"
+        XCTAssertEqual(AppServerErrorNotificationContract.classify(stale,
+            expectedThreadID: "thread", activeTurnID: "turn"), .ignored)
+        let disposition = AppServerErrorNotificationContract.classify(errorPayload(willRetry: false),
+            expectedThreadID: "thread", activeTurnID: "turn")
+        guard case .terminal(let turnID, let message) = disposition else { return XCTFail("Expected terminal error.") }
+        XCTAssertEqual(turnID, "turn")
+        XCTAssertNil(tracker.fail(taskID: "task", message: message))
+        XCTAssertNil(tracker.finishTurn(taskID: "task", turnID: "turn", succeeded: false, message: message))
+        XCTAssertTrue(tracker.removeAll().isEmpty)
+    }
+
+    func testLaterOrdinaryFailedTurnPreservesCompletedCompactionAndRejectsStaleTurn() {
+        var tracker = AppServerCompactionTracker()
+        XCTAssertTrue(tracker.started(taskID: "task", turnID: "turn", itemID: "item", activeTurnID: "turn"))
+        XCTAssertTrue(tracker.completed(taskID: "task", turnID: "turn", itemID: "item", activeTurnID: "turn"))
+        XCTAssertNil(tracker.finishTurn(taskID: "task", turnID: "stale", succeeded: false, message: "late"))
+        // A mismatched terminal must not consume the current completed record.
+        XCTAssertFalse(tracker.started(taskID: "task", turnID: "turn", itemID: "item", activeTurnID: "turn"))
+        XCTAssertNil(tracker.finishTurn(taskID: "task", turnID: "turn", succeeded: false, message: "Provider failed"))
+        XCTAssertTrue(tracker.removeAll().isEmpty)
+    }
+
+    func testNewTurnAfterCompletedCompactionDoesNotInventFailure() {
+        var tracker = AppServerCompactionTracker()
+        XCTAssertTrue(tracker.started(taskID: "task", turnID: "old", itemID: "item", activeTurnID: "old"))
+        XCTAssertTrue(tracker.completed(taskID: "task", turnID: "old", itemID: "item", activeTurnID: "old"))
+        XCTAssertNil(tracker.observeTurnStart(taskID: "task", turnID: "new"))
+        XCTAssertFalse(tracker.completed(taskID: "task", turnID: "old", itemID: "item", activeTurnID: "new"))
+        XCTAssertTrue(tracker.removeAll().isEmpty)
+    }
+
+    func testDisconnectOnlyFailsUnfinishedCompactionRecords() {
+        var tracker = AppServerCompactionTracker()
+        for task in ["completed", "running"] {
+            XCTAssertTrue(tracker.started(taskID: task, turnID: "turn", itemID: "item", activeTurnID: "turn"))
+        }
+        XCTAssertTrue(tracker.completed(taskID: "completed", turnID: "turn", itemID: "item", activeTurnID: "turn"))
+        XCTAssertEqual(tracker.removeAll(), ["running"])
+        XCTAssertFalse(tracker.isRunning(taskID: "running"))
+        XCTAssertTrue(tracker.removeAll().isEmpty)
     }
 
     func testMissingCompactionCompletionFailsEvenIfTurnClaimsSuccess() {
@@ -381,8 +430,8 @@ final class RuntimeContextContractTests: XCTestCase {
         XCTAssertEqual(NSDictionary(dictionary: nineB), NSDictionary(dictionary: fourB))
         XCTAssertEqual(nineB["model_context_window"] as? Int, 16_384)
         XCTAssertEqual(nineB["model_auto_compact_token_limit"] as? Int, 12_288)
-        XCTAssertEqual(nineB["features.shell_tool"] as? Bool, false)
-        XCTAssertEqual(nineB["features.unified_exec"] as? Bool, false)
+        XCTAssertEqual(nineB["features.shell_tool"] as? Bool, true)
+        XCTAssertEqual(nineB["features.unified_exec"] as? Bool, true)
         XCTAssertEqual(nineB["web_search"] as? String, "disabled")
         XCTAssertNil(nineB["compact_prompt"])
     }

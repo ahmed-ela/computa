@@ -18,7 +18,7 @@ enum AgentRuntimeIsolation {
         var result = [
             "HOME": userHomePath,
             "CODEX_HOME": codexHomePath,
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
         ]
         for key in inheritedKeys {
             if let value = inherited[key] { result[key] = value }

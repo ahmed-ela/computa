@@ -3,7 +3,7 @@ import json
 import re
 import uuid
 
-from sse_contract import ProtocolError, SSEContract
+from sse_contract import ProtocolError, SSEContract, protocol_error_diagnostic
 
 MAX_ERROR_BODY = 64 * 1024
 CONTEXT_LIMIT = 16384
@@ -70,6 +70,7 @@ class ResponseBoundary:
         self.error_body = bytearray()
         self.sent_start = False
         self.closed = False
+        self.upstream_eof = False
 
     async def __call__(self, message):
         if self.closed:
@@ -92,6 +93,7 @@ class ResponseBoundary:
         if message["type"] != "http.response.body" or self.start is None:
             raise ProtocolError("Missing response start.")
         final = not message.get("more_body", False)
+        self.upstream_eof = final
         body = message.get("body", b"")
         status = self.start["status"]
         if status == 200:
@@ -127,7 +129,7 @@ class ResponseBoundary:
             await self.send(message)
         self.closed = final
 
-    async def fail(self):
+    async def fail(self, error=None):
         if self.closed:
             return
         if not self.sent_start:
@@ -135,7 +137,13 @@ class ResponseBoundary:
             self.sent_start = True
         # The owned App Server treats invalid_prompt as terminal, unlike unknown
         # codes which would repeatedly retry a deterministic protocol error.
-        payload = self.contract.failure(code="invalid_prompt", message="Local model stream could not be validated.")
+        reason, causes, limited = protocol_error_diagnostic(error)
+        counters = self.contract.diagnostic_counters()
+        message = ("Local model stream could not be validated. "
+                   f"[mlx_protocol reason={reason} bytes={counters['bytes']} events={counters['events']} "
+                   f"items={counters['items']} last={counters['last']} terminal={counters['terminal']} "
+                   f"eof={int(self.upstream_eof)} causes={causes} limited={int(limited)}]")
+        payload = self.contract.failure(code="invalid_prompt", message=message)
         await self.send({"type": "http.response.body", "body": payload})
         self.closed = True
 

@@ -158,7 +158,8 @@ enum AppServerErrorNotificationContract {
 }
 
 /// Correlates compaction lifecycle at both the task and exact turn/item level.
-/// Item completion alone is not proof that the enclosing turn succeeded.
+/// A completed automatic compaction stays completed if later generation fails.
+/// Explicit maintenance requests still require their enclosing turn to succeed.
 struct AppServerCompactionTracker: Sendable {
     private struct Record: Sendable {
         let turnID: String
@@ -173,6 +174,7 @@ struct AppServerCompactionTracker: Sendable {
     mutating func observeTurnStart(taskID: AgentTask.ID, turnID: String) -> RuntimeCompactionState? {
         guard let record = records[taskID], record.turnID != turnID else { return nil }
         records.removeValue(forKey: taskID)
+        guard !record.completed else { return nil }
         return .failed(message: "A new turn began before the previous compaction turn was confirmed.")
     }
 
@@ -199,18 +201,119 @@ struct AppServerCompactionTracker: Sendable {
             return expectedCompaction ? .failed(message: "The runtime did not confirm the requested context compaction.") : nil
         }
         records.removeValue(forKey: taskID)
-        guard !succeeded || !record.completed else { return nil }
+        guard !record.completed || (expectedCompaction && !succeeded) else { return nil }
         return .failed(message: !succeeded ? message : "The runtime ended without confirming context compaction.")
     }
 
     mutating func fail(taskID: AgentTask.ID, message: String) -> RuntimeCompactionState? {
-        guard records.removeValue(forKey: taskID) != nil else { return nil }
+        guard let record = records.removeValue(forKey: taskID), !record.completed else { return nil }
         return .failed(message: message)
     }
 
     mutating func removeAll() -> [AgentTask.ID] {
-        let tasks = Array(records.keys)
+        let tasks = records.compactMap { $0.value.completed ? nil : $0.key }
         records.removeAll()
         return tasks
+    }
+}
+
+/// Presentation only. Process ownership, sandboxing and execution stay in App Server.
+/// One tracker belongs to one task; the runtime correlates each item to its original turn.
+struct AppServerCommandTranscript: Sendable {
+    static let maximumOutputBytes = 32_768
+    static let maximumItems = 128
+    private struct Record: Sendable {
+        var command: String
+        var cwd: String
+        var output: String = ""
+        var clipped = false
+        var terminal = false
+        var timestamp = Date()
+        var processID: String?
+    }
+    private var records: [String: Record] = [:]
+
+    mutating func receive(item: [String: Any], completed: Bool) -> TimelineEntry? {
+        guard item["type"] as? String == "commandExecution",
+              let id = item["id"] as? String, !id.isEmpty, id.utf8.count <= 512,
+              let command = item["command"] as? String,
+              let cwd = item["cwd"] as? String,
+              records[id]?.terminal != true else { return nil }
+        guard records[id] != nil || records.count < Self.maximumItems else { return nil }
+        if !completed, records[id] != nil { return nil }
+        let boundedCommand = Self.prefix(command, bytes: 8_192)
+        let boundedCwd = Self.prefix(cwd, bytes: 4_096)
+        var record = records[id] ?? Record(command: boundedCommand, cwd: boundedCwd)
+        guard record.command == boundedCommand, record.cwd == boundedCwd else { return nil }
+        if let processID = item["processId"] as? String {
+            record.processID = Self.prefix(processID, bytes: 128)
+        }
+        if let output = item["aggregatedOutput"] as? String {
+            record.output = Self.prefix(output, bytes: Self.maximumOutputBytes)
+            record.clipped = output.utf8.count > Self.maximumOutputBytes
+        }
+        if !completed {
+            records[id] = record
+            return Self.entry(id: id, record: record, status: .running, result: "Running")
+        }
+        record.terminal = true
+        records[id] = record
+        let exit = Self.integer(item["exitCode"])
+        let state = item["status"] as? String
+        let status: ToolRunStatus = state == "completed" && exit == 0 ? .succeeded : .failed
+        let result: String
+        if state == "declined" { result = "Declined; command was not approved" }
+        else if let exit { result = "Exit code: \(exit)" }
+        else { result = "Exit status unavailable (\(state == "failed" ? "failed" : "unverified"))" }
+        let duration = Self.integer(item["durationMs"]).flatMap { $0 >= 0 ? Double($0) / 1_000 : nil }
+        return Self.entry(id: id, record: record, status: status, result: result, duration: duration)
+    }
+
+    mutating func append(itemID: String, delta: String) -> TimelineEntry? {
+        guard var record = records[itemID], !record.terminal, !record.clipped else { return nil }
+        let remaining = Self.maximumOutputBytes - record.output.utf8.count
+        record.output += Self.prefix(delta, bytes: remaining)
+        record.clipped = delta.utf8.count > remaining
+        records[itemID] = record
+        return Self.entry(id: itemID, record: record, status: .running, result: "Running")
+    }
+
+    mutating func beginTurn() { records = records.filter { !$0.value.terminal } }
+
+    mutating func finishUnconfirmed(reason: String, interrupted: Bool, retainingPending: Bool = false) -> [TimelineEntry] {
+        let pending = records.filter { !$0.value.terminal }.map { id, record in
+            Self.entry(id: id, record: record, status: interrupted ? .failed : .running, result: reason)
+        }
+        if !retainingPending { records.removeAll() }
+        return pending
+    }
+
+    private static func entry(id: String, record: Record, status: ToolRunStatus,
+                              result: String, duration: TimeInterval? = nil) -> TimelineEntry {
+        let suffix = record.clipped ? "\n[Output truncated at \(maximumOutputBytes) bytes]" : ""
+        let session = record.processID.map { "\nProcess session: \($0)" } ?? ""
+        let summary = result + " — " + record.command
+        return TimelineEntry(id: id, kind: .tool, title: "Command", body: summary,
+            timestamp: record.timestamp, toolEvent: ToolEvent(name: "commandExecution", summary: summary,
+                status: status, input: "Working directory: \(record.cwd)\nCommand: \(record.command)" + session,
+                output: record.output + suffix + "\n" + result, duration: duration))
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite else { return nil }
+        let decimal = number.decimalValue
+        guard decimal >= Decimal(Int.min), decimal <= Decimal(Int.max),
+              Decimal(number.int64Value) == decimal else { return nil }
+        return Int(exactly: number.int64Value)
+    }
+
+    private static func prefix(_ text: String, bytes: Int) -> String {
+        var data = Array(text.utf8.prefix(max(0, bytes)))
+        while !data.isEmpty {
+            if let result = String(bytes: data, encoding: .utf8) { return result }
+            data.removeLast()
+        }
+        return ""
     }
 }

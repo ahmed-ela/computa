@@ -90,4 +90,69 @@ final class BrowserDOMActionProjectionTests: XCTestCase {
             XCTAssertThrowsError(try parse(["mactopusClickability": invalid]))
         }
     }
+
+    private func form() -> [String: Any] {
+        var result = raw()
+        result["strings"] = (result["strings"] as! [String]) + [
+            "#document", "INPUT", "TEXTAREA", "type", "search", "", "readonly", "inert", "password", "not empty", "disabled",
+        ]
+        return changeDocument(result) { doc in
+            doc["nodes"] = ["backendNodeId": [10, 20, 30], "nodeType": [9, 1, 1],
+                "nodeName": [6, 7, 8], "attributes": [[], [9, 10], []], "parentIndex": [-1, 0, 0],
+                "inputValue": ["index": [1], "value": [-1]], "textValue": ["index": [2], "value": [11]]]
+        }
+    }
+
+    private func changeForm(_ edit: (inout [String: Any]) -> Void) -> [String: Any] {
+        changeDocument(form()) { doc in
+            var nodes = doc["nodes"] as! [String: Any]; edit(&nodes); doc["nodes"] = nodes
+        }
+    }
+
+    func testOnlyExplicitEmptyNativeValuesAreProjectedWithExtensionParity() throws {
+        XCTAssertEqual(try parse(form()).emptyTextValues, [20, 30])
+        let projected: [String: Any] = ["mactopusClickability": [
+            "frameId": "main", "documentURL": url.absoluteString,
+            "clickableBackendNodeIds": [], "pointerBackendNodeIds": [],
+            "sourceTruncated": false, "sourceNodeCount": 3, "emptyTextValueBackendNodeIds": [20, 30],
+        ]]
+        XCTAssertEqual(try parse(projected).emptyTextValues, try parse(form()).emptyTextValues)
+        XCTAssertEqual(try parse(changeForm { $0.removeValue(forKey: "inputValue") }).emptyTextValues, [30])
+        XCTAssertEqual(try parse(changeForm { $0["inputValue"] = ["index": [1], "value": [15]] }).emptyTextValues, [30])
+        XCTAssertTrue(try parse(raw()).emptyTextValues.isEmpty, "Older/missing evidence never supplies an empty value")
+    }
+
+    func testProtectedDisabledReadonlyAndInertNativeFieldsRemainUnknown() throws {
+        for attrs in [[[], [9, 14], []], [[], [9, 10, 12, -1], []],
+                      [[], [9, 10, 16, -1], []], [[13, -1], [9, 10], []]] {
+            let parsed = try parse(changeForm { $0["attributes"] = attrs })
+            XCTAssertFalse(parsed.emptyTextValues.contains(20))
+        }
+        XCTAssertTrue(try parse(changeForm { $0["attributes"] = [[13, -1], [9, 10], []] }).emptyTextValues.isEmpty)
+    }
+
+    func testMalformedEmptyValueEvidenceFailsClosed() throws {
+        let edits: [(inout [String: Any]) -> Void] = [
+            { $0["inputValue"] = ["index": [1, 1], "value": [-1, -1]] },
+            { $0["inputValue"] = ["index": [3], "value": [-1]] },
+            { $0["inputValue"] = ["index": [1], "value": [-2]] },
+            { $0["inputValue"] = ["index": [1], "value": [true]] },
+            { $0["inputValue"] = ["index": [1], "value": [999]] },
+            { $0["inputValue"] = ["index": [1], "value": []] },
+            { $0["textValue"] = ["index": [1], "value": [-1]] },
+            { $0["nodeName"] = [6, 8, 8] }, { $0.removeValue(forKey: "nodeType") },
+            { $0["attributes"] = [[], [9, 10, 9, 14], []] },
+            { $0["attributes"] = [[], [9], []] },
+            { $0["parentIndex"] = [-1, 1, 0] }, { $0["parentIndex"] = [-1, 3, 0] },
+        ]
+        for edit in edits { XCTAssertThrowsError(try parse(changeForm(edit))) }
+        let invalidLists: [[Any]] = [[20, 20], [true], [0], Array(1...12_001)]
+        for ids in invalidLists {
+            XCTAssertThrowsError(try parse(["mactopusClickability": [
+                "frameId": "main", "documentURL": url.absoluteString,
+                "clickableBackendNodeIds": [], "pointerBackendNodeIds": [],
+                "sourceTruncated": false, "sourceNodeCount": 100_000, "emptyTextValueBackendNodeIds": ids,
+            ]]))
+        }
+    }
 }

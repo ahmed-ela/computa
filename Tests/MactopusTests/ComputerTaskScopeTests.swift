@@ -83,6 +83,23 @@ final class ComputerTaskScopeTests: XCTestCase {
         XCTAssertNil(titleOnly.candidateViolation(url: try url("http://localhost:9999/"), title: "Mactopus Fixture"))
     }
 
+    func testInventoryMatchReusesTheExistingExactCandidateRestriction() throws {
+        let scope = ComputerTaskScope(userPrompt: "Inspect https://fixture.example:8123. Use tab titled \"Result\".")
+        for (raw, title) in [("https://fixture.example:8123/view", "Result"),
+                             ("https://fixture.example:8124/view", "Result"),
+                             ("https://fixture.example.attacker.test:8123/view", "Result"),
+                             ("https://fixture.example:8123/view", "Result archive")] {
+            XCTAssertEqual(scope.candidateMatch(url: try url(raw), title: title),
+                           scope.candidateViolation(url: try url(raw), title: title) == nil)
+        }
+        XCTAssertEqual(scope.candidateMatch(url: try url("https://fixture.example:8123/view"), title: "Result"), true)
+        for prompt in ["Inspect a tab", "Compare https://one.example and https://two.example"] {
+            let unrestricted = ComputerTaskScope(userPrompt: prompt)
+            XCTAssertFalse(unrestricted.hasCandidateRestriction)
+            XCTAssertNil(unrestricted.candidateMatch(url: try url("https://one.example"), title: "Result"))
+        }
+    }
+
     func testUnknownAndAmbiguousIntentIsNotPretendedToBeSemanticallyVerified() throws {
         let unknown = ComputerTaskScope(userPrompt: "Check my recent message.")
         XCTAssertEqual(unknown.targetConfidence, .unknown)

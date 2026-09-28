@@ -1630,6 +1630,28 @@ final class AccessibilitySessionTests: XCTestCase {
         XCTAssertEqual(roundTripped, expected)
     }
 
+    func testBrowserOverviewIsRejectedBeforeNativeObservation() throws {
+        let root = FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: [
+            FakeAccessibilityNode(identifier: "body", role: "AXStaticText", title: "Native body")
+        ])
+        let runtime = FakeAccessibilityTreeRuntime(root: root)
+        let session = makeSession(runtime: runtime)
+        let applicationRequests = runtime.applicationElementRequests.count
+        let descriptions = runtime.describedNodeIDs.count
+        XCTAssertThrowsError(try session.read(read: .init(view: .overview))) { error in
+            guard let semanticError = error as? SemanticReadError, case .unsupportedOverview = semanticError else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertTrue(error.localizedDescription.contains("browser-only"))
+        }
+        XCTAssertEqual(runtime.applicationElementRequests.count, applicationRequests)
+        XCTAssertEqual(runtime.describedNodeIDs.count, descriptions)
+        XCTAssertTrue(runtime.performedActions.isEmpty)
+        XCTAssertTrue(runtime.setValues.isEmpty)
+        let content = try session.read(read: .init(view: .content))
+        XCTAssertTrue(content.observation.text.contains("Native body"))
+    }
+
     func testProgressiveHeadingsFindsUnknownTitleBelowThirtyTwoWrappers() throws {
         let title = FakeAccessibilityNode(identifier: "unknown", role: "AXStaticText", title: "An unfamiliar title")
         var child = FakeAccessibilityNode(identifier: "heading", role: "AXHeading", children: [title])
@@ -1825,6 +1847,54 @@ final class AccessibilitySessionTests: XCTestCase {
         XCTAssertTrue(read.observation.text.contains("source_truncated=1"))
         XCTAssertTrue(read.observation.text.contains("no_matches_in_visited_source"))
         XCTAssertTrue(read.observation.exposedElementIndices.isEmpty)
+    }
+
+    func testProgressiveReadReceiptsStayPageLocalAcrossContinuation() throws {
+        let children = (0..<60).map {
+            FakeAccessibilityNode(identifier: "fact-\($0)", role: "AXStaticText", title: "Observed document fact \($0)")
+        }
+        let session = makeSession(runtime: FakeAccessibilityTreeRuntime(root:
+            FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: children)))
+        let first = try session.read(read: .init(view: .content), outputCharacterLimit: 1_800)
+        let firstReceipt = try XCTUnwrap(first.observation.readReceipt)
+        let cursor = try XCTUnwrap(semanticCursor(first.observation.text))
+        let next = try session.read(read: .init(cursor: cursor), outputCharacterLimit: 1_800)
+        let nextReceipt = try XCTUnwrap(next.observation.readReceipt)
+        XCTAssertNotEqual(firstReceipt.id, nextReceipt.id)
+        XCTAssertNotEqual(firstReceipt.sourceID, nextReceipt.sourceID)
+        for read in [first, next] {
+            let receipt = try XCTUnwrap(read.observation.readReceipt)
+            XCTAssertEqual(receipt.consistency, .liveValidatedPage)
+            XCTAssertEqual(receipt.id, read.snapshot.id)
+            XCTAssertEqual(receipt.sourceID, read.snapshot.id)
+            XCTAssertEqual(receipt.view, .content)
+            XCTAssertNil(receipt.selectedElementCount)
+            XCTAssertNil(receipt.selectedFieldCount)
+            XCTAssertTrue(receipt.outputTruncated)
+            XCTAssertTrue(receipt.exposures.allSatisfy {
+                read.observation.exposedElementIndices.contains(Int($0.nodeID)!)
+            })
+        }
+        XCTAssertTrue(Set(firstReceipt.exposures.map(\.nodeID)).isDisjoint(with: nextReceipt.exposures.map(\.nodeID)))
+    }
+
+    func testProgressiveReadReceiptKeepsClippedSourceTailsUnknown() throws {
+        // Model the production AX description cap: only this 1,024-character
+        // prefix exists in the source observation; the unknown tail is not read.
+        let prefix = String(repeating: "x", count: 1_024)
+        let leaf = FakeAccessibilityNode(identifier: "fact", role: "AXStaticText", title: prefix,
+                                         descriptionWasTruncated: true)
+        let session = makeSession(runtime: FakeAccessibilityTreeRuntime(root:
+            FakeAccessibilityNode(identifier: "root", role: "AXWindow", children: [leaf])))
+        let read = try session.read(read: .init(view: .content))
+        let receipt = try XCTUnwrap(read.observation.readReceipt)
+        let label = try XCTUnwrap(receipt.exposures.first { $0.nodeID == "1" && $0.field == .label })
+        XCTAssertTrue(receipt.sourceTruncated)
+        XCTAssertTrue(receipt.fieldTruncated)
+        XCTAssertTrue(read.observation.text.contains("field_truncated=1"))
+        XCTAssertEqual(label.totalUTF8, 1_024, "No fabricated original length beyond the captured prefix")
+        XCTAssertEqual(label.endUTF8, 255, "Only actual body prefix before the ellipsis was exposed")
+        XCTAssertNil(receipt.selectedFieldCount)
     }
 
     private func semanticCursor(_ text: String) -> String? {

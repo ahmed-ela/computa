@@ -7,11 +7,17 @@ public struct AccessibilityModelObservation: Equatable, Sendable {
     public let text: String
     public let exposedElementIndices: Set<Int>
     public let snapshotID: UUID
+    /// Host-only read evidence; absent for legacy full-tree observations.
+    public let readReceipt: SemanticReadReceipt?
+    public let presentation: SemanticReadPresentation?
 
-    public init(text: String, exposedElementIndices: Set<Int>, snapshotID: UUID) {
+    public init(text: String, exposedElementIndices: Set<Int>, snapshotID: UUID,
+                readReceipt: SemanticReadReceipt? = nil, presentation: SemanticReadPresentation? = nil) {
         self.text = text
         self.exposedElementIndices = exposedElementIndices
         self.snapshotID = snapshotID
+        self.readReceipt = readReceipt
+        self.presentation = presentation
     }
 }
 
@@ -34,6 +40,10 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
     public let includedElementIndices: Set<Int>?
     public let allowsRaise: Bool
     public let maximumAncestorDepth: Int
+    /// Reserved per retained row for a later typed reference presentation.
+    /// Opting in also reserves the fixed guidance overhead and uses a UTF-8
+    /// budget. Legacy callers keep the original character-budget contract.
+    public let presentationRowByteReserve: Int
 
     public init(
         elementLimit: Int = 120,
@@ -46,7 +56,8 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         prioritizesFocusedDocument: Bool = false,
         includedElementIndices: Set<Int>? = nil,
         allowsRaise: Bool = true,
-        maximumAncestorDepth: Int = 32
+        maximumAncestorDepth: Int = 32,
+        presentationRowByteReserve: Int = 0
     ) {
         self.elementLimit = min(max(elementLimit, 0), 2_000)
         self.fieldCharacterLimit = min(max(fieldCharacterLimit, 1), 4_096)
@@ -59,13 +70,15 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         self.includedElementIndices = includedElementIndices
         self.allowsRaise = allowsRaise
         self.maximumAncestorDepth = min(max(maximumAncestorDepth, 1), 128)
+        self.presentationRowByteReserve = min(max(presentationRowByteReserve, 0), 1_024)
     }
 
     public func format(_ snapshot: AccessibilityTreeSnapshot) -> String {
         formatObservation(snapshot).text
     }
 
-    public func formatObservation(_ snapshot: AccessibilityTreeSnapshot) -> AccessibilityModelObservation {
+    public func formatObservation(_ snapshot: AccessibilityTreeSnapshot,
+                                  readRequest: SemanticReadRequest? = nil) -> AccessibilityModelObservation {
         var formatWasTruncated = false
         let metadataFieldLimit = min(fieldCharacterLimit, 48)
         let app = quoted(
@@ -143,19 +156,164 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
             )
             let output = ([header] + elementLines).joined(separator: "\n")
 
-            if output.count <= outputCharacterLimit || elementLines.isEmpty {
+            let reservedBytes = elementLines.count * presentationRowByteReserve
+                + (presentationRowByteReserve > 0 ? SemanticReadPresentation.fixedMetadataByteReserve : 0)
+            let fitsBudget = presentationRowByteReserve > 0
+                ? output.utf8.count + reservedBytes <= outputCharacterLimit
+                : output.count <= outputCharacterLimit
+            if fitsBudget || elementLines.isEmpty {
+                let retainedCandidates = elementCandidates.prefix(elementLines.count).filter {
+                    unambiguousCandidateIndices.contains($0.index)
+                }
+                let retainedIndices = Set(retainedCandidates.map(\.index))
                 return AccessibilityModelObservation(
                     text: output,
                     exposedElementIndices: Set(elementCandidates.prefix(elementLines.count).compactMap { candidate in
                         unambiguousCandidateIndices.contains(candidate.index) ? candidate.index : nil
                     }),
-                    snapshotID: snapshot.id
+                    snapshotID: snapshot.id,
+                    readReceipt: readRequest.map { request in
+                        let retained = elementCandidates.prefix(elementLines.count).compactMap { candidate in
+                            unambiguousCandidateIndices.contains(candidate.index) ? observedByIndex[candidate.index] : nil
+                        }
+                        return readReceipt(snapshot: snapshot, request: request, elements: retained,
+                                           observedByIndex: observedByIndex,
+                                           outputTruncated: omittedByBudget || selectedElements.count < (includedElementIndices?.count ?? snapshot.elements.count))
+                    },
+                    presentation: .init(snapshotID: snapshot.id, rows: retainedCandidates.compactMap { candidate in
+                        guard let element = observedByIndex[candidate.index] else { return nil }
+                        let enabled = element.isEnabled != false
+                        return SemanticReadPresentedRow(index: candidate.index, text: candidate.line,
+                            actions: enabled ? presentedActions(element.supportedActions) : [],
+                            settable: enabled && element.isValueSettable,
+                            followLink: false, region: true,
+                            parentIndex: element.parentIndex.flatMap {
+                                retainedIndices.contains($0) && $0 != candidate.index ? $0 : nil
+                            })
+                    }, maximumOutputBytes: presentationRowByteReserve > 0 ? outputCharacterLimit : 16_384)
                 )
             }
 
             let removed = elementCandidates[elementLines.count - 1]
             elementLines.removeLast()
             for index in removed.ancestors { ancestorUseCounts[index, default: 0] -= 1 }
+        }
+    }
+
+    /// Receipt construction uses the retained body lines, never header/ancestry
+    /// labels or captured-but-omitted elements. Live native pages cannot certify
+    /// one immutable source, even after their traversal cursor is exhausted.
+    private func readReceipt(snapshot: AccessibilityTreeSnapshot, request: SemanticReadRequest,
+                             elements: [AccessibilityTreeElement],
+                             observedByIndex: [Int: AccessibilityTreeElement],
+                             outputTruncated: Bool) -> SemanticReadReceipt {
+        var exposures = [SemanticReadFieldExposure]()
+        var fieldTruncated = snapshot.elements.contains { $0.evidenceFieldsTruncated == true }
+        for element in elements {
+            let provenance = readProvenance(element, rootIndex: snapshot.rootIndex, observedByIndex: observedByIndex)
+            let kind = readKind(element, provenance: provenance, rootIndex: snapshot.rootIndex,
+                                observedByIndex: observedByIndex)
+            // Identifier fallbacks are metadata even on a readable-text role.
+            let labelIsIdentifier = nonempty(element.title) == nil && nonempty(element.elementDescription) == nil
+                && (nonempty(element.identifier) != nil || nonempty(element.domIdentifier) != nil)
+            for (field, text, fieldKind) in [
+                (SemanticReadField.label, label(for: element), labelIsIdentifier ? .metadata : kind),
+                (SemanticReadField.value, element.value, kind),
+            ] {
+                guard let text = nonempty(text) else { continue }
+                let shown = exposedOriginalSpans(text)
+                fieldTruncated = fieldTruncated || shown.clipped
+                exposures += shown.spans.map { span in
+                    SemanticReadFieldExposure(nodeID: String(element.index), field: field,
+                        startUTF8: span.lowerBound, endUTF8: span.upperBound, totalUTF8: text.utf8.count,
+                        kind: fieldKind, provenance: provenance)
+                }
+            }
+            if element.role == "AXLink", let url = element.url {
+                if let exact = AccessibilityObservedLinkURL.validated(url, maximumBytes: 512) {
+                    exposures.append(.init(nodeID: String(element.index), field: .linkURL,
+                        startUTF8: 0, endUTF8: exact.utf8.count, totalUTF8: exact.utf8.count,
+                        kind: .navigation, provenance: provenance))
+                } else { fieldTruncated = true }
+            }
+        }
+        return SemanticReadReceipt(id: snapshot.id, sourceID: snapshot.id,
+            targetGeneration: "native:\(snapshot.application.processIdentifier)", consistency: .liveValidatedPage,
+            view: request.view, query: request.query, subtreeNodeID: request.elementIndex.map(String.init),
+            selectedElementCount: nil, selectedFieldCount: nil, sourceTruncated: snapshot.wasTruncated,
+            fieldTruncated: fieldTruncated, outputTruncated: outputTruncated, exposures: exposures)
+    }
+
+    /// The presentation folds whitespace. Only original bytes actually present
+    /// in the normalized, clipped field count: invented join spaces and omitted
+    /// whitespace never become a contiguous covered range. Escaping is reversible.
+    private func exposedOriginalSpans(_ text: String) -> (spans: [Range<Int>], clipped: Bool) {
+        var origins = [Range<Int>?]()
+        var whitespace = [Range<Int>]()
+        var whitespaceIsSingleSpace = false
+        var offset = 0
+        for character in text {
+            let next = offset + String(character).utf8.count
+            if character.isWhitespace {
+                whitespace.append(offset..<next)
+                whitespaceIsSingleSpace = whitespace.count == 1 && character == " "
+            } else {
+                if !origins.isEmpty && !whitespace.isEmpty {
+                    origins.append(whitespaceIsSingleSpace ? whitespace[0] : nil)
+                }
+                whitespace.removeAll(keepingCapacity: true)
+                whitespaceIsSingleSpace = false
+                origins.append(offset..<next)
+            }
+            offset = next
+        }
+        let clipped = origins.count > fieldCharacterLimit
+        let retained = clipped ? max(0, fieldCharacterLimit - 1) : origins.count
+        var spans = [Range<Int>]()
+        for origin in origins.prefix(retained) {
+            guard let origin else { continue }
+            if let last = spans.last, last.upperBound == origin.lowerBound {
+                spans[spans.count - 1] = last.lowerBound..<origin.upperBound
+            } else { spans.append(origin) }
+        }
+        return (spans, clipped)
+    }
+
+    private func readProvenance(_ element: AccessibilityTreeElement, rootIndex: Int?,
+                                observedByIndex: [Int: AccessibilityTreeElement]) -> SemanticReadProvenance {
+        guard case let .known(ancestors) = observedAncestry(for: element, rootIndex: rootIndex,
+                                                          observedByIndex: observedByIndex) else { return .unknown }
+        for index in [element.index] + ancestors {
+            guard let node = observedByIndex[index] else { return .unknown }
+            switch node.subrole {
+            case "AXLandmarkMain": return .main
+            case "AXLandmarkNavigation": return .navigation
+            case "AXLandmarkComplementary": return .complementary
+            case "AXLandmarkBanner": return .banner
+            case "AXLandmarkContentInfo": return .contentinfo
+            default: if node.role == "AXArticle" { return .article }
+            }
+        }
+        return .unknown
+    }
+
+    private func readKind(_ element: AccessibilityTreeElement, provenance: SemanticReadProvenance,
+                          rootIndex: Int?, observedByIndex: [Int: AccessibilityTreeElement]) -> SemanticReadContentKind {
+        if provenance == .navigation || element.role == "AXLink" { return .navigation }
+        let controls: Set<String> = ["AXButton", "AXCheckBox", "AXComboBox", "AXMenuItem", "AXPopUpButton",
+            "AXRadioButton", "AXSearchField", "AXSlider", "AXTextField", "AXToolbar", "AXTabGroup"]
+        if element.isValueSettable || !element.supportedActions.isEmpty
+            || controls.contains(element.role ?? "") { return .control }
+        if case let .known(ancestors) = observedAncestry(for: element, rootIndex: rootIndex,
+                                                       observedByIndex: observedByIndex),
+           ancestors.contains(where: { index in
+               guard let parent = observedByIndex[index] else { return false }
+               return controls.contains(parent.role ?? "") || parent.isValueSettable
+           }) { return .control }
+        switch element.role {
+        case "AXStaticText", "AXHeading": return .readable
+        case "AXWindow", "AXApplication", "AXWebArea", "AXDocument": return .metadata
+        default: return .unknown
         }
     }
 
@@ -662,6 +820,13 @@ public struct AccessibilitySnapshotTextFormatter: Equatable, Sendable {
         return "[" + shownActions.map { action in
             quoted(action, truncated: &truncated)
         }.joined(separator: ",") + "]"
+    }
+
+    private func presentedActions(_ actions: [String]) -> [String] {
+        Array(actions.filter {
+            guard let action = SemanticAXAction(rawValue: $0) else { return false }
+            return allowsRaise || action != .raise
+        }.prefix(actionLimit)).filter { $0.count <= fieldCharacterLimit }
     }
 
     private func quoted(_ value: String?, truncated: inout Bool) -> String {

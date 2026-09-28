@@ -15,7 +15,7 @@ final class AgentRuntimeIsolationTests: XCTestCase {
         XCTAssertEqual(environment["CODEX_HOME"], root)
         XCTAssertEqual(FileManager.default.homeDirectoryForCurrentUser, original)
     }
-    func testEmptyParentEnvironmentProducesOnlyExplicitHomesAndSystemPath() {
+    func testEmptyParentEnvironmentProducesOnlyExplicitHomesAndTrustedCLIPath() {
         XCTAssertEqual(
             AgentRuntimeIsolation.environment(
                 inheriting: [:], userHomePath: "/Users/fixture",
@@ -24,7 +24,7 @@ final class AgentRuntimeIsolationTests: XCTestCase {
             [
                 "HOME": "/Users/fixture",
                 "CODEX_HOME": "/Users/fixture/Library/Application Support/Mactopus/AgentHome",
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
             ]
         )
     }
@@ -49,7 +49,7 @@ final class AgentRuntimeIsolationTests: XCTestCase {
             ),
             [
                 "HOME": "/Users/actual-fixture", "CODEX_HOME": "/private/fixture/AgentHome",
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
             ]
         )
         XCTAssertEqual(inherited["HOME"], "untrusted-fixture")
@@ -66,7 +66,7 @@ final class AgentRuntimeIsolationTests: XCTestCase {
         var expected = allowed
         expected["HOME"] = "/Users/fixture"
         expected["CODEX_HOME"] = "/private/fixture/AgentHome"
-        expected["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        expected["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
         XCTAssertEqual(
             AgentRuntimeIsolation.environment(
                 inheriting: inherited, userHomePath: "/Users/fixture",
@@ -84,7 +84,7 @@ final class AgentRuntimeIsolationTests: XCTestCase {
         environment["CODEX_OSS_BASE_URL"] = "http://127.0.0.1:1237/v1"
         XCTAssertEqual(environment, [
             "HOME": "/Users/fixture", "CODEX_HOME": "/private/fixture/AgentHome",
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "CODEX_OSS_BASE_URL": "http://127.0.0.1:1237/v1",
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin", "CODEX_OSS_BASE_URL": "http://127.0.0.1:1237/v1",
         ])
     }
 

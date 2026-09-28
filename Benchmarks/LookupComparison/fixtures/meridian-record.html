@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Meridian Desk - Record</title><style>body{font:17px/1.6 system-ui,sans-serif;max-width:900px;margin:3rem auto;padding:0 1rem;color:#172338;background:#f7f9fc}header,main,section,article{margin:1rem 0;padding:1rem;border:1px solid #b7c6d8;background:white}a{margin:.3rem}input{font:inherit;padding:.5rem;width:75%}label{display:block;font-weight:600}</style></head><body>
+<header><a href="meridian-home.html">Records desk</a><a href="meridian-search.html">Search records</a></header>
+<main><article><h1 id="record-title">No record selected</h1><p id="record-body">Choose a record from the results.</p></article></main>
+<script>
+const records = {
+  r17: { title: "Juniper Veil survey return", body: "The Juniper Veil survey return accepted 29 crates. Handoff took place on 21 November 2034." },
+  r18: { title: "Juniper Cove equipment receipt", body: "The Juniper Cove equipment receipt records 7 cases. Receipt took place on 18 November 2034." },
+  r19: { title: "Amber Ferry survey return", body: "The Amber Ferry survey return accepted 12 crates. Handoff took place on 20 November 2034." },
+};
+const key = new URLSearchParams(location.search).get("entry");
+const record = Object.prototype.hasOwnProperty.call(records, key) ? records[key] : null;
+if (record) {
+  document.getElementById("record-title").textContent = record.title;
+  document.getElementById("record-body").textContent = record.body;
+}
+</script>
+</body></html>

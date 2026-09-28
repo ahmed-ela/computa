@@ -19,7 +19,8 @@ async function fixture() {
   await run(["git", "config", "user.name", "Runtime Source Test"], upstream);
   await run(["git", "config", "user.email", "runtime-test@example.invalid"], upstream);
   await writeFile(join(upstream, "runtime.rs"), "fn main() {}\n");
-  await run(["git", "add", "runtime.rs"], upstream);
+  await writeFile(join(upstream, "untouched.rs"), "pub const UPSTREAM: bool = true;\n");
+  await run(["git", "add", "runtime.rs", "untouched.rs"], upstream);
   await run(["git", "commit", "--quiet", "-m", "Upstream fixture"], upstream);
   await run(["git", "tag", "fixture-v1"], upstream);
   const sourceCommit = await run(["git", "rev-parse", "HEAD"], upstream, true);
@@ -44,6 +45,17 @@ describe("reviewed runtime source preparation", () => {
     await verifyPreparedRuntime(value.source, value.pin, value.patch);
   });
 
+  test("preparation preserves upstream files outside the reviewed patch in the index", async () => {
+    const value = await fixture();
+    await prepareRuntimeSource(value.root, value.source, value.pin, value.patch);
+    expect((await run(["git", "ls-files"], value.source, true)).split("\n")).toEqual([
+      "retained.rs", "runtime.rs", "untouched.rs",
+    ]);
+    expect(await run(["git", "diff", "HEAD", "--", "untouched.rs"], value.source, true)).toBe("");
+    expect(await readFile(join(value.source, "untouched.rs"), "utf8")).toBe("pub const UPSTREAM: bool = true;\n");
+    await verifyPreparedRuntime(value.source, value.pin, value.patch);
+  });
+
   test("unknown tracked edits are preserved and rejected", async () => {
     const value = await fixture();
     await prepareRuntimeSource(value.root, value.source, value.pin, value.patch);
@@ -59,6 +71,16 @@ describe("reviewed runtime source preparation", () => {
     await writeFile(join(value.source, "private-experiment.rs"), "unreviewed source\n");
     await expect(verifyPreparedRuntime(value.source, value.pin, value.patch)).rejects.toThrow("unreviewed files");
     expect(await readFile(join(value.source, "private-experiment.rs"), "utf8")).toBe("unreviewed source\n");
+  });
+
+  test("staged edits to patch-added files are preserved and rejected", async () => {
+    const value = await fixture();
+    await prepareRuntimeSource(value.root, value.source, value.pin, value.patch);
+    const edited = "pub fn unreviewed() {}\n";
+    await writeFile(join(value.source, "retained.rs"), edited);
+    await run(["git", "add", "retained.rs"], value.source);
+    await expect(verifyPreparedRuntime(value.source, value.pin, value.patch)).rejects.toThrow("differs from the exact reviewed patch");
+    expect(await readFile(join(value.source, "retained.rs"), "utf8")).toBe(edited);
   });
 
   test("wrong source revision is rejected without applying the patch", async () => {

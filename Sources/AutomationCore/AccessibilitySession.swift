@@ -1398,9 +1398,10 @@ extension AccessibilitySession {
     /// retained data belongs to this exact window and is capped at 2,000 nodes.
     /// Only emitted lines authorize subtree expansion or a semantic action.
     public func read(read request: SemanticReadRequest = .init(), outputCharacterLimit: Int = 6_000,
-                     allowsRaise: Bool = true) throws -> AccessibilitySemanticReadResult {
+                     allowsRaise: Bool = true, presentationRowByteReserve: Int = 0) throws -> AccessibilitySemanticReadResult {
         do {
             try requirePermission()
+            guard request.requestedView != .overview else { throw SemanticReadError.unsupportedOverview }
             let state: ProgressiveRead
             if let cursor = request.cursor {
                 guard let retained = progressiveRead, retained.cursor == cursor,
@@ -1460,7 +1461,9 @@ extension AccessibilitySession {
             let rendered = AccessibilitySnapshotTextFormatter(elementLimit: 120, fieldCharacterLimit: 256,
                 actionLimit: 8, outputCharacterLimit: max(1_024, outputCharacterLimit - 500),
                 usesCompactElementLines: true, includedElementIndices: Set(state.pending.prefix(120)),
-                allowsRaise: allowsRaise, maximumAncestorDepth: 128).formatObservation(snapshot)
+                allowsRaise: allowsRaise, maximumAncestorDepth: 128,
+                presentationRowByteReserve: presentationRowByteReserve)
+                .formatObservation(snapshot, readRequest: state.request)
             let emitted = rendered.exposedElementIndices
             guard !emitted.isEmpty || state.pending.isEmpty else {
                 // A pathological ancestry/field record must not produce an
@@ -1479,9 +1482,21 @@ extension AccessibilitySession {
                 ? (state.matched == 0 ? "no_matches_in_visited_source" : "matched") : "not_requested"
             let header = "SEMANTIC_READ view=\(state.request.view.rawValue) visited=\(state.elements.count) matched=\(state.matched) offset=\(outputOffset) shown=\(emitted.count) "
                 + "source_truncated=\(snapshot.wasTruncated ? 1 : 0) output_truncated=\(state.pending.isEmpty ? 0 : 1) "
+                + "field_truncated=\(rendered.readReceipt?.fieldTruncated == true ? 1 : 0) "
                 + "source_limit_reached=\(state.sourceLimitReached ? 1 : 0) next_cursor=\(state.cursor ?? "-") query_status=\(queryStatus) consistency=live_validated_page\n"
+            let receipt = rendered.readReceipt.map { body in
+                SemanticReadReceipt(id: body.id, sourceID: body.sourceID, targetGeneration: body.targetGeneration,
+                    consistency: .liveValidatedPage, view: body.view, query: body.query,
+                    subtreeNodeID: body.subtreeNodeID, selectedElementCount: nil, selectedFieldCount: nil,
+                    sourceTruncated: snapshot.wasTruncated, fieldTruncated: body.fieldTruncated,
+                    outputTruncated: body.outputTruncated || !state.pending.isEmpty, exposures: body.exposures)
+            }
             let observation = AccessibilityModelObservation(text: header + rendered.text,
-                exposedElementIndices: emitted, snapshotID: id)
+                exposedElementIndices: emitted, snapshotID: id, readReceipt: receipt,
+                presentation: rendered.presentation.map {
+                    SemanticReadPresentation(snapshotID: $0.snapshotID, rows: $0.rows,
+                        maximumOutputBytes: presentationRowByteReserve > 0 ? outputCharacterLimit : $0.maximumOutputBytes)
+                })
             activeSnapshot = ActiveSnapshot(snapshot: snapshot, handles: state.handles)
             return AccessibilitySemanticReadResult(snapshot: snapshot, observation: observation)
         } catch {
@@ -1591,6 +1606,7 @@ extension AccessibilitySession {
         let viewMatch: Bool
         switch state.request.view {
         case .all: viewMatch = true
+        case .overview: viewMatch = false // Rejected before native observation.
         case .content: viewMatch = hasText && !["AXWindow", "AXApplication"].contains(role)
         case .headings: viewMatch = role == "AXHeading" || (hasText && hasAncestor("AXHeading"))
         case .links: viewMatch = role == "AXLink" || (hasText && hasAncestor("AXLink"))

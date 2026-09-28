@@ -10,6 +10,135 @@ import re
 import uuid
 
 
+# Only exact host-authored conditions may leave the boundary as diagnostics.
+# Do not derive a reason from provider values, arbitrary exception strings, or IDs.
+_PROTOCOL_MESSAGES = frozenset((
+    'Arguments after completion',
+    'Completed item type mismatch',
+    'Contradictory completed response',
+    'Data after stream end',
+    'Data after terminal response',
+    'Duplicate JSON field',
+    'Duplicate function call ID',
+    'Duplicate or excessive items',
+    'Duplicate or invalid response',
+    'Duplicate response start.',
+    'End marker before terminal',
+    'Event after item completion',
+    'Event has no data',
+    'Event references unknown item',
+    'Expected a Responses event stream.',
+    'Expected stream bytes',
+    'Final text differs from public deltas',
+    'Function arguments mismatch',
+    'Function arguments must be an object',
+    'Function identity mismatch',
+    'Function item mismatch',
+    'Incomplete reasoning item',
+    'Inconsistent usage',
+    'Interleaved public text is unsupported',
+    'Interleaved reasoning is unsupported',
+    'Invalid arguments delta',
+    'Invalid completed item',
+    'Invalid content completion',
+    'Invalid final text',
+    'Invalid function arguments',
+    'Invalid function completion',
+    'Invalid initial content part',
+    'Invalid initial message',
+    'Invalid initial response',
+    'Invalid message completion',
+    'Invalid message content',
+    'Invalid message part',
+    'Invalid or late text delta',
+    'Invalid output budget',
+    'Invalid progress response',
+    'Invalid reasoning completion',
+    'Invalid stream UTF-8',
+    'Invalid stream identity',
+    'Invalid stream string',
+    'Invalid terminal message',
+    'Invalid terminal reasoning',
+    'Invalid text completion',
+    'Invalid usage',
+    'Item text exceeds bound',
+    'Item type mismatch',
+    'Malformed stream JSON',
+    'Malformed stream structure',
+    'Malformed terminal item',
+    'Missing event type',
+    'Missing incomplete reason',
+    'Missing item completion',
+    'Missing message lifecycle',
+    'Missing reasoning completion',
+    'Missing response start.',
+    'Missing response.created',
+    'Missing terminal output',
+    'Missing terminal response',
+    'Nonfinite JSON',
+    'Reasoning after public text is unsupported',
+    'Reasoning completion without deltas',
+    'Response after EOF.',
+    'Response identity mismatch',
+    'SSE event type mismatch',
+    'Stream exceeds byte bound',
+    'Stream exceeds event bound',
+    'Stream frame exceeds bound',
+    'Stream is already closed',
+    'Terminal function mismatch',
+    'Terminal identity mismatch',
+    'Terminal item type mismatch',
+    'Terminal omitted function',
+    'Terminal omitted public message',
+    'Terminal reasoning differs from deltas',
+    'Terminal status mismatch',
+    'Text before content part',
+    'Truncated SSE frame',
+    'Unexpected SSE field',
+    'Unknown or duplicate terminal item',
+    'Unstreamed final text',
+    'Unsupported content index',
+    'Unsupported output item',
+    'Unsupported stream event',
+    'Upstream error body limit exceeded.',
+    'Upstream model generation failed',
+    'Upstream response ended without EOF.',
+))
+_PROTOCOL_CODES = {message: re.sub(r"[^a-z0-9]+", "_", message.lower()).strip("_")
+                   for message in _PROTOCOL_MESSAGES}
+_STREAM_EVENT_TYPES = frozenset((
+    "response.created", "response.in_progress", "response.output_item.added",
+    "response.reasoning_text.delta", "response.reasoning_text.done",
+    "response.content_part.added", "response.output_text.delta", "response.output_text.done",
+    "response.content_part.done", "response.function_call_arguments.delta",
+    "response.function_call_arguments.done", "response.output_item.done",
+    "response.completed", "response.incomplete", "response.failed",
+))
+
+
+def protocol_error_diagnostic(error):
+    """Bounded first-condition/cause count; never format an exception or group."""
+    pending = [error] if error is not None else []
+    reason, causes, visited, limited = "unknown_protocol_error", 0, 0, False
+    while pending and visited < 32:
+        current = pending.pop()
+        visited += 1
+        if isinstance(current, BaseExceptionGroup):
+            # Push at most the remaining traversal budget; count omitted nodes.
+            children = current.exceptions
+            room = max(0, 32 - visited - len(pending))
+            pending.extend(reversed(children[:room]))
+            if len(children) > room:
+                limited = True
+        elif isinstance(current, ProtocolError):
+            if causes == 0:
+                args = current.args
+                message = args[0] if len(args) == 1 and type(args[0]) is str else None
+                reason = _PROTOCOL_CODES.get(message, "unknown_protocol_error")
+            causes += 1
+    return reason, causes, bool(pending) or limited
+
+
 class ProtocolError(ValueError):
     """A fixed, payload-free diagnosis safe for logs (not an upstream exception)."""
 
@@ -31,7 +160,9 @@ def _json(text):
     try:
         return json.loads(text, object_pairs_hook=_object_pairs,
                           parse_constant=lambda _: (_ for _ in ()).throw(ProtocolError("Nonfinite JSON")))
-    except (ValueError, UnicodeError, RecursionError) as error:
+    except ProtocolError:
+        raise
+    except (ValueError, UnicodeError, RecursionError):
         raise ProtocolError("Malformed stream JSON") from None
 
 
@@ -56,6 +187,14 @@ class SSEContract:
         self._terminal = None
         self._finished = self._failed = self._done_marker = False
         self._progress = False
+        self._last_event = "none"
+
+    def diagnostic_counters(self):
+        """Metadata only; no response/model/item identity or content is returned."""
+        return {"bytes": min(self._bytes, self.MAX_STREAM_BYTES + 1),
+                "events": min(self._events, self.MAX_EVENTS + 1),
+                "items": min(len(self._items), self.MAX_ITEMS),
+                "last": self._last_event, "terminal": int(self._terminal is not None)}
 
     def _emit(self, event):
         event = {**event, "sequence_number": self.sequence_number}
@@ -123,6 +262,7 @@ class SSEContract:
         event = _json(body)
         _require(isinstance(event, dict) and isinstance(event.get("type"), str), "Missing event type")
         _require(not names or names == [event["type"]], "SSE event type mismatch")
+        self._last_event = event["type"] if event["type"] in _STREAM_EVENT_TYPES else "unsupported"
         self._events += 1
         _require(self._events <= self.MAX_EVENTS, "Stream exceeds event bound")
         return self._event(event)

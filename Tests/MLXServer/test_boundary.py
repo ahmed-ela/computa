@@ -100,6 +100,30 @@ class RequestTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_protocol_group_reaches_terminal_diagnostic_and_releases_busy_state(self):
+        from sse_contract import ProtocolError
+        async def malformed(scope, receive, send):
+            await receive()
+            raise ExceptionGroup("private upstream context", [ProtocolError("Missing terminal response")])
+        # Use the same class imported by the response adapter; no MLX import or listener.
+        self.boundary.app = malformed
+        output = await self.invoke()
+        value = json.loads(output[-1]["body"].split(b"data: ")[1])
+        self.assertEqual(value["type"], "response.failed")
+        self.assertEqual(value["response"]["error"]["code"], "invalid_prompt")
+        self.assertIn("reason=missing_terminal_response", value["response"]["error"]["message"])
+        self.assertNotIn("private", value["response"]["error"]["message"])
+        self.assertFalse(self.boundary.busy)
+
+    async def test_mixed_exception_group_does_not_masquerade_as_protocol_diagnostic(self):
+        from sse_contract import ProtocolError
+        async def mixed(scope, receive, send):
+            raise ExceptionGroup("private context", [ProtocolError("Missing terminal response"), ValueError("other")])
+        self.boundary.app = mixed
+        with self.assertRaises(ExceptionGroup):
+            await self.invoke()
+        self.assertFalse(self.boundary.busy)
+
     async def test_only_public_model_ids_are_accepted_and_resolved_internally(self):
         self.boundary.model_paths = {MODEL: Path("/fixture/owned/models") / MODEL}
         await self.invoke()

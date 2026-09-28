@@ -893,7 +893,15 @@ final class AppState {
                 }
             } else {
                 completedEntry.assistantPhase = nil
-                tasks[index].entries.append(completedEntry)
+                if entry.kind == .tool, entry.toolEvent?.name == "commandExecution",
+                   let existing = tasks[index].entries.firstIndex(where: {
+                       $0.id == entry.id && $0.kind == .tool && $0.toolEvent?.name == "commandExecution"
+                   }) {
+                    completedEntry.timestamp = tasks[index].entries[existing].timestamp
+                    completedEntry.activityGroupID = tasks[index].entries[existing].activityGroupID
+                        ?? completedEntry.activityGroupID
+                    tasks[index].entries[existing] = completedEntry
+                } else { tasks[index].entries.append(completedEntry) }
             }
             tasks[index].updatedAt = max(tasks[index].updatedAt, entry.timestamp)
             if selectedTaskID == taskID {

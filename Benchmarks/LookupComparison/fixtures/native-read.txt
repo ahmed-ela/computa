@@ -1,0 +1,6 @@
+Synthetic local evaluation document
+
+The Bracken calibration value is 64 millimeters.
+The fixture owner is Sample Workshop.
+
+This plain text file is for a separate native-app read. Browser access does not establish native evaluation.

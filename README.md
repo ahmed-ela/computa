@@ -6,9 +6,34 @@
 
 Fast, Mac-optimized local AI.
 
+Mactopus can use browser and desktop controls and run command-line tools through
+its agent runtime. Ask it to run a command in a specific directory; the task
+shows command output and exit status. See [CLI commands](docs/COMMANDS.md) for
+examples, approvals, and process-session limits.
+
 Private personal repository: [ahmed-wlb/mactopus](https://github.com/ahmed-wlb/mactopus). Repository access is required; this is not an anonymous public download.
 
 Next work: [Chrome/Mactopus lookup comparison and generalized evidence handling](TODO.md).
+
+## Install the macOS app
+
+The downloadable preview uses the explicit private release tag
+[`v0.1.0-preview.1`](https://github.com/ahmed-wlb/mactopus/releases/tag/v0.1.0-preview.1).
+Repository access is required. Download the DMG and matching checksums, verify
+them, then open **Install Mactopus.command** from the mounted image and confirm
+**INSTALL**. On an Apple Silicon Mac with macOS 14 or later, it installs into
+`~/Applications`, downloads private Python/MLX dependencies and the pinned Qwen
+4B model (~3.06 GB), then opens the app. Allow about 10 GB free space. No Xcode,
+Homebrew, Git, Bun, or preinstalled Python is needed for this route.
+
+Assets labeled `signed-test` are Developer ID signed but **not notarized** and
+may be blocked by macOS; they are previews, not a Gatekeeper acceptance claim.
+Release publication and clean Mac validation are separate from having these
+packaging scripts in source. Existing app backups, retry behavior, download
+commands, and the path for already configured users are described in the
+[distribution guide](docs/DISTRIBUTION.md). Permissions and browser consent remain
+explicit user actions. Known lookup and stream failures remain documented in
+[TODO.md](TODO.md).
 
 ## Build, install, and run from GitHub
 
@@ -480,9 +505,9 @@ open .build/DerivedData/Build/Products/Debug/Mactopus.app
 
 ## Release bundle
 
-The supported source-install target is **Apple Silicon macOS**. Some historical local bundles contain an Intel slice in the outer Swift app, but the owned Rust/MLX runtime is arm64-only; that does not establish Intel support. Historical `Mactopus-macOS.zip` archives are local artifacts, not a GitHub release promised by this repository. Use the source installer above. Model weights and Python environments are downloaded separately and are not committed.
+The supported target is **Apple Silicon macOS**. Some historical local bundles contain an Intel slice in the outer Swift app, but the owned Rust/MLX runtime is arm64-only; that does not establish Intel support. Historical `Mactopus-macOS.zip` archives are local artifacts. The new private preview distribution uses a Developer ID signed DMG, labeled `signed-test` when not notarized; see the [distribution guide](docs/DISTRIBUTION.md). Model weights and Python environments are downloaded separately and are not committed.
 
-The local release is signed for this machine with Ahmed's Apple Development identity (`TeamIdentifier=MSMG8CJLB3`) and hardened runtime enabled. macOS can still bind Accessibility approval for a local development build to that build's exact code hash, so replacing the application may require requesting Accessibility again even though the signing identity is unchanged. Screen Recording can remain attached to the designated signing requirement. It is not Developer ID signed or notarized, so Gatekeeper assessment still rejects it as a distribution build; that is expected for this private local install.
+Earlier local releases used Ahmed's Apple Development identity (`TeamIdentifier=MSMG8CJLB3`) with hardened runtime enabled. That historical signature did not establish Developer ID distribution or notarization. The release signer now signs the app and bundled helpers with Developer ID; notarization remains a separate step. macOS can bind Accessibility approval for a local development build to that build's exact code hash, so replacing an app may require requesting Accessibility again even when the signing identity is unchanged. Screen Recording can remain attached to the designated signing requirement.
 
 For faster command-line iteration, the same targets are available through Swift Package Manager:
 
@@ -608,7 +633,7 @@ After overlapping visual-sidecar preparation with Qwen and embedding a fresh ver
 - The previously signed installed app passed separate `open → capture → snapshot` and natively approved `open → snapshot → AXPress → snapshot` Chrome turns, both ending `Completed`. Screen Recording was **Granted** for that app. The screenshot turn took 540 seconds; this capability result was not a speed benchmark. The coordinate-click path was separately validated in the V1 production-runtime test host, not repeated in that installed binary.
 - App Server persists a task's dynamic-tool schema when that task is created. Existing threads can retain older schemas and lack the new tab tools. Durable in-place schema migration is unfinished; the app must not claim old chats have gained these tools or that a new chat is the intended long-term recovery mechanism.
 - The App Server is bundle-only: missing, incompatible, or corrupt runtime artifacts fail closed, without silently falling back to the installed Codex/ChatGPT application. LM Studio provider and initial workspace are fixed in code; the default model is selectable in Settings.
-- The distributed ZIP is Apple Development signed with hardened runtime enabled for Ahmed's local use. It is not Developer ID signed or notarized for public distribution.
+- Historical local ZIPs used Apple Development signing. The new private preview DMG uses Developer ID signing; a `signed-test` asset is not notarized and may be blocked by macOS. See the [distribution guide](docs/DISTRIBUTION.md) for the exact install path and release checks.
 
 ## Source layout
 

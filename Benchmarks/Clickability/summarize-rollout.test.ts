@@ -83,3 +83,11 @@ test("rejects missing selected turn and duplicate call identities", () => {
   expect(() => audit([row("turn_context", { turn_id: other })])).toThrow("redacted");
   expect(() => audit([...start, call("same", "computer_v2_ax"), call("same", "computer_v2_ax")])).toThrow("redacted");
 });
+
+
+test("generic read continuation retains its known tool name", () => {
+  const result = audit([...start, call("continue", "computer_v2_continue"), output("continue", "PRIVATE_READ")]);
+  expect(result.requestedTools).toEqual(["computer_v2_continue"]);
+  expect(result.counts.calls).toBe(1);
+  expect(JSON.stringify(result)).not.toContain("PRIVATE_READ");
+});

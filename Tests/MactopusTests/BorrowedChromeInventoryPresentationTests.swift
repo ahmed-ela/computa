@@ -21,6 +21,25 @@ final class BorrowedChromeInventoryPresentationTests: XCTestCase {
         XCTAssertEqual(object["returned"] as? Int, 1)
     }
 
+    func testScopeClassificationMustAgreeWithFrozenInventoryOrdering() throws {
+        let item = BorrowedChromeInventoryItem(candidateToken: UUID(), title: "Metadata", url: URL(string: "https://example.com")!,
+                                              requestScopeMatch: true)
+        let page = BorrowedChromeInventoryPage(items: [item], nextCursor: nil, totalCount: 1, requestedScopeFirst: true)
+        let object = try decoded(page)
+        XCTAssertEqual(object["inventory_order"] as? String, "requested_scope_first")
+        XCTAssertEqual(try firstRow(object)["request_scope_match"] as? Bool, true)
+        let notice = try XCTUnwrap(object["metadata_notice"] as? String)
+        XCTAssertTrue(notice.contains("All inventory tabs remain included"))
+        XCTAssertTrue(notice.contains("target eligibility only, not authorization or content relevance"))
+        let invalid = BorrowedChromeInventoryPage(items: [item], nextCursor: nil, totalCount: 1)
+        XCTAssertThrowsError(try BorrowedChromeInventoryPresentation.render(invalid)) {
+            XCTAssertEqual($0 as? BorrowedChromeInventoryPresentationError, .invalidPage)
+        }
+        let unclassified = singleItemPage(title: "Metadata").items[0]
+        XCTAssertThrowsError(try BorrowedChromeInventoryPresentation.render(
+            .init(items: [unclassified], nextCursor: nil, totalCount: 1, requestedScopeFirst: true)))
+    }
+
     func testEmptyInventoryHasTerminalCursorAndNoRows() throws {
         let object = try decoded(.init(items: [], nextCursor: nil, totalCount: 0))
         XCTAssertEqual((object["items"] as? [[String: Any]])?.count, 0)
@@ -62,9 +81,9 @@ final class BorrowedChromeInventoryPresentationTests: XCTestCase {
         let object = try decoded(page)
         let row = try firstRow(object)
         XCTAssertEqual(row["title"] as? String, title)
-        XCTAssertEqual(Set(object.keys), ["items", "next_cursor", "continuation_tool", "total_count", "returned", "metadata_notice"])
+        XCTAssertEqual(Set(object.keys), ["items", "next_cursor", "continuation_tool", "total_count", "returned", "metadata_notice", "inventory_order"])
         XCTAssertEqual(object["continuation_tool"] as? String, "computer_v2_continue")
-        XCTAssertEqual(Set(row.keys), ["candidate_token", "title", "title_truncated", "url", "availability"])
+        XCTAssertEqual(Set(row.keys), ["candidate_token", "title", "title_truncated", "url", "availability", "request_scope_match"])
         for forbidden in ["consent", "approved", "endpoint", "target_id", "profile_directory", "javascript"] {
             XCTAssertNil(object[forbidden])
             XCTAssertNil(row[forbidden])

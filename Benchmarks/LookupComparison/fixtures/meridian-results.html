@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Meridian Desk - Results</title><style>body{font:17px/1.6 system-ui,sans-serif;max-width:900px;margin:3rem auto;padding:0 1rem;color:#172338;background:#f7f9fc}header,main,section,article{margin:1rem 0;padding:1rem;border:1px solid #b7c6d8;background:white}a{margin:.3rem}input{font:inherit;padding:.5rem;width:75%}label{display:block;font-weight:600}</style></head><body>
+<header><a href="meridian-home.html">Records desk</a><a href="meridian-search.html">Search records</a></header>
+<main><h1>Record results</h1><p id="displayed-query"></p><section aria-label="Search results"><h2>Search results</h2><p id="results-status" role="status"></p><ul id="result-list"></ul></section></main>
+<script>
+const records = [
+  { id: "r17", title: "Juniper Veil survey return" },
+  { id: "r18", title: "Juniper Cove equipment receipt" },
+  { id: "r19", title: "Amber Ferry survey return" },
+];
+const query = new URLSearchParams(location.search).get("q") || "";
+const normalized = value => value.normalize("NFKC").trim().toLowerCase().split(/\s+/).filter(Boolean);
+const terms = normalized(query);
+const matches = terms.length ? records.filter(record => terms.every(term => normalized(record.title).join(" ").includes(term))) : [];
+document.getElementById("displayed-query").textContent = query ? "Query: " + query : "No query supplied.";
+const status = document.getElementById("results-status");
+status.textContent = matches.length ? matches.length + " matching record(s)." : terms.length ? "No results found." : "Enter a query on the search page.";
+const list = document.getElementById("result-list");
+for (const record of matches) {
+  const row = document.createElement("li");
+  row.setAttribute("aria-label", record.title);
+  const link = document.createElement("a");
+  link.setAttribute("href", "meridian-record.html?entry=" + encodeURIComponent(record.id));
+  link.textContent = record.title;
+  row.append(link);
+  list.append(row);
+}
+</script>
+</body></html>

@@ -46,6 +46,8 @@ final class NativeBackgroundAccessibility {
     struct Observation: Sendable {
         let snapshotID: UUID
         let text: String
+        let readReceipt: SemanticReadReceipt?
+        var presentation: SemanticReadPresentation? = nil
     }
 
     private let backend: any NativeBackgroundAccessibilityBackend
@@ -83,13 +85,15 @@ final class NativeBackgroundAccessibility {
         try read(read: SemanticReadRequest(query: query), outputCharacterLimit: outputCharacterLimit)
     }
 
-    func read(read: SemanticReadRequest, outputCharacterLimit: Int? = nil) throws -> Observation {
+    func read(read: SemanticReadRequest, outputCharacterLimit: Int? = nil,
+              presentationRowByteReserve: Int = 0) throws -> Observation {
         do {
             // Clear action scope before any potentially blocking OS read. The
             // backend retains its own bounded, window-scoped read frontier.
             snapshot = nil; snapshotIsLive = false; scope = nil
             try requireTarget()
-            let result = try backend.semanticRead(read, outputCharacterLimit: outputCharacterLimit ?? 6_000)
+            let result = try backend.semanticRead(read, outputCharacterLimit: outputCharacterLimit ?? 6_000,
+                presentationRowByteReserve: presentationRowByteReserve)
             try requireTarget()
             snapshot = result.snapshot
             snapshotIsLive = read.cursor == nil && read.snapshotID == nil
@@ -98,7 +102,8 @@ final class NativeBackgroundAccessibility {
                 "NATIVE_AX scope=bound_window activation=none. Semantic AX/set_value only; "
                     + "global key/pointer tools are unavailable in this background binding. "
                     + "Read-only images grant no input authority. "
-                    + "Dispatch is not outcome verification.\n" + result.observation.text)
+                    + "Dispatch is not outcome verification.\n" + result.observation.text,
+                readReceipt: result.observation.readReceipt, presentation: result.observation.presentation)
         } catch {
             invalidate()
             throw error
@@ -152,7 +157,7 @@ final class NativeBackgroundAccessibility {
     /// Runtime-owned settling reads use a full bounded tree, not the first
     /// 1,600 output characters. The visible result remains compact and actions
     /// are still limited to the elements actually presented to the model.
-    func readForVerification(preferredText: String? = nil) throws -> Observation {
+    func readForVerification(preferredText: String? = nil, presentationRowByteReserve: Int = 0) throws -> Observation {
         do {
             snapshot = nil; snapshotIsLive = false; scope = nil
             try requireTarget()
@@ -163,14 +168,15 @@ final class NativeBackgroundAccessibility {
             let formatted = AccessibilitySnapshotTextFormatter(elementLimit: 160,
                 fieldCharacterLimit: 512, outputCharacterLimit: 4_000,
                 prioritizesRelevantElements: true, preferredText: preferredText,
-                usesCompactElementLines: true, allowsRaise: false).formatObservation(captured)
+                usesCompactElementLines: true, allowsRaise: false,
+                presentationRowByteReserve: presentationRowByteReserve).formatObservation(captured)
             snapshot = captured
             snapshotIsLive = true
             scope = NativeAccessibilityActionScope(observation: formatted)
             return Observation(snapshotID: captured.id, text:
                 "NATIVE_AX scope=bound_window activation=none verification_read=true. "
                 + "Fresh references only; hidden elements are not action targets. This read never dispatches input.\n"
-                + formatted.text)
+                + formatted.text, readReceipt: formatted.readReceipt, presentation: formatted.presentation)
         } catch { invalidate(); throw error }
     }
 
@@ -300,6 +306,8 @@ protocol NativeBackgroundAccessibilityBackend {
     func isStillSelected() throws -> Bool
     func snapshot(limits: AccessibilityTreeLimits) throws -> AccessibilityTreeSnapshot
     func semanticRead(_ request: SemanticReadRequest, outputCharacterLimit: Int) throws -> AccessibilitySemanticReadResult
+    func semanticRead(_ request: SemanticReadRequest, outputCharacterLimit: Int,
+                      presentationRowByteReserve: Int) throws -> AccessibilitySemanticReadResult
     func invalidateObservation()
     func perform(action: SemanticAXAction, index: Int, snapshot: AccessibilityTreeSnapshot, beforeDispatch: () throws -> Void) throws
     func setValue(text: String, index: Int, snapshot: AccessibilityTreeSnapshot, beforeDispatch: () throws -> Void) throws
@@ -307,6 +315,10 @@ protocol NativeBackgroundAccessibilityBackend {
 
 extension NativeBackgroundAccessibilityBackend {
     func invalidateObservation() {}
+    func semanticRead(_ request: SemanticReadRequest, outputCharacterLimit: Int,
+                      presentationRowByteReserve: Int) throws -> AccessibilitySemanticReadResult {
+        try semanticRead(request, outputCharacterLimit: outputCharacterLimit)
+    }
     // Preserve lightweight backend/mocks. A backend cannot silently accept a
     // cursor or pretend a query can discover nodes beyond its captured source.
     func semanticRead(_ request: SemanticReadRequest, outputCharacterLimit: Int) throws -> AccessibilitySemanticReadResult {
@@ -340,6 +352,11 @@ private final class SystemBackgroundAccessibilityBackend: NativeBackgroundAccess
     }
     func semanticRead(_ request: SemanticReadRequest, outputCharacterLimit: Int) throws -> AccessibilitySemanticReadResult {
         try session.read(read: request, outputCharacterLimit: outputCharacterLimit, allowsRaise: false)
+    }
+    func semanticRead(_ request: SemanticReadRequest, outputCharacterLimit: Int,
+                      presentationRowByteReserve: Int) throws -> AccessibilitySemanticReadResult {
+        try session.read(read: request, outputCharacterLimit: outputCharacterLimit, allowsRaise: false,
+            presentationRowByteReserve: presentationRowByteReserve)
     }
     func invalidateObservation() { session.invalidateSnapshot() }
     func perform(action: SemanticAXAction, index: Int, snapshot: AccessibilityTreeSnapshot, beforeDispatch: () throws -> Void) throws {

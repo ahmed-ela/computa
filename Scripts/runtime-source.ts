@@ -109,8 +109,12 @@ export async function prepareRuntimeSource(root: string, source: string, pin: Ru
   await verifyCheckoutIdentity(source, pin);
   const currentDiff = await reviewedDiff(source);
   if (!currentDiff) {
-    await run(["git", "apply", "--check", patch], source);
-    await run(["git", "apply", "--intent-to-add", patch], source);
+    // Load and update the complete index. Applying with --intent-to-add can
+    // replace the index with only patched paths on supported Apple Git builds,
+    // leaving untouched upstream files untracked. HEAD still anchors the exact
+    // reviewed diff, including new files, after this indexed application.
+    await run(["git", "apply", "--index", "--check", patch], source);
+    await run(["git", "apply", "--index", patch], source);
   }
   await verifyPreparedRuntime(source, pin, patch);
   return source;

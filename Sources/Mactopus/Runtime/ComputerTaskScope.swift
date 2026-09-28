@@ -123,13 +123,24 @@ struct ComputerTaskScope: Equatable, Sendable {
         switch tool {
         case "computer_v2_status", "computer_v2_apps", "computer_v2_tabs", "computer_v2_bind_tab":
             return nil
-        case "computer_v2_snapshot", "computer_v2_ax", "computer_v2_set_text", "computer_v2_verify":
+        case "computer_v2_snapshot", "computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text", "computer_v2_verify":
             guard !hasBorrowedBinding else { return nil }
             return "This request permits background Chrome tab tools only. Bind an observed Chrome tab before reading or interacting; native app fallback is outside the requested scope."
         default:
             guard tool == "computer" || tool.hasPrefix("computer_") || tool.hasPrefix("desktop_") else { return nil }
             return "This request permits background Chrome tab tools only. Foreground app opening, new-tab fallback, screenshots, and global keyboard/pointer input are outside the requested scope. No action was dispatched."
         }
+    }
+
+    /// Presentation reuses the bind-time restriction, never a relevance guess.
+    /// Unknown/ambiguous requests must not label every tab as a positive match.
+    var hasCandidateRestriction: Bool {
+        targetConfidence != .unknown && targetConfidence != .ambiguous
+    }
+
+    func candidateMatch(url: URL, title: String) -> Bool? {
+        guard hasCandidateRestriction else { return nil }
+        return candidateViolation(url: url, title: title) == nil
     }
 
     /// Call with the native owner's current inventory metadata, never a URL or

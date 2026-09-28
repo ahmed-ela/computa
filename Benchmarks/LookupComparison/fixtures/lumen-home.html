@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Lumen Registry - Workspace</title><style>body{font:17px/1.6 system-ui,sans-serif;max-width:900px;margin:3rem auto;padding:0 1rem;color:#172338;background:#f7f9fc}header,main{margin:1rem 0;padding:1rem;border:1px solid #b7c6d8;background:white}button,input{font:inherit;padding:.5rem}label{display:block;font-weight:600}dialog{max-width:650px;padding:2rem;border:1px solid #b7c6d8}dialog::backdrop{background:#17233866}input{width:90%}</style></head><body>
+<header><strong>Lumen Registry</strong><nav aria-label="Workspace"><button id="open-search" type="button" aria-haspopup="dialog" aria-controls="record-search-dialog" aria-expanded="false">Search records</button></nav></header>
+<main><h1>Registry workspace</h1><p>Welcome to the shared registry.</p><p>No record is currently selected.</p></main>
+<dialog id="record-search-dialog" aria-labelledby="search-title"><h2 id="search-title">Search records</h2><label for="record-query">Record name or phrase</label><input id="record-query" type="search" autocomplete="off" value="">
+<p id="query-status" role="status">Enter a record name or phrase.</p><a id="show-results" hidden>Show results</a><p><button id="close-search" type="button">Close</button></p></dialog>
+<script>
+const opener = document.getElementById("open-search");
+const dialog = document.getElementById("record-search-dialog");
+opener.addEventListener("click", () => {
+  dialog.showModal();
+  opener.setAttribute("aria-expanded", "true");
+});
+document.getElementById("close-search").addEventListener("click", () => dialog.close());
+dialog.addEventListener("close", () => opener.setAttribute("aria-expanded", "false"));
+const query = document.getElementById("record-query");
+const submit = document.getElementById("show-results");
+const status = document.getElementById("query-status");
+query.addEventListener("input", () => {
+  const value = query.value.trim();
+  submit.hidden = value.length === 0;
+  if (value) submit.setAttribute("href", "lumen-results.html?q=" + encodeURIComponent(value));
+  else submit.removeAttribute("href");
+  status.textContent = value ? "Query ready. Open results to view matching records." : "Enter a record name or phrase.";
+});
+</script>
+</body></html>

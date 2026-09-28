@@ -1,7 +1,7 @@
 import Foundation
 
 public enum SemanticReadView: String, CaseIterable, Codable, Sendable {
-    case all, content, headings, links
+    case all, overview, content, headings, links
 }
 
 /// Discovery is independent of knowing the requested text in advance. A cursor
@@ -47,6 +47,7 @@ public enum SemanticReadError: LocalizedError {
     case invalidRequest
     case unexposedSubtree
     case unsupportedProgressiveRead
+    case unsupportedOverview
     case outputBudgetTooSmall
 
     public var errorDescription: String? {
@@ -54,6 +55,7 @@ public enum SemanticReadError: LocalizedError {
         case .staleCursor: "The semantic-read cursor is stale or belongs to another observation. Start a fresh read."
         case .invalidRequest: "A cursor continues its original view/query; omit filters or repeat exactly the original filters. Start a fresh read to change filters or subtree."
         case .unexposedSubtree: "Subtree expansion requires an element shown in the current snapshot; do not guess indices."
+        case .unsupportedOverview: "The overview view is browser-only. For a native app use all, content, headings, or links."
         case .unsupportedProgressiveRead: "This native backend does not support progressive reads."
         case .outputBudgetTooSmall: "The retained semantic record does not fit this output budget. Read a narrower view or subtree."
         }

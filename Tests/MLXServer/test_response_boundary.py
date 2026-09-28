@@ -40,6 +40,45 @@ class ErrorShapeTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_terminal_diagnosis_survives_safe_terminal_error(self):
+        await self.start(200, [(b"content-type", b"text/event-stream")])
+        created = body({"type": "response.created", "response": {
+            "id": "private-response-id", "model": "private-model-path", "status": "in_progress", "output": []}})
+        raw = b"data: " + created + b"\n\n"
+        with self.assertRaises(ProtocolError) as caught:
+            await self.chunk(raw)
+        await self.adapter.fail(caught.exception)
+        event = json.loads(self.output[-1]["body"].split(b"data: ")[1])
+        self.assertEqual(event["type"], "response.failed")
+        self.assertEqual(event["response"]["output"], [])
+        error = event["response"]["error"]
+        self.assertEqual(error["code"], "invalid_prompt")
+        self.assertEqual(error["message"], "Local model stream could not be validated. "
+            f"[mlx_protocol reason=missing_terminal_response bytes={len(raw)} events=1 items=0 "
+            "last=response.created terminal=0 eof=1 causes=1 limited=0]")
+        self.assertNotIn("private", error["message"])
+        count = len(self.output)
+        await self.adapter.fail(caught.exception)
+        self.assertEqual(len(self.output), count)
+        await self.adapter.finish()
+
+    async def test_unknown_exception_text_never_enters_failure_diagnostic(self):
+        secret = "private provider body https://private.example/path"
+        await self.adapter.fail(ExceptionGroup(secret, [ProtocolError(secret)]))
+        event = json.loads(self.output[-1]["body"].split(b"data: ")[1])
+        error = event["response"]["error"]
+        self.assertIn("reason=unknown_protocol_error", error["message"])
+        self.assertNotIn(secret, error["message"])
+        self.assertLess(len(error["message"].encode()), 512)
+
+    async def test_distinct_transport_condition_remains_terminal_and_observable(self):
+        with self.assertRaises(ProtocolError) as caught:
+            await self.start(200, [(b"content-type", b"application/json")])
+        await self.adapter.fail(caught.exception)
+        event = json.loads(self.output[-1]["body"].split(b"data: ")[1])
+        self.assertEqual(event["response"]["error"]["code"], "invalid_prompt")
+        self.assertIn("reason=expected_a_responses_event_stream", event["response"]["error"]["message"])
+
     async def asyncSetUp(self):
         self.output = []
         async def send(message):

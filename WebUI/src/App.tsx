@@ -74,6 +74,7 @@ function modelName(model: string, snapshot: AppSnapshot) {
 }
 
 const toolNames: Record<string, string> = {
+  commandExecution: 'Command',
   computer_v2_status: 'Check permissions', computer_v2_apps: 'Find applications',
   computer_v2_open: 'Open application', computer_v2_snapshot: 'Inspect interface',
   computer_v2_capture: 'Capture window', computer_v2_ground_click: 'Locate and click',
@@ -209,7 +210,7 @@ function ToolDetails({ entry, showPayload }: { entry: EntrySnapshot; showPayload
         <Icon name="chevron" size={14} />
       </summary>
       <div className="tool-expanded-summary"><span>{tool.name}</span><p>{tool.summary}</p></div>
-      {showPayload ? (
+      {showPayload || tool.name === 'commandExecution' ? (
         <div className="tool-payload">
           <div><span>Input</span><pre>{tool.input}</pre></div>
           {tool.output ? <div><span>Output</span><pre>{tool.output}</pre></div> : null}

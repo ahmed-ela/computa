@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Delivery ledger</title><style>body{font:17px/1.6 system-ui,sans-serif;max-width:900px;margin:3rem auto;padding:0 1rem;color:#172338;background:#f7f9fc}header,nav,aside,main,article,section,div[role=toolbar]{margin:1rem 0;padding:1rem;border:1px solid #b7c6d8;background:white}h1,h2{line-height:1.2}button,a{margin:.3rem}button{padding:.5rem .8rem;font:inherit}dt{font-weight:700}dd{margin-bottom:.7rem}</style></head><body>
+<main><h1>Delivery ledger</h1>
+<p id="page-status" role="status">Showing records 1-2 of 6. Later records are not mounted.</p>
+<ul id="mounted-records" aria-label="Mounted delivery records"><li>Amber Kite: 12 boxes</li><li>Birch Pebble: 31 boxes</li></ul>
+<button id="next-page" type="button">Next captured set</button>
+</main>
+<script>
+const sets = [
+  ["Amber Kite: 12 boxes", "Birch Pebble: 31 boxes"],
+  ["Cinder Finch: 28 boxes", "Dune Ribbon: 9 boxes"],
+  ["Moss Lantern: 46 boxes", "Willow Compass: 15 boxes"],
+];
+let current = 0;
+const button = document.getElementById("next-page");
+button.addEventListener("click", () => {
+  if (current >= sets.length - 1) return;
+  current += 1;
+  document.getElementById("mounted-records").replaceChildren(...sets[current].map(text => {
+    const row = document.createElement("li"); row.textContent = text; return row;
+  }));
+  document.getElementById("page-status").textContent = `Showing records ${current * 2 + 1}-${current * 2 + 2} of 6. Earlier sets are not mounted.`;
+  button.disabled = current === sets.length - 1;
+});
+</script>
+</body></html>

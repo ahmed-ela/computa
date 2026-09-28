@@ -54,6 +54,109 @@ final class BorrowedChromeSessionOwnerTests: XCTestCase {
         await fixture.owner.disconnect()
     }
 
+    func testRequestedScopeOrdersBeforePaginationAndFreezesEveryCandidateAndLabel() async throws {
+        let fixture = try OwnerFixture()
+        let scope = ComputerTaskScope(userPrompt: "Inspect https://wanted.example:8443.")
+        let candidates = (0..<49).map { index in
+            BorrowedChromeTabCandidate(targetID: "target-\(index)", title: "Tab \(index)",
+                url: URL(string: "https://\([27, 48].contains(index) ? "wanted.example:8443" : "other.example")/\(index)")!)
+        }
+        await fixture.transport.setCandidates(candidates)
+        let turn = try await fixture.turn()
+        let first = try await fixture.owner.listTabs(turn: turn, requestScope: scope)
+        XCTAssertTrue(first.requestedScopeFirst)
+        XCTAssertEqual(first.items.prefix(2).map(\.title), ["Tab 27", "Tab 48"],
+                       "Matches beyond the old first page must be presented first.")
+        XCTAssertEqual(first.items.prefix(2).map(\.requestScopeMatch), [true, true])
+        let cursor = try XCTUnwrap(first.nextCursor)
+        // A continuation cannot rerank from new metadata or a different scope.
+        await fixture.transport.setCandidates([])
+        let changedScope = ComputerTaskScope(userPrompt: "Inspect https://other.example.")
+        let second = try await fixture.owner.listTabs(turn: turn, cursor: cursor, requestScope: changedScope)
+        let replay = try await fixture.owner.listTabs(turn: turn, cursor: cursor)
+        XCTAssertEqual(second, replay)
+        XCTAssertNil(second.nextCursor)
+        let items = first.items + second.items
+        XCTAssertEqual(items.count, 49)
+        XCTAssertEqual(Set(items.map(\.candidateToken)).count, 49)
+        XCTAssertEqual(items.map(\.title), ["Tab 27", "Tab 48"] + (0..<49).filter { ![27, 48].contains($0) }.map { "Tab \($0)" })
+        XCTAssertTrue(items.dropFirst(2).allSatisfy { $0.requestScopeMatch == false })
+        for page in [first, second] {
+            XCTAssertEqual(page.totalCount, 49)
+            XCTAssertTrue(page.requestedScopeFirst)
+            XCTAssertLessThanOrEqual(try BorrowedChromeInventoryPresentation.render(page).utf8.count, 12 * 1_024)
+        }
+        for item in items {
+            let retained = try await fixture.owner.observedCandidate(turn: turn, candidateToken: item.candidateToken)
+            XCTAssertEqual(retained.title, item.title)
+            XCTAssertEqual(retained.url, item.url)
+        }
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.lists, 1)
+        XCTAssertEqual(counts.attaches, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testScopeMatchingUsesFullMetadataBeforeTitleClippingAndURLOmission() async throws {
+        let fixture = try OwnerFixture()
+        let prefix = String(repeating: "A", count: 240)
+        let title = prefix + " Wanted"
+        let scope = ComputerTaskScope(userPrompt: "Inspect https://wanted.example:8443. Use the tab titled \"\(title)\".")
+        let longPath = String(repeating: "p", count: 5_000)
+        let matchingURL = URL(string: "https://wanted.example:8443/" + longPath)!
+        await fixture.transport.setCandidates([
+            .init(targetID: "title-mismatch", title: prefix + " Other", url: matchingURL),
+            .init(targetID: "port-mismatch", title: title, url: URL(string: "https://wanted.example:8444/" + longPath)!),
+            .init(targetID: "matching", title: title, url: matchingURL),
+            .init(targetID: "spoof-host", title: title, url: URL(string: "https://wanted.example.attacker.test:8443/" + longPath)!),
+        ])
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn, requestScope: scope)
+        XCTAssertEqual(page.items.map(\.requestScopeMatch), [true, false, false, false])
+        let output = try BorrowedChromeInventoryPresentation.render(page)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        let rows = try XCTUnwrap(object["items"] as? [[String: Any]])
+        XCTAssertEqual(Set(rows.compactMap { $0["title"] as? String }).count, 1,
+                       "Clipped identical display titles must not determine scope eligibility.")
+        XCTAssertTrue(rows.allSatisfy { $0["title_truncated"] as? Bool == true && $0["url_omitted"] as? Bool == true })
+        XCTAssertEqual(rows.compactMap { $0["request_scope_match"] as? Bool }, [true, false, false, false])
+        for item in page.items {
+            let candidate = try await fixture.owner.observedCandidate(turn: turn, candidateToken: item.candidateToken)
+            XCTAssertEqual(item.requestScopeMatch, scope.candidateViolation(url: candidate.url, title: candidate.title) == nil)
+        }
+        let candidate = try await fixture.owner.observedCandidate(turn: turn, candidateToken: page.items[0].candidateToken)
+        XCTAssertEqual(candidate.targetID, "matching")
+        XCTAssertEqual(candidate.url, matchingURL)
+        XCTAssertEqual(candidate.title, title)
+        await fixture.owner.disconnect()
+    }
+
+    func testUnknownAmbiguousAndNoMatchScopesNeverHideInventoryEntries() async throws {
+        for prompt in ["Inspect existing tabs.", "Compare https://one.example and https://two.example.", "Inspect https://absent.example."] {
+            let fixture = try OwnerFixture(count: 3)
+            let scope = ComputerTaskScope(userPrompt: prompt)
+            let turn = try await fixture.turn()
+            let page = try await fixture.owner.listTabs(turn: turn, requestScope: scope)
+            XCTAssertEqual(page.items.count, 3)
+            XCTAssertEqual(page.totalCount, 3)
+            XCTAssertNil(page.nextCursor)
+            XCTAssertEqual(page.requestedScopeFirst, scope.hasCandidateRestriction)
+            XCTAssertTrue(page.items.allSatisfy { $0.requestScopeMatch == (scope.hasCandidateRestriction ? false : nil) })
+            for (index, item) in page.items.enumerated() {
+                let candidate = try await fixture.owner.observedCandidate(turn: turn, candidateToken: item.candidateToken)
+                XCTAssertEqual(candidate.targetID, "target-\(index)")
+            }
+            let output = try BorrowedChromeInventoryPresentation.render(page)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+            XCTAssertEqual(object["inventory_order"] as? String, scope.hasCandidateRestriction ? "requested_scope_first" : "transport_order")
+            if !scope.hasCandidateRestriction {
+                let rows = try XCTUnwrap(object["items"] as? [[String: Any]])
+                XCTAssertTrue(rows.allSatisfy { $0["request_scope_match"] is NSNull })
+            }
+            await fixture.owner.disconnect()
+        }
+    }
+
     func testUnknownCursorPreservesValidPaginationAndStableNextCursor() async throws {
         let fixture = try OwnerFixture(count: 63)
         let turn = try await fixture.turn()
@@ -148,7 +251,10 @@ final class BorrowedChromeSessionOwnerTests: XCTestCase {
         var reachedEnd = false
         for index in 0...candidates.count {
             let requestedSize = index % 2 == 0 ? 25 : 1
-            let page = try await fixture.owner.listTabs(turn: turn, cursor: cursor, pageSize: requestedSize)
+            let page = try await fixture.owner.listTabs(turn: turn, cursor: cursor, pageSize: requestedSize,
+                requestScope: ComputerTaskScope(userPrompt: "Inspect https://example.com."))
+            XCTAssertTrue(page.requestedScopeFirst)
+            XCTAssertTrue(page.items.allSatisfy { $0.requestScopeMatch == true })
             XCTAssertFalse(page.items.isEmpty)
             XCTAssertLessThanOrEqual(page.items.count, requestedSize)
             if index == 0 { XCTAssertLessThan(page.items.count, requestedSize, "Byte budget must reduce the initial page.") }

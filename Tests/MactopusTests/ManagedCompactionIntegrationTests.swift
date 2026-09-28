@@ -393,7 +393,7 @@ final class ManagedCompactionIntegrationTests: XCTestCase {
     }
 
     private func withHarness(scenario: String, body: (Harness) async throws -> Void) async throws {
-        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: "/Users/ahmedelamin/.bun/bin/bun"),
+        try XCTSkipUnless((try? FixtureBunExecutable.resolve()) != nil,
             "The deterministic App Server fixture requires the installed Bun executable.")
         let harness = try Harness(scenario: scenario)
         do {

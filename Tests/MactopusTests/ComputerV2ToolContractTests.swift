@@ -9,6 +9,203 @@ final class ComputerV2ToolContractTests: XCTestCase {
     private let candidateToken = "33333333-3333-4333-8333-333333333333"
     private let inventoryCursor = "44444444-4444-4444-8444-444444444444"
 
+    func testReferenceSpecsReplaceLegacyChoicesAndPreservePolicyFilteredTools() throws {
+        let replaced = Set(["computer_v2_snapshot", "computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"])
+        let aliases = Set(ComputerV2ToolContract.Alias.allCases.map(\.rawValue))
+        for policy: ComputerInteractionPolicy in [.backgroundOnly, .foregroundAllowed] {
+            for model in ["lmstudio-community/Qwen3.5-4B-MLX-4bit", "mlx-community/Qwen3.8-27B-4bit"] {
+                let legacy = ComputerV2ToolContract.specs(for: model, interactionPolicy: policy)
+                let specs = ComputerV2ToolContract.referenceSpecs(for: model, interactionPolicy: policy)
+                let names = Set(specs.compactMap { $0["name"] as? String })
+                XCTAssertEqual(names, Set(legacy.compactMap { $0["name"] as? String }).subtracting(replaced).union(aliases))
+                XCTAssertTrue(names.isDisjoint(with: replaced))
+                XCTAssertEqual(specs.count, names.count)
+                XCTAssertEqual(specs.count, legacy.count + 1, "Fresh page and region reads are separate choices.")
+                for spec in specs {
+                    XCTAssertTrue(JSONSerialization.isValidJSONObject(spec))
+                    let schema = try XCTUnwrap(spec["inputSchema"] as? [String: Any])
+                    XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
+                    let description = try XCTUnwrap(spec["description"] as? String)
+                    for name in replaced { XCTAssertFalse(description.contains(name), name) }
+                }
+            }
+        }
+        XCTAssertTrue(replaced.isSubset(of: Set(ComputerV2ToolContract.specs.compactMap { $0["name"] as? String })),
+            "Legacy definitions remain available for existing threads.")
+    }
+
+    func testReferenceReadShapesSeparateFreshRegionAndContinuation() throws {
+        for view in ["all", "overview", "content", "headings", "links"] {
+            XCTAssertEqual(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_read_page", arguments: ["view": view]).tool, .readPage)
+            XCTAssertEqual(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_read_region",
+                arguments: ["region_ref": "r_1f03fd752898", "view": view, "query": "observed text"]).tool, .readRegion)
+        }
+        _ = try ComputerV2ToolContract.validateAlias(tool: "computer_v2_read_page", arguments: [:])
+        let invalidPages: [[String: Any]] = [["region_ref": "r_observed"], ["snapshot_id": snapshotID],
+            ["element_index": 0], ["cursor": inventoryCursor], ["view": "invented"], ["query": " "], ["query": String(repeating: "x", count: 201)]]
+        for arguments in invalidPages {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_read_page", arguments: arguments))
+        }
+        for arguments: [String: Any] in [[:], ["region_ref": "r_observed", "cursor": inventoryCursor],
+                                         ["region_ref": "r_observed", "snapshot_id": snapshotID],
+                                         ["region_ref": "r_observed", "element_index": 0]] {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_read_region", arguments: arguments))
+        }
+        XCTAssertEqual(try ComputerV2ToolContract.validate(tool: "computer_v2_continue", arguments: ["cursor": inventoryCursor]).tool, .continueRead)
+        XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_snapshot", arguments: [:]))
+    }
+
+    func testReferenceActionsRejectCallerSuppliedIndicesActionsDestinationsAndProof() throws {
+        let examples: [(String, [String: Any], ComputerV2ToolContract.Alias)] = [
+            ("computer_v2_press", ["action_ref": "a_1f03fd752898"], .press),
+            ("computer_v2_follow", ["link_ref": "l_1f03fd752898"], .follow),
+            ("computer_v2_fill", ["field_ref": "f_1f03fd752898", "text": "new value"], .fill),
+        ]
+        for (name, arguments, alias) in examples {
+            let call = try ComputerV2ToolContract.validateAlias(tool: name, arguments: arguments)
+            XCTAssertEqual(call.tool, alias)
+            for extra: [String: Any] in [["snapshot_id": snapshotID], ["element_index": 1], ["ax_action": "AXPress"],
+                                        ["url": "https://invented.test/"], ["baseline": "invented"], ["verified": true]] {
+                XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: name,
+                    arguments: arguments.merging(extra) { _, rhs in rhs }))
+            }
+        }
+        XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_follow",
+            arguments: ["link_ref": "l_observed", "postcondition": ["kind": "dialog_opened"]]))
+        XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_press", arguments: ["field_ref": "f_observed"]))
+        XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_fill", arguments: ["field_ref": "f_observed"]))
+    }
+
+    func testOpaqueReferencesAreBoundedStringsNotAuthorityOrNumericIndices() throws {
+        for value in ["", " ", " a_observed", "a_observed\n", true, 1, NSNull(), String(repeating: "é", count: 129)] as [Any] {
+            for (name, field) in [("computer_v2_press", "action_ref"), ("computer_v2_follow", "link_ref"),
+                                  ("computer_v2_read_region", "region_ref")] {
+                XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: name, arguments: [field: value]))
+            }
+        }
+        // Syntax validation cannot attest that a host has ever issued a token.
+        // Current scope, type and exposure must still pass the runtime resolver.
+        _ = try ComputerV2ToolContract.validateAlias(tool: "computer_v2_press", arguments: ["action_ref": "unissued_opaque_token"])
+    }
+
+    func testReferencePostconditionsPreserveBrowserAndNativeShapesWithoutIndices() throws {
+        let conditions: [[String: Any]] = [
+            ["kind": "region_changed", "region_ref": "r_region"], ["kind": "dialog_opened"],
+            ["kind": "value", "region_ref": "r_value", "expected": ""],
+            ["kind": "region_text", "region_ref": "r_region", "expected": "Observed intended text"],
+            ["kind": "selection", "expected": "true"],
+            ["kind": "selection", "region_ref": "r_selection", "expected": "true"],
+            ["kind": "detail_view", "expected": "Observed heading"],
+            ["kind": "detail_view", "detail_ref": "r_detail", "expected": "Observed heading"],
+            ["kind": "document_url", "expected": "https://example.test/observed"],
+        ]
+        for condition in conditions {
+            _ = try ComputerV2ToolContract.validateAlias(tool: "computer_v2_press",
+                arguments: ["action_ref": "a_observed", "postcondition": condition])
+        }
+        let invalid: [[String: Any]] = [
+            ["kind": "region_changed"], ["kind": "region_changed", "region_ref": "r_region", "expected": "guessed text"],
+            ["kind": "region_changed", "region_ref": "r_region", "expected": NSNull()],
+            ["kind": "region_changed", "region_ref": "r_region", "detail_ref": "r_detail"],
+            ["kind": "dialog_opened", "expected": "opened"], ["kind": "dialog_opened", "region_ref": "r_region"],
+            ["kind": "value", "expected": "new"], ["kind": "value", "region_ref": 1, "expected": "new"],
+            ["kind": "region_text", "region_ref": "r_region", "expected": " "],
+            ["kind": "selection", "expected": "false"], ["kind": "selection", "expected": true],
+            ["kind": "selection", "detail_ref": "r_detail", "expected": "true"],
+            ["kind": "detail_view", "region_ref": "r_region", "expected": "heading"],
+            ["kind": "detail_view", "detail_ref": NSNull(), "expected": "heading"],
+            ["kind": "document_url", "region_ref": "r_region", "expected": "https://example.test/"],
+            ["kind": "value", "element_index": 2, "expected": "new"],
+            ["kind": "detail_view", "detail_element_index": 2, "expected": "heading"],
+            ["kind": "region_changed", "region_ref": "r_region", "baseline": "invented"],
+            ["kind": "region_text", "region_ref": "r_region", "expected": String(repeating: "é", count: 2_049)],
+        ]
+        for condition in invalid {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_press",
+                arguments: ["action_ref": "a_observed", "postcondition": condition]))
+        }
+        XCTAssertThrowsError(try ComputerV2ToolContract.validateAlias(tool: "computer_v2_press",
+            arguments: ["action_ref": "a_observed", "postcondition": NSNull()]))
+    }
+
+    func testReferenceSchemasExposeOnlyTypedParametersAndConditionalPostconditions() throws {
+        let specs = ComputerV2ToolContract.referenceSpecs(for: "test-model")
+        let shapes: [(String, Set<String>, Set<String>)] = [
+            ("computer_v2_read_page", ["view", "query"], []),
+            ("computer_v2_read_region", ["region_ref", "view", "query"], ["region_ref"]),
+            ("computer_v2_press", ["action_ref", "postcondition"], ["action_ref"]),
+            ("computer_v2_follow", ["link_ref"], ["link_ref"]),
+            ("computer_v2_fill", ["field_ref", "text"], ["field_ref", "text"]),
+        ]
+        for (name, fields, required) in shapes {
+            let spec = try XCTUnwrap(specs.first { $0["name"] as? String == name })
+            let schema = try XCTUnwrap(spec["inputSchema"] as? [String: Any])
+            XCTAssertEqual(Set(try XCTUnwrap(schema["properties"] as? [String: Any]).keys), fields)
+            XCTAssertEqual(Set(try XCTUnwrap(schema["required"] as? [String])), required)
+        }
+        let press = try XCTUnwrap(specs.first { $0["name"] as? String == "computer_v2_press" })
+        let schema = try XCTUnwrap(press["inputSchema"] as? [String: Any])
+        let properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
+        let postcondition = try XCTUnwrap(properties["postcondition"])
+        XCTAssertEqual(postcondition["additionalProperties"] as? Bool, false)
+        let alternatives = try XCTUnwrap(postcondition["oneOf"] as? [[String: Any]])
+        XCTAssertEqual(alternatives.count, 7)
+        for alternative in alternatives {
+            let fields = try XCTUnwrap(alternative["properties"] as? [String: [String: Any]])
+            let kinds = try XCTUnwrap(fields["kind"]?["enum"] as? [String])
+            if ["region_text", "detail_view", "document_url"].contains(kinds.first ?? "") {
+                XCTAssertEqual(fields["expected"]?["minLength"] as? Int, 1)
+            }
+            if kinds == ["value"] { XCTAssertNil(fields["expected"], "An empty intended field value remains valid.") }
+        }
+        XCTAssertEqual(Set(try XCTUnwrap(postcondition["properties"] as? [String: Any]).keys),
+            ["kind", "region_ref", "detail_ref", "expected"])
+        XCTAssertTrue((press["description"] as? String)?.contains("browser links with link_ref") == true)
+        let region = try XCTUnwrap(specs.first { $0["name"] as? String == "computer_v2_read_region" })
+        XCTAssertTrue((region["description"] as? String)?.contains("Defaults to all within that region") == true)
+    }
+
+    func testFollowLinkAcceptsOnlyCurrentReferenceAndNoVerificationOverride() throws {
+        let args: [String: Any] = ["snapshot_id": snapshotID, "element_index": 3]
+        let call = try ComputerV2ToolContract.validate(tool: "computer_v2_follow_link", arguments: args)
+        XCTAssertEqual(call.tool, .followLink)
+        XCTAssertFalse(call.tool.requiresGlobalInput)
+        for extra: [String: Any] in [["postcondition": ["kind": "region_changed", "element_index": 4]],
+                                    ["url": "https://invented.test/"], ["ax_action": "AXPress"],
+                                    ["expected": "made up"]] {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: "computer_v2_follow_link",
+                arguments: args.merging(extra) { _, rhs in rhs }))
+        }
+        for invalid: [String: Any] in [["snapshot_id": "old", "element_index": 3],
+                                      ["snapshot_id": snapshotID, "element_index": true],
+                                      ["snapshot_id": snapshotID, "element_index": -1],
+                                      ["snapshot_id": snapshotID]] {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: "computer_v2_follow_link", arguments: invalid))
+        }
+        let press = args.merging(["ax_action": "AXPress"]) { _, rhs in rhs }
+        XCTAssertEqual(ComputerUnchangedAttemptGuard.key(tool: "computer_v2_follow_link", arguments: args,
+                                                        observedElementIdentity: "node:17"),
+                       ComputerUnchangedAttemptGuard.key(tool: "computer_v2_ax", arguments: press,
+                                                        observedElementIdentity: "node:17"))
+    }
+
+    func testDialogOpenedUsesOnlyHostOwnedPredicate() throws {
+        let action: [String: Any] = ["snapshot_id": snapshotID, "element_index": 2, "ax_action": "AXPress"]
+        let condition: [String: Any] = ["kind": "dialog_opened"]
+        let args = action.merging(["postcondition": condition]) { _, rhs in rhs }
+        _ = try ComputerV2ToolContract.validate(tool: "computer_v2_ax", arguments: args)
+        let parsed = try XCTUnwrap(ComputerV2ToolContract.browserPostcondition(in: args))
+        XCTAssertEqual(parsed.kind, .dialogOpened)
+        XCTAssertEqual(parsed.expected, "opened")
+        XCTAssertNil(parsed.elementIndex)
+        XCTAssertThrowsError(try ComputerV2ToolContract.nativePostcondition(in: args))
+        for extra: [String: Any] in [["element_index": 4], ["expected": "guessed"],
+                                    ["detail_element_index": 1], ["baseline": "absent"]] {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: "computer_v2_ax",
+                arguments: action.merging(["postcondition": condition.merging(extra) { _, rhs in rhs }]) { _, rhs in rhs }))
+        }
+    }
+
     func testContinuationIsReadOnlyAndRequiresOnlyOpaqueCursor() throws {
         let call = try ComputerV2ToolContract.validate(tool: "computer_v2_continue", arguments: ["cursor": inventoryCursor])
         XCTAssertEqual(call.tool, .continueRead)
@@ -121,6 +318,79 @@ final class ComputerV2ToolContractTests: XCTestCase {
         ]))
     }
 
+    func testNestedResultIndexErrorsCannotBeConfusedWithPressedControlIndex() throws {
+        let action: [String: Any] = ["snapshot_id": snapshotID, "element_index": 8, "ax_action": "AXPress"]
+        let missing = action.merging(["postcondition": ["kind": "region_changed"]]) { _, rhs in rhs }
+        assertFailure(.missing("postcondition.element_index"), .ax, missing)
+        let description = try XCTUnwrap(ComputerV2ToolContract.ValidationError.missing("postcondition.element_index").errorDescription)
+        XCTAssertTrue(description.hasPrefix("Missing computer V2 argument: postcondition.element_index"))
+        XCTAssertTrue(description.contains("Top-level element_index is the button to press"))
+        XCTAssertTrue(description.contains(ComputerV2ToolContract.regionChangedPressArgumentShape))
+        for invalid in [true, 0.5, "3", -1, NSNull()] as [Any] {
+            let arguments = action.merging(["postcondition": ["kind": "region_changed", "element_index": invalid]]) { _, rhs in rhs }
+            assertFailure(.invalid("postcondition.element_index"), .ax, arguments)
+        }
+        assertFailure(.missing("element_index"), .ax, ["snapshot_id": snapshotID, "ax_action": "AXPress",
+            "postcondition": ["kind": "region_changed", "element_index": 3]])
+        let complete = ComputerV2ToolContract.regionChangedPressArgumentShape
+            .replacingOccurrences(of: "<observed snapshot_id>", with: snapshotID)
+            .replacingOccurrences(of: "<observed button index>", with: "8")
+            .replacingOccurrences(of: "<observed container index>", with: "3")
+        let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(complete.utf8)) as? [String: Any])
+        let validated = try ComputerV2ToolContract.validate(tool: "computer_v2_ax", arguments: arguments)
+        XCTAssertEqual((validated.arguments["element_index"] as? NSNumber)?.intValue, 8)
+        XCTAssertEqual(try ComputerV2ToolContract.browserPostcondition(in: arguments)?.elementIndex, 3)
+    }
+
+    func testRegionChangedRequiresObservedResultIndexAndForbidsInventedExpectedText() throws {
+        let action: [String: Any] = ["snapshot_id": snapshotID, "element_index": 1, "ax_action": "AXPress"]
+        let condition: [String: Any] = ["kind": "region_changed", "element_index": 2]
+        let arguments = action.merging(["postcondition": condition]) { _, rhs in rhs }
+        _ = try ComputerV2ToolContract.validate(tool: "computer_v2_ax", arguments: arguments)
+        let parsed = try XCTUnwrap(ComputerV2ToolContract.browserPostcondition(in: arguments))
+        XCTAssertEqual(parsed.kind, .regionChanged)
+        XCTAssertEqual(parsed.elementIndex, 2)
+        XCTAssertEqual(parsed.expected, "changed", "The predicate is supplied by the host, not fabricated page content.")
+        XCTAssertThrowsError(try ComputerV2ToolContract.nativePostcondition(in: arguments))
+        let malformed: [[String: Any]] = [
+            ["kind": "region_changed"], ["kind": "region_changed", "element_index": true],
+            ["kind": "region_changed", "element_index": 0.5], ["kind": "region_changed", "element_index": -1],
+            condition.merging(["expected": "guessed next page"]) { _, rhs in rhs },
+            condition.merging(["expected": NSNull()]) { _, rhs in rhs },
+            condition.merging(["detail_element_index": 3]) { _, rhs in rhs },
+            condition.merging(["baseline": "invented"]) { _, rhs in rhs },
+        ]
+        for invalid in malformed {
+            XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: "computer_v2_ax",
+                arguments: action.merging(["postcondition": invalid]) { _, rhs in rhs }))
+        }
+        // Existing host-derived link/selection plans remain possible; this does
+        // not pretend the schema can infer capabilities from an integer index.
+        XCTAssertNil(try ComputerV2ToolContract.browserPostcondition(in: action))
+    }
+
+    func testRegionChangedSchemaAndGuidanceDistinguishReadContinuationFromInput() throws {
+        for policy: ComputerInteractionPolicy in [.backgroundOnly, .foregroundAllowed] {
+            let spec = try XCTUnwrap(ComputerV2ToolContract.specs(for: "test-model", interactionPolicy: policy)
+                .first { $0["name"] as? String == "computer_v2_ax" })
+            let schema = try XCTUnwrap(spec["inputSchema"] as? [String: Any])
+            let fields = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
+            let post = try XCTUnwrap(fields["postcondition"])
+            let alternatives = try XCTUnwrap(post["oneOf"] as? [[String: Any]])
+            XCTAssertEqual(alternatives.count, 3)
+            XCTAssertEqual(alternatives.first?["required"] as? [String], ["element_index"])
+            XCTAssertNotNil(alternatives.first?["not"])
+            XCTAssertEqual(alternatives.last?["required"] as? [String], ["expected"])
+            XCTAssertTrue(JSONSerialization.isValidJSONObject(spec))
+            let description = try XCTUnwrap(spec["description"] as? String)
+            XCTAssertTrue(description.contains("inspection/pagination buttons still require it"))
+            XCTAssertTrue(description.contains("region_changed"))
+            XCTAssertTrue(description.contains("without expected"))
+            XCTAssertTrue(description.contains("read the new content"))
+            XCTAssertTrue(description.contains("Runtime dispatches at most once"))
+        }
+    }
+
     func testNativeSchemaExplainsSelectionVersusDetailAndImmutableVerification() throws {
         let spec = try XCTUnwrap(ComputerV2ToolContract.specs.first { $0["name"] as? String == "computer_v2_ax" })
         let schema = try XCTUnwrap(spec["inputSchema"] as? [String: Any])
@@ -190,7 +460,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
 
     func testSpecsAreVersionedFlatAndActionSpecific() throws {
         let specs = ComputerV2ToolContract.specs
-        XCTAssertEqual(specs.count, 15)
+        XCTAssertEqual(specs.count, 16)
         XCTAssertEqual(specs.count, ComputerV2ToolContract.Tool.allCases.count)
         XCTAssertEqual(Set(specs.compactMap { $0["name"] as? String }).count, specs.count)
 
@@ -262,7 +532,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             "lmstudio-community/Qwen3.5-4B-MLX-4bit",
             "lmstudio-community/Qwen3.5-9B-MLX-4bit",
         ] {
-            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 15)
+            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 16)
             XCTAssertTrue(
                 ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed)
                     .contains { $0["name"] as? String == groundClick },
@@ -273,7 +543,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             "mlx-community/Qwen3.8-27B-4bit",
             "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit",
         ] {
-            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 14)
+            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 15)
             XCTAssertFalse(
                 ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed)
                     .contains { $0["name"] as? String == groundClick },
@@ -287,7 +557,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             let specs = ComputerV2ToolContract.specs(for: model)
             let names = Set(specs.compactMap { $0["name"] as? String })
             XCTAssertEqual(names, Set(Tool.allCases.filter { !$0.requiresGlobalInput }.map(\.rawValue)))
-            XCTAssertEqual(specs.count, 10)
+            XCTAssertEqual(specs.count, 11)
             for spec in specs {
                 let name = try XCTUnwrap(spec["name"] as? String)
                 let schema = try XCTUnwrap(spec["inputSchema"] as? [String: Any])
@@ -327,7 +597,8 @@ final class ComputerV2ToolContractTests: XCTestCase {
             return try XCTUnwrap(value["description"] as? String)
         }
         let snapshot = try description(.snapshot)
-        XCTAssertTrue(snapshot.contains("AX actions for buttons and links"))
+        XCTAssertTrue(snapshot.contains("Use computer_v2_follow_link for browser links marked follow_link=true"))
+        XCTAssertTrue(snapshot.contains("Use supported AX actions for other controls"))
         XCTAssertTrue(snapshot.contains("exact observed url with computer_v2_open"))
         XCTAssertTrue(snapshot.contains("navigation link without AXPress"))
         XCTAssertTrue(snapshot.contains("not an in-page script action"))
@@ -377,7 +648,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
     }
 
     func testProgressiveReadArgumentsAndCursorIsolation() throws {
-        for view in ["all", "content", "headings", "links"] {
+        for view in ["all", "overview", "content", "headings", "links"] {
             let call = try ComputerV2ToolContract.validate(tool: Tool.snapshot.rawValue, arguments: ["view": view])
             XCTAssertEqual(call.semanticRead.view.rawValue, view)
         }
@@ -408,7 +679,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
     func testReadRecoveryAndRejectedActionGiveAnExecutableAlternative() throws {
         let spec = try XCTUnwrap(ComputerV2ToolContract.specs.first { $0["name"] as? String == Tool.snapshot.rawValue })
         let description = try XCTUnwrap(spec["description"] as? String)
-        for required in ["view=content", "next_cursor", "snapshot_id+element_index", "Do not repeat unchanged reads"] {
+        for required in ["{\"view\":\"content\"}", "next_cursor", "BOTH snapshot_id and an observed element_index", "Do not repeat unchanged reads"] {
             XCTAssertTrue(description.contains(required))
         }
         XCTAssertThrowsError(try ComputerV2ToolContract.validate(tool: Tool.ax.rawValue, arguments: [
@@ -496,6 +767,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             (.continueRead, ["cursor": inventoryCursor]),
             (.bindTab, ["candidate_token": candidateToken]),
             (.snapshot, [:]),
+            (.followLink, ["snapshot_id": snapshotID, "element_index": 0]),
             (.ax, [
                 "snapshot_id": snapshotID,
                 "element_index": 0,
@@ -643,6 +915,10 @@ final class ComputerV2ToolContractTests: XCTestCase {
         XCTAssertTrue(tabs.contains("computer_v2_continue(cursor=next_cursor) until absent"))
         XCTAssertTrue(tabs.contains("exhaust the inventory"))
         XCTAssertTrue(tabs.contains("not evidence of page contents or relevance"))
+        XCTAssertTrue(tabs.contains("inventory_order=requested_scope_first"))
+        XCTAssertTrue(tabs.contains("request_scope_match=true"))
+        XCTAssertTrue(tabs.contains("All tabs remain included"))
+        XCTAssertTrue(tabs.contains("unknown or ambiguous requests retain transport order with null matches"))
         let bind = try XCTUnwrap(descriptions[.bindTab])
         for tool in ["computer_v2_snapshot", "computer_v2_ax", "computer_v2_set_text"] {
             XCTAssertTrue(bind.contains(tool))
@@ -671,6 +947,36 @@ final class ComputerV2ToolContractTests: XCTestCase {
         ])
         assertFailure(.invalid("query"), .snapshot, ["query": "   "])
         assertFailure(.invalid("query"), .snapshot, ["query": 17])
+    }
+
+    func testBrowserOverviewGuidanceKeepsContentAndNativeReadsDistinct() throws {
+        let snapshot = try spec(named: .snapshot)
+        let view = try XCTUnwrap(snapshot.properties["view"] as? [String: Any])
+        XCTAssertTrue((view["enum"] as? [String])?.contains("overview") == true)
+        XCTAssertTrue((view["description"] as? String)?.contains("browser-only") == true)
+        XCTAssertTrue((view["description"] as? String)?.contains("native default remains all") == true)
+        let descriptions = ComputerV2ToolContract.specs.compactMap { $0["description"] as? String }.joined(separator: "\n")
+        XCTAssertTrue(descriptions.contains("Start with computer_v2_snapshot(view=overview)"))
+        XCTAssertTrue(descriptions.contains("not exhaustive document content"))
+        XCTAssertTrue(descriptions.contains("Fresh reads omit snapshot_id and element_index"))
+        let literal = try ComputerV2ToolContract.validate(tool: Tool.snapshot.rawValue, arguments: ["query": "known phrase"])
+        XCTAssertNil(literal.semanticRead.requestedView, "Literal queries are not implicitly filtered to an overview.")
+    }
+
+    func testFreshReadViewChangesAndSubtreeReadsRemainDistinct() throws {
+        for view in ["content", "headings", "links", "all", "overview"] {
+            let fresh = try ComputerV2ToolContract.validate(tool: Tool.snapshot.rawValue, arguments: ["view": view])
+            XCTAssertNil(fresh.semanticRead.snapshotID)
+            XCTAssertNil(fresh.semanticRead.elementIndex)
+        }
+        let id = UUID().uuidString
+        assertFailure(.incompleteReadSubtree, .snapshot, ["snapshot_id": id, "view": "headings"])
+        assertFailure(.incompleteReadSubtree, .snapshot, ["element_index": 1])
+        let subtree = try ComputerV2ToolContract.validate(tool: Tool.snapshot.rawValue,
+            arguments: ["snapshot_id": id, "element_index": 1, "view": "content"])
+        XCTAssertEqual(subtree.semanticRead.snapshotID?.uuidString, id)
+        XCTAssertEqual(subtree.semanticRead.elementIndex, 1)
+        XCTAssertTrue(ComputerV2ToolContract.ValidationError.incompleteReadSubtree.localizedDescription.contains("omit both"))
     }
 
     func testBundleIDValidationFromWireJSONPreservesArgumentsAndRejectsEveryInvalidScalar() throws {

@@ -75,8 +75,8 @@ struct NativeChromeTabTopology {
 @MainActor
 enum NativeChromeTabReadRecovery {
     static func read(
-        isSameWindow: () throws -> Bool,
-        traverse: () throws -> ExistingChromeTabInventory
+        isSameWindow: @MainActor () throws -> Bool,
+        traverse: @MainActor () throws -> ExistingChromeTabInventory
     ) throws -> ExistingChromeTabInventory {
         guard try isSameWindow() else { throw ExistingChromeError.targetChanged }
         let inventory: ExistingChromeTabInventory

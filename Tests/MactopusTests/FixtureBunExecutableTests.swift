@@ -27,7 +27,7 @@ final class FixtureBunExecutableTests: XCTestCase {
         let expected = try executable()
         let environment = ["HOME": "/untrusted", "PATH": "/untrusted/working-directory"]
         XCTAssertEqual(try FixtureBunExecutable.resolve(environment: environment, homeDirectory: root, systemCandidates: []), expected.resolvingSymlinksInPath())
-        XCTAssertEqual(AgentRuntimeIsolation.environment(inheriting: environment, userHomePath: "/private/test", codexHomePath: "/private/test/agent")["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
+        XCTAssertEqual(AgentRuntimeIsolation.environment(inheriting: environment, userHomePath: "/private/test", codexHomePath: "/private/test/agent")["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
     }
 
     func testSupportsCanonicalHomebrewSymlinkWithoutPATHSearch() throws {

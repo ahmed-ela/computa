@@ -206,7 +206,7 @@ class LocalInferenceBoundary:
             except Exception as error:
                 if not is_protocol_error(error):
                     raise
-                await response.fail()
+                await response.fail(error)
         finally:
             self.busy = False
 

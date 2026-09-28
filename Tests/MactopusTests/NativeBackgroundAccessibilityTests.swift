@@ -29,6 +29,8 @@ final class NativeBackgroundAccessibilityTests: XCTestCase {
         var nodeTokens = [Int: UUID]()
         var rowSelected: Bool? = nil
         var fieldValue = ""
+        var suppliesReadReceipts = false
+        var lastReadReceipt: SemanticReadReceipt?
 
         func isStillSelected() throws -> Bool {
             checks += 1
@@ -74,7 +76,9 @@ final class NativeBackgroundAccessibilityTests: XCTestCase {
             let captured = try snapshot(limits: .agentDefault)
             let observation = AccessibilitySnapshotTextFormatter(elementLimit: 240,
                 outputCharacterLimit: outputCharacterLimit, usesCompactElementLines: true,
-                includedElementIndices: exposedIndices, allowsRaise: false).formatObservation(captured)
+                includedElementIndices: exposedIndices, allowsRaise: false).formatObservation(captured,
+                    readRequest: suppliesReadReceipts ? request : nil)
+            lastReadReceipt = observation.readReceipt
             return AccessibilitySemanticReadResult(snapshot: captured, observation: observation)
         }
         func setValue(text: String, index: Int, snapshot: AccessibilityTreeSnapshot, beforeDispatch: () throws -> Void) throws {
@@ -86,6 +90,19 @@ final class NativeBackgroundAccessibilityTests: XCTestCase {
             if failAction { throw Failure.injected }
         }
         func invalidateObservation() { invalidations += 1; capabilityValid = false }
+    }
+
+    func testReadReceiptPropagatesWithoutInventingLegacyVerificationCoverage() throws {
+        let backend = Backend()
+        let bound = NativeBackgroundAccessibility(backend: backend)
+        XCTAssertNil(try bound.read().readReceipt)
+        backend.suppliesReadReceipts = true
+        let observation = try bound.read(read: .init(view: .content))
+        XCTAssertNotNil(observation.readReceipt)
+        XCTAssertEqual(observation.readReceipt, backend.lastReadReceipt)
+        XCTAssertEqual(observation.snapshotID, observation.readReceipt?.sourceID)
+        XCTAssertNil(try bound.readForVerification().readReceipt,
+                     "Legacy full-tree verification does not certify body coverage")
     }
 
     func testReadsAndActsOnTargetWithoutAnyForegroundOrActivationDependency() throws {

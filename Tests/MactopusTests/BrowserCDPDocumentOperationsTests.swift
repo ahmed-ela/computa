@@ -5,6 +5,106 @@ import XCTest
 /// Deterministic channel-contract tests, not a claim of trusted physical input
 /// or successful DOM execution in a live browser.
 final class BrowserCDPDocumentOperationsTests: XCTestCase {
+    private func emptyFieldSteps(value: String? = nil, emptyIDs: [Int] = [17], truncated: Bool = false,
+                                 role: String = "searchbox", editable: Bool = true,
+                                 blocked: String? = nil) throws -> [DocumentChannelStep] {
+        var steps = try DocumentOperationFixture.observationSteps()
+        var properties: [[String: Any]] = [["name": "editable", "value": ["value": editable ? "plaintext" : "false"]]]
+        if let blocked, blocked != "ignored" { properties.append(["name": blocked, "value": ["value": true]]) }
+        var node: [String: Any] = ["backendDOMNodeId": 17, "role": ["value": role],
+            "name": ["value": "Query"], "ignored": blocked == "ignored", "properties": properties]
+        if let value { node["value"] = ["value": value] }
+        steps[2] = try .reply("Accessibility.getFullAXTree", ["nodes": [node]])
+        steps[3] = try .reply("DOMSnapshot.captureSnapshot", ["mactopusClickability": [
+            "frameId": "main-frame", "documentURL": DocumentOperationFixture.url.absoluteString,
+            "clickableBackendNodeIds": [], "pointerBackendNodeIds": [], "sourceNodeCount": 2,
+            "sourceTruncated": truncated, "emptyTextValueBackendNodeIds": emptyIDs,
+        ]])
+        return steps
+    }
+
+    private func fieldSnapshot(_ document: BrowserDocumentObservation, binding: BrowserTabBinding) -> BrowserTabSnapshot {
+        let node = document.nodes[0]
+        return BrowserTabSnapshot(id: UUID(), tabHandle: binding.handle, documentEpoch: binding.documentEpoch,
+            loaderID: document.loaderID, documentURL: document.url, elements: [
+                BrowserTabElement(index: 0, backendNodeID: 17, role: "AXTextField", label: node.name, value: node.value,
+                    isEnabled: !node.isDisabled, supportsPress: false, supportsSetText: true, semanticRole: node.role),
+            ], formattedText: "fixture", evidenceDocument: document)
+    }
+
+    private func fieldBinding() -> BrowserTabBinding {
+        BrowserTabBinding(handle: UUID(), taskKey: "fixture", browserGeneration: UUID(),
+            targetID: DocumentOperationFixture.target.targetID, targetInstanceToken: DocumentOperationFixture.target.instanceToken,
+            processIdentifier: 42, documentEpoch: UUID(), ownership: .borrowed, lifetime: BrowserTabLifetime())
+    }
+
+    func testExplicitEmptyFieldEvidenceCompilesDispatchesOnceAndVerifiesFreshValue() async throws {
+        let operations = BrowserCDPDocumentOperations(), binding = fieldBinding()
+        let initialChannel = ScriptedDocumentChannel(steps: try emptyFieldSteps())
+        var before = try await operations.observe(target: DocumentOperationFixture.target, socket: initialChannel)
+        XCTAssertEqual(before.nodes[0].value, "")
+        let snapshot = fieldSnapshot(before, binding: binding)
+        let compiled = try BrowserActionVerification.compile(action: .setText("Observed query"), elementIndex: 0,
+            snapshot: snapshot, binding: binding)
+        let plan = try XCTUnwrap(compiled)
+        before.verificationPlan = plan
+        let mutation = ScriptedDocumentChannel(steps: try emptyFieldSteps()
+            + Array(DocumentOperationFixture.successSteps().dropFirst(DocumentOperationFixture.observationMethods.count)))
+        try await operations.setText(target: DocumentOperationFixture.target, backendNodeID: 17, text: "Observed query",
+            document: before, permit: BrowserMutationPermit(), socket: mutation)
+        let mutationState = await mutation.state()
+        XCTAssertEqual(mutationState.mutationEnqueues, 1)
+        XCTAssertEqual(mutationState.requests.filter { $0.method == "Runtime.callFunctionOn" }.count, 1)
+        let freshChannel = ScriptedDocumentChannel(steps: try emptyFieldSteps(value: "Observed query", emptyIDs: []))
+        let after = try await operations.observe(target: DocumentOperationFixture.target, socket: freshChannel)
+        XCTAssertEqual(try plan.evaluate(binding: binding, snapshot: fieldSnapshot(after, binding: binding)).expectedValue, "Observed query")
+        let readState = await initialChannel.state()
+        XCTAssertEqual(readState.mutationEnqueues, 0)
+        XCTAssertFalse(readState.requests.contains { $0.hasPermit })
+    }
+
+    func testMissingTruncatedProtectedAndIneligibleEmptyEvidenceRemainsUnavailable() async throws {
+        let cases: [[DocumentChannelStep]] = try [emptyFieldSteps(emptyIDs: []), emptyFieldSteps(emptyIDs: [18]),
+            emptyFieldSteps(truncated: true), emptyFieldSteps(role: "generic"), emptyFieldSteps(editable: false),
+            emptyFieldSteps(blocked: "disabled"), emptyFieldSteps(blocked: "readonly"),
+            emptyFieldSteps(blocked: "ignored"), emptyFieldSteps(blocked: "protected")]
+        for steps in cases {
+            let channel = ScriptedDocumentChannel(steps: steps)
+            let observed = try await BrowserCDPDocumentOperations().observe(target: DocumentOperationFixture.target, socket: channel)
+            XCTAssertNil(observed.nodes[0].value)
+            let state = await channel.state()
+            XCTAssertEqual(state.mutationEnqueues, 0)
+        }
+        let missing = ScriptedDocumentChannel(steps: try emptyFieldSteps(emptyIDs: []))
+        let document = try await BrowserCDPDocumentOperations().observe(target: DocumentOperationFixture.target, socket: missing)
+        let binding = fieldBinding()
+        XCTAssertThrowsError(try BrowserActionVerification.compile(action: .setText("Query"), elementIndex: 0,
+            snapshot: fieldSnapshot(document, binding: binding), binding: binding)) { error in
+            XCTAssertEqual(error as? BrowserActionVerification.Failure, .baselineUnavailable)
+        }
+    }
+
+    func testConflictingOrChangedEmptyBaselineRejectsBeforeMutation() async throws {
+        let operations = BrowserCDPDocumentOperations()
+        let conflict = ScriptedDocumentChannel(steps: try emptyFieldSteps(value: "Already changed"))
+        do {
+            _ = try await operations.observe(target: DocumentOperationFixture.target, socket: conflict)
+            XCTFail("An AX/DOM value conflict must not create a synthetic baseline")
+        } catch let error as BrowserTabBrokerError { XCTAssertEqual(error, .elementChanged) }
+        let beforeChannel = ScriptedDocumentChannel(steps: try emptyFieldSteps())
+        let before = try await operations.observe(target: DocumentOperationFixture.target, socket: beforeChannel)
+        let changed = ScriptedDocumentChannel(steps: try emptyFieldSteps(value: "Changed", emptyIDs: [])
+            + [.reply("Runtime.releaseObjectGroup", [:])])
+        do {
+            try await operations.setText(target: DocumentOperationFixture.target, backendNodeID: 17, text: "Query",
+                document: before, permit: BrowserMutationPermit(), socket: changed)
+            XCTFail("Fresh preflight must preserve the exact observed empty baseline")
+        } catch let error as BrowserTabBrokerError { XCTAssertEqual(error, .elementChanged) }
+        let state = await changed.state()
+        XCTAssertEqual(state.mutationEnqueues, 0)
+        XCTAssertFalse(state.requests.contains { $0.method == "DOM.resolveNode" })
+    }
+
     func testFinalCDPBaselineRevalidationRejectsChangedResultBeforeMutation() async throws {
         let target = DocumentOperationFixture.target
         let binding = BrowserTabBinding(handle: UUID(), taskKey: "fixture", browserGeneration: UUID(),
@@ -36,6 +136,25 @@ final class BrowserCDPDocumentOperationsTests: XCTestCase {
         let state = await channel.state()
         XCTAssertEqual(state.mutationEnqueues, 0)
         XCTAssertFalse(state.requests.contains { $0.method == "DOM.resolveNode" })
+    }
+
+    func testObservedEditableMetadataIsPreservedEvenForGenericRoles() async throws {
+        for mode in ["absent", "false", "plaintext", "richtext", "boolean"] {
+            var steps = try DocumentOperationFixture.observationSteps()
+            let properties: [[String: Any]] = mode == "absent" ? [] : [[
+                "name": "editable", "value": ["value": mode == "boolean" ? true : mode] as [String: Any],
+            ]]
+            steps[2] = try .reply("Accessibility.getFullAXTree", ["nodes": [[
+                "backendDOMNodeId": 17, "role": ["value": "generic"], "name": ["value": "Observed content"],
+                "properties": properties,
+            ]]])
+            let channel = ScriptedDocumentChannel(steps: steps)
+            let observed = try await BrowserCDPDocumentOperations().observe(target: DocumentOperationFixture.target, socket: channel)
+            XCTAssertEqual(observed.nodes[0].isEditable, ["plaintext", "richtext", "boolean"].contains(mode), mode)
+            let state = await channel.state()
+            XCTAssertEqual(state.mutationEnqueues, 0)
+            XCTAssertFalse(state.requests.contains { $0.hasPermit })
+        }
     }
 
     func testPointerAffordanceRequiresFocusableExactAXNode() async throws {

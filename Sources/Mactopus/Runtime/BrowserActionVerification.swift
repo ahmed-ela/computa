@@ -9,6 +9,8 @@ enum BrowserActionVerification {
         case documentURL = "document_url"
         case value
         case regionText = "region_text"
+        case regionChanged = "region_changed"
+        case dialogOpened = "dialog_opened"
         case detailView = "detail_view"
     }
 
@@ -53,6 +55,13 @@ enum BrowserActionVerification {
         let childRoles: [String]
     }
 
+    /// Main-frame identity retained for an absence-to-exposure predicate.
+    /// AX exposure is not pixel visibility and carries no dialog content claim.
+    struct DialogBaseline: Codable, Equatable, Sendable {
+        let rootBackendNodeID: Int64
+        let rootRole: String
+    }
+
     struct Plan: Codable, Equatable, Sendable {
         let kind: Kind
         let expected: String
@@ -60,12 +69,22 @@ enum BrowserActionVerification {
         let scope: Scope
         let anchor: Anchor?
         let baselineSnapshotID: UUID
+        let dialogBaseline: DialogBaseline?
+
+        init(kind: Kind, expected: String, baselineFingerprint: String, scope: Scope,
+             anchor: Anchor?, baselineSnapshotID: UUID, dialogBaseline: DialogBaseline? = nil) {
+            self.kind = kind; self.expected = expected; self.baselineFingerprint = baselineFingerprint
+            self.scope = scope; self.anchor = anchor; self.baselineSnapshotID = baselineSnapshotID
+            self.dialogBaseline = dialogBaseline
+        }
 
         var property: String {
             switch kind {
             case .documentURL: return "document_url"
             case .value: return "node:\(anchor?.backendNodeID ?? -1):value"
             case .regionText: return "planned:region_text:\(anchor?.backendNodeID ?? -1)"
+            case .regionChanged: return "planned:region_changed:\(anchor?.backendNodeID ?? -1)"
+            case .dialogOpened: return "planned:dialog_opened"
             case .detailView: return "planned:detail_view:heading"
             }
         }
@@ -138,6 +157,8 @@ enum BrowserActionVerification {
     private static let maximumTextBytes = 8_192
     private static let maximumNodes = 12_000
     private static let maximumAnchorChildren = 128
+    private static let dialogOpenerRoles: Set<String> = ["button", "menuitem"]
+    private static let dialogRoles: Set<String> = ["dialog", "alertdialog"]
     private static let regionRoles: Set<String> = [
         "status", "region", "alert", "log", "group", "tabpanel", "dialog", "article", "section", "form",
     ]
@@ -150,10 +171,7 @@ enum BrowserActionVerification {
         guard let selected = snapshot.element(at: elementIndex), selected.isEnabled else {
             throw Failure.invalidRequest
         }
-        let scope = Scope(browserGeneration: binding.browserGeneration, targetID: binding.targetID,
-            targetInstanceToken: binding.targetInstanceToken, tabHandle: binding.handle,
-            documentEpoch: snapshot.documentEpoch, loaderID: snapshot.loaderID,
-            documentURL: snapshot.documentURL.absoluteString, frame: "main")
+        let scope = observationScope(snapshot, binding: binding)
         let inferred: Request?
         switch action {
         case .setText(let value): inferred = Request(kind: .value, elementIndex: elementIndex, expected: value)
@@ -166,6 +184,7 @@ enum BrowserActionVerification {
         var expected = request.expected
         let baseline: String
         let anchor: Anchor?
+        var dialogBaseline: DialogBaseline?
         switch request.kind {
         case .documentURL:
             guard action == .press, request.elementIndex == nil,
@@ -200,6 +219,26 @@ enum BrowserActionVerification {
             guard !expected.isEmpty else { throw Failure.invalidRequest }
             baseline = try graph.renderedText(node)
             anchor = try graph.anchor(node)
+        case .regionChanged:
+            guard action == .press, expected == "changed", let index = request.elementIndex,
+                  index != elementIndex, let region = snapshot.element(at: index),
+                  !region.supportsPress, !region.supportsSetText else { throw Failure.invalidRequest }
+            let graph = try Graph(snapshot)
+            let evidence = try graph.changedRegionBaseline(region)
+            baseline = evidence.text
+            anchor = evidence.anchor
+        case .dialogOpened:
+            guard action == .press, request.elementIndex == nil, expected == "opened",
+                  selected.supportsPress, !selected.supportsSetText, selected.linkURL == nil,
+                  dialogOpenerRoles.contains(elementRole(selected)) else { throw Failure.invalidRequest }
+            let graph = try Graph(snapshot)
+            let evidence = try graph.dialogOpeningBaseline(openerBackendID: selected.backendNodeID,
+                                                          existingDialogFailure: .baselineAlreadySatisfied)
+            guard evidence.opener.role == elementRole(selected),
+                  evidence.opener.name == canonical(selected.label) else { throw Failure.invalidRequest }
+            dialogBaseline = evidence.root
+            anchor = evidence.opener
+            baseline = try dialogBaselineText(root: evidence.root, opener: evidence.opener)
         case .detailView:
             guard action == .press, request.elementIndex == nil else { throw Failure.invalidRequest }
             let graph = try Graph(snapshot)
@@ -214,11 +253,36 @@ enum BrowserActionVerification {
             baseline = "heading_absent:" + scope.documentURL
             anchor = exactAnchor(selected)
         }
-        if request.kind != .detailView, baseline == expected { throw Failure.baselineAlreadySatisfied }
+        if request.kind != .detailView && request.kind != .regionChanged && request.kind != .dialogOpened,
+           baseline == expected { throw Failure.baselineAlreadySatisfied }
         let plan = Plan(kind: request.kind, expected: expected, baselineFingerprint: fingerprint(baseline),
-            scope: scope, anchor: anchor, baselineSnapshotID: snapshot.id)
+            scope: scope, anchor: anchor, baselineSnapshotID: snapshot.id, dialogBaseline: dialogBaseline)
         try plan.validate()
         return plan
+    }
+
+    /// Display-only candidates from this captured source. This shares the
+    /// compiler's complete-source, read-only text and stable-anchor checks;
+    /// it never substitutes for compiling a plan or fresh mutation preflight.
+    static func regionChangedCandidateBackendIDs(snapshot: BrowserTabSnapshot,
+                                                 binding: BrowserTabBinding) -> Set<Int64> {
+        guard (try? checkObservation(snapshot, binding: binding)) != nil,
+              let graph = try? Graph(snapshot) else { return [] }
+        let scope = observationScope(snapshot, binding: binding)
+        return Set(snapshot.elements.compactMap { element in
+            guard let evidence = try? graph.changedRegionBaseline(element) else { return nil }
+            let plan = Plan(kind: .regionChanged, expected: "changed", baselineFingerprint: fingerprint(evidence.text),
+                scope: scope, anchor: evidence.anchor, baselineSnapshotID: snapshot.id)
+            guard (try? plan.validate()) != nil else { return nil }
+            return element.backendNodeID
+        })
+    }
+
+    private static func observationScope(_ snapshot: BrowserTabSnapshot, binding: BrowserTabBinding) -> Scope {
+        Scope(browserGeneration: binding.browserGeneration, targetID: binding.targetID,
+            targetInstanceToken: binding.targetInstanceToken, tabHandle: binding.handle,
+            documentEpoch: snapshot.documentEpoch, loaderID: snapshot.loaderID,
+            documentURL: snapshot.documentURL.absoluteString, frame: "main")
     }
 
     static func evaluate(_ plan: Plan, snapshot: BrowserTabSnapshot, binding: BrowserTabBinding) throws -> Proof {
@@ -255,6 +319,26 @@ enum BrowserActionVerification {
             try checkSameDocument(scope, snapshot)
             let graph = try Graph(snapshot)
             observed = try graph.renderedText(graph.resolve(try requiredAnchor(plan)))
+        case .regionChanged:
+            try checkSameDocument(scope, snapshot)
+            let graph = try Graph(snapshot)
+            observed = try graph.readOnlyRegionText(graph.resolveExactRegion(try requiredAnchor(plan)))
+            guard plan.baselineFingerprint != fingerprint(observed) else { throw Failure.postconditionNotObserved }
+            // This predicate proves changed displayed text only. It does not
+            // assert a particular page, record, or whole-task outcome.
+            return Proof(property: plan.property, expectedValue: "changed", observationID: snapshot.id)
+        case .dialogOpened:
+            try checkSameDocument(scope, snapshot)
+            let graph = try Graph(snapshot)
+            guard try graph.dialogRootIdentity() == plan.dialogBaseline else { throw Failure.wrongDocument }
+            let dialogs = try graph.exposedMainFrameDialogs()
+            guard dialogs.count == 1 else {
+                throw dialogs.isEmpty ? Failure.postconditionNotObserved : Failure.ambiguousAnchor
+            }
+            // The opener may disappear or become inert while a modal is open.
+            // Its pre-dispatch identity was already checked. This proves only
+            // one newly AX-exposed semantic dialog in the same main document.
+            return Proof(property: plan.property, expectedValue: "opened", observationID: snapshot.id)
         case .detailView:
             guard sameOrigin(snapshot.documentURL, URL(string: scope.documentURL)!) else { throw Failure.wrongDocument }
             guard snapshot.documentURL.absoluteString != scope.documentURL else { throw Failure.postconditionNotObserved }
@@ -281,13 +365,19 @@ enum BrowserActionVerification {
             guard matches.count == 1 else { throw matches.isEmpty ? Failure.missingAnchor : Failure.ambiguousAnchor }
             guard role(matches[0]) == anchor.role, let value = matches[0].value else { throw Failure.missingAnchor }
             baseline = value
-        case .regionText, .detailView:
+        case .regionText, .regionChanged, .dialogOpened, .detailView:
             let snapshot = BrowserTabSnapshot(id: plan.baselineSnapshotID, tabHandle: plan.scope.tabHandle,
                 documentEpoch: plan.scope.documentEpoch, loaderID: document.loaderID, documentURL: document.url,
                 elements: [], formattedText: "", sourceTruncated: document.sourceTruncated, evidenceDocument: document)
             let graph = try Graph(snapshot)
             if plan.kind == .regionText {
                 baseline = try graph.renderedText(graph.resolve(requiredAnchor(plan)))
+            } else if plan.kind == .regionChanged {
+                baseline = try graph.readOnlyRegionText(graph.resolveExactRegion(requiredAnchor(plan)))
+            } else if plan.kind == .dialogOpened {
+                let evidence = try graph.dialogOpeningBaseline(openerBackendID: requiredAnchor(plan).backendNodeID,
+                                                              existingDialogFailure: .baselineChanged)
+                baseline = try dialogBaselineText(root: evidence.root, opener: evidence.opener)
             } else {
                 guard graph.headings(matching: plan.expected).isEmpty else { throw Failure.baselineChanged }
                 baseline = "heading_absent:" + document.url.absoluteString
@@ -300,7 +390,8 @@ enum BrowserActionVerification {
         guard validIdentity(plan.scope.targetID), validIdentity(plan.scope.targetInstanceToken),
               validIdentity(plan.scope.loaderID), plan.scope.frame == "main",
               validURL(plan.scope.documentURL), plan.expected.utf8.count <= maximumTextBytes,
-              isFingerprint(plan.baselineFingerprint) else { throw Failure.invalidPlan }
+              isFingerprint(plan.baselineFingerprint),
+              plan.kind == .dialogOpened || plan.dialogBaseline == nil else { throw Failure.invalidPlan }
         switch plan.kind {
         case .documentURL:
             guard plan.anchor == nil, validURL(plan.expected),
@@ -311,6 +402,19 @@ enum BrowserActionVerification {
         case .regionText:
             guard let anchor = plan.anchor, regionRoles.contains(anchor.role), !plan.expected.isEmpty,
                   canonical(plan.expected) == plan.expected else { throw Failure.invalidPlan }
+            try validate(anchor)
+        case .regionChanged:
+            guard let anchor = plan.anchor, regionRoles.contains(anchor.role), plan.expected == "changed",
+                  anchor.parentBackendNodeID != nil else { throw Failure.invalidPlan }
+            try validate(anchor)
+        case .dialogOpened:
+            guard let anchor = plan.anchor, let root = plan.dialogBaseline,
+                  plan.expected == "opened", dialogOpenerRoles.contains(anchor.role),
+                  anchor.parentBackendNodeID != nil, root.rootBackendNodeID > 0,
+                  ["rootwebarea", "webarea"].contains(root.rootRole),
+                  plan.baselineFingerprint == fingerprint(try dialogBaselineText(root: root, opener: anchor)) else {
+                throw Failure.invalidPlan
+            }
             try validate(anchor)
         case .detailView:
             guard let anchor = plan.anchor, !plan.expected.isEmpty, canonical(plan.expected) == plan.expected,
@@ -365,6 +469,22 @@ enum BrowserActionVerification {
                childPosition: nil, siblings: nil, childRoles: [])
     }
 
+    /// Explicit follow-link admission is narrower than generic press inference.
+    /// A root/custom node's incidental URL is never an observed semantic link.
+    static func observedLinkDestination(_ element: BrowserTabElement, at url: URL) -> String? {
+        guard elementRole(element) == "link", element.isEnabled, element.supportsPress,
+              let destination = observedDestination(element, at: url),
+              let scheme = URL(string: destination)?.scheme?.lowercased(),
+              ["http", "https"].contains(scheme) else { return nil }
+        return destination
+    }
+
+    /// Shared structural validation for host-owned search evidence. This
+    /// returns captured source nodes, never presentation/action capabilities.
+    static func completeCapturedNodes(snapshot: BrowserTabSnapshot, maximumAncestorDepth: Int = 128) -> [BrowserDocumentNode]? {
+        (try? Graph(snapshot, maximumAncestorDepth: maximumAncestorDepth))?.nodes
+    }
+
     private static func observedDestination(_ element: BrowserTabElement, at url: URL) -> String? {
         guard element.supportsPress, let link = element.linkURL,
               let destination = URL(string: link, relativeTo: url)?.absoluteURL.absoluteString,
@@ -390,6 +510,19 @@ enum BrowserActionVerification {
 
     private static func validIdentity(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.count <= 256 && !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+    }
+
+    private struct DialogOpeningState: Encodable {
+        let root: DialogBaseline
+        let opener: Anchor
+    }
+
+    private static func dialogBaselineText(root: DialogBaseline, opener: Anchor) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(DialogOpeningState(root: root, opener: opener))
+        guard let text = String(data: data, encoding: .utf8) else { throw Failure.invalidPlan }
+        return text
     }
 
     private static func fingerprint(_ value: String) -> String {
@@ -424,8 +557,9 @@ enum BrowserActionVerification {
         let nodes: [BrowserDocumentNode]
         let byID: [String: BrowserDocumentNode]
 
-        init(_ snapshot: BrowserTabSnapshot) throws {
-            guard !snapshot.sourceTruncated, let document = snapshot.evidenceDocument, !document.sourceTruncated,
+        init(_ snapshot: BrowserTabSnapshot, maximumAncestorDepth: Int = 128) throws {
+            guard (1...128).contains(maximumAncestorDepth),
+                  !snapshot.sourceTruncated, let document = snapshot.evidenceDocument, !document.sourceTruncated,
                   !document.nodes.isEmpty, document.nodes.count <= maximumNodes else { throw Failure.incompleteEvidence }
             try checkDocumentMatches(document, snapshot)
             var indexed: [String: BrowserDocumentNode] = [:]
@@ -444,7 +578,7 @@ enum BrowserActionVerification {
                 var seen = Set<String>()
                 var cursor: BrowserDocumentNode? = node
                 while let current = cursor, let id = current.nodeID {
-                    guard seen.insert(id).inserted, seen.count <= 128 else { throw Failure.incompleteEvidence }
+                    guard seen.insert(id).inserted, seen.count <= maximumAncestorDepth else { throw Failure.incompleteEvidence }
                     cursor = current.parentNodeID.flatMap { indexed[$0] }
                 }
             }
@@ -458,6 +592,45 @@ enum BrowserActionVerification {
             let matches = nodes.filter { $0.backendNodeID == backendID && !$0.isIgnored }
             guard matches.count == 1 else { throw matches.isEmpty ? Failure.missingAnchor : Failure.ambiguousAnchor }
             return matches[0]
+        }
+
+        func dialogRootIdentity() throws -> DialogBaseline {
+            guard let root = nodes.first(where: { $0.parentNodeID == nil }),
+                  let backend = root.backendNodeID, backend > 0, !root.isIgnored,
+                  try node(backendID: backend) == root else { throw Failure.incompleteEvidence }
+            return DialogBaseline(rootBackendNodeID: backend, rootRole: role(root))
+        }
+
+        /// CDP captures the main AX tree. Reject iframe/nested web-area ancestry
+        /// rather than treating a matching role in a subframe as this dialog.
+        private func isInMainFrame(_ node: BrowserDocumentNode) -> Bool {
+            var cursor = node.parentNodeID.flatMap { byID[$0] }
+            while let ancestor = cursor {
+                if ancestor.parentNodeID == nil { return ["rootwebarea", "webarea"].contains(role(ancestor)) }
+                if ["rootwebarea", "webarea", "iframe", "iframepresentational"].contains(role(ancestor)) { return false }
+                cursor = ancestor.parentNodeID.flatMap { byID[$0] }
+            }
+            return false
+        }
+
+        func exposedMainFrameDialogs() throws -> [BrowserDocumentNode] {
+            let dialogs = nodes.filter { !$0.isIgnored && dialogRoles.contains(role($0)) && isInMainFrame($0) }
+            for dialog in dialogs {
+                guard let backend = dialog.backendNodeID, backend > 0 else { throw Failure.incompleteEvidence }
+                guard try node(backendID: backend) == dialog else { throw Failure.ambiguousAnchor }
+            }
+            return dialogs
+        }
+
+        func dialogOpeningBaseline(openerBackendID: Int64, existingDialogFailure: Failure) throws
+            -> (root: DialogBaseline, opener: Anchor) {
+            let root = try dialogRootIdentity()
+            let opener = try node(backendID: openerBackendID)
+            guard dialogOpenerRoles.contains(role(opener)), !opener.isDisabled, !opener.isEditable,
+                  opener.linkURL == nil, isInMainFrame(opener) else { throw Failure.invalidRequest }
+            let dialogs = try exposedMainFrameDialogs()
+            guard dialogs.isEmpty else { throw existingDialogFailure }
+            return (root, try anchor(opener, requiresStableParent: true))
         }
 
         func headings(matching text: String) -> [BrowserDocumentNode] {
@@ -482,7 +655,44 @@ enum BrowserActionVerification {
             return result
         }
 
-        func renderedText(_ root: BrowserDocumentNode) throws -> String {
+        func changedRegionBaseline(_ element: BrowserTabElement) throws -> (text: String, anchor: Anchor) {
+            guard !element.supportsPress, !element.supportsSetText else { throw Failure.invalidRequest }
+            let node = try node(backendID: element.backendNodeID)
+            return (try readOnlyRegionText(node), try anchor(node, requiresStableParent: true))
+        }
+
+        /// A changed-region predicate cannot use an editable/control surface
+        /// or its labels as the result. Require actual text from the complete
+        /// source, rather than container names or omitted/over-budget tails.
+        func readOnlyRegionText(_ root: BrowserDocumentNode) throws -> String {
+            guard regionRoles.contains(role(root)), !root.isIgnored else { throw Failure.unsupportedRegion }
+            let controls: Set<String> = ["button", "checkbox", "combobox", "searchbox", "textbox", "menu", "menubar",
+                "menuitem", "menuitemcheckbox", "menuitemradio", "radio", "radiogroup", "switch", "tab", "tablist",
+                "toolbar", "slider", "spinbutton", "listbox", "option", "tree", "treeitem", "link"]
+            let region = [root] + (try descendants(root))
+            guard !region.contains(where: { controls.contains(role($0)) || $0.isEditable || $0.isDOMClickable || $0.isFocusablePointer
+                || $0.linkURL != nil }) else { throw Failure.unsupportedRegion }
+            let text = try renderedText(root, textOnly: true)
+            guard !text.isEmpty else { throw Failure.incompleteEvidence }
+            return text
+        }
+
+        /// Unlike exact-text verification, "changed" must not accept a
+        /// replacement container merely because its label/position resembles
+        /// the old one. Keep the actual backend node and parent identity.
+        func resolveExactRegion(_ anchor: Anchor) throws -> BrowserDocumentNode {
+            let current = try node(backendID: anchor.backendNodeID)
+            guard role(current) == anchor.role, let parentID = current.parentNodeID,
+                  let parent = byID[parentID], parent.backendNodeID == anchor.parentBackendNodeID,
+                  role(parent) == anchor.parentRole,
+                  fingerprint(canonical(parent.name)) == anchor.parentNameFingerprint,
+                  parent.childNodeIDs.firstIndex(of: current.nodeID ?? "") == anchor.childPosition else {
+                throw Failure.missingAnchor
+            }
+            return current
+        }
+
+        func renderedText(_ root: BrowserDocumentNode, textOnly: Bool = false) throws -> String {
             var fragments: [String] = []
             var pending = [root]
             var count = 0
@@ -491,7 +701,7 @@ enum BrowserActionVerification {
                 count += 1
                 guard count <= maximumNodes else { throw Failure.incompleteEvidence }
                 let textNode = ["statictext", "inlinetextbox"].contains(role(node))
-                if !node.isIgnored && (textNode || node.childNodeIDs.isEmpty) {
+                if !node.isIgnored && (textNode || (!textOnly && node.childNodeIDs.isEmpty)) {
                     let text = canonical(node.value ?? node.name)
                     if !text.isEmpty {
                         bytes += text.utf8.count + 1
@@ -507,7 +717,7 @@ enum BrowserActionVerification {
             return fragments.joined(separator: " ")
         }
 
-        func anchor(_ node: BrowserDocumentNode) throws -> Anchor {
+        func anchor(_ node: BrowserDocumentNode, requiresStableParent: Bool = false) throws -> Anchor {
             guard let backend = node.backendNodeID, backend > 0 else { throw Failure.baselineUnavailable }
             let children = try directChildren(node)
             guard children.count <= maximumAnchorChildren else { throw Failure.incompleteEvidence }
@@ -516,7 +726,7 @@ enum BrowserActionVerification {
             var parentName: String?
             var position: Int?
             var siblings: [Sibling]?
-            if !canonical(node.name).isEmpty, let parentID = node.parentNodeID, let parent = byID[parentID],
+            if requiresStableParent || !canonical(node.name).isEmpty, let parentID = node.parentNodeID, let parent = byID[parentID],
                let parentID = parent.backendNodeID, let nodeID = node.nodeID,
                let childPosition = parent.childNodeIDs.firstIndex(of: nodeID),
                parent.childNodeIDs.count <= maximumAnchorChildren {
@@ -527,6 +737,7 @@ enum BrowserActionVerification {
                     siblings = others.map { Sibling(backendNodeID: $0.backendNodeID!, role: role($0), nameFingerprint: fingerprint(canonical($0.name))) }
                 }
             }
+            if requiresStableParent && parentBackend == nil { throw Failure.baselineUnavailable }
             return Anchor(backendNodeID: backend, role: role(node), name: canonical(node.name),
                           parentBackendNodeID: parentBackend, parentRole: parentRole,
                           parentNameFingerprint: parentName, childPosition: position,

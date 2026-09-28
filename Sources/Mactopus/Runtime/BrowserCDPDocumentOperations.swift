@@ -72,7 +72,7 @@ struct BrowserCDPDocumentOperations {
         guard after == before else {
             throw BrowserTabBrokerError.staleDocument
         }
-        let nodes = rawNodes.prefix(12_000).map { parseNode($0, actionEvidence: actionEvidence) }
+        let nodes = try rawNodes.prefix(12_000).map { try parseNode($0, actionEvidence: actionEvidence) }
         let knownIDs = Set(nodes.compactMap(\.nodeID))
         let hasMissingChildren = nodes.contains { node in
             node.childNodeIDs.contains { !knownIDs.contains($0) }
@@ -375,10 +375,10 @@ struct BrowserCDPDocumentOperations {
         }
     }
 
-    private func parseNode(_ object: [String: Any], actionEvidence: BrowserDOMActionProjection) -> BrowserDocumentNode {
+    private func parseNode(_ object: [String: Any], actionEvidence: BrowserDOMActionProjection) throws -> BrowserDocumentNode {
         let role = stringValue(object["role"]) ?? ""
         let name = stringValue(object["name"]) ?? ""
-        let value = stringValue(object["value"])
+        var value = stringValue(object["value"])
         let properties = object["properties"] as? [[String: Any]] ?? []
         let disabled = properties.contains { property in
             property["name"] as? String == "disabled"
@@ -388,7 +388,24 @@ struct BrowserCDPDocumentOperations {
             property["name"] as? String == "readonly"
                 && boolValue(property["value"]) == true
         }
+        let editable = properties.contains { property in
+            guard property["name"] as? String == "editable" else { return false }
+            return ["plaintext", "richtext", "true"].contains(stringValue(property["value"]) ?? "")
+                || boolValue(property["value"]) == true
+        }
         let backendID = (object["backendDOMNodeId"] as? NSNumber)?.int64Value
+        let protectedValue = properties.contains { property in
+            ["protected", "password"].contains(property["name"] as? String ?? "")
+                && boolValue(property["value"]) == true
+        }
+        if !actionEvidence.truncated, let backendID, actionEvidence.emptyTextValues.contains(backendID),
+           ["textbox", "searchbox", "combobox"].contains(role.lowercased()), editable,
+           !disabled, !readOnly, !protectedValue, object["ignored"] as? Bool != true {
+            guard value == nil || value == "" else { throw BrowserTabBrokerError.elementChanged }
+            // Only this exact native field was explicitly observed empty.
+            // Missing/unsupported DOM evidence never turns an absent AX value into empty.
+            value = ""
+        }
         let focusable = properties.contains { property in
             property["name"] as? String == "focusable" && boolValue(property["value"]) == true
         }
@@ -406,7 +423,8 @@ struct BrowserCDPDocumentOperations {
             linkURL: properties.first { $0["name"] as? String == "url" }
                 .flatMap { stringValue($0["value"]) },
             isDOMClickable: backendID.map { actionEvidence.clickable.contains($0) } ?? false,
-            isFocusablePointer: focusable && (backendID.map { actionEvidence.pointer.contains($0) } ?? false)
+            isFocusablePointer: focusable && (backendID.map { actionEvidence.pointer.contains($0) } ?? false),
+            isEditable: editable
         )
     }
 
