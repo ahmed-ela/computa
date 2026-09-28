@@ -104,7 +104,7 @@ function Sidebar({
       <div className="window-drag-strip" aria-hidden="true" />
       <div className="sidebar-brand-row">
         <div className="brand-lockup">
-          <strong title="Fast, Mac-optimized local AI">Mactopus</strong>
+          <strong title="Fast, Mac-optimized local AI">Computa</strong>
         </div>
       </div>
 
@@ -174,7 +174,7 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
   return (
     <header className="task-toolbar">
       <div className="toolbar-title-block">
-        <strong>{task?.title === 'Untitled task' ? 'New task' : task?.title ?? 'Mactopus'}</strong>
+        <strong>{task?.title === 'Untitled task' ? 'New task' : task?.title ?? 'Computa'}</strong>
       </div>
       <div className="toolbar-actions">
         {task && task.status !== 'Draft' && task.status !== 'Completed' ? (
@@ -369,7 +369,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
       onDragOver={(event) => { if (draggedID) event.preventDefault(); }}
       onDrop={(event) => drop(event)}
     >
-      <div className="queue-header" title="Queued messages are kept while Mactopus is open">
+      <div className="queue-header" title="Queued messages are kept while Computa is open">
         <div><strong>Up next</strong><span>{task.queuedPrompts.length}</span></div>
         {task.queuePaused ? (
           <Button variant="outline" size="sm" className="queue-resume-button" onClick={() => post({ action: 'resumeQueue', taskID: task.id })}>
@@ -898,7 +898,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
                 </Button>
               </span>
             </div>
-            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access automatically approves Mactopus action requests; Ask every time asks before each protected action. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. Access mode resets to Ask every time when you relaunch.</p></details>
+            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access automatically approves Computa action requests; Ask every time asks before each protected action. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. Access mode resets to Ask every time when you relaunch.</p></details>
             <Button variant="outline" className="refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</Button>
           </section>
         </div>
@@ -912,7 +912,7 @@ function LoadingView() {
   return (
     <main className="loading-view">
       <span className="loading-mark"><Icon name="sparkles" size={22} /></span>
-      <strong>Starting Mactopus</strong>
+      <strong>Starting Computa</strong>
       <span>Connecting the native runtime…</span>
     </main>
   );
@@ -923,7 +923,7 @@ function BridgeUnavailableView() {
     <main className="loading-view" role="alert">
       <span className="loading-mark"><Icon name="info" size={22} /></span>
       <strong>Native bridge unavailable</strong>
-      <span>Open this interface from the Mactopus macOS application.</span>
+      <span>Open this interface from the Computa macOS application.</span>
     </main>
   );
 }
@@ -978,7 +978,7 @@ export function App() {
           <Conversation snapshot={snapshot} task={task} />
         ) : (
           <div className="no-task-view">
-            <h1>Mactopus</h1>
+            <h1>Computa</h1>
             <p>Fast, Mac-optimized local AI.</p>
             <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={15} /> New task</Button>
           </div>

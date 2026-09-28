@@ -38,7 +38,7 @@ function call() {
   if (plan.rotateTool) {
     if (step % 3 === 0) args.target = `Rephrased synthetic control ${step}`;
     else if (step % 3 === 1) { tool = "computer_v2_type"; args = { text: `MUST_NOT_TYPE_${step}` }; }
-    else { tool = "computer_v2_open"; args = { bundle_id: "com.example.MactopusBackgroundSentinel", activation: "foreground" }; }
+    else { tool = "computer_v2_open"; args = { bundle_id: "com.example.ComputaBackgroundSentinel", activation: "foreground" }; }
   }
   if (plan.rotateCapture && "capture_id" in args) args.capture_id = randomUUID();
   const id = `policy-request-${turnCount}-${step}`;
@@ -108,7 +108,7 @@ createInterface({ input: process.stdin }).on("line", line => {
       notify("item/started", { turnId: "policy-maintenance", item: { id: "policy-compaction", type: "contextCompaction" } });
       emit({ id: "maintenance-action", method: "item/tool/call", params: {
         threadId, turnId: "policy-maintenance", callId: "maintenance-action-call", tool: "computer_v2_open",
-        arguments: { bundle_id: "com.example.MactopusBackgroundSentinel", activation: "foreground" },
+        arguments: { bundle_id: "com.example.ComputaBackgroundSentinel", activation: "foreground" },
       } });
       break;
     default: emit({ id: message.id, error: { code: -32601, message: `Unexpected background fixture method: ${message.method}` } });

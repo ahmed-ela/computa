@@ -19,7 +19,7 @@ final class NativeRelay: @unchecked Sendable {
     }
 
     func run() {
-        DispatchQueue(label: "mactopus.native.chrome-reader").async { [self] in
+        DispatchQueue(label: "computa.native.chrome-reader").async { [self] in
             do {
                 while let data = try ChromeBridgeIPC.readFrame(STDIN_FILENO) {
                     let current = lock.withLock { socket }

@@ -1,6 +1,6 @@
-# Mactopus Browser Bridge
+# Computa Browser Bridge
 
-Manifest V3 companion for Mactopus's existing signed-in Chrome support. This is
+Manifest V3 companion for Computa's existing signed-in Chrome support. This is
 an alternate transport behind the existing native tab broker, not a new model
 tool surface and not a general-purpose CDP proxy.
 
@@ -30,7 +30,7 @@ Reconnection never retries a previous action or silently switches browser tabs.
 
 ## Initial developer setup
 
-1. Build/package Mactopus with its signed native host. Register the host for this
+1. Build/package Computa with its signed native host. Register the host for this
    user in Chrome's `NativeMessagingHosts` directory using a manifest with the
    exact `com.macndash.chrome_bridge` name, `stdio` type, signed helper path, and
    only the pinned extension origin below. Registration is currently an explicit
@@ -39,8 +39,8 @@ Reconnection never retries a previous action or silently switches browser tabs.
    developer extension. Do not install it via a policy override or change
    unrelated Chrome settings. Packaged consumer distribution requires Chrome
    Web Store delivery and a corresponding pinned identity migration.
-3. Keep Mactopus open. Open the extension popup and choose **Pair with Mactopus**.
-4. Confirm the separate, explicit pairing proposal in Mactopus. Only this step
+3. Keep Computa open. Open the extension popup and choose **Pair with Computa**.
+4. Confirm the separate, explicit pairing proposal in Computa. Only this step
    issues the shared pairing token. Previously remembered remote-debugging
    consent does not automatically authorize the extension.
 5. Run the integration gates before claiming installed-browser qualification.
@@ -48,9 +48,9 @@ Reconnection never retries a previous action or silently switches browser tabs.
 Development extension ID: `gdghbmoiibghgkfmhjlckipjjlclnlbk`.
 Native host: `com.macndash.chrome_bridge`.
 Both identifiers remain unchanged from Macndash so the installed Chrome profile
-and its saved pairing continue to work with Mactopus. Keep the existing unpacked
+and its saved pairing continue to work with Computa. Keep the existing unpacked
 extension installation and update the native-host manifest's helper path if the
-application bundle moves to `/Applications/Mactopus.app`.
+application bundle moves to `/Applications/Computa.app`.
 
 The manifest includes a public development key solely to stabilize the unpacked
 extension ID. There is no private key in this directory; this is not a Chrome

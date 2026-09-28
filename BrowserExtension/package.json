@@ -1,5 +1,5 @@
 {
-  "name": "mactopus-chrome-bridge",
+  "name": "computa-chrome-bridge",
   "private": true,
   "type": "module",
   "scripts": { "test": "bun test" }

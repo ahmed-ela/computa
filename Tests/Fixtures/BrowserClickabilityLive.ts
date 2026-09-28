@@ -13,9 +13,9 @@ const server = Bun.serve({hostname: '127.0.0.1', port: 0, async fetch(request) {
   }
   if (request.method !== 'GET' || url.pathname !== route) return new Response('not found', {status:404});
   return new Response(`<!doctype html><html lang="en"><meta charset="utf-8">
-<title>Mactopus clickability verification</title>
+<title>Computa clickability verification</title>
 <style>body{font:18px system-ui;margin:40px}.candidate{cursor:pointer;padding:18px;border:1px solid #bbb;margin:12px}td{padding:16px}</style>
-<h1>Mactopus clickability verification</h1>
+<h1>Computa clickability verification</h1>
 <div role="grid" aria-label="Synthetic messages"><div role="row" tabindex="-1" class="candidate" id="row" aria-label="Open synthetic itinerary"><span role="gridcell">Open synthetic itinerary</span></div></div>
 <div role="list"><div role="listitem" tabindex="0" class="candidate" id="card" aria-label="Open synthetic card">Open synthetic card</div></div>
 <div role="group" id="direct" aria-label="Direct listener tile" class="candidate">Direct listener tile</div>

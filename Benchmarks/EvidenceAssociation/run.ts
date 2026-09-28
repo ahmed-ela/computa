@@ -16,7 +16,7 @@ if (!selected.length || new Set(selected).size !== selected.length || selected.s
 if (mode === "corrupt" && selected.includes("checkpoint")) throw new Error("A checkpoint-generation candidate cannot use fixed corrupted memory");
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const policy = readFileSync("/Users/ahmedelamin/AGENTS.md", "utf8");
-const source = readFileSync("Sources/Mactopus/Runtime/CodexAppServerRuntime.swift", "utf8");
+const source = readFileSync("Sources/Computa/Runtime/CodexAppServerRuntime.swift", "utf8");
 const base = source.match(/baseInstructions: """\n([\s\S]*?)\n\s*""",\n\s*reasoningEffort:/)?.[1]?.split("\n").map(l => l.trim()).join("\n");
 if (!base) throw new Error("Cannot recover production base instructions");
 const raw = readFileSync(join(captureRoot, "connection-03.client-to-upstream.bin"));

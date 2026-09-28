@@ -21,13 +21,13 @@ SPEC.loader.exec_module(INSTALLER)
 
 class ReleaseInstallerTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="mactopus-installer-test-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="computa-installer-test-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         self.package = self.root / "package"
         self.home = self.root / "user"
         self.home.mkdir()
-        self.source = self.package / "Mactopus.app"
+        self.source = self.package / "Computa.app"
         self.make_app(self.source, b"new app")
         (self.package / "Installer").mkdir()
         self.manifest = {"schemaVersion": 1, "bundleIdentifier": INSTALLER.BUNDLE_ID,
@@ -38,17 +38,17 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.running = False
         self.fail_runtime = False
 
-    def make_app(self, app, text):
-        (app / "Contents/MacOS").mkdir(parents=True)
+    def make_app(self, app, text, *, executable="Computa", identity=INSTALLER.BUNDLE_ID):
+        (app / "Contents/MacOS").mkdir(parents=True, exist_ok=True)
         with (app / "Contents/Info.plist").open("wb") as handle:
-            plistlib.dump({"CFBundleIdentifier": INSTALLER.BUNDLE_ID, "CFBundleExecutable": "Mactopus"}, handle)
-        (app / "Contents/MacOS/Mactopus").write_bytes(text)
+            plistlib.dump({"CFBundleIdentifier": identity, "CFBundleExecutable": executable}, handle)
+        (app / "Contents/MacOS" / executable).write_bytes(text)
 
     def run_command(self, command, *, env=None):
         command = [str(item) for item in command]
         self.calls.append((command, env))
         if command[0] == "/usr/bin/pgrep":
-            if not self.running:
+            if self.running is not True and self.running != command[-1]:
                 raise subprocess.CalledProcessError(1, command)
         if command[0] == "/usr/bin/ditto":
             shutil.copytree(command[-2], command[-1], symlinks=True)
@@ -62,14 +62,14 @@ class ReleaseInstallerTests(unittest.TestCase):
                                  architecture="arm64", mac_version="14.0", **options)
 
     def test_install_preserves_old_app_and_state_and_launches_only_after_provisioning(self):
-        previous = self.home / "Applications/Mactopus.app"
+        previous = self.home / "Applications/Computa.app"
         self.make_app(previous, b"previous app")
         support = self.home / "Library/Application Support/LocalCodex"
         support.mkdir(parents=True)
         (support / "private-chats").write_text("untouched fixture")
         installed, backup = self.install()
-        self.assertEqual((installed / "Contents/MacOS/Mactopus").read_bytes(), b"new app")
-        self.assertEqual((backup / "Contents/MacOS/Mactopus").read_bytes(), b"previous app")
+        self.assertEqual((installed / "Contents/MacOS/Computa").read_bytes(), b"new app")
+        self.assertEqual((backup / "Contents/MacOS/Computa").read_bytes(), b"previous app")
         self.assertEqual((support / "private-chats").read_text(), "untouched fixture")
         commands = [call for call, _ in self.calls]
         self.assertEqual(commands[-1], ["/usr/bin/open", str(installed)])
@@ -79,13 +79,68 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(runtime_env["UV_NO_CONFIG"], "1")
         self.assertNotIn("HF_TOKEN", runtime_env)
 
+    def test_legacy_upgrade_preserves_old_name_in_backup_shared_runtime_and_user_data(self):
+        legacy = self.home / "Applications/Mactopus.app"
+        self.make_app(legacy, b"legacy app", executable="Mactopus")
+        runtime = self.make_existing_runtime()
+        saved = runtime.parent / "saved-chat.json"
+        saved.write_text("private fixture")
+        installed, backup = self.install(launch=False)
+        self.assertEqual(installed, self.home / "Applications/Computa.app")
+        self.assertEqual(backup.name, "Mactopus.app")
+        self.assertEqual((backup / "Contents/MacOS/Mactopus").read_bytes(), b"legacy app")
+        self.assertFalse(legacy.exists())
+        self.assertEqual(saved.read_text(), "private fixture")
+        self.assertEqual((runtime / "installation.json").read_text(), "existing receipt")
+        self.assertFalse(any(command[0] == "/bin/zsh" for command, _ in self.calls))
+
+    def test_failed_legacy_upgrade_restores_original_path_and_keeps_staged_computa(self):
+        legacy = self.home / "Applications/Mactopus.app"
+        self.make_app(legacy, b"legacy app", executable="Mactopus")
+        def move(source, destination):
+            if source.parent.name.startswith(".computa-install-"):
+                raise OSError("injected final move failure")
+            os.rename(source, destination)
+        with self.assertRaisesRegex(RuntimeError, "previous app was preserved"):
+            self.install(move=move)
+        self.assertEqual((legacy / "Contents/MacOS/Mactopus").read_bytes(), b"legacy app")
+        self.assertFalse((self.home / "Applications/Computa.app").exists())
+        self.assertEqual(len(list((self.home / "Applications").glob(".computa-install-*/Computa.app"))), 1)
+
+    def test_both_installed_names_are_preserved_and_block_before_staging_or_provisioning(self):
+        legacy = self.home / "Applications/Mactopus.app"
+        current = self.home / "Applications/Computa.app"
+        self.make_app(legacy, b"legacy app", executable="Mactopus")
+        self.make_app(current, b"current app")
+        with self.assertRaisesRegex(ValueError, "Both Computa.app and Mactopus.app"):
+            self.install()
+        self.assertEqual((legacy / "Contents/MacOS/Mactopus").read_bytes(), b"legacy app")
+        self.assertEqual((current / "Contents/MacOS/Computa").read_bytes(), b"current app")
+        self.assertFalse(any(command[0] in ("/usr/bin/ditto", "/bin/zsh") or "--model-only" in command for command, _ in self.calls))
+
+    def test_legacy_path_only_accepts_original_identity_and_executable(self):
+        legacy = self.home / "Applications/Mactopus.app"
+        for identity, executable in (("org.example.Unrelated", "Mactopus"), (INSTALLER.BUNDLE_ID, "Computa")):
+            with self.subTest(identity=identity, executable=executable):
+                self.make_app(legacy, b"unknown app", identity=identity, executable=executable)
+                with self.assertRaisesRegex(ValueError, "unknown application"):
+                    self.install()
+        self.assertFalse(any(command[0] in ("/usr/bin/ditto", "/bin/zsh") for command, _ in self.calls))
+
+    def test_running_legacy_app_blocks_before_staging_and_provisioning(self):
+        self.running = "Mactopus"
+        with self.assertRaisesRegex(ValueError, "Quit Mactopus"):
+            self.install()
+        self.assertFalse((self.home / "Applications").exists())
+        self.assertFalse(any(command[0] in ("/usr/bin/ditto", "/bin/zsh") for command, _ in self.calls))
+
     def test_runtime_failure_preserves_existing_app_and_never_launches(self):
-        previous = self.home / "Applications/Mactopus.app"
+        previous = self.home / "Applications/Computa.app"
         self.make_app(previous, b"previous app")
         self.fail_runtime = True
         with self.assertRaisesRegex(RuntimeError, "not replaced"):
             self.install()
-        self.assertEqual((previous / "Contents/MacOS/Mactopus").read_bytes(), b"previous app")
+        self.assertEqual((previous / "Contents/MacOS/Computa").read_bytes(), b"previous app")
         self.assertFalse(any(command[0] == "/usr/bin/open" for command, _ in self.calls))
 
     def make_existing_runtime(self):
@@ -104,14 +159,14 @@ class ReleaseInstallerTests(unittest.TestCase):
         verification = next(command for command in commands if "verify-runtime" in command)
         self.assertIn("-B", verification)
         receipt = Path(verification[verification.index("--receipt") + 1])
-        self.assertTrue(receipt.parent.name.startswith(".mactopus-install-"))
+        self.assertTrue(receipt.parent.name.startswith(".computa-install-"))
         self.assertEqual((runtime / "installation.json").read_text(), "existing receipt")
         self.assertEqual((runtime / "venv/bin/python").read_bytes(), b"existing inert runtime")
         self.assertTrue(any(command[1:3] == ["pip", "check"] for command in commands))
         self.assertFalse(any(command[0] == "/bin/zsh" or "sync" in command for command in commands))
 
     def test_existing_runtime_survives_verification_and_later_model_failures(self):
-        previous = self.home / "Applications/Mactopus.app"
+        previous = self.home / "Applications/Computa.app"
         self.make_app(previous, b"previous app")
         runtime = self.make_existing_runtime()
         before = {str(path.relative_to(runtime)): path.read_bytes() for path in runtime.rglob("*") if path.is_file()}
@@ -129,7 +184,7 @@ class ReleaseInstallerTests(unittest.TestCase):
                     self.install()
                 after = {str(path.relative_to(runtime)): path.read_bytes() for path in runtime.rglob("*") if path.is_file()}
                 self.assertEqual(after, before)
-                self.assertEqual((previous / "Contents/MacOS/Mactopus").read_bytes(), b"previous app")
+                self.assertEqual((previous / "Contents/MacOS/Computa").read_bytes(), b"previous app")
                 commands = [command for command, _ in self.calls]
                 self.assertFalse(any(command[0] in ("/bin/zsh", "/usr/bin/open") or "sync" in command for command in commands))
                 if failing_argument == "verify-runtime":
@@ -145,26 +200,26 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertLess(paths.index("Contents/Resources.plist"), paths.index("Contents/Resources/a"))
 
     def test_failed_final_move_rolls_back_without_deleting_either_bundle(self):
-        previous = self.home / "Applications/Mactopus.app"
+        previous = self.home / "Applications/Computa.app"
         self.make_app(previous, b"previous app")
         def move(source, destination):
-            if source.parent.name.startswith(".mactopus-install-"):
+            if source.parent.name.startswith(".computa-install-"):
                 raise OSError("injected final move failure")
             os.rename(source, destination)
         with self.assertRaisesRegex(RuntimeError, "previous app was preserved"):
             self.install(move=move)
-        self.assertEqual((previous / "Contents/MacOS/Mactopus").read_bytes(), b"previous app")
-        self.assertEqual(len(list((self.home / "Applications").glob(".mactopus-install-*/Mactopus.app"))), 1)
+        self.assertEqual((previous / "Contents/MacOS/Computa").read_bytes(), b"previous app")
+        self.assertEqual(len(list((self.home / "Applications").glob(".computa-install-*/Computa.app"))), 1)
 
     def test_running_app_blocks_before_staging_or_runtime_changes(self):
         self.running = True
-        with self.assertRaisesRegex(ValueError, "Quit Mactopus"):
+        with self.assertRaisesRegex(ValueError, "Quit Computa"):
             self.install()
         self.assertFalse((self.home / "Applications").exists())
         self.assertFalse(any(command[0] in ("/usr/bin/ditto", "/bin/zsh") for command, _ in self.calls))
 
     def test_starting_app_during_provisioning_blocks_replacement(self):
-        previous = self.home / "Applications/Mactopus.app"
+        previous = self.home / "Applications/Computa.app"
         self.make_app(previous, b"previous app")
         run = self.run_command
         def start_during_provision(command, *, env=None):
@@ -175,17 +230,17 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.run_command = start_during_provision
         with self.assertRaisesRegex(RuntimeError, "not replaced"):
             self.install()
-        self.assertEqual((previous / "Contents/MacOS/Mactopus").read_bytes(), b"previous app")
+        self.assertEqual((previous / "Contents/MacOS/Computa").read_bytes(), b"previous app")
 
     def test_app_manifest_tampering_symlinked_destination_and_old_macos_fail_closed(self):
-        (self.source / "Contents/MacOS/Mactopus").write_bytes(b"changed")
+        (self.source / "Contents/MacOS/Computa").write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "differs"):
             self.install()
         self.assertEqual(self.calls, [])
         with self.assertRaisesRegex(ValueError, "macOS 14"):
             INSTALLER.install(self.package, self.home, "uv", download_model=True, run=self.run_command,
                               system="Darwin", architecture="arm64", mac_version="13.6")
-        (self.source / "Contents/MacOS/Mactopus").write_bytes(b"new app")
+        (self.source / "Contents/MacOS/Computa").write_bytes(b"new app")
         (self.home / "Applications").symlink_to(self.package, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "symlinked"):
             self.install()

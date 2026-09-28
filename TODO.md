@@ -1,4 +1,49 @@
-# Mactopus TODO and validation
+# Computa TODO and validation
+
+## Rename checkpoint — 28 September 2026
+
+The product and repository are now **Computa**:
+[ahmed-wlb/computa](https://github.com/ahmed-wlb/computa),
+[computa.wtf](https://computa.wtf). The app, executable, Swift targets,
+`Computa.xcodeproj`, `Sources/Computa` and `Tests/ComputaTests` use that name.
+LocalCodex/HeyDash/Macndash data, bundle, preferences and pairing identifiers
+remain compatible; `MACTOPUS_*` environment variables, `mactopus-5` source pin
+and `mactopusClickability` protocol field remain unchanged. Installers can migrate
+one compatible legacy `~/Applications/Mactopus.app` to `Computa.app`; they
+reject both-present installations and either running process name. Backups
+retain the original bundle name, rollback restores its original path, and
+LocalCodex chat/model data stays in place.
+
+The Computa Release Xcode build and WebUI type check/production build passed.
+Rename validation passed 58 selected Swift cases, 21 Bun identity/runtime-source
+cases, with 10 additional opt-in signing tests skipped; 36 Bun source-installer/packaging/
+signing cases, 16 Python packaging cases, and 67 extension cases. These separate
+runs are not added to the historical overlapping totals below.
+
+The signed `v0.1.0-preview.1` Computa DMG was created and verified. Its actual
+mounted installer migrated `~/Applications/Mactopus.app` to
+`~/Applications/Computa.app`, backing up the old bundle at
+`~/Applications/Computa Backups/release-rsrkzkkt/Mactopus.app`. All 5,559 checked
+pre-existing preferences, CodexHome and model files were byte-identical before
+first launch. The UI launched as Computa with prior tasks populated, the Qwen
+default retained, MLX connected and Accessibility granted, then quit normally.
+
+Verified SHA-256 values:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Signed Computa main | `86e28876f804c7aca7ce30781b784efd90548465c259639305dc3c15d76a3e69` |
+| Signed agent runtime | `a639c86df85254f80beaa917d9245abbfa1a0041a184568c212b1df6a2415709` |
+| Computa preview DMG | `49694579017535d160a05faea805fba9b80ecc8dbfac3d431f8e64d9b20db849` |
+
+The Computa DMG, manifest and `SHA256SUMS` were uploaded to the draft release;
+GitHub digests match the local files. The preview remains a draft and is **not notarized**. This existing-Mac
+migration/startup check does not establish clean-Mac acceptance, repair the
+model stream/final-answer failure, complete the original lookup, or establish
+the controlled OS-process Stop check. Earlier Mactopus hashes, test counts and
+live outcomes remain historical evidence; no renamed live CLI task is claimed.
+
+## Earlier lookup checkpoint
 
 Earlier lookup checkpoint (28 September, before the CLI release): the reference interface was
 implemented, tested and installed as
@@ -9,7 +54,7 @@ requested conversation, title or source. Search was exposed in both overview
 reads but unused. All ten original attempts remain unsuccessful. The latest
 Lumen retest also failed; working safeguards do not establish task success.
 
-## CLI and distribution checkpoint — 28 September 2026
+## Pre-rename CLI and distribution checkpoint — 28 September 2026
 
 CLI execution and command-session polling are implemented with live output,
 exit status, exact task/turn ownership, existing approvals, and scoped Stop/quit
@@ -19,12 +64,12 @@ its regressions prove parent state is unchanged and a spawned child runtime can
 receive SIGCHLD and reap its own command. The same pinned engine completed a
 standalone command in 11 ms when launched with signals unblocked.
 
-Current source validation: 135 unique affected Swift cases passed after
+Pre-rename source validation: 135 unique affected Swift cases passed after
 corrections, including the two new signal regressions; 13 Bun packaging/signing
 tests and 11 Python installer tests passed. UI type checking and production
 build passed. These totals do not add overlapping reruns.
 
-The signed preview DMG was built and verified, and its installer successfully
+The Mactopus signed preview DMG was built and verified before the rename, and its installer successfully
 updated this Mac while preserving the previous app. It reused verified existing
 MLX/model data and bootstrapped pinned uv/Python. Installed main SHA-256:
 `2a481166b7d9a8540d0cb13ac0dc59d8ad677a54dd5da6bc15bbfdc97af0fbe6`.
@@ -70,7 +115,7 @@ command documentation are in `docs/DISTRIBUTION.md` and `docs/COMMANDS.md`.
   [Command documentation](docs/COMMANDS.md) describes use and limits.
 - [ ] **Verify remembered extension pairing.** Complete the normal extension
   setup and Pair and remember flow, then verify reconnection after restarting
-  Chrome and Mactopus. Current live evidence covers only a one-time connection.
+  Chrome and Computa. Recorded live evidence covers only a one-time connection.
 - [ ] **Finish notarization and verify a clean installation.** The
   [distribution workflow](docs/DISTRIBUTION.md) builds a DMG with a pinned
   Python/MLX/model installer and backed-up app upgrades. Submit/staple the
@@ -83,7 +128,7 @@ command documentation are in `docs/DISTRIBUTION.md` and `docs/COMMANDS.md`.
   This checkpoint preserves the source, tests, packaging scripts and measured
   unsuccessful live results; it does not claim the original lookup is fixed.
 
-## Reference-interface validation and final outcomes
+## Pre-rename reference-interface validation and final outcomes
 
 New threads advertise distinct fresh-page, region and continuation reads, and
 `press`, `follow` and `fill` use typed host-issued references to published rows.
@@ -146,7 +191,7 @@ Final cleanup verified all 52 baseline user tab identities and URLs unchanged.
 The unattributed extra fixture-home tab that appeared at 13:36:28 UTC was
 preserved; all three known owned test tabs were closed. Final Chrome state has
 53 tabs and zero agent attachments. The owned fixture server session 81982 stopped with
-exit 130 and no matching process remained. Mactopus remains running as PID
+exit 130 and no matching process remained. At that checkpoint Mactopus was running as PID
 43332, with the unchanged fa90ee67 main, the one-time Chrome connection and
 Ask Every Time. Remembered extension pairing remains unconfigured.
 The redacted original and Lumen review files and reference-interface validation
@@ -215,7 +260,7 @@ implemented, tested and installed; the requested lookup remains unfixed.
   separately. Preserve background-only operation, permissions, pairing, chats,
   and existing user tabs. No production-readiness claim from one successful task.
 
-## Current evidence
+## Historical lookup evidence
 
 The prior host's read-continuation patch passed 1,580 tests (49 skipped) and a
 signed Release build, and was installed on that host. Its read-only installed-app
@@ -338,7 +383,7 @@ the owned runtime is unchanged. Overview Swift validation passed 276 cases with
 two skips; the ordering correction then passed 62 focused cases. Bun checks passed
 55 tests/435 assertions. These runs overlap and are not a unique summed total.
 Final cleanup preserved all 51 user tab identities/URLs, with no extra or attached
-tabs; the fixture server was stopped and its listener absent. Mactopus remains
+tabs; the fixture server was stopped and its listener absent. At that checkpoint Mactopus was
 idle with the approved one-time Chrome connection and Ask Every Time. Remembered
 extension pairing remains unconfigured.
 

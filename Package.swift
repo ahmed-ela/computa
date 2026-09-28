@@ -3,12 +3,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "Mactopus",
+    name: "Computa",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "Mactopus", targets: ["Mactopus"])
+        .executable(name: "Computa", targets: ["Computa"])
     ],
     targets: [
         .target(
@@ -16,9 +16,9 @@ let package = Package(
             path: "Sources/AutomationCore"
         ),
         .executableTarget(
-            name: "Mactopus",
+            name: "Computa",
             dependencies: ["AutomationCore"],
-            path: "Sources/Mactopus",
+            path: "Sources/Computa",
             resources: [
                 .copy("Resources/WebUI"),
                 .copy("Resources/VisualGrounding"),
@@ -32,9 +32,9 @@ let package = Package(
             path: "Tests/AutomationCoreTests"
         ),
         .testTarget(
-            name: "MactopusTests",
-            dependencies: ["Mactopus"],
-            path: "Tests/MactopusTests"
+            name: "ComputaTests",
+            dependencies: ["Computa"],
+            path: "Tests/ComputaTests"
         )
     ]
 )

@@ -77,14 +77,14 @@ function expectedWireSchema(tool: any) {
 
 // Extract the literal production config, fail closed on a new expression. No
 // copied prompt prefix, extra instructions, output cap, or sampling override.
-const swift = readBounded(join(repo, "Sources/Mactopus/Runtime/CodexAppServerRuntime.swift")).toString();
+const swift = readBounded(join(repo, "Sources/Computa/Runtime/CodexAppServerRuntime.swift")).toString();
 const configBody = swift.split("static func localThreadConfig(")[1]?.split("struct Configuration:")[0];
 const entries = [...(configBody ?? "").matchAll(/"([a-z0-9_.]+)": ([^,\n]+),/g)];
 if (entries.length !== 22 || !swift.includes("case .smallModelComputerUse: 16384") || !swift.includes("case .smallModelComputerUse: 12288")) throw new Error("Review changed production config");
 const config: Record<string, unknown> = Object.fromEntries(entries.map(([, key, value]) => [key,
   value === "context.contextWindow" ? 16384 : value === "compactLimit" ? 12288 : JSON.parse(value)]));
 if (config["features.shell_tool"] !== false || config["features.unified_exec"] !== false || config.web_search !== "disabled") throw new Error("Unsafe production config");
-const artifactDir = join(repo, "Sources/Mactopus/Resources/AgentRuntime");
+const artifactDir = join(repo, "Sources/Computa/Resources/AgentRuntime");
 const manifestRaw = readBounded(join(artifactDir, "manifest.json"), 16384), manifest = JSON.parse(manifestRaw.toString());
 const pin = JSON.parse(readBounded(join(repo, "Runtime/codex-source.lock.json"), 16384).toString());
 const executable = join(artifactDir, "codex-app-server"), binary = readBounded(executable, 512 * 1024 * 1024);

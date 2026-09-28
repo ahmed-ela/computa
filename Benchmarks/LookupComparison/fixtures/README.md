@@ -1,6 +1,6 @@
 # Synthetic lookup comparison inputs
 
-These fixtures are deterministic inputs for later Chrome and Mactopus/Qwen runs. They contain invented records and addresses under `example.invalid`. Adding the fixtures or passing their integrity tests does **not** establish model correctness, browser accessibility coverage, native-app access, or a successful live comparison.
+These fixtures are deterministic inputs for later Chrome and Computa/Qwen runs. They contain invented records and addresses under `example.invalid`. Adding the fixtures or passing their integrity tests does **not** establish model correctness, browser accessibility coverage, native-app access, or a successful live comparison.
 
 `manifest.json` separates model-facing `tasks[].prompt` from evaluator-only `oracles`. Give the model only the task prompt. Do not attach the manifest, oracle values, HTML source, expected source filename, or a suggested tool sequence. Page filenames in the oracle identify expected sources; the actual run must record its observed localhost URL.
 
@@ -14,7 +14,7 @@ bun Benchmarks/LookupComparison/fixtures/serve.ts
 
 The default base URL is `http://127.0.0.1:8765/`; a numeric port may be supplied as the last argument. The server exposes only the sixteen HTML surfaces. It returns 404 for the manifest, native text, test code, and other files, and rejects write requests. Pages make no external requests, submit no forms, use no persistent storage, and reset on reload. Their visible controls affect only local fixture DOM state; most decoy controls intentionally do nothing.
 
-For each browser task, open its `initialPages` in separate test-owned Chrome tabs using the same base URL, preserving the user's existing tabs and drafts. Begin a fresh Mactopus chat with Qwen 3.5 4B and submit the exact prompt alone. Keep browser starting state and tab count consistent between compared runs, record any unavoidable differences, and do not leave a discovered answer tab selected as a shortcut. Capture the production app's own task-scoped observations and timing. Reload the virtualized page before every run, since it begins with only records 1-2 mounted. Close only the tabs created for these fixtures after evaluation and stop the local server.
+For each browser task, open its `initialPages` in separate test-owned Chrome tabs using the same base URL, preserving the user's existing tabs and drafts. Begin a fresh Computa chat with Qwen 3.5 4B and submit the exact prompt alone. Keep browser starting state and tab count consistent between compared runs, record any unavoidable differences, and do not leave a discovered answer tab selected as a shortcut. Capture the production app's own task-scoped observations and timing. Reload the virtualized page before every run, since it begins with only records 1-2 mounted. Close only the tabs created for these fixtures after evaluation and stop the local server.
 
 | Task | What the evaluator checks |
 | --- | --- |
@@ -34,7 +34,7 @@ The continued-field input is intended to force field pagination; live receipts m
 
 ## Native read gate
 
-`native-read.txt` is a separate inert input, not an HTML imitation of a native app. At the native evaluation stage, open that file as a separate test-owned TextEdit document, preserve existing documents, and issue the native task prompt from the manifest. Verify the fact through Mactopus's native application read path. Reading this source file directly or opening it in Chrome is insufficient. No native app has been opened by creating or testing these fixtures; the manifest deliberately marks this gate pending.
+`native-read.txt` is a separate inert input, not an HTML imitation of a native app. At the native evaluation stage, open that file as a separate test-owned TextEdit document, preserve existing documents, and issue the native task prompt from the manifest. Verify the fact through Computa's native application read path. Reading this source file directly or opening it in Chrome is insufficient. No native app has been opened by creating or testing these fixtures; the manifest deliberately marks this gate pending.
 
 ## Fixture integrity checks
 

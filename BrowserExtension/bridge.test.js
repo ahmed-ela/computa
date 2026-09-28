@@ -404,7 +404,7 @@ describe("shipping surface contracts", () => {
     expect(manifest.minimum_chrome_version).toBe("125");
   });
   test("fixed functions match current Swift native broker byte for byte", async () => {
-    const source = await readFile(new URL("../Sources/Mactopus/Runtime/BrowserCDPDocumentOperations.swift", import.meta.url), "utf8");
+    const source = await readFile(new URL("../Sources/Computa/Runtime/BrowserCDPDocumentOperations.swift", import.meta.url), "utf8");
     const templates = [...source.matchAll(/"functionDeclaration": """\n([\s\S]*?)\n(\s*)"""/g)]
       .map(match => match[1].split("\n").map(line => line.slice(match[2].length)).join("\n"));
     expect(templates).toEqual([PRESS_FUNCTION, SET_TEXT_FUNCTION]);

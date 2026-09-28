@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "mactopus-runtime-source-test-"));
+  const root = await mkdtemp(join(tmpdir(), "computa-runtime-source-test-"));
   temporaryDirectories.push(root);
   const upstream = join(root, "upstream");
   await mkdir(upstream);

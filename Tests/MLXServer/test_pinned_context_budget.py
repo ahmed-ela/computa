@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).parents[2] / "Sources/Mactopus/Resources/MLXServer"))
+sys.path.insert(0, str(Path(__file__).parents[2] / "Sources/Computa/Resources/MLXServer"))
 from response_boundary import ResponseBoundary
 
 

@@ -1,4 +1,4 @@
-name: Mactopus
+name: Computa
 
 options:
   bundleIdPrefix: com.ahmedelamin
@@ -26,23 +26,23 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ahmedelamin.LocalCodex.AutomationCore
         DEFINES_MODULE: YES
 
-  Mactopus:
+  Computa:
     type: application
     platform: macOS
     sources:
-      - path: Sources/Mactopus
+      - path: Sources/Computa
         excludes:
           - Resources
-      - path: Sources/Mactopus/Resources/WebUI
+      - path: Sources/Computa/Resources/WebUI
         type: folder
         buildPhase: resources
-      - path: Sources/Mactopus/Resources/VisualGrounding
+      - path: Sources/Computa/Resources/VisualGrounding
         type: folder
         buildPhase: resources
-      - path: Sources/Mactopus/Resources/AgentRuntime
+      - path: Sources/Computa/Resources/AgentRuntime
         type: folder
         buildPhase: resources
-      - path: Sources/Mactopus/Resources/MLXServer
+      - path: Sources/Computa/Resources/MLXServer
         type: folder
         buildPhase: resources
       - path: BrowserExtension
@@ -55,8 +55,8 @@ targets:
         script: '/bin/sh "$SRCROOT/Scripts/build-chrome-bridge.sh" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"'
         inputFiles:
           - $(SRCROOT)/Scripts/build-chrome-bridge.sh
-          - $(SRCROOT)/Sources/Mactopus/Runtime/ChromeBridgeIPC.swift
-          - $(SRCROOT)/Sources/Mactopus/Runtime/ChromeBridgeIdentity.swift
+          - $(SRCROOT)/Sources/Computa/Runtime/ChromeBridgeIPC.swift
+          - $(SRCROOT)/Sources/Computa/Runtime/ChromeBridgeIdentity.swift
           - $(SRCROOT)/Sources/ChromeBridgeHost/main.swift
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/ChromeBridge/ChromeBridgeHost
@@ -67,11 +67,11 @@ targets:
       base:
         # Stable identity preserves settings and macOS permission association.
         PRODUCT_BUNDLE_IDENTIFIER: com.ahmedelamin.LocalCodex
-        PRODUCT_NAME: Mactopus
+        PRODUCT_NAME: Computa
         DEVELOPMENT_TEAM: MSMG8CJLB3
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
-        INFOPLIST_FILE: Config/Mactopus-Info.plist
+        INFOPLIST_FILE: Config/Computa-Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MARKETING_VERSION: 0.1.0
         CURRENT_PROJECT_VERSION: 1
@@ -80,13 +80,13 @@ targets:
         Release:
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
-  MactopusTests:
+  ComputaTests:
     type: bundle.unit-test
     platform: macOS
     sources:
-      - path: Tests/MactopusTests
+      - path: Tests/ComputaTests
     dependencies:
-      - target: Mactopus
+      - target: Computa
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ahmedelamin.LocalCodexTests
@@ -107,17 +107,17 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
 
 schemes:
-  Mactopus:
+  Computa:
     build:
       targets:
         AutomationCore: all
-        Mactopus: all
-        MactopusTests: [test]
+        Computa: all
+        ComputaTests: [test]
         AutomationCoreTests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
-        - name: MactopusTests
+        - name: ComputaTests
         - name: AutomationCoreTests

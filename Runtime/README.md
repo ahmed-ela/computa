@@ -1,6 +1,6 @@
 # App-owned Agent Runtime
 
-Mactopus builds the standalone open-source `codex-app-server` component from
+Computa builds the standalone open-source `codex-app-server` component from
 `codex-source.lock.json`, with the reviewable patch under `patches/`. The pinned
 upstream revision matches the previously used installed runtime release. The
 installed Codex/ChatGPT application is neither changed nor used as a fallback.
@@ -54,7 +54,7 @@ silently folded into the shipped runtime. Do not run builds against that shared
 target cache concurrently.
 
 Generated binary, post-signing integrity manifest, and upstream LICENSE/NOTICE
-are copied to `Sources/Mactopus/Resources/AgentRuntime` before the normal Xcode
+are copied to `Sources/Computa/Resources/AgentRuntime` before the normal Xcode
 build seals the app bundle. Generated binary artifacts are not tracked in Git.
 The native resolver accepts only the pinned arm64 macOS standalone executable,
 checks size and SHA-256, and rejects symlinks, invalid manifests, and missing
@@ -67,7 +67,7 @@ before inference continues. Original tool identities and authority stay intact;
 large text results are explicitly truncated. No action is replayed, fabricated,
 or silently approved by this change. Overflow and unsupported retained results
 fail closed. Native approvals, StudyLock, and computer-use freshness checks are
-not weakened. Manual/idle compaction retains Mactopus's separately tested
+not weakened. Manual/idle compaction retains Computa's separately tested
 assistant-history restoration flow.
 
 For loopback, non-OpenAI providers using local summarizing compaction, a typed

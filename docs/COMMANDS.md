@@ -1,6 +1,6 @@
-# Running CLI commands
+# Running CLI commands in Computa
 
-Mactopus can use command-line tools as well as browser and desktop controls.
+Computa can use command-line tools as well as browser and desktop controls.
 Ask in the task composer, for example:
 
 > Run `uname -m` and `pwd`, then report their output and exit status.
@@ -16,12 +16,12 @@ is not a success.
 
 ## Working directory and tools
 
-The default working directory is Mactopus's private workspace under
+The default working directory is Computa's private workspace under
 `~/Library/Application Support/LocalCodex/CodexHome/Workspace`. Give an absolute
 working directory when asking about a project elsewhere.
 
 System command directories, `/opt/homebrew/bin`, and `/usr/local/bin` are on the
-runtime PATH. Mactopus does not install missing tools automatically. The engine
+runtime PATH. Computa does not install missing tools automatically. The engine
 keeps a private HOME and configuration directory; shell startup files, aliases,
 personal Codex configuration, and ambient credentials are not imported. Commands
 requiring an existing login or configuration may need an explicit path or their
@@ -51,7 +51,15 @@ Command text, output, and exit results become part of the local conversation.
 Avoid commands that print credentials or other information you do not want in
 the transcript.
 
-## Current limitations
+## Current validation and limitations
+
+Computa was previously named Mactopus. Before the rename, the signal-fixed
+installed app ran `uname -m` and received `arm64` with exit code 0. Its final
+model reply still failed `unstreamed_final_text` validation. A controlled live
+Stop test with independently observed OS-process exit remains pending. The
+renamed Computa build, installer migration and startup passed; a new live CLI
+task was not part of that rename check. The stream/final-answer failure remains
+unresolved and the preview remains a draft. See [TODO.md](../TODO.md).
 
 - The model can choose a wrong command or stop before completing a task. Review
   the actual output and exit status; a confident final message is not proof.

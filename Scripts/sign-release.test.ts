@@ -11,12 +11,12 @@ const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const identity = "Developer ID Application: Fixture (TEAM123456)";
 
 async function fixture() {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "mactopus-sign-"))); roots.push(root);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "computa-sign-"))); roots.push(root);
   const app = join(root, "input.app"), output = join(root, "signed.app");
   const runtime = "Contents/Resources/AgentRuntime/codex-app-server";
   const manifestPath = "Contents/Resources/AgentRuntime/manifest.json";
   for (const relative of ["Contents/MacOS", "Contents/Resources/ChromeBridge", "Contents/Resources/AgentRuntime"]) await mkdir(join(app, relative), { recursive: true });
-  for (const relative of ["Contents/Info.plist", "Contents/MacOS/Mactopus", "Contents/Resources/ChromeBridge/ChromeBridgeHost"]) await writeFile(join(app, relative), "fixture");
+  for (const relative of ["Contents/Info.plist", "Contents/MacOS/Computa", "Contents/Resources/ChromeBridge/ChromeBridgeHost"]) await writeFile(join(app, relative), "fixture");
   await writeFile(join(app, runtime), "original");
   const manifest = { executable: "codex-app-server", platform: "macos", architecture: "arm64", binarySize: 8, binarySHA256: sha("original"), sourceCommit: "pinned-source", patchSHA256: "pinned-patch" };
   await writeFile(join(app, manifestPath), JSON.stringify(manifest));

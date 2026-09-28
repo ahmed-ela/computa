@@ -2,16 +2,16 @@
 // Source installer. Kept separate from the app's runtime and never run by a model.
 import { lstat, mkdir, mkdtemp, rename } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 const bundleID = "com.ahmedelamin.LocalCodex";
-const help = `Build Mactopus from this checked-out source tree (Apple Silicon macOS only).
+const help = `Build Computa from this checked-out source tree (Apple Silicon macOS only).
 
 Usage: ./Scripts/setup.sh [--check | --build-only] [--no-launch] [--download-model]
                          [--signing-identity CERTIFICATE]
 
   --check           Read-only prerequisite check; no builds, installs, or downloads.
-  --build-only      Build and sign .build/SourceInstall/Build/Products/Release/Mactopus.app.
+  --build-only      Build and sign .build/SourceInstall/Build/Products/Release/Computa.app.
                     Do not install Python, models, or the app, and do not launch it.
   --no-launch       Install without opening the app.
   --download-model  Explicitly download the pinned Qwen 3.5 4B 4-bit model (~3 GB).
@@ -20,8 +20,10 @@ Usage: ./Scripts/setup.sh [--check | --build-only] [--no-launch] [--download-mod
   --help            Show this help.
 
 Default: build, prepare the private MLX Python environment, install into
-~/Applications/Mactopus.app, and open it. No model weights are downloaded unless
---download-model is supplied. Existing apps are backed up; quit Mactopus first.
+~/Applications/Computa.app, and open it. No model weights are downloaded unless
+--download-model is supplied. Existing apps are backed up; quit Computa and
+legacy Mactopus first. A legacy Mactopus.app is upgraded with its name preserved
+in the backup. If both app names exist, setup stops for you to resolve them.
 Default signing is ad-hoc: chat/native AX work, but Chrome extension pairing is
 unavailable. No macOS/Chrome permissions are auto-granted. See docs/BUILDING.md.`;
 
@@ -115,7 +117,7 @@ async function requireSafeDirectory(path: string): Promise<void> {
 
 export async function checkPrerequisites(context: SetupContext): Promise<void> {
   if (context.platform !== "darwin" || context.architecture !== "arm64") {
-    throw new Error("Mactopus currently builds only on Apple Silicon macOS (arm64). Intel and Linux are not supported.");
+    throw new Error("Computa currently builds only on Apple Silicon macOS (arm64). Intel and Linux are not supported.");
   }
   const missing = ["bun", "git", "xcodegen", "xcodebuild", "xcrun", "rustup", "cargo", "uv"]
     .filter(name => !context.which(name));
@@ -145,23 +147,36 @@ export async function checkPrerequisites(context: SetupContext): Promise<void> {
   context.log("Prerequisites passed. Allow substantial Cargo build time and roughly 35–50 GB free build/cache space.");
 }
 
-async function inspectApp(context: SetupContext, app: string): Promise<void> {
+async function inspectApp(context: SetupContext, app: string, expectedExecutable = "Computa"): Promise<void> {
   await requireSafeDirectory(app);
   const plist = join(app, "Contents/Info.plist");
   await requireRegular(plist);
   const identifier = await checked(context, ["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", plist], true);
   const executable = await checked(context, ["/usr/bin/plutil", "-extract", "CFBundleExecutable", "raw", "-o", "-", plist], true);
-  if (identifier !== bundleID || executable !== "Mactopus") {
-    throw new Error(`Refusing to replace or use an unknown app at ${app}. Expected Mactopus (${bundleID}).`);
+  if (identifier !== bundleID || executable !== expectedExecutable) {
+    throw new Error(`Refusing to replace or use an unknown app at ${app}. Expected ${expectedExecutable} (${bundleID}).`);
   }
-  await requireRegular(join(app, "Contents/MacOS/Mactopus"));
+  await requireRegular(join(app, "Contents/MacOS", expectedExecutable));
   await checked(context, ["/usr/bin/codesign", "--verify", "--deep", "--strict", app], true);
 }
 
 async function requireStopped(context: SetupContext): Promise<void> {
-  const process = await context.run(["/usr/bin/pgrep", "-x", "Mactopus"], context.root, true);
-  if (process.code === 0) throw new Error("Mactopus is running. Quit it normally, then rerun setup. No app was replaced or stopped.");
-  if (process.code !== 1) throw new Error("Could not determine whether Mactopus is running; refusing to replace the app.");
+  for (const name of ["Computa", "Mactopus"]) {
+    const process = await context.run(["/usr/bin/pgrep", "-x", name], context.root, true);
+    if (process.code === 0) throw new Error(`${name} is running. Quit it normally, then rerun setup. No app was replaced or stopped.`);
+    if (process.code !== 1) throw new Error(`Could not determine whether ${name} is running; refusing to replace the app.`);
+  }
+}
+
+async function existingApp(context: SetupContext, applications: string): Promise<string | undefined> {
+  if (!await exists(applications)) return undefined;
+  await requireSafeDirectory(applications);
+  const current = join(applications, "Computa.app"), legacy = join(applications, "Mactopus.app");
+  const hasCurrent = await exists(current), hasLegacy = await exists(legacy);
+  if (hasCurrent && hasLegacy) throw new Error("Both Computa.app and Mactopus.app exist in ~/Applications. Resolve the duplicate installations before setup; neither was changed.");
+  const existing = hasCurrent ? current : hasLegacy ? legacy : undefined;
+  if (existing) await inspectApp(context, existing, hasLegacy ? "Mactopus" : "Computa");
+  return existing;
 }
 
 async function resolveSigningIdentity(options: Options, context: SetupContext): Promise<string> {
@@ -179,34 +194,35 @@ async function resolveSigningIdentity(options: Options, context: SetupContext): 
 
 export async function installApp(context: SetupContext, source: string): Promise<{ app: string; backup?: string }> {
   const applications = join(context.userHome, "Applications");
-  const destination = join(applications, "Mactopus.app");
+  const destination = join(applications, "Computa.app");
   if (await exists(applications)) await requireSafeDirectory(applications);
   else await mkdir(applications, { mode: 0o755 });
   await requireStopped(context);
-  if (await exists(destination)) await inspectApp(context, destination);
-  const stage = await mkdtemp(join(applications, ".mactopus-install-"));
-  const stagedApp = join(stage, "Mactopus.app");
+  const previous = await existingApp(context, applications);
+  const stage = await mkdtemp(join(applications, ".computa-install-"));
+  const stagedApp = join(stage, "Computa.app");
   // ditto preserves executable modes and symlinks within the sealed bundle.
   // All validation happens before the existing app is moved.
   await checked(context, ["/usr/bin/ditto", source, stagedApp]);
   await inspectApp(context, stagedApp);
   await requireStopped(context);
   let backup: string | undefined;
-  if (await exists(destination)) {
+  const rechecked = await existingApp(context, applications);
+  if (rechecked !== previous) throw new Error("The installed app changed during staging; no app was replaced.");
+  if (previous) {
     // Revalidate after staging, not just at the beginning of a slow copy.
-    await inspectApp(context, destination);
-    const backupRoot = join(applications, "Mactopus Backups");
+    const backupRoot = join(applications, "Computa Backups");
     if (await exists(backupRoot)) await requireSafeDirectory(backupRoot);
     else await mkdir(backupRoot, { mode: 0o700 });
     const backupContainer = await mkdtemp(join(backupRoot, `${new Date().toISOString().replace(/[:.]/g, "-")}-`));
-    backup = join(backupContainer, "Mactopus.app");
-    await context.move(destination, backup);
+    backup = join(backupContainer, basename(previous));
+    await context.move(previous, backup);
   }
   try {
     await context.move(stagedApp, destination);
   } catch (error) {
-    if (backup && !await exists(destination)) {
-      try { await context.move(backup, destination); }
+    if (backup && previous && !await exists(previous)) {
+      try { await context.move(backup, previous); }
       catch (restoreError) {
         throw new Error(`Install failed and automatic rollback could not complete. Your previous app is preserved at ${backup}. Staged build: ${stagedApp}. ${String(restoreError)}`);
       }
@@ -227,8 +243,7 @@ export async function setup(options: Options, context: SetupContext): Promise<{ 
   if (options.check) return {};
   if (!options.buildOnly) {
     await requireStopped(context);
-    const destination = join(context.userHome, "Applications/Mactopus.app");
-    if (await exists(destination)) await inspectApp(context, destination);
+    await existingApp(context, join(context.userHome, "Applications"));
   }
   context.log("Building the source-pinned agent runtime, frozen WebUI dependencies, and native app. No installed Codex app is used.");
   await checked(context, ["bun", "Scripts/build-agent-runtime.ts", "--release", "--isolated-source"]);
@@ -238,11 +253,11 @@ export async function setup(options: Options, context: SetupContext): Promise<{ 
   if (webBuild.code !== 0) throw new Error("WebUI build failed.");
   await checked(context, ["xcodegen", "generate"]);
   const derivedData = join(context.root, ".build/SourceInstall");
-  await checked(context, ["xcodebuild", "-project", "Mactopus.xcodeproj", "-scheme", "Mactopus",
+  await checked(context, ["xcodebuild", "-project", "Computa.xcodeproj", "-scheme", "Computa",
     "-configuration", "Release", "-destination", "platform=macOS,arch=arm64", "-derivedDataPath", derivedData,
     "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "CODE_SIGN_IDENTITY=", "DEVELOPMENT_TEAM=", "build"]);
-  const product = join(derivedData, "Build/Products/Release/Mactopus.app");
-  for (const relative of ["Contents/MacOS/Mactopus", "Contents/Resources/ChromeBridge/ChromeBridgeHost",
+  const product = join(derivedData, "Build/Products/Release/Computa.app");
+  for (const relative of ["Contents/MacOS/Computa", "Contents/Resources/ChromeBridge/ChromeBridgeHost",
     "Contents/Resources/AgentRuntime/codex-app-server", "Contents/Resources/AgentRuntime/manifest.json",
     "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) {
     await requireRegular(join(product, relative));
@@ -262,6 +277,7 @@ export async function setup(options: Options, context: SetupContext): Promise<{ 
   }
   if (options.buildOnly) { context.log(`Built ${product}`); return { app: product }; }
   await requireStopped(context);
+  await existingApp(context, join(context.userHome, "Applications"));
   await checked(context, ["/bin/zsh", "Scripts/install-mlx-runtime.sh", ...(options.downloadModel ? ["--download-model"] : [])]);
   const installed = await installApp(context, product);
   if (!options.downloadModel) context.log("No weights downloaded. Install the pinned model with: /bin/zsh Scripts/install-mlx-runtime.sh --download-model");
@@ -281,5 +297,5 @@ if (import.meta.main) {
     },
   };
   try { await setup(parseOptions(process.argv.slice(2)), context); }
-  catch (error) { console.error(`Mactopus setup: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }
+  catch (error) { console.error(`Computa setup: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }
 }

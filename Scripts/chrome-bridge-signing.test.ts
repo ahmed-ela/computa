@@ -70,10 +70,10 @@ function expectRejected(result: Awaited<ReturnType<typeof command>>) {
 
 describe.skipIf(!enabled)("production Chrome bridge signing admission (opt-in)", () => {
   beforeAll(async () => {
-    directory = await mkdtemp(join(tmpdir(), "mactopus-bridge-signing-test-"));
+    directory = await mkdtemp(join(tmpdir(), "computa-bridge-signing-test-"));
     const base = join(directory, "probe");
     await checked(["xcrun", "swiftc", "-swift-version", "6", "-O",
-      join(root, "Sources/Mactopus/Runtime/ChromeBridgeIPC.swift"),
+      join(root, "Sources/Computa/Runtime/ChromeBridgeIPC.swift"),
       join(root, "Tests/Fixtures/ChromeBridgeSigningProbe.swift"), "-o", base]);
     adhocApp = await signedCopy(base, "adhoc-app", appID, "-");
     unsignedApp = join(directory, "unsigned-app");

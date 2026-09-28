@@ -8,15 +8,15 @@ const directories: string[] = [];
 afterEach(async () => { for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
 async function file(path: string, value = "fixture") { await mkdir(dirname(path), { recursive: true }); await writeFile(path, value); }
 async function fixture() {
-  const temporary = await realpath(await mkdtemp(join(tmpdir(), "mactopus-release-test-")));
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), "computa-release-test-")));
   directories.push(temporary);
-  const app = join(temporary, "input/Mactopus.app"), output = join(temporary, "output");
-  const info = { CFBundleIdentifier: "com.ahmedelamin.LocalCodex", CFBundleExecutable: "Mactopus",
+  const app = join(temporary, "input/Computa.app"), output = join(temporary, "output");
+  const info = { CFBundleIdentifier: "com.ahmedelamin.LocalCodex", CFBundleExecutable: "Computa",
     CFBundleShortVersionString: "0.1.0", LSMinimumSystemVersion: "14.0" };
   await file(join(app, "Contents/Info.plist"), JSON.stringify(info));
-  for (const name of ["Contents/MacOS/Mactopus", "Contents/Resources/AgentRuntime/codex-app-server",
+  for (const name of ["Contents/MacOS/Computa", "Contents/Resources/AgentRuntime/codex-app-server",
     "Contents/Resources/ChromeBridge/ChromeBridgeHost", "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) await file(join(app, name));
-  await chmod(join(app, "Contents/MacOS/Mactopus"), 0o755);
+  await chmod(join(app, "Contents/MacOS/Computa"), 0o755);
   const binary = join(app, "Contents/Resources/AgentRuntime/codex-app-server");
   await file(join(app, "Contents/Resources/AgentRuntime/manifest.json"), JSON.stringify({ schemaVersion: 1,
     platform: "macos", architecture: "arm64", executable: "codex-app-server", binarySize: 7, binarySHA256: await sha256(binary) }));
@@ -54,7 +54,7 @@ test("requires an explicit safe release tag and keeps pre-release version separa
 test("signed-test packaging preserves exact app bytes and mode, records pins, and never signs or installs", async () => {
   const f = await fixture(); const before = await bundleFiles(f.app);
   const result = (await packageRelease(f.options, f.context))!;
-  expect(result.dmg).toEndWith("Mactopus-0.1.0-preview.1-arm64-signed-test.dmg");
+  expect(result.dmg).toEndWith("Computa-0.1.0-preview.1-arm64-signed-test.dmg");
   expect(await bundleFiles(f.app)).toEqual(before);
   const manifest = JSON.parse(await readFile(result.manifest, "utf8"));
   expect(manifest.appFiles).toEqual(before);
@@ -75,7 +75,7 @@ test("checks the supported arm64 slice of universal app and helper plus the arm6
   expect(inspections).toHaveLength(3);
   expect(inspections.every(call => call.slice(1, 4).join(" ") === "-arch arm64 -L")).toBe(true);
   expect(inspections.map(call => call.at(-1)!.slice(f.app.length + 1))).toEqual([
-    "Contents/MacOS/Mactopus", "Contents/Resources/AgentRuntime/codex-app-server",
+    "Contents/MacOS/Computa", "Contents/Resources/AgentRuntime/codex-app-server",
     "Contents/Resources/ChromeBridge/ChromeBridgeHost",
   ]);
 });

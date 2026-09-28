@@ -69,12 +69,15 @@ def bundle_files(app):
     return sorted(result, key=lambda entry: entry["path"].encode("utf-8"))
 
 
-def inspect_app(app, run=checked, expected_files=None):
+def inspect_app(app, run=checked, expected_files=None, *, expected_executable="Computa"):
     app = safe_directory(app)
     with (app / "Contents/Info.plist").open("rb") as handle:
         info = plistlib.load(handle)
-    if info.get("CFBundleIdentifier") != BUNDLE_ID or info.get("CFBundleExecutable") != "Mactopus":
+    if info.get("CFBundleIdentifier") != BUNDLE_ID or info.get("CFBundleExecutable") != expected_executable:
         raise ValueError("Refusing to replace or install an unknown application")
+    executable = app / "Contents/MacOS" / expected_executable
+    if executable.is_symlink() or not executable.is_file():
+        raise ValueError("The application's executable is missing or nonregular")
     if expected_files is not None and bundle_files(app) != expected_files:
         raise ValueError("The application differs from its release manifest")
     run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app])
@@ -82,13 +85,27 @@ def inspect_app(app, run=checked, expected_files=None):
 
 
 def require_stopped(run=checked):
-    try:
-        run(["/usr/bin/pgrep", "-x", "Mactopus"])
-    except subprocess.CalledProcessError as error:
-        if error.returncode == 1:
-            return
-        raise ValueError("Could not determine whether Mactopus is running") from error
-    raise ValueError("Quit Mactopus normally before installing; no process was stopped")
+    for name in ("Computa", "Mactopus"):
+        try:
+            run(["/usr/bin/pgrep", "-x", name])
+        except subprocess.CalledProcessError as error:
+            if error.returncode == 1:
+                continue
+            raise ValueError(f"Could not determine whether {name} is running") from error
+        raise ValueError(f"Quit {name} normally before installing; no process was stopped")
+
+
+def existing_app(applications, run):
+    current, legacy = applications / "Computa.app", applications / "Mactopus.app"
+    has_current = current.exists() or current.is_symlink()
+    has_legacy = legacy.exists() or legacy.is_symlink()
+    if has_current and has_legacy:
+        raise ValueError("Both Computa.app and Mactopus.app exist in ~/Applications. "
+                         "Resolve the duplicate installations before setup; neither was changed")
+    existing = current if has_current else legacy if has_legacy else None
+    if existing is not None:
+        inspect_app(existing, run, expected_executable="Mactopus" if has_legacy else "Computa")
+    return existing
 
 
 def runtime_environment(home, uv):
@@ -162,21 +179,20 @@ def install(package_root, home, uv, *, download_model=False, launch=True, run=ch
     actual = tuple(map(int, (mac_version or platform.mac_ver()[0]).split(".")))
     if actual < minimum:
         raise ValueError(f"macOS {manifest['minimumMacOS']} or later is required")
-    source = package_root / "Mactopus.app"
+    source = package_root / "Computa.app"
     inspect_app(source, run, manifest["appFiles"])
     run(["/usr/bin/codesign", "--verify", "--strict", "-R", "=anchor apple generic", source])
     require_stopped(run)
     applications = safe_directory(home / "Applications", create=True)
-    destination = applications / "Mactopus.app"
-    if destination.exists() or destination.is_symlink():
-        inspect_app(destination, run)
+    destination = applications / "Computa.app"
+    previous = existing_app(applications, run)
     runtime = safe_directory(home / "Library/Application Support/LocalCodex/MLX", create=True)
     for name in ["models", "python", "uv-cache", "model-download-cache"]:
         safe_directory(runtime / name, create=True)
     # No recursive deletion or in-place app overwrite. Keep a failed staging
     # directory so a retry cannot destroy either the old or new bundle.
-    stage = Path(tempfile.mkdtemp(prefix=".mactopus-install-", dir=applications))
-    staged_app = stage / "Mactopus.app"
+    stage = Path(tempfile.mkdtemp(prefix=".computa-install-", dir=applications))
+    staged_app = stage / "Computa.app"
     run(["/usr/bin/ditto", "--rsrc", "--extattr", "--acl", source, staged_app])
     inspect_app(staged_app, run, manifest["appFiles"])
     require_stopped(run)
@@ -194,17 +210,18 @@ def install(package_root, home, uv, *, download_model=False, launch=True, run=ch
     require_stopped(run)
     inspect_app(staged_app, run, manifest["appFiles"])
     backup = None
-    if destination.exists() or destination.is_symlink():
-        inspect_app(destination, run)
-        backup_root = safe_directory(applications / "Mactopus Backups", create=True)
-        backup = Path(tempfile.mkdtemp(prefix="release-", dir=backup_root)) / "Mactopus.app"
-        move(destination, backup)
+    if existing_app(applications, run) != previous:
+        raise RuntimeError("The installed app changed during setup; no app was replaced")
+    if previous is not None:
+        backup_root = safe_directory(applications / "Computa Backups", create=True)
+        backup = Path(tempfile.mkdtemp(prefix="release-", dir=backup_root)) / previous.name
+        move(previous, backup)
     try:
         move(staged_app, destination)
     except Exception as error:
-        if backup is not None and not destination.exists() and not destination.is_symlink():
+        if backup is not None and previous is not None and not previous.exists() and not previous.is_symlink():
             try:
-                move(backup, destination)
+                move(backup, previous)
             except Exception as restore_error:
                 raise RuntimeError(f"Install and rollback failed. Previous app: {backup}; staged app: {staged_app}") from restore_error
         raise RuntimeError(f"Install failed; the previous app was preserved. Staged app: {staged_app}") from error
@@ -238,4 +255,4 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        raise SystemExit(f"Mactopus installer: {error}") from error
+        raise SystemExit(f"Computa installer: {error}") from error

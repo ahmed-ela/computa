@@ -8,7 +8,7 @@ bridge_root="${SRCROOT:?Expected Xcode SRCROOT}"
 bridge_destination="$bridge_resources/ChromeBridge"
 mkdir -p "$bridge_destination"
 bridge_binary="$bridge_destination/ChromeBridgeHost"
-bridge_slices=$(mktemp -d "${TMPDIR:-/tmp}/mactopus-chrome-bridge.XXXXXX")
+bridge_slices=$(mktemp -d "${TMPDIR:-/tmp}/computa-chrome-bridge.XXXXXX")
 trap 'rm -r "$bridge_slices"' EXIT
 
 # Xcode sets ARCHS to the slices in the enclosing app. A direct local invocation
@@ -23,8 +23,8 @@ for architecture in ${ARCHS:-arm64}; do
   slice="$bridge_slices/ChromeBridgeHost-$architecture"
   xcrun swiftc -swift-version 6 -O \
     -target "$architecture-apple-macos${MACOSX_DEPLOYMENT_TARGET:-14.0}" \
-    "$bridge_root/Sources/Mactopus/Runtime/ChromeBridgeIPC.swift" \
-    "$bridge_root/Sources/Mactopus/Runtime/ChromeBridgeIdentity.swift" \
+    "$bridge_root/Sources/Computa/Runtime/ChromeBridgeIPC.swift" \
+    "$bridge_root/Sources/Computa/Runtime/ChromeBridgeIdentity.swift" \
     "$bridge_root/Sources/ChromeBridgeHost/main.swift" \
     -o "$slice"
   set -- "$@" "$slice"

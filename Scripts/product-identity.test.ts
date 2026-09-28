@@ -7,56 +7,56 @@ import { resolve } from "node:path";
 // not. These checks read source only and never start the app or touch user data.
 const root = resolve(import.meta.dir, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
-const source = (path: string) => read(`Sources/Mactopus/${path}`);
+const source = (path: string) => read(`Sources/Computa/${path}`);
 
-describe("Mactopus product identity", () => {
+describe("Computa product identity", () => {
   test("the Swift package and Xcode project use the renamed product", () => {
     const packageFile = read("Package.swift");
-    expect(packageFile).toContain('name: "Mactopus"');
-    expect(packageFile).toContain('.executable(name: "Mactopus", targets: ["Mactopus"])');
-    expect(packageFile).toContain('path: "Sources/Mactopus"');
-    expect(packageFile).toContain('path: "Tests/MactopusTests"');
+    expect(packageFile).toContain('name: "Computa"');
+    expect(packageFile).toContain('.executable(name: "Computa", targets: ["Computa"])');
+    expect(packageFile).toContain('path: "Sources/Computa"');
+    expect(packageFile).toContain('path: "Tests/ComputaTests"');
     expect(packageFile).not.toContain('name: "HeyDash"');
 
     const project = read("project.yml");
-    expect(project).toMatch(/^name: Mactopus\s*$/m);
-    expect(project).toMatch(/^\s+PRODUCT_NAME: Mactopus\s*$/m);
-    expect(project).toContain("path: Sources/Mactopus");
-    expect(project).toContain("INFOPLIST_FILE: Config/Mactopus-Info.plist");
-    const generatedProject = read("Mactopus.xcodeproj/project.pbxproj");
-    expect(generatedProject).toContain("Mactopus.app");
-    expect(generatedProject).toContain("Config/Mactopus-Info.plist");
-    expect(generatedProject).toContain("MactopusTests.xctest");
+    expect(project).toMatch(/^name: Computa\s*$/m);
+    expect(project).toMatch(/^\s+PRODUCT_NAME: Computa\s*$/m);
+    expect(project).toContain("path: Sources/Computa");
+    expect(project).toContain("INFOPLIST_FILE: Config/Computa-Info.plist");
+    const generatedProject = read("Computa.xcodeproj/project.pbxproj");
+    expect(generatedProject).toContain("Computa.app");
+    expect(generatedProject).toContain("Config/Computa-Info.plist");
+    expect(generatedProject).toContain("ComputaTests.xctest");
     expect(generatedProject).not.toContain("Macrouse.app");
   });
 
-  test("the application entry point and owned instruction classes use Mactopus", () => {
-    const app = source("MactopusApp.swift");
-    expect(app).toContain("struct MactopusApp: App");
-    expect(app).toContain("enum MactopusLaunchMode");
-    expect(app).toContain("MactopusAppDelegate.self");
-    expect(source("Runtime/MactopusAgentInstructions.swift")).toContain("MactopusAgentInstructions");
-    expect(source("Runtime/MactopusRuntimeArtifact.swift")).toContain("struct MactopusRuntimeArtifact");
-    expect(source("Runtime/CodexAppServerRuntime.swift")).toMatch(/You are Mactopus[.,]/);
+  test("the application entry point and owned instruction classes use Computa", () => {
+    const app = source("ComputaApp.swift");
+    expect(app).toContain("struct ComputaApp: App");
+    expect(app).toContain("enum ComputaLaunchMode");
+    expect(app).toContain("ComputaAppDelegate.self");
+    expect(source("Runtime/ComputaAgentInstructions.swift")).toContain("ComputaAgentInstructions");
+    expect(source("Runtime/ComputaRuntimeArtifact.swift")).toContain("struct ComputaRuntimeArtifact");
+    expect(source("Runtime/CodexAppServerRuntime.swift")).toMatch(/You are Computa[.,]/);
   });
 
   test("native and web display branding agrees", () => {
-    const info = read("Config/Mactopus-Info.plist");
-    expect(info).toMatch(/<key>CFBundleDisplayName<\/key>\s*<string>Mactopus<\/string>/);
-    expect(info).toContain("Mactopus captures your display");
-    expect(source("Web/WebViewHost.swift")).toContain('window.title = "Mactopus"');
-    expect(read("WebUI/index.html")).toContain("<title>Mactopus</title>");
+    const info = read("Config/Computa-Info.plist");
+    expect(info).toMatch(/<key>CFBundleDisplayName<\/key>\s*<string>Computa<\/string>/);
+    expect(info).toContain("Computa captures your display");
+    expect(source("Web/WebViewHost.swift")).toContain('window.title = "Computa"');
+    expect(read("WebUI/index.html")).toContain("<title>Computa</title>");
     const bundledUI = source("Resources/WebUI/index.html");
-    expect(bundledUI).toContain("<title>Mactopus</title>");
+    expect(bundledUI).toContain("<title>Computa</title>");
     expect(bundledUI).not.toContain("<title>Macrouse</title>");
-    expect(JSON.parse(read("WebUI/package.json")).name).toBe("mactopus-web-ui");
+    expect(JSON.parse(read("WebUI/package.json")).name).toBe("computa-web-ui");
     expect(read("WebUI/src/App.tsx")).not.toContain("HeyDash");
-    expect(read("WebUI/vite.config.ts")).toContain("../Sources/Mactopus/Resources/WebUI");
+    expect(read("WebUI/vite.config.ts")).toContain("../Sources/Computa/Resources/WebUI");
   });
 
   test("the app ships its own instructions without another app's policy resource", () => {
-    expect(existsSync(resolve(root, "Sources/Mactopus/Resources/AgentInstructions/StudyLock.md"))).toBe(false);
-    expect(source("Runtime/MactopusAgentInstructions.swift")).not.toContain("StudyLock");
+    expect(existsSync(resolve(root, "Sources/Computa/Resources/AgentInstructions/StudyLock.md"))).toBe(false);
+    expect(source("Runtime/ComputaAgentInstructions.swift")).not.toContain("StudyLock");
     expect(source("Runtime/CodexAppServerRuntime.swift")).not.toContain("StudyLock");
     expect(read("Package.swift")).not.toContain('Resources/AgentInstructions');
     expect(read("project.yml")).not.toContain('Resources/AgentInstructions');
@@ -127,7 +127,7 @@ describe("rename compatibility contracts", () => {
     const manifest = JSON.parse(read("BrowserExtension/manifest.json"));
     const id = [...createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest("hex").slice(0, 32)]
       .map(digit => String.fromCharCode(97 + Number.parseInt(digit, 16))).join("");
-    expect(manifest.name).toBe("Mactopus Browser Bridge");
+    expect(manifest.name).toBe("Computa Browser Bridge");
     expect(id).toBe("gdghbmoiibghgkfmhjlckipjjlclnlbk");
     expect(read("BrowserExtension/bridge.js")).toContain('HOST_NAME = "com.macndash.chrome_bridge"');
     expect(read("BrowserExtension/bridge.js")).toContain('STORAGE_KEY = "macndashChromeBridgeV1"');
@@ -142,7 +142,7 @@ describe("rename compatibility contracts", () => {
     expect(pin.runtimeVersion).toBe("mactopus-5");
     // The verified binary/manifest are intentionally not committed. Also check
     // an already-built artifact when present, without making it a test prerequisite.
-    if (existsSync(resolve(root, "Sources/Mactopus/Resources/AgentRuntime/manifest.json"))) {
+    if (existsSync(resolve(root, "Sources/Computa/Resources/AgentRuntime/manifest.json"))) {
       const manifest = JSON.parse(source("Resources/AgentRuntime/manifest.json"));
       expect(manifest.runtimeVersion).toBe("mactopus-5");
       expect(manifest.sourceCommit).toBe(pin.sourceCommit);

@@ -1,26 +1,34 @@
-# Mactopus
+# Computa
 
 <img width="128" height="128" alt="ChatGPT Image Sep 26, 2026, 10_26_23 AM" src="https://github.com/user-attachments/assets/869c295e-620a-4946-83aa-7785266cd289" />
 
 <img width="668" height="430" alt="Screenshot 2026-09-26 at 10 29 53 AM" src="https://github.com/user-attachments/assets/d6e483e2-118a-441c-ab0e-9727bb2dbab1" />
 
-Fast, Mac-optimized local AI.
+Fast, Mac-optimized local AI. [computa.wtf](https://computa.wtf).
 
-Mactopus can use browser and desktop controls and run command-line tools through
+Computa can use browser and desktop controls and run command-line tools through
 its agent runtime. Ask it to run a command in a specific directory; the task
 shows command output and exit status. See [CLI commands](docs/COMMANDS.md) for
 examples, approvals, and process-session limits.
 
-Private personal repository: [ahmed-wlb/mactopus](https://github.com/ahmed-wlb/mactopus). Repository access is required; this is not an anonymous public download.
+Private personal repository: [ahmed-wlb/computa](https://github.com/ahmed-wlb/computa). Repository access is required; this is not an anonymous public download.
 
-Next work: [Chrome/Mactopus lookup comparison and generalized evidence handling](TODO.md).
+Next work: [Chrome/Computa lookup comparison and generalized evidence handling](TODO.md).
 
 ## Install the macOS app
 
-The downloadable preview uses the explicit private release tag
-[`v0.1.0-preview.1`](https://github.com/ahmed-wlb/mactopus/releases/tag/v0.1.0-preview.1).
-Repository access is required. Download the DMG and matching checksums, verify
-them, then open **Install Mactopus.command** from the mounted image and confirm
+The draft preview uses the explicit private release tag
+[`v0.1.0-preview.1`](https://github.com/ahmed-wlb/computa/releases/tag/v0.1.0-preview.1).
+Repository access is required. The signed Computa DMG was built, verified and
+uploaded to the draft release with matching GitHub/local digests. Its mounted
+installer migrated the existing Mactopus app on this Mac.
+All 5,559 checked pre-existing preferences, CodexHome and model files remained
+byte-identical before first launch. Computa launched with prior tasks, the Qwen
+default, connected MLX and granted Accessibility, then quit normally. This is an
+existing-Mac migration and launch check; the known model-stream and controlled
+live Stop acceptance gaps remain open. The preview remains a draft. Once the
+intended asset is available, download its DMG and matching checksums, verify
+them, then open **Install Computa.command** from the mounted image and confirm
 **INSTALL**. On an Apple Silicon Mac with macOS 14 or later, it installs into
 `~/Applications`, downloads private Python/MLX dependencies and the pinned Qwen
 4B model (~3.06 GB), then opens the app. Allow about 10 GB free space. No Xcode,
@@ -40,12 +48,12 @@ explicit user actions. Known lookup and stream failures remain documented in
 On an Apple Silicon Mac, first install the [documented prerequisites](docs/BUILDING.md#requirements): full Xcode with Swift 6.2+, Git, XcodeGen, Bun, Rustup with Rust 1.95.0, and `uv`. Then:
 
 ```sh
-git clone https://github.com/ahmed-wlb/mactopus.git
-cd mactopus
+git clone https://github.com/ahmed-wlb/computa.git
+cd computa
 ./Scripts/setup.sh --download-model
 ```
 
-This builds the Rust agent runtime, Octane/WebKit app and native helper from source, prepares an app-owned Python environment, downloads the pinned Qwen 3.5 4B 4-bit weights (~3.06 GB), installs into `~/Applications/Mactopus.app`, and opens it. Use `./Scripts/setup.sh --check` for a read-only prerequisite check. No LM Studio or installed Codex app is required. No model weights or executable binaries are stored in this Git repository.
+This builds the Rust agent runtime, Octane/WebKit app and native helper from source, prepares an app-owned Python environment, downloads the pinned Qwen 3.5 4B 4-bit weights (~3.06 GB), installs into `~/Applications/Computa.app`, and opens it. Use `./Scripts/setup.sh --check` for a read-only prerequisite check. No LM Studio or installed Codex app is required. No model weights or executable binaries are stored in this Git repository.
 
 The default local build is ad-hoc signed and supports chat and native Accessibility. **The optional Chrome extension bridge requires an Apple Development or Developer ID signing identity**; see the [signed build option](docs/BUILDING.md). The bridge does not drop its certificate checks to make an ad-hoc build connect. macOS permissions and browser pairing remain explicit user actions. Existing installed apps are backed up, not deleted.
 
@@ -56,7 +64,7 @@ The default local build is ad-hoc signed and supports chat and native Accessibil
 | Swift host, computer-use harness, Chrome helper | [`Sources`](Sources), [`project.yml`](project.yml) |
 | Octane UI (built with Bun; rendered by system WebKit) | [`WebUI`](WebUI), [`WebUI/bun.lock`](WebUI/bun.lock) |
 | Rust agent runtime | [Exact public upstream commit](https://github.com/openai/codex/tree/4607249e430dac1c961df4dc615beae88e33cec8), [our complete patch](Runtime/patches/compaction-retention.patch), [checksum lock](Runtime/codex-source.lock.json) |
-| Headless MLX server and installation | [`Sources/Mactopus/Resources/MLXServer`](Sources/Mactopus/Resources/MLXServer), [`Scripts`](Scripts) |
+| Headless MLX server and installation | [`Sources/Computa/Resources/MLXServer`](Sources/Computa/Resources/MLXServer), [`Scripts`](Scripts) |
 | Browser extension | [`BrowserExtension`](BrowserExtension) |
 
 To fetch and inspect the complete patched Rust tree without compiling:
@@ -69,15 +77,15 @@ This reconstructs the runtime under `.build/runtime/codex-source-reviewed`; upst
 
 ## Overview
 
-Mactopus is a clean-room macOS desktop-agent client with its own source-pinned build of the open-source Codex App Server. Its signed Swift host owns the agent runtime and macOS permissions, while a compiled Octane interface renders in the system `WKWebView`. It recreates the shape of a local Codex-style desktop experience without copying the Codex GUI, private source, or application assets. It does not modify or launch the App Server inside an installed Codex/ChatGPT app.
+Computa is a clean-room macOS desktop-agent client with its own source-pinned build of the open-source Codex App Server. Its signed Swift host owns the agent runtime and macOS permissions, while a compiled Octane interface renders in the system `WKWebView`. It recreates the shape of a local Codex-style desktop experience without copying the Codex GUI, private source, or application assets. It does not modify or launch the App Server inside an installed Codex/ChatGPT app.
 
 The project has moved beyond a static UI shell: it launches an isolated App Server over stdio, loads and resumes local-model threads, starts turns, streams thread/turn/item updates into the transcript, presents native approval requests, and exposes a versioned clean-room computer-use contract for desktop observation and control.
 
 ## Rename compatibility
 
-Mactopus was previously named Macrouse, before that Macndash, HeyDash, and LocalCodex. The app, executable, Swift module, Xcode project/scheme, and source/test directories now use Mactopus. To preserve existing installations, the signing team and bundle identifier (`com.ahmedelamin.LocalCodex`), Application Support directory (`~/Library/Application Support/LocalCodex`), and saved preferences (`LocalCodex.defaultModelID`, `HeyDash.accessMode`, `HeyDash.rememberedChromeConnection`) are deliberately unchanged. No settings, conversations, or downloaded visual-grounding models are moved or reset.
+Computa was previously named Mactopus; earlier names were Macrouse, Macndash, HeyDash, and LocalCodex. The app, executable, Swift module, Xcode project/scheme, and source/test directories now use Computa. To preserve existing installations, the signing team and bundle identifier (`com.ahmedelamin.LocalCodex`), Application Support directory (`~/Library/Application Support/LocalCodex`), and saved preferences (`LocalCodex.defaultModelID`, `HeyDash.accessMode`, `HeyDash.rememberedChromeConnection`) are deliberately unchanged. No settings, conversations, or downloaded visual-grounding models are moved or reset.
 
-The internal `localCodex` WebKit bridge, `localcodex-app` resource scheme, `local_codex` App Server source identity, `LOCALCODEX_*` and `HEYDASH_*` environment variables, MLX `heydash_instance` protocol field, fingerprint domains, and benchmark schema/result identifiers also remain stable. The current source-pinned engine is `mactopus-5`, as recorded in `Runtime/codex-source.lock.json`. The Chrome bridge keeps its installed extension ID, `com.macndash.chrome_bridge` native host name, `macndashChromeBridgeV1` storage key, and existing Keychain and preferences identifiers so pairing survives the rename. Dated verification records and external experimental fixtures retain their original artifact names and hashes. These compatibility names are not current product branding.
+The internal `localCodex` WebKit bridge, `localcodex-app` resource scheme, `local_codex` App Server source identity, `MACTOPUS_*`, `LOCALCODEX_*` and `HEYDASH_*` environment variables, MLX `heydash_instance` protocol field, fingerprint domains, and benchmark schema/result identifiers also remain stable. The browser capture field `mactopusClickability` also remains a stable protocol name. The current source-pinned engine is `mactopus-5`, as recorded in `Runtime/codex-source.lock.json`. The Chrome bridge keeps its installed extension ID, `com.macndash.chrome_bridge` native host name, `macndashChromeBridgeV1` storage key, and existing Keychain and preferences identifiers so pairing survives the rename. Dated verification records and external experimental fixtures retain their original artifact names and hashes. These compatibility names are not current product branding. The repository is now `ahmed-wlb/computa`; existing clones can update their origin to `https://github.com/ahmed-wlb/computa.git`. The source and release installers target `~/Applications/Computa.app` and can migrate a compatible `~/Applications/Mactopus.app`. They refuse installation if both names exist or either app is running. The existing bundle must have the same bundle identity; it is backed up under `~/Applications/Computa Backups` with its original name, and rollback restores its original path. Saved LocalCodex data stays in place. The mounted Computa preview installer successfully exercised this migration on the existing Mac; clean-Mac validation remains separate.
 
 ## Current architecture
 
@@ -90,19 +98,20 @@ CodexAppServerRuntime + AutomationCore
   typed AgentRuntimeClient adapter + JSON-RPC event mapping
           │ stdio
           ▼
-Mactopus.app/Contents/Resources/AgentRuntime/codex-app-server
+Computa.app/Contents/Resources/AgentRuntime/codex-app-server
   --listen stdio:// (verified app-owned artifact)
           │
           ├── app-owned headless MLX-VLM process (loopback only)
           │     lmstudio-community/Qwen3.5-4B-MLX-4bit (default)
           │     lmstudio-community/Qwen3.5-9B-MLX-4bit (optional)
           │
-          └── Mactopus dynamic tools: computer_v2_*
+          ├── native exec_command / write_stdin: sandboxed CLI sessions
+          └── Computa dynamic tools: computer_v2_*
                 ├── AutomationCore (AppKit, Accessibility, ScreenCaptureKit)
                 └── native visual fallback (external pinned MLX worker)
 ```
 
-The Octane/WebKit layer owns ordinary presentation. `CodexAppServerRuntime` translates App Server requests and notifications into the typed task, status, timeline, and connection events consumed by `AppState`. A narrow native bridge sends revisioned, data-minimized snapshots to the page and accepts only validated UI actions; it never exposes Accessibility or ScreenCaptureKit directly. Privileged approval decisions remain in native Swift: the approval overlay in Ask every time, or AppState's automatic resolver in Full access. They are never accepted from JavaScript. App Server remains responsible for the agent loop, thread state, sandbox selection, approval requests, and model-provider integration. Mactopus deliberately removes unrelated built-in tools, plugins, memories, skills, and MCP configuration from its constrained local-model turns.
+The Octane/WebKit layer owns ordinary presentation. `CodexAppServerRuntime` translates App Server requests and notifications into the typed task, status, timeline, and connection events consumed by `AppState`. A narrow native bridge sends revisioned, data-minimized snapshots to the page and accepts only validated UI actions; it never exposes Accessibility or ScreenCaptureKit directly. Privileged approval decisions remain in native Swift: the approval overlay in Ask every time, or AppState's automatic resolver in Full access. They are never accepted from JavaScript. App Server remains responsible for the agent loop, thread state, sandbox selection, approval requests, and model-provider integration. Computa deliberately removes unrelated built-in tools, plugins, memories, skills, and MCP configuration from its constrained local-model turns.
 
 New tasks default to `lmstudio-community/Qwen3.5-4B-MLX-4bit`. Settings can change the persisted default for new tasks, and the composer selector can change an individual idle task's model. The selected model ID is sent to App Server on thread start, resume, and turn start; existing threads keep their recorded model unless explicitly changed. Historical 27B/35B catalog entries and saved preferences are preserved, but the owned MLX backend rejects unsupported models explicitly instead of silently substituting one. Other turn defaults are:
 
@@ -115,9 +124,9 @@ New tasks default to `lmstudio-community/Qwen3.5-4B-MLX-4bit`. Settings can chan
 - isolated App Server home: `~/Library/Application Support/LocalCodex/CodexHome`;
 - persistent App Server threads (`ephemeral: false`).
 
-The private `CODEX_HOME` keeps existing Mactopus chats separate from personal Codex chats. It is not sufficient by itself to isolate configuration: a Documents workspace inside a home Git repository could previously discover the ancestor `.codex/config.toml` and `AGENTS.md`. Mactopus now launches in its private workspace with `project_root_markers=[]` at both process and thread boundaries. The engine child's `HOME` is its private `CodexHome/ProcessHome`, preventing global `.agents` skill imports; the native app and real macOS home are unchanged. It forwards only explicit home paths, a system PATH, temporary-directory/locale settings, and the selected local inference endpoint; it does not forward ambient Codex routing variables, API keys, proxies, or startup hooks. Login-shell initialization and shell snapshots are disabled for this shell-tool-free engine. Auth stores are file-backed inside the private home, not shared desktop credentials. This is application configuration isolation, not an OS sandbox.
+The private `CODEX_HOME` keeps existing Computa chats separate from personal Codex chats. It is not sufficient by itself to isolate configuration: a Documents workspace inside a home Git repository could previously discover the ancestor `.codex/config.toml` and `AGENTS.md`. Computa now launches in its private workspace with `project_root_markers=[]` at both process and thread boundaries. The engine child's `HOME` is its private `CodexHome/ProcessHome`, preventing global `.agents` skill imports; the native app and real macOS home are unchanged. It forwards only explicit home paths, a fixed PATH containing system command directories plus `/opt/homebrew/bin` and `/usr/local/bin`, temporary-directory/locale settings, and the selected local inference endpoint; it does not forward ambient Codex routing variables, API keys, proxies, or startup hooks. Login-shell initialization and shell snapshots remain disabled while native `exec_command` and `write_stdin` are enabled. Auth stores are file-backed inside the private home, not shared desktop credentials. This is application configuration isolation, not an OS sandbox.
 
-The compact base instruction is under 1 KiB. Mactopus supplies self-contained, general-purpose developer instructions on new and resumed chats. It does not bundle StudyLock instructions or read another application's prompts. Native permissions, access controls, untrusted-page boundaries, and evidence-based error reporting remain enforced. This separation does not change StudyLock or any other application's settings or enforcement. Saved chats and their history remain intact; earlier messages can still mention instructions from an older build, but are not current policy. Restarting the app applies updated owned instructions on resume. Machine-managed/system-wide engine policy is not bypassed by these app settings.
+The compact base instruction is under 1 KiB. Computa supplies self-contained, general-purpose developer instructions on new and resumed chats. It does not bundle StudyLock instructions or read another application's prompts. Native permissions, access controls, untrusted-page boundaries, and evidence-based error reporting remain enforced. This separation does not change StudyLock or any other application's settings or enforcement. Saved chats and their history remain intact; earlier messages can still mention instructions from an older build, but are not current policy. Restarting the app applies updated owned instructions on resume. Machine-managed/system-wide engine policy is not bypassed by these app settings.
 
 ## Application surface
 
@@ -140,7 +149,7 @@ turn completion dispatches the next message once; stopping, disconnecting, or
 failing pauses the queue. Resume is explicit, and unconfirmed delivery stays
 visible for review rather than automatically retrying. Editing holds that item
 until Save or Cancel, and a message already being sent cannot be changed.
-Queued messages are app-session-local: keep Mactopus open until they are sent.
+Queued messages are app-session-local: keep Computa open until they are sent.
 
 Steer delivers a queued message into the current turn using the App Server's
 [`turn/steer` contract](https://learn.chatgpt.com/docs/app-server#steer-an-active-turn).
@@ -197,11 +206,11 @@ assertions remain in `RuntimeContextLiveTests` and
 the UI. See `Benchmarks/CONTEXT-RETENTION-2026-09-24.md` for recorded outcomes.
 
 The runtime may retain user messages that exceed this local model budget.
-Mactopus interrupts the exact turn if the post-compaction estimate still exceeds
+Computa interrupts the exact turn if the post-compaction estimate still exceeds
 the effective window, or repeated compactions make no forward progress. It
 revokes that turn's computer capabilities immediately and keeps the task busy
 until the runtime confirms termination. The user can then shorten the input or
-start a new task; Mactopus never silently deletes retained instructions to make
+start a new task; Computa never silently deletes retained instructions to make
 them fit. Diagnostic estimates are not displayed as measured ring occupancy.
 
 Access is deliberately simple and is changed only through a **native macOS
@@ -221,10 +230,10 @@ a loop; switch to Ask every time to review or decline it.
 
 ### Remembered extension bridge (local developer installation)
 
-The optional [Mactopus Browser Bridge](BrowserExtension/README.md) uses a pinned
+The optional [Computa Browser Bridge](BrowserExtension/README.md) uses a pinned
 Manifest V3 extension, a signed Swift native-messaging helper, and authenticated
 local IPC. Explicitly install it in the intended Chrome profile, choose **Pair
-with Mactopus** in its popup, then confirm **Pair and remember** in Mactopus.
+with Computa** in its popup, then confirm **Pair and remember** in Computa.
 Pairing is held in this app's Keychain namespace and that extension installation;
 live sessions and tab handles are always fresh. It does not copy browser profiles
 or use the remote-debugging WebSocket approval flow.
@@ -245,8 +254,8 @@ The separate native **Connect existing Chrome** control grants a revocable conne
 to the already-running, ordinary Chrome session. It requires an idle runtime and
 an explicit confirmation even in Full access. Chrome Remote Debugging must be
 enabled by the user, and Chrome may show its own Allow prompt. If macOS denies
-the connection-file read, check **Files & Folders → LocalCodex (or Mactopus) →
-Google Chrome**. That OS permission covers Chrome's app-data directory; Mactopus
+the connection-file read, check **Files & Folders → LocalCodex (or Computa) →
+Google Chrome**. That OS permission covers Chrome's app-data directory; Computa
 reads only `DevToolsActivePort`, not cookies or other profile files. Full Disk
 Access is not required. Disconnect revokes consent immediately, including while
 a connection is pending; quitting ends the live connection. **Connect & Remember**
@@ -301,17 +310,17 @@ non-interference; those live qualifications remain pending.
 
 The guarded foreground and global-input implementations remain for an explicit host/test `foregroundAllowed` configuration; they are not the production default, and the app currently has no user-facing switch for this mode. A model argument or Full access cannot opt into it. Foreground app launch/navigation additionally requires explicit `activation: "foreground"`; omitted activation still means non-activating binding. The historical benchmarks below describe their original configurations, not background-only qualification.
 
-Within that host opt-in, an explicit `browser_mode: "isolated"` Chrome URL launches a project-owned profile with a random loopback DevTools port and no wildcard-origin override. It retains an opaque task-scoped handle and changes the document epoch when observation detects a changed main-frame loader or URL, including its fragment. Semantic reads and actions address that exact target without explicitly foregrounding it. The broker rejects overlapping operations for a task, consumes a valid mutation snapshot before awaiting transport, and rechecks that a revoked handle has not disappeared before publishing an observation or preparing input. The transport repeats document and element checks on its mutation connection, resolves the node into a main-frame isolated JavaScript world, and checks document membership, URL, connection, and control state in the synchronous mutation function. Revocation and the one-shot WebSocket enqueue share a lock: revocation that wins before enqueue prevents that command; a command already enqueued cannot be recalled. These checks are not an atomic lock on the browser DOM or a record of all intervening navigation events. Coordinate capture, pointer, and keyboard calls intentionally fail closed for brokered tabs; native-app AX and guarded screenshot paths remain separate. A semantic mutation requires the current snapshot UUID and element index; foreground pointer input requires a current `capture_id` and image-space coordinates. The runtime maps those image pixels to global screen points and rejects stale or changed native windows and targets. A consumed observation must be replaced with a fresh snapshot or capture to verify the result. Window capture is read-only and does **not** present a per-screenshot native approval gate: once macOS Screen Recording access is granted, a local model turn can request native-window captures while Mactopus runs.
+Within that host opt-in, an explicit `browser_mode: "isolated"` Chrome URL launches a project-owned profile with a random loopback DevTools port and no wildcard-origin override. It retains an opaque task-scoped handle and changes the document epoch when observation detects a changed main-frame loader or URL, including its fragment. Semantic reads and actions address that exact target without explicitly foregrounding it. The broker rejects overlapping operations for a task, consumes a valid mutation snapshot before awaiting transport, and rechecks that a revoked handle has not disappeared before publishing an observation or preparing input. The transport repeats document and element checks on its mutation connection, resolves the node into a main-frame isolated JavaScript world, and checks document membership, URL, connection, and control state in the synchronous mutation function. Revocation and the one-shot WebSocket enqueue share a lock: revocation that wins before enqueue prevents that command; a command already enqueued cannot be recalled. These checks are not an atomic lock on the browser DOM or a record of all intervening navigation events. Coordinate capture, pointer, and keyboard calls intentionally fail closed for brokered tabs; native-app AX and guarded screenshot paths remain separate. A semantic mutation requires the current snapshot UUID and element index; foreground pointer input requires a current `capture_id` and image-space coordinates. The runtime maps those image pixels to global screen points and rejects stale or changed native windows and targets. A consumed observation must be replaced with a fresh snapshot or capture to verify the result. Window capture is read-only and does **not** present a per-screenshot native approval gate: once macOS Screen Recording access is granted, a local model turn can request native-window captures while Computa runs.
 
-Mactopus remains semantic-first: it uses native Accessibility or the brokered browser DOM whenever those surfaces expose the intended control. Only under the foreground host opt-in is `computer_v2_ground_click` available as a native-app screenshot fallback for the 4B and 9B Qwen options, which leave enough memory headroom for a resident visual sidecar on this 24 GB Mac. That opt-in runtime starts preparing the sidecar when a supported-model turn begins so planning can overlap model load and warm-up; background-only turns never start this warm-up. GoClick and GUI-Owl 2B run on each grounding request; ShowUI 2B runs only when either result is missing or the two disagree. The worker returns only parsed normalized points and diagnostics. Swift independently selects the closest pair, requires that pair to agree within 3% of the screenshot diagonal, uses their midpoint, and otherwise fails closed without presenting a click approval. The entire window is recaptured and fingerprinted after inference and again after approval, so a grounded click cannot use a capture whose surrounding context changed. After dispatch, the same tool returns a fresh verification-only screenshot with synchronized Accessibility when available. That observation intentionally has no reusable `capture_id`, so it cannot authorize another pointer action. An observation failure is reported as post-action uncertainty rather than as a failed click that might be repeated. The 27B and 35B model options do not register this resident sidecar tool on this machine.
+Computa remains semantic-first: it uses native Accessibility or the brokered browser DOM whenever those surfaces expose the intended control. Only under the foreground host opt-in is `computer_v2_ground_click` available as a native-app screenshot fallback for the 4B and 9B Qwen options, which leave enough memory headroom for a resident visual sidecar on this 24 GB Mac. That opt-in runtime starts preparing the sidecar when a supported-model turn begins so planning can overlap model load and warm-up; background-only turns never start this warm-up. GoClick and GUI-Owl 2B run on each grounding request; ShowUI 2B runs only when either result is missing or the two disagree. The worker returns only parsed normalized points and diagnostics. Swift independently selects the closest pair, requires that pair to agree within 3% of the screenshot diagonal, uses their midpoint, and otherwise fails closed without presenting a click approval. The entire window is recaptured and fingerprinted after inference and again after approval, so a grounded click cannot use a capture whose surrounding context changed. After dispatch, the same tool returns a fresh verification-only screenshot with synchronized Accessibility when available. That observation intentionally has no reusable `capture_id`, so it cannot authorize another pointer action. An observation failure is reported as post-action uncertainty rather than as a failed click that might be repeated. The 27B and 35B model options do not register this resident sidecar tool on this machine.
 
 ### Shared browser checks and permissions
 
 Browser approvals include `observed_page_url` from the immutable retained browser snapshot, in addition to the bundle, PID, handle, and epoch. No title is inferred from page-controlled labels or parsed out of formatted text. URL display does not replace post-approval document and node revalidation. Runtime-owned lifetimes also cover targets still being created: terminal cleanup can synchronously revoke a pending open or mutation before scheduling network cleanup.
 
-The opt-in model-free production broker gate is `CuaV2SafeChromeSemanticLiveTests/testProductionBrokerMutatesOnlyBackgroundTabAndShutsDown`, enabled with `LOCALCODEX_LIVE_CHROME_BROKER_PRIMITIVE_TEST=1`. It uses an inline, nonce-restricted loopback fixture, same-title tabs, independent acknowledged page telemetry, a retained-snapshot reuse refusal, and process-group/profile-marker cleanup checks. It does not start App Server or LM Studio and does not request a Mactopus approval. The ordinary semantic and same-title model gates honor `LOCALCODEX_LIVE_MODEL_ID` for the supplied 4B/9B IDs. Their capability deadline is 180 seconds; the 30-second performance SLO is reported separately and does not terminate a capability trial. Every gate prints `BROWSER_GATE_ARTIFACT_DIR`; set the absolute `LOCALCODEX_LIVE_ARTIFACT_DIR` to choose a durable root. Model wire traces and result/cleanup records are retained there. Model-run JSON records use schema version 8, with separate functional, protocol, harness/model-failure, active-tab, global-application-focus, and owned-cleanup outcomes. The model gates await independent successful-press proof before the tool response and normal terminal tab closure; B can also be checked after the turn. No new gate result is claimed here.
+The opt-in model-free production broker gate is `CuaV2SafeChromeSemanticLiveTests/testProductionBrokerMutatesOnlyBackgroundTabAndShutsDown`, enabled with `LOCALCODEX_LIVE_CHROME_BROKER_PRIMITIVE_TEST=1`. It uses an inline, nonce-restricted loopback fixture, same-title tabs, independent acknowledged page telemetry, a retained-snapshot reuse refusal, and process-group/profile-marker cleanup checks. It does not start App Server or LM Studio and does not request a Computa approval. The ordinary semantic and same-title model gates honor `LOCALCODEX_LIVE_MODEL_ID` for the supplied 4B/9B IDs. Their capability deadline is 180 seconds; the 30-second performance SLO is reported separately and does not terminate a capability trial. Every gate prints `BROWSER_GATE_ARTIFACT_DIR`; set the absolute `LOCALCODEX_LIVE_ARTIFACT_DIR` to choose a durable root. Model wire traces and result/cleanup records are retained there. Model-run JSON records use schema version 8, with separate functional, protocol, harness/model-failure, active-tab, global-application-focus, and owned-cleanup outcomes. The model gates await independent successful-press proof before the tool response and normal terminal tab closure; B can also be checked after the turn. No new gate result is claimed here.
 
-Permission onboarding is explicit. AutomationCore can read permission state without prompting, and only the human-operated **Request access** buttons in Mactopus Settings call the macOS permission-request APIs. A button press is not proof of a grant: on this macOS 27 installation, Screen Recording returned denied without a system prompt. If the request remains denied, Mactopus opens **System Settings → Privacy & Security → Screen & System Audio Recording** when that pane link is available, or opens System Settings as a fallback, so the user can add and enable the app in the screen-recording list, not the audio-only list. Relaunch Mactopus after granting access, then refresh its Settings status. Permission-dependent tool calls fail closed when authorization is absent; the local model cannot grant or request access itself.
+Permission onboarding is explicit. AutomationCore can read permission state without prompting, and only the human-operated **Request access** buttons in Computa Settings call the macOS permission-request APIs. A button press is not proof of a grant: on this macOS 27 installation, Screen Recording returned denied without a system prompt. If the request remains denied, Computa opens **System Settings → Privacy & Security → Screen & System Audio Recording** when that pane link is available, or opens System Settings as a fallback, so the user can add and enable the app in the screen-recording list, not the audio-only list. Relaunch Computa after granting access, then refresh its Settings status. Permission-dependent tool calls fail closed when authorization is absent; the local model cannot grant or request access itself.
 
 ### Recovery and outcome evidence
 
@@ -400,7 +409,7 @@ The default is [Qwen3.5-4B MLX 4-bit](https://huggingface.co/lmstudio-community/
 
 ## App-owned headless MLX
 
-Mactopus starts one loopback-only MLX-VLM process on `127.0.0.1:1237` and stops it with its owned runtime. The process also watches its parent so an app crash does not intentionally leave a model daemon running. There is no LM Studio GUI, extra proxy process, or cloud inference. The native App Server still handles the agent loop, tools, approvals and conversation storage; MLX handles model inference and images.
+Computa starts one loopback-only MLX-VLM process on `127.0.0.1:1237` and stops it with its owned runtime. The process also watches its parent so an app crash does not intentionally leave a model daemon running. There is no LM Studio GUI, extra proxy process, or cloud inference. The native App Server still handles the agent loop, tools, approvals and conversation storage; MLX handles model inference and images.
 
 Source setup provisions Python 3.12.13 with MLX 0.32.2 / MLX-VLM 0.7.1 under `~/Library/Application Support/LocalCodex/MLX/venv`. Optional pinned model downloads go into `LocalCodex/MLX/models`. The app prefers that owned environment and retains the existing `LocalCodex/VisualGrounding/venv` as a compatibility fallback when no owned environment is present. Model lookup checks the owned and legacy `~/.lmstudio/models` locations per model, so downloading 4B does not hide an existing legacy 9B. These legacy paths and model/provider IDs preserve saved tasks; they are not a dependency on an installed or running LM Studio app. Startup checks the pinned environment and local weights and fails explicitly if they are missing. Optional visual grounders remain separately installed; do not upgrade either pinned environment independently. See [the source-install guide](docs/BUILDING.md) for dependencies, checksums and download consent.
 
@@ -418,18 +427,18 @@ See [the migration validation record](Benchmarks/MLXServing/MIGRATION-VALIDATION
 
 Earlier runs served `mlx-community/Qwen3.8-27B-4bit` through LM Studio at `127.0.0.1:1234`. That model directory was about 16.08 GB; its three weight shards totaled 16,054,541,349 bytes. Those 27B runs used one parallel request and a bounded 22 GiB custom model-loading guardrail. They are historical evidence, not the current default serving path.
 
-Mactopus declares 4,096 tokens for the constrained 27B/35B profile, with auto-compaction at 3,072. The 4B and 9B computer-use profile declares 16,384 tokens with auto-compaction at 12,288, leaving more working space beyond the fixed instructions and tool definitions. These are application budgets, not the LM Studio backend's advertised or automatically fitted maximum. The shared profile permits 4B/9B switches without changing the loaded task's context class. App Server ignores context overrides for already-loaded threads; after a profile update, restarting Mactopus's owned runtime lets the same saved task resume with the new configuration. Switching a still-loaded task between the constrained and small-model classes remains guarded.
+Computa declares 4,096 tokens for the constrained 27B/35B profile, with auto-compaction at 3,072. The 4B and 9B computer-use profile declares 16,384 tokens with auto-compaction at 12,288, leaving more working space beyond the fixed instructions and tool definitions. These are application budgets, not the LM Studio backend's advertised or automatically fitted maximum. The shared profile permits 4B/9B switches without changing the loaded task's context class. App Server ignores context overrides for already-loaded threads; after a profile update, restarting Computa's owned runtime lets the same saved task resume with the new configuration. Switching a still-loaded task between the constrained and small-model classes remains guarded.
 
-One model-local compatibility patch is required on this installation. Codex exposes a `request_user_input` tool schema even though Mactopus does not implement that tool; with that schema serialized, this MLX/model path stalled. The installed model's `chat_template.jinja` skips only that schema when rendering tools. The original template is preserved beside it as `chat_template.jinja.localcodex-original` (SHA-256 `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`); the patched template hash is `c73f9ec1cfc68a6ce7e19f06b1779afa4b1a55e1da8775d498f379a09b8fae75`.
+One model-local compatibility patch is required on this installation. Codex exposes a `request_user_input` tool schema even though Computa does not implement that tool; with that schema serialized, this MLX/model path stalled. The installed model's `chat_template.jinja` skips only that schema when rendering tools. The original template is preserved beside it as `chat_template.jinja.localcodex-original` (SHA-256 `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`); the patched template hash is `c73f9ec1cfc68a6ce7e19f06b1779afa4b1a55e1da8775d498f379a09b8fae75`.
 
-That compatibility patch lives in LM Studio's model directory, not in either Mactopus ZIP. Redownloading the model may replace it.
+That compatibility patch lives in LM Studio's model directory, not in the historical Mactopus ZIPs. Redownloading the model may replace it.
 
 ## Install the native visual-grounding sidecar
 
 The app bundle contains the worker, prompts, manifests, and warm-up image, but not the approximately 4.0 GB of visual model weights or its approximately 0.6 GB Python environment. Install them once into `~/Library/Application Support/LocalCodex/VisualGrounding`:
 
 ```sh
-cd mactopus
+cd computa
 Scripts/install-visual-grounding.sh
 ```
 
@@ -463,7 +472,7 @@ checks response formatting and inert-content behavior using real Octane renderin
 The checked-in browser bundle is produced with Bun and runs as static JavaScript in WebKit. Bun and Node are not included in the application:
 
 ```sh
-cd mactopus/WebUI
+cd computa/WebUI
 bun install
 bun run check
 bun run build
@@ -476,16 +485,16 @@ Octane currently declares Node.js 22.22.2 or newer for its supported development
 `project.yml` is the source of truth for the native Xcode project:
 
 ```sh
-cd mactopus
+cd computa
 bun Scripts/build-agent-runtime.ts
 xcodegen generate
 
-xcodebuild -project Mactopus.xcodeproj -scheme Mactopus \
+xcodebuild -project Computa.xcodeproj -scheme Computa \
   -configuration Debug \
   -derivedDataPath .build/DerivedData \
   build
 
-xcodebuild -project Mactopus.xcodeproj -scheme Mactopus \
+xcodebuild -project Computa.xcodeproj -scheme Computa \
   -configuration Debug \
   -derivedDataPath .build/DerivedData \
   test
@@ -494,13 +503,13 @@ xcodebuild -project Mactopus.xcodeproj -scheme Mactopus \
 The debug application is written to:
 
 ```text
-.build/DerivedData/Build/Products/Debug/Mactopus.app
+.build/DerivedData/Build/Products/Debug/Computa.app
 ```
 
 Run it with:
 
 ```sh
-open .build/DerivedData/Build/Products/Debug/Mactopus.app
+open .build/DerivedData/Build/Products/Debug/Computa.app
 ```
 
 ## Release bundle
@@ -514,7 +523,7 @@ For faster command-line iteration, the same targets are available through Swift 
 ```sh
 swift build
 swift test
-swift run Mactopus
+swift run Computa
 ```
 
 Run the deterministic Swift suite with warnings promoted to errors:
@@ -569,7 +578,7 @@ The historical semantic and visual Chrome fixture tests are retained as V1 evide
 
 Normal test runs compile the live cases but skip external model and desktop work. The presence of a live test is not evidence that it passed.
 
-The live gates parse the isolated App Server rollout for model-level `function_call` and matching `function_call_output`, and enable a test-only recorder for exact newline-delimited App Server frames. They check matching call IDs and successful client responses. For each call, both `item/started` and `item/tool/call` must precede that response, with `item/completed` afterward; App Server can emit the first two in either order. The shipped app leaves its recorder disabled so Mactopus does not make a second copy of prompts or tool payloads. Historical Chrome gate evidence below applies only to V1; it is not V2 proof.
+The live gates parse the isolated App Server rollout for model-level `function_call` and matching `function_call_output`, and enable a test-only recorder for exact newline-delimited App Server frames. They check matching call IDs and successful client responses. For each call, both `item/started` and `item/tool/call` must precede that response, with `item/completed` afterward; App Server can emit the first two in either order. The shipped app leaves its recorder disabled so Computa does not make a second copy of prompts or tool payloads. Historical Chrome gate evidence below applies only to V1; it is not V2 proof.
 
 ## Verification status
 
@@ -623,11 +632,11 @@ After overlapping visual-sidecar preparation with Qwen and embedding a fresh ver
 
 ## Current limitations
 
-- New tasks expose native `computer_v2_*` tools, not the App Server's shell or built-in coding/editing tool set. Mactopus is a local chat and desktop-automation client, not a shell-capable coding agent.
+- Tasks support native `exec_command` and `write_stdin` alongside `computer_v2_*`. Other built-in coding/editing tools remain disabled. The pre-rename live CLI test returned the correct output and exit status, but the model's final answer failed stream validation; controlled OS-process Stop acceptance and final-answer reliability remain unresolved. The renamed app passed migration and startup checks, not another live CLI task. See [CLI limits](docs/COMMANDS.md) and [TODO.md](TODO.md).
 - Ordinary Chrome can be bound for non-activating native AX/read-only capture, or separately connected by the native user for exact background DOM tab access. The default runtime does not permit native URL navigation or global input. The retained foreground host/test opt-in requires a positively identified native address bar for existing-mode navigation and fails closed otherwise; its explicit isolated mode uses a separate temporary profile with no imported tabs, cookies, credentials, or extensions. This is not full Codex CUA/browser parity. Owned brokered tasks within one runtime reuse that runtime's owned process/profile. Task-scoped handles restrict broker calls, not shared-profile cookies, storage, same-origin scripting, or site-triggered cross-tab effects.
 - Brokered actions use DOM click/value operations, not general trusted keyboard/pointer input. Text entry rejects read-only controls; mutations reject disabled, inert, detached, non-main-document, or unsupported controls. Browser screenshot/coordinate/keyboard support remains disabled. The visual-grounding cascade is retained only for foreground host/test opt-in native-window work and does not add browser visual control.
 - Loader/URL comparisons detect observed document changes, not every possible intervening navigation. Same-document changes that return to the previous URL between reads and arbitrary semantic changes between the final AX read and browser execution require a persistent event/DOM invalidation design for stronger guarantees. Local DevTools clients remain inside the trust boundary; loopback, origin checks, and a private profile directory are not authentication against other local processes. Terminal task cleanup revokes its lifetime before asynchronous exact-session detachment (borrowed) or exact-target closure (owned). Explicit runtime shutdown stops its owned App Server and isolated Chrome process groups, reaps their roots, and removes owned profiles after observed group exit. Shutdown has bounded waits and reports incomplete cleanup; the app termination delegate also has a ten-second reply deadline. Force quit, host failure, or descendants escaping their created process group are not covered by an unlimited cleanup guarantee. The bootstrap blank tab is retained during use rather than closing unrelated blank or loading tabs by URL.
-- This Mac also has Codex's richer installed `cua_repl`/computer-use stack, but Mactopus does not load or copy it. Only project-owned clean-room tools are exposed to Qwen.
+- This Mac also has Codex's richer installed `cua_repl`/computer-use stack, but Computa does not load or copy it. Only project-owned clean-room tools are exposed to Qwen.
 - The historical semantic and visual smoke turns proved V1 model/runtime paths on the controlled Chrome fixture; they do not establish V2 performance or reliable tool selection on arbitrary interfaces.
 - The focused-window screenshot reduces visible image size, but a visual grounder is still probabilistic. The agreement threshold, whole-window freshness checks, native approval, and post-action verification reduce risk; they do not establish reliability on arbitrary apps, targets, display scales, or instructions.
 - The previously signed installed app passed separate `open → capture → snapshot` and natively approved `open → snapshot → AXPress → snapshot` Chrome turns, both ending `Completed`. Screen Recording was **Granted** for that app. The screenshot turn took 540 seconds; this capability result was not a speed benchmark. The coordinate-click path was separately validated in the V1 production-runtime test host, not repeated in that installed binary.
@@ -644,9 +653,9 @@ Sources/
 │   ├── application launch and running-app metadata
 │   ├── ScreenCaptureKit display capture and native pointer/keyboard input
 │   └── bounded Accessibility snapshots and guarded semantic actions
-└── Mactopus/
+└── Computa/
     ├── Assets.xcassets/    clean-room application icon
-    ├── MactopusApp.swift
+    ├── ComputaApp.swift
     ├── Models/             Task and timeline value types
     ├── Runtime/            App Server transport and runtime boundary
     ├── State/              Root-owned observable application state

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import unittest
 
-path = Path(__file__).parents[2] / "Sources/Mactopus/Resources/MLXServer/sse_contract.py"
+path = Path(__file__).parents[2] / "Sources/Computa/Resources/MLXServer/sse_contract.py"
 spec = importlib.util.spec_from_file_location("heydash_sse", path)
 sse = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sse)

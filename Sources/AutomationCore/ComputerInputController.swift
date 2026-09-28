@@ -420,8 +420,8 @@ public final class ComputerInputController {
         )
     }
 
-    /// Restores the intended input target after Mactopus's native approval UI
-    /// has taken focus. Raw keyboard events are otherwise delivered to Mactopus.
+    /// Restores the intended input target after Computa's native approval UI
+    /// has taken focus. Raw keyboard events are otherwise delivered to Computa.
     @discardableResult
     public func activateApplication(
         processIdentifier: Int32
@@ -467,7 +467,7 @@ public final class ComputerInputController {
     }
 
     /// Moves the pointer to the intended scroll target before posting the
-    /// continuous scroll event. This avoids scrolling Mactopus's approval UI.
+    /// continuous scroll event. This avoids scrolling Computa's approval UI.
     public func scroll(
         at point: ScreenPoint,
         deltaX: Int32 = 0,

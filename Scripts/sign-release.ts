@@ -73,10 +73,10 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
   }).filter(value => value.name === options.identity || value.hash.toLowerCase() === options.identity.toLowerCase());
   if (identities.length !== 1) throw new Error("Select one installed Developer ID Application identity. No credentials were created.");
   const identity = identities[0].hash;
-  for (const file of ["Contents/Info.plist", "Contents/MacOS/Mactopus", "Contents/Resources/ChromeBridge/ChromeBridgeHost",
+  for (const file of ["Contents/Info.plist", "Contents/MacOS/Computa", "Contents/Resources/ChromeBridge/ChromeBridgeHost",
     "Contents/Resources/AgentRuntime/codex-app-server", "Contents/Resources/AgentRuntime/manifest.json"]) await regular(join(app, file));
   if ((await run(["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", join(app, "Contents/Info.plist")])).trim() !== bundleID) {
-    throw new Error("Expected the Mactopus bundle identifier.");
+    throw new Error("Expected the Computa bundle identifier.");
   }
   const manifestPath = "Contents/Resources/AgentRuntime/manifest.json";
   const runtimePath = "Contents/Resources/AgentRuntime/codex-app-server";
@@ -108,7 +108,7 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
   await writeFile(join(output, manifestPath), JSON.stringify(manifest, null, 2) + "\n");
   await run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, output]);
   await run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", "=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists", output]);
-  return { app: output, mainSHA256: digest(await readFile(join(output, "Contents/MacOS/Mactopus"))), runtimeSHA256: manifest.binarySHA256 };
+  return { app: output, mainSHA256: digest(await readFile(join(output, "Contents/MacOS/Computa"))), runtimeSHA256: manifest.binarySHA256 };
 }
 
 if (import.meta.main) {

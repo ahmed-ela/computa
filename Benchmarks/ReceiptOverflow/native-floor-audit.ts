@@ -34,7 +34,7 @@ async function capture(command: string[], cwd = root, stdin?: string) {
   return stdout.trim();
 }
 const pin = JSON.parse(await readFile(join(root, "Runtime/codex-source.lock.json"), "utf8"));
-const manifest = JSON.parse(await readFile(join(root, "Sources/Mactopus/Resources/AgentRuntime/manifest.json"), "utf8"));
+const manifest = JSON.parse(await readFile(join(root, "Sources/Computa/Resources/AgentRuntime/manifest.json"), "utf8"));
 const patch = await readFile(join(root, "Runtime/patches/compaction-retention.patch"), "utf8");
 if (hash(patch) !== pin.patchSHA256 || manifest.patchSHA256 !== pin.patchSHA256
     || await capture(["git", "rev-parse", "HEAD"], sourceRoot) !== pin.sourceCommit

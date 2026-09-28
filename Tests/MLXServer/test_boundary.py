@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-path = Path(__file__).parents[2] / "Sources/Mactopus/Resources/MLXServer/server.py"
+path = Path(__file__).parents[2] / "Sources/Computa/Resources/MLXServer/server.py"
 sys.path.insert(0, str(path.parent))
 spec = importlib.util.spec_from_file_location("heydash_mlx", path)
 server = importlib.util.module_from_spec(spec)

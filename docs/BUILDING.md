@@ -1,6 +1,15 @@
-# Building Mactopus from source
+# Building Computa from source
 
 ## Packaging status
+
+Computa was previously Mactopus; the repository is now
+[`ahmed-wlb/computa`](https://github.com/ahmed-wlb/computa), with product site
+[computa.wtf](https://computa.wtf). Source targets and paths use the new name.
+The Computa Release build, signed DMG, mounted-installer migration from
+Mactopus, and startup on the existing Mac passed. The checked pre-existing data
+remained byte-identical before launch. See [the distribution checkpoint](DISTRIBUTION.md)
+for scope and artifact identity; clean-Mac, stream/final-answer and controlled
+OS-process Stop validation remain open.
 
 The source-install entry point builds the pinned Rust engine, native app and
 WebUI, then prepares app-owned headless MLX serving. Orchestration and rollback
@@ -53,8 +62,8 @@ copied from another app.
 ## Checkout and setup
 
 ```sh
-git clone https://github.com/ahmed-wlb/mactopus.git
-cd mactopus
+git clone https://github.com/ahmed-wlb/computa.git
+cd computa
 ./Scripts/setup.sh --check
 ./Scripts/setup.sh --download-model
 ```
@@ -103,7 +112,7 @@ Other modes:
 ```sh
 ./Scripts/setup.sh --check                 # Read-only; no build/install/download
 ./Scripts/setup.sh --build-only            # Only build a signed app in .build
-./Scripts/setup.sh --no-launch             # Install without opening Mactopus
+./Scripts/setup.sh --no-launch             # Install without opening Computa
 ./Scripts/setup.sh --download-model --no-launch
 bun test Scripts/setup.test.ts             # Mocked commands and temporary homes
 ```
@@ -111,7 +120,7 @@ bun test Scripts/setup.test.ts             # Mocked commands and temporary homes
 The build-only artifact is:
 
 ```text
-.build/SourceInstall/Build/Products/Release/Mactopus.app
+.build/SourceInstall/Build/Products/Release/Computa.app
 ```
 
 The source build sequence is pinned Rust App Server, `bun install
@@ -125,24 +134,29 @@ not a Developer ID distribution signature or notarization.
 
 ## Installation, data, and permissions
 
-Setup installs only to `~/Applications/Mactopus.app`, not `/Applications`.
-Quit Mactopus normally first; setup refuses to kill it or replace it while it
-is running. It checks the existing bundle identity, executable, and signature,
-and refuses an unknown app or a symlinked installation directory.
+Setup installs only to `~/Applications/Computa.app`, not `/Applications`.
+Quit Computa and any older Mactopus copy normally first; setup refuses to kill
+either app or install while either process name is running. It accepts at most
+one existing bundle at `~/Applications/Computa.app` or
+`~/Applications/Mactopus.app`; if both exist, it stops without choosing between
+them. It checks the existing bundle identity, executable, and signature, and
+refuses an unknown app or a symlinked installation directory.
 
 The new bundle is staged and verified before replacement. A compatible old
-bundle is moved into a uniquely named directory under `~/Applications/Mactopus
-Backups/`. A failed final move attempts to restore the old bundle and reports
-the preserved paths if recovery needs assistance. Backups are not automatically
-deleted. Existing `~/Library/Application Support/LocalCodex` chats, preferences,
+bundle with the same bundle ID is moved into a uniquely named directory under
+`~/Applications/Computa Backups/`, retaining its original `Computa.app` or
+`Mactopus.app` name. The new app is installed as `Computa.app`. A failed final
+move attempts to restore the old bundle to its original name and path, and
+reports the preserved paths if recovery needs assistance. Backups are not
+automatically deleted. Existing `~/Library/Application Support/LocalCodex` chats, preferences,
 browser tabs, and installed system-level applications are not removed or reset.
 
-An existing `/Applications/Mactopus.app` is intentionally left untouched. When
+An existing `/Applications/Computa.app` is intentionally left untouched. When
 both locations exist, use the exact newly installed path instead of assuming
 Spotlight picked the desired copy. The setup command opens that exact path.
 
 The stable legacy bundle ID is `com.ahmedelamin.LocalCodex`; the product name is
-Mactopus. A locally rebuilt ad-hoc signature may require macOS permissions to
+Computa. A locally rebuilt ad-hoc signature may require macOS permissions to
 be granted again. Setup does not edit TCC, bypass Gatekeeper, enable Remote
 Debugging, install a browser extension silently, or grant Full Access. Review
 Accessibility and Screen Recording prompts yourself. Optional Chrome access
@@ -164,8 +178,10 @@ MACTOPUS_TEST_BUN=/absolute/path/to/bun swift test
 ```
 
 The override exists only for Debug fixtures. Release builds cannot launch those
-fixtures, and production's system-only PATH and owned engine isolation stay
-unchanged. The fixture resolver checks for an executable regular file that is
+fixtures. Production uses a fixed PATH containing system command directories,
+`/opt/homebrew/bin`, and `/usr/local/bin`; it does not import the launching
+shell's PATH. Owned HOME/configuration isolation remains unchanged. The
+`MACTOPUS_*` fixture variables retain their compatibility names. The fixture resolver checks for an executable regular file that is
 not group/world writable; it does not claim to authenticate the Bun publisher.
 
 An optional signing-boundary test uses your existing Apple identity to compile
