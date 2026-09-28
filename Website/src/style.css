@@ -1,0 +1,18 @@
+html,
+body {
+  margin: 0;
+  background: #fff;
+}
+
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+}
+
+img {
+  display: block;
+  width: min(70vw, 320px);
+  height: auto;
+}

@@ -1,6 +1,8 @@
 .build/
 .DS_Store
 WebUI/node_modules/
+Website/node_modules/
+Website/dist/
 xcuserdata/
 *.xcuserstate
 *.profraw
