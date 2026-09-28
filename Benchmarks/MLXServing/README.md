@@ -14,7 +14,7 @@ bun Benchmarks/MLXServing/run.ts /ABS/PRIVATE/OUTPUT http://127.0.0.1:1237/ /ABS
 The optional selector is `all`, `text`, `tool`, `image`, `cancel`, or
 `cancel-early`, or `cancel-delayed`. Its next
 optional argument selects observation: `metrics` (the original direct server)
-or `guarded:<launch-UUID>` (HeyDash's bundled boundary). For the latter, supply
+or `guarded:<launch-UUID>` (Computa's bundled boundary). For the latter, supply
 the exact lowercase UUID chosen by the process owner at launch, for example:
 
 ```sh
@@ -82,7 +82,7 @@ mode-0700 external directory. Hashes freeze source/input provenance before the
 first request. Terminal output contains only gate results, never reasoning.
 SIGINT/SIGTERM stops before the next request; an in-flight request is allowed to
 finish unless this is the explicit cancellation probe. Never run concurrently
-with HeyDash or another inference producer.
+with Computa or another inference producer.
 
 These gates establish specific protocol primitives, not overall model accuracy,
 actual native App Server integration, or successful computer use. The metrics
@@ -95,7 +95,7 @@ Contract reference: [OpenAI function calling and streaming](https://developers.o
 
 `parent-death-live.ts` owns a fresh supervisor and MLX server, then abruptly kills
 only that supervisor to exercise the real parent watcher. Run it **only after
-HeyDash and all other inference producers have stopped**. It refuses an occupied
+Computa and all other inference producers have stopped**. It refuses an occupied
 port 1237 and never adopts or kills another listener. The default checks an
 unloaded process only; `--load-4b` explicitly performs one synthetic, no-tool
 marker response first and records the loaded process footprint.

@@ -47,7 +47,7 @@ Reconnection never retries a previous action or silently switches browser tabs.
 
 Development extension ID: `gdghbmoiibghgkfmhjlckipjjlclnlbk`.
 Native host: `com.macndash.chrome_bridge`.
-Both identifiers remain unchanged from Macndash so the installed Chrome profile
+Both identifiers remain unchanged across product renames so the installed Chrome profile
 and its saved pairing continue to work with Computa. Keep the existing unpacked
 extension installation and update the native-host manifest's helper path if the
 application bundle moves to `/Applications/Computa.app`.

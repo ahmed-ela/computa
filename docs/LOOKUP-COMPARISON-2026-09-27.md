@@ -1,4 +1,8 @@
-# Lookup comparison checkpoint — 2026-09-27
+# Computa lookup comparison checkpoint — 2026-09-27
+
+This historical report uses the current product name, Computa. Original
+artifact paths, fixture titles, branch names, runtime labels and results are
+preserved; these results do not validate the current build.
 
 Status (28 September, final cleanup complete): the reference interface is
 implemented, tested and installed as
@@ -72,7 +76,7 @@ Final cleanup verified all 52 baseline user tab identities and URLs unchanged.
 The unattributed extra fixture-home tab that appeared at 13:36:28 UTC was
 preserved; all three known owned test tabs were closed. Final Chrome state has
 53 tabs and zero agent attachments. The owned fixture server session 81982 stopped with
-exit 130 and no matching process remained. Mactopus remains running as PID
+exit 130 and no matching process remained. Computa remains running as PID
 43332, with the unchanged fa90ee67 main, the one-time Chrome connection and
 Ask Every Time. Remembered extension pairing remains unconfigured.
 The redacted original and Lumen review files and reference-interface validation
@@ -81,8 +85,8 @@ implemented, tested and installed; the requested lookup remains unfixed.
 
 ## Starting state and evidence boundaries
 
-The `Macrouse` checkout was newly cloned at revision `a6eab70` into the local
-repositories directory. This Mac had no preinstalled Mactopus app, app-owned
+The checkout of the `Macrouse` branch was newly cloned at revision `a6eab70` into the local
+repositories directory. This Mac had no preinstalled Computa app, app-owned
 MLX environment, or Qwen model. References in the original TODO to an installed
 app and a 42-tab trial describe **prior-host evidence**, not a run reproduced on
 this Mac. That earlier trial demonstrated inventory pagination and failed the
@@ -138,7 +142,7 @@ observations and are not combined or assumed equivalent. The model received the
 original task only, with no candidate title, URL, content, or tool sequence.
 
 The browser-access baseline gate can be satisfied by either the remembered
-[Mactopus extension bridge](../BrowserExtension/README.md) or the legacy direct
+[Computa extension bridge](../BrowserExtension/README.md) or the legacy direct
 **Connect existing Chrome** route. The extension uses a signed native-messaging
 helper and authenticated local IPC; it does **not** use the remote-debugging
 WebSocket approval flow. Fresh app UI reports **Browser extension not connected**.
@@ -165,7 +169,7 @@ This automation-policy boundary does not make remote debugging universally
 necessary. No settings were changed during those rejected setup attempts.
 
 After an explicitly approved Chrome backup/restart, attribution validation and
-the normal Mactopus **Connect once** / Chrome **Allow** flow established a live
+the normal Computa **Connect once** / Chrome **Allow** flow established a live
 connection. Existing tabs were restored. A separate read-only Qwen connection
 check completed in 48.688 seconds with exactly one `computer_v2_tabs` call and no
 other tool calls. It received 25 entries, reported total 45, and an unused next
@@ -314,7 +318,7 @@ the matching call/snapshot wrapper. Flattened or embedded page-text spoofs remai
 unmeasured. These are parser tests, not model-task success.
 
 The earlier TextEdit fixture remains untested after access was denied. The separate
-inert Mactopus Lookup Fixture app was built and signature-checked, and its initial
+inert `Mactopus Lookup Fixture` app was built and signature-checked, and its initial
 exact-path access attempt was also denied. After the user resumed, the same normal
 computer-use route succeeded; the later installed-app native read passed as
 recorded under Recovery. No alternate AX workaround was used. These are separate
@@ -482,7 +486,7 @@ Chrome connected; permission and pairing changes were not made during this suite
 ## Recovery trials on 28 September
 
 The native gate subsequently cleared through the same authorized computer-use
-route. A fresh Qwen task read the distinct inert Mactopus Lookup Fixture and
+route. A fresh Qwen task read the distinct inert `Mactopus Lookup Fixture` and
 correctly reported the displayed calibration value and owner. It completed in
 **151.174 seconds**, using apps, a read-only native binding, and one native snapshot.
 The observed request-to-Allow-once interval was **88.454 seconds**; that interval
@@ -706,7 +710,7 @@ lookup attempts remain unsuccessful, rather than verified negative searches.
 Final cleanup verified all 51 user tab identities and URLs unchanged, zero extra
 tabs, and zero agent attachments. Only the initial fixture page had been opened;
 it was closed. The owned fixture server exited 143 after termination and its
-listener was verified absent. Mactopus remains running and idle with the approved
+listener was verified absent. Computa remains running and idle with the approved
 one-time Chrome connection and Ask Every Time; remembered pairing is unconfigured.
 Private conversation pointers and raw records remain outside this repository.
 
@@ -888,7 +892,7 @@ input, approval or final answer occurred. Calls 7–10 repeated identical first
 selections remained partial; this was not a verified negative search.
 
 Fresh cleanup verified all 52 starting user IDs and URLs unchanged, zero extras
-and zero attachments; only the owned neutral home was closed. Mactopus was quit
+and zero attachments; only the owned neutral home was closed. Computa was quit
 for the next build, and the fixture server retained. Original acceptance remains
 unchecked after eight unsuccessful attempts.
 

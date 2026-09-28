@@ -53,8 +53,8 @@ the transcript.
 
 ## Current validation and limitations
 
-Computa was previously named Mactopus. Before the rename, the signal-fixed
-installed app ran `uname -m` and received `arm64` with exit code 0. Its final
+Before the rename, the signal-fixed Computa build ran `uname -m` and received
+`arm64` with exit code 0. Its final
 model reply still failed `unstreamed_final_text` validation. A controlled live
 Stop test with independently observed OS-process exit remains pending. The
 renamed Computa build, installer migration and startup passed; a new live CLI

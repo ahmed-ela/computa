@@ -1,8 +1,11 @@
 # Existing Chrome default — 2026-09-24
 
+Prose uses the current product name, Computa. Historical artifact paths,
+identifiers, quoted records, and measured results retain their original values.
+
 ## Outcome
 
-HeyDash now defaults to the user's ordinary Chrome process and existing profile,
+Computa now defaults to the user's ordinary Chrome process and existing profile,
 not a disposable project-owned Chrome profile. Opening without a URL activates
 the existing session without navigating; a supplied URL opens a verified new tab.
 The isolated browser broker remains available through explicit
@@ -68,7 +71,7 @@ the final results above were all obtained after those fixes.
 Temporary public test pages and blank tabs created by failed attempts were closed
 after verification; original user tabs were left intact. Closing tabs is
 recoverable through Chrome's normal reopen-closed-tab behavior. The updated debug
-HeyDash app was reopened and its UI reported `Local runtime connected` with
+Computa app was reopened and its UI reported `Local runtime connected` with
 Qwen3.5-4B. Installed app unchanged; no commit or push performed.
 
 ## Local evidence

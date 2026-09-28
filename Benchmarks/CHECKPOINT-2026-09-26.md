@@ -1,4 +1,7 @@
-# HeyDash checkpoint — September 26, 2026
+# Computa checkpoint — September 26, 2026
+
+Prose uses the current product name, Computa. Historical artifact paths,
+identifiers, quoted records, and measured results retain their original values.
 
 This checkpoint saves the current implementation and research, not a claim of
 complete production qualification.

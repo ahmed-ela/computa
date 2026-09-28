@@ -3,8 +3,8 @@
 This records the source-distribution checks, not a claim that every computer-use
 task succeeds or that installation on a second Mac has been completed.
 
-This is a historical Mactopus validation record. The product is now named
-Computa; the original artifact names, paths and results below are retained and
+This historical validation record uses the current product name, Computa.
+The original artifact names, paths and results below are retained and
 do not establish validation of the renamed build or installer.
 
 | Check | Result |

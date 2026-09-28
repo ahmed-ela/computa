@@ -2,11 +2,11 @@
 
 ## Packaging status
 
-Computa was previously Mactopus; the repository is now
+The Computa repository is
 [`ahmed-wlb/computa`](https://github.com/ahmed-wlb/computa), with product site
 [computa.wtf](https://computa.wtf). Source targets and paths use the new name.
 The Computa Release build, signed DMG, mounted-installer migration from
-Mactopus, and startup on the existing Mac passed. The checked pre-existing data
+the legacy app, and startup on the existing Mac passed. The checked pre-existing data
 remained byte-identical before launch. See [the distribution checkpoint](DISTRIBUTION.md)
 for scope and artifact identity; clean-Mac, stream/final-answer and controlled
 OS-process Stop validation remain open.
@@ -135,7 +135,7 @@ not a Developer ID distribution signature or notarization.
 ## Installation, data, and permissions
 
 Setup installs only to `~/Applications/Computa.app`, not `/Applications`.
-Quit Computa and any older Mactopus copy normally first; setup refuses to kill
+Quit Computa and any older app copy normally first; setup refuses to kill
 either app or install while either process name is running. It accepts at most
 one existing bundle at `~/Applications/Computa.app` or
 `~/Applications/Mactopus.app`; if both exist, it stops without choosing between

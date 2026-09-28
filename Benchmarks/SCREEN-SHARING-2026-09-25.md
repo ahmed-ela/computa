@@ -1,13 +1,16 @@
 # Remote-interface collection: observational baseline
 
-The user requested an unmodified HeyDash attempt first, then evidence-based,
+Prose uses the current product name, Computa. Historical artifact paths,
+identifiers, quoted records, and measured results retain their original values.
+
+The user requested an unmodified Computa attempt first, then evidence-based,
 general harness improvements. The target is the macOS **Screen Sharing** app,
 not Screen Mirroring, iPhone Mirroring, or the local browser. No model-generated
 action was corrected or supplemented during the baseline.
 
 ## Baseline
 
-Source checkpoint: `9a19e26`; existing development HeyDash process and owned
+Source checkpoint: `9a19e26`; existing development Computa process and owned
 runtime. Sole loaded model: `lmstudio-community/Qwen3.5-4B-MLX-4bit`, idle before
 submission, parallelism one, no queued requests. App access mode was already
 Full access; no permission or model-loading settings were changed.
@@ -35,7 +38,7 @@ failure. The baseline task failed.
 After the terminal response, an independent operator inspection of Screen
 Sharing found its All Connections window with a saved Mac mini connection row.
 The operator did not connect or navigate the remote browser at this stage. That
-inspection is not credited to HeyDash and is not proof the connection works.
+inspection is not credited to Computa and is not proof the connection works.
 
 ## Setup exclusion
 
@@ -277,7 +280,7 @@ It inspected and captured that local window, then requested one visual click on
 a local browser tab. The native result explicitly reported that the click was
 dispatched and returned a post-action observation. This is a wrong-computer
 failure, not progress toward the remote task. The operator stopped the run via
-HeyDash at 12:35:11Z; the terminal record is `interrupted` after 54.622 seconds.
+Computa at 12:35:11Z; the terminal record is `interrupted` after 54.622 seconds.
 No tab list or Screen Sharing connection was produced. Do not infer independent
 tab preservation from the absence of a close-tool call.
 One automatic compaction completed at 12:35:04.266Z, before the operator stop.
@@ -451,7 +454,7 @@ keypress or type.
 
 The persisted turn began at **2026-09-26 01:28:40.285Z** and ended with
 `turn_aborted`, reason `interrupted`, at **01:32:56.739Z**: **256.454 seconds**.
-The operator explicitly pressed HeyDash Stop before the five-minute budget.
+The operator explicitly pressed Computa Stop before the five-minute budget.
 The UI then showed Waiting. Compaction was in progress when interrupted; do
 **not** describe this terminal event as an intrinsic compaction failure. Three
 earlier `compacted` records were persisted at 01:30:05.327Z, 01:30:43.608Z, and
@@ -625,7 +628,7 @@ have the focused window, including after the second successful open/bind. No
 occlusion error was returned in this retry.
 
 The root operator reported foreground changes during the trial; the later UI
-was already Waiting before the operator quit idle HeyDash to release its owned
+was already Waiting before the operator quit idle Computa to release its owned
 MLX process. This is **not a clean controlled speed or capability comparison**.
 No complete remote YouTube URL list or tab-coverage proof was produced.
 

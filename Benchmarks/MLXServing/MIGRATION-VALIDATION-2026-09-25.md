@@ -1,15 +1,18 @@
 # App-owned headless MLX migration: consolidated validation
 
+Prose uses the current product name, Computa. Historical artifact paths,
+identifiers, quoted records, and measured results retain their original values.
+
 Evidence snapshot: September 25, 2026, after the loaded-model parent-death and
 controlled delayed-cancellation gates. This report distinguishes code/build validation,
-synthetic provider primitives, and actual HeyDash native-runtime trials. It is
+synthetic provider primitives, and actual Computa native-runtime trials. It is
 not a claim that the installed application has already been migrated or that the
 larger Screen Sharing goal is complete. Nothing has been committed or pushed.
 
 ## Result at this snapshot
 
-Qwen3.5-4B MLX 4-bit runs through HeyDash's app-owned, loopback-only MLX-VLM
-backend without an LM Studio serving process. Actual HeyDash text, native status
+Qwen3.5-4B MLX 4-bit runs through Computa's app-owned, loopback-only MLX-VLM
+backend without an LM Studio serving process. Actual Computa text, native status
 tool, Chrome window capture, manual compaction, and production-threshold
 automatic compaction gates passed. Normal runtime shutdown released its listener.
 A separate loaded-model supervisor-crash gate also passed: the watched server
@@ -68,7 +71,7 @@ tokens/sec, or a matched comparison with LM Studio.
 | Production-threshold automatic compaction | One lifecycle completed at the shipping threshold; measured context shrank; exact canary and one subsequent read-only status tool retained | 189.165 s |
 
 The full deterministic count is computed from the logged bundles:
-HeyDashTests 518 discovered / 32 skipped, and AutomationCoreTests 241 discovered /
+`HeyDashTests` 518 discovered / 32 skipped, and AutomationCoreTests 241 discovered /
 2 skipped, both with zero failures. It must not be described as 759 passing tests.
 
 The Chrome gate used a benign Example Domain test page and allowed no click,

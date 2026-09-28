@@ -34,7 +34,7 @@ question, model settings, and policy; only candidate OCR observation text change
 
 ## Commands
 
-Run from the HeyDash repository. Use fresh private temp directories; scripts
+Run from the Computa repository. Use fresh private temp directories; scripts
 refuse to overwrite outputs or put private captures into the repository.
 
 ```sh

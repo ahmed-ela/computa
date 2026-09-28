@@ -6,13 +6,12 @@ The product and repository are now **Computa**:
 [ahmed-wlb/computa](https://github.com/ahmed-wlb/computa),
 [computa.wtf](https://computa.wtf). The app, executable, Swift targets,
 `Computa.xcodeproj`, `Sources/Computa` and `Tests/ComputaTests` use that name.
-LocalCodex/HeyDash/Macndash data, bundle, preferences and pairing identifiers
-remain compatible; `MACTOPUS_*` environment variables, `mactopus-5` source pin
+Existing storage, bundle, preferences and pairing identifiers remain unchanged; `MACTOPUS_*` environment variables, `mactopus-5` source pin
 and `mactopusClickability` protocol field remain unchanged. Installers can migrate
 one compatible legacy `~/Applications/Mactopus.app` to `Computa.app`; they
 reject both-present installations and either running process name. Backups
 retain the original bundle name, rollback restores its original path, and
-LocalCodex chat/model data stays in place.
+Computa chat and model data stay in their existing locations.
 
 The Computa Release Xcode build and WebUI type check/production build passed.
 Rename validation passed 58 selected Swift cases, 21 Bun identity/runtime-source
@@ -40,10 +39,13 @@ The Computa DMG, manifest and `SHA256SUMS` were uploaded to the draft release;
 GitHub digests match the local files. The preview remains a draft and is **not notarized**. This existing-Mac
 migration/startup check does not establish clean-Mac acceptance, repair the
 model stream/final-answer failure, complete the original lookup, or establish
-the controlled OS-process Stop check. Earlier Mactopus hashes, test counts and
+the controlled OS-process Stop check. Earlier app hashes, test counts and
 live outcomes remain historical evidence; no renamed live CLI task is claimed.
 
 ## Earlier lookup checkpoint
+
+Historical results below use the current product name, Computa. Original
+artifact paths, runtime labels and hashes are preserved.
 
 Earlier lookup checkpoint (28 September, before the CLI release): the reference interface was
 implemented, tested and installed as
@@ -69,7 +71,7 @@ corrections, including the two new signal regressions; 13 Bun packaging/signing
 tests and 11 Python installer tests passed. UI type checking and production
 build passed. These totals do not add overlapping reruns.
 
-The Mactopus signed preview DMG was built and verified before the rename, and its installer successfully
+The earlier Computa signed preview DMG was built and verified before the rename, and its installer successfully
 updated this Mac while preserving the previous app. It reused verified existing
 MLX/model data and bootstrapped pinned uv/Python. Installed main SHA-256:
 `2a481166b7d9a8540d0cb13ac0dc59d8ad677a54dd5da6bc15bbfdc97af0fbe6`.
@@ -191,7 +193,7 @@ Final cleanup verified all 52 baseline user tab identities and URLs unchanged.
 The unattributed extra fixture-home tab that appeared at 13:36:28 UTC was
 preserved; all three known owned test tabs were closed. Final Chrome state has
 53 tabs and zero agent attachments. The owned fixture server session 81982 stopped with
-exit 130 and no matching process remained. At that checkpoint Mactopus was running as PID
+exit 130 and no matching process remained. At that checkpoint Computa was running as PID
 43332, with the unchanged fa90ee67 main, the one-time Chrome connection and
 Ask Every Time. Remembered extension pairing remains unconfigured.
 The redacted original and Lumen review files and reference-interface validation
@@ -210,9 +212,9 @@ implemented, tested and installed; the requested lookup remains unfixed.
 - [x] Preserve existing tabs and drafts. Do not send website messages. Keep
   personal conversation content and URLs out of committed benchmark artifacts.
 
-## 2. Measure unchanged Mactopus
+## 2. Measure unchanged Computa
 
-- [x] Submit the same task to a fresh chat in the installed Mactopus with
+- [x] Submit the same task to a fresh chat in the installed Computa with
   Qwen 3.5 4B. Do not provide the answer, candidate title/URL, or a tool sequence.
 - [x] Avoid contaminating the starting state: do not leave the discovered
   conversation newly opened, selected, or attached by Codex as a shortcut or
@@ -383,7 +385,7 @@ the owned runtime is unchanged. Overview Swift validation passed 276 cases with
 two skips; the ordering correction then passed 62 focused cases. Bun checks passed
 55 tests/435 assertions. These runs overlap and are not a unique summed total.
 Final cleanup preserved all 51 user tab identities/URLs, with no extra or attached
-tabs; the fixture server was stopped and its listener absent. At that checkpoint Mactopus was
+tabs; the fixture server was stopped and its listener absent. At that checkpoint Computa was
 idle with the approved one-time Chrome connection and Ask Every Time. Remembered
 extension pairing remains unconfigured.
 
@@ -448,7 +450,7 @@ unused; four final reads repeated the first 53 of 359 elements and ignored the
 offered continuation. The supervisor stopped for lack of progress before its
 15-minute ceiling. All 52 starting user IDs/URLs were preserved, with zero
 extras or attachments; only the owned neutral home was closed. Original
-acceptance stays unchecked after eight failures. Mactopus was quit for the
+acceptance stays unchecked after eight failures. Computa was quit for the
 search-receipt follow-up build; the fixture server is retained for retests.
 
 ### Installed search-receipt follow-up

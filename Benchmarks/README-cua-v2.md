@@ -1,10 +1,10 @@
-# CUA versus LocalCodex V2 benchmark
+# CUA versus Computa V2 benchmark
 
 This is a test distribution and measurement contract, **not a claim that the two harnesses already have comparable results**. The machine-readable cases are in [`cua-v2-cases.json`](cua-v2-cases.json). The new browser target, [`CuaV2SafeBenchmark.html`](../Tests/Fixtures/CuaV2SafeBenchmark.html), is self-contained, makes no remote requests, and has no persistent storage. Do not use the older `ComputerUseFixture.html` for this benchmark.
 
 ## What is executable today
 
-The existing opt-in LocalCodex matrix exercises five agent-in-loop gates with Qwen3.5-4B and Qwen3.5-9B only:
+The existing opt-in Computa matrix exercises five agent-in-loop gates with Qwen3.5-4B and Qwen3.5-9B only:
 
 ```sh
 Benchmarks/run-computer-v2-matrix.sh --models 4b,9b --tasks status,chrome,semantic,combined,visual --reps 3
@@ -163,7 +163,7 @@ same-model, prompt-and-schema-matched adapter experiment, not a claim that the
 two host stacks have identical instructions, approvals, orchestration, or
 oracle implementations. The requested action protocol and success criterion
 were aligned; the executed failure paths and verification mechanisms were not.
-For the hardened LocalCodex tab arm, five action-stage runs proved A still
+For the hardened Computa tab arm, five action-stage runs proved A still
 alive in the background after B was focused and then failed closed with both
 tabs unchanged. One additional retained setup run stopped before tab identity
 could be proven because its tool result exposed no process ID; it is not counted
@@ -180,7 +180,7 @@ The fixture's exact success strings are `SEMANTIC_OK:<run>`, `VISUAL_OK:<run>`, 
 
 There are two distinct experiments:
 
-1. **Driver-only:** a scripted operator asks each host for the same observation or action, with no model in the loop. For a future like-for-like test, time the actual CUA tool call and a complete LocalCodex V2 tool call, including normal routing and safety checks. The current `DriverLatencyLiveTests` time only in-process AutomationCore work, so they are *lower-level diagnostic probes*, not the complete paired comparison. Keep launch, tool warm-up, approval time, capture/AX formatting, mutation, and independent verification separate. Compare AX-to-AX and screenshot-to-screenshot; never compare CUA's tab-aware DOM read with V2's screenshot and call it a driver-speed result.
+1. **Driver-only:** a scripted operator asks each host for the same observation or action, with no model in the loop. For a future like-for-like test, time the actual CUA tool call and a complete Computa V2 tool call, including normal routing and safety checks. The current `DriverLatencyLiveTests` time only in-process AutomationCore work, so they are *lower-level diagnostic probes*, not the complete paired comparison. Keep launch, tool warm-up, approval time, capture/AX formatting, mutation, and independent verification separate. Compare AX-to-AX and screenshot-to-screenshot; never compare CUA's tab-aware DOM read with V2's screenshot and call it a driver-speed result.
 2. **Agent-in-loop:** give the *same model* the same task, initial state, observation modality, tool budget, and approval policy through each harness. Qwen 4B and 9B are the supported model arms here; 27B is excluded. Codex-hosted-model + CUA versus Qwen + V2 is useful as a product-level observation but is **model-confounded** and must not rank the drivers or prove that a skill prompt caused a difference. If Qwen cannot be connected to CUA, report the agent-in-loop harness comparison as unavailable instead of inventing a like-for-like result.
 
 Run paired trials serially. Counterbalance order (CUA→V2, then V2→CUA), use a fresh nonce or independent Calculator before-state, and record app focus/window/tab identity before every action. Treat focus loss and permission denial as outcomes, not invisible exclusions. Do not count a refused unsafe action as successful task completion; count it separately as a safety pass. Reuse neither stale snapshots nor screenshots except in explicit fail-closed tests.

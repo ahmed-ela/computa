@@ -14,8 +14,8 @@ does not select prereleases. These instructions describe the release workflow;
 the presence of scripts in the repository does not establish that an asset has
 been published or tested on a clean Mac.
 
-The product is now Computa ([computa.wtf](https://computa.wtf)); earlier artifacts
-were named Mactopus. The Computa Release Xcode build, WebUI type check and
+Computa ([computa.wtf](https://computa.wtf)) is the product name throughout
+this guide. The Computa Release Xcode build, WebUI type check and
 production build passed. Its Developer ID signed `v0.1.0-preview.1` DMG was
 created, verified and uploaded with its manifest and `SHA256SUMS` to the draft
 release; GitHub digests match the local files. DMG SHA-256:
@@ -38,7 +38,7 @@ unsuccessful. See [TODO.md](../TODO.md) for test counts and signed artifact hash
 
 1. Download the DMG, its matching `.manifest.json`, and `SHA256SUMS` from the same
    release. In their download directory, run `shasum -a 256 --check SHA256SUMS`.
-2. Quit Computa and any older Mactopus copy, then open the DMG. Read `READ ME.txt` for the asset's signing
+2. Quit Computa and any older app copy, then open the DMG. Read `READ ME.txt` for the asset's signing
    and notarization status.
 3. On a clean Mac, open **Install Computa.command** and type **INSTALL** when
    prompted. It copies the app to `~/Applications/Computa.app`, provisions the
@@ -61,7 +61,7 @@ If both `/Applications` and `~/Applications` contain copies, open the intended
 copy explicitly. The command installer supports migration from a compatible
 `~/Applications/Mactopus.app`; dragging into `/Applications` does not perform
 that migration. Both names use the stable `com.ahmedelamin.LocalCodex` bundle ID
-and existing LocalCodex data.
+and existing app data.
 
 If GitHub CLI is already available and authenticated, the equivalent download is:
 
@@ -83,7 +83,7 @@ the app closed after installation.
 
 ## Updates, storage, and retries
 
-The installer refuses to run while Computa or Mactopus is running. It accepts
+The installer refuses to run while Computa or a legacy app copy is running. It accepts
 at most one existing bundle at `~/Applications/Computa.app` or
 `~/Applications/Mactopus.app`; both present is an error, with neither selected
 or removed. The existing bundle must match the stable bundle identity.
@@ -93,7 +93,7 @@ runtime and model, then moves the existing bundle into
 `~/Applications/Computa Backups/release-*/`, retaining its original app name.
 The new bundle is installed as `~/Applications/Computa.app`. If the final move
 fails, rollback attempts to restore the old bundle to its original name and
-path. Conversations and model data remain under LocalCodex; preferences,
+path. Conversations and model data remain in their existing support directory; preferences,
 browser tabs and previous backups are not deleted. The mounted Computa preview
 installer exercised this legacy migration on the existing Mac as recorded above;
 that does not establish a clean installation on another Mac.

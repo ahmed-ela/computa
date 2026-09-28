@@ -1,6 +1,9 @@
 # Guarded headless MLX transport: first live run
 
-This is a synthetic transport result, **not** an end-to-end HeyDash computer-use
+Prose uses the current product name, Computa. Historical artifact paths,
+identifiers, quoted records, and measured results retain their original values.
+
+This is a synthetic transport result, **not** an end-to-end Computa computer-use
 or native App Server pass. The root operator ran the bundled guarded backend
 serially on loopback with Qwen3.5-4B MLX 4-bit. No real computer/shell tool was
 executed. Production instructions and inherited policy were retained. Requests

@@ -1,6 +1,6 @@
 # Native visual-grounding benchmark
 
-This directory retains the reproducible fixture corpus and production-worker replay for LocalCodex's native-window visual fallback. It measures screenshot target localization, not the entire agent loop or a general computer-use success rate.
+This directory retains the reproducible fixture corpus and production-worker replay for Computa's native-window visual fallback. It measures screenshot target localization, not the entire agent loop or a general computer-use success rate.
 
 ## Production method
 

@@ -34,7 +34,7 @@ actions or establish successful remote tab collection.
 
 Use a **fresh empty mode-0700 output directory** for each run. Raw requests and
 responses stay private, outside this repository. Never run model diagnostics in
-parallel with HeyDash work or another inference test. No returned tool call is
+parallel with Computa work or another inference test. No returned tool call is
 dispatched. Inherited policy is neither rewritten nor removed.
 
 ```sh

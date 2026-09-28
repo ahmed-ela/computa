@@ -38,11 +38,12 @@ changes model settings, unloads a model, or retries a failed request. Reasoning
 tokens count toward the cap; inspect recorded usage rather than interpreting an
 empty final answer as an incorrect extraction.
 
-Build `AutomationCore` through the regular Xcode build first, then compile:
+Build `AutomationCore` through the regular Computa Xcode build with
+`-derivedDataPath .build/DerivedData` first, then compile:
 
 ```sh
-swiftc -I .build/HeyDash/Build/Products/Debug \
-  -L .build/HeyDash/Build/Products/Debug -lAutomationCore \
+swiftc -I .build/DerivedData/Build/Products/Debug \
+  -L .build/DerivedData/Build/Products/Debug -lAutomationCore \
   Benchmarks/AXAssociation/make-fixtures.swift \
   -o /tmp/heydash-ax-association-fixtures
 ```

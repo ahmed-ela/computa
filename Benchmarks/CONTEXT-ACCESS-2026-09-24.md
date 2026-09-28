@@ -1,4 +1,7 @@
-# HeyDash context and access validation — 2026-09-24
+# Computa context and access validation — 2026-09-24
+
+Prose uses the current product name, Computa. Historical artifact paths,
+identifiers, quoted records, and measured results retain their original values.
 
 ## Outcome
 
@@ -28,10 +31,10 @@ Existing rename, queue, UI, grounding, and unrelated benchmark edits remain.
 
 - Mac17,8, 24 GiB unified memory, macOS 27.0.
 - Qwen3.5-4B MLX 4-bit served by the local LM Studio server.
-- HeyDash declares 8,192 tokens; App Server reports an effective 7,782-token
+- Computa declares 8,192 tokens; App Server reports an effective 7,782-token
   window. Automatic compaction starts at 6,144 configured tokens (75%).
 - LM Studio's already-loaded model context is 123,648. That server capacity is
-  distinct from HeyDash's smaller declared budget and the ring's effective
+  distinct from Computa's smaller declared budget and the ring's effective
   window. This test does not prove behavior with an actual 8K server hard cap.
 - Native App Server compactor, with no custom checkpoint prompt or additional
   developer-instruction experiment. Those experiments did not demonstrate a
@@ -67,7 +70,7 @@ paused on failure; it does not race an unresolved compaction.
 | Identical uncompacted recall control | 2/2 passed, 6.198 / 6.736 seconds |
 
 Total deterministic checks: **477 passed**. The full native run included 349
-HeyDash tests (16 skipped, one failed test with two assertion failures) and 108
+Computa tests (16 skipped, one failed test with two assertion failures) and 108
 AutomationCore tests (2 skipped). It therefore correctly exited with
 `TEST FAILED`; it must not be described as an entirely green suite. The two
 successful live safety/mode gates are separate from the deterministic count.
@@ -82,7 +85,7 @@ manual test decision or visible gate. Returning to Ask restored the wait.
 Raw JSON-RPC matched all three requests, results, completed items, and distinct
 turn identities. No unexpected approval was accepted.
 
-Full access only changes HeyDash's native approval decisions. Tool validation,
+Full access only changes Computa's native approval decisions. Tool validation,
 macOS permissions, sandbox constraints, and StudyLock remain binding. Read-only
 inspection does not prompt in either mode. The mode is session-only, resets to
 Ask on relaunch, and cannot be changed through the web bridge or a model tool.
@@ -138,17 +141,17 @@ prompts. They require the named 4B model already loaded in LM Studio.
 TEST_RUNNER_HEYDASH_LIVE_ACCESS_MODE_TEST=1 \
 TEST_RUNNER_HEYDASH_LIVE_AUTO_COMPACTION_TEST=1 \
 TEST_RUNNER_HEYDASH_LIVE_OVERSIZED_CONTEXT_TEST=1 \
-xcodebuild -project HeyDash.xcodeproj -scheme HeyDash \
-  -configuration Debug -derivedDataPath .build/HeyDash \
+xcodebuild -project Computa.xcodeproj -scheme Computa \
+  -configuration Debug -derivedDataPath .build/Computa \
   -destination 'platform=macOS,arch=arm64' test
 
 TEST_RUNNER_HEYDASH_LIVE_MANUAL_COMPACTION_TEST=1 \
 TEST_RUNNER_HEYDASH_LIVE_CONTEXT_BASELINE_TEST=1 \
-xcodebuild -project HeyDash.xcodeproj -scheme HeyDash \
-  -configuration Debug -derivedDataPath .build/HeyDash \
+xcodebuild -project Computa.xcodeproj -scheme Computa \
+  -configuration Debug -derivedDataPath .build/Computa \
   -destination 'platform=macOS,arch=arm64' \
-  -only-testing:HeyDashTests/RuntimeContextLiveTests/testManualCompactionConfirmsLifecycleAndRetainsCanary \
-  -only-testing:HeyDashTests/RuntimeContextLiveTests/testUncompactedControlRetainsCanaryAfterReadOnlyToolUse \
+  -only-testing:ComputaTests/RuntimeContextLiveTests/testManualCompactionConfirmsLifecycleAndRetainsCanary \
+  -only-testing:ComputaTests/RuntimeContextLiveTests/testUncompactedControlRetainsCanaryAfterReadOnlyToolUse \
   -test-iterations 2 test
 ```
 
@@ -158,8 +161,8 @@ Raw transport capture remains opt-in and disabled in the production app.
 
 | Evidence file | SHA-256 |
 | --- | --- |
-| heydash-native-default-full-validation.log | e5c97b2725e1efa21edbae3157356723a5d3079f31e46e0204ecfea4cbae6818 |
-| heydash-native-default-paired-quality.log | 162ea29785c92a8c286847705351f8d8bb98ccbad766f83aec4ca14d21cfe80f |
+| `heydash-native-default-full-validation.log` | e5c97b2725e1efa21edbae3157356723a5d3079f31e46e0204ecfea4cbae6818 |
+| `heydash-native-default-paired-quality.log` | 162ea29785c92a8c286847705351f8d8bb98ccbad766f83aec4ca14d21cfe80f |
 | automatic-compaction-protocol.jsonl | db2ab71da0fdaf8401871ccc040f3c94ddcc77c1af0494d2e59d49991c1d8e67 |
 | oversized-input-protocol.jsonl | c597f1deb09a31fe896bedd437e9f5edfd9cf246d84b0c5c7943ae9f756b2d67 |
 | access-mode-protocol.jsonl | e4230431b9e5bdbea39702dac5fb862126e6617a1b7ffa74b949d2320f9d4665 |

@@ -1,5 +1,8 @@
 # Chrome failure attribution investigation — 2026-09-24
 
+Prose uses the current product name, Computa. Historical artifact paths,
+identifiers, quoted records, and measured results retain their original values.
+
 ## Renewed quiet-window real-app trial — 2026-09-25, 03:02 PDT
 
 **Not an accuracy pass.** The user confirmed the Mac would remain untouched.
@@ -507,7 +510,7 @@ success evidence.
 
 LM Studio was restarted on loopback only, with the sole loaded Qwen 4B instance
 verified as `parallel: 1`. Its backend still advertises 123,648 effective context
-tokens despite a 16,384 load request; HeyDash's separate 16,384/12,288 application
+tokens despite a 16,384 load request; Computa's separate 16,384/12,288 application
 limits remain authoritative for this experiment. No inference was submitted during
 these setup checks. End-to-end acceptance and shipping-threshold compaction remain
 pending; no commit or push was performed.
@@ -624,7 +627,7 @@ left the next inference near/above the same trigger. This motivates a separate
 experiment succeeding yet. 9B and larger-model limits remain unchanged.
 
 LM Studio remained available after the later test shutdown. Read-only source
-review found separate owned process groups and no HeyDash shutdown operation
+review found separate owned process groups and no Computa shutdown operation
 targeting LM Studio. Earlier observer-process exits and the interrupted shell
 session do not identify a proven server-shutdown cause.
 
@@ -665,7 +668,7 @@ copied into this report. No commit or push has been performed.
 The narrow activation-failure attribution path is now deterministic. This is
 **not** a claim that Chrome focus or general Qwen compaction is fully reliable.
 
-When bounded native activation fails, HeyDash saves its exact typed diagnostic
+When bounded native activation fails, Computa saves its exact typed diagnostic
 as app-owned evidence, revokes this turn's computer capabilities, and interrupts
 the exact App Server turn while the tool is still pending. It displays a native
 system diagnostic with an unknown cause and an explicit retry step, not a
@@ -677,11 +680,11 @@ the [official App Server lifecycle](https://learn.chatgpt.com/docs/app-server#li
 Private, atomic evidence files survive task reload and retain original timestamps
 and call identities. Strict byte/record bounds, duplicate/conflict validation,
 file-type checks, readback, and cross-process locking protect the store. If
-storage or interruption fails, HeyDash reports that explicitly and never claims
+storage or interruption fails, Computa reports that explicitly and never claims
 an unverified turn completion. Stale tool calls and late assistant messages from
 older turns are rejected. Blank model messages no longer create empty replies.
 
-The approved input handoff now permits one bounded restoration when HeyDash's
+The approved input handoff now permits one bounded restoration when Computa's
 own approval host reclaims focus. It stops if another application takes focus,
 and still requires continuous exact-window focus plus the existing final target
 checks before input. It does not repeat the approved input action.
@@ -717,7 +720,7 @@ Evidence:
 - `/tmp/heydash-improve-unit3-20260924.log`: initial deterministic store/runtime checks.
 
 StudyLock and inherited policies are unchanged, including the home-policy hash
-below. The owned Rust runtime remains heydash-2. No commit, push, release package,
+below. The owned Rust runtime remains `heydash-2`. No commit, push, release package,
 or installed `/Applications` replacement was performed. Remaining work is
 foreground/AX reliability and then a real read-only Amazon acceptance trial;
 general generated-summary fidelity also remains unproven.
@@ -737,7 +740,7 @@ A `Page Not Found` page is not HTTP-status telemetry. The model's third
 compaction summary speculated about StudyLock, and later output promoted that
 speculation into a definite diagnosis.
 
-HeyDash's unchanged production workspace is `~/Documents`. The existing home
+Computa's unchanged production workspace is `~/Documents`. The existing home
 Git root makes the home `AGENTS.md` part of inherited project instructions.
 The original rollout contains that policy verbatim. This explains why the model
 knows the policy; it does not establish that the policy caused a browser error.

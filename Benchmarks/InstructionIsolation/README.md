@@ -6,12 +6,12 @@ the same template plus one candidate developer scope reminder. It does not run
 an App Server, compactor, broker, browser, or native action.
 
 The complete standing StudyLock policy is unchanged in both arms. This experiment
-tests whether its enforcement-only scope is being mistaken for HeyDash's entire
+tests whether its enforcement-only scope is being mistaken for Computa's entire
 role; it must not establish success by removing the policy.
 
 ## Inputs
 
-Run only while HeyDash's owned model server is idle, with the operator coordinating
+Run only while Computa's owned model server is idle, with the operator coordinating
 exclusive serial inference. The script checks the exact owned launch UUID before
 every request and stops instead of waiting/retrying if the model is busy. It never
 starts a server, changes a model, or changes settings.
@@ -30,7 +30,10 @@ the repository. Input files must be bounded regular files, not symlinks.
 The JSON template uses normal Responses request fields:
 
 - `model`: `lmstudio-community/Qwen3.5-4B-MLX-4bit`.
-- `instructions`: exact production base instructions beginning `You are HeyDash.`.
+- `instructions`: the frozen historical base instructions beginning
+  `You are HeyDash.` or `You are Macndash.`, exactly as accepted by this retained
+  experiment. Current Computa instructions are not accepted unchanged; renaming
+  the prose does not revise that historical input contract.
 - `input`: only complete policy-bearing `# AGENTS.md instructions for ...`
   user messages, plus production system/developer messages if any. **Remove real
   user questions, assistant responses, tool output, and personal/browser data.**
@@ -74,7 +77,7 @@ negative answer containing bypass instructions.
 ## Interpretation limits
 
 Passing these twelve cases is not a statistical reliability claim. It does not
-prove that installed HeyDash actually emits the candidate instructions, resumes
+prove that installed Computa actually emits the candidate instructions, resumes
 the same thread correctly, retains policy through compaction, or reads a live
 mailbox. Follow with the production native runtime gate and the existing
 `RuntimeAutomaticCompactionPathsLiveTests` architecture, keeping the exact policy

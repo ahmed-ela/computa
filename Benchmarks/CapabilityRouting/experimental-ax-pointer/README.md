@@ -1,6 +1,6 @@
 # Native AX pointer target experiment — UNBUILT / UNPROMOTED
 
-This patch is preserved research work, not shipped HeyDash behavior. It has not
+This patch is preserved research work, not shipped Computa behavior. It has not
 been compiled, tested, benchmarked, or exercised against a real desktop. No
 pointer input was dispatched while authoring it. The runtime/tool integration
 was intentionally not completed or promoted.

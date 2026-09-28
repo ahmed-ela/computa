@@ -1,4 +1,7 @@
-# HeyDash compaction history repair — 2026-09-24
+# Computa compaction history repair — 2026-09-24
+
+Prose uses the current product name, Computa. Historical artifact paths,
+identifiers, quoted records, and measured results retain their original values.
 
 ## Outcome
 
@@ -167,7 +170,7 @@ The two offline helper files pass **33 tests / 123 assertions**.
 
 ### Cold-resume telemetry repair
 
-App Server publishes persisted usage just after the resume response. HeyDash
+App Server publishes persisted usage just after the resume response. Computa
 previously discarded it because no live turn identity existed yet. The runtime
 now registers a bounded buffer before the RPC, then accepts usage only for the
 exact newest completed turn in the acknowledged bounded page. It does not make
@@ -284,7 +287,7 @@ Evidence under `../../outputs/HeyDash-context-robustness-2026-09-24/`:
 The follow-up read-only audit confirmed the running dependency is
 `codex-cli 0.155.0-alpha.9.2`, SHA-256
 `9280c0754e8f1f6b72f495d30c8c82a006dbc4995bf0492916fa0901f6bfd1f9`.
-HeyDash's `Configuration.localQwen` still names the installed ChatGPT executable;
+Computa's `Configuration.localQwen` still names the installed ChatGPT executable;
 neither `project.yml` nor `Package.swift` bundles a separate App Server.
 No local source checkout was found in the bounded temporary/workspace search,
 so a precise Rust patch location has not been established.
@@ -311,7 +314,7 @@ runtime-dependency change remains awaiting user approval.
 
 ### Approved app-owned runtime experiment (subsequent update)
 
-The user approved this dependency change. HeyDash now resolves only its bundled
+The user approved this dependency change. Computa now resolves only its bundled
 standalone App Server, built from upstream tag `rust-v0.155.0-alpha.9.2`, commit
 `4607249e430dac1c961df4dc615beae88e33cec8`, with a reviewable pinned source patch.
 The installed Codex/ChatGPT binary is unchanged; no PATH fallback is permitted.
@@ -427,7 +430,7 @@ whole conversations, not compaction latency or generation-token throughput.
 #### Actual development-app verification and artifacts
 
 The final signed development build was reopened. Process inspection confirmed
-HeyDash launched its own bundled `AgentRuntime/codex-app-server --listen stdio://`.
+Computa launched its own bundled `AgentRuntime/codex-app-server --listen stdio://`.
 Enter sent a fresh Qwen 4B no-tools request and the rendered reply was exactly
 `HEYDASH_OWNED_RUNTIME_OK`. Native accessibility and a screenshot verified the
 context Gauge at **37%, 2,918 / 7,782 tokens** and its explanatory popover. The

@@ -1,5 +1,8 @@
 # LM Studio sampling and capacity audit — 2026-09-24
 
+Prose uses the current product name, Computa. Historical artifact paths,
+identifiers, quoted records, and measured results retain their original values.
+
 Read-only audit; no inference, sampling/default changes, model unload/reload, or process changes were performed. These findings identify controls and confounds, not the cause of a failed canary copy.
 
 ## Exact installed target
@@ -12,7 +15,7 @@ Read-only audit; no inference, sampling/default changes, model unload/reload, or
 
 ## Actual production response settings
 
-All four completed SSE responses in `../outputs/HeyDash-context-replay-2026-09-24/capture/` (relative to the HeyDash repository root) reported:
+All four completed SSE responses in `../outputs/HeyDash-context-replay-2026-09-24/capture/` (relative to the Computa repository root) reported:
 
 ```json
 {"temperature":0.1,"top_p":false,"presence_penalty":0,"frequency_penalty":1.1,"max_output_tokens":null}
