@@ -29,6 +29,26 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         case pendingAction
     }
 
+    /// Bounded host classifications, never page text or a model-authored
+    /// explanation. Persisting these keeps the actionable reason available
+    /// after subsequent reads and compaction without republishing private data.
+    enum PreflightIssue: String, Codable, Sendable {
+        case browserDialogAlreadyOpen
+        case browserPostconditionRequired
+        case browserPostconditionInvalid
+
+        var guidance: String {
+            switch self {
+            case .browserDialogAlreadyOpen:
+                "A dialog already existed before input; dialog_opened cannot verify this request. Inspect its current controls. Correct the same intended action using a supported postcondition, or report it unperformed. No approval or input occurred."
+            case .browserPostconditionRequired:
+                "This browser press requires a supported postcondition before input. Inspect the intended result and correct the same intended action using current references. No approval or input occurred."
+            case .browserPostconditionInvalid:
+                "The declared browser postcondition was not supported by the observed target. Inspect the intended result and correct the same intended action using a supported postcondition, or report it unperformed. No approval or input occurred."
+            }
+        }
+    }
+
     enum PreflightCorrection: Sendable {
         case validatedArguments
         case freshBoundObservation(observationID: String, targetID: String)
@@ -94,6 +114,10 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         let tool: String
         var targetID: String
         let recoveryKey: String?
+        /// Optional host-owned document scope. Native/older receipts may omit
+        /// it, but a scoped browser intent cannot correlate with another
+        /// document merely because backend node IDs happen to be reused.
+        let recoveryScope: String?
         let requiresVerification: Bool
         /// Hashes avoid retaining a second copy of private pre-action content.
         let baselineProperties: [String: String]?
@@ -105,6 +129,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         var verification: Verification?
         var recoveredBy: String?
         var preflightRejection: PreflightRejection?
+        var preflightIssue: PreflightIssue?
         /// Host-classified schema rejection occurred before any application
         /// was bound. Optional for compatibility with earlier saved receipts.
         var preflightTargetWasUnbound: Bool?
@@ -195,10 +220,11 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
 
     mutating func begin(operationID: String, tool: String, targetID: String,
                         recoveryKey: String? = nil, requiresVerification: Bool = true,
-                        baselineProperties: [String: String]? = nil) throws {
+                        baselineProperties: [String: String]? = nil, recoveryScope: String? = nil) throws {
         try Self.identity(turnID)
         for value in [operationID, tool, targetID] { try Self.identity(value) }
         if let recoveryKey { try Self.identity(recoveryKey) }
+        if let recoveryScope { try Self.readScopeIdentity(recoveryScope) }
         guard !operations.contains(where: { $0.id == operationID }) else { throw Failure.duplicateOperation }
         if operations.count == Self.maximumOperations {
             let referenced = Set(operations.compactMap(\.recoveredBy)
@@ -218,7 +244,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
             })
         }
         operations.append(Operation(id: operationID, tool: tool, targetID: targetID,
-                                    recoveryKey: recoveryKey, requiresVerification: requiresVerification,
+                                    recoveryKey: recoveryKey, recoveryScope: recoveryScope, requiresVerification: requiresVerification,
                                     baselineProperties: fingerprints,
                                     observationAfter: try nextSequence()))
     }
@@ -476,7 +502,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
     /// must use recordFailure instead.
     mutating func recordPreflightRejection(operationID: String, kind: PreflightRejection,
                                           code: String, message: String, targetWasUnbound: Bool = false,
-                                          requiredReadScope: String? = nil) throws {
+                                          requiredReadScope: String? = nil, issue: PreflightIssue? = nil) throws {
         try Self.identity(code)
         if let requiredReadScope { try Self.readScopeIdentity(requiredReadScope) }
         let index = try unresolvedIndex(operationID)
@@ -486,8 +512,10 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
               kind != .pendingAction,
               kind != .freshInventoryRequired || !operations[index].requiresVerification,
               !targetWasUnbound || kind == .invalidArguments,
+              issue == nil || kind == .invalidArguments,
               requiredReadScope == nil || kind == .freshObservationRequired else { throw Failure.invalidTransition }
         operations[index].preflightRejection = kind
+        operations[index].preflightIssue = issue
         operations[index].preflightTargetWasUnbound = targetWasUnbound ? true : nil
         operations[index].requiredReadScope = requiredReadScope
         operations[index].failureCode = code
@@ -696,10 +724,15 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         let unresolved = unresolvedOutcomeOperations
         let failures = unresolved.filter { $0.failureCode != nil }.count
         let blocked = unresolvedBlockedInputCount
+        let preflightGuidance = unresolved.compactMap { operation -> String? in
+            guard let issue = operation.preflightIssue else { return nil }
+            return "operation=\(operation.id) issue=\(issue.rawValue): \(issue.guidance)"
+        }.prefix(3)
         return "Computer-use outcome not verified: \(unresolved.count) operation(s) remain unresolved"
             + (failures == 0 ? "." : ", including \(failures) failed operation(s).")
             + (blocked == 0 ? "" : " \(blocked) subsequent input request(s) were blocked before dispatch; they are not additional uncertain actions.")
             + " This attempt does not establish that the requested action completed or that a search found no results."
+            + (preflightGuidance.isEmpty ? "" : " Rejected before input: " + preflightGuidance.joined(separator: " "))
     }
 
     /// A compact, app-authored reminder suitable for compaction. It deliberately
@@ -711,6 +744,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
                 + ($0.foregroundEffect.map { " foreground_effect=\($0.rawValue)" } ?? "")
                 + " status=\($0.failureCode == nil ? "unverified" : "failed")"
                 + ($0.preflightRejection.map { " preflight_rejection=\($0.rawValue)" } ?? "")
+                + ($0.preflightIssue.map { " preflight_issue=\($0.rawValue) correction=\($0.guidance)" } ?? "")
                 + ($0.plannedVerificationProgress.map {
                     " verification=\($0.outcome.rawValue) verification_reads=\($0.attempts)/\(Self.maximumPlannedVerificationAttempts)"
                 } ?? "")
@@ -784,6 +818,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
     }
 
     private static func plansHaveMatchingIntent(failed: Operation, successor: Operation) -> Bool {
+        guard failed.recoveryScope == successor.recoveryScope else { return false }
         if let original = failed.nativeVerificationPlan {
             guard let replacement = successor.nativeVerificationPlan else { return false }
             return original.scope.evidenceTargetID == replacement.scope.evidenceTargetID
@@ -812,6 +847,17 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         switch receipt.kind {
         case .validatedArguments:
             guard rejection != .freshInventoryRequired else { return false }
+            if failed.requiresVerification, failed.recoveryScope != successor.recoveryScope { return false }
+            if rejection == .invalidArguments, failed.requiresVerification {
+                // A successful action on another control does not repair a
+                // rejected intent merely because it used the same tool/tab.
+                // Missing identity (including unbound schema errors) cannot
+                // be inferred from a later action or fresh observation.
+                guard failed.preflightTargetWasUnbound != true,
+                      failed.targetID == successor.targetID,
+                      let key = failed.recoveryKey, key == successor.recoveryKey,
+                      successor.requiresVerification, successor.verification != nil else { return false }
+            }
             if failed.tool != successor.tool {
                 // Two tool names may express the same observed link press.
                 // Only a verified host-owned URL plan can correct the other
@@ -873,6 +919,7 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
               failed.failureCode != nil, let key = failed.recoveryKey,
               key.hasPrefix("focus:"), key.count > "focus:".count,
               successor.tool == "computer_v2_set_text", successor.targetID == failed.targetID,
+              successor.recoveryScope == failed.recoveryScope,
               let verification = successor.verification else { return false }
         return verification.operationID == successor.id
             && verification.property == String(key.dropFirst("focus:".count)) + ":value"
@@ -886,9 +933,13 @@ struct ComputerActionEvidence: Codable, Equatable, Sendable {
         for operation in operations {
             for id in [operation.id, operation.tool, operation.targetID] { try Self.identity(id) }
             if let key = operation.recoveryKey { try Self.identity(key) }
+            if let scope = operation.recoveryScope { try Self.readScopeIdentity(scope) }
             if let scope = operation.requiredReadScope {
                 try Self.readScopeIdentity(scope)
                 guard operation.preflightRejection == .freshObservationRequired else { throw Failure.invalidCheckpoint }
+            }
+            if operation.preflightIssue != nil {
+                guard operation.preflightRejection == .invalidArguments else { throw Failure.invalidCheckpoint }
             }
             if let baseline = operation.baselineProperties {
                 guard baseline.count <= Self.maximumProperties,

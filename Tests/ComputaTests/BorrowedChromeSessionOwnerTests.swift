@@ -9,6 +9,7 @@ final class BorrowedChromeSessionOwnerTests: XCTestCase {
             .disconnected, .invalidApplication, .invalidTurn, .invalidCandidate, .invalidCursor,
             .invalidPageSize, .capacityExceeded, .invalidInventory,
             .runtimeRecoveryInProgress, .runtimeRecoveryFailed,
+            .temporaryTabsConsentRequired, .workspaceAlreadyCreated, .workspaceSourceChanged,
         ]
         for error in errors {
             XCTAssertEqual((error as NSError).localizedDescription, error.errorDescription)
@@ -230,6 +231,63 @@ final class BorrowedChromeSessionOwnerTests: XCTestCase {
         } catch { XCTAssertEqual(error as? BorrowedChromeSessionOwnerError, .invalidCandidate) }
         let counts = await fixture.transport.counts()
         XCTAssertEqual(counts.attaches, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testKnownBusyCandidateNeverAttachesOrReleasesAnotherBinding() async throws {
+        let fixture = try OwnerFixture()
+        let url = try XCTUnwrap(URL(string: "https://example.com/"))
+        await fixture.transport.setCandidates([
+            .init(targetID: "free", title: "Duplicate", url: url, availability: .available),
+            .init(targetID: "busy", title: "Duplicate", url: url, availability: .busy),
+        ])
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        let binding = try await fixture.owner.bind(turn: turn, candidateToken: page.items[0].candidateToken)
+        for _ in 0..<2 {
+            do {
+                _ = try await fixture.owner.bind(turn: turn, candidateToken: page.items[1].candidateToken)
+                XCTFail("Known-busy metadata must not start attachment.")
+            } catch {
+                guard case ChromeBridgeIPC.Failure.targetBusy = error else { return XCTFail("Expected a typed busy rejection: \(error)") }
+            }
+        }
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.attaches, 1)
+        XCTAssertEqual(counts.detaches, 0)
+        XCTAssertEqual(counts.mutations, 0)
+        try binding.lifetime.check()
+        _ = try await fixture.owner.snapshot(turn: turn, binding: binding)
+        await fixture.owner.disconnect()
+    }
+
+    func testBusyCandidateNeedsFreshInventoryBeforeItCanBind() async throws {
+        let fixture = try OwnerFixture()
+        let url = try XCTUnwrap(URL(string: "https://example.com/"))
+        await fixture.transport.setCandidates([
+            .init(targetID: "target", title: "Document", url: url, availability: .busy),
+        ])
+        let turn = try await fixture.turn()
+        let old = try await fixture.owner.listTabs(turn: turn)
+        await fixture.transport.setCandidates([
+            .init(targetID: "target", title: "Document", url: url, availability: .available),
+        ])
+        do {
+            _ = try await fixture.owner.bind(turn: turn, candidateToken: old.items[0].candidateToken)
+            XCTFail("Transport availability alone cannot refresh an old token.")
+        } catch {
+            guard case ChromeBridgeIPC.Failure.targetBusy = error else { return XCTFail("Expected a typed busy rejection: \(error)") }
+        }
+        let beforeRefresh = await fixture.transport.counts()
+        XCTAssertEqual(beforeRefresh.attaches, 0)
+        let fresh = try await fixture.owner.listTabs(turn: turn)
+        do {
+            _ = try await fixture.owner.bind(turn: turn, candidateToken: old.items[0].candidateToken)
+            XCTFail("Old inventory tokens must remain invalid after refresh.")
+        } catch { XCTAssertEqual(error as? BorrowedChromeSessionOwnerError, .invalidCandidate) }
+        _ = try await fixture.owner.bind(turn: turn, candidateToken: fresh.items[0].candidateToken)
+        let afterRefresh = await fixture.transport.counts()
+        XCTAssertEqual(afterRefresh.attaches, 1)
         await fixture.owner.disconnect()
     }
 
@@ -923,6 +981,258 @@ final class BorrowedChromeSessionOwnerTests: XCTestCase {
     }
 }
 
+/// Creation tests use the same inert transport as borrowed-tab lifecycle tests.
+/// No live Chrome instance, focus, profile or installed app is touched.
+final class TemporaryChromeWorkspaceOwnerTests: XCTestCase {
+    func testAdditionalConsentDefaultsOffAndDoesNotBreakBorrowedAccess() async throws {
+        let fixture = try OwnerFixture()
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        await expectOwnerError(.temporaryTabsConsentRequired) {
+            _ = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken)
+        }
+        let binding = try await fixture.owner.bind(turn: turn, candidateToken: page.items[0].candidateToken)
+        _ = try await fixture.owner.snapshot(turn: turn, binding: binding)
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryCreates, 0)
+        XCTAssertEqual(counts.forbidden, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testOlderTransportDoesNotCreateOrAskForPermission() async throws {
+        let fixture = try OwnerFixture(temporaryTabs: true, temporaryTransport: false)
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        do {
+            _ = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken)
+            XCTFail("Expected unsupported transport")
+        } catch { guard case ChromeBridgeIPC.Failure.unsupportedCommand = error else { return XCTFail("\(error)") } }
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryCreates, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testObservedBusySourceCannotBeDuplicatedAsConflictWorkaround() async throws {
+        let fixture = try OwnerFixture(temporaryTabs: true)
+        await fixture.transport.setCandidates([.init(targetID: "busy", title: "Search", url: URL(string: "https://example.com")!, availability: .busy)])
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        do {
+            _ = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken)
+            XCTFail("Expected conflict")
+        } catch { guard case ChromeBridgeIPC.Failure.targetBusy = error else { return XCTFail("\(error)") } }
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryCreates, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testFreshBusyOrChangedURLStopsBeforeCreation() async throws {
+        for busy in [false, true] {
+            let fixture = try OwnerFixture(temporaryTabs: true)
+            let turn = try await fixture.turn()
+            let page = try await fixture.owner.listTabs(turn: turn)
+            await fixture.transport.setCandidates([.init(targetID: "target-0", title: "Changed",
+                url: busy ? ownerCandidate(0).url : URL(string: "https://example.com/other")!, availability: busy ? .busy : .available)])
+            do {
+                _ = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken)
+                XCTFail("Expected changed source")
+            } catch {
+                if busy { guard case ChromeBridgeIPC.Failure.targetBusy = error else { return XCTFail("\(error)") } }
+                else { XCTAssertEqual(error as? BorrowedChromeSessionOwnerError, .workspaceSourceChanged) }
+            }
+            let counts = await fixture.transport.counts()
+            XCTAssertEqual(counts.temporaryCreates, 0)
+            await fixture.owner.disconnect()
+        }
+    }
+
+    func testCreateBindsWithoutActivationAndExactTurnEndClosesOnlyWorkspace() async throws {
+        let fixture = try OwnerFixture(count: 2, temporaryTabs: true)
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        let old = try await fixture.owner.bind(turn: turn, candidateToken: page.items[0].candidateToken)
+        let binding = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[1].candidateToken)
+        XCTAssertNotEqual(binding.targetID, old.targetID)
+        XCTAssertEqual(binding.ownership, .borrowed, "Protocol observation remains borrowed; only receipt authorizes cleanup.")
+        XCTAssertThrowsError(try old.lifetime.check())
+        _ = try await fixture.owner.snapshot(turn: turn, binding: binding)
+        let replay = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[1].candidateToken)
+        XCTAssertEqual(replay.handle, binding.handle)
+        await fixture.owner.revoke(turn: turn)
+        let candidates = try await fixture.transport.listCandidates()
+        XCTAssertEqual(Set(candidates.map(\.targetID)), ["target-0", "target-1"])
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryCreates, 1)
+        XCTAssertEqual(counts.temporaryReleases, 1)
+        XCTAssertEqual(counts.forbidden, 0)
+        XCTAssertEqual(counts.mutations, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testInventoryRefreshDoesNotPermitReplacementOrCrossTurnTokens() async throws {
+        let fixture = try OwnerFixture(count: 2, temporaryTabs: true)
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        let binding = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken)
+        let fresh = try await fixture.owner.listTabs(turn: turn)
+        let replay = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: fresh.items[0].candidateToken)
+        XCTAssertEqual(replay.handle, binding.handle)
+        await expectOwnerError(.workspaceAlreadyCreated) {
+            _ = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: fresh.items[1].candidateToken)
+        }
+        let other = try await fixture.turn("other")
+        await expectOwnerError(.invalidCandidate) {
+            _ = try await fixture.owner.createWorkspace(turn: other, sourceCandidateToken: fresh.items[0].candidateToken)
+        }
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryCreates, 1)
+        await fixture.owner.disconnect()
+    }
+
+    func testFailedCreateOrAttachOrObservationPreservesExistingBindingAndNoRetry() async throws {
+        for phase in ["create", "attach", "observe"] {
+            let fixture = try OwnerFixture(count: 2, temporaryTabs: true)
+            let turn = try await fixture.turn()
+            let page = try await fixture.owner.listTabs(turn: turn)
+            let prior = try await fixture.owner.bind(turn: turn, candidateToken: page.items[0].candidateToken)
+            let fail: @Sendable () async throws -> Void = { throw BrowserTabBrokerError.targetClosed }
+            switch phase {
+            case "create": await fixture.transport.onCreate(fail)
+            case "attach": await fixture.transport.onAttach(fail)
+            default: await fixture.transport.onObserve(fail)
+            }
+            do {
+                _ = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[1].candidateToken)
+                XCTFail("Expected \(phase) failure")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
+            _ = try await fixture.owner.snapshot(turn: turn, binding: prior)
+            await expectOwnerError(.workspaceAlreadyCreated) {
+                _ = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[1].candidateToken)
+            }
+            let candidates = try await fixture.transport.listCandidates()
+            XCTAssertEqual(candidates.map(\.targetID), ["target-0", "target-1"])
+            let counts = await fixture.transport.counts()
+            XCTAssertEqual(counts.temporaryCreates, 1)
+            XCTAssertEqual(counts.temporaryReleases, 1)
+            XCTAssertEqual(counts.forbidden, 0)
+            await fixture.owner.disconnect()
+        }
+    }
+
+    func testRevokedPendingCreateCleansLateExactReceiptAndCannotPublish() async throws {
+        let fixture = try OwnerFixture(temporaryTabs: true)
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        let gate = OwnerInventoryGate()
+        await fixture.transport.onCreate { await gate.pause() }
+        let pending = Task { try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken) }
+        await gate.waitForArrival(1)
+        turn.lifetime.revoke()
+        await fixture.owner.revoke(turn: turn)
+        await gate.resumeAll()
+        do { _ = try await pending.value; XCTFail("Late creation cannot publish") } catch { }
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryCreates, 1)
+        XCTAssertEqual(counts.temporaryReleases, 1)
+        XCTAssertEqual(counts.attaches, 0)
+        let candidates = try await fixture.transport.listCandidates()
+        XCTAssertEqual(candidates.map(\.targetID), ["target-0"])
+        await fixture.owner.disconnect()
+    }
+
+    func testSynchronousTurnRevocationFencesCreationAtActualEnqueue() async throws {
+        let fixture = try OwnerFixture(temporaryTabs: true)
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        let gate = OwnerInventoryGate()
+        await fixture.transport.beforeCreate { await gate.pause() }
+        let pending = Task { try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken) }
+        await gate.waitForArrival(1)
+        // No actor cleanup is needed to prevent this already-queued creation.
+        turn.lifetime.revoke()
+        await gate.resumeAll()
+        do { _ = try await pending.value; XCTFail("Revoked creation cannot enqueue") } catch { }
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryCreates, 0)
+        XCTAssertEqual(counts.temporaryReleases, 0)
+        XCTAssertEqual(counts.attaches, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testCancelledPendingCreateCleansLateReceiptWithoutReplaying() async throws {
+        let fixture = try OwnerFixture(temporaryTabs: true)
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        let gate = OwnerInventoryGate()
+        await fixture.transport.onCreate { await gate.pause() }
+        let pending = Task { try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken) }
+        await gate.waitForArrival(1)
+        pending.cancel()
+        await gate.resumeAll()
+        do { _ = try await pending.value; XCTFail("Cancelled creation cannot publish") } catch { }
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryCreates, 1)
+        XCTAssertEqual(counts.temporaryReleases, 1)
+        XCTAssertEqual(counts.attaches, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testRevocationDuringAttachCleansWorkspaceOnce() async throws {
+        let fixture = try OwnerFixture(temporaryTabs: true)
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        let gate = OwnerInventoryGate()
+        await fixture.transport.onAttach { await gate.pause() }
+        let pending = Task { try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken) }
+        await gate.waitForArrival(1)
+        await fixture.owner.revoke(turn: turn)
+        await gate.resumeAll()
+        do { _ = try await pending.value; XCTFail("Revoked attachment cannot publish") } catch { }
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryCreates, 1)
+        XCTAssertEqual(counts.temporaryReleases, 1)
+        XCTAssertEqual(counts.forbidden, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testRuntimeRecoveryClosesOnlyExactWorkspaceAndFencesOldInput() async throws {
+        let fixture = try OwnerFixture(temporaryTabs: true)
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        let binding = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken)
+        let token = try fixture.owner.suspendForRuntimeRecovery()
+        XCTAssertThrowsError(try binding.lifetime.check())
+        try await fixture.owner.quiesceForRuntimeRecovery(token, drainHostWork: {})
+        try await fixture.owner.resumeAfterRuntimeRecovery(token)
+        let fresh = try await fixture.turn("fresh")
+        let inventory = try await fixture.owner.listTabs(turn: fresh)
+        XCTAssertEqual(inventory.totalCount, 1)
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryReleases, 1)
+        XCTAssertEqual(counts.forbidden, 0)
+        await fixture.owner.disconnect()
+    }
+
+    func testAdoptedWorkspaceIsRetainedAndCannotBeRecreated() async throws {
+        let fixture = try OwnerFixture(temporaryTabs: true)
+        let turn = try await fixture.turn()
+        let page = try await fixture.owner.listTabs(turn: turn)
+        let binding = try await fixture.owner.createWorkspace(turn: turn, sourceCandidateToken: page.items[0].candidateToken)
+        await fixture.transport.adoptTemporary(targetID: binding.targetID)
+        do { _ = try await fixture.owner.snapshot(turn: turn, binding: binding); XCTFail("Adoption revokes attachment") } catch { }
+        await fixture.owner.revoke(turn: turn)
+        let counts = await fixture.transport.counts()
+        XCTAssertEqual(counts.temporaryReleases, 0)
+        XCTAssertEqual(counts.forbidden, 0)
+        let issues = await fixture.owner.temporaryCleanupIssues()
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertTrue(issues[0].contains("retained"))
+        let remaining = try await fixture.transport.listCandidates()
+        XCTAssertTrue(remaining.contains(where: { $0.targetID == binding.targetID }))
+        await fixture.owner.disconnect()
+    }
+}
+
 private actor OwnerInventoryGate {
     private var arrivalCount = 0
     private var suspended = [CheckedContinuation<Void, Never>]()
@@ -960,10 +1270,13 @@ private func ownerCandidate(_ index: Int, title: String = "Identical visible tab
 private struct OwnerFixture: Sendable {
     let owner: BorrowedChromeSessionOwner
     let transport: OwnerTestTransport
-    let consent = ChromeDebuggingConsent(approvedByUser: true)
+    let consent: ChromeDebuggingConsent
 
-    init(count: Int = 1, title: String = "Identical visible tab") throws {
-        transport = OwnerTestTransport(candidates: (0..<count).map { ownerCandidate($0, title: title) })
+    init(count: Int = 1, title: String = "Identical visible tab", temporaryTabs: Bool = false,
+         temporaryTransport: Bool = true) throws {
+        consent = ChromeDebuggingConsent(approvedByUser: true, allowsTemporaryTabs: temporaryTabs)
+        transport = OwnerTestTransport(candidates: (0..<count).map { ownerCandidate($0, title: title) },
+                                       temporaryTabs: temporaryTransport)
         owner = try BorrowedChromeSessionOwner(
             application: ownerTestApplication, transport: transport, consent: consent, verifyIdentity: {}
         )
@@ -988,6 +1301,8 @@ private actor OwnerTestTransport: BorrowedChromeSessionTransport {
         let shutdowns: Int
         let forbidden: Int
         let mutations: Int
+        let temporaryCreates: Int
+        let temporaryReleases: Int
     }
 
     nonisolated let generation = UUID()
@@ -998,20 +1313,65 @@ private actor OwnerTestTransport: BorrowedChromeSessionTransport {
     private var attachHook: (@Sendable () async throws -> Void)?
     private var observeHook: (@Sendable () async throws -> Void)?
     private var listHook: (@Sendable () async throws -> Void)?
+    private var createHook: (@Sendable () async throws -> Void)?
+    private var beforeCreateHook: (@Sendable () async throws -> Void)?
+    private let temporaryTabs: Bool
+    private var receipts = [UUID: TemporaryChromeTabReceipt]()
+    private var adoptedTargets = Set<String>()
+    private var createCount = 0, releaseCount = 0
     private(set) var detached = [BrowserTarget]()
     private(set) var text = ""
 
-    init(candidates: [BorrowedChromeTabCandidate] = [ownerCandidate(0)]) { self.candidates = candidates }
+    init(candidates: [BorrowedChromeTabCandidate] = [ownerCandidate(0)], temporaryTabs: Bool = true) {
+        self.candidates = candidates; self.temporaryTabs = temporaryTabs
+    }
     func setCandidates(_ candidates: [BorrowedChromeTabCandidate]) { self.candidates = candidates }
     func onAttach(_ hook: @escaping @Sendable () async throws -> Void) { attachHook = hook }
     func onObserve(_ hook: @escaping @Sendable () async throws -> Void) { observeHook = hook }
     func onList(_ hook: @escaping @Sendable () async throws -> Void) { listHook = hook }
+    func onCreate(_ hook: @escaping @Sendable () async throws -> Void) { createHook = hook }
+    func beforeCreate(_ hook: @escaping @Sendable () async throws -> Void) { beforeCreateHook = hook }
+    func adoptTemporary(targetID: String) {
+        adoptedTargets.insert(targetID)
+        targets.removeValue(forKey: targetID)
+    }
     func breakConnection() { closed = true }
     func failNextDetach() { detachFailure = true }
 
     func counts() -> Counts {
         Counts(lists: listCount, attaches: attachCount, detaches: detached.count,
-               shutdowns: shutdownCount, forbidden: forbiddenCount, mutations: mutationCount)
+               shutdowns: shutdownCount, forbidden: forbiddenCount, mutations: mutationCount,
+               temporaryCreates: createCount, temporaryReleases: releaseCount)
+    }
+
+    func supportsTemporaryTabs() -> Bool { temporaryTabs }
+    func createTemporary(sourceTargetID: String, expectedSourceURL: URL,
+                         taskNonce: UUID, permit: BrowserMutationPermit) async throws -> TemporaryChromeTabReceipt {
+        guard temporaryTabs else { throw ChromeBridgeIPC.Failure.unsupportedCommand }
+        guard candidates.contains(where: { $0.targetID == sourceTargetID && $0.url == expectedSourceURL }) else {
+            throw BorrowedChromeSessionOwnerError.workspaceSourceChanged
+        }
+        let before = beforeCreateHook; beforeCreateHook = nil
+        try await before?()
+        try permit.commit { createCount += 1 }
+        let candidate = BorrowedChromeTabCandidate(targetID: "temporary-\(UUID().uuidString)", title: "Temporary",
+                                                    url: expectedSourceURL, availability: .available)
+        let receipt = TemporaryChromeTabReceipt(leaseToken: UUID(), taskNonce: taskNonce, candidate: candidate)
+        candidates.append(candidate)
+        receipts[receipt.leaseToken] = receipt
+        let hook = createHook; createHook = nil
+        do { try await hook?() }
+        catch { try await releaseTemporary(receipt); throw error }
+        return receipt
+    }
+    @discardableResult func releaseTemporary(_ receipt: TemporaryChromeTabReceipt) async throws -> TemporaryChromeTabRelease {
+        guard receipts[receipt.leaseToken] == receipt else { return .alreadyReleased }
+        receipts.removeValue(forKey: receipt.leaseToken)
+        if adoptedTargets.contains(receipt.candidate.targetID) { return .retained }
+        releaseCount += 1
+        candidates.removeAll { $0.targetID == receipt.candidate.targetID }
+        targets.removeValue(forKey: receipt.candidate.targetID)
+        return .closed
     }
 
     func validateConnection() throws {
@@ -1074,6 +1434,7 @@ private actor OwnerTestTransport: BorrowedChromeSessionTransport {
 
     func detach(target: BrowserTarget) throws {
         try validateConnection()
+        if adoptedTargets.contains(target.targetID) { return }
         guard targets[target.targetID]?.attachedSession == target.attachedSession else {
             throw BrowserTabBrokerError.targetReplaced
         }

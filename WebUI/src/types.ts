@@ -93,6 +93,7 @@ export interface AppSnapshot {
   modelOptions: ModelOption[];
   showToolPayloads: boolean;
   isInspectorPresented: boolean;
+  isBrowserPresented: boolean;
   isSettingsPresented: boolean;
 }
 
@@ -111,6 +112,7 @@ export type NativeAction =
   | { action: 'steerQueuedPrompt'; taskID: string; id: string }
   | { action: 'resumeQueue'; taskID: string }
   | { action: 'toggleInspector' }
+  | { action: 'toggleBrowser' }
   | { action: 'showSettings' }
   | { action: 'dismissSettings' }
   | { action: 'setAppearance'; value: 'system' | 'light' | 'dark' }

@@ -44,7 +44,9 @@ final class NativeFailureRuntimeTests: XCTestCase {
     }
 
     func testFailedInterruptKeepsTurnBusyAndToolBlocked() async throws {
-        try await withHarness { runtime, root, audit in
+        try await withHarness(expectedShutdownIssues: [
+            "Background command termination unconfirmed: Synthetic interrupt failed"
+        ]) { runtime, root, audit in
             try Data("yes".utf8).write(to: root.appendingPathComponent("interrupt-fails"))
             try await runtime.submit(prompt: "Synthetic activation failure", toTaskID: "native-failure-task", modelID: self.modelID)
             try await self.waitFor { audit.stopFailed }
@@ -115,7 +117,8 @@ final class NativeFailureRuntimeTests: XCTestCase {
         }
     }
 
-    private func withHarness(chromeRecoveryFailure: Bool = false, _ body: (CodexAppServerRuntime, URL, Audit) async throws -> Void) async throws {
+    private func withHarness(chromeRecoveryFailure: Bool = false, expectedShutdownIssues: [String] = [],
+                             _ body: (CodexAppServerRuntime, URL, Audit) async throws -> Void) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaNativeFailure-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -138,7 +141,10 @@ final class NativeFailureRuntimeTests: XCTestCase {
             try await body(runtime, root, audit)
             let report = await runtime.shutdown()
             events.cancel()
-            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            // A fixture which deliberately refuses interruption must not be
+            // reported as successful cleanup. All other cleanup stays strict.
+            XCTAssertEqual(report.issues, expectedShutdownIssues)
+            XCTAssertEqual(report.succeeded, expectedShutdownIssues.isEmpty)
         } catch {
             _ = await runtime.shutdown()
             events.cancel()

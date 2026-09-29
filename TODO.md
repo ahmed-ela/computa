@@ -1,5 +1,49 @@
 # Computa TODO and validation
 
+## Embedded browser: human pane first
+
+The initial browser delivery is the human-operated right pane: toggle/resize,
+new/select/close tabs, address navigation, history/reload/stop and an independent
+Computa-owned website-data profile. Hiding the pane preserves tabs; open tabs
+are not restored after quitting. See [usage](README.md#native-browser-pane) and
+[implementation](docs/EMBEDDED-BROWSER.md).
+
+### Embedded-browser agent control (deferred)
+
+- [ ] Design bounded isolated reading and action transport without granting
+  synthetic user activation or access to the privileged chat bridge.
+- [ ] Protect human focus/selection and qualify delayed callbacks during real
+  concurrent human use; component-level checks alone are insufficient.
+- [ ] Give temporary task tabs explicit ownership, capacity limits, navigation
+  receipts, cancellation and cleanup. Never replace or close human-owned tabs.
+- [ ] Qualify approved one-dispatch actions with bounded read-only verification,
+  stale references, uncertain outcomes, lost acknowledgements and compaction.
+- [ ] Benchmark isolated Qwen tasks for evidence-supported completion, latency
+  and memory before enabling tools. Obtain approval before account access or
+  interrupting the installed app; validate public pages and accounts separately.
+- [ ] Only after qualification, enable selected typed tools and document their
+  limits. This pane does not establish that the research-thread lookup works.
+
+Deferred agent prototypes are not part of this release. Existing Chrome and
+native desktop tooling retain their separate behavior.
+
+## Preserved runtime fixes — 29 September 2026
+
+This update also publishes previously local MLX stream-boundary and Chrome
+recovery fixes so installing the pane does not revert the existing app.
+The Responses producer and terminal message now use the same emitted channels;
+malformed or incomplete tool spans fail closed. Browser preflight failures
+retain typed guidance and document-scoped recovery identity. Compaction keeps
+valid bounded tab records instead of truncating structured inventory mid-record.
+Busy tabs do not advertise usable binding authority. Temporary Chrome task tabs
+retain their separately approved, versioned native grant and exact ownership.
+
+These changes do not establish general lookup success: Qwen has still stopped
+after shallow inventory inspection on the research-thread task. Keep content
+evidence, completion/persistence work and broader concurrency qualification as
+follow-ups. Experimental Goal UI and embedded-browser agent adapters are not
+included. See [release validation](docs/BROWSER-PANE-RELEASE-2026-09-29.md).
+
 ## Rename checkpoint — 28 September 2026
 
 The product and repository are now **Computa**:

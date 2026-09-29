@@ -8,12 +8,28 @@ struct WebWorkspaceView: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .center) {
-                CodexWebView(
-                    state: state,
-                    snapshot: WebUISnapshot(state: state)
-                )
+                HSplitView {
+                    CodexWebView(
+                        state: state,
+                        snapshot: WebUISnapshot(state: state)
+                    )
+                    .frame(minWidth: 600, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+
+                    // External pages are sibling views, never children of the
+                    // privileged Octane document or its script-message bridge.
+                    // Hiding the pane preserves the session and every tab.
+                    if state.shouldPresentBrowserPane {
+                        EmbeddedBrowserPane(
+                            session: state.browserSession,
+                            isInteractionBlocked: state.approvalGateBlocksInteraction,
+                            onClose: { state.isBrowserPresented = false }
+                        )
+                        .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
                 .allowsHitTesting(!state.approvalGateBlocksInteraction)
                 .accessibilityHidden(state.approvalGateBlocksInteraction)
+                .disabled(state.approvalGateBlocksInteraction)
 
                 // The web surface stays inert through approval settlement.
                 // The separate native mode menu remains a human-controlled way

@@ -12,6 +12,7 @@ struct ChromeExtensionHello: Decodable, Sendable, Equatable {
     let suspended: Bool
     let pairingToken: String?
     let pairingNonce: String?
+    var capabilities: [String: Int]? = nil
 
     var valid: Bool {
         version == 1 && ["hello", "pairRequested"].contains(event)
@@ -84,7 +85,7 @@ actor ExtensionChromeLink {
     }
 
     func request(operation: String, params: Data = Data("{}".utf8), generation: String,
-                 permit: BrowserMutationPermit? = nil) async throws -> Data {
+                 permit: BrowserMutationPermit? = nil, consent: ChromeDebuggingConsent? = nil) async throws -> Data {
         try check()
         try Task.checkCancellation()
         guard pending.count < 32,
@@ -108,8 +109,12 @@ actor ExtensionChromeLink {
                 do {
                     try Task.checkCancellation()
                     let send = { writeAttempted = true; try self.socket.send(data) }
-                    if let permit { try permit.commit(send) }
-                    else { try send() }
+                    let submit = {
+                        if let permit { try permit.commit(send) }
+                        else { try send() }
+                    }
+                    if let consent { try consent.withApproval(submit) }
+                    else { try submit() }
                 } catch {
                     pending.removeValue(forKey: requestID)?.2.cancel()
                     continuation.resume(throwing: error)
@@ -172,6 +177,9 @@ actor ExtensionChromeLink {
         case "target_busy": .targetBusy
         case "target_unavailable": .targetUnavailable
         case "unsupported_command": .unsupportedCommand
+        case "temporary_tabs_not_authorized": .temporaryTabsNotAuthorized
+        case "stale_temporary_lease", "temporary_task_already_used": .temporaryTabUnavailable
+        case "invalid_temporary_receipt": .invalidFrame
         default: .rejected
         }
     }

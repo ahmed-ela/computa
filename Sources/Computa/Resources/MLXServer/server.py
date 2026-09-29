@@ -14,6 +14,7 @@ import time
 import uuid
 
 from response_boundary import ResponseBoundary, is_protocol_error
+from producer_stream import producer_scope, install_producer_adapter
 
 MODEL_IDS = (
     "lmstudio-community/Qwen3.5-4B-MLX-4bit",
@@ -199,14 +200,15 @@ class LocalInferenceBoundary:
                     return {"type": "http.request", "body": bytes(body), "more_body": False}
                 return await receive()
 
-            response = ResponseBoundary(send, request.get("max_output_tokens", 4096))
-            try:
-                await self.app(scope, replay_receive, response)
-                await response.finish()
-            except Exception as error:
-                if not is_protocol_error(error):
-                    raise
-                await response.fail(error)
+            with producer_scope() as producer:
+                response = ResponseBoundary(send, request.get("max_output_tokens", 4096), producer)
+                try:
+                    await self.app(scope, replay_receive, response)
+                    await response.finish()
+                except Exception as error:
+                    if not is_protocol_error(error):
+                        raise
+                    await response.fail(error)
         finally:
             self.busy = False
 
@@ -246,6 +248,8 @@ def main():
     mx.set_cache_limit(256 * 1024 * 1024)
     mx.set_memory_limit(10 * 1024 * 1024 * 1024)
     from mlx_vlm.server import app
+    from mlx_vlm.server import openai
+    install_producer_adapter(openai)
     import uvicorn
 
     def memory():

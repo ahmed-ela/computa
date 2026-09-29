@@ -100,6 +100,40 @@ class RequestTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_child_stream_fault_is_typed_and_scope_clears_before_next_request(self):
+        from producer_stream import _current
+        from sse_contract import ProtocolError
+        captures = []
+        async def upstream(scope, receive, send):
+            await receive()
+            async def child():
+                capture = _current.get()
+                self.assertIsNotNone(capture)
+                captures.append(capture)
+                capture.append(capture.raw, "synthetic private source")
+                capture.fail("Malformed generated tool call")
+            # StreamingResponse may run its iterator in an ASGI child task.
+            # Like pinned upstream, catch the producer error into a raw frame.
+            try:
+                await asyncio.create_task(child())
+            except ProtocolError:
+                pass
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"text/event-stream")]})
+            await send({"type": "http.response.body", "body": b'data: {"error":"private"}\n\n'})
+        self.boundary.app = upstream
+        for _ in range(2):
+            out = await self.invoke()
+            final = json.loads(out[-1]["body"].split(b"data: ")[1])
+            self.assertEqual(final["type"], "response.failed")
+            self.assertEqual(final["response"]["output"], [])
+            self.assertIn("reason=malformed_generated_tool_call", final["response"]["error"]["message"])
+            self.assertNotIn("private", json.dumps(final))
+            self.assertFalse(self.boundary.busy)
+            self.assertIsNone(_current.get())
+        self.assertIsNot(captures[0], captures[1])
+        self.assertTrue(all(not c.raw and c.fault is None for c in captures))
+
     async def test_protocol_group_reaches_terminal_diagnostic_and_releases_busy_state(self):
         from sse_contract import ProtocolError
         async def malformed(scope, receive, send):

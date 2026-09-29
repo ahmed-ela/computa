@@ -10,6 +10,56 @@ import XCTest
 final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
     private let modelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
 
+    func testTemporaryWorkspaceRunsThroughProductionCoreAndCleansUpOnlyItsReceipt() async throws {
+        for mode in ["temporary-workspace-allowed", "temporary-workspace-compaction"] {
+        try await withHarness(mode: mode) { runtime, root, audit, connector in
+            let request = self.request(temporaryTabs: true)
+            try await runtime.connectChrome(request)
+            try await runtime.submit(prompt: "Use background Chrome tools only. Inspect the document without replacing existing tabs.",
+                                     toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed }
+            let entry = try await connector.entry(request.id)
+            try await self.waitForAsync { await entry.transport.temporaryCounts().released == 1 }
+            let counts = await entry.transport.counts()
+            let temporary = await entry.transport.temporaryCounts()
+            XCTAssertEqual(temporary.created, 1)
+            XCTAssertEqual(temporary.released, 1)
+            XCTAssertEqual(counts.attachIDs, ["temporary-target"])
+            XCTAssertEqual(counts.forbidden, 0)
+            XCTAssertEqual(audit.approvals, 1)
+            if mode == "temporary-workspace-compaction" {
+                XCTAssertTrue(audit.compactions.contains(.completed))
+            }
+            let rows = try self.results(root)
+            XCTAssertEqual(rows.count, 3)
+            XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+            let specs = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("specs.json"))) as? [[String: Any]]
+            XCTAssertTrue(specs?.contains { $0["name"] as? String == "computer_v2_create_workspace" } == true)
+        }
+        }
+    }
+
+    func testOldChromeGrantRejectsWorkspaceEvenIfModelInventsTheTool() async throws {
+        try await withHarness(mode: "temporary-workspace-denied") { runtime, root, audit, connector in
+            let request = self.request()
+            try await runtime.connectChrome(request)
+            try await runtime.submit(prompt: "Inspect existing browser metadata only", toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor {
+                guard FileManager.default.fileExists(atPath: root.appendingPathComponent("results.json").path) else { return false }
+                return (try? self.results(root).count) == 2
+            }
+            let entry = try await connector.entry(request.id)
+            let temporary = await entry.transport.temporaryCounts()
+            XCTAssertEqual(temporary.created, 0)
+            XCTAssertEqual(temporary.released, 0)
+            XCTAssertEqual(audit.approvals, 0)
+            let rows = try self.results(root)
+            XCTAssertEqual(rows.last?["success"] as? Bool, false)
+            let specs = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("specs.json"))) as? [[String: Any]]
+            XCTAssertFalse(specs?.contains { $0["name"] as? String == "computer_v2_create_workspace" } == true)
+        }
+    }
+
     /// Real model and bundled App Server; only browser state is simulated.
     /// This measures use of the runtime's verification contract, not live
     /// Chrome/Gmail behavior, native input or desktop noninterference.
@@ -956,6 +1006,35 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         try await runAutomaticVerification(mode: "runtime-verify-no-plan", observedValues: [])
     }
 
+    func testExistingDialogPreflightKeepsSpecificReasonWithoutApprovalOrInput() async throws {
+        try await withHarness(mode: "runtime-verify-dialog-already-open") { runtime, root, audit, connector in
+            let request = self.request()
+            try await runtime.connectChrome(request)
+            let entry = try await connector.entry(request.id)
+            await entry.transport.useExistingDialog()
+            try await runtime.submit(prompt: "Inspect the inert page; only perform a verifiable action.",
+                                     toTaskID: "task", modelID: self.modelID)
+            try await self.waitFor { audit.status == .waiting || audit.status == .completed }
+            let rows = try self.results(root)
+            XCTAssertEqual(rows.count, 4)
+            let output = try XCTUnwrap(rows.last?["text"] as? String)
+            XCTAssertEqual(rows.last?["success"] as? Bool, false)
+            XCTAssertTrue(output.contains("preflight_issue=browserDialogAlreadyOpen"))
+            XCTAssertTrue(output.contains(ComputerActionEvidence.PreflightIssue.browserDialogAlreadyOpen.guidance))
+            XCTAssertTrue(output.contains("dispatch=not_dispatched"))
+            XCTAssertFalse(output.contains("For a same-page dialog use dialog_opened"))
+            let counts = await entry.transport.counts()
+            XCTAssertEqual(counts.presses, 0)
+            XCTAssertEqual(counts.text, "")
+            XCTAssertEqual(counts.forbidden, 0)
+            XCTAssertEqual(audit.approvals, 0)
+            XCTAssertEqual(audit.status, .waiting)
+            XCTAssertFalse(audit.entries.contains { $0.body.contains("FALSE_SUCCESS_MUST_NOT_APPEAR") })
+            XCTAssertTrue(audit.entries.contains { $0.title == "Outcome not verified"
+                && $0.body.contains("browserDialogAlreadyOpen") })
+        }
+    }
+
     func testRuntimeVerificationSurvivesCompactionLifecycleBetweenDispatchAndObservation() async throws {
         try await runAutomaticVerification(mode: "runtime-verify-compaction", observedValues: ["1"], injectCompaction: true)
     }
@@ -1661,12 +1740,12 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         func shutdown() async -> [String] { [] }
     }
 
-    private func request() -> ChromeConnectionRequest {
+    private func request(temporaryTabs: Bool = false) -> ChromeConnectionRequest {
         ChromeConnectionRequest(
             application: .init(processIdentifier: 4242, bundleIdentifier: "com.google.Chrome",
                                executableURL: URL(fileURLWithPath: "/fixture/Google Chrome")),
             userDataDirectory: URL(fileURLWithPath: "/fixture/private-profile"),
-            consent: ChromeDebuggingConsent(approvedByUser: true)
+            consent: ChromeDebuggingConsent(approvedByUser: true, allowsTemporaryTabs: temporaryTabs)
         )
     }
 
@@ -1890,7 +1969,28 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
     private var longDocument = false
     private var navigationLink = false
     private var referenceHierarchy = false
+    private var existingDialog = false
     private var searchNavigation: String?
+    private var temporaryReceipt: TemporaryChromeTabReceipt?
+    private var temporaryCreated = 0, temporaryReleased = 0
+    func temporaryCounts() -> (created: Int, released: Int) { (temporaryCreated, temporaryReleased) }
+    func supportsTemporaryTabs() -> Bool { true }
+    func createTemporary(sourceTargetID: String, expectedSourceURL: URL, taskNonce: UUID,
+                         permit: BrowserMutationPermit) throws -> TemporaryChromeTabReceipt {
+        try validateConnection()
+        guard consent.allowsTemporaryTabs, sourceTargetID == "target-0", expectedSourceURL == url,
+              temporaryReceipt == nil else { throw ChromeBridgeIPC.Failure.rejected }
+        let receipt = TemporaryChromeTabReceipt(leaseToken: UUID(), taskNonce: taskNonce,
+            candidate: .init(targetID: "temporary-target", title: "Temporary fixture", url: url, availability: .available))
+        try permit.commit { temporaryReceipt = receipt; temporaryCreated += 1 }
+        return receipt
+    }
+    func releaseTemporary(_ receipt: TemporaryChromeTabReceipt) throws -> TemporaryChromeTabRelease {
+        guard temporaryReceipt == receipt else { return .alreadyReleased }
+        temporaryReceipt = nil
+        temporaryReleased += 1
+        return .closed
+    }
     init(consent: ChromeDebuggingConsent, url: URL = URL(string: "https://example.com/inert")!, candidateTitle: String = "Identical fixture tabs", textRole: String = "textbox") {
         self.consent = consent
         self.url = url
@@ -1913,6 +2013,7 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
     func useLongDocument() { longDocument = true }
     func useNavigationLink() { navigationLink = true }
     func useReferenceHierarchy() { referenceHierarchy = true }
+    func useExistingDialog() { existingDialog = true; referenceHierarchy = true }
     func useSearchNavigation(_ variant: String) {
         searchNavigation = variant
         url = URL(string: "https://example.com/search")!
@@ -1928,7 +2029,7 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
     func navigateOnNextAttach(to url: URL) { nextAttachURL = url }
     func attach(targetID: String) throws -> BrowserTarget {
         try validateConnection()
-        guard ["target-0", "target-1"].contains(targetID) else { throw BrowserTabBrokerError.targetClosed }
+        guard ["target-0", "target-1"].contains(targetID) || temporaryReceipt?.candidate.targetID == targetID else { throw BrowserTabBrokerError.targetClosed }
         if let existing = targets[targetID] { return existing }
         if let nextAttachURL {
             url = nextAttachURL
@@ -1975,6 +2076,10 @@ private actor BorrowedRuntimeTransport: BorrowedChromeSessionTransport {
                       name: "Synthetic fixture paragraph \(index). " + String(repeating: "Read-only bounded pagination content. ", count: 4),
                       value: nil, isDisabled: false, isReadOnly: true, isIgnored: false)
             }
+        }
+        if existingDialog {
+            nodes.append(.init(backendNodeID: 8, role: "dialog", name: "Existing panel", value: nil,
+                               isDisabled: false, isReadOnly: true, isIgnored: false))
         }
         if referenceHierarchy {
             nodes = nodes.map { node in

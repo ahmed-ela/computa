@@ -10,6 +10,37 @@ protocol BorrowedChromeSessionTransport: BrowserTabTransport {
     func attach(targetID: String) async throws -> BrowserTarget
     func detach(target: BrowserTarget) async throws
     func shutdown() async
+    func supportsTemporaryTabs() async throws -> Bool
+    func createTemporary(sourceTargetID: String, expectedSourceURL: URL, taskNonce: UUID,
+                         permit: BrowserMutationPermit) async throws -> TemporaryChromeTabReceipt
+    @discardableResult func releaseTemporary(_ receipt: TemporaryChromeTabReceipt) async throws -> TemporaryChromeTabRelease
+}
+
+extension BorrowedChromeSessionTransport {
+    func supportsTemporaryTabs() async throws -> Bool { false }
+    func createTemporary(sourceTargetID: String, expectedSourceURL: URL, taskNonce: UUID,
+                         permit: BrowserMutationPermit) async throws -> TemporaryChromeTabReceipt {
+        throw ChromeBridgeIPC.Failure.unsupportedCommand
+    }
+    @discardableResult func releaseTemporary(_ receipt: TemporaryChromeTabReceipt) async throws -> TemporaryChromeTabRelease {
+        throw ChromeBridgeIPC.Failure.unsupportedCommand
+    }
+}
+
+/// Created by the authenticated extension, never by model-supplied tab IDs,
+/// URLs or titles. This is the only authority for closing a task-created tab.
+struct TemporaryChromeTabReceipt: Equatable, Sendable {
+    let leaseToken: UUID
+    let taskNonce: UUID
+    let candidate: BorrowedChromeTabCandidate
+}
+
+enum TemporaryChromeTabRelease: Equatable, Sendable {
+    case closed
+    case retained
+    /// The local receipt was already surrendered. This is not a fresh claim
+    /// that Chrome closed the tab (it may have retained an adopted surface).
+    case alreadyReleased
 }
 
 extension BorrowedChromeDevToolsTransport: BorrowedChromeSessionTransport { }
@@ -104,6 +135,9 @@ enum BorrowedChromeSessionOwnerError: Error, LocalizedError, Equatable {
     case invalidInventory
     case runtimeRecoveryInProgress
     case runtimeRecoveryFailed
+    case temporaryTabsConsentRequired
+    case workspaceAlreadyCreated
+    case workspaceSourceChanged
 
     var errorDescription: String? {
         switch self {
@@ -127,6 +161,12 @@ enum BorrowedChromeSessionOwnerError: Error, LocalizedError, Equatable {
             return "The browser runtime is recovering. Wait for recovery to complete before requesting a fresh tab inventory; do not replay input."
         case .runtimeRecoveryFailed:
             return "The browser runtime could not recover safely. Restore the authorized Chrome connection before requesting a fresh tab inventory; do not replay input."
+        case .temporaryTabsConsentRequired:
+            return "Creating task-owned background tabs requires the native Temporary tabs authorization. Existing-tab access remains available; the model cannot enable this permission."
+        case .workspaceAlreadyCreated:
+            return "This task already created its temporary workspace. Reuse it; another tab was not created. If it was adopted or lost, report that limitation without creating replacements."
+        case .workspaceSourceChanged:
+            return "The source tab changed since the inventory. Refresh computer_v2_tabs before selecting a source; no temporary tab was created."
         }
     }
 }
@@ -193,8 +233,8 @@ private final class BorrowedChromeAdmission: @unchecked Sendable {
     }
 }
 
-/// Owns a connection and its attached protocol sessions, NEVER the browser,
-/// process, profile, window or user tabs. There is no activate/close API here.
+/// Owns a connection and its attached sessions, never user tabs or the browser.
+/// Separately granted temporary tabs carry exact extension-owned receipts.
 actor BorrowedChromeSessionOwner {
     private struct InventoryEntry {
         let token: UUID
@@ -214,9 +254,17 @@ actor BorrowedChromeSessionOwner {
         let id: UUID
         let turnNonce: UUID
         let lifetime: BrowserTabLifetime
+        let broker: BrowserTabSessionBroker
         var target: BrowserTarget?
         var binding: BrowserTabBinding?
         var releaseTask: Task<Void, Error>?
+    }
+
+    private struct Workspace {
+        let source: BorrowedChromeTabCandidate
+        let nonce: UUID
+        var receipt: TemporaryChromeTabReceipt?
+        var binding: BrowserTabBinding?
     }
 
     nonisolated let application: BorrowedChromeApplicationIdentity
@@ -231,6 +279,9 @@ actor BorrowedChromeSessionOwner {
     private var inventories = [UUID: Inventory]()
     private var reservations = [String: Reservation]()
     private var operations = [UUID: UUID]()
+    private var workspaces = [UUID: Workspace]()
+    private var temporaryReleases = [UUID: Task<Void, Never>]()
+    private var temporaryCleanupNotices = Set<String>()
     private var closed = false
     private var shutdownTask: Task<Void, Never>?
     private var recoveryToken: UUID?
@@ -238,6 +289,16 @@ actor BorrowedChromeSessionOwner {
     private var recoveryWaiter: CheckedContinuation<Void, Error>?
     private var recoveryWork: Task<Void, Never>?
     private var recoveryDeadline: Task<Void, Never>?
+
+    nonisolated var hasTemporaryTabsConsent: Bool { consent.allowsTemporaryTabs }
+
+    func supportsTemporaryTabs() async throws -> Bool {
+        try checkOwner()
+        guard consent.allowsTemporaryTabs else { return false }
+        return try await transport.supportsTemporaryTabs()
+    }
+
+    func temporaryCleanupIssues() -> [String] { temporaryCleanupNotices.sorted() }
 
     /// Internal dependency seam. Real callers use connect(), which captures the
     /// exact PID/launch/listener/file authority rather than trusting this label.
@@ -271,7 +332,18 @@ actor BorrowedChromeSessionOwner {
         for reservation in reservations.values { reservation.lifetime.revoke() }
         if shutdownTask == nil {
             let broker = broker, transport = transport
-            Task { await broker.invalidateAll(); await transport.shutdown() }
+            let extraBrokers = reservations.values.map(\.broker)
+            let receipts = workspaces.values.compactMap(\.receipt)
+            let cleanupTasks = temporaryReleases
+            Task {
+                await broker.invalidateAll()
+                for other in extraBrokers { await other.invalidateAll() }
+                for receipt in receipts {
+                    if let cleanup = cleanupTasks[receipt.leaseToken] { await cleanup.value }
+                    else { _ = try? await transport.releaseTemporary(receipt) }
+                }
+                await transport.shutdown()
+            }
         }
     }
 
@@ -429,6 +501,11 @@ actor BorrowedChromeSessionOwner {
                 throw error
             }
         }
+        // Inventory metadata is not an action capability for a known-busy
+        // target. Reject before releasing an existing binding or contacting
+        // the transport. A fresh inventory must observe availability again;
+        // elapsed time or a repeated token is not recovery evidence.
+        guard candidate.availability != .busy else { throw ChromeBridgeIPC.Failure.targetBusy }
         guard reservations.count < 16, retainedTargetCount < 2_048 else {
             throw BorrowedChromeSessionOwnerError.capacityExceeded
         }
@@ -436,7 +513,7 @@ actor BorrowedChromeSessionOwner {
         try turn.lifetime.register(lifetime, id: id)
         // Reserve BEFORE the first suspension. Failed competing callers must
         // never attach, then detach a session another task already owns.
-        reservations[candidate.targetID] = Reservation(id: id, turnNonce: turn.nonce, lifetime: lifetime)
+        reservations[candidate.targetID] = Reservation(id: id, turnNonce: turn.nonce, lifetime: lifetime, broker: broker)
         var attachedTarget: BrowserTarget?
         var publishedBinding: BrowserTabBinding?
         do {
@@ -483,6 +560,115 @@ actor BorrowedChromeSessionOwner {
         }
     }
 
+    /// Clone only an observed, unchanged source into an inactive task-owned
+    /// surface. Creation is one-shot per logical turn, including uncertain
+    /// failures. A fresh inventory is not authority to create replacements.
+    func createWorkspace(turn: BorrowedChromeTurn, sourceCandidateToken: UUID) async throws -> BrowserTabBinding {
+        let operation = try beginOperation(turn)
+        defer { endOperation(turn, operation) }
+        guard consent.allowsTemporaryTabs else { throw BorrowedChromeSessionOwnerError.temporaryTabsConsentRequired }
+        let source = try observedCandidate(turn: turn, candidateToken: sourceCandidateToken)
+        guard source.availability != .busy else { throw ChromeBridgeIPC.Failure.targetBusy }
+        guard ["http", "https"].contains(source.url.scheme ?? "") else {
+            throw BorrowedChromeSessionOwnerError.invalidCandidate
+        }
+        if let workspace = workspaces[turn.nonce] {
+            guard workspace.source.targetID == source.targetID,
+                  workspace.source.url == source.url, let binding = workspace.binding else {
+                throw BorrowedChromeSessionOwnerError.workspaceAlreadyCreated
+            }
+            try await checkConnection(turn)
+            try requireBinding(turn, binding)
+            return binding
+        }
+        guard reservations.count < 16, workspaces.count < 16, retainedTargetCount < 2_048,
+              retainedMetadataBytes + Self.metadataBytes(source) <= 1_048_576 else {
+            throw BorrowedChromeSessionOwnerError.capacityExceeded
+        }
+        try await checkConnection(turn)
+        guard try await transport.supportsTemporaryTabs() else { throw ChromeBridgeIPC.Failure.unsupportedCommand }
+        try checkTurn(turn)
+        let candidates = try await transport.listCandidates()
+        try checkTurn(turn)
+        guard let current = candidates.first(where: { $0.targetID == source.targetID }), current.url == source.url else {
+            throw BorrowedChromeSessionOwnerError.workspaceSourceChanged
+        }
+        guard current.availability != .busy else { throw ChromeBridgeIPC.Failure.targetBusy }
+        let nonce = UUID(), reservationID = UUID(), lifetime = BrowserTabLifetime()
+        try turn.lifetime.register(lifetime, id: reservationID)
+        // Publish the one-shot fence before sending create. Failures cannot
+        // spawn duplicate tabs by refreshing inventory or changing the source.
+        workspaces[turn.nonce] = Workspace(source: source, nonce: nonce)
+        var receipt: TemporaryChromeTabReceipt?
+        var attached: BrowserTarget?
+        let workspaceBroker = BrowserTabSessionBroker(
+            transport: transport, browserGeneration: generation, ownership: .borrowed
+        )
+        do {
+            return try await withTaskCancellationHandler {
+                let created = try await transport.createTemporary(sourceTargetID: source.targetID,
+                    expectedSourceURL: source.url, taskNonce: nonce, permit: BrowserMutationPermit(lifetime: lifetime))
+                guard created.taskNonce == nonce,
+                      Self.validTargetID(created.candidate.targetID), created.candidate.targetID != source.targetID,
+                      created.candidate.title.utf8.count <= 16_384,
+                      created.candidate.url.absoluteString.utf8.count <= 16_384,
+                      created.candidate.url == source.url,
+                      created.candidate.availability != .busy,
+                      !candidates.contains(where: { $0.targetID == created.candidate.targetID }) else {
+                    // An unvalidated receipt cannot authorize closing anything.
+                    throw ChromeBridgeIPC.Failure.invalidFrame
+                }
+                receipt = created
+                try checkTurn(turn)
+                try lifetime.check()
+                workspaces[turn.nonce]?.receipt = created
+                guard reservations[created.candidate.targetID] == nil else { throw BrowserTabBrokerError.operationInProgress }
+                reservations[created.candidate.targetID] = Reservation(
+                    id: reservationID, turnNonce: turn.nonce, lifetime: lifetime, broker: workspaceBroker
+                )
+                let target = try await transport.attach(targetID: created.candidate.targetID)
+                attached = target
+                try checkReservation(turn, targetID: created.candidate.targetID, id: reservationID)
+                guard target.targetID == created.candidate.targetID, target.webSocketURL == nil,
+                      target.attachedSession?.connectionGeneration == generation,
+                      target.instanceToken == target.attachedSession?.incarnation.uuidString else {
+                    throw BrowserTabBrokerError.targetReplaced
+                }
+                reservations[target.targetID]?.target = target
+                let binding = try await workspaceBroker.bindBorrowed(taskKey: turn.taskKey,
+                    processIdentifier: application.processIdentifier, target: target, lifetime: lifetime)
+                try checkReservation(turn, targetID: target.targetID, id: reservationID)
+                reservations[target.targetID]?.binding = binding
+                // Stage with an independent borrowed-mode broker so failed
+                // creation/attachment/observation leaves the old binding usable.
+                let prior = reservations.filter { $0.value.turnNonce == turn.nonce && $0.value.id != reservationID }
+                for (id, reservation) in prior {
+                    try await release(targetID: id, reservation: reservation, taskKey: turn.taskKey)
+                }
+                try checkReservation(turn, targetID: target.targetID, id: reservationID)
+                workspaces[turn.nonce]?.binding = binding
+                return binding
+            } onCancel: { lifetime.revoke() }
+        } catch {
+            lifetime.revoke()
+            await workspaceBroker.invalidateAll()
+            if let receipt {
+                if let reservation = reservations[receipt.candidate.targetID], reservation.id == reservationID {
+                    var cleanup = reservation
+                    cleanup.target = cleanup.target ?? attached
+                    try? await release(targetID: receipt.candidate.targetID, reservation: cleanup, taskKey: turn.taskKey)
+                } else if let attached {
+                    try? await transport.detach(target: attached)
+                }
+                await releaseTemporaryReceipt(receipt)
+            }
+            turn.lifetime.remove(reservationID)
+            if case ChromeBridgeIPC.Failure.invalidFrame = error { await disconnect() }
+            await discardIfConnectionFailed(error)
+            throw error
+        }
+    }
+
     func snapshot(
         turn: BorrowedChromeTurn, binding: BrowserTabBinding, query: String? = nil
     ) async throws -> BrowserTabObservation {
@@ -492,8 +678,8 @@ actor BorrowedChromeSessionOwner {
     func snapshot(
         turn: BorrowedChromeTurn, binding: BrowserTabBinding, read: SemanticReadRequest
     ) async throws -> BrowserTabObservation {
-        try await withBinding(turn, binding: binding) {
-            try await self.broker.snapshot(
+        try await withBinding(turn, binding: binding) { broker in
+            try await broker.snapshot(
                 taskKey: turn.taskKey, binding: binding, bundleIdentifier: self.application.bundleIdentifier, read: read
             )
         }
@@ -503,8 +689,8 @@ actor BorrowedChromeSessionOwner {
         turn: BorrowedChromeTurn, binding: BrowserTabBinding, snapshot: BrowserTabSnapshot,
         elementIndex: Int, action: String, verificationPlan: BrowserActionVerification.Plan? = nil
     ) async throws {
-        try await withBinding(turn, binding: binding) {
-            try await self.broker.perform(
+        try await withBinding(turn, binding: binding) { broker in
+            try await broker.perform(
                 taskKey: turn.taskKey, binding: binding, snapshot: snapshot, elementIndex: elementIndex, action: action,
                 verificationPlan: verificationPlan
             )
@@ -515,8 +701,8 @@ actor BorrowedChromeSessionOwner {
         turn: BorrowedChromeTurn, binding: BrowserTabBinding, snapshot: BrowserTabSnapshot,
         elementIndex: Int, text: String, verificationPlan: BrowserActionVerification.Plan? = nil
     ) async throws {
-        try await withBinding(turn, binding: binding) {
-            try await self.broker.setText(
+        try await withBinding(turn, binding: binding) { broker in
+            try await broker.setText(
                 taskKey: turn.taskKey, binding: binding, snapshot: snapshot, elementIndex: elementIndex, text: text,
                 verificationPlan: verificationPlan
             )
@@ -533,6 +719,9 @@ actor BorrowedChromeSessionOwner {
         for reservation in owned.values { reservation.lifetime.revoke() }
         for (targetID, reservation) in owned where reservation.target != nil {
             try? await release(targetID: targetID, reservation: reservation, taskKey: turn.taskKey)
+        }
+        if let receipt = workspaces.removeValue(forKey: turn.nonce)?.receipt {
+            await releaseTemporaryReceipt(receipt)
         }
         // A target-less reservation belongs to a suspended attach. Its original
         // operation alone releases it when the exact returned session is known.
@@ -627,7 +816,7 @@ actor BorrowedChromeSessionOwner {
 
     private func withBinding<T: Sendable>(
         _ turn: BorrowedChromeTurn, binding: BrowserTabBinding,
-        operation: () async throws -> T
+        operation: (BrowserTabSessionBroker) async throws -> T
     ) async throws -> T {
         let ticket = try beginOperation(turn)
         defer { endOperation(turn, ticket) }
@@ -635,7 +824,8 @@ actor BorrowedChromeSessionOwner {
             try requireBinding(turn, binding)
             try await checkConnection(turn)
             try requireBinding(turn, binding)
-            let result = try await operation()
+            guard let bindingBroker = reservations[binding.targetID]?.broker else { throw BrowserTabBrokerError.handleMissing }
+            let result = try await operation(bindingBroker)
             try requireBinding(turn, binding)
             return result
         } catch {
@@ -662,7 +852,7 @@ actor BorrowedChromeSessionOwner {
         if let existing = current.releaseTask {
             cleanup = existing
         } else {
-            let broker = broker, transport = transport
+            let broker = reservation.broker, transport = transport
             cleanup = Task {
                 if let binding = reservation.binding { try? await broker.revoke(taskKey: taskKey, binding: binding) }
                 // Cancellation of the action must not cancel its exact detach.
@@ -682,6 +872,26 @@ actor BorrowedChromeSessionOwner {
             await disconnect()
             throw error
         }
+    }
+
+    private func releaseTemporaryReceipt(_ receipt: TemporaryChromeTabReceipt) async {
+        if let pending = temporaryReleases[receipt.leaseToken] { await pending.value; return }
+        let transport = transport
+        let cleanup = Task {
+            do {
+                let result = try await transport.releaseTemporary(receipt)
+                if result == .retained {
+                    self.temporaryCleanupNotices.insert("A task-created tab was retained because it was adopted, changed, or its ownership could not be proved. No existing user tab was closed.")
+                }
+            } catch {
+                self.temporaryCleanupNotices.insert("Task-created tab cleanup could not be confirmed. No tab was rediscovered by title or URL, and no existing user tab was closed.")
+            }
+        }
+        // Publish before awaiting: revoke and a late create/attach share exact
+        // receipt cleanup, never rediscover by title/URL or close user tabs.
+        temporaryReleases[receipt.leaseToken] = cleanup
+        await cleanup.value
+        temporaryReleases.removeValue(forKey: receipt.leaseToken)
     }
 
     private func page(_ turn: BorrowedChromeTurn, start: Int, size: Int) throws -> BorrowedChromeInventoryPage {
@@ -794,12 +1004,24 @@ actor BorrowedChromeSessionOwner {
         consent.revoke()
         for turn in turns.values { turn.lifetime.revoke() }
         for reservation in reservations.values { reservation.lifetime.revoke() }
+        let extraBrokers = reservations.values.map(\.broker)
+        let receipts = workspaces.values.compactMap(\.receipt)
+        let cleanupTasks = temporaryReleases
         turns.removeAll()
         inventories.removeAll()
         reservations.removeAll()
+        workspaces.removeAll()
         operations.removeAll()
         let broker = broker, transport = transport
-        shutdownTask = Task { await broker.invalidateAll(); await transport.shutdown() }
+        shutdownTask = Task {
+            await broker.invalidateAll()
+            for other in extraBrokers { await other.invalidateAll() }
+            for receipt in receipts {
+                if let cleanup = cleanupTasks[receipt.leaseToken] { await cleanup.value }
+                else { _ = try? await transport.releaseTemporary(receipt) }
+            }
+            await transport.shutdown()
+        }
     }
 
     private var retainedMetadataBytes: Int {

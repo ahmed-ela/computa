@@ -63,7 +63,7 @@ def stream_start():
 
 
 class ResponseBoundary:
-    def __init__(self, send, max_output_tokens):
+    def __init__(self, send, max_output_tokens, producer=None):
         self.send = send
         self.contract = SSEContract(max_output_tokens=max_output_tokens)
         self.start = None
@@ -71,6 +71,7 @@ class ResponseBoundary:
         self.sent_start = False
         self.closed = False
         self.upstream_eof = False
+        self.producer = producer
 
     async def __call__(self, message):
         if self.closed:
@@ -97,6 +98,10 @@ class ResponseBoundary:
         body = message.get("body", b"")
         status = self.start["status"]
         if status == 200:
+            # Upstream catches parser exceptions and encodes an untyped error.
+            # Preserve only our exact host-authored fault, never that raw body.
+            if self.producer is not None and self.producer.fault is not None:
+                raise self.producer.fault
             output = self.contract.feed(body)
             if final:
                 output += self.contract.finish()

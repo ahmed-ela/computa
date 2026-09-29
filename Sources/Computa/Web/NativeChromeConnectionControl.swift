@@ -41,6 +41,14 @@ struct NativeChromeConnectionControl: View {
                     Button("Cancel connection") { state.disconnectChrome() }
                 case .connected:
                     Text("Connected to your existing Chrome session")
+                    if state.extensionBridge?.enabled == true {
+                        if state.extensionBridge?.temporaryTabsAllowed == true {
+                            Text("Temporary task tabs allowed")
+                        } else if let id = state.chromeConnectionID {
+                            Button("Allow temporary task tabs…") { presentation = .temporaryTabs(id) }
+                                .disabled(!state.canAllowTemporaryChromeTabs)
+                        }
+                    }
                     if state.extensionBridge?.enabled != true, !state.remembersChromeConnection, let id = state.chromeConnectionID {
                         Button("Reconnect automatically…") { presentation = .remember(id) }
                             .disabled(!state.canRememberChromeConnection)
@@ -108,6 +116,13 @@ struct NativeChromeConnectionControl: View {
                     state.rememberChromeConnection(expectedID: connectionID)
                 }
                 .disabled(!state.canRememberChromeConnection || state.chromeConnectionID != connectionID)
+            case .temporaryTabs(let connectionID):
+                Button("Cancel", role: .cancel) { presentation = nil }
+                Button("Allow and remember") {
+                    presentation = nil
+                    state.allowTemporaryChromeTabs(expectedConnectionID: connectionID)
+                }
+                .disabled(!state.canAllowTemporaryChromeTabs || state.chromeConnectionID != connectionID)
             case .unavailable:
                 Button("OK", role: .cancel) { presentation = nil }
             }
@@ -122,6 +137,12 @@ struct NativeChromeConnectionControl: View {
         }
         .onChange(of: state.canRememberChromeConnection) { _, canRemember in
             if !canRemember, case .remember? = presentation { presentation = nil }
+        }
+        .onChange(of: state.canAllowTemporaryChromeTabs) { _, canAllow in
+            if !canAllow, case .temporaryTabs? = presentation { presentation = nil }
+        }
+        .onChange(of: state.chromeConnectionID) { _, id in
+            if case .temporaryTabs(let expected)? = presentation, id != expected { presentation = nil }
         }
         .onChange(of: state.presentedSheet) { _, sheet in
             if sheet != nil { presentation = nil }
@@ -149,6 +170,7 @@ private enum NativeChromeConnectionPresentation {
     case extensionPairing
     case confirm(NativeChromeConnectionTarget)
     case remember(UUID)
+    case temporaryTabs(UUID)
     case unavailable(String)
 
     var title: String {
@@ -156,6 +178,7 @@ private enum NativeChromeConnectionPresentation {
         case .extensionPairing: "Authorize the Computa Chrome extension?"
         case .confirm: "Connect to your existing Chrome?"
         case .remember: "Remember this Chrome connection?"
+        case .temporaryTabs: "Allow temporary background tabs?"
         case .unavailable: "Chrome connection unavailable"
         }
     }
@@ -168,6 +191,8 @@ private enum NativeChromeConnectionPresentation {
             "Computa can read and interact with tabs in your signed-in Chrome session. Connecting does not navigate any tab. This background connection does not grant tab activation or closing.\n\nFrom Chrome's app-data directory, Computa reads only the connection file—not cookies or other profile files. macOS may separately request Chrome app-data access; Full Disk Access is not requested.\n\nConnect once lasts until Computa quits. Connect & Remember also authorizes reconnection to this same Chrome app and profile on future launches. Disconnect Chrome forgets that choice. Chrome must already be running; Chrome or macOS may still require approval. No debugging or permission setting is changed."
         case .remember:
             "Allow Computa to reconnect to this same Chrome app and profile whenever Computa opens? This gives future Computa sessions the same ability to read and interact with your signed-in tabs.\n\nComputa will resolve a fresh connection each time. It does not save a process, connection address, cookies or other profile contents, launch Chrome, or change Chrome/macOS permissions. Chrome may still ask for approval.\n\nDisconnect Chrome or Forget automatic connection removes this saved choice."
+        case .temporaryTabs:
+            "Allow Computa to open inactive task tabs from pages observed in this signed-in Chrome profile? Your existing tabs and drafts stay untouched.\n\nComputa can close only temporary tabs it created and still owns. If you activate a temporary tab, or ownership is uncertain, it retains the tab and stops controlling it. No foreground activation is granted.\n\nThis choice is remembered for this extension pairing. Disconnect Chrome removes it. The connection will briefly restart to apply it."
         case .unavailable(let message): message
         }
     }

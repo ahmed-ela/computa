@@ -31,6 +31,8 @@ final class AppState {
     var selectedEntryID: TimelineEntry.ID?
     var composerText = ""
     var isInspectorPresented = false
+    var isBrowserPresented = false
+    let browserSession: EmbeddedBrowserSession
     var presentedSheet: SheetDestination? {
         didSet {
             if presentedSheet != nil, approvalGateBlocksInteraction {
@@ -89,6 +91,7 @@ final class AppState {
         runtime: (any AgentRuntimeClient)? = nil,
         permissionClient: any AutomationPermissionClient = PermissionInspector(),
         preferences: UserDefaults = .standard,
+        browserSession: EmbeddedBrowserSession? = nil,
         enableChromeExtensionBridge: Bool = false,
         chromeTargetProvider: @escaping @MainActor () throws -> NativeChromeConnectionTarget = {
             try NativeChromeConnectionTarget.prepare()
@@ -97,6 +100,7 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        self.browserSession = browserSession ?? EmbeddedBrowserSession(defaults: preferences)
         self.chromeTargetProvider = chromeTargetProvider
         remembersChromeConnection = RememberedChromeConnection.load(from: preferences) != nil
         let storedAccessMode = preferences.object(forKey: Self.accessModePreferenceKey) as? String
@@ -122,6 +126,12 @@ final class AppState {
     var selectedTask: AgentTask? {
         guard let selectedTaskID else { return nil }
         return tasks.first { $0.id == selectedTaskID }
+    }
+
+    /// Settings is rendered inside the privileged UI document. Temporarily
+    /// remove the sibling pane so it cannot cover or interact through Settings.
+    var shouldPresentBrowserPane: Bool {
+        isBrowserPresented && presentedSheet != .settings
     }
 
     var selectedEntry: TimelineEntry? {
@@ -237,6 +247,26 @@ final class AppState {
             guard let self, self.canConnectChrome else { return }
             do { try await bridge.approvePairing() }
             catch { self.chromeConnectionState = .failed(message: error.localizedDescription) }
+        }
+    }
+
+    var canAllowTemporaryChromeTabs: Bool {
+        canPairChromeExtension && chromeConnectionState == .connected
+            && chromeConnectionTask == nil && extensionBridge?.enabled == true
+            && extensionBridge?.temporaryTabsAllowed == false
+    }
+
+    /// No web-bridge action exists for this native capability grant.
+    func allowTemporaryChromeTabs(expectedConnectionID: UUID) {
+        guard canAllowTemporaryChromeTabs, chromeConnectionID == expectedConnectionID,
+              let bridge = extensionBridge else { return }
+        do {
+            try bridge.allowTemporaryTabs()
+            // Normal teardown preserves pairing; a new extension session
+            // receives the expanded grant only after all old authority dies.
+            endChromeConnection(state: .disconnected)
+        } catch {
+            chromeConnectionState = .failed(message: error.localizedDescription)
         }
     }
 
@@ -764,6 +794,7 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        browserSession.shutdown()
         discardAllMessageDrafts()
         extensionBridge?.stop()
         endChromeConnection(state: .disconnected)

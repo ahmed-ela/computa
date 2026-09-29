@@ -13,6 +13,16 @@ import uuid
 # Only exact host-authored conditions may leave the boundary as diagnostics.
 # Do not derive a reason from provider values, arbitrary exception strings, or IDs.
 _PROTOCOL_MESSAGES = frozenset((
+    'Invalid producer text',
+    'Producer capture exceeds bound',
+    'Producer state mismatch',
+    'Producer ended with buffered text',
+    'Unsupported producer tool parser',
+    'Unsupported producer thinking parser',
+    'Incomplete generated tool call',
+    'Malformed generated tool call',
+    'Unadvertised generated tool call',
+    'Excessive generated tool calls',
     'Arguments after completion',
     'Completed item type mismatch',
     'Contradictory completed response',

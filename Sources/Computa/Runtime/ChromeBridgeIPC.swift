@@ -176,6 +176,7 @@ enum ChromeBridgeIPC {
     enum Failure: Error, LocalizedError {
         case unavailable, identity, signingRequired, configuration, invalidFrame, closed, deadline, rejected
         case targetBusy, targetUnavailable, unsupportedCommand
+        case temporaryTabsNotAuthorized, temporaryTabUnavailable
         var errorDescription: String? {
             switch self {
             case .unavailable: "The Computa browser bridge is not available."
@@ -187,6 +188,8 @@ enum ChromeBridgeIPC {
             case .deadline: "The browser bridge request timed out. The operation was not replayed."
             case .rejected: "The browser extension rejected this operation."
             case .unsupportedCommand: "The installed browser extension does not support this command. No permission change is needed."
+            case .temporaryTabsNotAuthorized: "Temporary task tabs require the separate native Chrome-menu grant. No temporary tab was created; existing-tab access is unchanged."
+            case .temporaryTabUnavailable: "This task's temporary tab was already used, released, or taken over by the user. No replacement was created. Stop using its old references; report the limitation without creating another tab."
             case .targetBusy:
                 "The selected tab is already controlled by another automation or debugger session. "
                     + "This is a tab-busy conflict, not a missing permission. Report the conflict; "

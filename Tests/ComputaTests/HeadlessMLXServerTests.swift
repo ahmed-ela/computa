@@ -54,7 +54,8 @@ final class HeadlessMLXServerTests: XCTestCase {
         let configuration = try HeadlessMLXConfiguration.local()
         let resources = try FileManager.default.contentsOfDirectory(
             at: configuration.script.deletingLastPathComponent(), includingPropertiesForKeys: nil)
-        XCTAssertEqual(Set(resources.map(\.lastPathComponent)), ["server.py", "response_boundary.py", "sse_contract.py"])
+        XCTAssertEqual(Set(resources.map(\.lastPathComponent)),
+                       ["server.py", "response_boundary.py", "sse_contract.py", "producer_stream.py"])
     }
 
     func testOwnedMLXInstallationIsPreferredWithoutRequiringLegacyEnvironment() {

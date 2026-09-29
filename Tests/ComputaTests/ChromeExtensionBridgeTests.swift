@@ -215,6 +215,11 @@ final class ChromeExtensionBridgeTests: XCTestCase {
     }
 
     func testFiniteRemoteErrorCategoriesDistinguishBusyFromUnavailable() {
+        assertFailure(.temporaryTabsNotAuthorized) { throw ExtensionChromeLink.operationFailure(errorCode: "temporary_tabs_not_authorized") }
+        for code in ["stale_temporary_lease", "temporary_task_already_used"] {
+            assertFailure(.temporaryTabUnavailable) { throw ExtensionChromeLink.operationFailure(errorCode: code) }
+            XCTAssertFalse(ExtensionChromeLink.revokesConnection(errorCode: code))
+        }
         assertFailure(.unsupportedCommand) { throw ExtensionChromeLink.operationFailure(errorCode: "unsupported_command") }
         assertFailure(.targetBusy) { throw ExtensionChromeLink.operationFailure(errorCode: "target_busy") }
         assertFailure(.targetUnavailable) { throw ExtensionChromeLink.operationFailure(errorCode: "target_unavailable") }
@@ -248,6 +253,9 @@ final class ChromeExtensionBridgeTests: XCTestCase {
 
     func testHelloAndPairingRequestAcceptExpectedIdentity() throws {
         let hello = try Self.hello()
+        XCTAssertNil(hello.capabilities, "Old extensions retain existing-tab compatibility, never new authority.")
+        let updated = try Self.hello(overrides: ["capabilities": ["temporaryTabsVersion": 1]])
+        XCTAssertEqual(updated.capabilities?["temporaryTabsVersion"], 1)
         XCTAssertTrue(hello.valid)
         XCTAssertNil(hello.pairingToken)
         XCTAssertNil(hello.pairingNonce)
@@ -318,6 +326,8 @@ final class ChromeExtensionBridgeTests: XCTestCase {
                  (.configuration, .configuration), (.unavailable, .unavailable),
                  (.deadline, .deadline), (.rejected, .rejected),
                  (.targetBusy, .targetBusy), (.targetUnavailable, .targetUnavailable),
+                 (.temporaryTabsNotAuthorized, .temporaryTabsNotAuthorized),
+                 (.temporaryTabUnavailable, .temporaryTabUnavailable),
                  (.unsupportedCommand, .unsupportedCommand): break
             default: XCTFail("Unexpected bridge failure category", file: file, line: line)
             }

@@ -16,7 +16,7 @@ final class ComputerTaskScopeTests: XCTestCase {
                          "desktop_open_application", "desktop_input", "desktop_perform_action", "desktop_set_text"] {
                 XCTAssertNotNil(scope.toolViolation(tool: tool, hasBorrowedBinding: true), tool)
             }
-            for tool in ["computer_v2_status", "computer_v2_apps", "computer_v2_tabs", "computer_v2_bind_tab"] {
+            for tool in ["computer_v2_status", "computer_v2_apps", "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace"] {
                 XCTAssertNil(scope.toolViolation(tool: tool, hasBorrowedBinding: false), tool)
             }
             for tool in ["computer_v2_snapshot", "computer_v2_ax", "computer_v2_set_text", "computer_v2_verify"] {
