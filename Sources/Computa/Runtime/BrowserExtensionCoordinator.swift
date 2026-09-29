@@ -3,6 +3,27 @@ import Darwin
 import Foundation
 import Observation
 import Security
+import CryptoKit
+
+/// Separate versioned, pairing-bound scope; an old remembered connection is
+/// never interpreted as permission to create or clean up temporary tabs.
+enum ChromeTemporaryTabsGrant {
+    static let key = "Computa.chromeExtension.temporaryTabs.v1"
+    static func matches(_ preferences: UserDefaults, installationID: String, token: String) -> Bool {
+        guard let value = preferences.dictionary(forKey: key),
+              value["version"] as? Int == 1,
+              value["installationID"] as? String == installationID else { return false }
+        return value["pairingDigest"] as? String == digest(token)
+    }
+    static func save(_ preferences: UserDefaults, installationID: String, token: String) {
+        preferences.set(["version": 1, "installationID": installationID,
+                         "pairingDigest": digest(token)], forKey: key)
+    }
+    static func forget(_ preferences: UserDefaults) { preferences.removeObject(forKey: key) }
+    private static func digest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
 
 /// Pure authorization fence, deliberately independent of IPC and Keychain so
 /// identity and revocation races are deterministic in tests. A duplicated
@@ -93,6 +114,24 @@ final class BrowserExtensionCoordinator {
     }
 
     var enabled: Bool { preferences.bool(forKey: Self.enabledKey) }
+
+    var temporaryTabsAllowed: Bool {
+        guard enabled, let installation = preferences.string(forKey: Self.installationKey),
+              let token = ChromeExtensionPairingStore.load(installation) else { return false }
+        return ChromeTemporaryTabsGrant.matches(preferences, installationID: installation, token: token)
+    }
+
+    /// Invoked only by the idle native confirmation, tied to the exact live
+    /// pairing. The caller revokes/reconnects before this can reach a model.
+    func allowTemporaryTabs() throws {
+        guard !stopped, let id = pairedLink, let hello = hellos[id],
+              hello.paired, !hello.suspended, enabled,
+              preferences.string(forKey: Self.installationKey) == hello.installationId,
+              let token = ChromeExtensionPairingStore.load(hello.installationId),
+              token == hello.pairingToken else { throw ChromeBridgeIPC.Failure.identity }
+        try authority.requireUnique(id: id, hello: hello, hellos: hellos)
+        ChromeTemporaryTabsGrant.save(preferences, installationID: hello.installationId, token: token)
+    }
 
     func start() {
         guard server == nil, !stopped else { return }
@@ -195,6 +234,7 @@ final class BrowserExtensionCoordinator {
         guard !stopped, links[id] === link else { throw ChromeBridgeIPC.Failure.closed }
         try authority.validate(attempt, hellos: hellos)
         try ChromeExtensionPairingStore.save(token, installationID: hello.installationId)
+        ChromeTemporaryTabsGrant.forget(preferences)
         preferences.set(hello.installationId, forKey: Self.installationKey)
         preferences.set(true, forKey: Self.enabledKey)
         pairingAvailable = false
@@ -212,12 +252,15 @@ final class BrowserExtensionCoordinator {
         let target = try NativeChromeConnectionTarget.prepare()
         guard target.application.processIdentifier == link.chromePID else { throw ChromeBridgeIPC.Failure.identity }
         let admission = ExtensionChromeAdmission(link: link, installationID: hello.installationId,
-            pairingToken: token, bridgeEpoch: hello.bridgeEpoch)
+            pairingToken: token, bridgeEpoch: hello.bridgeEpoch,
+            supportsTemporaryTabs: hello.capabilities?["temporaryTabsVersion"] == 1)
         try admission.check()
         pairedLink = id; automaticallyAuthorized = true
         status = "Browser extension authorized"
         let accepted = onAdmission(ChromeConnectionRequest(application: target.application, userDataDirectory: target.userDataDirectory,
-            consent: ChromeDebuggingConsent(approvedByUser: true), extensionAdmission: admission))
+            consent: ChromeDebuggingConsent(approvedByUser: true,
+                allowsTemporaryTabs: ChromeTemporaryTabsGrant.matches(preferences, installationID: hello.installationId, token: token)),
+            extensionAdmission: admission))
         if !accepted { pairedLink = nil; automaticallyAuthorized = false; status = "Browser authorized — reconnect when tasks are idle" }
     }
 
@@ -242,6 +285,7 @@ final class BrowserExtensionCoordinator {
         var revocations = Array(pendingPairings.values)
         if let installation, let token, let paired { revocations.append((paired, installation, token)) }
         if let installation { ChromeExtensionPairingStore.forget(installation) }
+        ChromeTemporaryTabsGrant.forget(preferences)
         preferences.removeObject(forKey: Self.installationKey)
         preferences.set(false, forKey: Self.enabledKey)
         pairedLink = nil; automaticallyAuthorized = false; pairingAvailable = false

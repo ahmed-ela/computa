@@ -15,10 +15,14 @@ Routine reconnects are intended to reuse the installed extension grant; that
 behavior still requires live qualification, and is not a promise that Chrome
 will never show another permission prompt.
 
-The first release supports existing HTTP(S) page inventory, exact tab binding,
+The existing-tab grant supports HTTP(S) page inventory, exact tab binding,
 AX observation, and the native broker's guarded semantic press/set-text actions.
-It does **not** add navigation, creating/closing tabs, activating windows,
-physical input, screenshot capture, subframe actions, arbitrary JavaScript,
+A **separate, versioned native-user grant** can additionally create a task-owned
+inactive copy of an exactly observed, available source page. It can remove only
+the exact unchanged tab established by that creation receipt. Existing grants
+do not gain this capability merely because the extension is upgraded.
+Neither grant adds arbitrary URL navigation, activating windows, physical
+input, screenshot capture, subframe actions, arbitrary JavaScript,
 cookies APIs, content scripts, remote code, or web-page messaging. Existing
 native controls remain distinct. Browser restrictions, managed policies,
 incognito/file-access limitations, and StudyLock protections are unchanged.
@@ -80,10 +84,12 @@ Responses:
 | Operation | Exact `params` | Result |
 | --- | --- | --- |
 | `approvePair` | `installationId`, `pairingNonce`, `pairingToken` | `{paired:true}` |
-| `authorizeSession` | `installationId`, `pairingToken` | `{generation,bridgeEpoch}` |
+| `authorizeSession` | `installationId`, `pairingToken`, optional `temporaryTabsVersion:1` after native approval | `{generation,bridgeEpoch}` |
 | `revokePair` | `installationId`, `pairingToken` | `{paired:false,disconnected:true}` |
-| `ping` | `{}` | `{generation,bridgeEpoch}` |
-| `inventory` | `{}` | `{generation,candidates:[{targetID,title,url}]}` |
+| `ping` | `{}` | `{generation,bridgeEpoch,capabilities:{temporaryTabsVersion:1}}` |
+| `inventory` | `{}` | `{generation,candidates:[{targetID,title,url,availability}]}` |
+| `createTemporary` | `sourceTargetID`, `expectedSourceURL`, `taskNonce` (UUID) | `{leaseToken,taskNonce,targetID,title,url,availability}` |
+| `releaseTemporary` | `leaseToken`, `taskNonce` | `{released:true,closed:Boolean,retained:Boolean}` |
 | `attach` | `targetID` | `{attachmentToken,targetID,title,url}` |
 | `detach` | `attachmentToken` | `{detached:true}` |
 | `command` | `attachmentToken`, `method`, `params` | Allowlisted CDP result or bounded semantic projection |
@@ -96,6 +102,56 @@ fresh generation, revokes old attachments first, and rejects suspended access.
 The app must await this response before sending ordinary requests. Generations
 and attachment tokens are never restored from disk.
 
+### Task-owned temporary tabs (capability version 1)
+
+`hello`, `pairRequested`, and `ping` advertise protocol support, not consent.
+Native code checks the pre-authentication capability before adding the optional
+grant version, preserving existing-tab compatibility with older strict-schema
+extensions. The native app must separately
+record the user's temporary-tab grant and include `temporaryTabsVersion:1` in
+each new authenticated session. Omitting it preserves the old existing-tab-only
+contract; no blanket `tabs`, host, or scripting permission was added.
+
+The native runtime supplies an opaque current source token, resolving it to the
+exact target and observed URL before `createTemporary`. The bridge verifies
+that URL and positive debugger availability again before its single call to
+`chrome.tabs.create({url,active:false,windowId})`. It uses the returned exact tab
+ID to find the debugger target, never a title or URL search. Restricted, busy,
+unknown-availability, changed, redirected or ambiguous source/receipt identities
+fail closed. The model cannot provide an arbitrary URL, activate a tab/window,
+choose a profile, or close an existing tab through this operation.
+
+Creation does not imply that Chrome has committed the new document. A bounded
+two-second read-only settling loop follows only the exact receipt tab ID while
+it transitions from empty/`about:blank`/pending requested URL to the exact
+requested URL. It never repeats creation or accepts an unrelated redirect;
+activation, ownership changes and cancellation still invalidate the lease.
+
+At most one creation is admitted per native task nonce, four live temporary
+leases per session, and 128 task tombstones per session. An unchanged duplicate
+returns the same live lease; a released or changed request cannot create another
+tab. Cancellation and timeouts never replay creation. A late result is cleaned
+only by its exact creation receipt while unchanged, inactive and unclaimed;
+otherwise it is retained without returning usable authority.
+
+Activation, pinning/grouping or uncertain navigation revokes temporary-tab
+actions and retains the tab. A fixed broker semantic mutation gets a bounded
+1.5-second navigation-settling window after its result, but any URL change still
+removes automatic-close eligibility: Chrome's update event does not identify
+the actor, so navigation alone cannot prove that closing remains safe. The
+release result explicitly reports `retained:true` in that case. Callers must not
+claim it was closed. Adopted tabs stay intact on later app disconnect, Cancel,
+timeout or session replacement. Intentional cleanup removes attachment authority
+before detach, so it does not turn a normal release into a Chrome Cancel pause.
+
+Leases and task IDs are never persisted or reconstructed after worker restart.
+An ambiguous orphan is retained. Cleanup checks exact target, current URL,
+window, inactive state and observed takeover events before removing the single
+receipt-owned tab; existing tabs with identical titles/URLs are never candidates.
+The browser remains authoritative: Chrome restrictions and StudyLock enforcement
+are unchanged. This capability is implemented and deterministically tested;
+live installed qualification is a separate gate.
+
 `revokePair` is authenticated, revocation-only, and also works when the grant is
 suspended or no active generation exists. The app must capture the token before
 deleting its Keychain record, send this request, then close its link. A failed
@@ -105,7 +161,7 @@ forget can clear any remaining stale extension pairing.
 Extension events:
 
 - `hello`: `version`, `event`, `installationId`, `extensionId`, `bridgeEpoch`,
-  `paired`, `suspended`; includes `pairingToken` only when paired. Secret-bearing
+  `paired`, `suspended`, `capabilities:{temporaryTabsVersion:1}`; includes `pairingToken` only when paired. Secret-bearing
   hello data must never appear in diagnostic logs or prompts.
 - `pairRequested`: same public identity/Boolean fields, plus `pairingNonce`.
   Emitted only after an explicit popup Pair action, or as the current proposal

@@ -237,6 +237,7 @@ return {
   ],
   showToolPayloads: false,
   isInspectorPresented: false,
+  isBrowserPresented: false,
   isSettingsPresented: false,
 };
 }
@@ -478,6 +479,10 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
 
       case 'toggleInspector':
         publish({ ...snapshot, isInspectorPresented: !snapshot.isInspectorPresented });
+        return;
+      case 'toggleBrowser':
+        // The actual browser is a native sibling, not an iframe in this preview.
+        publish({ ...snapshot, isBrowserPresented: !snapshot.isBrowserPresented });
         return;
       case 'showSettings':
         publish({ ...snapshot, isSettingsPresented: true });

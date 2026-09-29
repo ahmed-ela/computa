@@ -5,6 +5,7 @@ struct ExtensionChromeAdmission: Sendable {
     let installationID: String
     let pairingToken: String
     let bridgeEpoch: String
+    var supportsTemporaryTabs = false
 
     func check() throws { try link.checkPeerIdentity() }
 
@@ -32,6 +33,9 @@ actor ExtensionChromeTransport: BorrowedChromeSessionTransport {
     private var attached: [String: BrowserTarget] = [:]
     private var attaching = Set<String>()
     private var closed = false
+    private var temporaryTabsSupported = false
+    private var temporaryTabsAuthorized = false
+    private var temporaryReceipts = [UUID: TemporaryChromeTabReceipt]()
     private let operations = BrowserCDPDocumentOperations()
 
     init(admission: ExtensionChromeAdmission, consent: ChromeDebuggingConsent) {
@@ -39,8 +43,11 @@ actor ExtensionChromeTransport: BorrowedChromeSessionTransport {
     }
 
     func authorize() async throws {
-        _ = try await send("authorizeSession", ["installationId": admission.installationID,
-                                                 "pairingToken": admission.pairingToken])
+        var parameters: [String: Any] = ["installationId": admission.installationID,
+                                        "pairingToken": admission.pairingToken]
+        temporaryTabsAuthorized = consent.allowsTemporaryTabs && admission.supportsTemporaryTabs
+        if temporaryTabsAuthorized { parameters["temporaryTabsVersion"] = 1 }
+        _ = try await send("authorizeSession", parameters)
         try await validateConnection()
     }
 
@@ -48,6 +55,70 @@ actor ExtensionChromeTransport: BorrowedChromeSessionTransport {
         let value = try await send("ping")
         guard value["generation"] as? String == generation.uuidString,
               value["bridgeEpoch"] as? String == admission.bridgeEpoch else { throw ChromeBridgeIPC.Failure.identity }
+        temporaryTabsSupported = (value["capabilities"] as? [String: Any])?["temporaryTabsVersion"] as? Int == 1
+    }
+
+    func supportsTemporaryTabs() async throws -> Bool {
+        try await validateConnection()
+        return consent.allowsTemporaryTabs && temporaryTabsAuthorized && temporaryTabsSupported
+    }
+
+    func createTemporary(sourceTargetID: String, expectedSourceURL: URL,
+                         taskNonce: UUID, permit: BrowserMutationPermit) async throws -> TemporaryChromeTabReceipt {
+        try consent.check(); try admission.check()
+        guard consent.allowsTemporaryTabs else { throw BorrowedChromeSessionOwnerError.temporaryTabsConsentRequired }
+        guard temporaryTabsAuthorized && temporaryTabsSupported else { throw ChromeBridgeIPC.Failure.unsupportedCommand }
+        guard !closed, temporaryReceipts.count < 16 else { throw ChromeBridgeIPC.Failure.closed }
+        let params = try JSONSerialization.data(withJSONObject: ["sourceTargetID": sourceTargetID,
+            "expectedSourceURL": expectedSourceURL.absoluteString, "taskNonce": taskNonce.uuidString])
+        // Parse/retain the exact receipt before post-response authority checks.
+        // If cancellation/revocation arrived while Chrome created it, cleanup
+        // must still know precisely which extension-owned tab was created.
+        let reply = try await admission.link.request(operation: "createTemporary", params: params,
+                                                    generation: generation.uuidString, permit: permit, consent: consent)
+        guard let result = try JSONSerialization.jsonObject(with: reply) as? [String: Any],
+              let rawLease = result["leaseToken"] as? String, let lease = UUID(uuidString: rawLease),
+              let rawNonce = result["taskNonce"] as? String, UUID(uuidString: rawNonce) == taskNonce else {
+            await shutdown(); throw ChromeBridgeIPC.Failure.invalidFrame
+        }
+        let candidate: BorrowedChromeTabCandidate
+        do { candidate = try Self.candidate(result) }
+        catch { await shutdown(); throw error }
+        guard candidate.targetID != sourceTargetID, temporaryReceipts[lease] == nil else {
+            await shutdown(); throw ChromeBridgeIPC.Failure.invalidFrame
+        }
+        let receipt = TemporaryChromeTabReceipt(leaseToken: lease, taskNonce: taskNonce, candidate: candidate)
+        temporaryReceipts[lease] = receipt
+        do {
+            try consent.check(); try admission.check(); try Task.checkCancellation()
+            guard !closed else { throw ChromeBridgeIPC.Failure.closed }
+            guard candidate.url == expectedSourceURL, candidate.availability != .busy else {
+                throw BorrowedChromeSessionOwnerError.workspaceSourceChanged
+            }
+            return receipt
+        } catch {
+            // Task cancellation must not cancel the exact cleanup request.
+            _ = await Task { try? await self.releaseTemporary(receipt) }.value
+            throw error
+        }
+    }
+
+    @discardableResult func releaseTemporary(_ receipt: TemporaryChromeTabReceipt) async throws -> TemporaryChromeTabRelease {
+        guard temporaryReceipts[receipt.leaseToken] == receipt else { return .alreadyReleased }
+        temporaryReceipts.removeValue(forKey: receipt.leaseToken)
+        // A held receipt retains cleanup authority after model/turn/consent
+        // revocation. The extension independently checks generation, adoption,
+        // task nonce and lease identity. Never accept an arbitrary target ID.
+        let params = try JSONSerialization.data(withJSONObject: ["leaseToken": receipt.leaseToken.uuidString,
+                                                                "taskNonce": receipt.taskNonce.uuidString])
+        let reply = try await admission.link.request(operation: "releaseTemporary", params: params,
+                                                      generation: generation.uuidString)
+        guard let result = try JSONSerialization.jsonObject(with: reply) as? [String: Any],
+              result["released"] as? Bool == true, let closed = result["closed"] as? Bool,
+              let retained = result["retained"] as? Bool, closed != retained else {
+            throw ChromeBridgeIPC.Failure.invalidFrame
+        }
+        return closed ? .closed : .retained
     }
 
     func listCandidates() async throws -> [BorrowedChromeTabCandidate] {
@@ -114,12 +185,28 @@ actor ExtensionChromeTransport: BorrowedChromeSessionTransport {
             throw BrowserTabBrokerError.targetReplaced
         }
         attached.removeValue(forKey: target.targetID)
+        if await attachmentWasRevoked(session.sessionID) { return }
         do { _ = try await send("detach", ["attachmentToken": session.sessionID]) }
-        catch { await shutdown(); throw error }
+        catch {
+            // User adoption explicitly retires an attachment before notifying
+            // native code. That exact-token event is already cleanup evidence,
+            // not a reason to revoke unrelated tabs/the remembered connection.
+            if await attachmentWasRevoked(session.sessionID) { return }
+            await shutdown(); throw error
+        }
+    }
+
+    private func attachmentWasRevoked(_ token: String) async -> Bool {
+        do {
+            try await admission.link.check()
+            do { try await admission.link.checkAttachment(token); return false }
+            catch { try await admission.link.check(); return true }
+        } catch { return false }
     }
     func shutdown() async {
         guard !closed else { return }
         closed = true; attached.removeAll()
+        for receipt in Array(temporaryReceipts.values) { _ = try? await releaseTemporary(receipt) }
         // Close the authenticated link. Native host signals appDisconnected
         // and extension invalidates its generation before reattachment.
         await admission.link.close()
@@ -152,15 +239,16 @@ actor ExtensionChromeTransport: BorrowedChromeSessionTransport {
         let value = try JSONSerialization.data(withJSONObject: ["attachmentToken": session.sessionID,
                                                                 "method": method, "params": parameters])
         let result = try await admission.link.request(operation: "command", params: value,
-            generation: generation.uuidString, permit: permit)
+            generation: generation.uuidString, permit: permit, consent: consent)
         try await requireCurrent(target)
         return result
     }
-    private func send(_ operation: String, _ params: [String: String] = [:]) async throws -> [String: Any] {
+    private func send(_ operation: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {
         try consent.check(); try admission.check()
         guard !closed else { throw ChromeBridgeIPC.Failure.closed }
         let data = try JSONSerialization.data(withJSONObject: params)
-        let reply = try await admission.link.request(operation: operation, params: data, generation: generation.uuidString)
+        let reply = try await admission.link.request(operation: operation, params: data,
+                                                     generation: generation.uuidString, consent: consent)
         try consent.check()
         guard !closed, let object = try JSONSerialization.jsonObject(with: reply) as? [String: Any] else {
             throw ChromeBridgeIPC.Failure.invalidFrame

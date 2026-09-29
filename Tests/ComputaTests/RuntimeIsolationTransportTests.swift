@@ -91,7 +91,9 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         let childCWD = try XCTUnwrap(child["cwd"] as? String)
         XCTAssertEqual(URL(fileURLWithPath: childCWD).resolvingSymlinksInPath(),
                        URL(fileURLWithPath: configuration.workspacePath).resolvingSymlinksInPath())
-        XCTAssertEqual(child["path"] as? String, "/usr/bin:/bin:/usr/sbin:/sbin")
+        // The CLI implementation deliberately includes these two fixed tool
+        // directories; no caller-specific PATH or shell initialization is inherited.
+        XCTAssertEqual(child["path"] as? String, "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
         let keys = Set(try XCTUnwrap(child["environmentKeys"] as? [String]))
         var expectedEnvironment = AgentRuntimeIsolation.environment(
             inheriting: ProcessInfo.processInfo.environment,
@@ -110,7 +112,10 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         XCTAssertEqual(threadRequests.map { $0["method"] as? String }, [threadMethod])
         let params = try XCTUnwrap(threadRequests.first?["params"] as? [String: Any])
         XCTAssertEqual(params["cwd"] as? String, configuration.workspacePath)
-        XCTAssertEqual(params["developerInstructions"] as? String, ComputaAgentInstructions.developerInstructions())
+        // New chats receive reference tools; the cold legacy fixture has no
+        // persisted reference-tool marker and must retain its legacy contract.
+        XCTAssertEqual(params["developerInstructions"] as? String,
+                       ComputaAgentInstructions.developerInstructions(referenceTools: threadMethod == "thread/start"))
         let config = try XCTUnwrap(params["config"] as? [String: Any])
         XCTAssertEqual(config["project_root_markers"] as? [String], [])
         XCTAssertNil(config["project_doc_max_bytes"])

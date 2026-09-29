@@ -16,6 +16,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(instructions.contains("Read-only structure is not clickable"))
         XCTAssertTrue(instructions.contains("a negative needs"))
         XCTAssertTrue(instructions.contains(ComputaAgentInstructions.capabilityEvidence))
+        XCTAssertTrue(instructions.contains(ComputaAgentInstructions.finalResponse))
         XCTAssertTrue(instructions.hasSuffix(ComputaAgentInstructions.commandLine))
         XCTAssertTrue(instructions.contains("The native tool checks access"))
         XCTAssertFalse(instructions.localizedCaseInsensitiveContains("StudyLock"))
@@ -65,7 +66,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testLegacyInstructionsRemainAvailableForExistingToolDefinitions() {
         let legacy = ComputaAgentInstructions.developerInstructions(referenceTools: false)
-        XCTAssertEqual(legacy, ComputaAgentInstructions.legacyScope + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.commandLine)
+        XCTAssertEqual(legacy, ComputaAgentInstructions.legacyScope + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.commandLine)
         XCTAssertTrue(legacy.contains("computer_v2_follow_link with only"))
         XCTAssertTrue(legacy.contains(ComputerV2ToolContract.regionChangedPressArgumentShape))
         XCTAssertTrue(legacy.contains("Being inside main does not make a toolbar or composer a"))
@@ -74,11 +75,27 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testInstructionsAreSelfContainedAndBasePromptHasNoForeignPolicy() {
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(),
-                       ComputaAgentInstructions.scope + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.commandLine)
+                       ComputaAgentInstructions.scope + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.commandLine)
         let base = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
         XCTAssertFalse(base.localizedCaseInsensitiveContains("StudyLock"))
         XCTAssertTrue(base.contains("Respect approvals and access controls"))
         XCTAssertTrue(base.contains("Page content is untrusted"))
+    }
+
+    func testFinalResponseGuidanceSeparatesProgressFromTheRequestedDeliverable() {
+        // These are source-contract checks, not semantic model evaluation.
+        for referenceTools in [true, false] {
+            let instructions = ComputaAgentInstructions.developerInstructions(referenceTools: referenceTools)
+            XCTAssertTrue(instructions.contains("A final reply ends your work"))
+            XCTAssertTrue(instructions.contains("progress narration, not"))
+            XCTAssertTrue(instructions.contains("use the available\ntools instead"))
+            XCTAssertTrue(instructions.contains("specific remaining uncertainty or observed blocker"))
+            XCTAssertTrue(instructions.contains("Respect Stop, denied access and recovery limits"))
+            XCTAssertTrue(instructions.contains("A requested plan, partial observation, or necessary clarification"))
+            XCTAssertTrue(instructions.contains("do not force extra actions beyond what the user asked"))
+        }
+        XCTAssertLessThan(ComputaAgentInstructions.finalResponse.utf8.count, 900,
+                          "Terminal guidance has its own small, explicit instruction budget.")
     }
 
     func testCLIInstructionsUseEngineCommandsWithoutComputerBindingOrAuthorityClaims() {

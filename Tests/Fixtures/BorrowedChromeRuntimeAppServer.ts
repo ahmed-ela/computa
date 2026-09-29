@@ -95,6 +95,24 @@ function received(message: any) {
       default: return finish(true);
     }
   }
+  if (mode.startsWith("temporary-workspace-")) {
+    if (step++ === 0) {
+      if (!success) return finish(false);
+      return call("computer_v2_create_workspace", { candidate_token: JSON.parse(text).items[0].candidate_token });
+    }
+    if (mode === "temporary-workspace-denied") return finish(!success && text.includes("not been enabled"));
+    if (!success) return finish(false);
+    if (step === 2) {
+      if (!text.includes("temporary_task_tab=true")) return finish(false);
+      if (mode === "temporary-workspace-compaction") {
+        const item = { id: "workspace-mid-turn-compaction", type: "contextCompaction" };
+        notify("item/started", { turnId, item });
+        notify("item/completed", { turnId, item });
+      }
+      return call("computer_v2_read_page", { view: "content" });
+    }
+    return finish(true);
+  }
   if (mode.startsWith("follow-link-")) return followLinkWorkflow(success, text);
   if (mode.startsWith("search-detail-")) return searchDetailWorkflow(success, text);
   if (mode.startsWith("publication-recovery-")) return publicationRecoveryWorkflow(success, text);
@@ -541,10 +559,17 @@ function runtimeVerification(success: boolean, text: string) {
         }
         if (mode === "runtime-verify-no-plan") {
           call("computer_v2_ax", { snapshot_id: snapshot, element_index: 0, ax_action: "AXPress" });
+        } else if (mode === "runtime-verify-dialog-already-open") {
+          call("computer_v2_ax", { snapshot_id: snapshot, element_index: 0, ax_action: "AXPress",
+            postcondition: { kind: "dialog_opened" } });
         } else counterPress();
         break;
       case 3:
-        if (mode === "runtime-verify-no-plan") {
+        if (mode === "runtime-verify-dialog-already-open") {
+          if (success || !text.includes("preflight_issue=browserDialogAlreadyOpen")
+              || !text.includes("dispatch=not_dispatched")) return finish(false);
+          finalAnswer("EXISTING_DIALOG_FALSE_SUCCESS_MUST_NOT_APPEAR");
+        } else if (mode === "runtime-verify-no-plan") {
           if (success || !text.includes("requires postcondition before input")
               || !text.includes("dispatch=not_dispatched")) return finish(false);
           finalAnswer("UNPLANNED_PRESS_FALSE_SUCCESS_MUST_NOT_APPEAR");

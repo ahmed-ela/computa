@@ -460,7 +460,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
 
     func testSpecsAreVersionedFlatAndActionSpecific() throws {
         let specs = ComputerV2ToolContract.specs
-        XCTAssertEqual(specs.count, 16)
+        XCTAssertEqual(specs.count, 17)
         XCTAssertEqual(specs.count, ComputerV2ToolContract.Tool.allCases.count)
         XCTAssertEqual(Set(specs.compactMap { $0["name"] as? String }).count, specs.count)
 
@@ -532,7 +532,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             "lmstudio-community/Qwen3.5-4B-MLX-4bit",
             "lmstudio-community/Qwen3.5-9B-MLX-4bit",
         ] {
-            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 16)
+            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 17)
             XCTAssertTrue(
                 ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed)
                     .contains { $0["name"] as? String == groundClick },
@@ -543,7 +543,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             "mlx-community/Qwen3.8-27B-4bit",
             "lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit",
         ] {
-            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 15)
+            XCTAssertEqual(ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed).count, 16)
             XCTAssertFalse(
                 ComputerV2ToolContract.specs(for: modelID, interactionPolicy: .foregroundAllowed)
                     .contains { $0["name"] as? String == groundClick },
@@ -557,7 +557,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             let specs = ComputerV2ToolContract.specs(for: model)
             let names = Set(specs.compactMap { $0["name"] as? String })
             XCTAssertEqual(names, Set(Tool.allCases.filter { !$0.requiresGlobalInput }.map(\.rawValue)))
-            XCTAssertEqual(specs.count, 11)
+            XCTAssertEqual(specs.count, 12)
             for spec in specs {
                 let name = try XCTUnwrap(spec["name"] as? String)
                 let schema = try XCTUnwrap(spec["inputSchema"] as? [String: Any])
@@ -626,7 +626,8 @@ final class ComputerV2ToolContractTests: XCTestCase {
             XCTAssertTrue(try description(tool).contains("fresh AX snapshot"))
         }
         let instructions = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
-        XCTAssertTrue(instructions.contains("Bind each turn"))
+        XCTAssertTrue(instructions.contains("For computer UI tasks, bind each turn"))
+        XCTAssertTrue(instructions.contains("CLI commands need no app binding"))
         XCTAssertTrue(instructions.contains("User-approved connection: computer_v2_tabs then computer_v2_bind_tab(observed candidate_token)"))
         XCTAssertTrue(instructions.contains("else computer_v2_open"))
         XCTAssertTrue(instructions.contains("Native open"))
@@ -766,6 +767,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
             (.tabs, [:]),
             (.continueRead, ["cursor": inventoryCursor]),
             (.bindTab, ["candidate_token": candidateToken]),
+            (.createWorkspace, ["candidate_token": candidateToken]),
             (.snapshot, [:]),
             (.followLink, ["snapshot_id": snapshotID, "element_index": 0]),
             (.ax, [

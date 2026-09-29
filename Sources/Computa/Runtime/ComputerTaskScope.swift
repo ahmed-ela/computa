@@ -121,7 +121,7 @@ struct ComputerTaskScope: Equatable, Sendable {
     func toolViolation(tool: String, hasBorrowedBinding: Bool) -> String? {
         guard backgroundChromeOnly else { return nil }
         switch tool {
-        case "computer_v2_status", "computer_v2_apps", "computer_v2_tabs", "computer_v2_bind_tab":
+        case "computer_v2_status", "computer_v2_apps", "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace":
             return nil
         case "computer_v2_snapshot", "computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text", "computer_v2_verify":
             guard !hasBorrowedBinding else { return nil }

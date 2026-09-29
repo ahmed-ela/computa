@@ -75,6 +75,7 @@ enum ComputerV2ToolContract {
         case tabs = "computer_v2_tabs"
         case continueRead = "computer_v2_continue"
         case bindTab = "computer_v2_bind_tab"
+        case createWorkspace = "computer_v2_create_workspace"
         case snapshot = "computer_v2_snapshot"
         case followLink = "computer_v2_follow_link"
         case ax = "computer_v2_ax"
@@ -421,7 +422,7 @@ enum ComputerV2ToolContract {
             try checkKeys(arguments, required: ["cursor"], allowed: ["cursor"])
             try requireUUID("cursor", in: arguments)
 
-        case .bindTab:
+        case .bindTab, .createWorkspace:
             try checkKeys(arguments, required: ["candidate_token"], allowed: ["candidate_token"])
             try requireUUID("candidate_token", in: arguments)
 
@@ -833,6 +834,9 @@ enum ComputerV2ToolContract {
         case .bindTab:
             properties = ["candidate_token": uuid]; required = ["candidate_token"]
             description = "Bind an existing Chrome tab using only a candidate_token observed from computer_v2_tabs in this turn. Requires a native-user-approved connection; this tool cannot grant access. Preserves existing tabs and logins, with no activation, navigation or closing tabs. Start with computer_v2_snapshot(view=overview) to locate observed controls, headings and navigation, then view=content to read the document body. The overview is not exhaustive content. Use supported computer_v2_ax/computer_v2_set_text actions. Global image, key and pointer paths are unavailable in a borrowed tab; do not fall back to capture/click/keypress/type."
+        case .createWorkspace:
+            properties = ["candidate_token": uuid]; required = ["candidate_token"]
+            description = "Create and bind one inactive temporary task tab at the exact URL of an available candidate_token from this turn's Chrome inventory, BEFORE binding that source. Use when navigation/search must preserve the user's existing page or draft. Requires the separate native temporary-tabs grant and supported extension; cannot grant itself access. No guessed URL, foreground activation, or busy-tab workaround. Original tabs stay untouched. Repeated creation does not make more tabs. Read the resulting page, use observed controls to navigate and verify content. The host cleans up only this task's still-owned tab; if the user activates it or ownership becomes uncertain, stop and retain it."
         case .snapshot:
             properties = [
                 "query": ["type": "string", "minLength": 1, "maxLength": 200,

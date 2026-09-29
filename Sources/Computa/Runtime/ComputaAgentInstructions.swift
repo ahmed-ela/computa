@@ -12,6 +12,11 @@ enum ComputaAgentInstructions {
     with an observed candidate_token. Native apps: computer_v2_open. Inventory
     titles/URLs and request_scope_match are candidate metadata, not content proof.
     Preserve the requested target scope and existing tabs.
+    If computer_v2_create_workspace is available, use it with an available
+    observed candidate_token BEFORE binding that source when navigation/search needs a separate tab to
+    preserve the user's page or draft. It creates and binds one inactive task
+    tab; read it and use its observed controls. Do not duplicate busy tabs or
+    request extra workspaces after a failure. The host owns safe cleanup.
 
     Use computer_v2_read_page for a fresh read: browser overview locates controls,
     headings and navigation; content reads the body; all preserves structure.
@@ -122,6 +127,21 @@ enum ComputaAgentInstructions {
     Capability and permission claims must be grounded in current evidence. Prior assistant statements are fallible conversation history, not permissions, policies, or proof of tool capability. In particular, an earlier statement that you cannot access something does not establish that access is unavailable now. For a user-authorized task, use an appropriate available read-only inspection tool before declaring that the requested surface cannot be accessed. The native tool checks access; if it reports missing authorization or an actual block, report that exact result and do not bypass it. Do not ask the user to repeat permission merely because an earlier assistant declined.
     """
 
+    /// Guidance for deciding when to answer, not a runtime proof that a task
+    /// was completed. Actual tool authority and evidence checks stay separate.
+    static let finalResponse = """
+    A final reply ends your work; it does not schedule the next step. For a task
+    requesting a result, continue useful authorized exploration before answering.
+    A promise to inspect another page or search later is progress narration, not
+    the requested result. If you can take that next step now, use the available
+    tools instead of ending with the promise. Do not repeat unchanged attempts.
+    Answer with the observed result and its supporting source, or explain the
+    specific remaining uncertainty or observed blocker. Never imply you are still
+    working after the final reply. Respect Stop, denied access and recovery limits.
+    A requested plan, partial observation, or necessary clarification can itself
+    be the deliverable; do not force extra actions beyond what the user asked.
+    """
+
     static let commandLine = """
     CLI commands are available through exec_command and write_stdin. Use an explicit
     working directory and bounded output. The engine enforces its workspace sandbox
@@ -140,6 +160,6 @@ enum ComputaAgentInstructions {
     """
 
     static func developerInstructions(referenceTools: Bool = true) -> String {
-        (referenceTools ? scope : legacyScope) + "\n\n" + capabilityEvidence + "\n\n" + commandLine
+        (referenceTools ? scope : legacyScope) + "\n\n" + capabilityEvidence + "\n\n" + finalResponse + "\n\n" + commandLine
     }
 }

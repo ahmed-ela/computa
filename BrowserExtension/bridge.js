@@ -1,4 +1,5 @@
 import { BridgeError, requireValue, record, text, keys, allowedURL, validateCommand, projectAccessibilityResult, projectClickabilityResult } from "./commands.js";
+import { TemporaryTabs, TEMPORARY_TABS_VERSION } from "./temporary-tabs.js";
 
 export const HOST_NAME = "com.macndash.chrome_bridge";
 export const MAX_MESSAGE_BYTES = 512 * 1024;
@@ -7,12 +8,15 @@ const encoder = new TextEncoder();
 
 // Dependency injection keeps tests away from the user's browser and native host.
 export class ChromeBridge {
-  constructor({ chrome, emit, uuid = () => crypto.randomUUID(), commandTimeoutMs = 15_000, cleanupTimeoutMs = 1_500 }) {
+  constructor({ chrome, emit, uuid = () => crypto.randomUUID(), commandTimeoutMs = 15_000, cleanupTimeoutMs = 1_500,
+    temporarySettlementTimeoutMs = 2000, temporarySettlementPollMs = 50 }) {
     this.chrome = chrome;
     this.emit = emit;
     this.uuid = uuid;
     this.commandTimeoutMs = commandTimeoutMs;
     this.cleanupTimeoutMs = cleanupTimeoutMs;
+    this.temporarySettlementTimeoutMs = temporarySettlementTimeoutMs;
+    this.temporarySettlementPollMs = temporarySettlementPollMs;
     this.bridgeEpoch = uuid();
     this.generation = null;
     this.attachments = new Map();
@@ -24,6 +28,7 @@ export class ChromeBridge {
     this.pendingCount = 0;
     this.pairingNonce = null;
     this.state = null;
+    this.temporaryTabs = new TemporaryTabs(this);
   }
 
   async initialize() {
@@ -58,7 +63,8 @@ export class ChromeBridge {
   hello() {
     const hello = { version: 1, event: "hello", installationId: this.state.installationId,
       extensionId: this.chrome.runtime.id, bridgeEpoch: this.bridgeEpoch,
-      paired: !!this.state.pairingToken, suspended: this.state.suspended };
+      paired: !!this.state.pairingToken, suspended: this.state.suspended,
+      capabilities: { temporaryTabsVersion: TEMPORARY_TABS_VERSION } };
     if (this.state.pairingToken) hello.pairingToken = this.state.pairingToken;
     this.emit(hello);
     return hello;
@@ -81,7 +87,8 @@ export class ChromeBridge {
     if (!this.pairingNonce || this.state.pairingToken) return;
     this.emit({ version: 1, event: "pairRequested", installationId: this.state.installationId,
       extensionId: this.chrome.runtime.id, bridgeEpoch: this.bridgeEpoch,
-      paired: false, suspended: this.state.suspended, pairingNonce: this.pairingNonce });
+      paired: false, suspended: this.state.suspended, pairingNonce: this.pairingNonce,
+      capabilities: { temporaryTabsVersion: TEMPORARY_TABS_VERSION } });
   }
 
   async resumeFromPopup() {
@@ -99,10 +106,12 @@ export class ChromeBridge {
     const attachments = [...this.attachments.values()];
     this.attachments.clear();
     this.requestIDs.clear();
+    const detached = Promise.allSettled(attachments.map(item => this.detachSafely(item.targetID)));
+    const temporaryCleanup = this.temporaryTabs.revoke(detached);
     if (suspend) this.state.suspended = true;
     if (forget) { this.state.pairingToken = null; this.pairingNonce = null; this.state.suspended = true; }
     await this.save();
-    await Promise.allSettled(attachments.map(item => this.detachSafely(item.targetID)));
+    await Promise.allSettled([temporaryCleanup, detached]);
   }
 
   async hostDisconnected() { await this.revoke(); }
@@ -178,9 +187,11 @@ export class ChromeBridge {
 
   async current(item, generation, revision) {
     requireValue(this.attachments.get(item.attachmentToken) === item, "stale_attachment", "The tab attachment is no longer current.");
+    this.temporaryTabs.assertAttachable(item.targetID);
     const target = (await this.targets(generation, revision)).find(target => target.id === item.targetID);
     requireValue(!!target, "target_unavailable", "The exact attached tab is unavailable or restricted.");
     requireValue(this.attachments.get(item.attachmentToken) === item, "stale_attachment", "The tab attachment is no longer current.");
+    this.temporaryTabs.assertAttachable(item.targetID);
     return target;
   }
 
@@ -210,7 +221,9 @@ export class ChromeBridge {
       return { paired: true };
     }
     if (operation === "authorizeSession") {
-      requireValue(keys(params, ["installationId", "pairingToken"]) && !!this.state.pairingToken && !this.state.suspended
+      requireValue((keys(params, ["installationId", "pairingToken"])
+        || (keys(params, ["installationId", "pairingToken", "temporaryTabsVersion"]) && params.temporaryTabsVersion === TEMPORARY_TABS_VERSION))
+        && !!this.state.pairingToken && !this.state.suspended
         && params.installationId === this.state.installationId && params.pairingToken === this.state.pairingToken,
       "unauthorized", "The extension pairing does not match or is suspended.");
       requireValue(!this.usedGenerations.has(generation), "duplicate_generation", "A new session must use a fresh generation.");
@@ -220,6 +233,7 @@ export class ChromeBridge {
       requireValue(this.revision === expectedRevision && !this.state.suspended && params.pairingToken === this.state.pairingToken,
         "revoked", "Pairing was revoked.");
       this.generation = generation;
+      this.temporaryTabs.authorize(params.temporaryTabsVersion);
       this.usedGenerations.add(generation);
       this.requestIDs.add(request.id);
       return { generation, bridgeEpoch: this.bridgeEpoch };
@@ -229,7 +243,11 @@ export class ChromeBridge {
     switch (operation) {
       case "ping":
         requireValue(keys(params, []));
-        return { generation, bridgeEpoch: this.bridgeEpoch };
+        return { generation, bridgeEpoch: this.bridgeEpoch, capabilities: { temporaryTabsVersion: TEMPORARY_TABS_VERSION } };
+      case "createTemporary":
+        return this.temporaryTabs.create(params, generation, revision);
+      case "releaseTemporary":
+        return this.temporaryTabs.release(params, generation, revision);
       case "inventory": {
         requireValue(keys(params, []));
         return { generation, candidates: (await this.targets(generation, revision)).map(target => ({ targetID: target.id,
@@ -243,6 +261,7 @@ export class ChromeBridge {
         const target = (await this.targets(generation, revision)).find(target => target.id === params.targetID);
         requireValue(!!target, "target_unavailable", "The exact tab is unavailable or restricted.");
         requireValue(!target.attached, "target_busy", "The exact tab already has an automation or debugger attachment.");
+        this.temporaryTabs.assertAttachable(target.id);
         this.check(generation, revision);
         const attachment = this.chrome.debugger.attach({ targetId: target.id }, "1.3");
         // An attach can finish after its deadline. Clean it up on its original exact target.
@@ -251,7 +270,7 @@ export class ChromeBridge {
         }, () => {});
         try { await this.bounded(attachment); }
         catch (error) { await this.detachSafely(target.id); throw error; }
-        try { this.check(generation, revision); }
+        try { this.check(generation, revision); this.temporaryTabs.assertAttachable(target.id); }
         catch (error) { await this.detachSafely(target.id); throw error; }
         const item = { attachmentToken: this.uuid(), targetID: target.id, tabId: target.tabId,
           objects: new Map(), contexts: new Set(), frame: null };
@@ -280,7 +299,9 @@ export class ChromeBridge {
         if (params.method === "Runtime.callFunctionOn") requireValue(item.objects.has(command.objectId)
           && command.arguments[0].value === item.frame?.url, "stale_object", "The object or document is not current.");
         this.check(generation, revision);
+        this.temporaryTabs.mutationStarted(item, params.method, command);
         const result = (await this.bounded(this.chrome.debugger.sendCommand({ targetId: item.targetID }, params.method, command))) ?? {};
+        this.temporaryTabs.mutationFinished(item, params.method, command);
         this.check(generation, revision);
         requireValue(this.attachments.get(item.attachmentToken) === item, "stale_attachment", "The tab attachment was revoked.");
         if (params.method === "Page.getFrameTree") {

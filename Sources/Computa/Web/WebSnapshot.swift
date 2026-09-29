@@ -15,6 +15,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let modelOptions: [LocalModelOption]
     let showToolPayloads: Bool
     let isInspectorPresented: Bool
+    let isBrowserPresented: Bool
     let isSettingsPresented: Bool
     let promptReceipts: [PromptReceipt]
 
@@ -47,6 +48,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         modelOptions = LocalModelCatalog.options
         showToolPayloads = state.showToolPayloads
         isInspectorPresented = state.isInspectorPresented
+        isBrowserPresented = state.isBrowserPresented
         isSettingsPresented = state.presentedSheet == .settings
         promptReceipts = state.promptReceipts
     }

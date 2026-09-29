@@ -132,6 +132,7 @@ enum BrowserActionVerification {
         case unsupportedRegion
         case baselineUnavailable
         case baselineAlreadySatisfied
+        case dialogAlreadyOpen
         case baselineChanged
         case postconditionNotObserved
 
@@ -148,10 +149,26 @@ enum BrowserActionVerification {
             case .unsupportedRegion: return "Select an observed semantic container for region verification, not a text child."
             case .baselineUnavailable: return "The required browser pre-action evidence is unavailable. Do not repeat input."
             case .baselineAlreadySatisfied: return "The postcondition already held before input; it does not verify a changed outcome."
+            case .dialogAlreadyOpen: return "A dialog already existed before input, so dialog_opened cannot establish a newly opened dialog."
             case .baselineChanged: return "The planned pre-action state changed before dispatch. Observe again; no input was sent."
             case .postconditionNotObserved: return "The planned browser postcondition has not been observed. No action was repeated."
             }
         }
+    }
+
+    /// Correlation only, captured before dispatch. A backend node number can
+    /// be reused after navigation or target replacement. Neither fresh opaque
+    /// snapshot IDs nor model arguments may define this document identity.
+    static func recoveryScope(binding: BrowserTabBinding, snapshot: BrowserTabSnapshot) -> String? {
+        guard snapshot.isLiveObservation, snapshot.tabHandle == binding.handle,
+              snapshot.documentEpoch == binding.documentEpoch, !snapshot.loaderID.isEmpty,
+              (try? binding.lifetime.check()) != nil else { return nil }
+        let fields = [binding.browserGeneration.uuidString, binding.targetID,
+                      binding.targetInstanceToken, binding.handle.uuidString,
+                      binding.documentEpoch.uuidString, snapshot.loaderID,
+                      snapshot.documentURL.absoluteString]
+        guard let data = try? JSONEncoder().encode(fields) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private static let maximumTextBytes = 8_192
@@ -233,7 +250,7 @@ enum BrowserActionVerification {
                   dialogOpenerRoles.contains(elementRole(selected)) else { throw Failure.invalidRequest }
             let graph = try Graph(snapshot)
             let evidence = try graph.dialogOpeningBaseline(openerBackendID: selected.backendNodeID,
-                                                          existingDialogFailure: .baselineAlreadySatisfied)
+                                                          existingDialogFailure: .dialogAlreadyOpen)
             guard evidence.opener.role == elementRole(selected),
                   evidence.opener.name == canonical(selected.label) else { throw Failure.invalidRequest }
             dialogBaseline = evidence.root

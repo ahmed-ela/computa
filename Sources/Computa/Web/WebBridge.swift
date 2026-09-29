@@ -135,6 +135,10 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "toggleInspector":
             state.isInspectorPresented.toggle()
 
+        case "toggleBrowser":
+            guard !state.approvalGateBlocksInteraction else { return }
+            state.isBrowserPresented.toggle()
+
         case "showSettings":
             state.refreshAutomationPermissions()
             state.presentedSheet = .settings

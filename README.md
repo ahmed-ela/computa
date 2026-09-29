@@ -480,6 +480,33 @@ bun run build
 
 Octane currently declares Node.js 22.22.2 or newer for its supported development toolchain. The app's `.tsx` and the component package's `.tsrx` sources both typecheck and build with the installed Bun toolchain; retain a current Node installation as the upstream-compatible fallback.
 
+### Native browser pane
+
+The top-right **Browser** toggle opens a resizable native WKWebView pane beside
+the chat. Press **+** (or ⌘T while the pane is shown) to create a tab, enter a
+website address, and press **Return** or the Go arrow. Bare domains such as
+`example.com` use HTTPS; the address field is not a search box. Select a tab by
+its title, close it with ×, and drag the divider to resize the pane. Back/forward,
+reload and stop work independently for each tab.
+
+Hiding the pane or opening Settings preserves its live tabs. Closing a tab
+releases its WebView. Eight live tabs are allowed by default; this is a count
+limit, not a memory-use guarantee. Open tabs are not yet restored after quitting.
+
+Website data uses a separate Computa-owned persistent WebKit profile. It does
+not copy Chrome or Codex cookies or sessions; sign in separately. The privileged
+chat UI and untrusted websites use separate WebViews, configurations and stores.
+Native approval requests block both surfaces until resolved.
+
+This version declines popups, downloads, file pickers, camera/microphone requests,
+external-app schemes and JavaScript modal dialogs. Sites requiring these
+features, including popup-dependent sign-in, may not work yet.
+
+The pane is **human-operated only**. Qwen is not given access to this browser
+profile or new embedded-browser tools; existing Chrome/native tools are unchanged.
+[Agent control is a deferred TODO](TODO.md#embedded-browser-agent-control-deferred).
+See [implementation and validation](docs/EMBEDDED-BROWSER.md).
+
 ## Generate, build, and test the app
 
 `project.yml` is the source of truth for the native Xcode project:

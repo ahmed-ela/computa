@@ -26,7 +26,12 @@ enum ComputaLaunchMode: Equatable {
     ) -> AppState {
         switch self {
         case .application:
-            return AppState(tasks: [], runtime: runtimeFactory(), preferences: preferencesFactory(), enableChromeExtensionBridge: true)
+            let preferences = preferencesFactory()
+            // The browser is owned by the UI only. Do not pass its profile or
+            // WebViews to the agent runtime until that capability is qualified.
+            let browser = EmbeddedBrowserSession(defaults: preferences)
+            return AppState(tasks: [], runtime: runtimeFactory(), preferences: preferences,
+                            browserSession: browser, enableChromeExtensionBridge: true)
         case .testHost:
             // A unique suite prevents even incidental test-host state changes
             // from reading or writing the application's saved access choice.

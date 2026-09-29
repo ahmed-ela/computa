@@ -189,6 +189,15 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
           title="Toggle inspector"
           onClick={() => post({ action: 'toggleInspector' })}
         >
+          <Icon name="info" size={18} />
+        </Button>
+        <Button variant="ghost" size="icon"
+          className={`icon-button ${snapshot.isBrowserPresented ? 'active' : ''}`}
+          aria-label="Toggle browser"
+          aria-pressed={snapshot.isBrowserPresented}
+          title="Browser"
+          onClick={() => post({ action: 'toggleBrowser' })}
+        >
           <Icon name="inspect" size={18} />
         </Button>
       </div>

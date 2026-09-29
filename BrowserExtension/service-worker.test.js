@@ -20,6 +20,7 @@ function fixture(state = undefined) {
       },
     },
     debugger: { onDetach: event(), detach: async () => {} },
+    tabs: { onActivated: event(), onRemoved: event(), onUpdated: event() },
     storage: { local: { get: async () => structuredClone(stored), set: async value => Object.assign(stored, structuredClone(value)) } },
   };
   const worker = startChromeBridge(chrome, { schedule: callback => { timers.push(callback); return timers.length; },
@@ -111,4 +112,19 @@ test("app reconnect handshake sends current hello instead of buffered actions", 
   expect(f.worker.bridge.generation).toBeNull();
   expect(port.sent.map(message => message.event)).toEqual(["hello", "hello", "hello"]);
   expect(f.connections).toHaveLength(1);
+});
+
+test("temporary-tab ownership observes Chrome activation, removal and update events", async () => {
+  const f = fixture(); await f.worker.ready;
+  const calls = [];
+  for (const name of ["onActivated", "onRemoved", "onUpdated"]) {
+    f.worker.bridge.temporaryTabs[name] = (...args) => { calls.push([name, ...args]); };
+  }
+  f.chrome.tabs.onActivated.emit({ tabId: 11 });
+  f.chrome.tabs.onRemoved.emit(12);
+  f.chrome.tabs.onUpdated.emit(13, { pinned: true }, { id: 13, active: false });
+  await flush();
+  expect(calls).toEqual([["onActivated", { tabId: 11 }], ["onRemoved", 12],
+    ["onUpdated", 13, { pinned: true }, { id: 13, active: false }]]);
+  expect(f.connections).toEqual([]);
 });

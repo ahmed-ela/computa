@@ -3,6 +3,32 @@ import XCTest
 @testable import Computa
 
 final class BrowserActionVerificationTests: XCTestCase {
+    func testRecoveryScopeSurvivesFreshReadsButNotDocumentOrTargetReplacement() throws {
+        let binding = binding()
+        let before = dialogBefore(binding)
+        let scope = try XCTUnwrap(Verification.recoveryScope(binding: binding, snapshot: before))
+        XCTAssertEqual(scope.count, 64)
+        XCTAssertEqual(scope, Verification.recoveryScope(binding: binding, snapshot: dialogBefore(binding)),
+                       "A new snapshot ID is not a new browser document.")
+        XCTAssertNotEqual(scope, Verification.recoveryScope(binding: binding,
+            snapshot: snapshot(binding, nodes: dialogNodes(), loader: "replacement-loader")))
+        XCTAssertNotEqual(scope, Verification.recoveryScope(binding: binding,
+            snapshot: snapshot(binding, url: "https://example.test/other", nodes: dialogNodes())))
+        for other in [replacing(binding, targetID: "other-tab"), replacing(binding, targetInstance: "new-instance"),
+                      replacing(binding, generation: UUID()), replacing(binding, handle: UUID()),
+                      replacing(binding, documentEpoch: UUID())] {
+            XCTAssertNotEqual(scope, Verification.recoveryScope(binding: other, snapshot: dialogBefore(other)))
+        }
+        XCTAssertNil(Verification.recoveryScope(binding: replacing(binding, handle: UUID()), snapshot: before))
+        XCTAssertNil(Verification.recoveryScope(binding: replacing(binding, documentEpoch: UUID()), snapshot: before))
+        XCTAssertNil(Verification.recoveryScope(binding: binding,
+            snapshot: snapshot(binding, nodes: dialogNodes(), loader: "")))
+        var retained = before
+        retained.isLiveObservation = false
+        XCTAssertNil(Verification.recoveryScope(binding: binding, snapshot: retained))
+        XCTAssertFalse(scope.contains("example.test"), "The scope retains no page text or URL.")
+    }
+
     private typealias Verification = BrowserActionVerification
 
     func testDialogOpenedVerifiesOnlyNewAXExposureAtSameURLWithOpenerRemoved() throws {
@@ -64,7 +90,7 @@ final class BrowserActionVerificationTests: XCTestCase {
     func testDialogOpenedRequiresCompleteAbsenceAndAllowsAnIgnoredDialogToBecomeExposed() throws {
         let binding = binding()
         let visible = snapshot(binding, nodes: dialogNodes(dialogIDs: [20]), displayed: [element(10, "button", "Open panel")])
-        assertFailure(.baselineAlreadySatisfied) { try dialogPlan(visible, binding: binding) }
+        assertFailure(.dialogAlreadyOpen) { try dialogPlan(visible, binding: binding) }
         let hidden = snapshot(binding, nodes: dialogNodes(dialogIDs: [20], ignoredDialogs: true),
                               displayed: [element(10, "button", "Open panel")])
         let plan = try dialogPlan(hidden, binding: binding)

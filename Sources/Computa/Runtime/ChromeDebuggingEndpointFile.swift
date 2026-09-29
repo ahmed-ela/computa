@@ -33,8 +33,13 @@ enum ChromeDebuggingEndpointOperation: String, Equatable, Sendable {
 final class ChromeDebuggingConsent: @unchecked Sendable {
     private let lock = NSLock()
     private var approved: Bool
+    private let temporaryTabsApproved: Bool
 
-    init(approvedByUser: Bool = false) { approved = approvedByUser }
+    init(approvedByUser: Bool = false, allowsTemporaryTabs: Bool = false) {
+        approved = approvedByUser
+        temporaryTabsApproved = approvedByUser && allowsTemporaryTabs
+    }
+    var allowsTemporaryTabs: Bool { lock.withLock { approved && temporaryTabsApproved } }
     func revoke() { lock.withLock { approved = false } }
     func check() throws { try withApproval {} }
 
