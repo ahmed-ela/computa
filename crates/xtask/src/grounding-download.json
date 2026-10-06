@@ -1,0 +1,21 @@
+{
+  "files": {
+    "README.md": 619,
+    "added_tokens.json": 392,
+    "chat_template.json": 1049,
+    "config.json": 5063,
+    "merges.txt": 1671853,
+    "model.safetensors": 2199225887,
+    "model.safetensors.index.json": 89313,
+    "preprocessor_config.json": 572,
+    "special_tokens_map.json": 613,
+    "tokenizer.json": 11420371,
+    "tokenizer_config.json": 4327,
+    "vocab.json": 2776833
+  },
+  "schema_version": 1,
+  "source": {
+    "repo": "mlx-community/ShowUI-2B-bf16-4bit",
+    "revision": "c80dc363dfd4e802ef21fe7fd50a0fab8694c59e"
+  }
+}

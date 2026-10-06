@@ -239,6 +239,22 @@ After updating this unpacked developer extension, reload it once from Chrome's
 Extensions page to activate the changed JavaScript. Reopening Computa reconnects
 the remembered pairing but does not replace Chrome's loaded extension code.
 
+The Rust bridge reconnects its authenticated native helper with one timer and
+an attempt delay capped at 30 seconds. Opening Computa reuses the remembered
+installation and Keychain pairing, and no pending website request is replayed.
+An unsupported operation means Chrome still has an older extension worker
+loaded; that update needs one developer-extension reload, not a reload per chat.
+
+The signed Rust app can repair its native-host registration only when launched
+from the OS account's `Applications/Computa.app`. It verifies that exact app and
+its bundled `ChromeBridgeHost` have the required identities and signing Team,
+then publishes only the fixed host name and installed extension origin. A
+matching signed old registration gets a private backup. Foreign, changed or
+unverifiable registrations are rejected. Staged apps and qualification fixtures
+cannot repoint the live registration. These source checks do not constitute
+proof that an installed extension has been activated or a live website chat has
+completed.
+
 | Operation | Parameters | Result |
 | --- | --- | --- |
 | `webProviderStart` | `{provider: "chatgpt" \| "gemini" \| "claude"}` | New inactive owned tab; `state: "loading"`, `sessionToken` |

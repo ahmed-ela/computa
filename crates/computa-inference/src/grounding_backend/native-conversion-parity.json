@@ -1,0 +1,55 @@
+{
+  "comparison": "exact dtype bits for every converted tensor; source tensors, transforms and quantized affine values/scales/biases",
+  "converter": "computa-mlx-affine-v1",
+  "florence_tokenizer": {
+    "comparison": "all serialized token records and trained location marker identifiers against exact upstream Florence processor",
+    "fixture_sha256": "429afd3de3534f287e0351a17d00e594211d519440eec2c9616248b2852f72d3",
+    "probe_sha256": "cbdcfbbd04d526596ea03bff1bcfad032cf2eb43831cea122ffc38273b152a3f",
+    "records": 1030
+  },
+  "models": {
+    "goclick-base-4bit": {
+      "compared_values": 119455376,
+      "comparison": "exact dtype bits",
+      "extra_names": [],
+      "mismatches": [],
+      "mlx": "0.32.2",
+      "model": "goclick-base-4bit",
+      "native_tensors": 870,
+      "probe_sha256": "50b69d740d84ba94b52fa18826398eb7e07490d3e1936e636b3e49d8507139bd",
+      "reference_package": "0.7.1",
+      "reference_tensors": 870,
+      "schema_version": 2
+    },
+    "gui-owl-2b": {
+      "compared_values": 675901440,
+      "comparison": "exact dtype bits; original upstream sanitizer and module selection, streamed GPU affine row groups",
+      "extra_names": [],
+      "mismatches": [],
+      "mlx": "0.32.2",
+      "model": "gui-owl-2b",
+      "native_tensors": 1019,
+      "probe_sha256": "462f33399dbebecf14b023336a692913408f858791c4dba970fbf1310a75a01b",
+      "reference_device": "gpu",
+      "reference_package": "0.7.1",
+      "reference_tensors": 1019,
+      "schema_version": 3
+    }
+  },
+  "publisher_prequantized_model": "showui-2b-4bit uses unchanged pinned publisher tensors",
+  "reference": {
+    "device": "gpu",
+    "mlx": "0.32.2",
+    "mlx_vlm": "0.7.1",
+    "source_files_sha256": {
+      "models/florence2/florence2.py": "2e9718fc676415b435858e44afcab04bae62f0aa757460e528b5c69ad6bff092",
+      "models/florence2/processing_florence2.py": "cf352488827df015b107896f0cfe0154a76ce04be2b7515374ae48e82a950bb4",
+      "models/florence2/vision.py": "4f1ca5a8b474fa04fc92fa37b818d391db37a28885c77af8b53d35b98d368456",
+      "models/qwen3_vl/language.py": "77ead946a5e15aa6463754b190c90c2eb07ac5a1bfbc0de36b7e2f46adb2591c",
+      "models/qwen3_vl/qwen3_vl.py": "12f0393421918eb1cbaa6daa447d93a405762e997f688676688e5c71d987d3ee",
+      "models/qwen3_vl/vision.py": "0c51d19e208e5d8fa7a6751aee0a9360a5bd8783dcfcf532286d14a0f1fbc7f9",
+      "utils.py": "0959896be30b30a77bfdae13f61fb8c21e57de2eb6b6071771e19de082e7a977"
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,20 @@
+[package]
+name = "computa-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+[dependencies]
+computa-contracts = { path = "../computa-contracts" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+libc.workspace = true
+uuid.workspace = true
+[dev-dependencies]
+tempfile.workspace = true
+[lints]
+workspace = true

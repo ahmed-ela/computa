@@ -1,0 +1,68 @@
+{
+  "artifact_format": "computa-native-grounding-v1",
+  "converter": "computa-mlx-affine-v1",
+  "models": {
+    "goclick-base-4bit": {
+      "files": {
+        "README.md": "47e2d4e8882c180ed657b9ce227208447570579904639264816a4b50fc08926a",
+        "config.json": "fe1aab2553b54ecb37c6114d99c8c70c0011dacd4250fd7855264effa55db6ed",
+        "generation_config.json": "dc60ba0a427187371e43340dd402b598e49a6adc23d3ddc76b841a262ef05513",
+        "model.safetensors": "5a8c5e5953a221880837c2b5689aefe5f3c2b61c8c262265d0568671dfb44917",
+        "model.safetensors.index.json": "04472ff3ed24cd9a625a32442810ccd0ca1e975b362ee95b877fcd38e28586a8",
+        "native-conversion.json": "9b8590cb1280016337b68b08297bb643a268ae9be9ed3738989b13eed4f1b285",
+        "preprocessor_config.json": "d7c23d895fa820e5ec6fc9a95fb1f6dcb108ffd4d3ca9b10e6586223464094bf",
+        "tokenizer.json": "c881e878901b9e462ddb77fe383b80b7a2b064619c42eb7fe343e2f6d5d1efec",
+        "tokenizer_config.json": "a300ffc5c3ecbe75b2031c9147c14168a45076f6ae2c309db54c72ab8b47cfeb",
+        "vocab.json": "394fdc63c71aabe0a9b97117f5d62fb5fcc4d59b2b3ea929a3929e6a53217b3c"
+      },
+      "source": {
+        "repo": "HongxinLi/GoClick-Base",
+        "revision": "05633a495f9d2ce823372d0c7fd9b0b4bb67c6fa"
+      }
+    },
+    "gui-owl-2b": {
+      "files": {
+        "README.md": "8520a786d7a9d411e45466c2b7e7786d062ec03f2778acecc4a45991a803d8d8",
+        "chat_template.json": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+        "config.json": "485037d824a7d9310244cd3a27fc7ae10342d1e12d2ced4328565e76a9145a95",
+        "generation_config.json": "29d2f9cebb08e5a8d0312d42f20018c4cda80dc3f53feb0989f6fabe0319eed9",
+        "merges.txt": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+        "model.safetensors": "aec0eb12dc15e889082052c94193381cb7ba246c2c3c7312a047c292b1a7a560",
+        "model.safetensors.index.json": "a3f62fd345551e8785e131debb3b7040721feb089e4403fcf1d7b514b715c895",
+        "native-conversion.json": "782d58d6bd1e517b50f4cb26916fca369d4cd7e753018882415fe6508fc13936",
+        "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+        "tokenizer.json": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+        "tokenizer_config.json": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
+        "video_preprocessor_config.json": "f38c890c32e0c037969b33be7693b2a51464695378b223418db5262a6da43fa0",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      },
+      "source": {
+        "repo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+        "revision": "528ceaec795bbfbe6103bd79e03db849feadfb24"
+      }
+    },
+    "showui-2b-4bit": {
+      "files": {
+        "README.md": "50c34a02858a20b26e8022121245ba429df57320f54d4445ee60250cf8982635",
+        "added_tokens.json": "7fa54985b58718a8fdb4f4d97484c4bd908db114847675e4bf3afe3e1d5d7bd4",
+        "chat_template.json": "94174d7176c52a7192f96fc34eb2cf23c7c2059d63cdbfadca1586ba89731fb7",
+        "config.json": "11f8bcb395238bb78a0e067deb2dc545324bfee3ebc4cb5ec2f013fb47165c05",
+        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "model.safetensors": "afeefddbea2032cf3a5b28fc478da9a2d9c98cf796663deca2b35c47620adae3",
+        "model.safetensors.index.json": "114615c5e912181fe4b79e72fed89ae80bd051232a01a4ce52c5932e9caa4b76",
+        "preprocessor_config.json": "29d27c703e5186231bc2ca07a876738a9f67ef5cb300ea2f72cf4048170d090d",
+        "special_tokens_map.json": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd",
+        "tokenizer.json": "091aa7594dc2fcfbfa06b9e3c22a5f0562ac14f30375c13af7309407a0e67b8a",
+        "tokenizer_config.json": "2cd4a50de05e1e2a916d04cb62522216d5a3af31bec65dbea96806d75f4b4b16",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      },
+      "source": {
+        "repo": "mlx-community/ShowUI-2B-bf16-4bit",
+        "revision": "c80dc363dfd4e802ef21fe7fd50a0fab8694c59e"
+      }
+    }
+  },
+  "numerical_parity_sha256": "f2ce056c3bdcac9b112fb7a75d82dcc3391f008509c647a46824ee31c62c8f60",
+  "schema_version": 1,
+  "source_manifest_sha256": "ed11487995a8194a73bf9646f8af6f94c3d5fb8a160d47c8ffba4c7e3c9b5204"
+}

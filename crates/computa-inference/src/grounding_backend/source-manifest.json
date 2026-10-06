@@ -1,0 +1,215 @@
+{
+  "models": {
+    "goclick-base-4bit": {
+      "files": [
+        {
+          "gitBlobSHA1": "0872128d7e617fe8db324f7ea83b7385a881a104",
+          "path": "README.md",
+          "sha256": null,
+          "size": 5892
+        },
+        {
+          "gitBlobSHA1": "74a4482afd52515c89ae8d7d388a537a16f5d350",
+          "path": "config.json",
+          "sha256": null,
+          "size": 2430
+        },
+        {
+          "gitBlobSHA1": "ca6e8967b9375f0a159e3f434b1998d23b542ff7",
+          "path": "generation_config.json",
+          "sha256": null,
+          "size": 292
+        },
+        {
+          "gitBlobSHA1": null,
+          "path": "model.safetensors",
+          "sha256": "8c122bc1ddbf188b1fe00dc1be2c3a4a92b93ee022570f790fcd8e94aab13907",
+          "size": 1083916964
+        },
+        {
+          "gitBlobSHA1": "85cd7be3568df661ad536b6ab20d59b08ba079ae",
+          "path": "preprocessor_config.json",
+          "sha256": null,
+          "size": 806
+        },
+        {
+          "gitBlobSHA1": "ad0bcbeb288f0d1373d88e0762e66357f55b8311",
+          "path": "tokenizer.json",
+          "sha256": null,
+          "size": 1355863
+        },
+        {
+          "gitBlobSHA1": "44784bc58d4cb18d3549ad71e062efcf032d9ef5",
+          "path": "tokenizer_config.json",
+          "sha256": null,
+          "size": 34
+        },
+        {
+          "gitBlobSHA1": "94a2f4fd50e976bda926c700291522ea1a79323f",
+          "path": "vocab.json",
+          "sha256": null,
+          "size": 1099884
+        }
+      ],
+      "repo": "HongxinLi/GoClick-Base",
+      "revision": "05633a495f9d2ce823372d0c7fd9b0b4bb67c6fa",
+      "schemaVersion": 1,
+      "totalBytes": 1086382165
+    },
+    "gui-owl-2b": {
+      "files": [
+        {
+          "gitBlobSHA1": "8e236a482f8f5ef38bf9edc8a46a789f9ad3b939",
+          "path": "README.md",
+          "sha256": null,
+          "size": 3539
+        },
+        {
+          "gitBlobSHA1": "1081bacf1af7c7c6de4a585ce02cd0fd34e382da",
+          "path": "chat_template.json",
+          "sha256": null,
+          "size": 5499
+        },
+        {
+          "gitBlobSHA1": "b555f057378534aca7b8fd1345723ba862464a4a",
+          "path": "config.json",
+          "sha256": null,
+          "size": 1499
+        },
+        {
+          "gitBlobSHA1": "3c8523257004002e8fbab1f5fb822802ba1bf46e",
+          "path": "generation_config.json",
+          "sha256": null,
+          "size": 214
+        },
+        {
+          "gitBlobSHA1": "20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0",
+          "path": "merges.txt",
+          "sha256": null,
+          "size": 1671839
+        },
+        {
+          "gitBlobSHA1": null,
+          "path": "model.safetensors",
+          "sha256": "f6847dd4ded9506962f75dbc254346d16bb8173fec3a16b31088ded0eb439186",
+          "size": 4255140312
+        },
+        {
+          "gitBlobSHA1": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+          "path": "preprocessor_config.json",
+          "sha256": null,
+          "size": 390
+        },
+        {
+          "gitBlobSHA1": "c6cc1014128b19d1fc46b1d30a23e3b1d35db421",
+          "path": "tokenizer.json",
+          "sha256": null,
+          "size": 7032403
+        },
+        {
+          "gitBlobSHA1": "d3d3763207692c78780f4bf42d4dadf49a5c8012",
+          "path": "tokenizer_config.json",
+          "sha256": null,
+          "size": 10868
+        },
+        {
+          "gitBlobSHA1": "d8dc2a4c15c7a2c9d00d411d0dfe46557b74fead",
+          "path": "video_preprocessor_config.json",
+          "sha256": null,
+          "size": 386
+        },
+        {
+          "gitBlobSHA1": "4783fe10ac3adce15ac8f358ef5462739852c569",
+          "path": "vocab.json",
+          "sha256": null,
+          "size": 2776833
+        }
+      ],
+      "repo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+      "revision": "528ceaec795bbfbe6103bd79e03db849feadfb24",
+      "schemaVersion": 1,
+      "totalBytes": 4266643782
+    },
+    "showui-2b-4bit": {
+      "files": [
+        {
+          "gitBlobSHA1": "16a01741fb0fc39b65ec402233035a4a0d33ee71",
+          "path": "README.md",
+          "sha256": null,
+          "size": 619
+        },
+        {
+          "gitBlobSHA1": "caa81304af029feb531f1fe80a096dc539ea0153",
+          "path": "added_tokens.json",
+          "sha256": null,
+          "size": 392
+        },
+        {
+          "gitBlobSHA1": "13303be6f396b038cf397b34a8096819d403836b",
+          "path": "chat_template.json",
+          "sha256": null,
+          "size": 1049
+        },
+        {
+          "gitBlobSHA1": "f96e52f3d1e1b0af0d3ce764270feb3c8d6be45b",
+          "path": "config.json",
+          "sha256": null,
+          "size": 5063
+        },
+        {
+          "gitBlobSHA1": "31349551d90c7606f325fe0f11bbb8bd5fa0d7c7",
+          "path": "merges.txt",
+          "sha256": null,
+          "size": 1671853
+        },
+        {
+          "gitBlobSHA1": null,
+          "path": "model.safetensors",
+          "sha256": "afeefddbea2032cf3a5b28fc478da9a2d9c98cf796663deca2b35c47620adae3",
+          "size": 2199225887
+        },
+        {
+          "gitBlobSHA1": "a168db86832d1edbaf9f34930736f29de7082f4f",
+          "path": "model.safetensors.index.json",
+          "sha256": null,
+          "size": 89313
+        },
+        {
+          "gitBlobSHA1": "6775a5f42a55a6562cc312e44d38ffa6e6bca1f9",
+          "path": "preprocessor_config.json",
+          "sha256": null,
+          "size": 572
+        },
+        {
+          "gitBlobSHA1": "ac23c0aaa2434523c494330aeb79c58395378103",
+          "path": "special_tokens_map.json",
+          "sha256": null,
+          "size": 613
+        },
+        {
+          "gitBlobSHA1": null,
+          "path": "tokenizer.json",
+          "sha256": "091aa7594dc2fcfbfa06b9e3c22a5f0562ac14f30375c13af7309407a0e67b8a",
+          "size": 11420371
+        },
+        {
+          "gitBlobSHA1": "84c1ef8e03a2a77a2a0682820d0ec7c37e686312",
+          "path": "tokenizer_config.json",
+          "sha256": null,
+          "size": 4327
+        },
+        {
+          "gitBlobSHA1": "4783fe10ac3adce15ac8f358ef5462739852c569",
+          "path": "vocab.json",
+          "sha256": null,
+          "size": 2776833
+        }
+      ],
+      "repo": "mlx-community/ShowUI-2B-bf16-4bit",
+      "revision": "c80dc363dfd4e802ef21fe7fd50a0fab8694c59e",
+      "schemaVersion": 1,
+      "totalBytes": 2215196892
+    }
+  },
+  "schemaVersion": 1
+}

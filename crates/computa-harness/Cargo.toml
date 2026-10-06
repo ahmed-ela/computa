@@ -1,0 +1,38 @@
+[package]
+name = "computa-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+computa-contracts = { path = "../computa-contracts" }
+computa-macos = { path = "../computa-macos" }
+computa-browser = { path = "../computa-browser" }
+computa-state = { path = "../computa-state" }
+url.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+libc.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2 = "0.6"
+block2 = "0.6"
+
+[lints]
+workspace = true

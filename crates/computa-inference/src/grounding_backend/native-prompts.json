@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "method_version": "goclick-guiowl-showui-agreement-v2",
+  "goclick_template": "Where is the {descriptor} element? (Output the center coordinates of the target)",
+  "gui_owl_system_sha256": "adefe76b20adbedf89cf8d96cab0a91a0c870ae9ef736770e161861d730ae607",
+  "gui_owl_user_template": "Please generate the next move according to the UI screenshot, instruction and previous actions.\n\nInstruction: {instruction}\n\nPrevious actions:\nNone",
+  "gui_owl_part_order": ["text", "image"],
+  "showui_part_order": ["protocol_text", "image", "instruction_text"],
+  "showui_protocol_text": "Based on the screenshot of the page, I give a text description and you give its corresponding location. The coordinate represents a clickable location [x, y] for an element, which is a relative coordinate on the screenshot, scaled from 0 to 1.",
+  "generation": {"thinking": false, "sampling": "greedy", "goclick_max_tokens": 32, "gui_owl_max_tokens": 256, "showui_max_tokens": 32}
+}

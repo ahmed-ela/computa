@@ -15,6 +15,18 @@ Private personal repository: [ahmed-wlb/computa](https://github.com/ahmed-wlb/co
 
 Next work: [Chrome/Computa lookup comparison and generalized evidence handling](TODO.md).
 
+The complete Rust migration is being qualified on
+[`codex/browser-model-providers`](https://github.com/ahmed-ela/computa/pull/3).
+Its source lives under [`crates`](crates); the installed Swift app remains the
+baseline until the real desktop, local-model and three-provider tests pass.
+See [migration scope and qualification gates](docs/RUST-MIGRATION.md).
+With the pinned Rust toolchain, run `cargo xtask check` for native and WASM
+checks, `cargo xtask setup --check` for read-only build prerequisites, or
+`cargo run --locked --release -p xtask -- setup --build-only` to build an isolated
+app without installing it. The release installer and workers share the same
+immutable Metal-library pin.
+The Rust workers use native MLX and their exact bundled Metal library.
+
 ## Install the macOS app
 
 The draft preview uses the explicit private release tag

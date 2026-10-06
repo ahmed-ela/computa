@@ -1,0 +1,28 @@
+[package]
+name = "computa-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+computa-contracts = { path = "../computa-contracts" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+pulldown-cmark = "0.13"
+url.workspace = true
+uuid.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+serde-wasm-bindgen.workspace = true
+web-sys = { workspace = true, features = ["Window", "Document", "Element", "Node", "NodeList", "DomTokenList", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "Event", "EventTarget", "KeyboardEvent", "MouseEvent", "DragEvent", "DataTransfer", "DomRect", "CssStyleDeclaration", "HtmlCollection", "console"] }
+
+[lints]
+workspace = true
