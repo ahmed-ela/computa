@@ -8,3 +8,4 @@ pub mod models;
 pub mod runtime_source;
 pub mod setup;
 pub mod source_build;
+pub mod version;

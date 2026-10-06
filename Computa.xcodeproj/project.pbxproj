@@ -459,6 +459,7 @@
 		ADEC149AAF9CD8A873A8CD5A /* NativeMessageEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessageEvidenceTests.swift; sourceTree = "<group>"; };
 		AE7C9A47729FE183CECF8395 /* AppStateStreamingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateStreamingTests.swift; sourceTree = "<group>"; };
 		B0A5B4A975407351C1B881C0 /* AppServerSteerContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppServerSteerContractTests.swift; sourceTree = "<group>"; };
+		B10C1788C1E9C867D02C298F /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = "<group>"; };
 		B19A16BAD8B266D357964FCC /* HeadlessMLXServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeadlessMLXServerTests.swift; sourceTree = "<group>"; };
 		B5F5F4B81E1ADB664D0E53E5 /* EmbeddedBrowserSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedBrowserSession.swift; sourceTree = "<group>"; };
 		B6609EB0A1F75DF77B891244 /* NativePostActionImageObservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePostActionImageObservation.swift; sourceTree = "<group>"; };
@@ -579,6 +580,14 @@
 				D212AA1A8A6157629490F58A /* WebViewHost.swift */,
 			);
 			path = Web;
+			sourceTree = "<group>";
+		};
+		3725FB65B84A28B0F37D9AA2 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				B10C1788C1E9C867D02C298F /* Version.xcconfig */,
+			);
+			path = Config;
 			sourceTree = "<group>";
 		};
 		43DD0BA715D99597534F5B4C /* Models */ = {
@@ -835,6 +844,7 @@
 		CCB030B17F395216FEDD07EB = {
 			isa = PBXGroup;
 			children = (
+				3725FB65B84A28B0F37D9AA2 /* Config */,
 				B3AF81410FA606487B236533 /* Sources */,
 				8AA4BAC3299399220F085A04 /* Tests */,
 				EF75A427D21B245E10A6A36D /* BrowserExtension */,
@@ -1462,11 +1472,11 @@
 		};
 		44D8F88227E7F3888AAC593A /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = B10C1788C1E9C867D02C298F /* Version.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = MSMG8CJLB3;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -1475,7 +1485,6 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
@@ -1572,12 +1581,12 @@
 		};
 		A51A15CC3FBC904EEF495D0A /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = B10C1788C1E9C867D02C298F /* Version.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = MSMG8CJLB3;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -1586,7 +1595,6 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",

@@ -41,7 +41,8 @@ class ReleaseInstallerTests(unittest.TestCase):
     def make_app(self, app, text, *, executable="Computa", identity=INSTALLER.BUNDLE_ID):
         (app / "Contents/MacOS").mkdir(parents=True, exist_ok=True)
         with (app / "Contents/Info.plist").open("wb") as handle:
-            plistlib.dump({"CFBundleIdentifier": identity, "CFBundleExecutable": executable}, handle)
+            plistlib.dump({"CFBundleIdentifier": identity, "CFBundleExecutable": executable,
+                          "CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "1"}, handle)
         (app / "Contents/MacOS" / executable).write_bytes(text)
 
     def run_command(self, command, *, env=None):
@@ -78,6 +79,25 @@ class ReleaseInstallerTests(unittest.TestCase):
         runtime_env = next(env for command, env in self.calls if command[0] == "/bin/zsh")
         self.assertEqual(runtime_env["UV_NO_CONFIG"], "1")
         self.assertNotIn("HF_TOKEN", runtime_env)
+
+    def test_new_metadata_and_old_manifests_without_app_build_are_accepted(self):
+        with (self.source / "Contents/Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+        INSTALLER.validate_release_metadata({"appVersion": "0.1.0", "version": "0.1.0-preview.1",
+                                             "tag": "v0.1.0-preview.1"}, info)
+        INSTALLER.validate_release_metadata({"appVersion": "0.1.0", "appBuild": "1",
+                                             "version": "0.1.0", "tag": "v0.1.0"}, info)
+
+    def test_mismatched_or_invalid_versions_fail_before_staging_or_provisioning(self):
+        for fields in ({"appBuild": "2"}, {"appBuild": 1}, {"appBuild": "01"}, {"appBuild": None},
+                       {"appVersion": "0.2.0"}, {"version": "0.2.0", "tag": "v0.2.0"},
+                       {"version": "0.1.0-preview.01", "tag": "v0.1.0-preview.01"}):
+            with self.subTest(fields=fields):
+                (self.package / "release-manifest.json").write_text(json.dumps({**self.manifest, **fields}))
+                with self.assertRaisesRegex(ValueError, "Release"):
+                    self.install()
+                self.assertFalse((self.home / "Applications").exists())
+        self.assertFalse(any(command[0] in ("/usr/bin/ditto", "/bin/zsh") for command, _ in self.calls))
 
     def test_legacy_upgrade_preserves_old_name_in_backup_shared_runtime_and_user_data(self):
         legacy = self.home / "Applications/Mactopus.app"

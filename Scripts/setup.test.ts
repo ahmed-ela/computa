@@ -32,6 +32,10 @@ async function fixture() {
     "Scripts/mlx-runtime-install.py", "Scripts/mlx-runtime-requirements.lock", "Scripts/mlx-model.lock.json"]) {
     await file(join(root, path));
   }
+  await file(join(root, "Config/Version.xcconfig"), "MARKETING_VERSION = 0.1.0\nCURRENT_PROJECT_VERSION = 1\n");
+  await file(join(root, "Cargo.toml"), '[workspace]\nmembers = ["crates/app"]\n[workspace.package]\nversion = "0.1.0"\n');
+  await file(join(root, "crates/app/Cargo.toml"), '[package]\nname = "computa-app"\nversion.workspace = true\n');
+  await file(join(root, "Cargo.lock"), 'version = 4\n[[package]]\nname = "computa-app"\nversion = "0.1.0"\n');
   const calls: string[][] = [];
   const logs: string[] = [];
   let running: string | undefined;
@@ -77,6 +81,12 @@ describe("source setup options", () => {
 });
 
 describe("source prerequisite checks", () => {
+  test("source version drift blocks builds and installation", async () => {
+    const f = await fixture();
+    await file(join(f.context.root, "Cargo.toml"), '[workspace]\nmembers = ["crates/app"]\n[workspace.package]\nversion = "0.2.0"\n');
+    await expect(setup(parseOptions(["--build-only"]), f.context)).rejects.toThrow("differs");
+    expect(f.calls.some(call => call.includes("build") || call.includes("install") || call[0] === "/usr/bin/open")).toBe(false);
+  });
   test("check is read-only and never invokes builds, installs, or launches", async () => {
     const f = await fixture();
     await setup(parseOptions(["--check"]), f.context);

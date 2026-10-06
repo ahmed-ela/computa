@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { isAppVersion, isBuildNumber, releaseBase } from "./version";
 
 export const bundleID = "com.ahmedelamin.LocalCodex";
 const help = `Package a prebuilt, signed Apple Silicon Computa app without modifying it.
@@ -40,7 +41,8 @@ export function parseOptions(args: string[]): Options {
       if (value !== "notarized" && value !== "signed-test") throw new Error("Channel must be notarized or signed-test");
       result.channel = value;
     } else if (key === "--tag" || key === "--version") {
-      if (!(key === "--tag" ? /^v\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)*$/ : /^\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)*$/).test(value)) throw new Error(`Invalid ${key}`);
+      if (key === "--tag" && !value.startsWith("v")) throw new Error("Release tag must start with v");
+      releaseBase(key === "--tag" ? value.slice(1) : value);
       result[key === "--tag" ? "tag" : "version"] = value;
     } else result[key === "--app" ? "app" : "output"] = resolve(value);
   }
@@ -114,7 +116,9 @@ export async function inspectApp(context: Context, app: string, channel: Options
   const info = JSON.parse(await checked(context, ["/usr/bin/plutil", "-convert", "json", "-o", "-", join(app, "Contents/Info.plist")]));
   if (info.CFBundleIdentifier !== bundleID || info.CFBundleExecutable !== "Computa") throw new Error("Unexpected app identity");
   const version = info.CFBundleShortVersionString;
-  if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)*$/.test(version)) throw new Error("App needs a safe release version");
+  if (!isAppVersion(version)) throw new Error("App version must be numeric major.minor.patch");
+  const build = info.CFBundleVersion;
+  if (!isBuildNumber(build)) throw new Error("App build must be an integer from 1 through 9999");
   const minimumMacOS = info.LSMinimumSystemVersion;
   if (typeof minimumMacOS !== "string" || !/^\d+\.\d+(?:\.\d+)?$/.test(minimumMacOS) || Number(minimumMacOS.split(".")[0]) < 14) {
     throw new Error("The release must declare macOS 14 or later");
@@ -146,7 +150,7 @@ export async function inspectApp(context: Context, app: string, channel: Options
     await checked(context, ["/usr/bin/xcrun", "stapler", "validate", app]);
     await checked(context, ["/usr/sbin/spctl", "--assess", "--type", "execute", app]);
   }
-  return { version, minimumMacOS, files, runtime };
+  return { version, build, minimumMacOS, files, runtime };
 }
 
 export async function packageRelease(options: Options, context: Context) {
@@ -155,8 +159,9 @@ export async function packageRelease(options: Options, context: Context) {
   const app = options.app!, output = options.output!;
   if (output === app || output.startsWith(app + sep) || app.startsWith(output + sep)) throw new Error("App and output directories must be separate");
   const inspected = await inspectApp(context, app, options.channel);
-  await safeDirectory(output, true);
   const releaseVersion = options.version ?? options.tag!.slice(1);
+  if (releaseBase(releaseVersion) !== inspected.version) throw new Error("Release tag base must match the signed app version");
+  await safeDirectory(output, true);
   const stem = `Computa-${releaseVersion}-arm64${options.channel === "signed-test" ? "-signed-test" : ""}`;
   for (const name of [`${stem}.dmg`, `${stem}.manifest.json`, "SHA256SUMS"]) {
     if (await exists(join(output, name))) throw new Error(`Output already exists; select an empty release directory: ${name}`);
@@ -175,7 +180,7 @@ export async function packageRelease(options: Options, context: Context) {
   await chmod(join(payload, "Install Computa.command"), 0o755);
   const manifest = {
     schemaVersion: 1, bundleIdentifier: bundleID, version: releaseVersion, tag: options.tag,
-    appVersion: inspected.version, architecture: "arm64",
+    appVersion: inspected.version, appBuild: inspected.build, architecture: "arm64",
     minimumMacOS: inspected.minimumMacOS, channel: options.channel,
     notarizedAppVerified: options.channel === "notarized", modelIncluded: false,
     modelManifestSHA256: await sha256(join(payload, "Installer/mlx-model.lock.json")),

@@ -864,6 +864,12 @@ pub struct ReleaseManifest {
     pub version: String,
     pub tag: String,
     pub app_version: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_app_build"
+    )]
+    pub app_build: Option<String>,
     pub architecture: String,
     pub minimum_mac_os: String,
     pub channel: ReleaseChannel,
@@ -872,6 +878,11 @@ pub struct ReleaseManifest {
     #[serde(rename = "modelManifestSHA256")]
     pub model_manifest_sha256: String,
     pub app_files: Vec<FileEntry>,
+}
+fn deserialize_app_build<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 pub struct PackageOptions {
     pub app: PathBuf,
@@ -886,14 +897,7 @@ pub struct Package {
     pub stage: PathBuf,
 }
 fn version(value: &str) -> bool {
-    let base = value.split(['-', '+']).next().unwrap_or("");
-    base.split('.').count() == 3
-        && base
-            .split('.')
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b))
+    crate::version::release_base(value).is_ok()
 }
 pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Result<Package> {
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -949,6 +953,19 @@ pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Res
             text(&plist)?,
         ],
     )?;
+    let app_build = checked(
+        runner,
+        &[
+            "/usr/bin/plutil",
+            "-extract",
+            "CFBundleVersion",
+            "raw",
+            "-o",
+            "-",
+            text(&plist)?,
+        ],
+    )?;
+    crate::version::validate_release_metadata(release_version, &app_version, Some(&app_build))?;
     let minimum = checked(
         runner,
         &[
@@ -961,12 +978,11 @@ pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Res
             text(&plist)?,
         ],
     )?;
-    if !version(&app_version)
-        || minimum
-            .split('.')
-            .next()
-            .and_then(|s| s.parse::<u32>().ok())
-            .is_none_or(|n| n < 14)
+    if minimum
+        .split('.')
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .is_none_or(|n| n < 14)
         || minimum
             .split('.')
             .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
@@ -1036,6 +1052,7 @@ pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Res
         version: release_version.into(),
         tag: options.tag.clone(),
         app_version,
+        app_build: Some(app_build),
         architecture: "arm64".into(),
         minimum_mac_os: minimum.clone(),
         channel: options.channel,
@@ -1105,6 +1122,41 @@ fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()
 }
+
+fn verify_manifest_plist(
+    manifest: &ReleaseManifest,
+    plist: &Path,
+    runner: &dyn Runner,
+) -> io::Result<()> {
+    let field = |key| {
+        checked(
+            runner,
+            &[
+                "/usr/bin/plutil",
+                "-extract",
+                key,
+                "raw",
+                "-o",
+                "-",
+                text(plist)?,
+            ],
+        )
+    };
+    if field("CFBundleShortVersionString")? != manifest.app_version
+        || field("LSMinimumSystemVersion")? != manifest.minimum_mac_os
+    {
+        return Err(invalid("Release plist metadata differs from its manifest"));
+    }
+    if let Some(expected) = &manifest.app_build {
+        crate::version::validate_build(expected)?;
+        let actual = field("CFBundleVersion")?;
+        crate::version::validate_build(&actual)?;
+        if actual != *expected {
+            return Err(invalid("Release plist build differs from its manifest"));
+        }
+    }
+    Ok(())
+}
 /// Release package validation happens before any native install command or
 /// model download; unreviewed legacy/Python installer manifests are rejected.
 pub async fn install_release(
@@ -1136,39 +1188,18 @@ pub async fn install_release(
     {
         return Err(invalid("Unsupported or changed Rust release manifest"));
     }
+    crate::version::validate_release_metadata(
+        &manifest.version,
+        &manifest.app_version,
+        manifest.app_build.as_deref(),
+    )?;
     crate::models::load_manifest(&package.join("mlx-model.lock.json"))?;
     let app = package.join("Computa.app");
     if verify_release_gates(&app, manifest.channel, runner)? != manifest.app_files {
         return Err(invalid("Application differs from its release manifest"));
     }
     let plist = app.join("Contents/Info.plist");
-    if checked(
-        runner,
-        &[
-            "/usr/bin/plutil",
-            "-extract",
-            "CFBundleShortVersionString",
-            "raw",
-            "-o",
-            "-",
-            text(&plist)?,
-        ],
-    )? != manifest.app_version
-        || checked(
-            runner,
-            &[
-                "/usr/bin/plutil",
-                "-extract",
-                "LSMinimumSystemVersion",
-                "raw",
-                "-o",
-                "-",
-                text(&plist)?,
-            ],
-        )? != manifest.minimum_mac_os
-    {
-        return Err(invalid("Release plist metadata differs from its manifest"));
-    }
+    verify_manifest_plist(&manifest, &plist, runner)?;
     require_stopped(runner)?;
     check_existing(user_home, runner)?;
     let actual = checked(runner, &["/usr/bin/sw_vers", "-productVersion"])?;
@@ -1239,9 +1270,78 @@ mod tests {
     #[test]
     fn release_versions_and_output_separation_are_strict() {
         assert!(version("1.2.3-beta.1"));
+        assert!(version("1.2.3-beta.1+sha.01"));
         assert!(!version("1.2"));
         assert!(!version("1.2.3/unsafe"));
+        for invalid in [
+            "01.2.3",
+            "1.2.3-",
+            "1.2.3+",
+            "1.2.3-a..b",
+            "1.2.3-01",
+            "1.2.3+one+two",
+            "4294967296.0.0",
+        ] {
+            assert!(!version(invalid));
+        }
         assert!(require_separate(Path::new("/tmp/app"), Path::new("/tmp/app/output")).is_err());
+    }
+    #[test]
+    fn old_release_manifest_omits_build_but_new_claim_must_match_plist() {
+        let old = serde_json::json!({
+            "schemaVersion":2,"bundleIdentifier":BUNDLE_ID,"version":"1.2.3-preview.1",
+            "tag":"v1.2.3-preview.1","appVersion":"1.2.3","architecture":"arm64",
+            "minimumMacOs":"14.0","channel":"signed-test","notarizedAppVerified":false,
+            "modelIncluded":false,"modelManifestSHA256":"0".repeat(64),"appFiles":[]
+        });
+        let mut manifest: ReleaseManifest = serde_json::from_value(old.clone()).unwrap();
+        for invalid in [serde_json::Value::Null, serde_json::json!(2)] {
+            let mut present = old.clone();
+            present["appBuild"] = invalid;
+            assert!(serde_json::from_value::<ReleaseManifest>(present).is_err());
+        }
+        assert!(manifest.app_build.is_none());
+        assert!(
+            serde_json::to_value(&manifest)
+                .unwrap()
+                .get("appBuild")
+                .is_none()
+        );
+        crate::version::validate_release_metadata(&manifest.version, &manifest.app_version, None)
+            .unwrap();
+        struct PlistRunner;
+        impl Runner for PlistRunner {
+            fn run(&self, args: &[String]) -> io::Result<CommandResult> {
+                let value = match args[2].as_str() {
+                    "CFBundleShortVersionString" => "1.2.3",
+                    "CFBundleVersion" => "2",
+                    "LSMinimumSystemVersion" => "14.0",
+                    _ => return Err(invalid("Unexpected fixture plist key")),
+                };
+                Ok(CommandResult {
+                    code: 0,
+                    stdout: value.into(),
+                })
+            }
+        }
+        let plist = Path::new("/private-fixture/Info.plist");
+        verify_manifest_plist(&manifest, plist, &PlistRunner).unwrap();
+        manifest.app_build = Some("2".into());
+        verify_manifest_plist(&manifest, plist, &PlistRunner).unwrap();
+        assert_eq!(serde_json::to_value(&manifest).unwrap()["appBuild"], "2");
+        manifest.app_build = Some("3".into());
+        assert!(verify_manifest_plist(&manifest, plist, &PlistRunner).is_err());
+        manifest.app_build = Some("01".into());
+        assert!(verify_manifest_plist(&manifest, plist, &PlistRunner).is_err());
+        manifest.app_version = "2.0.0".into();
+        assert!(
+            crate::version::validate_release_metadata(
+                &manifest.version,
+                &manifest.app_version,
+                None
+            )
+            .is_err()
+        );
     }
     struct FixtureRunner {
         commands: std::sync::Mutex<Vec<Vec<String>>>,
@@ -1265,7 +1365,7 @@ mod tests {
                 "/usr/bin/plutil"=>match args[2].as_str(){
                     "CFBundleIdentifier"=>BUNDLE_ID.into(),
                     "CFBundleExecutable"=>if args.last().unwrap().contains("Mactopus.app") {"Mactopus".into()} else {"Computa".into()},
-                    "CFBundleShortVersionString"=>"0.1.0".into(),"LSMinimumSystemVersion"=>"14.0".into(),_=>String::new(),
+                    "CFBundleShortVersionString"=>"0.1.0".into(),"CFBundleVersion"=>"1".into(),"LSMinimumSystemVersion"=>"14.0".into(),_=>String::new(),
                 },
                 "/usr/bin/pgrep"=>{code=1;String::new()},
                 "/usr/bin/lipo"=>"arm64".into(),
@@ -1569,9 +1669,11 @@ mod tests {
         let root = temp.path().canonicalize().unwrap();
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for file in [
+            "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
             "Config/Computa-Info.plist",
+            "Config/Version.xcconfig",
             "Runtime/codex-source.lock.json",
             "Runtime/patches/compaction-retention.patch",
             "Scripts/mlx-model.lock.json",

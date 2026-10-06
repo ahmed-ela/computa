@@ -3,6 +3,7 @@
 import { lstat, mkdir, mkdtemp, rename } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { checkVersion } from "./version";
 
 const bundleID = "com.ahmedelamin.LocalCodex";
 const help = `Build Computa from this checked-out source tree (Apple Silicon macOS only).
@@ -144,6 +145,7 @@ export async function checkPrerequisites(context: SetupContext): Promise<void> {
     "Scripts/mlx-runtime-install.py", "Scripts/mlx-runtime-requirements.lock", "Scripts/mlx-model.lock.json"]) {
     await requireRegular(join(context.root, relative));
   }
+  await checkVersion(context.root);
   context.log("Prerequisites passed. Allow substantial Cargo build time and roughly 35–50 GB free build/cache space.");
 }
 

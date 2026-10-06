@@ -79,6 +79,7 @@ fn version_at_least(actual: &str, minimum: &[u32]) -> bool {
 /// Reads source files and invokes only version/identity queries. It never
 /// invokes Cargo builds, tests, installs, directories or network downloads.
 pub fn check_prerequisites(root: &Path, wasm_bindgen: &str, runner: &dyn Runner) -> io::Result<()> {
+    crate::version::read(root)?;
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         return Err(distribution::invalid(
             "Computa requires Apple Silicon macOS",
@@ -156,6 +157,25 @@ fn require_product_profile(debug_assertions: bool) -> io::Result<()> {
     }
     Ok(())
 }
+
+fn render_info_plist(template: &str, version: &crate::version::AppVersion) -> io::Result<String> {
+    let plist = template
+        .replace("$(DEVELOPMENT_LANGUAGE)", "en")
+        .replace("$(EXECUTABLE_NAME)", "Computa")
+        .replace("$(PRODUCT_BUNDLE_IDENTIFIER)", distribution::BUNDLE_ID)
+        .replace("$(PRODUCT_NAME)", "Computa")
+        .replace("$(PRODUCT_BUNDLE_PACKAGE_TYPE)", "APPL")
+        .replace("$(MARKETING_VERSION)", &version.marketing)
+        .replace("$(CURRENT_PROJECT_VERSION)", &version.build)
+        .replace("$(MACOSX_DEPLOYMENT_TARGET)", "14.0");
+    if plist.contains("$(") {
+        return Err(distribution::invalid(
+            "Info.plist contains unresolved build settings",
+        ));
+    }
+    Ok(plist)
+}
+
 pub fn build_app(
     root: &Path,
     wasm_bindgen: &str,
@@ -163,6 +183,7 @@ pub fn build_app(
     runner: &dyn Runner,
 ) -> io::Result<PathBuf> {
     require_product_profile(cfg!(debug_assertions))?;
+    let version = crate::version::read(root)?;
     let source = crate::source_build::capture(root, runner)?;
     crate::runtime_source::build_product_runtime(
         root,
@@ -243,21 +264,10 @@ pub fn build_app(
     ] {
         fs::write(contents.join("Resources").join(name), bytes)?;
     }
-    let plist = fs::read_to_string(root.join("Config/Computa-Info.plist"))?;
-    let plist = plist
-        .replace("$(DEVELOPMENT_LANGUAGE)", "en")
-        .replace("$(EXECUTABLE_NAME)", "Computa")
-        .replace("$(PRODUCT_BUNDLE_IDENTIFIER)", distribution::BUNDLE_ID)
-        .replace("$(PRODUCT_NAME)", "Computa")
-        .replace("$(PRODUCT_BUNDLE_PACKAGE_TYPE)", "APPL")
-        .replace("$(MARKETING_VERSION)", env!("CARGO_PKG_VERSION"))
-        .replace("$(CURRENT_PROJECT_VERSION)", "1")
-        .replace("$(MACOSX_DEPLOYMENT_TARGET)", "14.0");
-    if plist.contains("$(") {
-        return Err(distribution::invalid(
-            "Info.plist contains unresolved build settings",
-        ));
-    }
+    let plist = render_info_plist(
+        &fs::read_to_string(root.join("Config/Computa-Info.plist"))?,
+        &version,
+    )?;
     fs::write(contents.join("Info.plist"), plist)?;
     distribution::sign_bundle_with_source(&app, identity, false, runner, root, &source)?;
     if identity != "-" {
@@ -339,5 +349,21 @@ mod tests {
         assert!(version_at_least("14.10.1", &[14, 2]));
         assert!(!version_at_least("13.9", &[14, 0]));
         assert!(!version_at_least("unknown", &[14, 0]));
+    }
+    #[test]
+    fn plist_uses_canonical_marketing_and_build_without_unresolved_overrides() {
+        let version = crate::version::parse_xcconfig(
+            "MARKETING_VERSION = 0.1.1\nCURRENT_PROJECT_VERSION = 2\n",
+        )
+        .unwrap();
+        let rendered =
+            render_info_plist(include_str!("../../../Config/Computa-Info.plist"), &version)
+                .unwrap();
+        assert!(
+            rendered.contains("<key>CFBundleShortVersionString</key>\n\t<string>0.1.1</string>")
+        );
+        assert!(rendered.contains("<key>CFBundleVersion</key>\n\t<string>2</string>"));
+        assert!(!rendered.contains("$("));
+        assert!(render_info_plist("$(UNREVIEWED)", &version).is_err());
     }
 }

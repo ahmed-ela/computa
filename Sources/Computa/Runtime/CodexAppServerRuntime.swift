@@ -1256,7 +1256,7 @@ private extension CodexAppServerRuntime {
                             "clientInfo": [
                                 "name": "local_codex",
                                 "title": "Computa",
-                                "version": "0.1.0",
+                                "version": (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "unknown",
                             ],
                             "capabilities": ["experimentalApi": true],
                         ]

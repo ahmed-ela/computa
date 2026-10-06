@@ -12,7 +12,7 @@ async function fixture() {
   directories.push(temporary);
   const app = join(temporary, "input/Computa.app"), output = join(temporary, "output");
   const info = { CFBundleIdentifier: "com.ahmedelamin.LocalCodex", CFBundleExecutable: "Computa",
-    CFBundleShortVersionString: "0.1.0", LSMinimumSystemVersion: "14.0" };
+    CFBundleShortVersionString: "0.1.0", CFBundleVersion: "1", LSMinimumSystemVersion: "14.0" };
   await file(join(app, "Contents/Info.plist"), JSON.stringify(info));
   for (const name of ["Contents/MacOS/Computa", "Contents/Resources/AgentRuntime/codex-app-server",
     "Contents/Resources/ChromeBridge/ChromeBridgeHost", "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) await file(join(app, name));
@@ -59,6 +59,7 @@ test("signed-test packaging preserves exact app bytes and mode, records pins, an
   const manifest = JSON.parse(await readFile(result.manifest, "utf8"));
   expect(manifest.appFiles).toEqual(before);
   expect(manifest.appVersion).toBe("0.1.0");
+  expect(manifest.appBuild).toBe("1");
   expect(manifest.version).toBe("0.1.0-preview.1");
   expect(manifest.notarizedAppVerified).toBe(false);
   expect(manifest.modelIncluded).toBe(false);
@@ -66,6 +67,20 @@ test("signed-test packaging preserves exact app bytes and mode, records pins, an
   expect(await readFile(join(f.output, "SHA256SUMS"), "utf8")).toContain(await sha256(result.dmg));
   expect(f.calls.some(call => call.includes("--sign") || call[0].endsWith("/open") || call[0].endsWith("/xattr"))).toBe(false);
   expect(f.calls.some(call => call[0].endsWith("/hdiutil") && call[1] === "verify")).toBe(true);
+});
+
+test("rejects invalid SemVer tags, nonnumeric Apple metadata and a tag for a different app version", async () => {
+  for (const tag of ["v01.1.0", "v0.1.0-preview.01", "v0.1.0.preview.1", "v0.1.0-"]) {
+    expect(() => parseOptions(["--app", "/a", "--output", "/b", "--tag", tag])).toThrow();
+  }
+  const f = await fixture();
+  await expect(packageRelease({ ...f.options, tag: "v0.2.0" }, f.context)).rejects.toThrow("must match");
+  expect(f.calls.some(call => call[0].endsWith("/ditto") || call[0].endsWith("/hdiutil"))).toBe(false);
+  f.info.CFBundleShortVersionString = "0.1.0-preview.1";
+  await expect(inspectApp(f.context, f.app, "signed-test")).rejects.toThrow("major.minor.patch");
+  f.info.CFBundleShortVersionString = "0.1.0";
+  f.info.CFBundleVersion = "0";
+  await expect(inspectApp(f.context, f.app, "signed-test")).rejects.toThrow("App build");
 });
 
 test("checks the supported arm64 slice of universal app and helper plus the arm64-only runtime", async () => {

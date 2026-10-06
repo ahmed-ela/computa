@@ -409,6 +409,10 @@ workaround. Pairing and browser permissions are unchanged.
 
 ## Prerequisites
 
+App releases use `major.minor.patch` with a separate increasing Apple build
+number. See [versioning and bump commands](docs/VERSIONING.md) for the shared
+Mac build metadata, release tags, and future iOS target convention.
+
 - Apple Silicon (arm64), macOS 14 or newer;
 - Xcode with a Swift 6.2-capable toolchain (the Swift Package manifest uses tools version 6.2);
 - XcodeGen when regenerating the Xcode project (`brew install xcodegen`);

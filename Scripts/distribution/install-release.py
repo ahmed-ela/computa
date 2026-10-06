@@ -10,12 +10,42 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import shutil
 import stat
 import subprocess
 import tempfile
 
 BUNDLE_ID = "com.ahmedelamin.LocalCodex"
+
+
+def app_version(value):
+    return (isinstance(value, str) and re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value)
+            and all(int(part) <= 4294967295 for part in value.split(".")))
+
+
+def build_number(value):
+    return isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,3}", value)
+
+
+def validate_release_metadata(manifest, info):
+    version, build = info.get("CFBundleShortVersionString"), info.get("CFBundleVersion")
+    if not app_version(version) or not build_number(build):
+        raise ValueError("The signed app needs numeric major.minor.patch and a build from 1 through 9999")
+    # Older schema-1 manifests did not carry appBuild. The sealed plist/file
+    # inventory remains authoritative for those packages.
+    for field, actual, validate in (("appVersion", version, app_version), ("appBuild", build, build_number)):
+        if field in manifest and (not validate(manifest[field]) or manifest[field] != actual):
+            raise ValueError(f"Release {field} differs from the signed app")
+    if "version" in manifest or "tag" in manifest:
+        release = manifest.get("version")
+        match = re.fullmatch(r"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
+                             r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+                             r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?", release) if isinstance(release, str) else None
+        if (not match or match[1] != version or manifest.get("tag") != f"v{release}"
+                or (match[2] and any(part.isdigit() and len(part) > 1 and part.startswith("0")
+                                     for part in match[2].split(".")))):
+            raise ValueError("Release tag must be valid SemVer matching the signed app version")
 
 
 def checked(command, *, env=None):
@@ -180,7 +210,8 @@ def install(package_root, home, uv, *, download_model=False, launch=True, run=ch
     if actual < minimum:
         raise ValueError(f"macOS {manifest['minimumMacOS']} or later is required")
     source = package_root / "Computa.app"
-    inspect_app(source, run, manifest["appFiles"])
+    info = inspect_app(source, run, manifest["appFiles"])
+    validate_release_metadata(manifest, info)
     run(["/usr/bin/codesign", "--verify", "--strict", "-R", "=anchor apple generic", source])
     require_stopped(run)
     applications = safe_directory(home / "Applications", create=True)
