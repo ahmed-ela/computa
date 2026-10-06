@@ -233,6 +233,12 @@ The native app can use `webProviderStart`, `webProviderSend`, `webProviderPoll`,
 bridge envelope. These commands use Chrome's existing signed-in profile. No
 additional extension permissions or separate browser process are needed.
 
+Choose ChatGPT, Gemini, or Claude in Computa's task model picker and sign into
+that provider in the paired Chrome profile. No provider API key is needed.
+After updating this unpacked developer extension, reload it once from Chrome's
+Extensions page to activate the changed JavaScript. Reopening Computa reconnects
+the remembered pairing but does not replace Chrome's loaded extension code.
+
 | Operation | Parameters | Result |
 | --- | --- | --- |
 | `webProviderStart` | `{provider: "chatgpt" \| "gemini" \| "claude"}` | New inactive owned tab; `state: "loading"`, `sessionToken` |
@@ -284,6 +290,11 @@ selectors are not accepted. Response extraction is restricted to the owned tab.
 Completion requires a final-answer control, no stop-generation control, and
 stable text for 1.6 seconds. Readiness is capped at 45 seconds and each response
 at 180 seconds; polling requests never wait for the entire generation.
+During Claude's initial navigation, a fresh, unsubmitted session can retry
+read-only document inspection within that readiness deadline. It cannot send a
+prompt until its stable empty page and Incognito mode are verified. Document
+replacement after readiness still revokes ownership. A failed unsent session
+can close only its positively inspected, stable, empty starting page.
 
 A failed cleanup returns `cleanup: "failed"` with an error and leaves the owned
 tab open for inspection. It never deletes preexisting conversations or falls

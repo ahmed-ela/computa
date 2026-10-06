@@ -178,7 +178,10 @@ actor ExtensionChromeLink {
     nonisolated static func operationFailure(errorCode: String?) -> ChromeBridgeIPC.Failure {
         // Only finite protocol categories reach model-visible native copy.
         // Never forward the extension's free-form error message or an unknown code.
-        switch errorCode {
+        if let websiteFailure = ChromeBridgeIPC.Failure.websiteOperationFailure(errorCode: errorCode) {
+            return websiteFailure
+        }
+        return switch errorCode {
         case "target_busy": .targetBusy
         case "target_unavailable": .targetUnavailable
         case "unsupported_command": .unsupportedCommand
@@ -186,12 +189,6 @@ actor ExtensionChromeLink {
         case "stale_temporary_lease", "temporary_task_already_used": .temporaryTabUnavailable
         case "invalid_temporary_receipt": .invalidFrame
         case "unsupported_operation": .reloadExtensionRequired
-        case "web_sign_in_required": .websiteSignInRequired
-        case "web_temporary_mode_unverified", "web_temporary_mode_unavailable",
-             "web_composer_unavailable", "web_composer_not_empty", "web_prompt_not_inserted",
-             "web_send_unavailable", "web_document_changed", "web_invalid_document",
-             "web_ready_timeout", "web_response_timeout", "web_tab_unavailable",
-             "web_operation_failed": .websiteUnavailable
         default: .rejected
         }
     }

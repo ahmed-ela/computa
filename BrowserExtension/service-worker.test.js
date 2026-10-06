@@ -120,11 +120,12 @@ test("temporary-tab ownership observes Chrome activation, removal and update eve
   for (const name of ["onActivated", "onRemoved", "onUpdated"]) {
     f.worker.bridge.temporaryTabs[name] = (...args) => { calls.push([name, ...args]); };
   }
+  f.worker.bridge.webProviders.onRemoved = tabId => { calls.push(["providerRemoved", tabId]); };
   f.chrome.tabs.onActivated.emit({ tabId: 11 });
   f.chrome.tabs.onRemoved.emit(12);
   f.chrome.tabs.onUpdated.emit(13, { pinned: true }, { id: 13, active: false });
   await flush();
-  expect(calls).toEqual([["onActivated", { tabId: 11 }], ["onRemoved", 12],
+  expect(calls).toEqual([["onActivated", { tabId: 11 }], ["onRemoved", 12], ["providerRemoved", 12],
     ["onUpdated", 13, { pinned: true }, { id: 13, active: false }]]);
   expect(f.connections).toEqual([]);
 });

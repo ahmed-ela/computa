@@ -52,7 +52,9 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   });
 });
 chrome.tabs.onActivated.addListener(info => { void ready.then(() => bridge.temporaryTabs.onActivated(info)); });
-chrome.tabs.onRemoved.addListener(tabId => { void ready.then(() => bridge.temporaryTabs.onRemoved(tabId)); });
+chrome.tabs.onRemoved.addListener(tabId => {
+  void ready.then(() => Promise.allSettled([bridge.temporaryTabs.onRemoved(tabId), bridge.webProviders.onRemoved(tabId)]));
+});
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   void ready.then(() => bridge.temporaryTabs.onUpdated(tabId, changeInfo, tab));
 });

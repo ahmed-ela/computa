@@ -552,13 +552,15 @@ function Composer({
         />
         <div className="composer-controls">
           <div className="composer-left">
+            {/* Capture input before controlled restoration while the native host acknowledges the choice. */}
             <NativeSelect
+              key={`${task.id}:${task.model}`}
               className="model-picker"
               aria-label="Task model"
               title={selectedModel?.detail ?? task.model}
               value={task.model}
               disabled={!task.modelSelectable}
-              onChange={(event: Event) => post({ action: 'setTaskModel', taskID: task.id, modelID: (event.currentTarget as HTMLSelectElement).value })}
+              onInput={(event: Event) => post({ action: 'setTaskModel', taskID: task.id, modelID: (event.currentTarget as HTMLSelectElement).value })}
             >
               {!selectedModel && <NativeSelectOption value={task.model}>{task.model}</NativeSelectOption>}
               {snapshot.modelOptions.map((option) => <NativeSelectOption key={option.id} value={option.id}>{option.label.split(' · ')[0]}</NativeSelectOption>)}
@@ -856,9 +858,10 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
             <label className="setting-row">
               <span><strong>Default model</strong><small>Used for new tasks. You can choose another in the composer.</small></span>
               <NativeSelect
+                key={snapshot.defaultModel}
                 aria-label="Default model for new tasks"
                 value={snapshot.defaultModel}
-                onChange={(event: Event) => post({ action: 'setDefaultModel', modelID: (event.currentTarget as HTMLSelectElement).value })}
+                onInput={(event: Event) => post({ action: 'setDefaultModel', modelID: (event.currentTarget as HTMLSelectElement).value })}
               >
                 {snapshot.modelOptions.map((option) => <NativeSelectOption key={option.id} value={option.id}>{option.label.split(' · ')[0]}</NativeSelectOption>)}
               </NativeSelect>

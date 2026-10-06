@@ -174,14 +174,15 @@ actor WebModelServer {
                 operation: cancel ? "webProviderCancel" : "webProviderFinish",
                 params: ["sessionToken": session.token])
             guard ["deleted", "not_created"].contains(reply["cleanup"] as? String ?? "") else {
-                throw Failure.cleanupFailed
+                throw Self.snapshotFailure(reply, fallback: .cleanupFailed)
             }
             if sessions[taskID]?.token == session.token { sessions.removeValue(forKey: taskID) }
             return []
         } catch {
             // Retain exact ownership for another cleanup attempt; never claim
             // that closing a tab alone deleted a saved website conversation.
-            return [Failure.cleanupFailed.localizedDescription]
+            let cause = (error as? ChromeBridgeIPC.Failure)?.localizedDescription
+            return [Failure.cleanupFailed.localizedDescription + (cause.map { " " + $0 } ?? "")]
         }
     }
 
@@ -204,7 +205,7 @@ actor WebModelServer {
         } else {
             let reply = try await call(transport, operation: "webProviderStart", params: ["provider": provider])
             guard let token = reply["sessionToken"] as? String, UUID(uuidString: token) != nil,
-                  ["ready", "loading"].contains(reply["state"] as? String ?? "") else { throw Failure.providerFailed }
+                  ["ready", "loading"].contains(reply["state"] as? String ?? "") else { throw Self.snapshotFailure(reply) }
             session = Session(token: token, provider: provider, transport: transport)
             sessions[taskID] = session
             let readinessDeadline = ContinuousClock.now + .seconds(45)
@@ -213,7 +214,7 @@ actor WebModelServer {
                 try Task.checkCancellation()
                 let state = try await call(transport, operation: "webProviderPoll", params: ["sessionToken": token])
                 if state["state"] as? String == "ready" { ready = true }
-                else if !["loading", "running"].contains(state["state"] as? String ?? "") { throw Failure.providerFailed }
+                else if !["loading", "running"].contains(state["state"] as? String ?? "") { throw Self.snapshotFailure(state) }
                 if !ready { try await Task.sleep(for: .milliseconds(500)) }
             }
             guard ready else { throw Failure.deadline }
@@ -221,7 +222,7 @@ actor WebModelServer {
         try Task.checkCancellation()
         let sent = try await call(session.transport, operation: "webProviderSend",
                                   params: ["sessionToken": session.token, "prompt": request.prompt])
-        guard sent["state"] as? String == "running" else { throw Failure.providerFailed }
+        guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
         let end = ContinuousClock.now + .seconds(300)
         while ContinuousClock.now < end {
             try Task.checkCancellation()
@@ -232,7 +233,7 @@ actor WebModelServer {
                 let reply = try WebModelResponseCodec.parseReply(text, request: request)
                 return try WebModelResponseCodec.streamData(for: reply, request: request)
             case "running": try await Task.sleep(for: .milliseconds(500))
-            default: throw Failure.providerFailed
+            default: throw Self.snapshotFailure(value)
             }
         }
         throw Failure.deadline
@@ -240,6 +241,14 @@ actor WebModelServer {
 
     static func provider(for model: String) -> String? {
         LocalModelCatalog.webProvider(for: model)
+    }
+
+    private static func snapshotFailure(_ value: [String: Any], fallback: Failure = .providerFailed) -> any Error {
+        // A successful bridge frame can carry a failed provider snapshot. Use
+        // the same finite native reasons as ok:false replies, never page copy.
+        let code = (value["error"] as? [String: Any])?["code"] as? String
+        if let failure = ChromeBridgeIPC.Failure.websiteOperationFailure(errorCode: code) { return failure }
+        return fallback
     }
 
     private func call(_ transport: any WebModelTransport, operation: String,

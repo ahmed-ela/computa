@@ -133,6 +133,60 @@ describe("owned website provider sessions", () => {
     expect(next.calls.filter(call => call[0] === "remove")).toEqual([["remove", 42]]);
     expect(next.sessions.sessions.size).toBe(0);
   });
+  test("manually closed unsent owned tabs release capacity and their persisted receipts", async () => {
+    const f = fixture();
+    for (let i = 0; i < 5; i++) {
+      const started = await f.start();
+      expect(f.sessions.onDetach({ tabId: 42 })).toBe(true);
+      expect(await f.sessions.onRemoved(42)).toBe(true);
+      expect(f.sessions.sessions.has(started.sessionToken)).toBe(false);
+      expect(Object.values(f.stored)[0]).toEqual([]);
+      expect(f.sessions.cleanupFailures).toEqual([]);
+    }
+    expect(f.calls.some(call => call[0] === "remove" || call[0] === "command")).toBe(false);
+    expect(await f.start()).toMatchObject({ state: "loading" });
+  });
+  test("an unrelated removed tab cannot release provider ownership", async () => {
+    const f = fixture(); const started = await f.start();
+    expect(await f.sessions.onRemoved(99)).toBe(false);
+    expect(f.sessions.sessions.has(started.sessionToken)).toBe(true);
+    expect(Object.values(f.stored)[0]).toHaveLength(1);
+    expect(f.calls.some(call => call[0] === "remove" || call[0] === "command")).toBe(false);
+  });
+  test("removed submitted or changed tabs release capacity while retaining unverified-history warnings", async () => {
+    for (const submitted of [false, true]) {
+      const f = fixture(); const token = await f.ready();
+      if (submitted) await f.request("webProviderSend", { sessionToken: token, prompt: "hello" });
+      else f.sessions.sessions.get(token).ownershipLost = true;
+      const callCount = f.calls.length;
+      expect(await f.sessions.onRemoved(42)).toBe(true);
+      expect(f.sessions.sessions.size).toBe(0);
+      expect(Object.values(f.stored)[0]).toEqual([]);
+      expect(f.sessions.cleanupFailures).toMatchObject([{ sessionToken: token, error: { code: "web_tab_closed" } }]);
+      expect(f.events.at(-1)).toMatchObject({ event: "webProviderCleanupFailed", sessionToken: token, error: { code: "web_tab_closed" } });
+      expect(f.calls.length).toBe(callCount);
+    }
+  });
+  test("intentional removal after verified finish does not emit a cleanup warning", async () => {
+    const f = fixture(); const token = await f.ready();
+    await f.request("webProviderSend", { sessionToken: token, prompt: "hello" });
+    f.chrome.tabs.remove = async tabId => { f.calls.push(["remove", tabId]); await f.sessions.onRemoved(tabId); };
+    expect(await f.request("webProviderFinish", { sessionToken: token })).toMatchObject({ state: "finished", cleanup: "not_created" });
+    expect(f.sessions.sessions.size).toBe(0);
+    expect(f.sessions.cleanupFailures).toEqual([]);
+    expect(f.events).toEqual([]);
+  });
+  test("worker restart prunes terminal receipts before applying its capacity limit", async () => {
+    const f = fixture(); await f.start();
+    const [key] = Object.keys(f.stored), entry = f.stored[key][0];
+    const initial = { [key]: [0, 1, 2, 3].map(i => ({ ...entry, token: `closed-${i}`, tabId: i, cleanup: "not_created" })) };
+    initial[key].push({ ...entry, token: "pending-owned", tabId: 42 });
+    const next = fixture({ initial }); await next.sessions.initialize();
+    expect(next.calls.filter(call => call[0] === "remove")).toEqual([["remove", 42]]);
+    expect(next.sessions.sessions.size).toBe(0);
+    expect(next.stored[key]).toEqual([]);
+    expect(await next.start()).toMatchObject({ state: "loading" });
+  });
 });
 
 describe("website identity boundaries", () => {
@@ -395,6 +449,131 @@ describe("Claude document and message ownership", () => {
     Object.assign(f.observed, { url: "https://claude.ai/new?incognito=", documentLoaderId: "owned-loader" });
     expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "ready" });
     expect(f.sessions.sessions.get(started.sessionToken).documentLoaderId).toBe("owned-loader");
+  });
+  test("a fresh Claude root without a loader waits without evaluating DOM actions", async () => {
+    const f = claudeDocumentFixture(); const started = await f.start();
+    f.observed.documentLoaderId = "";
+    f.advance(6000);
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "loading" });
+    expect(f.sessions.sessions.get(started.sessionToken).ownershipLost).not.toBe(true);
+    expect(f.calls.some(call => call[0] === "command" && ["Runtime.evaluate", "Input.insertText"].includes(call[2]))).toBe(false);
+    f.observed.documentLoaderId = "committed-loader";
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "ready" });
+    expect(f.sessions.sessions.get(started.sessionToken).documentLoaderId).toBe("committed-loader");
+  });
+  test("uncommitted blank and Claude documents stop retrying at the readiness deadline", async () => {
+    for (const url of ["about:blank", "https://claude.ai/new"]) {
+      const f = claudeDocumentFixture(); const started = await f.start();
+      Object.assign(f.observed, { url, documentLoaderId: "" });
+      f.advance(44_999);
+      expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "loading" });
+      f.advance(1);
+      expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "failed", error: { code: "web_ready_timeout" } });
+      expect(f.sessions.sessions.get(started.sessionToken).ownershipLost).not.toBe(true);
+      expect(f.calls.some(call => call[0] === "command" && ["Runtime.evaluate", "Input.insertText"].includes(call[2]))).toBe(false);
+    }
+  });
+  test("initial redirect during isolated-world creation retries without evaluating the replaced document", async () => {
+    const f = claudeDocumentFixture(); const started = await f.start();
+    f.hooks.world = () => { f.observed.documentLoaderId = "committed-loader"; delete f.hooks.world; };
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "loading" });
+    expect(f.calls.some(call => call[0] === "command" && call[2] === "Runtime.evaluate")).toBe(false);
+    expect(f.sessions.sessions.get(started.sessionToken).ownershipLost).not.toBe(true);
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "ready" });
+    expect(f.sessions.sessions.get(started.sessionToken).documentLoaderId).toBe("committed-loader");
+  });
+  test("a pre-ready DOM URL race remains loading and never enables incognito in that document", async () => {
+    const f = claudeDocumentFixture(); const started = await f.start();
+    f.hooks.inspect = () => { f.observed.error = "document_changed"; };
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "loading" });
+    expect(f.calls.filter(call => call[0] === "command" && call[2] === "Runtime.evaluate").length).toBe(1);
+    expect(f.sessions.sessions.get(started.sessionToken).ownershipLost).not.toBe(true);
+    delete f.hooks.inspect; delete f.observed.error;
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "ready" });
+  });
+  test("initial inspect retries missing frames, contexts and invalid evaluation results before binding", async () => {
+    for (const [method, invalid] of [["Page.getFrameTree", {}], ["Page.createIsolatedWorld", {}],
+      ["Runtime.evaluate", { exceptionDetails: { text: "Execution context was destroyed." } }],
+      ["Runtime.evaluate", { result: { type: "undefined" } }]]) {
+      const f = claudeDocumentFixture(); const started = await f.start();
+      const sendCommand = f.chrome.debugger.sendCommand;
+      f.chrome.debugger.sendCommand = async (target, requested, params) => requested === method ? invalid : sendCommand(target, requested, params);
+      expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "loading" });
+      expect(f.sessions.sessions.get(started.sessionToken).ownershipLost).not.toBe(true);
+      expect(f.sessions.sessions.get(started.sessionToken).documentLoaderId).toBeNull();
+      expect(f.calls.some(call => call[0] === "command" && call[2] === "Input.insertText")).toBe(false);
+      f.chrome.debugger.sendCommand = sendCommand;
+      expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "ready" });
+      expect(f.sessions.sessions.get(started.sessionToken).documentLoaderId).toBe("owned-loader");
+    }
+  });
+  test("persistent initial invalid-document reads are bounded and retain their diagnostic code", async () => {
+    const f = claudeDocumentFixture(); const started = await f.start();
+    f.chrome.debugger.sendCommand = async () => ({});
+    f.advance(44_999);
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "loading" });
+    f.advance(1);
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "failed", error: { code: "web_invalid_document" } });
+    expect(f.sessions.sessions.get(started.sessionToken).documentLoaderId).toBeNull();
+    expect((await f.request("webProviderFinish", { sessionToken: started.sessionToken })).cleanup).toBe("failed");
+    expect(f.calls.some(call => call[0] === "remove")).toBe(false);
+  });
+  test("initial read retry excludes arbitrary runtime errors and errors from incognito toggles", async () => {
+    const f = claudeDocumentFixture(); const started = await f.start();
+    f.chrome.debugger.sendCommand = async () => { throw new Error("Arbitrary Chrome runtime failure"); };
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "failed", error: { code: "web_operation_failed" } });
+    const toggle = claudeDocumentFixture(); const startedToggle = await toggle.start();
+    toggle.observed.temporary = false;
+    let toggles = 0;
+    toggle.hooks.enableTemporary = () => { toggles += 1; throw new BridgeError("web_invalid_document", "Lost mode-toggle result"); };
+    expect(await toggle.request("webProviderPoll", { sessionToken: startedToggle.sessionToken })).toMatchObject({ state: "failed", error: { code: "web_invalid_document" } });
+    await toggle.request("webProviderPoll", { sessionToken: startedToggle.sessionToken });
+    expect(toggles).toBe(1);
+  });
+  test("invalid document reads after ready never receive the initial-read exception", async () => {
+    const f = claudeDocumentFixture(); const token = await f.ready();
+    const sendCommand = f.chrome.debugger.sendCommand;
+    f.chrome.debugger.sendCommand = async (target, method, params) => method === "Page.createIsolatedWorld" ? {} : sendCommand(target, method, params);
+    await expect(f.request("webProviderSend", { sessionToken: token, prompt: "hello" })).rejects.toMatchObject({ code: "web_invalid_document" });
+    expect(f.calls.some(call => call[0] === "command" && call[2] === "Input.insertText")).toBe(false);
+    expect((await f.request("webProviderFinish", { sessionToken: token })).cleanup).toBe("failed");
+    expect(f.calls.some(call => call[0] === "remove")).toBe(false);
+  });
+  test("pre-ready retries cannot adopt messages already in the fresh route", async () => {
+    const f = claudeDocumentFixture(); const started = await f.start();
+    f.observed.documentLoaderId = "";
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "loading" });
+    Object.assign(f.observed, { documentLoaderId: "committed-loader", userCount: 1, responseCount: 1 });
+    expect(await f.request("webProviderPoll", { sessionToken: started.sessionToken })).toMatchObject({ state: "failed", error: { code: "web_conversation_changed" } });
+    expect(f.sessions.sessions.get(started.sessionToken).ownershipLost).toBe(true);
+    expect((await f.request("webProviderFinish", { sessionToken: started.sessionToken })).cleanup).toBe("failed");
+    expect(f.calls.some(call => call[0] === "remove")).toBe(false);
+  });
+  test("unsent unbound cleanup requires a stable empty Claude starting document", async () => {
+    const f = claudeDocumentFixture(); const started = await f.start();
+    expect(await f.request("webProviderCancel", { sessionToken: started.sessionToken })).toMatchObject({ state: "finished", cleanup: "not_created" });
+    expect(f.calls.filter(call => call[0] === "remove")).toEqual([["remove", 42]]);
+    expect(f.calls.some(call => call[0] === "command" && call[2] === "Input.insertText")).toBe(false);
+  });
+  test("unsent unbound cleanup preserves blank, unstable, occupied and saved-chat tabs", async () => {
+    for (const changed of [{ url: "about:blank", documentLoaderId: "" }, { documentLoaderId: "" },
+      { userCount: 1 }, { responseCount: 1 }, { url: "https://claude.ai/chat/unowned" }]) {
+      const f = claudeDocumentFixture(); const started = await f.start();
+      Object.assign(f.observed, changed);
+      expect((await f.request("webProviderFinish", { sessionToken: started.sessionToken })).cleanup).toBe("failed");
+      expect(f.calls.some(call => call[0] === "remove")).toBe(false);
+    }
+    const f = claudeDocumentFixture(); const started = await f.start();
+    f.hooks.world = () => { f.observed.documentLoaderId = "replacement-loader"; };
+    expect((await f.request("webProviderFinish", { sessionToken: started.sessionToken })).cleanup).toBe("failed");
+    expect(f.calls.some(call => call[0] === "remove")).toBe(false);
+  });
+  test("worker recovery never adopts an unsent document whose loader was not bound", async () => {
+    const f = claudeDocumentFixture(); await f.start();
+    const recovered = claudeDocumentFixture(f.stored);
+    await recovered.sessions.initialize();
+    expect(recovered.calls.some(call => call[0] === "remove")).toBe(false);
+    expect(recovered.sessions.cleanupFailures.length).toBe(1);
   });
   test("pins the ready document loader and persists confirmed counts across tool followups", async () => {
     const f = claudeDocumentFixture(); const token = await f.ready();

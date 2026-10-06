@@ -241,12 +241,14 @@ final class ChromeExtensionBridgeTests: XCTestCase {
         assertFailure(.websiteSignInRequired) { throw ExtensionChromeLink.operationFailure(errorCode: "web_sign_in_required") }
         XCTAssertEqual(ExtensionChromeLink.operationFailure(errorCode: "web_sign_in_required").localizedDescription,
                        "Sign in to the selected website in Chrome, then retry.")
-        for code in ["web_temporary_mode_unverified", "web_composer_unavailable", "web_ready_timeout"] {
-            assertFailure(.websiteUnavailable) { throw ExtensionChromeLink.operationFailure(errorCode: code) }
-            XCTAssertTrue(ExtensionChromeLink.operationFailure(errorCode: code).localizedDescription.contains("Temporary chat availability"))
-            XCTAssertFalse(ExtensionChromeLink.revokesConnection(errorCode: code))
+        for reason in ChromeBridgeIPC.WebsiteFailureReason.allCases {
+            assertFailure(.websiteFailure(reason)) { throw ExtensionChromeLink.operationFailure(errorCode: reason.rawValue) }
+            XCTAssertEqual(ExtensionChromeLink.operationFailure(errorCode: reason.rawValue).localizedDescription,
+                           "\(reason.message) (\(reason.rawValue))")
+            XCTAssertFalse(ExtensionChromeLink.revokesConnection(errorCode: reason.rawValue))
         }
-        for code in ["web_sign_in_required PRIVATE PAGE CONTENT", "web_future_invented_error", "unsupported_operation\nPRIVATE PAGE CONTENT"] {
+        for code in ["web_sign_in_required PRIVATE PAGE CONTENT", "web_document_changed\nPRIVATE PAGE CONTENT",
+                     "web_future_invented_error", "unsupported_operation\nPRIVATE PAGE CONTENT"] {
             assertFailure(.rejected) { throw ExtensionChromeLink.operationFailure(errorCode: code) }
             XCTAssertFalse(ExtensionChromeLink.operationFailure(errorCode: code).localizedDescription.contains("PRIVATE PAGE CONTENT"))
         }
@@ -354,6 +356,7 @@ final class ChromeExtensionBridgeTests: XCTestCase {
                  (.reloadExtensionRequired, .reloadExtensionRequired),
                  (.websiteSignInRequired, .websiteSignInRequired),
                  (.websiteUnavailable, .websiteUnavailable): break
+            case (.websiteFailure(let expectedReason), .websiteFailure(let actualReason)) where expectedReason == actualReason: break
             default: XCTFail("Unexpected bridge failure category", file: file, line: line)
             }
         } catch { XCTFail("Unexpected error type: \(type(of: error))", file: file, line: line) }

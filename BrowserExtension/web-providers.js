@@ -196,7 +196,7 @@ export class WebProviderSessions {
     if (!Array.isArray(stored)) return;
     // Session storage survives worker restarts, but is cleared on browser exit,
     // preventing a new Chrome process from reusing an old tab ID as authority.
-    for (const entry of stored.slice(0, MAX_SESSIONS)) {
+    for (const entry of stored.filter(entry => !["deleted", "not_created"].includes(entry?.cleanup)).slice(0, MAX_SESSIONS)) {
       if (!entry || !text(entry.token, 128) || !Number.isSafeInteger(entry.tabId)
         || !Object.hasOwn(WEB_PROVIDERS, entry.provider)
         || !(entry.conversation === null || conversationURL(entry.provider, entry.conversation) === entry.conversation)) continue;
@@ -212,6 +212,7 @@ export class WebProviderSessions {
       const result = await this.finish(session);
       if (result.cleanup === "failed") this.noteCleanupFailure(session);
     }));
+    await this.saveLedger();
   }
   validate(operation, params) {
     if (operation === "webProviderStart") requireValue(keys(params, ["provider"]) && Object.hasOwn(WEB_PROVIDERS, params.provider));
@@ -245,14 +246,23 @@ export class WebProviderSessions {
     await this.saveLedger();
     throw new BridgeError(code, message);
   }
+  claudeDocumentPending(session) {
+    return session.provider === "claude" && session.state === "loading" && !session.submitted
+      && !session.documentLoaderId && !session.ownershipLost && !session.recovered
+      && session.sequence === 0 && session.confirmedUserCount === 0;
+  }
   async verifyClaudeDocument(session, frame, expectedLoaderId = session.documentLoaderId) {
-    if (session.ownershipLost || !text(frame?.loaderId, 256) || expectedLoaderId && frame.loaderId !== expectedLoaderId
-      || session.recovered && !text(session.documentLoaderId, 256))
+    const changed = !text(frame?.loaderId, 256) || expectedLoaderId && frame.loaderId !== expectedLoaderId;
+    if (changed && this.claudeDocumentPending(session))
+      throw new BridgeError("web_document_loading", "Wait for Claude's initial document to finish loading.");
+    if (session.ownershipLost || changed || session.recovered && !text(session.documentLoaderId, 256))
       await this.loseClaudeOwnership(session, "web_document_changed",
         "The Claude document's ownership was lost. Its tab was left open and no browser action was replayed.");
   }
   async verifyClaudeObservation(session, observed, action) {
     if (session.provider !== "claude") return;
+    if (!text(observed.documentLoaderId, 256) && this.claudeDocumentPending(session))
+      throw new BridgeError("web_document_loading", "Wait for Claude's initial document to finish loading.");
     if (!text(observed.documentLoaderId, 256) || session.documentLoaderId && observed.documentLoaderId !== session.documentLoaderId)
       await this.loseClaudeOwnership(session, "web_document_changed", "The Claude document was replaced. Its tab was left open.");
     if (!this.claudeUserCounts(session, action).includes(observed.userCount)
@@ -286,6 +296,8 @@ export class WebProviderSessions {
     const frame = tree?.frameTree?.frame;
     requireValue(frame && text(frame.id) && text(frame.url, 16_384), "web_invalid_document", "The website returned no main document.");
     const rawURL = frame.url + (frame.urlFragment ?? "");
+    if (rawURL === "about:blank" && this.claudeDocumentPending(session))
+      throw new BridgeError("web_document_loading", "Wait for Claude's initial document to finish loading.");
     const owned = conversationURL(session.provider, rawURL);
     // ChatGPT first allocates a local DOM conversation ID, then promotes the
     // route to a DIFFERENT server UUID. Admit the route transition only once,
@@ -323,6 +335,8 @@ export class WebProviderSessions {
       returnByValue: true, awaitPromise: true }, cleanup);
     requireValue(!result.exceptionDetails && result.result?.value && typeof result.result.value === "object", "web_invalid_document", "The provider page could not be inspected.");
     const value = result.result.value;
+    if (value.error === "document_changed" && this.claudeDocumentPending(session))
+      throw new BridgeError("web_document_loading", "Wait for Claude's initial document to finish loading.");
     if (session.provider === "claude" && value.error === "conversation_changed")
       await this.loseClaudeOwnership(session, "web_conversation_changed", "The Claude conversation changed. Its tab was left open.");
     if (value.error) throw new BridgeError(`web_${value.error}`, "The website interface changed or the owned chat is unavailable. No browser action was replayed.");
@@ -441,10 +455,12 @@ export class WebProviderSessions {
     }
     requireValue(operation === "webProviderPoll", "unsupported_operation", "Unsupported web provider operation.");
     if (!["loading", "running"].includes(session.state)) return this.snapshot(session);
+    let initialRead = this.claudeDocumentPending(session);
     try {
       const observed = await this.page(session, "inspect");
       await this.verifyClaudeObservation(session, observed, "inspect");
       this.check(generation, revision);
+      initialRead = false;
       if (session.state === "loading") {
         requireValue(!session.conversation && observed.responseCount === 0 && observed.userCount === 0, "web_not_fresh", "The website opened an existing conversation. It was not modified.");
         if (observed.composer) {
@@ -472,6 +488,15 @@ export class WebProviderSessions {
           throw new BridgeError("web_response_timeout", "The website did not complete its response in time.");
       }
     } catch (error) {
+      // A new tab may have no main frame, isolated context or serializable
+      // evaluation result while its first document commits. Retry only the
+      // initial read; failures from a mode toggle are never replayed here.
+      if (initialRead && error.code === "web_invalid_document" && this.claudeDocumentPending(session)
+        && this.now() - session.created < READY_TIMEOUT_MS) return this.snapshot(session);
+      if (error.code === "web_document_loading" && this.claudeDocumentPending(session)) {
+        if (this.now() - session.created < READY_TIMEOUT_MS) return this.snapshot(session);
+        error = new BridgeError("web_ready_timeout", "Claude's initial document did not become ready in time.");
+      }
       // Loading can briefly expose about:blank during Chrome's initial navigation.
       if (session.state === "loading" && error.code === "web_sign_in_required" && this.now() - session.created < 5_000) return this.snapshot(session);
       session.state = error.code === "web_sign_in_required" ? "needs_sign_in" : "failed";
@@ -484,12 +509,16 @@ export class WebProviderSessions {
     try {
       // One final observation captures any late provider conversation URL and
       // proves that this owned session still has no saved history thread.
-      if (session.provider === "claude") requireValue(!session.ownershipLost && text(session.documentLoaderId, 256), "web_document_changed",
-        "The Claude tab's document identity was never verified. It was left open.");
+      if (session.provider === "claude") {
+        requireValue(!session.ownershipLost, "web_document_changed", "The Claude tab's document ownership was lost. It was left open.");
+        if (session.submitted || session.recovered) requireValue(text(session.documentLoaderId, 256), "web_document_changed",
+          "The Claude tab's document identity was never verified. It was left open.");
+      }
       const observed = session.submitted || session.recovered || session.provider === "claude" ? await this.page(session, "inspect", {}, true) : null;
       if (observed) await this.verifyClaudeObservation(session, observed, "inspect");
       if (!session.submitted) {
-        if (observed) requireValue(observed.userCount === 0 && observed.responseCount === 0 && !session.conversation,
+        if (observed) requireValue(observed.userCount === 0 && observed.responseCount === 0 && !session.conversation
+          && freshURL(session.provider, observed.url),
           "web_cleanup_unverified", "The owned tab no longer contains its empty starting page. It was left open.");
         session.cleanup = "not_created";
       } else {
@@ -526,6 +555,26 @@ export class WebProviderSessions {
         sessionToken: session.token, error: result.error });
       try { await this.bounded(this.chrome.debugger.detach({ tabId: session.tabId }), 1_000); } catch {}
     }));
+  }
+  async onRemoved(tabId) {
+    const session = [...this.sessions.values()].find(value => value.tabId === tabId);
+    if (!session) return false;
+    session.revoked = true;
+    this.sessions.delete(session.token);
+    if (!["deleted", "not_created"].includes(session.cleanup) && (session.submitted || session.ownershipLost)) {
+      session.state = "failed";
+      session.cleanup = "failed";
+      session.failure = { code: "web_tab_closed", message: "The owned website tab was closed. Saved website history cleanup was not verified." };
+      this.noteCleanupFailure(session);
+      this.emit({ version: 1, event: "webProviderCleanupFailed", provider: session.provider, sessionToken: session.token, error: session.failure });
+    } else {
+      session.state = "finished";
+      session.cleanup = "not_created";
+      session.failure = null;
+      this.cleanupFailures = this.cleanupFailures.filter(item => item.sessionToken !== session.token);
+    }
+    await this.saveLedger();
+    return true;
   }
   onDetach(source) {
     const session = [...this.sessions.values()].find(value => source.tabId === value.tabId);
