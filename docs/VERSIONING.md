@@ -8,7 +8,7 @@ Computa uses `major.minor.patch`, following [Semantic Versioning](https://semver
 
 The `0.x.y` series is initial development and does not promise a stable public
 API. `1.0.0` will mark the first stable contract. Published release artifacts
-are immutable; distribute changed app bytes under a new version or preview tag.
+are immutable; distribute changed app bytes under a new version or alpha tag.
 
 ## Shared source
 
@@ -62,9 +62,15 @@ overrides are intended for local experiments, not release versioning.
 
 ## Release packages
 
-Use tags such as `v0.1.1` or `v0.1.1-preview.1`. Preview labels belong to the
-release tag and manifest, while the Apple app version remains `0.1.1`.
-Both packagers validate SemVer syntax and require the tag's numeric base to
+New packages accept `vMAJOR.MINOR.PATCH` or `vMAJOR.MINOR.PATCH-alpha.N`.
+Alpha is the only prerelease channel; beta, release-candidate and preview labels
+are not used for new packages. The automatic publisher currently accepts only
+alpha tags, leaving stable publication for a separately qualified release.
+Use the increasing Apple build number as `N`: app `0.1.2` build `3` produces
+`v0.1.2-alpha.3`. A build-only bump produces `v0.1.2-alpha.4`; a patch bump
+produces `v0.1.3-alpha.4`. The suffix belongs to the release tag and manifest,
+while the Apple app version remains numeric.
+Both packagers validate this tag policy and require the tag's numeric base to
 match the signed app's marketing version. They read the actual signed plist
 and record both `appVersion` and `appBuild`; they never rewrite the app's version
 or invalidate its signature to make a tag match.
@@ -75,6 +81,13 @@ those packages still have their exact plist bytes covered by the app file
 inventory. Rust packages carry their matching installer; older Rust installers
 with strict manifest fields are not forward compatible with new fields.
 Historical preview packages and their manifests are not rewritten.
+
+Release useful, validated checkpoints as they become ready, including multiple
+alphas in a day when warranted. There is no fixed timer or daily quota.
+Version changes go through a feature branch, pull request and squash merge.
+After local build/sign/package preparation and draft upload, the GitHub Actions
+publisher automatically verifies the assets and publishes an alpha on explicit
+dispatch. See [the release procedure](RELEASING.md).
 
 Qualification of the draft Rust migration remains separate from app versioning;
 a matching version does not approve installation or satisfy its release gates.

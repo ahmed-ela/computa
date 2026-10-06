@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { isAppVersion, isBuildNumber, releaseBase } from "./version";
+import { isAppVersion, isBuildNumber } from "./version";
+import { tagMetadata } from "./release-policy";
 
 export const bundleID = "com.ahmedelamin.LocalCodex";
 const help = `Package a prebuilt, signed Apple Silicon Computa app without modifying it.
@@ -41,8 +42,7 @@ export function parseOptions(args: string[]): Options {
       if (value !== "notarized" && value !== "signed-test") throw new Error("Channel must be notarized or signed-test");
       result.channel = value;
     } else if (key === "--tag" || key === "--version") {
-      if (key === "--tag" && !value.startsWith("v")) throw new Error("Release tag must start with v");
-      releaseBase(key === "--tag" ? value.slice(1) : value);
+      tagMetadata(key === "--tag" ? value : `v${value}`);
       result[key === "--tag" ? "tag" : "version"] = value;
     } else result[key === "--app" ? "app" : "output"] = resolve(value);
   }
@@ -156,11 +156,13 @@ export async function inspectApp(context: Context, app: string, channel: Options
 export async function packageRelease(options: Options, context: Context) {
   if (options.help) { context.log(help); return; }
   if (context.platform !== "darwin" || context.architecture !== "arm64") throw new Error("Packaging requires Apple Silicon macOS");
+  const release = tagMetadata(options.tag!);
+  if (options.version !== undefined && options.version !== release.version) throw new Error("--version must match --tag without its v prefix");
   const app = options.app!, output = options.output!;
   if (output === app || output.startsWith(app + sep) || app.startsWith(output + sep)) throw new Error("App and output directories must be separate");
   const inspected = await inspectApp(context, app, options.channel);
-  const releaseVersion = options.version ?? options.tag!.slice(1);
-  if (releaseBase(releaseVersion) !== inspected.version) throw new Error("Release tag base must match the signed app version");
+  const releaseVersion = release.version;
+  if (release.appVersion !== inspected.version) throw new Error("Release tag base must match the signed app version");
   await safeDirectory(output, true);
   const stem = `Computa-${releaseVersion}-arm64${options.channel === "signed-test" ? "-signed-test" : ""}`;
   for (const name of [`${stem}.dmg`, `${stem}.manifest.json`, "SHA256SUMS"]) {

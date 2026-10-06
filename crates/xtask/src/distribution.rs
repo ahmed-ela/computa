@@ -899,15 +899,31 @@ pub struct Package {
 fn version(value: &str) -> bool {
     crate::version::release_base(value).is_ok()
 }
+/// New packages use stable or alpha tags. The historical installer parser above
+/// remains generic SemVer so existing release manifests continue to validate.
+fn fresh_release_version(tag: &str) -> io::Result<&str> {
+    let message = "Release tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-alpha.N with a positive canonical N";
+    let value = tag.strip_prefix('v').ok_or_else(|| invalid(message))?;
+    crate::version::release_base(value)?;
+    let parsed = semver::Version::parse(value).map_err(|_| invalid(message))?;
+    let alpha = parsed.pre.as_str().strip_prefix("alpha.");
+    if !parsed.build.is_empty()
+        || (!parsed.pre.is_empty()
+            && !alpha.is_some_and(|number| {
+                !number.is_empty()
+                    && !number.starts_with('0')
+                    && number.bytes().all(|byte| byte.is_ascii_digit())
+            }))
+    {
+        return Err(invalid(message));
+    }
+    Ok(value)
+}
 pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Result<Package> {
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         return Err(invalid("Packaging requires Apple Silicon macOS"));
     }
-    let release_version = options
-        .tag
-        .strip_prefix('v')
-        .filter(|v| version(v))
-        .ok_or_else(|| invalid("Expected a safe release tag vMAJOR.MINOR.PATCH"))?;
+    let release_version = fresh_release_version(&options.tag)?;
     require_separate(&options.app, &options.output)?;
     let files = verify_release_gates(&options.app, options.channel, runner)?;
     let installer_metadata = fs::symlink_metadata(&options.installer)?;
@@ -1285,6 +1301,80 @@ mod tests {
             assert!(!version(invalid));
         }
         assert!(require_separate(Path::new("/tmp/app"), Path::new("/tmp/app/output")).is_err());
+    }
+    #[test]
+    fn fresh_packages_accept_only_stable_or_canonical_alpha_tags() {
+        for tag in [
+            "v0.1.0",
+            "v4294967295.0.1",
+            "v1.2.3-alpha.1",
+            "v1.2.3-alpha.9007199254740993",
+        ] {
+            assert_eq!(fresh_release_version(tag).unwrap(), &tag[1..]);
+        }
+        for tag in [
+            "1.2.3",
+            "v01.2.3",
+            "v1.02.3",
+            "v1.2.03",
+            "v1.2",
+            "v1.2.3.4",
+            "v4294967296.0.0",
+            "v1.2.3-beta.1",
+            "v1.2.3-rc.1",
+            "v1.2.3-preview.1",
+            "v1.2.3-dev.1",
+            "v1.2.3-Alpha.1",
+            "v1.2.3-alpha",
+            "v1.2.3-alpha.0",
+            "v1.2.3-alpha.01",
+            "v1.2.3-alpha.-1",
+            "v1.2.3-alpha.1.2",
+            "v1.2.3+build.1",
+            "v1.2.3-alpha.1+build.1",
+            "v1.2.3-alpha.1\n",
+            " v1.2.3",
+            "v1.2.3 ",
+        ] {
+            assert!(
+                fresh_release_version(tag).is_err(),
+                "Unexpected new release tag: {tag:?}"
+            );
+        }
+        // Historical packages still use the generic installation validator.
+        assert!(version("1.2.3-preview.1"));
+        assert!(version("1.2.3-beta.1+build.001"));
+    }
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn rejected_new_tags_stop_before_package_commands_or_output_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let output = root.join("release");
+        let runner = FixtureRunner::new();
+        for tag in [
+            "v0.1.0-beta.1",
+            "v0.1.0-rc.1",
+            "v0.1.0-preview.1",
+            "v0.1.0+build.1",
+            "v0.1.0-alpha.1+build.1",
+        ] {
+            let error = package_release(
+                &PackageOptions {
+                    app: root.join("missing.app"),
+                    output: output.clone(),
+                    installer: root.join("missing-installer"),
+                    tag: tag.into(),
+                    channel: ReleaseChannel::SignedTest,
+                },
+                &runner,
+            )
+            .err()
+            .expect("New release tag must be rejected");
+            assert!(error.to_string().contains("Release tag"));
+        }
+        assert!(!output.exists());
+        assert!(runner.commands.lock().unwrap().is_empty());
     }
     #[test]
     fn old_release_manifest_omits_build_but_new_claim_must_match_plist() {

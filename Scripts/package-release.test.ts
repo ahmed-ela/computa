@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { bundleFiles, inspectApp, packageRelease, parseOptions, sha256, type Context } from "./package-release";
@@ -40,7 +40,7 @@ async function fixture() {
       return { code: 0, stdout: "" };
     },
   };
-  const options = parseOptions(["--app", app, "--output", output, "--tag", "v0.1.0-preview.1", "--channel", "signed-test"]);
+  const options = parseOptions(["--app", app, "--output", output, "--tag", "v0.1.0-alpha.1", "--channel", "signed-test"]);
   return { context, options, app, output, calls, info, fail: (command: string) => { failing = command; } };
 }
 
@@ -54,13 +54,13 @@ test("requires an explicit safe release tag and keeps pre-release version separa
 test("signed-test packaging preserves exact app bytes and mode, records pins, and never signs or installs", async () => {
   const f = await fixture(); const before = await bundleFiles(f.app);
   const result = (await packageRelease(f.options, f.context))!;
-  expect(result.dmg).toEndWith("Computa-0.1.0-preview.1-arm64-signed-test.dmg");
+  expect(result.dmg).toEndWith("Computa-0.1.0-alpha.1-arm64-signed-test.dmg");
   expect(await bundleFiles(f.app)).toEqual(before);
   const manifest = JSON.parse(await readFile(result.manifest, "utf8"));
   expect(manifest.appFiles).toEqual(before);
   expect(manifest.appVersion).toBe("0.1.0");
   expect(manifest.appBuild).toBe("1");
-  expect(manifest.version).toBe("0.1.0-preview.1");
+  expect(manifest.version).toBe("0.1.0-alpha.1");
   expect(manifest.notarizedAppVerified).toBe(false);
   expect(manifest.modelIncluded).toBe(false);
   expect(manifest.uvPin.sha256).toMatch(/^[a-f0-9]{64}$/);
@@ -70,17 +70,28 @@ test("signed-test packaging preserves exact app bytes and mode, records pins, an
 });
 
 test("rejects invalid SemVer tags, nonnumeric Apple metadata and a tag for a different app version", async () => {
-  for (const tag of ["v01.1.0", "v0.1.0-preview.01", "v0.1.0.preview.1", "v0.1.0-"]) {
+  for (const tag of ["v01.1.0", "v0.1.0-alpha.01", "v0.1.0.preview.1", "v0.1.0-"]) {
     expect(() => parseOptions(["--app", "/a", "--output", "/b", "--tag", tag])).toThrow();
   }
   const f = await fixture();
   await expect(packageRelease({ ...f.options, tag: "v0.2.0" }, f.context)).rejects.toThrow("must match");
   expect(f.calls.some(call => call[0].endsWith("/ditto") || call[0].endsWith("/hdiutil"))).toBe(false);
-  f.info.CFBundleShortVersionString = "0.1.0-preview.1";
+  f.info.CFBundleShortVersionString = "0.1.0-alpha.1";
   await expect(inspectApp(f.context, f.app, "signed-test")).rejects.toThrow("major.minor.patch");
   f.info.CFBundleShortVersionString = "0.1.0";
   f.info.CFBundleVersion = "0";
   await expect(inspectApp(f.context, f.app, "signed-test")).rejects.toThrow("App build");
+});
+
+test("fresh package policy cannot be bypassed through the module API", async () => {
+  const f = await fixture();
+  for (const tag of ["v0.1.0-beta.1", "v0.1.0-rc.1", "v0.1.0-preview.1", "v0.1.0+build.1", "v0.1.0-alpha.1+build.1"]) {
+    expect(() => parseOptions(["--app", f.app, "--output", f.output, "--tag", tag])).toThrow();
+    await expect(packageRelease({ ...f.options, tag }, f.context)).rejects.toThrow("Release tag");
+  }
+  await expect(packageRelease({ ...f.options, version: "0.1.0-alpha.2" }, f.context)).rejects.toThrow("must match");
+  expect(f.calls).toHaveLength(0);
+  await expect(lstat(f.output)).rejects.toThrow();
 });
 
 test("checks the supported arm64 slice of universal app and helper plus the arm64-only runtime", async () => {
