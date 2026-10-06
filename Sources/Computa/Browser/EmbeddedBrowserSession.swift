@@ -6,6 +6,7 @@ import WebKit
 @MainActor @Observable
 final class EmbeddedBrowserTab: Identifiable {
     let id: UUID
+    let isPopup: Bool
     fileprivate(set) var title = "New tab"
     fileprivate(set) var url: URL?
     fileprivate(set) var isLoading = false
@@ -16,7 +17,7 @@ final class EmbeddedBrowserTab: Identifiable {
     fileprivate(set) var documentGeneration = UUID()
     fileprivate(set) var error: String?
 
-    fileprivate init(id: UUID = UUID()) { self.id = id }
+    fileprivate init(id: UUID = UUID(), isPopup: Bool = false) { self.id = id; self.isPopup = isPopup }
 }
 
 /// Browser views are independent of the privileged Octane UI WebView and Chrome.
@@ -28,12 +29,16 @@ final class EmbeddedBrowserSession {
         case tabLimit(Int)
         case tabClosed
         case sessionClosed
+        case modelPopupUnsupported
+        case popupProfileMismatch
 
         var errorDescription: String? {
             switch self {
             case .tabLimit(let limit): "This browser allows up to \(limit) tabs. Close a tab before opening another."
             case .tabClosed: "That browser tab is no longer open."
             case .sessionClosed: "This browser session has ended."
+            case .modelPopupUnsupported: "Pop-up windows are not enabled for model inference pages."
+            case .popupProfileMismatch: "The requested pop-up did not preserve this browser's sign-in profile."
             }
         }
     }
@@ -63,6 +68,7 @@ final class EmbeddedBrowserSession {
         let view: WKWebView
         let delegate: EmbeddedBrowserDelegate
         let isModelOwned: Bool
+        let popupOpenerTabID: UUID?
         weak var presentationHost: NSView?
         var observations: [NSKeyValueObservation] = []
         var navigation: WKNavigation?
@@ -70,11 +76,13 @@ final class EmbeddedBrowserSession {
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
 
-        init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate, isModelOwned: Bool) {
+        init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate, isModelOwned: Bool,
+             popupOpenerTabID: UUID? = nil) {
             self.tab = tab
             self.view = view
             self.delegate = delegate
             self.isModelOwned = isModelOwned
+            self.popupOpenerTabID = popupOpenerTabID
         }
     }
 
@@ -118,36 +126,72 @@ final class EmbeddedBrowserSession {
             guard !isShutdown else { throw Failure.sessionClosed }
             guard tabs.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
             if let url { try EmbeddedBrowserURLPolicy.validate(url) }
-
-            let tab = EmbeddedBrowserTab()
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = dataStore()
             // This fresh controller has no native script handlers, scripts, or UI resource scheme.
             configuration.userContentController = WKUserContentController()
-            configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+            // OAuth can open a window after an asynchronous response, beyond
+            // the original click's gesture. Human popups still use the tab cap
+            // and navigation policy; inference-owned pages cannot open them.
+            configuration.preferences.javaScriptCanOpenWindowsAutomatically = !modelOwned
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-            let view = modelOwned ? EmbeddedModelWebView(frame: .zero, configuration: configuration)
-                : WKWebView(frame: .zero, configuration: configuration)
-            let delegate = EmbeddedBrowserDelegate(session: self, tabID: tab.id)
-            view.navigationDelegate = delegate
-            view.uiDelegate = delegate
-            view.allowsBackForwardNavigationGestures = true
-            let entry = Entry(tab: tab, view: view, delegate: delegate, isModelOwned: modelOwned)
-            entries[tab.id] = entry
-            tabs.append(tab)
-            // Inactive creation stays inactive even when inventory is empty.
-            // Human '+' uses the default true. Inactive creation must not
-            // acquire selection as an incidental consequence of being first.
-            if select { selectedTabID = tab.id }
-            observe(entry)
-            errorMessage = nil
+            let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned)
             // Empty tabs intentionally do not load a homepage or trigger any network request.
-            if let url { try navigate(tabID: tab.id, to: url) }
-            return tab.id
+            if let url { try navigate(tabID: entry.tab.id, to: url) }
+            return entry.tab.id
         } catch {
             errorMessage = error.localizedDescription
             throw error
         }
+    }
+
+    private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool,
+                             popupOpenerTabID: UUID? = nil) throws -> Entry {
+        guard !isShutdown else { throw Failure.sessionClosed }
+        guard tabs.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil)
+        let view = modelOwned ? EmbeddedModelWebView(frame: .zero, configuration: configuration)
+            : WKWebView(frame: .zero, configuration: configuration)
+        let delegate = EmbeddedBrowserDelegate(session: self, tabID: tab.id)
+        view.navigationDelegate = delegate
+        view.uiDelegate = delegate
+        view.allowsBackForwardNavigationGestures = true
+        let entry = Entry(tab: tab, view: view, delegate: delegate, isModelOwned: modelOwned,
+                          popupOpenerTabID: popupOpenerTabID)
+        entries[tab.id] = entry
+        tabs.append(tab)
+        // Inactive creation stays inactive, including the first inference tab.
+        if select { selectedTabID = tab.id }
+        observe(entry)
+        errorMessage = nil
+        return entry
+    }
+
+    fileprivate func createPopup(from source: WKWebView, tabID: UUID,
+                                 configuration: WKWebViewConfiguration, url: URL?) -> WKWebView? {
+        guard let opener = entries[tabID], opener.view === source else { return nil }
+        do {
+            guard !opener.isModelOwned else { throw Failure.modelPopupUnsupported }
+            // window.open('', name) supplies an empty relative URL rather than
+            // nil/about:blank. WebKit owns that initial blank document.
+            if let url, !url.absoluteString.isEmpty { try EmbeddedBrowserURLPolicy.validate(url) }
+            guard configuration.websiteDataStore === source.configuration.websiteDataStore else {
+                throw Failure.popupProfileMismatch
+            }
+            // WebKit owns this configuration, opener and initial navigation.
+            // Return synchronously without replacing settings or loading again.
+            return try registerTab(configuration: configuration, select: true, modelOwned: false,
+                                   popupOpenerTabID: tabID).view
+        } catch {
+            report(error.localizedDescription, tabID: tabID)
+            return nil
+        }
+    }
+
+    fileprivate func closePopup(_ view: WKWebView, tabID: UUID) {
+        guard let entry = entries[tabID], entry.view === view, !entry.isModelOwned,
+              entry.popupOpenerTabID != nil else { return }
+        closeTab(tabID)
     }
 
     func selectTab(_ id: UUID) {
@@ -174,7 +218,8 @@ final class EmbeddedBrowserSession {
         entry.view.removeFromSuperview()
         tabs.remove(at: index)
         if selectedTabID == id {
-            selectedTabID = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].id
+            if let opener = entry.popupOpenerTabID, entries[opener] != nil { selectedTabID = opener }
+            else { selectedTabID = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].id }
         }
         errorMessage = selectedTabID.flatMap { entries[$0]?.tab.error }
     }
@@ -628,10 +673,11 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        // Do not repurpose WebKit's supplied configuration or silently load into the user's tab.
-        deny("This page requested another window. Pop-up windows are not enabled; the current tab was preserved.", view: webView)
-        return nil
+        session?.createPopup(from: webView, tabID: tabID, configuration: configuration,
+                             url: navigationAction.request.url)
     }
+
+    func webViewDidClose(_ webView: WKWebView) { session?.closePopup(webView, tabID: tabID) }
 
     func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
                  initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,

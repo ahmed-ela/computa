@@ -514,9 +514,12 @@ not copy Chrome or Codex cookies or sessions; sign in separately. The privileged
 chat UI and untrusted websites use separate WebViews, configurations and stores.
 Native approval requests block both surfaces until resolved.
 
-This version declines popups, downloads, file pickers, camera/microphone requests,
-external-app schemes and JavaScript modal dialogs. Sites requiring these
-features, including popup-dependent sign-in, may not work yet.
+Human pages can open pop-ups as visible tabs sharing the same sign-in profile.
+Website-closed pop-ups return to their surviving opener; the normal tab limit
+and navigation rules still apply. Model inference pages cannot open pop-ups.
+Downloads, file pickers, camera/microphone requests, external-app schemes and
+JavaScript modal dialogs are declined. Providers can separately reject embedded
+browser sign-in, even when their pop-up opens correctly.
 
 General browsing in the pane remains human-operated. Qwen has no general embedded
 browser tools. ChatGPT inference uses separate owned tabs in this profile through

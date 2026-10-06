@@ -36,9 +36,158 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertFalse(first.configuration.userContentController === second.configuration.userContentController)
         XCTAssertTrue(first.configuration.userContentController.userScripts.isEmpty)
         XCTAssertNil(first.configuration.urlSchemeHandler(forURLScheme: "localcodex-app"))
-        XCTAssertFalse(first.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
+        XCTAssertTrue(first.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
         XCTAssertNotNil(first.navigationDelegate)
         XCTAssertNotNil(first.uiDelegate)
+    }
+
+    func testAsyncBlankPopupPreservesOpenerAndSharedConfigurationAndClosesOnlyChild() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        window.contentView = host
+        defer { session.shutdown(); window.close() }
+        let openerID = try session.createTab()
+        let opener = try XCTUnwrap(session.webView(for: openerID))
+        try session.presentTab(openerID, in: host)
+        try await loadPopupFixture(opener)
+        let document = session.documentGeneration(for: openerID)
+        _ = try await script(opener, """
+        window.receipts = [];
+        window.addEventListener('message', event => {
+          if (event.source === window.fixtureChild && event.data === 'popup-finished') window.receipts.push(event.data);
+        });
+        setTimeout(() => {
+          window.fixtureChild = window.open('', 'computa-auth-fixture');
+          if (window.fixtureChild) {
+            window.fixtureChild.document.write('<!doctype html><p id="popup-ready">Popup fixture</p>');
+            window.fixtureChild.document.close();
+          }
+        }, 30);
+        return true;
+        """)
+        try await waitForPopupCount(2, session: session)
+        let childTab = try XCTUnwrap(session.tabs.first(where: { $0.id != openerID }))
+        let child = try XCTUnwrap(session.webView(for: childTab.id))
+        XCTAssertNil(session.errorMessage)
+        XCTAssertNil(session.tabs.first(where: { $0.id == openerID })?.error)
+        session.detachPresentedTab(openerID, from: host)
+        try session.presentTab(childTab.id, in: host)
+        XCTAssertTrue(childTab.isPopup)
+        XCTAssertEqual(session.selectedTabID, childTab.id)
+        XCTAssertTrue(child.configuration.websiteDataStore === opener.configuration.websiteDataStore)
+        XCTAssertTrue(child.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
+        XCTAssertTrue(child.configuration.userContentController.userScripts.isEmpty)
+        XCTAssertNil(child.configuration.urlSchemeHandler(forURLScheme: "localcodex-app"))
+        let childReady = try await script(child, "return !!document.getElementById('popup-ready') && !!window.opener;")
+        XCTAssertEqual(childReady, Data("true".utf8))
+        _ = try await script(child, "window.opener.postMessage('popup-finished', window.opener.location.origin); return true;")
+        let deadline = ContinuousClock.now + .seconds(5)
+        var received = false
+        while ContinuousClock.now < deadline {
+            received = (try? await script(opener, "return window.receipts.length === 1;")) == Data("true".utf8)
+            if received { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(received, "The real popup must deliver its completion to the unchanged opener")
+        _ = try await script(child, "setTimeout(() => window.close(), 0); return true;")
+        try await waitForPopupCount(1, session: session)
+        XCTAssertEqual(session.selectedTabID, openerID)
+        XCTAssertTrue(session.webView(for: openerID) === opener)
+        XCTAssertEqual(session.documentGeneration(for: openerID), document)
+        XCTAssertNil(session.webView(for: childTab.id))
+        XCTAssertNil(child.uiDelegate)
+        XCTAssertNil(child.navigationDelegate)
+        let closed = try await script(opener, "return window.fixtureChild.closed && !!document.getElementById('ready');")
+        XCTAssertEqual(closed, Data("true".utf8))
+    }
+
+    func testTargetBlankPopupAndCloseCallbacksPreserveOpenerAndBackgroundSelection() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let openerID = try session.createTab()
+        let opener = try XCTUnwrap(session.webView(for: openerID))
+        try await loadPopupFixture(opener)
+        _ = try await script(opener, "document.getElementById('blank-link').click(); return true;")
+        try await waitForPopupCount(2, session: session)
+        let firstID = try XCTUnwrap(session.tabs.first(where: { $0.id != openerID })).id
+        let first = try XCTUnwrap(session.webView(for: firstID))
+        let firstDelegate = try XCTUnwrap(first.uiDelegate)
+        XCTAssertTrue(session.tabs.first(where: { $0.id == firstID })?.isPopup == true)
+        firstDelegate.webViewDidClose?(opener)
+        opener.uiDelegate?.webViewDidClose?(opener)
+        XCTAssertEqual(session.tabs.count, 2, "Wrong-view and ordinary-tab close callbacks have no child authority")
+        _ = try await script(opener, "window.otherChild = window.open('about:blank', 'second-popup'); return !!window.otherChild;")
+        try await waitForPopupCount(3, session: session)
+        let secondID = try XCTUnwrap(session.tabs.last).id
+        let second = try XCTUnwrap(session.webView(for: secondID))
+        session.selectTab(openerID)
+        firstDelegate.webViewDidClose?(first)
+        XCTAssertEqual(session.selectedTabID, openerID, "Closing a background child cannot switch tabs")
+        firstDelegate.webViewDidClose?(second)
+        XCTAssertNotNil(session.webView(for: secondID), "A late child delegate cannot close another tab")
+        session.closeTab(openerID)
+        XCTAssertNotNil(session.webView(for: secondID), "Closing the opener leaves its human child usable")
+        session.selectTab(secondID)
+        second.uiDelegate?.webViewDidClose?(second)
+        XCTAssertTrue(session.tabs.isEmpty)
+        XCTAssertNil(session.selectedTabID)
+    }
+
+    func testPopupCapAndInferenceOwnershipRejectWithoutReplacingTabs() async throws {
+        let session = EmbeddedBrowserSession(persistent: false, maximumTabs: 2)
+        defer { session.shutdown() }
+        let openerID = try session.createTab()
+        let opener = try XCTUnwrap(session.webView(for: openerID))
+        try await loadPopupFixture(opener)
+        let selected = try session.createTab()
+        let generation = session.documentGeneration(for: openerID)
+        let rejected = try await script(opener, "return window.open('about:blank', 'over-cap') === null;")
+        XCTAssertEqual(rejected, Data("true".utf8))
+        XCTAssertEqual(session.tabs.map(\.id), [openerID, selected])
+        XCTAssertEqual(session.selectedTabID, selected)
+        XCTAssertEqual(session.documentGeneration(for: openerID), generation)
+        XCTAssertTrue(session.tabs[0].error?.contains("up to 2 tabs") == true)
+
+        let modelSession = EmbeddedBrowserSession(persistent: false)
+        defer { modelSession.shutdown() }
+        let humanID = try modelSession.createTab()
+        let modelID = try modelSession.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let model = try XCTUnwrap(modelSession.webView(for: modelID))
+        try await loadPopupFixture(model)
+        XCTAssertFalse(model.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
+        let modelRejected = try await script(model, "return window.open('about:blank', 'model-popup') === null;")
+        XCTAssertEqual(modelRejected, Data("true".utf8))
+        model.uiDelegate?.webViewDidClose?(model)
+        XCTAssertEqual(modelSession.tabs.map(\.id), [humanID, modelID])
+        XCTAssertEqual(modelSession.selectedTabID, humanID)
+        XCTAssertTrue(modelSession.webView(for: modelID) === model)
+    }
+
+    private func loadPopupFixture(_ view: WKWebView) async throws {
+        view.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        view.loadHTMLString("<p id='ready'>Opener fixture</p><a id='blank-link' href='about:blank' target='_blank'>New tab</a>",
+                            baseURL: URL(string: "https://popup.example.test/"))
+        let deadline = ContinuousClock.now + .seconds(5)
+        var ready = false
+        while ContinuousClock.now < deadline {
+            if !view.isLoading {
+                ready = (try? await script(view, "return !!document.getElementById('ready');")) == Data("true".utf8)
+            }
+            if ready { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(ready)
+    }
+
+    private func waitForPopupCount(_ count: Int, session: EmbeddedBrowserSession) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while session.tabs.count != count, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertEqual(session.tabs.count, count, "Browser error: \(session.errorMessage ?? session.tabs.compactMap(\.error).first ?? "none")")
     }
 
     func testNonpersistentSessionDoesNotCreateProductionProfilePreference() throws {

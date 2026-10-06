@@ -47,9 +47,16 @@ is not implemented. No Chrome/Codex data or signed-in sessions are imported.
 
 ## Deliberate first-version limitations
 
-Popups, downloads, file selection, camera/microphone requests, external-app
-schemes and JavaScript modal dialogs are declined. Popup-dependent OAuth may
-therefore be unavailable. Website models accept text/Accessibility observations;
+Human browser pages can open pop-ups as visible tabs, using WebKit's supplied
+configuration so the opener relationship and signed-in profile remain intact.
+Closing a child from the website returns selection to its surviving opener.
+Pop-ups count toward the normal tab limit and obey the same URL policy.
+Inference-owned pages cannot create or close browser tabs this way.
+
+Downloads, file selection, camera/microphone requests, external-app schemes and
+JavaScript modal dialogs are declined. Google can independently reject embedded
+browser OAuth; pop-up support alone does not establish sign-in compatibility.
+Website models accept text/Accessibility observations;
 image, screenshot and audio inputs are unsupported. A tab count
 limit does not guarantee bounded memory on arbitrarily heavy websites.
 
@@ -84,3 +91,21 @@ AppState scopes passed 86 Swift tests; the fixed adapter passed 8 JavaScript
 tests. These scopes cover lost wakeups, source and owner validation, bounded
 deadlines, cancellation, late completion evidence, literal insertion, rendered
 Markdown lineage, changed-body rejection and exact-tab cleanup.
+
+The later signed Swift build `0.1.2 (3)` qualified human pop-up support with
+57 focused Swift tests across session lifecycle, pane state, launch isolation and
+embedded model transport. A separate nonpersistent native loopback fixture
+passed six paths: direct navigation, blank-first asynchronous navigation,
+targeted form POST, `noopener`, COOP and blank `document.write`. It verified
+shared synthetic cookies, exact opener callbacks where permitted, one initial
+request, child-only teardown and selection restoration. The fixture's ports
+are separate origins on the same site; it does not establish cross-site cookie
+or provider compatibility.
+
+With the existing Google profile already signed in, the installed app's Claude
+"Continue with Google" opened the real account chooser, completed the standard
+identity consent, closed its pop-up and returned to the authenticated
+`https://claude.ai/new` composer. The previous build rejected this same action
+as a disabled pop-up. No user-agent change or Chrome connection was needed.
+This qualifies browser sign-in for the tested account/session, not an embedded
+Claude model transport; Claude inference still uses the Chrome transport.

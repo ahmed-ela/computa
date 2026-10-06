@@ -42,7 +42,7 @@ struct EmbeddedBrowserPane: View {
                 ZStack {
                     EmbeddedBrowserPageHost(session: session, tabID: tab.id, webView: webView,
                                             isInteractionBlocked: isInteractionBlocked)
-                    if tab.url == nil, !tab.isLoading {
+                    if tab.url == nil, !tab.isLoading, !tab.isPopup {
                         emptyPage(hasTab: true)
                     }
                 }
