@@ -27,6 +27,7 @@ enum ExtensionChromeLinkEvent: Sendable {
     case hello(UUID, ChromeExtensionHello)
     case detached(UUID, String)
     case disconnected(UUID)
+    case webProviderCleanupFailed(UUID)
 }
 
 /// Bounded request ledger shared by setup and the extension transport. No
@@ -152,6 +153,10 @@ actor ExtensionChromeLink {
                 guard detachedTokens.count < 4_096 else { throw ChromeBridgeIPC.Failure.invalidFrame }
                 detachedTokens.insert(token)
                 event(.detached(id, token))
+            } else if eventName == "webProviderCleanupFailed",
+                      ["chatgpt", "gemini"].contains(value["provider"] as? String ?? ""),
+                      let token = value["sessionToken"] as? String, UUID(uuidString: token) != nil {
+                event(.webProviderCleanupFailed(id))
             } else { throw ChromeBridgeIPC.Failure.invalidFrame }
             return
         }
@@ -180,6 +185,13 @@ actor ExtensionChromeLink {
         case "temporary_tabs_not_authorized": .temporaryTabsNotAuthorized
         case "stale_temporary_lease", "temporary_task_already_used": .temporaryTabUnavailable
         case "invalid_temporary_receipt": .invalidFrame
+        case "unsupported_operation": .reloadExtensionRequired
+        case "web_sign_in_required": .websiteSignInRequired
+        case "web_temporary_mode_unverified", "web_temporary_mode_unavailable",
+             "web_composer_unavailable", "web_composer_not_empty", "web_prompt_not_inserted",
+             "web_send_unavailable", "web_document_changed", "web_invalid_document",
+             "web_ready_timeout", "web_response_timeout", "web_tab_unavailable",
+             "web_operation_failed": .websiteUnavailable
         default: .rejected
         }
     }

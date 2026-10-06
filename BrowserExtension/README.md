@@ -225,3 +225,47 @@ and app/browser restarts without recurring remote-debugging prompts; another
 foreground app receiving user input while background actions complete; Cancel,
 DevTools conflict, sleep/wake, helper/worker termination; and idle CPU/RSS plus
 action-latency measurements. Unit tests are not evidence of these live results.
+
+### Website model transport
+
+The native app can use `webProviderStart`, `webProviderSend`, `webProviderPoll`,
+`webProviderFinish`, and `webProviderCancel` through the existing authenticated
+bridge envelope. These commands use Chrome's existing signed-in profile. No
+additional extension permissions or separate browser process are needed.
+
+| Operation | Parameters | Result |
+| --- | --- | --- |
+| `webProviderStart` | `{provider: "chatgpt" \| "gemini"}` | New inactive owned tab; `state: "loading"`, `sessionToken` |
+| `webProviderPoll` | `{sessionToken}` | `loading`, `ready`, `running`, `complete`, `needs_sign_in`, or `failed`; bounded current response `text` and per-send `sequence` |
+| `webProviderSend` | `{sessionToken, prompt}` | One submission; `state: "running"`. Call only after `ready` or `complete`. |
+| `webProviderFinish` | `{sessionToken}` | Closes the owned temporary tab; `state: "finished"`, `cleanup: "not_created"` on success |
+| `webProviderCancel` | `{sessionToken}` | Stops the owned response, then performs the same cleanup |
+
+Every website session starts from an empty new conversation. Before sending,
+ChatGPT's temporary-chat control or Gemini's visible temporary-chat notice must
+be observed. Continued temporary-mode evidence is checked again at cleanup.
+Temporary sessions do not create entries in the provider's saved chat history;
+`not_created` reports that fact, and does not claim immediate erasure from the
+provider's internal retention systems. The app remains responsible for its local
+transcript and for calling finish/cancel at the end of the logical native turn.
+Multiple tool-result sends can share that same website session.
+
+Only extension-owned fixed DOM actions run. Prompt text is inserted with Chrome's
+`Input.insertText`; arbitrary JavaScript, URLs, target IDs and model-supplied DOM
+selectors are not accepted. Response extraction is restricted to the owned tab.
+Completion requires a final-answer control, no stop-generation control, and
+stable text for 1.6 seconds. Readiness is capped at 45 seconds and each response
+at 180 seconds; polling requests never wait for the entire generation.
+
+A failed cleanup returns `cleanup: "failed"` with an error and leaves the owned
+tab open for inspection. It never deletes preexisting conversations or falls
+back to bulk history deletion. A Chrome session-storage ledger records only
+owned tab identities and temporary-mode state, so worker restarts can clean up
+verified owned temporary tabs without resubmitting prompts. It contains no
+prompt, response, credentials, or pairing token, and expires with the browser
+session. Unverified recovery is exposed as `webProviderCleanupFailures` in popup
+status; disconnect cleanup failures also emit `webProviderCleanupFailed`.
+
+The native transport interface can replace these website operations with a VM
+implementation later; DOM adaptation and Chrome tab ownership remain confined
+to this module.

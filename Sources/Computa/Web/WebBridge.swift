@@ -5,6 +5,22 @@ import WebKit
 @MainActor
 final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     static let handlerName = "localCodex"
+    static var diagnosticsEnabled: Bool {
+        ProcessInfo.processInfo.environment["COMPUTA_WEBUI_DIAGNOSTICS"] == "1"
+    }
+    static let diagnosticBootstrapScript = """
+    window.addEventListener('error', event => {
+      window.webkit.messageHandlers.localCodex.postMessage({
+        action: 'webClientFailure', kind: event.error?.name || 'ResourceError',
+        line: Number(event.lineno || 0)
+      });
+    }, true);
+    window.addEventListener('unhandledrejection', event => {
+      window.webkit.messageHandlers.localCodex.postMessage({
+        action: 'webClientFailure', kind: event.reason?.name || 'PromiseRejection', line: 0
+      });
+    });
+    """
 
     private weak var state: AppState?
     private weak var webView: WKWebView?
@@ -29,6 +45,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     func attach(webView: WKWebView) {
         self.webView = webView
+        Self.diagnostic("attached frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
     }
 
     func update(snapshot baseSnapshot: WebUISnapshot) {
@@ -44,6 +61,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         var versionedSnapshot = baseSnapshot
         versionedSnapshot.revision = nextRevision
         latestSnapshot = versionedSnapshot
+        Self.diagnostic("snapshot revision=\(nextRevision) tasks=\(versionedSnapshot.tasks.count) ready=\(pageIsReady)")
         pushLatestSnapshotIfReady()
     }
 
@@ -70,7 +88,18 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         switch action {
         case "ready":
             pageIsReady = true
+            if let webView {
+                Self.diagnostic("client ready frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
+            }
             pushLatestSnapshotIfReady()
+
+        case "webClientFailure":
+            guard Self.diagnosticsEnabled else { return }
+            let reported = body["kind"] as? String ?? "UnknownError"
+            let allowed = ["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", "AggregateError", "ResourceError", "PromiseRejection"]
+            let kind = allowed.contains(reported) ? reported : "UnknownError"
+            let line = body["line"] as? Int ?? 0
+            Self.diagnostic("client failure kind=\(kind) line=\(line)")
 
         case "selectTask":
             guard let id = body["id"] as? String,
@@ -202,10 +231,54 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 arguments: ["snapshot": object],
                 in: nil,
                 in: .page
-            ) { _ in }
+            ) { [weak self] result in
+                guard Self.diagnosticsEnabled else { return }
+                switch result {
+                case .success: Self.diagnostic("snapshot applied revision=\(snapshot.revision)")
+                case .failure(let error):
+                    let value = error as NSError
+                    Self.diagnostic("snapshot failed domain=\(value.domain) code=\(value.code)")
+                }
+                self?.diagnosePage(webView)
+            }
         } catch {
             assertionFailure("Could not send the Computa web snapshot: \(error)")
         }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Self.diagnostic("navigation finished trusted=\(WebUIResourceLocator.contains(webView.url)) frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
+        diagnosePage(webView)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        let value = error as NSError
+        Self.diagnostic("navigation failed domain=\(value.domain) code=\(value.code)")
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let value = error as NSError
+        Self.diagnostic("provisional navigation failed domain=\(value.domain) code=\(value.code)")
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        Self.diagnostic("web content process terminated")
+    }
+
+    private func diagnosePage(_ webView: WKWebView) {
+        guard Self.diagnosticsEnabled else { return }
+        webView.evaluateJavaScript("JSON.stringify({ready:document.readyState,rootNodes:document.getElementById('root')?.childNodes.length || 0,rootTextLength:document.getElementById('root')?.innerText.length || 0,appShell:!!document.querySelector('.app-shell'),receiver:typeof window.__localCodexReceiveState,width:innerWidth,height:innerHeight})") { value, error in
+            if let value = value as? String { Self.diagnostic("page \(value)") }
+            else if let error {
+                let value = error as NSError
+                Self.diagnostic("page probe failed domain=\(value.domain) code=\(value.code)")
+            }
+        }
+    }
+
+    private static func diagnostic(_ message: String) {
+        guard diagnosticsEnabled else { return }
+        NSLog("ComputaWebUI %@", message)
     }
 
     func webView(

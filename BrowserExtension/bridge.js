@@ -1,6 +1,8 @@
 import { BridgeError, requireValue, record, text, keys, allowedURL, validateCommand, projectAccessibilityResult, projectClickabilityResult } from "./commands.js";
 import { TemporaryTabs, TEMPORARY_TABS_VERSION } from "./temporary-tabs.js";
 
+import { WebProviderSessions } from "./web-providers.js";
+
 export const HOST_NAME = "com.macndash.chrome_bridge";
 export const MAX_MESSAGE_BYTES = 512 * 1024;
 const STORAGE_KEY = "macndashChromeBridgeV1";
@@ -29,6 +31,8 @@ export class ChromeBridge {
     this.pairingNonce = null;
     this.state = null;
     this.temporaryTabs = new TemporaryTabs(this);
+    this.webProviders = new WebProviderSessions({ chrome, uuid, bounded: (promise, timeout) => this.bounded(promise, timeout),
+      check: (generation, revision) => this.check(generation, revision), emit });
   }
 
   async initialize() {
@@ -37,6 +41,7 @@ export class ChromeBridge {
       ? { installationId: value.installationId, pairingToken: text(value.pairingToken, 256) ? value.pairingToken : null, suspended: value.suspended === true }
       : { installationId: this.uuid(), pairingToken: null, suspended: false };
     await this.save();
+    await this.webProviders.initialize();
   }
 
   save() {
@@ -73,7 +78,8 @@ export class ChromeBridge {
   status() {
     return { paired: !!this.state.pairingToken, suspended: this.state.suspended,
       connected: this.generation !== null, installationId: this.state.installationId,
-      extensionId: this.chrome.runtime.id, attachmentCount: this.attachments.size };
+      extensionId: this.chrome.runtime.id, attachmentCount: this.attachments.size,
+      webProviderCleanupFailures: this.webProviders.cleanupFailures };
   }
 
   // Called only by a validated extension popup message, never by native or web content.
@@ -111,12 +117,14 @@ export class ChromeBridge {
     if (suspend) this.state.suspended = true;
     if (forget) { this.state.pairingToken = null; this.pairingNonce = null; this.state.suspended = true; }
     await this.save();
-    await Promise.allSettled([temporaryCleanup, detached]);
+    await Promise.allSettled([temporaryCleanup, detached, this.webProviders.revokeAll()]);
   }
 
   async hostDisconnected() { await this.revoke(); }
 
   async onDetach(source, reason) {
+    const providerDetached = this.webProviders.onDetach(source);
+    if (providerDetached && reason !== "target_closed") { await this.revoke({ suspend: true }); this.hello(); }
     const item = [...this.attachments.values()].find(value => source.targetId === value.targetID || source.tabId === value.tabId);
     if (!item) return;
     this.attachments.delete(item.attachmentToken);
@@ -240,6 +248,8 @@ export class ChromeBridge {
     }
     const revision = this.revision;
     this.check(generation, revision);
+    if (["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish", "webProviderCancel"].includes(operation))
+      return this.webProviders.perform(operation, params, generation, revision);
     switch (operation) {
       case "ping":
         requireValue(keys(params, []));

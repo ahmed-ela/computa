@@ -177,6 +177,7 @@ enum ChromeBridgeIPC {
         case unavailable, identity, signingRequired, configuration, invalidFrame, closed, deadline, rejected
         case targetBusy, targetUnavailable, unsupportedCommand
         case temporaryTabsNotAuthorized, temporaryTabUnavailable
+        case reloadExtensionRequired, websiteSignInRequired, websiteUnavailable
         var errorDescription: String? {
             switch self {
             case .unavailable: "The Computa browser bridge is not available."
@@ -190,6 +191,10 @@ enum ChromeBridgeIPC {
             case .unsupportedCommand: "The installed browser extension does not support this command. No permission change is needed."
             case .temporaryTabsNotAuthorized: "Temporary task tabs require the separate native Chrome-menu grant. No temporary tab was created; existing-tab access is unchanged."
             case .temporaryTabUnavailable: "This task's temporary tab was already used, released, or taken over by the user. No replacement was created. Stop using its old references; report the limitation without creating another tab."
+            case .reloadExtensionRequired: "Reload the Computa Browser Bridge extension in Chrome, then retry."
+            case .websiteSignInRequired: "Sign in to the selected website in Chrome, then retry."
+            case .websiteUnavailable:
+                "The selected website chat could not be used. Open it in Chrome, check its sign-in, Temporary chat availability, and any website error, then retry."
             case .targetBusy:
                 "The selected tab is already controlled by another automation or debugger session. "
                     + "This is a tab-busy conflict, not a missing permission. Report the conflict; "

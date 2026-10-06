@@ -211,6 +211,70 @@ enum AppServerCompletedToolItemContract {
     }
 }
 
+enum AppServerThreadHistoryContract {
+    static func entries(from data: Data, excludingAssistantTurns excluded: Set<String> = []) throws -> [TimelineEntry] {
+        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = envelope["result"] as? [String: Any],
+              let thread = result["thread"] as? [String: Any],
+              let turns = thread["turns"] as? [[String: Any]] else {
+            throw AgentRPCError(object: ["code": -32603, "message": "Saved chat history could not be read."])
+        }
+        var seen = Set<String>()
+        var entries: [TimelineEntry] = []
+        for turn in turns {
+            let turnID = turn["id"] as? String ?? ""
+            let timestamp = (turn["startedAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? .distantPast
+            let items = turn["items"] as? [[String: Any]] ?? []
+            let userID = items.first(where: { $0["type"] as? String == "userMessage" })?["id"] as? String
+            for item in items {
+                guard let id = item["id"] as? String, seen.insert(id).inserted,
+                      let type = item["type"] as? String else { continue }
+                let entry: TimelineEntry?
+                switch type {
+                case "userMessage":
+                    let content = item["content"] as? [[String: Any]] ?? []
+                    let text = content.enumerated().compactMap { index, value -> String? in
+                        if let text = value["text"] as? String {
+                            // Core appends its continuation/evidence guidance
+                            // after the original user text; it is not chat prose.
+                            if index > 0, text.hasPrefix("APP_RUNTIME_") { return nil }
+                            return text
+                        }
+                        if ["image", "localImage"].contains(value["type"] as? String ?? "") { return "[Image]" }
+                        return nil
+                    }.joined(separator: "\n")
+                    entry = TimelineEntry(id: id, kind: .user, title: "You", body: text,
+                        timestamp: timestamp, activityGroupID: userID)
+                case "agentMessage":
+                    guard !excluded.contains(turnID), let text = item["text"] as? String else { continue }
+                    entry = TimelineEntry(id: id, kind: .assistant, title: "Computa", body: text,
+                        timestamp: timestamp, activityGroupID: userID, assistantPhase: item["phase"] as? String)
+                case "reasoning":
+                    let raw = (item["content"] as? [String] ?? []).joined(separator: "\n\n")
+                    let text = raw.isEmpty ? (item["summary"] as? [String] ?? []).joined(separator: "\n\n") : raw
+                    entry = text.isEmpty ? nil : TimelineEntry(id: id, kind: .reasoning, title: "Thinking",
+                        body: text, timestamp: timestamp, activityGroupID: userID)
+                case "commandExecution", "mcpToolCall", "dynamicToolCall", "webSearch":
+                    let name = item["name"] as? String ?? item["tool"] as? String ?? type
+                    let summary = AppServerCompletedToolItemContract.summary(for: item, name: name)
+                    let output = item["aggregatedOutput"] as? String
+                        ?? (item["contentItems"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                    let input = try JSONSerialization.data(withJSONObject: item, options: [.sortedKeys])
+                    entry = TimelineEntry(id: id, kind: .tool, title: name, body: summary, timestamp: timestamp,
+                        toolEvent: ToolEvent(name: name, summary: summary,
+                            status: AppServerCompletedToolItemContract.status(for: item),
+                            input: String(decoding: input, as: UTF8.self), output: output,
+                            duration: (item["durationMs"] as? NSNumber).map { $0.doubleValue / 1_000 }),
+                        activityGroupID: userID)
+                default: entry = nil
+                }
+                if let entry { entries.append(entry) }
+            }
+        }
+        return entries
+    }
+}
+
 enum ComputerToolContract {
     static let maximumSemanticTextLength = 4_096
 
@@ -452,9 +516,11 @@ enum LocalThreadContext: Equatable, Sendable {
     case constrained
     case expanded
     case smallModelComputerUse
+    case webBrowser
 
     static func forModel(_ modelID: String) -> Self {
-        switch modelID {
+        if LocalModelCatalog.isWebBrowser(modelID) { return .webBrowser }
+        return switch modelID {
         case "lmstudio-community/Qwen3.5-4B-MLX-4bit",
              "lmstudio-community/Qwen3.5-9B-MLX-4bit":
             .smallModelComputerUse
@@ -469,6 +535,7 @@ enum LocalThreadContext: Equatable, Sendable {
         case .constrained: 4096
         case .expanded: 8192
         case .smallModelComputerUse: 16384
+        case .webBrowser: 65536
         }
     }
 
@@ -482,6 +549,7 @@ enum LocalThreadContext: Equatable, Sendable {
         // retain observations without repeatedly compacting the fixed context.
         // The 27B/35B and unvalidated models keep the constrained profile.
         case .smallModelComputerUse: 12288
+        case .webBrowser: 49152
         }
     }
 
@@ -603,9 +671,14 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
             return modelProvider == "lmstudio" ? backend : .external
         }
         func validateSelectedModel(_ modelID: String) throws {
+            if LocalModelCatalog.isWebBrowser(modelID) { return }
             guard effectiveBackend == .headlessMLX,
                   !LocalModelCatalog.supportsHeadlessMLX(modelID) else { return }
             throw HeadlessMLXServer.Failure.unsupportedModel
+        }
+
+        func modelProvider(for modelID: String) -> String {
+            LocalModelCatalog.isWebBrowser(modelID) ? "web_browser" : modelProvider
         }
 
         /// Explicit opt-in for existing externally managed inference gates and
@@ -1041,6 +1114,9 @@ private extension CodexAppServerRuntime {
         private var retryReportedForTurn: [AgentTask.ID: String] = [:]
         private var localProviderLaunchEnvironment: [String: String] = [:]
         private var inferenceServer: HeadlessMLXServer?
+        private let webModelServer = WebModelServer()
+        private var webProviderBaseURL: URL?
+        private var webCleanupTasks: [AgentTask.ID: Task<[String], Never>] = [:]
         private var selectingInferenceModel = false
         private var inferenceSelectionTask: Task<Void, Error>?
         private var inferenceSelectionTaskID: AgentTask.ID?
@@ -1082,19 +1158,8 @@ private extension CodexAppServerRuntime {
 
         func start() async throws {
             guard !isPreparingCommandShutdown, !isShuttingDown else { throw RuntimeError.serverStopped }
+            if isReady { return }
             guard !selectingInferenceModel else { throw HeadlessMLXServer.Failure.busy }
-            if isReady {
-                if let inferenceServer {
-                    do { try await inferenceServer.start() }
-                    catch {
-                        // A caller cancellation must not tear down other work;
-                        // a dead inference owner must not pass a stale ready bit.
-                        if !(error is CancellationError) { serverFailed(error) }
-                        throw error
-                    }
-                }
-                return
-            }
             guard !isStartingServer else {
                 throw RuntimeError.serverError("The App Server is still starting.")
             }
@@ -1137,19 +1202,8 @@ private extension CodexAppServerRuntime {
             localProviderLaunchEnvironment = environment.filter {
                 $0.key == "CODEX_OSS_BASE_URL" || $0.key == "CODEX_OSS_PORT"
             }
-            if configuration.effectiveBackend == .headlessMLX {
-                let server = HeadlessMLXServer(configuration: try .local())
-                inferenceServer = server
-                do {
-                    try await server.start()
-                    try Task.checkCancellation()
-                    guard !isShuttingDown, inferenceServer === server else { throw RuntimeError.serverStopped }
-                } catch {
-                    childCleanupIssues.append(contentsOf: await server.shutdown())
-                    if inferenceServer === server { inferenceServer = nil }
-                    throw error
-                }
-            }
+            // The browser providers need only App Server and connected Chrome.
+            // Start the local inference service when a local model is submitted.
             let localInferenceOwner = inferenceServer
             let process: OwnedChildProcess
             do {
@@ -1269,6 +1323,7 @@ private extension CodexAppServerRuntime {
                 try request.consent.check()
                 chromeConnection?.task = nil
                 chromeConnection?.owner = owner
+                await webModelServer.connect(request)
                 for taskID in computerRecovery.keys {
                     computerRecovery[taskID]?.connected(generation: request.id)
                 }
@@ -1317,6 +1372,8 @@ private extension CodexAppServerRuntime {
             events.yield(.chromeConnectionChanged(connectionID: connection.request.id, state: .disconnected))
             let cleanupID = UUID()
             let cleanup = Task<Void, Never> {
+                let issues = await webModelServer.disconnect()
+                childCleanupIssues.append(contentsOf: issues)
                 if let owner = connection.owner { await owner.disconnect() }
                 // A connector that completed after cancellation owns only its
                 // original connection. Never tear down the replacement owner.
@@ -1472,8 +1529,11 @@ private extension CodexAppServerRuntime {
             let grounder = await groundingIssues
             for cleanup in Array(browserCleanupTasks.values) { await cleanup.value }
             browserCleanupTasks.removeAll()
+            let webIssues = await webModelServer.shutdown()
+            for cleanup in Array(webCleanupTasks.values) { _ = await cleanup.value }
+            webCleanupTasks.removeAll()
             let issues = Array(Set(
-                processIssues + inferenceIssues + childCleanupIssues + browser.issues + grounder
+                processIssues + inferenceIssues + webIssues + childCleanupIssues + browser.issues + grounder
             )).sorted()
             events.yield(.connectionChanged(.disconnected))
             events.finish()
@@ -1542,7 +1602,8 @@ private extension CodexAppServerRuntime {
             )
         }
 
-        private func requireHeadlessInferenceIdle() throws {
+        private func requireHeadlessInferenceIdle(for modelID: String? = nil) throws {
+            if let modelID, LocalModelCatalog.isWebBrowser(modelID) { return }
             guard configuration.effectiveBackend == .headlessMLX else { return }
             // The owned server has one worker and no queue. Claim its inference
             // lane before any suspension, including same-model submissions.
@@ -1550,10 +1611,28 @@ private extension CodexAppServerRuntime {
         }
 
         private func prepareInferenceModel(_ modelID: String, taskID: AgentTask.ID, claim: UUID) async throws {
+            if LocalModelCatalog.isWebBrowser(modelID) { return }
             guard configuration.effectiveBackend == .headlessMLX else { return }
             try Task.checkCancellation()
             guard turnSubmissionClaims[taskID] == claim, !cancelledSubmissions.contains(claim),
-                  !isShuttingDown, let owner = inferenceServer else { throw CancellationError() }
+                  !isShuttingDown else { throw CancellationError() }
+            if inferenceServer == nil {
+                let server = HeadlessMLXServer(configuration: try .local())
+                inferenceServer = server
+                do {
+                    try await server.start()
+                    try Task.checkCancellation()
+                    guard !isShuttingDown, inferenceServer === server,
+                          turnSubmissionClaims[taskID] == claim, !cancelledSubmissions.contains(claim) else {
+                        throw CancellationError()
+                    }
+                } catch {
+                    childCleanupIssues.append(contentsOf: await server.shutdown())
+                    if inferenceServer === server { inferenceServer = nil }
+                    throw error
+                }
+            }
+            guard let owner = inferenceServer else { throw CancellationError() }
             let activity = headlessWorkState(excludingSubmissionFor: taskID)
             guard activity.isIdle else { throw HeadlessMLXServer.Failure.busy }
             selectingInferenceModel = true
@@ -1577,12 +1656,13 @@ private extension CodexAppServerRuntime {
         }
 
         func submit(prompt: String, taskID: AgentTask.ID, modelID: String) async throws {
+            if let cleanup = webCleanupTasks[taskID] { _ = await cleanup.value }
             guard !isPreparingCommandShutdown, !commandCleanupTasks.contains(taskID) else {
                 throw RuntimeError.serverError("Wait for this task's command cleanup to finish.")
             }
             try requireNoPendingChromeConnection()
             try configuration.validateSelectedModel(modelID)
-            try requireHeadlessInferenceIdle()
+            try requireHeadlessInferenceIdle(for: modelID)
             guard turnIdentity.activeTurnID(for: taskID) == nil,
                   turnSubmissionClaims[taskID] == nil, !compactionReservations.contains(taskID),
                   !compactionTracker.isRunning(taskID: taskID),
@@ -1596,6 +1676,11 @@ private extension CodexAppServerRuntime {
                 cancelledSubmissions.remove(claim)
             }
             try await start()
+            if let existing = threadForTask[taskID], let loaded = contextForLoadedThread[existing],
+               !loaded.supportsModelSwitch(to: modelID) {
+                throw RuntimeError.contextChangeRequiresNewTask
+            }
+            if LocalModelCatalog.isWebBrowser(modelID) { try await ensureWebProvider() }
             let generation = serverGeneration
             // Loaded threads keep their current model for a pre-turn compact
             // RPC; turn/start is what applies the newly selected model. Cold
@@ -1604,7 +1689,7 @@ private extension CodexAppServerRuntime {
                 contextForLoadedThread[threadID] == nil ? nil : modelForTask[taskID]
             } ?? modelID
             try await prepareInferenceModel(maintenanceModelID, taskID: taskID, claim: claim)
-            if configuration.requiresLocalModelPreflight {
+            if !LocalModelCatalog.isWebBrowser(modelID), configuration.requiresLocalModelPreflight {
                 let endpoint = try LocalModelServerPreflight.endpoint(launchEnvironment: localProviderLaunchEnvironment)
                 try await LocalModelServerPreflight.check(endpoint: endpoint, modelID: modelID, timeout: 2)
                 try Task.checkCancellation()
@@ -1612,7 +1697,7 @@ private extension CodexAppServerRuntime {
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
             }
             let supportsVisualGrounding = LocalModelCatalog.supportsResidentVisualGrounding(modelID)
-            guard visualGroundingResidency.reserve(
+            guard LocalModelCatalog.isWebBrowser(modelID) || visualGroundingResidency.reserve(
                 taskID: taskID,
                 supportsSidecar: supportsVisualGrounding
             ) else {
@@ -1653,14 +1738,14 @@ private extension CodexAppServerRuntime {
                         method: "thread/resume",
                         params: [
                             "threadId": threadID,
-                            "modelProvider": configuration.modelProvider,
+                            "modelProvider": configuration.modelProvider(for: modelID),
                             "model": modelID,
                             "cwd": configuration.workspacePath,
                             "sandbox": "workspace-write",
                             "approvalPolicy": "on-request",
                             "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
                             "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID)),
-                            "config": threadConfig(for: modelID),
+                            "config": threadConfig(for: modelID, taskID: taskID),
                             "excludeTurns": true,
                             "initialTurnsPage": ["limit": 3, "sortDirection": "desc", "itemsView": "full"],
                         ]
@@ -1686,7 +1771,7 @@ private extension CodexAppServerRuntime {
                 let response = try await request(
                     method: "thread/start",
                     params: [
-                        "modelProvider": configuration.modelProvider,
+                        "modelProvider": configuration.modelProvider(for: modelID),
                         "model": modelID,
                         "cwd": configuration.workspacePath,
                         "sandbox": "workspace-write",
@@ -1695,7 +1780,7 @@ private extension CodexAppServerRuntime {
                         "threadSource": "local_codex",
                         "baseInstructions": baseInstructions(for: modelID),
                         "developerInstructions": ComputaAgentInstructions.developerInstructions(),
-                        "config": threadConfig(for: modelID),
+                        "config": threadConfig(for: modelID, taskID: taskID),
                         "dynamicTools": dynamicToolSpecs(for: modelID),
                     ]
                 )
@@ -1749,7 +1834,7 @@ private extension CodexAppServerRuntime {
             let turnResponse: Data
             let startToken = turnIdentity.beginStart(taskID: taskID)
             do {
-                if !supportsVisualGrounding {
+                if !LocalModelCatalog.isWebBrowser(modelID), !supportsVisualGrounding {
                     try await suspendVisualGrounderForHighMemoryModel()
                 }
                 try Task.checkCancellation()
@@ -1811,9 +1896,69 @@ private extension CodexAppServerRuntime {
             // not reset task bindings, approvals, model, or screenshot epochs.
         }
 
-        private func threadConfig(for modelID: String) -> [String: Any] {
-            CodexAppServerRuntime.localThreadConfig(for: modelID,
+        private func threadConfig(for modelID: String, taskID: AgentTask.ID? = nil) -> [String: Any] {
+            var result = CodexAppServerRuntime.localThreadConfig(for: modelID,
                 autoCompactLimitOverride: configuration.autoCompactLimitOverride)
+            if LocalModelCatalog.isWebBrowser(modelID), let webProviderBaseURL {
+                var headers = ["Authorization": "Bearer " + webModelServer.bearerToken]
+                if let taskID { headers["X-Computa-Task-ID"] = taskID }
+                result["model_providers.web_browser"] = [
+                    "name": "ChatGPT and Gemini in Chrome",
+                    "base_url": webProviderBaseURL.absoluteString,
+                    "wire_api": "responses",
+                    "requires_openai_auth": false,
+                    "supports_websockets": false,
+                    "request_max_retries": 0,
+                    "stream_max_retries": 0,
+                    "http_headers": headers,
+                ] as [String: Any]
+            }
+            return result
+        }
+
+        private func ensureWebProvider() async throws {
+            guard let connection = chromeConnection, connection.owner != nil,
+                  connection.request.extensionAdmission != nil else {
+                throw RuntimeError.serverError("Connect the Computa extension in signed-in Chrome before using ChatGPT or Gemini.")
+            }
+            try connection.request.consent.check()
+            if webProviderBaseURL == nil {
+                webProviderBaseURL = try await webModelServer.start()
+            }
+            try connection.request.consent.check()
+            guard chromeConnection?.attemptID == connection.attemptID else { throw CancellationError() }
+        }
+
+        @discardableResult
+        private func scheduleWebCleanup(taskID: AgentTask.ID, cancelled: Bool) -> Task<[String], Never>? {
+            guard LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "") else { return nil }
+            if let existing = webCleanupTasks[taskID] { return existing }
+            let cleanup = Task<[String], Never> {
+                let issues = cancelled ? await webModelServer.cancel(taskID: taskID)
+                    : await webModelServer.finish(taskID: taskID)
+                if !issues.isEmpty {
+                    childCleanupIssues.append(contentsOf: issues)
+                    let message = "Your chat is saved in Computa. Closing the temporary website session could not be confirmed. " + issues.joined(separator: "; ")
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(
+                        kind: .system, title: "Website session cleanup unconfirmed",
+                        body: message)))
+                }
+                webCleanupTasks.removeValue(forKey: taskID)
+                return issues
+            }
+            webCleanupTasks[taskID] = cleanup
+            return cleanup
+        }
+
+        private func publishTerminalStatus(taskID: AgentTask.ID, status: TaskStatus, cancelled: Bool) {
+            guard let cleanup = scheduleWebCleanup(taskID: taskID, cancelled: cancelled) else {
+                events.yield(.taskStatusChanged(taskID: taskID, status: status))
+                return
+            }
+            Task {
+                let issues = await cleanup.value
+                events.yield(.taskStatusChanged(taskID: taskID, status: issues.isEmpty ? status : .waiting))
+            }
         }
 
         private func hydrateAssistantEvidence(_ data: Data, taskID: AgentTask.ID) {
@@ -2014,16 +2159,16 @@ private extension CodexAppServerRuntime {
 
         func compact(taskID: AgentTask.ID) async throws {
             try requireNoPendingChromeConnection()
-            try requireHeadlessInferenceIdle()
+            let modelID = modelForTask[taskID] ?? configuration.model
+            try requireHeadlessInferenceIdle(for: modelID)
             guard !isShuttingDown, turnIdentity.activeTurnID(for: taskID) == nil,
                   turnSubmissionClaims[taskID] == nil,
                   !compactionReservations.contains(taskID),
                   let threadID = threadForTask[taskID] else {
                 throw RuntimeError.serverError("Finish the current turn before compacting an existing task.")
             }
-            let modelID = modelForTask[taskID] ?? configuration.model
             try configuration.validateSelectedModel(modelID)
-            guard visualGroundingResidency.reserve(taskID: taskID,
+            guard LocalModelCatalog.isWebBrowser(modelID) || visualGroundingResidency.reserve(taskID: taskID,
                 supportsSidecar: LocalModelCatalog.supportsResidentVisualGrounding(modelID)) else {
                 throw RuntimeError.serverError("Wait for the other local-model memory profile before compacting.")
             }
@@ -2038,31 +2183,37 @@ private extension CodexAppServerRuntime {
             }
             do {
                 try await start()
+                if LocalModelCatalog.isWebBrowser(modelID) { try await ensureWebProvider() }
                 let generation = serverGeneration
                 try await prepareInferenceModel(modelID, taskID: taskID, claim: claim)
                 if contextForLoadedThread[threadID] == nil {
                     let resumed = try await request(method: "thread/resume", params: [
                         "threadId": threadID,
-                        "modelProvider": configuration.modelProvider,
+                        "modelProvider": configuration.modelProvider(for: modelID),
                         "model": modelID,
                         "cwd": configuration.workspacePath,
                         "sandbox": "workspace-write",
                         "approvalPolicy": "on-request",
                         "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
                         "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID)),
-                        "config": threadConfig(for: modelID),
+                        "config": threadConfig(for: modelID, taskID: taskID),
                         "excludeTurns": true,
                         "initialTurnsPage": ["limit": 3, "sortDirection": "desc", "itemsView": "full"],
                     ])
                     hydrateAssistantEvidence(resumed, taskID: taskID)
                     contextForLoadedThread[threadID] = LocalThreadContext.forModel(modelID)
                 }
-                if !LocalModelCatalog.supportsResidentVisualGrounding(modelID) {
+                if !LocalModelCatalog.isWebBrowser(modelID), !LocalModelCatalog.supportsResidentVisualGrounding(modelID) {
                     try await suspendVisualGrounderForHighMemoryModel()
                 }
                 guard serverGeneration == generation, !cancelledSubmissions.contains(claim) else { throw CancellationError() }
                 try await runManagedCompaction(taskID: taskID, threadID: threadID)
-                events.yield(.taskStatusChanged(taskID: taskID, status: .completed))
+                if let cleanup = scheduleWebCleanup(taskID: taskID, cancelled: false) {
+                    let issues = await cleanup.value
+                    events.yield(.taskStatusChanged(taskID: taskID, status: issues.isEmpty ? .completed : .waiting))
+                } else {
+                    events.yield(.taskStatusChanged(taskID: taskID, status: .completed))
+                }
             } catch {
                 if turnSubmissionClaims[taskID] == claim {
                     _ = compactionTracker.fail(taskID: taskID, message: error.localizedDescription)
@@ -2071,11 +2222,13 @@ private extension CodexAppServerRuntime {
                         state: .failed(message: error.localizedDescription)))
                     events.yield(.taskStatusChanged(taskID: taskID, status: .waiting))
                 }
+                if let cleanup = scheduleWebCleanup(taskID: taskID, cancelled: true) { _ = await cleanup.value }
                 throw error
             }
         }
 
         func interrupt(taskID: AgentTask.ID) async throws {
+            let webCleanup = scheduleWebCleanup(taskID: taskID, cancelled: true)
             if let claim = turnSubmissionClaims[taskID] { cancelledSubmissions.insert(claim) }
             if inferenceSelectionTaskID == taskID { inferenceSelectionTask?.cancel() }
             finishResumingContext(taskID: taskID, usage: nil)
@@ -2117,6 +2270,7 @@ private extension CodexAppServerRuntime {
                     timeout: tasksWithCommands.contains(taskID) ? .seconds(5) : nil)
             } catch { interruptFailure = error }
             await cleanup?.value
+            if let webCleanup { _ = await webCleanup.value }
             if tasksWithCommands.contains(taskID) {
                 do {
                     let count = try await terminateOwnedCommandSessions(taskID: taskID, threadID: threadID, turnID: turnID)
@@ -2210,7 +2364,7 @@ private extension CodexAppServerRuntime {
                 method: "thread/list",
                 params: [
                     "limit": 100,
-                    "modelProviders": [configuration.modelProvider],
+                    "modelProviders": Array(Set([configuration.modelProvider, "web_browser"])).sorted(),
                     "archived": false,
                     "sortKey": "recency_at",
                     "sortDirection": "desc",
@@ -2224,7 +2378,7 @@ private extension CodexAppServerRuntime {
                 throw RuntimeError.malformedResponse("thread/list did not return a thread collection")
             }
 
-            let tasks = records.compactMap { record -> AgentTask? in
+            var tasks = records.compactMap { record -> AgentTask? in
                 guard let id = record["id"] as? String else { return nil }
                 threadForTask[id] = id
                 taskForThread[id] = id
@@ -2247,7 +2401,7 @@ private extension CodexAppServerRuntime {
                 if persistedModel == nil { tasksWithUnknownPersistedModel.insert(id) }
                 else { tasksWithUnknownPersistedModel.remove(id) }
                 modelForTask[id] = modelID
-                if status == .running {
+                if status == .running, !LocalModelCatalog.isWebBrowser(modelID) {
                     visualGroundingResidency.restoreActive(
                         taskID: id,
                         supportsSidecar: LocalModelCatalog.supportsResidentVisualGrounding(modelID)
@@ -2263,6 +2417,21 @@ private extension CodexAppServerRuntime {
                     model: modelID,
                     entries: nativeFailureEntries(threadID: id)
                 )
+            }
+            for index in tasks.indices where LocalModelCatalog.isWebBrowser(tasks[index].model) {
+                let taskID = tasks[index].id
+                do {
+                    let history = try await request(method: "thread/read", params: [
+                        "threadId": taskID, "includeTurns": true,
+                    ])
+                    let failures = try nativeFailureStore().load(threadID: taskID)
+                    let rejectedTurns = Set(failures.map(\.turnID))
+                    tasks[index].entries = try AppServerThreadHistoryContract.entries(from: history,
+                        excludingAssistantTurns: rejectedTurns) + nativeFailureEntries(threadID: taskID)
+                } catch {
+                    tasks[index].entries.append(TimelineEntry(kind: .system, title: "Saved chat history unavailable",
+                        body: "The local transcript could not be loaded. It has not been erased. " + error.localizedDescription))
+                }
             }
             if tasks.contains(where: {
                 $0.status == .running
@@ -2509,10 +2678,8 @@ private extension CodexAppServerRuntime {
                 }
                 pendingAssistantItems.removeValue(forKey: taskID)
                 discardReasoningDrafts(taskID: taskID)
-                events.yield(.taskStatusChanged(
-                    taskID: taskID,
-                    status: completionStatus
-                ))
+                publishTerminalStatus(taskID: taskID, status: completionStatus,
+                    cancelled: completionStatus != .completed)
 
             case "thread/tokenUsage/updated":
                 if observeResumingContext(taskID: taskID, params: params) { return }
@@ -2776,7 +2943,7 @@ private extension CodexAppServerRuntime {
                         entry: TimelineEntry(kind: .system, title: "Agent error", body: message)
                     ))
                 }
-                events.yield(.taskStatusChanged(taskID: taskID, status: .waiting))
+                publishTerminalStatus(taskID: taskID, status: .waiting, cancelled: true)
 
             default:
                 break
@@ -3612,11 +3779,14 @@ private extension CodexAppServerRuntime {
         }
 
         private func baseInstructions(for modelID: String, referenceTools: Bool = true) -> String {
+            let observationInstructions = LocalModelCatalog.isWebBrowser(modelID)
+                ? "\nThis browser model transport supports text only. Use the offered Accessibility and Chrome page-text observations. Screenshot and image attachment transfer is unavailable; do not request captures or infer visual content from encoded image data. If the requested information requires viewing an image or an opaque UI, report that limitation."
+                : ""
             if referenceTools {
                 let background = configuration.computerInteractionPolicy == .backgroundOnly
                     ? "Background-only is enforced: no activation or global pointer/key input. Images grant no input authority."
                     : "Use only tools offered for this model and respect each observation's input scope."
-                return configuration.baseInstructions + "\n" + background + "\n" + """
+                return configuration.baseInstructions + observationInstructions + "\n" + background + "\n" + """
                 Use computer_v2_read_page for a fresh page, computer_v2_read_region with an observed region_ref for a subtree, and computer_v2_continue with next_cursor. Never add snapshot_id or element_index to these calls. Copy the current typed reference: computer_v2_follow(link_ref), computer_v2_fill(field_ref,text), or computer_v2_press(action_ref,postcondition). A region_ref alone is readable context, not a press target. Fresh reads and action results replace all earlier references.
                 Browser presses require a postcondition declared BEFORE input unless their link destination is automatic through follow. If intending to open a same-page dialog, use {kind:dialog_opened}, with no expected text or result reference. For unknown future result text, use {kind:region_changed,region_ref:<observed candidate>}; it proves only displayed text changed. value/region_text require an observed result region_ref and exact expected value. Native detail_view needs an observed detail_ref for a separate pane; selection proves selection only. Runtime approval, exact-target checks, bounded verification and at-most-once dispatch always apply.
                 VERIFIED_PROPERTY and ALREADY_SATISFIED need no repeated input or verification. VERIFICATION_PENDING permits read-only recovery, never a changed postcondition or replay. A host recovery read does not perform or prove the rejected action. Read new content to establish meaning and answer once supported. Filling a search field is not submission; search conclusions need observed query and actual results or a verified empty state. Captured no_matches and an overview do not prove document/account completeness. Never infer message sender, incoming direction or latest ordering from selection alone.
@@ -3633,7 +3803,7 @@ private extension CodexAppServerRuntime {
                 sidecar would exceed this Mac's safe memory budget; use Accessibility.
                 """
             }
-            return configuration.baseInstructions + "\n" + groundingInstruction + "\n" + """
+            return configuration.baseInstructions + observationInstructions + "\n" + groundingInstruction + "\n" + """
                 Computer action receipts are separate from outcomes. Browser actions are verified by the runtime against a postcondition declared BEFORE dispatch. Link destinations and set_text values are automatic; other browser presses require postcondition. For a row/card opening a detail view, detail_view expects an exact heading already observed within that target. For a control changing a field or status region with a known exact result, use value or region_text with the observed result element_index and exact expected text. For unknown future result text, use browser region_changed without expected. The outer element_index is the pressed control; postcondition.element_index is the separate observed result container. Complete shape: \(ComputerV2ToolContract.regionChangedPressArgumentShape). The host freezes that complete noneditable region before approval and verifies only a change there; read the new content to establish meaning. Never use the pressed control as its own result region or treat changed text as pagination/task success. Read before acting if that baseline is missing. VERIFIED_PROPERTY means that narrow check passed; do not verify or perform the action again. VERIFICATION_PENDING means do not repeat input or change the expected result after dispatch. Background native actions are also runtime-verified: selection and set_text are automatic when observed, otherwise declare the exact result region before input. Native detail_view additionally needs the observed detail_element_index of a separate pane. ALREADY_SATISFIED means no input was sent because the state already held. After VERIFIED_PROPERTY or ALREADY_SATISFIED, read the new content rather than clicking again. Snapshot indices are valid only in their own observation. A selected conversation does not certify its latest incoming message: sender, direction, ordering, and latest-message coverage need separate evidence. Filling a search box is not submission. For searches verify the requested query AND the results/explicit empty state; snapshot no_matches only describes captured elements. If a required operation failed or cannot be verified, report uncertainty, never invent a completed search. Respect runtime recovery instructions and user background-only scope.
                 """
         }
@@ -4671,6 +4841,11 @@ private extension CodexAppServerRuntime {
                 tool: tool,
                 arguments: arguments
             )
+            if call.tool == .capture, LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "") {
+                // Persisted threads can retain an older tool schema. Reject
+                // their capture before approvals or image production too.
+                throw RuntimeError.serverError("This browser model receives text observations only. Screenshots cannot be attached through this transport. Use Accessibility or Chrome page-text observations.")
+            }
             try configuration.computerInteractionPolicy.requireV2(call)
             if let epoch = computerV2Sessions[taskID]?.epoch,
                computerV2Sessions[taskID]?.application == nil,
@@ -7616,6 +7791,9 @@ private extension CodexAppServerRuntime {
         }
 
         private func serverFailed(_ error: Error) {
+            for taskID in threadForTask.keys where LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "") {
+                scheduleWebCleanup(taskID: taskID, cancelled: true)
+            }
             // The browser belongs to its explicit native authorization, not to
             // an App Server process. Revoke action authority synchronously,
             // then retain the wire only after old work is demonstrably drained.

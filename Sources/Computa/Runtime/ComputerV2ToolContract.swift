@@ -203,11 +203,14 @@ enum ComputerV2ToolContract {
         for modelID: String,
         interactionPolicy: ComputerInteractionPolicy = .backgroundOnly
     ) -> [[String: Any]] {
+        // Website prompts carry semantic text. Captures require an actual
+        // image attachment transport, which browser models do not yet have.
+        let available = Tool.allCases.filter { $0 != .capture || !LocalModelCatalog.isWebBrowser(modelID) }
         if interactionPolicy == .backgroundOnly {
-            return Tool.allCases.filter { !$0.requiresGlobalInput }.map(backgroundSpec)
+            return available.filter { !$0.requiresGlobalInput }.map(backgroundSpec)
         }
         guard LocalModelCatalog.supportsResidentVisualGrounding(modelID) else {
-            return Tool.allCases.filter { $0 != .groundClick }.map(spec)
+            return available.filter { $0 != .groundClick }.map(spec)
         }
         return specs.map { original in
             guard original["name"] as? String == Tool.click.rawValue else { return original }

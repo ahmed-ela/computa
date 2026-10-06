@@ -1,3 +1,4 @@
+const cleanupWarning = document.getElementById("web-cleanup-warning");
 const status = document.getElementById("status");
 const pair = document.getElementById("pair");
 const resume = document.getElementById("resume");
@@ -9,6 +10,9 @@ async function refresh(action = "status") {
     const response = await chrome.runtime.sendMessage({ action });
     if (!response?.ok) throw new Error(response?.error ?? "Open Computa to finish connecting.");
     const state = response.result;
+    const cleanupFailures = Array.isArray(state.webProviderCleanupFailures) ? state.webProviderCleanupFailures : [];
+    cleanupWarning.hidden = cleanupFailures.length === 0;
+    cleanupWarning.textContent = cleanupFailures.length ? "A temporary website chat could not be cleaned up. Check its remaining Chrome tab. Your local transcript is retained." : "";
     status.textContent = action === "pair" ? "Confirm the pairing in Computa."
       : !state.paired ? "Not paired" : state.suspended ? "Access paused"
       : state.connected ? "Connected to Computa" : "Paired · waiting for Computa";

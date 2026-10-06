@@ -72,6 +72,13 @@ private struct CodexWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: WebBridge.handlerName)
+        if WebBridge.diagnosticsEnabled {
+            controller.addUserScript(WKUserScript(
+                source: WebBridge.diagnosticBootstrapScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            ))
+        }
 
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = controller
