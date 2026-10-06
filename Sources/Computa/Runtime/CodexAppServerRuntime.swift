@@ -1903,7 +1903,7 @@ private extension CodexAppServerRuntime {
                 var headers = ["Authorization": "Bearer " + webModelServer.bearerToken]
                 if let taskID { headers["X-Computa-Task-ID"] = taskID }
                 result["model_providers.web_browser"] = [
-                    "name": "ChatGPT and Gemini in Chrome",
+                    "name": "ChatGPT, Gemini, and Claude in Chrome",
                     "base_url": webProviderBaseURL.absoluteString,
                     "wire_api": "responses",
                     "requires_openai_auth": false,
@@ -1919,7 +1919,7 @@ private extension CodexAppServerRuntime {
         private func ensureWebProvider() async throws {
             guard let connection = chromeConnection, connection.owner != nil,
                   connection.request.extensionAdmission != nil else {
-                throw RuntimeError.serverError("Connect the Computa extension in signed-in Chrome before using ChatGPT or Gemini.")
+                throw RuntimeError.serverError("Connect the Computa extension in signed-in Chrome before using ChatGPT, Gemini, or Claude.")
             }
             try connection.request.consent.check()
             if webProviderBaseURL == nil {

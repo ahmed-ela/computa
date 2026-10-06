@@ -154,7 +154,7 @@ actor ExtensionChromeLink {
                 detachedTokens.insert(token)
                 event(.detached(id, token))
             } else if eventName == "webProviderCleanupFailed",
-                      ["chatgpt", "gemini"].contains(value["provider"] as? String ?? ""),
+                      ["chatgpt", "gemini", "claude"].contains(value["provider"] as? String ?? ""),
                       let token = value["sessionToken"] as? String, UUID(uuidString: token) != nil {
                 event(.webProviderCleanupFailed(id))
             } else { throw ChromeBridgeIPC.Failure.invalidFrame }

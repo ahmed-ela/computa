@@ -3,6 +3,7 @@ import { BridgeError, keys, requireValue, text } from "./commands.js";
 export const WEB_PROVIDERS = Object.freeze({
   chatgpt: { origin: "https://chatgpt.com", root: "https://chatgpt.com/?temporary-chat=true" },
   gemini: { origin: "https://gemini.google.com", root: "https://gemini.google.com/app" },
+  claude: { origin: "https://claude.ai", root: "https://claude.ai/new" },
 });
 const MAX_PROMPT = 180_000;
 const MAX_RESPONSE = 220_000;
@@ -16,25 +17,30 @@ export function conversationURL(provider, rawURL) {
   try {
     const url = new URL(rawURL);
     if (url.origin !== WEB_PROVIDERS[provider]?.origin) return null;
-    const pattern = provider === "chatgpt" ? /^\/c\/(?:[a-zA-Z0-9-]+|local-chatgpt(?:%3[Aa]|:)[a-zA-Z0-9-]+)\/?$/ : /^\/(?:u\/\d+\/)?app\/[a-zA-Z0-9_-]+\/?$/;
-    return pattern.test(url.pathname) ? url.origin + url.pathname.replace(/\/$/, "") : null;
+    const pattern = provider === "chatgpt" ? /^\/c\/(?:[a-zA-Z0-9-]+|local-chatgpt(?:%3[Aa]|:)[a-zA-Z0-9-]+)\/?$/
+      : provider === "gemini" ? /^\/(?:u\/\d+\/)?app\/[a-zA-Z0-9_-]+\/?$/
+      : null;
+    return pattern?.test(url.pathname) ? url.origin + url.pathname.replace(/\/$/, "") : null;
   } catch { return null; }
 }
 export function freshURL(provider, rawURL) {
   try {
     const url = new URL(rawURL);
     return url.origin === WEB_PROVIDERS[provider]?.origin
-      && (provider === "chatgpt" ? url.pathname === "/" : /^\/(?:u\/\d+\/)?app\/?$/.test(url.pathname));
+      && (provider === "chatgpt" ? url.pathname === "/"
+        : provider === "claude" ? url.pathname === "/new"
+        : /^\/(?:u\/\d+\/)?app\/?$/.test(url.pathname));
   } catch { return false; }
 }
 
 // This fixed function is the only provider DOM program. Prompts are separately
 // passed to Chrome's Input.insertText, never interpolated as executable code.
 // It runs in an isolated main-frame world and returns only this owned chat.
-export function providerPageAction(input) {
-  const { provider, action, expectedConversation, expectedConversationIdentity, expectedURL, prompt } = input;
+export async function providerPageAction(input) {
+  const { provider, action, expectedConversation, expectedConversationIdentity, expectedUserCounts, expectedFirstUserMarker,
+    expectedFirstUserIdentity, expectedFirstUserFingerprint, expectedURL, prompt } = input;
   if (window !== window.top || document.URL !== expectedURL) return { error: "document_changed" };
-  const origin = provider === "chatgpt" ? "https://chatgpt.com" : "https://gemini.google.com";
+  const origin = ({ chatgpt: "https://chatgpt.com", gemini: "https://gemini.google.com", claude: "https://claude.ai" })[provider];
   if (location.origin !== origin) return { error: "sign_in_required" };
   const cleanURL = location.origin + location.pathname.replace(/\/$/, "");
   if (expectedConversation && cleanURL !== expectedConversation) return { error: "conversation_changed" };
@@ -49,18 +55,50 @@ export function providerPageAction(input) {
   const labelled = (nodes, expression) => [...nodes].filter(visible).find(node => expression.test(
     [node.getAttribute("aria-label"), node.getAttribute("data-testid"), node.getAttribute("title"), node.innerText].filter(Boolean).join(" ").trim()));
   const composer = provider === "chatgpt" ? find(["#prompt-textarea", '[contenteditable="true"][aria-label="Ask ChatGPT"]', 'textarea[data-testid="prompt-textarea"]'])
+    : provider === "claude" ? find(['[data-testid="chat-input"][contenteditable="true"][role="textbox"]'])
     : find(['rich-textarea [contenteditable="true"]', 'div.ql-editor[contenteditable="true"]']);
   const modernChatGPTAnswers = [...document.querySelectorAll('[data-markdown-text-style="assistant-message"]')].filter(visible);
   const responseNodes = provider === "chatgpt"
     ? modernChatGPTAnswers.length ? modernChatGPTAnswers
       : [...document.querySelectorAll('[data-message-author-role="assistant"]')].map(node => node.querySelector(".markdown") || node).filter(visible)
+    : provider === "claude" ? [...document.querySelectorAll('[data-testid="assistant-message"] [data-perf-reply-text]')].filter(visible)
     : [...document.querySelectorAll(".model-response-text, model-response .markdown")].filter(visible);
   // Avoid duplicate Gemini descendants when the provider adds a wrapper class.
   const answers = responseNodes.filter(node => !responseNodes.some(other => other !== node && other.contains(node)));
+  const claudeUsers = provider === "claude" ? [...document.querySelectorAll('[data-testid="user-message"]')] : [];
   const userCount = provider === "chatgpt" ? document.querySelectorAll('[data-message-author-role="user"], [data-markdown-text-style="user-message"]').length
+    : provider === "claude" ? claudeUsers.length
     : document.querySelectorAll("user-query").length;
+  if (provider === "claude" && (!Array.isArray(expectedUserCounts) || !expectedUserCounts.includes(userCount)))
+    return { error: "conversation_changed" };
+  let firstUserIdentity = null, firstUserFingerprint = null, firstUserMarkerVerified = false;
+  if (provider === "claude" && userCount > 0) {
+    const firstUser = claudeUsers[0];
+    const owner = firstUser.closest("[id]");
+    const normalizedBody = (firstUser.innerText || firstUser.textContent || "").replace(/\r\n?/g, "\n").normalize("NFC").trim();
+    firstUserIdentity = owner?.getAttribute("id");
+    firstUserMarkerVerified = typeof expectedFirstUserMarker === "string" && expectedFirstUserMarker.length > 0
+      && normalizedBody.split("\n").some(line => line.trim() === `Computa session marker: ${expectedFirstUserMarker}`);
+    if (!firstUserMarkerVerified || typeof firstUserIdentity !== "string" || firstUserIdentity.length === 0
+      || firstUserIdentity.length > 256 || normalizedBody.length > 180_200
+      || expectedFirstUserIdentity && firstUserIdentity !== expectedFirstUserIdentity
+      || !expectedFirstUserFingerprint && ["prepare", "submit"].includes(action)) return { error: "conversation_changed" };
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalizedBody));
+    firstUserFingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+    // Digesting yields the event loop. Recheck the same first DOM message and
+    // rendered body before reading an answer or performing any mutation.
+    const currentUsers = [...document.querySelectorAll('[data-testid="user-message"]')];
+    if (document.URL !== expectedURL || !firstUser.isConnected || currentUsers.length !== userCount || currentUsers[0] !== firstUser
+      || firstUser.closest("[id]") !== owner || owner.getAttribute("id") !== firstUserIdentity
+      || (firstUser.innerText || firstUser.textContent || "").replace(/\r\n?/g, "\n").normalize("NFC").trim() !== normalizedBody
+      || expectedFirstUserFingerprint && firstUserFingerprint !== expectedFirstUserFingerprint) return { error: "conversation_changed" };
+  }
   const stop = provider === "chatgpt" ? find(['button[data-testid="stop-button"]', 'button[aria-label="Stop streaming"]', 'button[aria-label="Stop generating"]', 'button[aria-label="Stop"]'])
+    : provider === "claude" ? find(['button[aria-label="Stop response"]'])
     : find(['button[aria-label="Stop response"]', 'button[aria-label="Stop generating"]', 'button[aria-label="Stop"]', 'button.stop-button']);
+  const claudeStatus = provider === "claude" ? find(['[data-testid="response-status-announcer"][role="status"]']) : null;
+  const interrupted = !!claudeStatus && (claudeStatus.textContent || "").trim().replace(/’/g, "'") === "Claude's response was interrupted.";
+  const claudeStreaming = provider === "claude" && [...document.querySelectorAll('[data-testid="assistant-message"][data-is-streaming="true"]')].some(visible);
   const answer = answers.at(-1);
   const answerText = answer ? (answer.innerText || answer.textContent || "").trim() : "";
   let answerComplete = false;
@@ -73,10 +111,20 @@ export function providerPageAction(input) {
       const copy = node.querySelector('.turn-action-controls button[aria-label="Copy"], button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]');
       if (enabled(copy)) { answerComplete = true; break; }
     }
+  } else if (provider === "claude" && answer) {
+    const message = answer.closest('[data-testid="assistant-message"]');
+    const article = answer.closest('[role="article"]');
+    const copy = article?.querySelector('[data-testid="message-actions"] button[data-testid="action-bar-copy"][aria-label="Copy"]');
+    answerComplete = !interrupted && message?.getAttribute("data-is-streaming") === "false"
+      && article?.querySelectorAll('[data-testid="assistant-message"]').length === 1 && enabled(copy);
   } else if (answer) {
     answerComplete = !!answer.closest("model-response")?.querySelector('button[aria-label*="Good response"], button[aria-label*="Copy"], button[data-test-id="copy-button"]');
   }
-  const temporary = provider === "chatgpt"
+  const claudeExit = provider === "claude" ? find(['button[aria-label="Exit incognito"]']) : null;
+  const claudeIncognitoBadge = claudeExit && new URL(document.URL).searchParams.has("incognito")
+    && [...document.querySelectorAll(".animate-incognito-header-in span")].find(node => visible(node)
+      && (node.textContent || "").trim() === "Incognito chat");
+  const temporary = provider === "claude" ? !!claudeIncognitoBadge : provider === "chatgpt"
     ? !!find(['button[aria-label="Turn off temporary chat"]'])
       || (new URL(document.URL).searchParams.get("temporary-chat") === "true"
         && [...document.querySelectorAll("button")].some(node => visible(node)
@@ -86,7 +134,8 @@ export function providerPageAction(input) {
         && !node.closest('button, [role="menu"], [role="tooltip"], model-response, user-query')
         && ["Just stopping by?", "Temporary Chat"].includes((node.textContent || "").trim()));
   const state = { url: document.URL, temporary, conversationIdentity, composer: !!composer, responseCount: answers.length, userCount,
-    busy: !!stop, text: answerText.slice(0, 220_001), answerComplete };
+    firstUserIdentity, firstUserFingerprint, firstUserMarkerVerified,
+    busy: !!stop || claudeStreaming, interrupted, text: answerText.slice(0, 220_001), answerComplete };
   if (action === "inspect") {
     const signIn = !composer && !!labelled(document.querySelectorAll('a, button'), /^(?:Log in|Sign in)(?:\s|$)/i);
     return { ...state, signIn };
@@ -94,22 +143,24 @@ export function providerPageAction(input) {
   if (action === "enableTemporary") {
     if (temporary) return { ...state, enabled: true };
     if (userCount || answers.length) return { error: "not_fresh" };
-    const toggle = find(['button[aria-label="Temporary chat"]']);
+    const toggle = provider === "claude" ? find(['button[aria-label="Use incognito"]'])
+      : find(['button[aria-label="Temporary chat"]']);
     if (!enabled(toggle)) return { error: "temporary_mode_unavailable" };
     toggle.click(); return { ...state, enabled: false };
   }
   if (action === "prepare") {
-    if (!enabled(composer) || stop) return { error: "composer_unavailable" };
+    if (!enabled(composer) || stop || claudeStreaming) return { error: "composer_unavailable" };
     const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
     if (value?.trim()) return { error: "composer_not_empty" };
     composer.focus();
     return { ...state, prepared: document.activeElement === composer || composer.contains(document.activeElement) };
   }
   if (action === "submit") {
-    if (!enabled(composer) || stop) return { error: "composer_unavailable" };
+    if (!enabled(composer) || stop || claudeStreaming) return { error: "composer_unavailable" };
     const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
     if ((value || "").replace(/\r\n/g, "\n").trim() !== prompt.trim()) return { error: "prompt_not_inserted" };
     const send = provider === "chatgpt" ? find(['button[data-testid="send-button"]', 'button[aria-label="Send prompt"]', 'button[aria-label="Send message"]', 'button[aria-label="Send"]'])
+      : provider === "claude" ? find(['button[data-testid="chat-input-send"][aria-label="Send message"]'])
       : find(['button[aria-label="Send message"]', 'button[aria-label="Send"]', 'button.send-button']);
     if (!enabled(send)) return { error: "send_unavailable" };
     send.click();
@@ -130,7 +181,11 @@ export class WebProviderSessions {
     if (!this.chrome.storage?.session) return Promise.resolve();
     const entries = [...this.sessions.values()].map(session => ({ token: session.token, tabId: session.tabId,
       provider: session.provider, conversation: session.conversation, submitted: session.submitted,
-      temporary: session.temporary === true, conversationIdentity: session.conversationIdentity ?? null, promoted: session.promoted === true, cleanup: session.cleanup }));
+      temporary: session.temporary === true, conversationIdentity: session.conversationIdentity ?? null, promoted: session.promoted === true,
+      documentLoaderId: session.documentLoaderId ?? null, sequence: session.sequence, confirmedUserCount: session.confirmedUserCount,
+      firstUserMarker: session.firstUserMarker ?? null, firstUserIdentity: session.firstUserIdentity ?? null,
+      firstUserFingerprint: session.firstUserFingerprint ?? null,
+      pendingSubmission: session.pendingSubmission === true, ownershipLost: session.ownershipLost === true, cleanup: session.cleanup }));
     const saved = this.storageQueue.then(() => this.chrome.storage.session.set({ [LEDGER_KEY]: entries }));
     this.storageQueue = saved.catch(() => {});
     return saved;
@@ -146,7 +201,9 @@ export class WebProviderSessions {
         || !Object.hasOwn(WEB_PROVIDERS, entry.provider)
         || !(entry.conversation === null || conversationURL(entry.provider, entry.conversation) === entry.conversation)) continue;
       this.sessions.set(entry.token, { ...entry, generation: null, revision: -1, revoked: true,
-        created: this.now(), state: "interrupted", sequence: 0, response: "", recovered: true });
+        created: this.now(), state: "interrupted", sequence: Number.isSafeInteger(entry.sequence) && entry.sequence >= 0 ? entry.sequence : 0,
+        confirmedUserCount: Number.isSafeInteger(entry.confirmedUserCount) && entry.confirmedUserCount >= 0 ? entry.confirmedUserCount : 0,
+        response: "", recovered: true });
     }
     await Promise.allSettled([...this.sessions.values()].map(async session => {
       try { await this.bounded(this.chrome.debugger.attach({ tabId: session.tabId }, "1.3"), 1_000); } catch {}
@@ -161,12 +218,67 @@ export class WebProviderSessions {
     else if (operation === "webProviderSend") requireValue(keys(params, ["sessionToken", "prompt"]) && text(params.sessionToken, 128) && text(params.prompt, MAX_PROMPT));
     else requireValue(keys(params, ["sessionToken"]) && text(params.sessionToken, 128));
   }
-  async command(session, method, params = {}, cleanup = false) {
+  async command(session, method, params = {}, cleanup = false, timeoutMs = 1_500) {
     if (!cleanup) {
       this.check(session.generation, session.revision);
       requireValue(!session.revoked, "web_stale_session", "The website session was revoked.");
     }
-    return this.bounded(this.chrome.debugger.sendCommand({ tabId: session.tabId }, method, params), 1_500);
+    return this.bounded(this.chrome.debugger.sendCommand({ tabId: session.tabId }, method, params), timeoutMs);
+  }
+  claudeUserCounts(session, action) {
+    const { sequence, confirmedUserCount, pendingSubmission } = session;
+    requireValue(!session.ownershipLost && Number.isSafeInteger(sequence) && sequence >= 0 && Number.isSafeInteger(confirmedUserCount)
+      && confirmedUserCount >= 0 && (pendingSubmission ? sequence === confirmedUserCount + 1 : sequence === confirmedUserCount),
+      "web_conversation_changed", "The Claude session's message ownership could not be verified. The tab was left open.");
+    if (action === "prepare") {
+      requireValue(!pendingSubmission, "web_conversation_changed", "The previous Claude submission was not confirmed. No new prompt was sent.");
+      return [sequence];
+    }
+    if (action === "submit") {
+      requireValue(pendingSubmission, "web_conversation_changed", "The Claude submission no longer belongs to this session.");
+      return [confirmedUserCount];
+    }
+    return pendingSubmission ? [confirmedUserCount, sequence] : [confirmedUserCount];
+  }
+  async loseClaudeOwnership(session, code, message) {
+    session.ownershipLost = true;
+    await this.saveLedger();
+    throw new BridgeError(code, message);
+  }
+  async verifyClaudeDocument(session, frame, expectedLoaderId = session.documentLoaderId) {
+    if (session.ownershipLost || !text(frame?.loaderId, 256) || expectedLoaderId && frame.loaderId !== expectedLoaderId
+      || session.recovered && !text(session.documentLoaderId, 256))
+      await this.loseClaudeOwnership(session, "web_document_changed",
+        "The Claude document's ownership was lost. Its tab was left open and no browser action was replayed.");
+  }
+  async verifyClaudeObservation(session, observed, action) {
+    if (session.provider !== "claude") return;
+    if (!text(observed.documentLoaderId, 256) || session.documentLoaderId && observed.documentLoaderId !== session.documentLoaderId)
+      await this.loseClaudeOwnership(session, "web_document_changed", "The Claude document was replaced. Its tab was left open.");
+    if (!this.claudeUserCounts(session, action).includes(observed.userCount)
+      || session.state === "running" && action === "inspect" && observed.responseCount > session.baseline
+        && observed.text && observed.userCount !== session.sequence)
+      await this.loseClaudeOwnership(session, "web_conversation_changed",
+        "The Claude conversation's message count changed unexpectedly. Its tab was left open.");
+    if (observed.userCount > 0) {
+      if (!text(session.firstUserMarker, 128) || !observed.firstUserMarkerVerified || !text(observed.firstUserIdentity, 256)
+        || !/^[a-f0-9]{64}$/.test(observed.firstUserFingerprint || "")
+        || session.firstUserIdentity && observed.firstUserIdentity !== session.firstUserIdentity
+        || session.firstUserFingerprint && observed.firstUserFingerprint !== session.firstUserFingerprint)
+        await this.loseClaudeOwnership(session, "web_conversation_changed",
+          "Claude's first user message no longer matches the owned submission. Its tab was left open.");
+      if (!session.firstUserFingerprint) {
+        requireValue(action === "inspect" || action === "enableTemporary", "web_conversation_changed", "The first Claude submission was not verified.");
+        session.firstUserIdentity = observed.firstUserIdentity;
+        session.firstUserFingerprint = observed.firstUserFingerprint;
+        await this.saveLedger();
+      }
+    }
+    if (session.pendingSubmission && action === "inspect" && observed.userCount === session.sequence) {
+      session.confirmedUserCount = session.sequence;
+      session.pendingSubmission = false;
+      await this.saveLedger();
+    }
   }
   async page(session, action, extra = {}, cleanup = false) {
     requireValue(!cleanup || ["inspect", "stop"].includes(action));
@@ -191,17 +303,33 @@ export class WebProviderSessions {
     if (!owned && !freshURL(session.provider, rawURL)) {
       throw new BridgeError("web_sign_in_required", "Sign in to this website in Chrome, then retry.");
     }
+    if (session.provider === "claude") await this.verifyClaudeDocument(session, frame);
     const world = await this.command(session, "Page.createIsolatedWorld", { frameId: frame.id, worldName: "computa-web-provider-v1", grantUniveralAccess: false }, cleanup);
     requireValue(Number.isSafeInteger(world.executionContextId), "web_invalid_document", "The website document could not be inspected.");
+    if (session.provider === "claude") {
+      // If navigation replaced the document while its isolated world was being
+      // created, never evaluate a mutation in the replacement context.
+      const current = await this.command(session, "Page.getFrameTree", {}, cleanup);
+      await this.verifyClaudeDocument(session, current?.frameTree?.frame, frame.loaderId);
+    }
     const payload = { provider: session.provider, action, expectedURL: rawURL,
       expectedConversation: promotion ? null : session.conversation,
-      expectedConversationIdentity: session.conversationIdentity ?? null, ...extra };
+      expectedConversationIdentity: session.conversationIdentity ?? null,
+      ...(session.provider === "claude" ? { expectedUserCounts: this.claudeUserCounts(session, action),
+        expectedFirstUserMarker: session.firstUserMarker ?? null, expectedFirstUserIdentity: session.firstUserIdentity ?? null,
+        expectedFirstUserFingerprint: session.firstUserFingerprint ?? null } : {}), ...extra };
     const source = providerPageAction.toString();
     const result = await this.command(session, "Runtime.evaluate", { expression: `(${source})(${JSON.stringify(payload)})`, contextId: world.executionContextId,
       returnByValue: true, awaitPromise: true }, cleanup);
     requireValue(!result.exceptionDetails && result.result?.value && typeof result.result.value === "object", "web_invalid_document", "The provider page could not be inspected.");
     const value = result.result.value;
+    if (session.provider === "claude" && value.error === "conversation_changed")
+      await this.loseClaudeOwnership(session, "web_conversation_changed", "The Claude conversation changed. Its tab was left open.");
     if (value.error) throw new BridgeError(`web_${value.error}`, "The website interface changed or the owned chat is unavailable. No browser action was replayed.");
+    if (session.provider === "claude") {
+      value.documentLoaderId = frame.loaderId;
+      if (["inspect", "prepare", "enableTemporary"].includes(action)) await this.verifyClaudeObservation(session, value, action);
+    }
     if (promotion) {
       requireValue(session.temporary && value.temporary && text(session.conversationIdentity, 256)
         && value.conversationIdentity === session.conversationIdentity, "web_conversation_changed",
@@ -245,7 +373,8 @@ export class WebProviderSessions {
       catch (error) { creationAbandoned = true; throw error; }
       requireValue(Number.isSafeInteger(tab?.id), "web_tab_unavailable", "Chrome could not open the provider website.");
       const session = { token: this.uuid(), tabId: tab.id, provider: params.provider, generation, revision, state: "loading",
-        created: this.now(), cleanup: "pending", sequence: 0, response: "", submitted: false, conversation: null, revoked: false };
+        created: this.now(), cleanup: "pending", sequence: 0, confirmedUserCount: 0, pendingSubmission: false,
+        documentLoaderId: null, response: "", submitted: false, conversation: null, revoked: false };
       try {
         this.check(generation, revision);
         const attachment = this.chrome.debugger.attach({ tabId: tab.id }, "1.3");
@@ -278,23 +407,34 @@ export class WebProviderSessions {
     if (operation === "webProviderSend") {
       requireValue(session.state === "ready" || session.state === "complete", "web_not_ready", "Wait for the website chat to be ready before sending.");
       const before = await this.page(session, "prepare");
+      await this.verifyClaudeObservation(session, before, "prepare");
       requireValue(before.temporary && session.temporary, "web_temporary_mode_unverified", "The website is no longer in its owned temporary chat mode. No prompt was sent.");
       requireValue(before.prepared, "web_composer_unavailable", "The website composer could not receive text.");
       if (!session.submitted) requireValue(before.responseCount === 0 && before.userCount === 0 && freshURL(session.provider, before.url),
         "web_not_fresh", "The website conversation was not empty. It was not modified.");
+      const firstUserMarker = session.provider === "claude" && !session.submitted ? this.uuid() : null;
+      const outboundPrompt = firstUserMarker ? `Computa session marker: ${firstUserMarker}\n\n${params.prompt}` : params.prompt;
       session.baseline = before.responseCount;
       session.response = "";
-      session.sequence += 1;
       session.lastChanged = this.now();
       session.turnStarted = this.now();
-      await this.command(session, "Input.insertText", { text: params.prompt });
+      if (session.provider === "claude") {
+        const current = await this.command(session, "Page.getFrameTree", {}, false, 1_000);
+        await this.verifyClaudeDocument(session, current?.frameTree?.frame);
+      }
+      await this.command(session, "Input.insertText", { text: outboundPrompt });
       this.check(generation, revision);
       // Mark submission authority before clicking: a click may succeed even if
       // Chrome's reply is lost, and the new URL still belongs to this session.
       session.submitted = true;
+      session.sequence += 1;
+      if (session.provider === "claude") {
+        session.pendingSubmission = true;
+        if (firstUserMarker) session.firstUserMarker = firstUserMarker;
+      }
       session.state = "running";
       await this.saveLedger();
-      try { await this.page(session, "submit", { prompt: params.prompt }); }
+      try { await this.page(session, "submit", { prompt: outboundPrompt }); }
       catch (error) { session.state = "failed"; session.failure = { code: error.code ?? "web_send_failed", message: error.message }; throw error; }
       this.check(generation, revision);
       return this.snapshot(session);
@@ -303,12 +443,17 @@ export class WebProviderSessions {
     if (!["loading", "running"].includes(session.state)) return this.snapshot(session);
     try {
       const observed = await this.page(session, "inspect");
+      await this.verifyClaudeObservation(session, observed, "inspect");
       this.check(generation, revision);
       if (session.state === "loading") {
         requireValue(!session.conversation && observed.responseCount === 0 && observed.userCount === 0, "web_not_fresh", "The website opened an existing conversation. It was not modified.");
         if (observed.composer) {
-          if (observed.temporary) { session.temporary = true; session.state = "ready"; await this.saveLedger(); }
-          else if (session.provider === "gemini" && !session.temporaryRequested) {
+          if (observed.temporary) {
+            session.temporary = true;
+            if (session.provider === "claude") session.documentLoaderId = observed.documentLoaderId;
+            session.state = "ready"; await this.saveLedger();
+          }
+          else if (["gemini", "claude"].includes(session.provider) && !session.temporaryRequested) {
             await this.page(session, "enableTemporary"); session.temporaryRequested = true;
           } else if (this.now() - session.created > READY_TIMEOUT_MS)
             throw new BridgeError("web_temporary_mode_unverified", "The website did not confirm temporary chat mode. No prompt was sent.");
@@ -317,9 +462,12 @@ export class WebProviderSessions {
         else if (this.now() - session.created > READY_TIMEOUT_MS) throw new BridgeError("web_ready_timeout", "The website did not become ready in time.");
       } else {
         if (observed.responseCount > session.baseline && observed.text) {
+          if (session.provider === "claude") requireValue(observed.userCount === session.sequence && !session.pendingSubmission,
+            "web_conversation_changed", "Claude returned a reply without the one owned user submission. It was not parsed.");
           if (session.response !== observed.text) { session.response = observed.text; session.lastChanged = this.now(); }
-          if (!observed.busy && observed.answerComplete && this.now() - session.lastChanged >= STABLE_RESPONSE_MS) session.state = "complete";
+          if (!observed.interrupted && !observed.busy && observed.answerComplete && this.now() - session.lastChanged >= STABLE_RESPONSE_MS) session.state = "complete";
         }
+        if (observed.interrupted) throw new BridgeError("web_response_interrupted", "The website response was interrupted and was not parsed as a tool response.");
         if (session.state === "running" && this.now() - session.turnStarted > TURN_TIMEOUT_MS)
           throw new BridgeError("web_response_timeout", "The website did not complete its response in time.");
       }
@@ -336,7 +484,10 @@ export class WebProviderSessions {
     try {
       // One final observation captures any late provider conversation URL and
       // proves that this owned session still has no saved history thread.
-      const observed = session.submitted || session.recovered ? await this.page(session, "inspect", {}, true) : null;
+      if (session.provider === "claude") requireValue(!session.ownershipLost && text(session.documentLoaderId, 256), "web_document_changed",
+        "The Claude tab's document identity was never verified. It was left open.");
+      const observed = session.submitted || session.recovered || session.provider === "claude" ? await this.page(session, "inspect", {}, true) : null;
+      if (observed) await this.verifyClaudeObservation(session, observed, "inspect");
       if (!session.submitted) {
         if (observed) requireValue(observed.userCount === 0 && observed.responseCount === 0 && !session.conversation,
           "web_cleanup_unverified", "The owned tab no longer contains its empty starting page. It was left open.");

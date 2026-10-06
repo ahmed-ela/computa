@@ -239,11 +239,7 @@ actor WebModelServer {
     }
 
     static func provider(for model: String) -> String? {
-        switch model {
-        case "browser/chatgpt": "chatgpt"
-        case "browser/gemini": "gemini"
-        default: nil
-        }
+        LocalModelCatalog.webProvider(for: model)
     }
 
     private func call(_ transport: any WebModelTransport, operation: String,

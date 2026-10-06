@@ -11,6 +11,7 @@ enum LocalModelCatalog {
     static let defaultModelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
     static let chatGPTBrowserModelID = "browser/chatgpt"
     static let geminiBrowserModelID = "browser/gemini"
+    static let claudeBrowserModelID = "browser/claude"
     private static let visualGroundingModelIDs: Set<String> = [
         "lmstudio-community/Qwen3.5-9B-MLX-4bit",
         "lmstudio-community/Qwen3.5-4B-MLX-4bit",
@@ -27,6 +28,12 @@ enum LocalModelCatalog {
             id: geminiBrowserModelID,
             label: "Gemini · Chrome",
             detail: "Uses signed-in Gemini in Chrome with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
+            highMemory: false
+        ),
+        LocalModelOption(
+            id: claudeBrowserModelID,
+            label: "Claude · Chrome",
+            detail: "Uses signed-in Claude Incognito in Chrome with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the Incognito website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(
@@ -63,6 +70,7 @@ enum LocalModelCatalog {
         switch id {
         case chatGPTBrowserModelID: "chatgpt"
         case geminiBrowserModelID: "gemini"
+        case claudeBrowserModelID: "claude"
         default: nil
         }
     }

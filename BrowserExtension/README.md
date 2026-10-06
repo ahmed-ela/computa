@@ -235,20 +235,48 @@ additional extension permissions or separate browser process are needed.
 
 | Operation | Parameters | Result |
 | --- | --- | --- |
-| `webProviderStart` | `{provider: "chatgpt" \| "gemini"}` | New inactive owned tab; `state: "loading"`, `sessionToken` |
+| `webProviderStart` | `{provider: "chatgpt" \| "gemini" \| "claude"}` | New inactive owned tab; `state: "loading"`, `sessionToken` |
 | `webProviderPoll` | `{sessionToken}` | `loading`, `ready`, `running`, `complete`, `needs_sign_in`, or `failed`; bounded current response `text` and per-send `sequence` |
 | `webProviderSend` | `{sessionToken, prompt}` | One submission; `state: "running"`. Call only after `ready` or `complete`. |
 | `webProviderFinish` | `{sessionToken}` | Closes the owned temporary tab; `state: "finished"`, `cleanup: "not_created"` on success |
 | `webProviderCancel` | `{sessionToken}` | Stops the owned response, then performs the same cleanup |
 
 Every website session starts from an empty new conversation. Before sending,
-ChatGPT's temporary-chat control or Gemini's visible temporary-chat notice must
-be observed. Continued temporary-mode evidence is checked again at cleanup.
+ChatGPT's temporary-chat control, Gemini's visible temporary-chat notice, or
+Claude's Incognito chat badge and Exit incognito control must be observed.
+Continued temporary-mode evidence is checked again at cleanup.
 Temporary sessions do not create entries in the provider's saved chat history;
 `not_created` reports that fact, and does not claim immediate erasure from the
 provider's internal retention systems. The app remains responsible for its local
 transcript and for calling finish/cancel at the end of the logical native turn.
-Multiple tool-result sends can share that same website session.
+Multiple tool-result sends can share that same website session. Claude begins
+at its empty `/new` page and enables Incognito before any prompt is entered;
+existing saved `/chat` conversations are never adopted. Its reply body is read
+without the screen-reader heading or message toolbar, and a streaming reply
+cannot be considered complete even if a Copy control is already present.
+Because Claude keeps its incognito `/new` URL throughout a chat, the bridge also
+pins its CDP main-document loader identity at readiness and verifies the owned
+user-message count before composer actions, polling, and cleanup. Each send must
+add exactly one user message before its reply can complete. Reloads, resets, or
+extra messages permanently revoke cleanup authority and leave the tab open;
+worker recovery preserves these identity checks. A final Send whose acknowledgement
+was lost can be cleaned up only with the previous confirmed count or its one
+pending submission.
+The first outbound Claude prompt also carries a fresh opaque session marker.
+Only a rendered first user message containing that exact marker can establish
+ownership; the bridge then pins its nearest DOM ancestor ID and a SHA-256 digest
+of its normalized rendered body. Later actions, cleanup, and worker recovery
+check both, so a replacement chat with the same document and message count
+cannot acquire authority. Rendering Markdown does not need to reproduce the raw
+prompt bytes. The digest operation rechecks the same message node and body after
+its asynchronous wait, and the recovery ledger stores the marker, ID, and digest
+without storing prompt or response text.
+An interrupted reply fails before tool parsing, while cleanup can still close
+its verified owned incognito tab.
+
+Claude's [official incognito documentation](https://support.claude.com/en/articles/12260368-use-incognito-chats)
+confirms that these chats are excluded from chat history and memory, with
+provider-side retention of 30 days by default (Enterprise retention can differ).
 
 Only extension-owned fixed DOM actions run. Prompt text is inserted with Chrome's
 `Input.insertText`; arbitrary JavaScript, URLs, target IDs and model-supplied DOM

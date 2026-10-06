@@ -22,6 +22,28 @@ final class WebModelServerTests: XCTestCase {
         _ = await server.shutdown()
     }
 
+    func testClaudeRoutesToClaudeReusesItsSessionAndStartsFreshAfterCleanup() async throws {
+        let transport = FixtureWebModelTransport()
+        let server = WebModelServer()
+        await server.setTransportForTesting(transport)
+        let claudeRequest = Data("{\"model\":\"browser/claude\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
+        _ = try await server.infer(claudeRequest, taskID: "claude-task")
+        _ = try await server.infer(claudeRequest, taskID: "claude-task")
+        let initialProviders = await transport.startedProviders()
+        XCTAssertEqual(initialProviders, ["claude"])
+        let issues = await server.finish(taskID: "claude-task")
+        XCTAssertTrue(issues.isEmpty)
+        let finishedOperations = await transport.operations()
+        XCTAssertEqual(finishedOperations.filter { $0 == "webProviderFinish" }.count, 1)
+        _ = try await server.infer(claudeRequest, taskID: "claude-task")
+        let restartedProviders = await transport.startedProviders()
+        XCTAssertEqual(restartedProviders, ["claude", "claude"])
+        let shutdownIssues = await server.shutdown()
+        XCTAssertTrue(shutdownIssues.isEmpty)
+        let finalOperations = await transport.operations()
+        XCTAssertEqual(finalOperations.filter { $0 == "webProviderCancel" }.count, 1)
+    }
+
     func testUnverifiedCleanupIsReportedAndRetried() async throws {
         let transport = FixtureWebModelTransport(cleanupFailsOnce: true)
         let server = WebModelServer()
@@ -121,6 +143,7 @@ private actor WebListenerStartupGate {
 
 private actor FixtureWebModelTransport: WebModelTransport {
     private var ledger: [String] = []
+    private var providers: [String] = []
     private var cleanupFailsOnce: Bool
     private let cleanupDelay: Bool
     private var tokens = Set<String>()
@@ -128,10 +151,14 @@ private actor FixtureWebModelTransport: WebModelTransport {
         self.cleanupFailsOnce = cleanupFailsOnce; self.cleanupDelay = cleanupDelay
     }
     func operations() -> [String] { ledger }
+    func startedProviders() -> [String] { providers }
     func request(operation: String, params: Data) async throws -> Data {
         ledger.append(operation)
         var response: [String: String]
         if operation == "webProviderStart" {
+            let object = try JSONSerialization.jsonObject(with: params) as! [String: String]
+            guard let provider = object["provider"] else { throw WebModelServer.Failure.invalidRequest }
+            providers.append(provider)
             let token = UUID().uuidString; tokens.insert(token)
             response = ["sessionToken": token, "state": "ready"]
         } else {

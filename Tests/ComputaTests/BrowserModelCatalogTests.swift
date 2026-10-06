@@ -7,7 +7,8 @@ final class BrowserModelCatalogTests: XCTestCase {
             let localNames = Set(ComputerV2ToolContract.referenceSpecs(for: LocalModelCatalog.defaultModelID,
                 interactionPolicy: policy).compactMap { $0["name"] as? String })
             XCTAssertTrue(localNames.contains("computer_v2_capture"))
-            for browser in [LocalModelCatalog.chatGPTBrowserModelID, LocalModelCatalog.geminiBrowserModelID] {
+            for browser in [LocalModelCatalog.chatGPTBrowserModelID, LocalModelCatalog.geminiBrowserModelID,
+                            LocalModelCatalog.claudeBrowserModelID] {
                 let browserNames = Set(ComputerV2ToolContract.referenceSpecs(for: browser,
                     interactionPolicy: policy).compactMap { $0["name"] as? String })
                 XCTAssertFalse(browserNames.contains("computer_v2_capture"))
@@ -20,9 +21,11 @@ final class BrowserModelCatalogTests: XCTestCase {
     func testBrowserModelsRouteToTheirWebsitesWithoutLocalInferenceRequirements() throws {
         let configuration = CodexAppServerRuntime.Configuration.localQwen
         for (model, provider) in [(LocalModelCatalog.chatGPTBrowserModelID, "chatgpt"),
-                                  (LocalModelCatalog.geminiBrowserModelID, "gemini")] {
+                                  (LocalModelCatalog.geminiBrowserModelID, "gemini"),
+                                  (LocalModelCatalog.claudeBrowserModelID, "claude")] {
             XCTAssertNotNil(LocalModelCatalog.option(for: model))
             XCTAssertEqual(LocalModelCatalog.webProvider(for: model), provider)
+            XCTAssertEqual(WebModelServer.provider(for: model), provider)
             XCTAssertEqual(configuration.modelProvider(for: model), "web_browser")
             XCTAssertNoThrow(try configuration.validateSelectedModel(model))
             XCTAssertFalse(LocalModelCatalog.supportsHeadlessMLX(model))
@@ -30,15 +33,21 @@ final class BrowserModelCatalogTests: XCTestCase {
         }
         XCTAssertEqual(configuration.modelProvider(for: LocalModelCatalog.defaultModelID), "lmstudio")
         XCTAssertNil(LocalModelCatalog.webProvider(for: "browser/unrecognized"))
+        XCTAssertNil(WebModelServer.provider(for: "browser/unrecognized"))
+        XCTAssertNil(WebModelServer.provider(for: LocalModelCatalog.defaultModelID))
     }
 
     func testProviderSwitchNeedsNewThreadWhileWebsitesShareBrowserContextProfile() {
         let browser = LocalThreadContext.forModel(LocalModelCatalog.chatGPTBrowserModelID)
         XCTAssertEqual(browser, .webBrowser)
         XCTAssertTrue(browser.supportsModelSwitch(to: LocalModelCatalog.geminiBrowserModelID))
+        XCTAssertTrue(browser.supportsModelSwitch(to: LocalModelCatalog.claudeBrowserModelID))
+        XCTAssertEqual(LocalThreadContext.forModel(LocalModelCatalog.claudeBrowserModelID), browser)
         XCTAssertFalse(browser.supportsModelSwitch(to: LocalModelCatalog.defaultModelID))
         XCTAssertFalse(LocalThreadContext.forModel(LocalModelCatalog.defaultModelID)
             .supportsModelSwitch(to: LocalModelCatalog.chatGPTBrowserModelID))
+        XCTAssertFalse(LocalThreadContext.forModel(LocalModelCatalog.defaultModelID)
+            .supportsModelSwitch(to: LocalModelCatalog.claudeBrowserModelID))
         let config = CodexAppServerRuntime.localThreadConfig(for: LocalModelCatalog.chatGPTBrowserModelID)
         XCTAssertEqual(config["model_context_window"] as? Int, 65_536)
         XCTAssertEqual(config["model_auto_compact_token_limit"] as? Int, 49_152)
