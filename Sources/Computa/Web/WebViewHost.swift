@@ -57,6 +57,14 @@ struct WebWorkspaceView: View {
                 .frame(height: 34)
         }
         .ignoresSafeArea()
+        // A detached WKWebView is not a visible WebKit page. Keep owned model
+        // views attached and renderable without showing or focusing them.
+        .background(Color(nsColor: .windowBackgroundColor))
+        .background {
+            EmbeddedModelRenderHost(session: state.browserSession)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 }
 

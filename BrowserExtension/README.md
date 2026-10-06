@@ -233,8 +233,22 @@ The native app can use `webProviderStart`, `webProviderSend`, `webProviderPoll`,
 bridge envelope. These commands use Chrome's existing signed-in profile. No
 additional extension permissions or separate browser process are needed.
 
-Choose ChatGPT, Gemini, or Claude in Computa's task model picker and sign into
-that provider in the paired Chrome profile. No provider API key is needed.
+In Computa's Swift app, choose **Gemini · Chrome** or **Claude · Chrome** and
+sign into that provider in the paired Chrome profile. **ChatGPT · Built-in
+browser** instead uses the app-owned WebKit profile: sign into `chatgpt.com` in
+Computa's Browser pane. That ChatGPT route does not require Chrome or this
+extension. The bridge's `chatgpt` operation remains available to other transport
+clients. No provider API key is needed.
+
+The built-in ChatGPT adapter opens a separate owned Temporary Chat, preserves
+the human tab, and closes the owned tab after verified cleanup at the end of the
+native turn. It waits for navigation and private-world DOM-change notifications
+coalesced over approximately 100 ms, while this extension retains its existing
+polling contract. Both routes keep transcripts locally and support text,
+Accessibility and terminal tools through Computa's harness; image/screenshot and
+audio inputs remain unsupported. These transport descriptions do not establish
+live end-to-end qualification.
+
 After updating this unpacked developer extension, reload it once from Chrome's
 Extensions page to activate the changed JavaScript. Reopening Computa reconnects
 the remembered pairing but does not replace Chrome's loaded extension code.

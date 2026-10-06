@@ -5,6 +5,15 @@ import Foundation
 /// Another transport can replace Chrome without changing the desktop tools.
 protocol WebModelTransport: Sendable {
     func request(operation: String, params: Data) async throws -> Data
+    func changeRevision(sessionToken: String) async throws -> UInt64?
+    func waitForChange(sessionToken: String, after revision: UInt64,
+                       until deadline: ContinuousClock.Instant) async throws -> UInt64?
+}
+
+extension WebModelTransport {
+    func changeRevision(sessionToken: String) async throws -> UInt64? { nil }
+    func waitForChange(sessionToken: String, after revision: UInt64,
+                       until deadline: ContinuousClock.Instant) async throws -> UInt64? { nil }
 }
 
 private struct ChromeWebModelTransport: WebModelTransport {
@@ -35,23 +44,35 @@ private struct ChromeWebModelTransport: WebModelTransport {
 /// rollout persistence; only model inference goes through the website.
 actor WebModelServer {
     enum Failure: LocalizedError {
-        case chromeRequired, invalidRequest, busy, providerFailed, deadline, cleanupFailed
+        case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, deadline, cleanupFailed
         var errorDescription: String? {
             switch self {
             case .chromeRequired: "Connect the Computa Chrome extension, then sign in to the selected website in Chrome."
+            case .embeddedRequired: "Open ChatGPT in Computa's built-in browser and sign in before using this model."
             case .invalidRequest: "The browser model request could not be validated."
             case .busy: "This browser model already has a request running."
-            case .providerFailed: "The website could not produce a response. Check its sign-in, usage limit, or error message in Chrome."
+            case .providerFailed: "The website could not produce a response. Check its sign-in, usage limit, or error message in the browser."
             case .deadline: "The website did not finish its response before the five-minute deadline."
             case .cleanupFailed: "The web conversation cleanup could not be verified. Its local transcript has been retained."
             }
         }
     }
 
-    struct Session: Sendable {
+    private enum Route: Equatable, Sendable {
+        case embedded, chrome
+    }
+
+    private struct Session: Sendable {
         let token: String
         let provider: String
+        let route: Route
         let transport: any WebModelTransport
+    }
+
+    private struct ActiveRequest: Sendable {
+        let id: UUID
+        let route: Route
+        let operation: Task<Data, Error>
     }
 
     nonisolated let bearerToken = UUID().uuidString + UUID().uuidString
@@ -59,11 +80,15 @@ actor WebModelServer {
     private var baseURL: URL?
     private var starting: Task<URL, Error>?
     private var transport: (any WebModelTransport)?
+    private var embeddedTransport: (any WebModelTransport)?
     private var sessions: [String: Session] = [:]
-    private var active: [String: Task<Data, Error>] = [:]
+    private var active: [String: ActiveRequest] = [:]
+    private var retiringTaskIDs = Set<String>()
     private var cleanupTasks: [String: Task<[String], Never>] = [:]
     private var connections: [UUID: NWConnection] = [:]
     private var shuttingDown = false
+    private var readinessTimeout: Duration = .seconds(45)
+    private var responseTimeout: Duration = .seconds(300)
     private let queue = DispatchQueue(label: "wtf.computa.web-model-http")
     #if DEBUG
     private var beforeListenerStartForTesting: (@Sendable () async -> Void)?
@@ -120,9 +145,18 @@ actor WebModelServer {
         if request.extensionAdmission != nil { transport = ChromeWebModelTransport(connection: request) }
     }
 
+    func configureEmbeddedTransport(_ value: any WebModelTransport) {
+        embeddedTransport = value
+    }
+
     // Also permits a deterministic transport in tests without touching Chrome.
     #if DEBUG
     func setTransportForTesting(_ value: any WebModelTransport) { transport = value }
+    func setTimeoutsForTesting(readiness: Duration, response: Duration) {
+        readinessTimeout = max(.milliseconds(1), min(.seconds(45), readiness))
+        responseTimeout = max(.milliseconds(1), min(.seconds(300), response))
+    }
+
     func setBeforeListenerStartForTesting(_ value: (@Sendable () async -> Void)?) {
         beforeListenerStartForTesting = value
     }
@@ -131,7 +165,8 @@ actor WebModelServer {
     @discardableResult
     func disconnect() async -> [String] {
         transport = nil
-        let ids = Set(sessions.keys).union(active.keys)
+        let ids = Set(sessions.filter { $0.value.route == .chrome }.keys)
+            .union(active.filter { $0.value.route == .chrome }.keys)
         var issues: [String] = []
         for id in ids { issues += await cancel(taskID: id) }
         return issues
@@ -142,9 +177,12 @@ actor WebModelServer {
     }
 
     func cancel(taskID: String) async -> [String] {
-        active[taskID]?.cancel()
-        if let task = active[taskID] { _ = try? await task.value }
-        active.removeValue(forKey: taskID)
+        retiringTaskIDs.insert(taskID)
+        defer { retiringTaskIDs.remove(taskID) }
+        let request = active[taskID]
+        request?.operation.cancel()
+        if let request { _ = try? await request.operation.value }
+        if active[taskID]?.id == request?.id { active.removeValue(forKey: taskID) }
         return await cleanup(taskID: taskID, cancel: true)
     }
 
@@ -152,7 +190,11 @@ actor WebModelServer {
         shuttingDown = true
         starting?.cancel()
         listener?.cancel(); listener = nil; baseURL = nil
-        let issues = await disconnect()
+        transport = nil
+        embeddedTransport = nil
+        let ids = Set(sessions.keys).union(active.keys)
+        var issues: [String] = []
+        for id in ids { issues += await cancel(taskID: id) }
         for connection in connections.values { connection.cancel() }
         connections.removeAll()
         return issues
@@ -187,35 +229,45 @@ actor WebModelServer {
     }
 
     func infer(_ data: Data, taskID: String) async throws -> Data {
-        guard !shuttingDown, active[taskID] == nil, cleanupTasks[taskID] == nil else { throw Failure.busy }
+        guard !shuttingDown, active[taskID] == nil, cleanupTasks[taskID] == nil,
+              !retiringTaskIDs.contains(taskID) else { throw Failure.busy }
         let request = try WebModelResponseCodec.prepareRequest(data)
-        guard let provider = Self.provider(for: request.model), let transport else { throw Failure.chromeRequired }
-        let operation = Task { try await self.perform(request, provider: provider, taskID: taskID, transport: transport) }
-        active[taskID] = operation
-        defer { active.removeValue(forKey: taskID) }
+        guard let provider = Self.provider(for: request.model) else { throw Failure.invalidRequest }
+        let route: Route = provider == "chatgpt" ? .embedded : .chrome
+        guard let transport = route == .embedded ? embeddedTransport : transport else {
+            throw route == .embedded ? Failure.embeddedRequired : Failure.chromeRequired
+        }
+        let operation = Task { try await self.perform(request, provider: provider, route: route,
+                                                     taskID: taskID, transport: transport) }
+        let id = UUID()
+        active[taskID] = ActiveRequest(id: id, route: route, operation: operation)
+        defer { if active[taskID]?.id == id { active.removeValue(forKey: taskID) } }
         return try await operation.value
     }
 
     private func perform(_ request: WebModelResponseCodec.Request, provider: String,
-                         taskID: String, transport: any WebModelTransport) async throws -> Data {
+                         route: Route, taskID: String, transport: any WebModelTransport) async throws -> Data {
         let session: Session
         if let existing = sessions[taskID] {
-            guard existing.provider == provider else { throw Failure.invalidRequest }
+            guard existing.provider == provider, existing.route == route else { throw Failure.invalidRequest }
             session = existing
         } else {
             let reply = try await call(transport, operation: "webProviderStart", params: ["provider": provider])
             guard let token = reply["sessionToken"] as? String, UUID(uuidString: token) != nil,
                   ["ready", "loading"].contains(reply["state"] as? String ?? "") else { throw Self.snapshotFailure(reply) }
-            session = Session(token: token, provider: provider, transport: transport)
+            session = Session(token: token, provider: provider, route: route, transport: transport)
             sessions[taskID] = session
-            let readinessDeadline = ContinuousClock.now + .seconds(45)
+            let readinessDeadline = ContinuousClock.now + readinessTimeout
             var ready = reply["state"] as? String == "ready"
             while !ready, ContinuousClock.now < readinessDeadline {
                 try Task.checkCancellation()
+                let revision = try await transport.changeRevision(sessionToken: token)
+                guard ContinuousClock.now < readinessDeadline else { throw Failure.deadline }
                 let state = try await call(transport, operation: "webProviderPoll", params: ["sessionToken": token])
+                guard ContinuousClock.now < readinessDeadline else { throw Failure.deadline }
                 if state["state"] as? String == "ready" { ready = true }
                 else if !["loading", "running"].contains(state["state"] as? String ?? "") { throw Self.snapshotFailure(state) }
-                if !ready { try await Task.sleep(for: .milliseconds(500)) }
+                if !ready { try await waitForNextPoll(session, after: revision, until: readinessDeadline) }
             }
             guard ready else { throw Failure.deadline }
         }
@@ -223,20 +275,35 @@ actor WebModelServer {
         let sent = try await call(session.transport, operation: "webProviderSend",
                                   params: ["sessionToken": session.token, "prompt": request.prompt])
         guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
-        let end = ContinuousClock.now + .seconds(300)
+        let end = ContinuousClock.now + responseTimeout
         while ContinuousClock.now < end {
             try Task.checkCancellation()
+            let revision = try await session.transport.changeRevision(sessionToken: session.token)
+            guard ContinuousClock.now < end else { throw Failure.deadline }
             let value = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token])
+            guard ContinuousClock.now < end else { throw Failure.deadline }
             switch value["state"] as? String {
             case "complete":
                 guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
                 let reply = try WebModelResponseCodec.parseReply(text, request: request)
                 return try WebModelResponseCodec.streamData(for: reply, request: request)
-            case "running": try await Task.sleep(for: .milliseconds(500))
+            case "running": try await waitForNextPoll(session, after: revision, until: end)
             default: throw Self.snapshotFailure(value)
             }
         }
         throw Failure.deadline
+    }
+
+    private func waitForNextPoll(_ session: Session, after revision: UInt64?,
+                                 until deadline: ContinuousClock.Instant) async throws {
+        if let revision,
+           try await session.transport.waitForChange(sessionToken: session.token, after: revision, until: deadline) != nil {
+            return
+        }
+        // The Chrome extension retains its current polling contract. Embedded
+        // WebKit supplies versioned notifications and never takes this fallback.
+        let remaining = deadline - .now
+        if remaining > .zero { try await Task.sleep(for: min(.milliseconds(500), remaining)) }
     }
 
     static func provider(for model: String) -> String? {

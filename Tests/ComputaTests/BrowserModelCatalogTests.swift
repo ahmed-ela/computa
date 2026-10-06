@@ -2,6 +2,17 @@ import XCTest
 @testable import Computa
 
 final class BrowserModelCatalogTests: XCTestCase {
+    func testChatGPTDescribesTheBuiltInBrowserWhileOtherProvidersKeepChrome() throws {
+        let chatgpt = try XCTUnwrap(LocalModelCatalog.option(for: LocalModelCatalog.chatGPTBrowserModelID))
+        XCTAssertEqual(chatgpt.label, "ChatGPT · Built-in browser")
+        XCTAssertTrue(chatgpt.detail.contains("Computa's built-in browser"))
+        XCTAssertTrue(chatgpt.detail.contains("screenshots are unavailable"))
+        XCTAssertFalse(chatgpt.detail.contains("Chrome"))
+        for model in [LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID] {
+            XCTAssertTrue(try XCTUnwrap(LocalModelCatalog.option(for: model)).label.contains("Chrome"))
+        }
+    }
+
     func testBrowserToolsOmitCaptureWhileRetainingSemanticToolsAndLocalSchemas() {
         for policy: ComputerInteractionPolicy in [.backgroundOnly, .foregroundAllowed] {
             let localNames = Set(ComputerV2ToolContract.referenceSpecs(for: LocalModelCatalog.defaultModelID,

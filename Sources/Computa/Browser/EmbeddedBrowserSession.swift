@@ -12,13 +12,16 @@ final class EmbeddedBrowserTab: Identifiable {
     fileprivate(set) var canGoBack = false
     fileprivate(set) var canGoForward = false
     fileprivate(set) var documentID = UUID()
+    /// Invalidates full-document navigation receipts; SPA route changes preserve it.
+    fileprivate(set) var documentGeneration = UUID()
     fileprivate(set) var error: String?
 
     fileprivate init(id: UUID = UUID()) { self.id = id }
 }
 
 /// Browser views are independent of the privileged Octane UI WebView and Chrome.
-/// The view host may detach a view when hidden; only close/shutdown destroys its session.
+/// Human views may detach when hidden; inference views return to a render host.
+/// Only close/shutdown destroys either session.
 @MainActor @Observable
 final class EmbeddedBrowserSession {
     enum Failure: Error, LocalizedError, Equatable {
@@ -45,20 +48,33 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private let profileID: UUID?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var entries: [UUID: Entry] = [:]
+    @ObservationIgnored private weak var modelRenderHost: NSView?
+    @ObservationIgnored private var modelRenderHosts: [ModelRenderHostReference] = []
     @ObservationIgnored private var isShutdown = false
     static let profileDefaultsKey = "Computa.EmbeddedBrowser.ProfileIdentifier.v1"
+
+    private final class ModelRenderHostReference {
+        weak var view: NSView?
+        init(_ view: NSView) { self.view = view }
+    }
 
     private final class Entry {
         let tab: EmbeddedBrowserTab
         let view: WKWebView
         let delegate: EmbeddedBrowserDelegate
+        let isModelOwned: Bool
+        weak var presentationHost: NSView?
         var observations: [NSKeyValueObservation] = []
         var navigation: WKNavigation?
+        var preparedDocumentNavigation = false
+        var modelChanges: EmbeddedModelChangeChannel?
+        var modelSignalWorld: WKContentWorld?
 
-        init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate) {
+        init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate, isModelOwned: Bool) {
             self.tab = tab
             self.view = view
             self.delegate = delegate
+            self.isModelOwned = isModelOwned
         }
     }
 
@@ -94,6 +110,10 @@ final class EmbeddedBrowserSession {
 
     @discardableResult
     func createTab(url: URL? = nil, select: Bool = true) throws -> UUID {
+        try createTab(url: url, select: select, modelOwned: false)
+    }
+
+    private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
             guard tabs.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
@@ -106,12 +126,13 @@ final class EmbeddedBrowserSession {
             configuration.userContentController = WKUserContentController()
             configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-            let view = WKWebView(frame: .zero, configuration: configuration)
+            let view = modelOwned ? EmbeddedModelWebView(frame: .zero, configuration: configuration)
+                : WKWebView(frame: .zero, configuration: configuration)
             let delegate = EmbeddedBrowserDelegate(session: self, tabID: tab.id)
             view.navigationDelegate = delegate
             view.uiDelegate = delegate
             view.allowsBackForwardNavigationGestures = true
-            let entry = Entry(tab: tab, view: view, delegate: delegate)
+            let entry = Entry(tab: tab, view: view, delegate: delegate, isModelOwned: modelOwned)
             entries[tab.id] = entry
             tabs.append(tab)
             // Inactive creation stays inactive even when inventory is empty.
@@ -138,6 +159,11 @@ final class EmbeddedBrowserSession {
     func closeTab(_ id: UUID) {
         guard let entry = entries.removeValue(forKey: id), let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         entry.tab.documentID = UUID()
+        entry.tab.documentGeneration = UUID()
+        entry.modelChanges?.close()
+        if let world = entry.modelSignalWorld {
+            entry.view.configuration.userContentController.removeScriptMessageHandler(forName: Self.modelSignalName, contentWorld: world)
+        }
         entry.delegate.invalidate()
         entry.observations.forEach { $0.invalidate() }
         entry.observations.removeAll()
@@ -157,7 +183,8 @@ final class EmbeddedBrowserSession {
         do {
             let entry = try entry(tabID)
             try EmbeddedBrowserURLPolicy.validate(url)
-            prepareNavigation(entry)
+            prepareNavigation(entry, replacesDocument: true)
+            (entry.view as? EmbeddedModelWebView)?.captureNativeFocus()
             entry.navigation = entry.view.load(URLRequest(url: url))
         } catch {
             report(error.localizedDescription, tabID: tabID)
@@ -179,24 +206,139 @@ final class EmbeddedBrowserSession {
 
     func reload(tabID: UUID) {
         guard let entry = entries[tabID], entry.view.url != nil else { return }
-        prepareNavigation(entry)
+        prepareNavigation(entry, replacesDocument: true)
         entry.navigation = entry.view.reload()
     }
 
     func stop(tabID: UUID) {
         guard let entry = entries[tabID] else { return }
         entry.navigation = nil
+        entry.preparedDocumentNavigation = false
         entry.tab.documentID = UUID()
+        entry.tab.documentGeneration = UUID()
         entry.view.stopLoading()
         entry.tab.isLoading = false
+        signalModelChange(entry)
     }
 
     func webView(for id: UUID) -> WKWebView? { entries[id]?.view }
+
+    func captureModelNativeFocus(tabID: UUID) {
+        (entries[tabID]?.view as? EmbeddedModelWebView)?.captureNativeFocus()
+    }
+
+    func restoreModelNativeFocus(tabID: UUID) {
+        (entries[tabID]?.view as? EmbeddedModelWebView)?.restoreNativeFocus()
+    }
+
+    /// The SwiftUI workspace keeps this host attached even when Browser or
+    /// Settings is hidden. It is a render surface, never an input destination.
+    func installModelRenderHost(_ host: NSView) {
+        modelRenderHosts.removeAll { $0.view == nil }
+        if !modelRenderHosts.contains(where: { $0.view === host }) { modelRenderHosts.append(ModelRenderHostReference(host)) }
+        // WindowGroup shares this session. Updating another window must not
+        // move live pages away from a surviving designated render host.
+        if modelRenderHost == nil { modelRenderHost = modelRenderHosts.first?.view }
+        for entry in entries.values where entry.isModelOwned && entry.presentationHost == nil {
+            mountModelView(entry)
+        }
+    }
+
+    func removeModelRenderHost(_ host: NSView) {
+        modelRenderHosts.removeAll { $0.view == nil || $0.view === host }
+        if modelRenderHost === host {
+            modelRenderHost = modelRenderHosts.first?.view
+            for entry in entries.values where entry.isModelOwned && entry.presentationHost == nil {
+                if modelRenderHost != nil { mountModelView(entry) }
+                else if entry.view.superview === host { entry.view.removeFromSuperview() }
+            }
+        }
+    }
+
+    func presentTab(_ id: UUID, in host: NSView) throws {
+        let entry = try entry(id)
+        entry.presentationHost = host
+        entry.view.removeFromSuperview()
+        entry.view.frame = host.bounds
+        entry.view.autoresizingMask = [.width, .height]
+        (entry.view as? EmbeddedModelWebView)?.captureNativeFocus(in: host.window)
+        host.addSubview(entry.view)
+    }
+
+    func detachPresentedTab(_ id: UUID, from host: NSView) {
+        guard let entry = entries[id], entry.presentationHost === host else { return }
+        entry.presentationHost = nil
+        if entry.view.superview === host { entry.view.removeFromSuperview() }
+        if entry.isModelOwned { mountModelView(entry) }
+    }
+
+    private func mountModelView(_ entry: Entry) {
+        guard let host = modelRenderHost else { return }
+        if entry.view.superview !== host { entry.view.removeFromSuperview() }
+        entry.view.autoresizingMask = []
+        entry.view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
+        (entry.view as? EmbeddedModelWebView)?.captureNativeFocus(in: host.window)
+        if entry.view.superview !== host { host.addSubview(entry.view) }
+    }
+
+    func documentGeneration(for id: UUID) -> UUID? { entries[id]?.tab.documentGeneration }
+
+    static let modelSignalName = "computaChatGPTSignal"
+
+    /// Only inference-owned views receive this notification-only private-world handler.
+    func installModelChangeSignal(tabID: UUID, ownerToken: String, world: WKContentWorld) throws {
+        let entry = try entry(tabID)
+        guard UUID(uuidString: ownerToken) != nil, entry.modelChanges == nil else { throw Failure.tabClosed }
+        entry.modelChanges = EmbeddedModelChangeChannel(ownerToken: ownerToken)
+        entry.modelSignalWorld = world
+        entry.view.configuration.userContentController.add(EmbeddedModelSignalHandler(session: self, tabID: tabID),
+                                                           contentWorld: world, name: Self.modelSignalName)
+    }
+
+    func modelChangeRevision(for id: UUID) throws -> UInt64 {
+        guard let channel = try entry(id).modelChanges else { throw Failure.tabClosed }
+        return try channel.currentRevision()
+    }
+
+    func waitForModelChange(tabID: UUID, after revision: UInt64,
+                            until deadline: ContinuousClock.Instant) async throws -> UInt64 {
+        guard let channel = try entry(tabID).modelChanges else { throw Failure.tabClosed }
+        return try await channel.wait(after: revision, until: deadline)
+    }
+
+    fileprivate func receivedModelSignal(_ message: WKScriptMessage, tabID: UUID) {
+        guard let entry = entries[tabID], message.webView === entry.view, message.frameInfo.isMainFrame,
+              let channel = entry.modelChanges,
+              let body = message.body as? [String: String], body.count == 2, Set(body.keys) == ["ownerToken", "kind"],
+              body["ownerToken"] == channel.ownerToken, body["kind"] == "dom_changed" else { return }
+        let origin = message.frameInfo.securityOrigin
+        guard origin.`protocol` == "https", origin.host == "chatgpt.com", origin.port == 0 || origin.port == 443 else { return }
+        channel.signal()
+    }
+
+    private func signalModelChange(_ entry: Entry) { entry.modelChanges?.signal() }
+
+    /// Model pages share the sign-in profile, but never reuse a human's tab.
+    func createModelTab(url: URL) throws -> UUID {
+        let id = try createTab(select: false, modelOwned: true)
+        do {
+            guard let view = webView(for: id) else { throw Failure.tabClosed }
+            view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
+            if let entry = entries[id] { mountModelView(entry) }
+            try navigate(tabID: id, to: url)
+            return id
+        } catch {
+            closeTab(id)
+            throw error
+        }
+    }
 
     func shutdown() {
         guard !isShutdown else { return }
         isShutdown = true
         for id in tabs.map(\.id) { closeTab(id) }
+        modelRenderHost = nil
+        modelRenderHosts.removeAll()
         websiteDataStore = nil
     }
 
@@ -206,10 +348,13 @@ final class EmbeddedBrowserSession {
         return entry
     }
 
-    private func prepareNavigation(_ entry: Entry) {
+    private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
         entry.tab.documentID = UUID()
+        entry.preparedDocumentNavigation = replacesDocument
+        if replacesDocument { entry.tab.documentGeneration = UUID() }
         entry.tab.error = nil
         entry.tab.isLoading = true
+        signalModelChange(entry)
         errorMessage = nil
     }
 
@@ -241,6 +386,7 @@ final class EmbeddedBrowserSession {
         entry.tab.isLoading = view.isLoading
         entry.tab.canGoBack = view.canGoBack
         entry.tab.canGoForward = view.canGoForward
+        signalModelChange(entry)
     }
 
     fileprivate func owns(_ view: WKWebView, tabID: UUID) -> Bool { entries[tabID]?.view === view }
@@ -253,7 +399,11 @@ final class EmbeddedBrowserSession {
 
     fileprivate func started(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
+        // A native load/reload invalidates synchronously, before WebKit starts it.
+        // Page-initiated full navigations advance here; pushState does not arrive here.
+        let prepared = entry.preparedDocumentNavigation && entry.navigation === navigation
         prepareNavigation(entry)
+        if !prepared { entry.tab.documentGeneration = UUID() }
         entry.navigation = navigation
         refresh(tabID, view: view)
     }
@@ -261,6 +411,7 @@ final class EmbeddedBrowserSession {
     fileprivate func completed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID, error: Error? = nil) {
         guard let entry = entries[tabID], entry.view === view, entry.navigation === navigation else { return }
         entry.navigation = nil
+        entry.preparedDocumentNavigation = false
         refresh(tabID, view: view)
         entry.tab.isLoading = false
         if let error, (error as NSError).code != NSURLErrorCancelled {
@@ -271,9 +422,133 @@ final class EmbeddedBrowserSession {
     fileprivate func terminated(_ view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
         entry.navigation = nil
+        entry.preparedDocumentNavigation = false
         entry.tab.documentID = UUID()
+        entry.tab.documentGeneration = UUID()
         entry.tab.isLoading = false
         report("The web content process stopped. Reload this tab to recover; no action was replayed.", tabID: tabID)
+        signalModelChange(entry)
+    }
+}
+
+/// DOM focus is needed for the fixed editor adapter, but must never acquire
+/// the application's native first responder, including during reparenting.
+@MainActor
+private final class EmbeddedModelWebView: WKWebView {
+    private weak var focusWindow: NSWindow?
+    private weak var focusResponder: NSResponder?
+    private var restoringFocus = false
+
+    override var acceptsFirstResponder: Bool { false }
+
+    func captureNativeFocus(in targetWindow: NSWindow? = nil) {
+        guard let target = targetWindow ?? window, let responder = target.firstResponder,
+              !ownsResponder(responder) else { return }
+        focusWindow = target
+        focusResponder = responder
+    }
+
+    func restoreNativeFocus() {
+        guard !restoringFocus, let target = window, target === focusWindow,
+              let responder = focusResponder, let current = target.firstResponder,
+              ownsResponder(current), !ownsResponder(responder) else { return }
+        // An old control detached during an await is no longer an admissible
+        // focus destination; never redirect into another window.
+        if let view = responder as? NSView, view.window !== target { return }
+        if let responderWindow = responder as? NSWindow, responderWindow !== target { return }
+        restoringFocus = true
+        defer { restoringFocus = false }
+        _ = target.makeFirstResponder(responder)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        // NSWindow has already installed this responder at this point. A
+        // refusal falls back to the window, clearing the human's input. Restore
+        // the exact captured responder synchronously before another key event.
+        restoreNativeFocus()
+        return true
+    }
+
+    private func ownsResponder(_ responder: NSResponder) -> Bool {
+        responder === self || (responder as? NSView)?.isDescendant(of: self) == true
+    }
+}
+
+@MainActor
+private final class EmbeddedModelSignalHandler: NSObject, WKScriptMessageHandler {
+    private weak var session: EmbeddedBrowserSession?
+    private let tabID: UUID
+
+    init(session: EmbeddedBrowserSession, tabID: UUID) { self.session = session; self.tabID = tabID }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        session?.receivedModelSignal(message, tabID: tabID)
+    }
+}
+
+/// Revision is recorded before inspection. A change between inspection and
+/// registration returns immediately instead of disappearing into a missed wakeup.
+@MainActor
+private final class EmbeddedModelChangeChannel {
+    let ownerToken: String
+    private var revision: UInt64 = 0
+    private var closed = false
+    private struct Waiter {
+        let continuation: CheckedContinuation<UInt64, Error>
+        let timeout: Task<Void, Never>
+    }
+    private var waiters: [UUID: Waiter] = [:]
+
+    init(ownerToken: String) { self.ownerToken = ownerToken }
+    func currentRevision() throws -> UInt64 {
+        guard !closed else { throw EmbeddedBrowserSession.Failure.tabClosed }
+        return revision
+    }
+
+    func signal() {
+        guard !closed else { return }
+        guard revision < UInt64.max else { close(); return }
+        revision += 1
+        let pending = Array(waiters.values)
+        waiters.removeAll()
+        for waiter in pending { waiter.timeout.cancel(); waiter.continuation.resume(returning: revision) }
+    }
+
+    func close() {
+        closed = true
+        let pending = Array(waiters.values)
+        waiters.removeAll()
+        for waiter in pending {
+            waiter.timeout.cancel()
+            waiter.continuation.resume(throwing: EmbeddedBrowserSession.Failure.tabClosed)
+        }
+    }
+
+    func wait(after expected: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64 {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            guard !closed else { throw EmbeddedBrowserSession.Failure.tabClosed }
+            if revision != expected || ContinuousClock.now >= deadline { return revision }
+            return try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                let timeout = Task {
+                    do {
+                        try await Task.sleep(until: deadline, clock: .continuous)
+                        self.complete(id, cancelled: false)
+                    } catch { }
+                }
+                waiters[id] = Waiter(continuation: continuation, timeout: timeout)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.complete(id, cancelled: true) }
+        }
+    }
+
+    private func complete(_ id: UUID, cancelled: Bool) {
+        guard let waiter = waiters.removeValue(forKey: id) else { return }
+        waiter.timeout.cancel()
+        if cancelled { waiter.continuation.resume(throwing: CancellationError()) }
+        else { waiter.continuation.resume(returning: revision) }
     }
 }
 

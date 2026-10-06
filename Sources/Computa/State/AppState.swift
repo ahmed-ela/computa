@@ -771,6 +771,8 @@ final class AppState {
         connectionState = .connecting
 
         do {
+            await runtime.configureEmbeddedWebModelTransport(EmbeddedWebModelTransport(browser: browserSession))
+            guard !Task.isCancelled, !isShuttingDown else { return }
             let snapshot = try await runtime.loadTasks()
             guard !isShuttingDown else { return }
             replaceTasks(with: snapshot)
@@ -794,7 +796,6 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
-        browserSession.shutdown()
         discardAllMessageDrafts()
         extensionBridge?.stop()
         endChromeConnection(state: .disconnected)
@@ -806,10 +807,13 @@ final class AppState {
         approvalRequestsAwaitingResolvedEvents.removeAll()
         pausedQueueTaskIDs.formUnion(queuedPrompts.keys)
         let runtime = self.runtime
+        let browserSession = self.browserSession
         let chromeCleanup = chromeCleanupTask
         let task = Task {
             await chromeCleanup?.value
-            return await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
+            let report = await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
+            browserSession.shutdown()
+            return report
         }
         runtimeShutdown = task
         let report = await task.value

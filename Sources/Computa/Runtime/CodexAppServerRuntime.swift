@@ -785,6 +785,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         await core.disconnectChrome()
     }
 
+    func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
+        await core.configureEmbeddedWebModelTransport(transport)
+    }
+
     #if DEBUG
     /// Inert integration fixture only. Not a tool, WebKit message or Release API.
     func installOwnedBrowserBindingForFixture(taskID: AgentTask.ID, binding: BrowserTabBinding) async throws {
@@ -1115,6 +1119,7 @@ private extension CodexAppServerRuntime {
         private var localProviderLaunchEnvironment: [String: String] = [:]
         private var inferenceServer: HeadlessMLXServer?
         private let webModelServer = WebModelServer()
+        private var embeddedWebModelConfigured = false
         private var webProviderBaseURL: URL?
         private var webCleanupTasks: [AgentTask.ID: Task<[String], Never>] = [:]
         private var selectingInferenceModel = false
@@ -1202,7 +1207,7 @@ private extension CodexAppServerRuntime {
             localProviderLaunchEnvironment = environment.filter {
                 $0.key == "CODEX_OSS_BASE_URL" || $0.key == "CODEX_OSS_PORT"
             }
-            // The browser providers need only App Server and connected Chrome.
+            // Website providers need App Server and their configured browser transport.
             // Start the local inference service when a local model is submitted.
             let localInferenceOwner = inferenceServer
             let process: OwnedChildProcess
@@ -1346,6 +1351,12 @@ private extension CodexAppServerRuntime {
 
         func disconnectChrome() async {
             await invalidateChromeConnection()?.value
+        }
+
+        func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
+            guard !isShuttingDown, !isPreparingCommandShutdown else { return }
+            await webModelServer.configureEmbeddedTransport(transport)
+            embeddedWebModelConfigured = true
         }
 
         @discardableResult
@@ -1680,7 +1691,7 @@ private extension CodexAppServerRuntime {
                !loaded.supportsModelSwitch(to: modelID) {
                 throw RuntimeError.contextChangeRequiresNewTask
             }
-            if LocalModelCatalog.isWebBrowser(modelID) { try await ensureWebProvider() }
+            if LocalModelCatalog.isWebBrowser(modelID) { try await ensureWebProvider(modelID: modelID) }
             let generation = serverGeneration
             // Loaded threads keep their current model for a pre-turn compact
             // RPC; turn/start is what applies the newly selected model. Cold
@@ -1903,7 +1914,7 @@ private extension CodexAppServerRuntime {
                 var headers = ["Authorization": "Bearer " + webModelServer.bearerToken]
                 if let taskID { headers["X-Computa-Task-ID"] = taskID }
                 result["model_providers.web_browser"] = [
-                    "name": "ChatGPT, Gemini, and Claude in Chrome",
+                    "name": "Computa website models",
                     "base_url": webProviderBaseURL.absoluteString,
                     "wire_api": "responses",
                     "requires_openai_auth": false,
@@ -1916,10 +1927,19 @@ private extension CodexAppServerRuntime {
             return result
         }
 
-        private func ensureWebProvider() async throws {
+        private func ensureWebProvider(modelID: String) async throws {
+            if modelID == LocalModelCatalog.chatGPTBrowserModelID {
+                guard embeddedWebModelConfigured else { throw WebModelServer.Failure.embeddedRequired }
+                if webProviderBaseURL == nil {
+                    webProviderBaseURL = try await webModelServer.start()
+                }
+                try Task.checkCancellation()
+                guard !isShuttingDown, !isPreparingCommandShutdown else { throw CancellationError() }
+                return
+            }
             guard let connection = chromeConnection, connection.owner != nil,
                   connection.request.extensionAdmission != nil else {
-                throw RuntimeError.serverError("Connect the Computa extension in signed-in Chrome before using ChatGPT, Gemini, or Claude.")
+                throw RuntimeError.serverError("Connect the Computa extension in signed-in Chrome before using Gemini or Claude.")
             }
             try connection.request.consent.check()
             if webProviderBaseURL == nil {
@@ -2183,7 +2203,7 @@ private extension CodexAppServerRuntime {
             }
             do {
                 try await start()
-                if LocalModelCatalog.isWebBrowser(modelID) { try await ensureWebProvider() }
+                if LocalModelCatalog.isWebBrowser(modelID) { try await ensureWebProvider(modelID: modelID) }
                 let generation = serverGeneration
                 try await prepareInferenceModel(modelID, taskID: taskID, claim: claim)
                 if contextForLoadedThread[threadID] == nil {

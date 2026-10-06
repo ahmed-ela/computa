@@ -20,8 +20,8 @@ enum LocalModelCatalog {
     static let options: [LocalModelOption] = [
         LocalModelOption(
             id: chatGPTBrowserModelID,
-            label: "ChatGPT · Chrome",
-            detail: "Uses signed-in ChatGPT in Chrome with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
+            label: "ChatGPT · Built-in browser",
+            detail: "Uses signed-in ChatGPT in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(

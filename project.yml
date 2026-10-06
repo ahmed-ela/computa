@@ -45,6 +45,9 @@ targets:
       - path: Sources/Computa/Resources/MLXServer
         type: folder
         buildPhase: resources
+      - path: Sources/Computa/Resources/BrowserModels
+        type: folder
+        buildPhase: resources
       - path: BrowserExtension
         type: folder
         buildPhase: resources

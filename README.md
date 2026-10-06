@@ -497,7 +497,7 @@ Octane currently declares Node.js 22.22.2 or newer for its supported development
 The top-right **Browser** toggle opens a resizable native WKWebView pane beside
 the chat. Press **+** (or ⌘T while the pane is shown) to create a tab, enter a
 website address, and press **Return** or the Go arrow. Bare domains such as
-`example.com` use HTTPS; the address field is not a search box. Select a tab by
+`example.com` use HTTPS; ordinary text searches Google. Select a tab by
 its title, close it with ×, and drag the divider to resize the pane. Back/forward,
 reload and stop work independently for each tab.
 
@@ -514,10 +514,36 @@ This version declines popups, downloads, file pickers, camera/microphone request
 external-app schemes and JavaScript modal dialogs. Sites requiring these
 features, including popup-dependent sign-in, may not work yet.
 
-The pane is **human-operated only**. Qwen is not given access to this browser
-profile or new embedded-browser tools; existing Chrome/native tools are unchanged.
+General browsing in the pane remains human-operated. Qwen has no general embedded
+browser tools. ChatGPT inference uses separate owned tabs in this profile through
+the fixed website-model adapter described below; existing Chrome/native tools remain available.
 [Agent control is a deferred TODO](TODO.md#embedded-browser-agent-control-deferred).
 See [implementation and validation](docs/EMBEDDED-BROWSER.md).
+
+### Website models
+
+In the Swift app, choose **ChatGPT · Built-in browser** after signing into
+`chatgpt.com` in the Browser pane. ChatGPT uses that Computa-owned WebKit profile
+and requires neither Chrome nor its extension. **Gemini · Chrome** and
+**Claude · Chrome** use the signed-in profile of the separately paired
+[Chrome bridge](BrowserExtension/README.md#website-model-transport).
+These website routes do not require provider API keys.
+
+Each native turn creates a new owned, inactive website chat. ChatGPT must confirm
+Temporary Chat mode before sending; the app preserves the human sign-in tab.
+Tool-result iterations share the owned chat until the turn completes or is
+cancelled, when the app verifies temporary mode and closes that exact tab.
+Unverified cleanup retains the owned tab and reports a warning. Conversations
+and tool results remain in Computa's local transcript store.
+
+The built-in ChatGPT transport waits for WebKit navigation and DOM-change
+notifications, coalescing streaming changes over approximately 100 ms. Readiness,
+completion and cleanup still validate the owned document, conversation and
+message counts. Deadline and stable-response timers remain; there is no recurring
+website poll on this route. Gemini and Claude retain the Chrome bridge's polling
+contract. All website models currently accept text and Accessibility observations
+and use the local terminal/computer harness; screenshots, image attachments and
+audio inputs are unsupported.
 
 ## Generate, build, and test the app
 

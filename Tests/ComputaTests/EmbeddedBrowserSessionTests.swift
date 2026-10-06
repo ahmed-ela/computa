@@ -166,6 +166,235 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertFalse(session.tabs[0].isLoading)
     }
 
+    func testFullDocumentGenerationChangesForNavigationButNotSPARoutes() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let initial = session.documentGeneration(for: id)
+        view.loadHTMLString("<p id='ready'>Ready</p>", baseURL: URL(string: "https://example.test/"))
+        let deadline = ContinuousClock.now + .seconds(10)
+        var loaded = false
+        while ContinuousClock.now < deadline {
+            if !view.isLoading, (try? await script(view, "return !!document.getElementById('ready');")) == Data("true".utf8) {
+                loaded = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(loaded)
+        let document = session.documentGeneration(for: id)
+        XCTAssertNotEqual(initial, document)
+        _ = try await script(view, "history.pushState({}, '', '/spa-route#fragment'); return true;")
+        _ = try await script(view, "history.replaceState({}, '', '/another-route'); return true;")
+        XCTAssertEqual(session.documentGeneration(for: id), document)
+        XCTAssertEqual(view.url?.path, "/another-route")
+        try session.navigate(tabID: id, to: XCTUnwrap(URL(string: "about:blank")))
+        XCTAssertNotEqual(session.documentGeneration(for: id), document, "Native full navigation must invalidate before WebKit starts")
+    }
+
+    func testModelChangeRecordedBeforeWaitDoesNotLoseTheWakeup() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false)
+        try session.installModelChangeSignal(tabID: id, ownerToken: UUID().uuidString,
+                                             world: .world(name: "computa-model-test"))
+        let before = try session.modelChangeRevision(for: id)
+        // This is a native navigation signal; it arrives before the waiter is registered.
+        session.stop(tabID: id)
+        let after = try await session.waitForModelChange(tabID: id, after: before, until: .now + .seconds(5))
+        XCTAssertGreaterThan(after, before)
+        XCTAssertNotNil(session.webView(for: id))
+    }
+
+    func testModelRenderHostAttachesFixedViewportWithoutChangingHumanSelectionOrFocus() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { session.shutdown(); window.close() }
+        let host = EmbeddedModelRenderContainer(session: session)
+        host.frame = NSRect(x: 0, y: 0, width: 1_100, height: 800)
+        window.contentView = host
+        session.installModelRenderHost(host)
+        let input = NSTextView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
+        host.addSubview(input)
+        XCTAssertTrue(window.makeFirstResponder(input))
+        let keyWindow = NSApplication.shared.keyWindow
+        let humanID = try session.createTab()
+        let modelID = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let model = try XCTUnwrap(session.webView(for: modelID))
+        XCTAssertTrue(model.superview === host)
+        XCTAssertTrue(model.window === window)
+        XCTAssertFalse(model.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(model.frame.size, NSSize(width: 1_024, height: 768))
+        XCTAssertEqual(session.selectedTabID, humanID)
+        XCTAssertTrue(window.firstResponder === input)
+        XCTAssertTrue(NSApplication.shared.keyWindow === keyWindow)
+        XCTAssertNil(host.hitTest(NSPoint(x: 10, y: 10)))
+        // Exercise the fixed adapter's actual focus path, rather than asking
+        // NSWindow to perform an explicit native focus change the app never makes.
+        model.loadHTMLString("<!doctype html><input id='model-editor'>", baseURL: URL(string: "https://chatgpt.com/"))
+        let deadline = ContinuousClock.now + .seconds(10)
+        var loaded = false
+        while ContinuousClock.now < deadline {
+            if !model.isLoading,
+               (try? await script(model, "return !!document.getElementById('model-editor');")) == Data("true".utf8) {
+                loaded = true; break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(loaded)
+        session.captureModelNativeFocus(tabID: modelID)
+        let focused = try await script(model, "document.getElementById('model-editor').focus(); return document.activeElement === document.getElementById('model-editor');")
+        XCTAssertEqual(focused, Data("true".utf8))
+        // The DOM editor can focus without changing AppKit's human responder.
+        await Task.yield()
+        XCTAssertTrue(window.firstResponder === input)
+        XCTAssertTrue(NSApplication.shared.keyWindow === keyWindow)
+        session.installModelRenderHost(host)
+        XCTAssertTrue(model.superview === host)
+        XCTAssertTrue(window.firstResponder === input)
+        session.closeTab(modelID)
+        XCTAssertNil(model.superview)
+        XCTAssertNil(model.window)
+        XCTAssertEqual(session.tabs.map(\.id), [humanID])
+        XCTAssertTrue(window.firstResponder === input)
+    }
+
+    func testModelPresentationReturnsExactViewToBackingHostAndIgnoresStaleDetach() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let backing = EmbeddedModelRenderContainer(session: session)
+        session.installModelRenderHost(backing)
+        let human = try session.createTab()
+        let id = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let model = try XCTUnwrap(session.webView(for: id))
+        let generation = session.documentGeneration(for: id)
+        let first = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 600))
+        let second = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 700))
+        try session.presentTab(id, in: first)
+        XCTAssertTrue(model.superview === first)
+        XCTAssertEqual(model.frame.size, first.bounds.size)
+        try session.presentTab(id, in: second)
+        session.detachPresentedTab(id, from: first)
+        XCTAssertTrue(model.superview === second, "Late dismantling of an old host cannot remove the current presentation")
+        session.detachPresentedTab(id, from: second)
+        XCTAssertTrue(model.superview === backing)
+        XCTAssertEqual(model.frame.size, NSSize(width: 1_024, height: 768))
+        XCTAssertTrue(session.webView(for: id) === model)
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        XCTAssertEqual(session.selectedTabID, human)
+        session.detachPresentedTab(id, from: second)
+        XCTAssertTrue(model.superview === backing)
+    }
+
+    func testModelRenderHostReplacementPreservesViewsAndShutdownRemovesThem() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let first = EmbeddedModelRenderContainer(session: session)
+        let second = EmbeddedModelRenderContainer(session: session)
+        session.installModelRenderHost(first)
+        let id = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let model = try XCTUnwrap(session.webView(for: id))
+        session.installModelRenderHost(second)
+        session.installModelRenderHost(first)
+        session.installModelRenderHost(second)
+        XCTAssertTrue(model.superview === first, "Other WindowGroup updates must preserve the designated live render host")
+        first.detach()
+        XCTAssertTrue(model.superview === second)
+        second.detach()
+        XCTAssertNil(model.superview)
+        XCTAssertNotNil(session.webView(for: id), "Unmounting a workspace is not authority to destroy a model session")
+        session.installModelRenderHost(second)
+        XCTAssertTrue(model.superview === second)
+        session.shutdown()
+        XCTAssertNil(model.superview)
+        XCTAssertTrue(second.subviews.isEmpty)
+        XCTAssertNil(session.webView(for: id))
+    }
+
+    func testModelChangeWaitCancellationKeepsTheOwnedTab() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false)
+        try session.installModelChangeSignal(tabID: id, ownerToken: UUID().uuidString,
+                                             world: .world(name: "computa-model-test"))
+        let revision = try session.modelChangeRevision(for: id)
+        let waiter = Task { try await session.waitForModelChange(tabID: id, after: revision, until: .now + .seconds(30)) }
+        await Task.yield()
+        waiter.cancel()
+        do { _ = try await waiter.value; XCTFail("A cancelled wait must fail") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertNotNil(session.webView(for: id))
+        XCTAssertEqual(try session.modelChangeRevision(for: id), revision)
+    }
+
+    func testModelChangeWaitDeadlineAndTabClosureAreDistinct() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false)
+        try session.installModelChangeSignal(tabID: id, ownerToken: UUID().uuidString,
+                                             world: .world(name: "computa-model-test"))
+        let revision = try session.modelChangeRevision(for: id)
+        let unchanged = try await session.waitForModelChange(tabID: id, after: revision, until: .now + .milliseconds(25))
+        XCTAssertEqual(unchanged, revision, "Only the deadline elapsed; no page change was reported")
+        let waiter = Task { try await session.waitForModelChange(tabID: id, after: revision, until: .now + .seconds(30)) }
+        await Task.yield()
+        session.closeTab(id)
+        do { _ = try await waiter.value; XCTFail("Closing the owned tab must wake its waiter") }
+        catch { XCTAssertEqual(error as? EmbeddedBrowserSession.Failure, .tabClosed) }
+    }
+
+    func testModelNotificationHandlerIsPrivateAndAcceptsOnlyItsExactReceipt() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false)
+        let humanID = try session.createTab()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let humanView = try XCTUnwrap(session.webView(for: humanID))
+        let token = UUID().uuidString
+        let world = WKContentWorld.world(name: "computa-model-test")
+        try session.installModelChangeSignal(tabID: id, ownerToken: token, world: world)
+        view.loadHTMLString("<p id='ready'>Ready</p>", baseURL: URL(string: "https://chatgpt.com/?temporary-chat=true"))
+        let deadline = ContinuousClock.now + .seconds(10)
+        var loaded = false
+        while ContinuousClock.now < deadline {
+            if !view.isLoading, (try? await script(view, "return !!document.getElementById('ready');")) == Data("true".utf8) {
+                loaded = true; break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(loaded)
+        let hidden = "return !window.webkit?.messageHandlers?.computaChatGPTSignal;"
+        let pageHidden = try await script(view, hidden)
+        let humanHidden = try await script(humanView, hidden, world: world)
+        XCTAssertEqual(pageHidden, Data("true".utf8), "The website page world receives no native handler")
+        XCTAssertEqual(humanHidden, Data("true".utf8), "Human tabs receive no model handler")
+        // Drain earlier native load/KVO callbacks before recording this receipt.
+        await Task.yield()
+        let before = try session.modelChangeRevision(for: id)
+        let invalid = "window.webkit.messageHandlers.computaChatGPTSignal.postMessage({ownerToken: '\(UUID().uuidString)', kind: 'dom_changed'}); window.webkit.messageHandlers.computaChatGPTSignal.postMessage({ownerToken: '\(token)', kind: 'dom_changed', text: 'not allowed'}); return true;"
+        _ = try await script(view, invalid, world: world)
+        let ignored = try await session.waitForModelChange(tabID: id, after: before, until: .now + .milliseconds(100))
+        XCTAssertEqual(ignored, before)
+        _ = try await script(view, "window.webkit.messageHandlers.computaChatGPTSignal.postMessage({ownerToken: '\(token)', kind: 'dom_changed'}); return true;", world: world)
+        let after = try await session.waitForModelChange(tabID: id, after: before, until: .now + .seconds(2))
+        XCTAssertGreaterThan(after, before)
+    }
+
+    private func script(_ view: WKWebView, _ body: String, world: WKContentWorld = .page) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            view.callAsyncJavaScript(body, arguments: [:], in: nil, in: world) { result in
+                switch result {
+                case .success(let value):
+                    do { continuation.resume(returning: try JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed)) }
+                    catch { continuation.resume(throwing: error) }
+                case .failure(let error): continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     func testProcessTerminationReportsRecoverableErrorWithoutReloadingOrNewTab() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
