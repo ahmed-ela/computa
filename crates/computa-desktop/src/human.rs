@@ -77,7 +77,7 @@ impl HumanBrowser {
                         tab.is_loading = native.isLoading();
                         if let Some(url) = native.URL().and_then(|url| url.absoluteString()) {
                             let value = url.to_string();
-                            if ValidatedBrowserAddress::normalize(&value).is_ok() {
+                            if ValidatedBrowserAddress::validate(&value).is_ok() {
                                 tab.url = Some(bounded(value, 8192));
                             }
                         }
@@ -118,9 +118,9 @@ impl HumanBrowser {
             .with_devtools(false)
             .with_incognito(self.private)
             .with_data_store_identifier(*self.profile.as_bytes())
-            .with_navigation_handler(|url| ValidatedBrowserAddress::normalize(&url).is_ok())
+            .with_navigation_handler(|url| ValidatedBrowserAddress::validate(&url).is_ok())
             .with_new_window_req_handler(move |url, _| {
-                if ValidatedBrowserAddress::normalize(&url).is_ok() {
+                if ValidatedBrowserAddress::validate(&url).is_ok() {
                     popup_callback(HumanEvent::Popup { source: id, url });
                 }
                 NewWindowResponse::Deny
@@ -274,7 +274,7 @@ impl HumanBrowser {
             HumanEvent::Load { tab, loading, url } => {
                 if let Some(entry) = self.tabs.get_mut(&tab) {
                     entry.metadata.is_loading = loading;
-                    if ValidatedBrowserAddress::normalize(&url).is_ok() {
+                    if ValidatedBrowserAddress::validate(&url).is_ok() {
                         entry.metadata.url = Some(bounded(url, 8192));
                     }
                     if loading {
@@ -285,7 +285,7 @@ impl HumanBrowser {
             HumanEvent::Popup { source, url } => {
                 if self.tabs.contains_key(&source) && !blocked {
                     let address =
-                        ValidatedBrowserAddress::normalize(&url).map_err(|e| e.to_string())?;
+                        ValidatedBrowserAddress::validate(&url).map_err(|e| e.to_string())?;
                     self.create(window, Some(address), true)?;
                 }
             }

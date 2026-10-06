@@ -274,7 +274,7 @@ pub fn run_with_options(options: Options) -> io::Result<()> {
         })
         .with_navigation_handler(|url| url == UI_DOCUMENT)
         .with_new_window_req_handler(move |url, _| {
-            if computa_macos::browser_controls::ValidatedBrowserAddress::normalize(&url).is_ok() {
+            if computa_macos::browser_controls::ValidatedBrowserAddress::validate(&url).is_ok() {
                 let _ = link_proxy.send_event(DesktopEvent::OpenHumanUrl(url));
             }
             wry::NewWindowResponse::Deny
@@ -713,7 +713,7 @@ impl Host {
                 if !self.closing
                     && !self.controls.interaction_blocked()
                     && let Ok(address) =
-                        computa_macos::browser_controls::ValidatedBrowserAddress::normalize(&url)
+                        computa_macos::browser_controls::ValidatedBrowserAddress::validate(&url)
                 {
                     match self.human.create(&self.window, Some(address), true) {
                         Ok(_) => self.snapshot.is_browser_presented = true,

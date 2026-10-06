@@ -20,57 +20,87 @@ impl ValidatedBrowserAddress {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    /// Resolves input from the trusted human address field, including searches.
     pub fn normalize(address: &str) -> Result<Self> {
         let value = address.trim();
-        if value.is_empty()
-            || value.len() > 8192
-            || value.chars().any(|c| c.is_whitespace() || c.is_control())
-        {
-            return Err(AutomationError::Invalid(
-                "Enter a website address, such as https://example.com.".into(),
-            ));
+        if value.is_empty() || value.len() > 8192 || value.chars().any(char::is_control) {
+            return Err(invalid_address());
         }
-        if value == "about:blank" {
-            return Ok(Self(value.into()));
+        if value.split_once(':').is_some_and(|(prefix, _)| {
+            matches!(
+                prefix.to_ascii_lowercase().as_str(),
+                "site" | "inurl" | "intitle" | "intext" | "filetype" | "before" | "after"
+            )
+        }) {
+            return Self::search(value);
         }
-        let candidate = if value.contains("://") {
+        let candidate = if value == "about:blank" || has_scheme_prefix(value) {
             value.to_owned()
-        } else {
-            let authority = value.split('/').next().unwrap_or("");
+        } else if !value.chars().any(char::is_whitespace) {
+            let authority = authority(value);
             if let Some((_, port)) = authority.rsplit_once(':')
                 && !authority.starts_with('[')
                 && (port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()))
             {
-                return Err(AutomationError::Invalid(
-                    "This browser supports only HTTP, HTTPS, and about:blank.".into(),
-                ));
+                return Err(unsupported_scheme());
             }
-            if authority != "localhost"
-                && !authority.starts_with("localhost:")
-                && !authority.contains('.')
-                && !authority.starts_with('[')
+            if authority == "localhost"
+                || authority.starts_with("localhost:")
+                || authority.contains('.')
+                || authority.starts_with('[')
             {
-                return Err(AutomationError::Invalid(
-                    "Enter a website address, such as https://example.com.".into(),
-                ));
+                format!("https://{value}")
+            } else {
+                return Self::search(value);
             }
-            format!("https://{value}")
+        } else {
+            if value.split_once(':').is_some_and(|(prefix, _)| {
+                matches!(
+                    prefix.to_ascii_lowercase().as_str(),
+                    "javascript"
+                        | "data"
+                        | "file"
+                        | "mailto"
+                        | "tel"
+                        | "ftp"
+                        | "about"
+                        | "http"
+                        | "https"
+                )
+            }) {
+                return Err(unsupported_scheme());
+            }
+            return Self::search(value);
         };
-        let url = url::Url::parse(&candidate)
-            .map_err(|_| AutomationError::Invalid("website address".into()))?;
+        Self::validate(&candidate)
+    }
+
+    /// Validates an absolute website URL without address or search fallback.
+    /// Website navigation, popups, and observed page URLs must use this path.
+    pub fn validate(address: &str) -> Result<Self> {
+        if address.is_empty() || address.len() > 8192 || address.chars().any(char::is_control) {
+            return Err(invalid_address());
+        }
+        if address == "about:blank" {
+            return Ok(Self(address.into()));
+        }
+        if !has_scheme_prefix(address) {
+            return Err(unsupported_scheme());
+        }
+        let raw_authority = address.split_once("://").map(|(_, rest)| authority(rest));
+        if raw_authority.is_none_or(str::is_empty) {
+            return Err(invalid_address());
+        }
+        let url = url::Url::parse(address).map_err(|_| invalid_address())?;
         if !matches!(url.scheme(), "http" | "https") {
-            return Err(AutomationError::Invalid(
-                "This browser supports only HTTP, HTTPS, and about:blank.".into(),
-            ));
+            return Err(unsupported_scheme());
         }
         if url.host_str().is_none_or(str::is_empty) || url.port() == Some(0) {
-            return Err(AutomationError::Invalid("website host or port".into()));
+            return Err(invalid_address());
         }
         if !url.username().is_empty()
             || url.password().is_some()
-            || candidate
-                .split_once("://")
-                .is_some_and(|(_, rest)| rest.split('/').next().unwrap_or("").contains('@'))
+            || raw_authority.is_some_and(|authority| authority.contains('@'))
         {
             return Err(AutomationError::Invalid(
                 "Addresses containing a username or password are not supported.".into(),
@@ -78,6 +108,35 @@ impl ValidatedBrowserAddress {
         }
         Ok(Self(url.to_string()))
     }
+
+    fn search(query: &str) -> Result<Self> {
+        let mut url = url::Url::parse("https://www.google.com/search").expect("fixed search URL");
+        url.query_pairs_mut().append_pair("q", query);
+        Self::validate(url.as_str())
+    }
+}
+
+fn authority(value: &str) -> &str {
+    value.split(['/', '?', '#']).next().unwrap_or("")
+}
+
+fn has_scheme_prefix(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once("://") else {
+        return false;
+    };
+    let mut bytes = scheme.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+fn invalid_address() -> AutomationError {
+    AutomationError::Invalid("Enter a search or website address.".into())
+}
+
+fn unsupported_scheme() -> AutomationError {
+    AutomationError::Invalid(
+        "This browser supports only HTTP, HTTPS, and about:blank. No external application or file was opened.".into(),
+    )
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeBrowserEvent {
@@ -225,7 +284,9 @@ impl TrustedNativeBrowserControls {
             NSTextField::alloc(mtm),
             NSRect::new(NSPoint::new(105., 12.), NSSize::new(340., 24.)),
         );
-        address.setPlaceholderString(Some(&NSString::from_str("Enter a website address")));
+        address.setPlaceholderString(Some(&NSString::from_str(
+            "Search or enter a website address",
+        )));
         let status = NSTextField::labelWithString(
             &NSString::from_str("Your browser inside Computa — sign in separately from Chrome"),
             mtm,
@@ -332,7 +393,7 @@ impl TrustedNativeBrowserControls {
         } else {
             self.address.setStringValue(&NSString::from_str(""));
             self.status.setStringValue(&NSString::from_str(
-                "Enter a website address to get started.",
+                "Enter a search or website address to get started.",
             ));
         }
         self.refresh_enabled();
@@ -407,30 +468,133 @@ impl Drop for TrustedNativeBrowserControls {
 mod tests {
     use super::*;
     #[test]
-    fn native_url_policy_matches_human_browser_without_search_or_external_schemes() {
-        for value in [
-            "example.com/path",
-            "localhost:8080",
-            "[::1]:8443/path",
-            "https://example.com/",
-            "about:blank",
+    fn native_url_policy_adds_https_and_preserves_web_addresses() {
+        for (input, expected) in [
+            ("example.com", "https://example.com/"),
+            (
+                "  https://example.com/path?q=1  ",
+                "https://example.com/path?q=1",
+            ),
+            ("localhost:5181", "https://localhost:5181/"),
+            ("example.com:443/path?q=1", "https://example.com/path?q=1"),
+            (
+                "example.com?hello=world",
+                "https://example.com/?hello=world",
+            ),
+            ("example.com?q=a:b", "https://example.com/?q=a:b"),
+            (
+                "example.com/?next=https://example.org",
+                "https://example.com/?next=https://example.org",
+            ),
+            ("[::1]:5181", "https://[::1]:5181/"),
+            ("http://127.0.0.1:5181", "http://127.0.0.1:5181/"),
+            ("about:blank", "about:blank"),
         ] {
-            assert!(ValidatedBrowserAddress::normalize(value).is_ok(), "{value}")
+            assert_eq!(
+                ValidatedBrowserAddress::normalize(input).unwrap().as_str(),
+                expected,
+                "{input}"
+            );
         }
+    }
+
+    #[test]
+    fn native_url_policy_searches_words_operators_and_lossless_queries() {
+        for input in [
+            "hello",
+            "search for papers",
+            "site:example.com",
+            "site:example.com cats",
+            "INURL:example.com/path",
+            "intitle:hello",
+            "intext:hello",
+            "filetype:pdf rust",
+            "before:2026-01-01",
+            "after:2026-01-01",
+            "Rust: ownership guide",
+            "compare https://example.com and https://example.org",
+            "C++ & Swift #1",
+            "café 東京",
+            "  two words  ",
+            "50% off + free",
+        ] {
+            let address = ValidatedBrowserAddress::normalize(input).unwrap();
+            let url = url::Url::parse(address.as_str()).unwrap();
+            assert_eq!(url.scheme(), "https", "{input}");
+            assert_eq!(url.host_str(), Some("www.google.com"), "{input}");
+            assert_eq!(url.path(), "/search", "{input}");
+            assert_eq!(
+                url.query_pairs().collect::<Vec<_>>(),
+                vec![("q".into(), input.trim().into())],
+                "{input}"
+            );
+        }
+        assert!(
+            ValidatedBrowserAddress::normalize("C++ & Swift #1")
+                .unwrap()
+                .as_str()
+                .contains("C%2B%2B")
+        );
+    }
+
+    #[test]
+    fn native_url_policy_rejects_external_schemes_credentials_and_invalid_addresses() {
         for value in [
-            "hello world",
+            "",
+            "  ",
             "mail:foo@example.com",
             "file:///private/tmp/a",
+            "custom://example.com",
             "javascript:alert(1)",
+            "javascript:alert('hello world')",
+            "data:text/html,x",
+            "mailto:user@example.com",
+            "about:config",
             "https://u:p@example.com/",
             "https://@example.com/",
+            "https://",
+            "https:///example.com",
             "http://example.com:0/",
+            "https://example.com:65536/",
+            "example.com:abc",
             "https://example.com/a\nb",
+            "search\0text",
         ] {
             assert!(
                 ValidatedBrowserAddress::normalize(value).is_err(),
                 "{value}"
             )
+        }
+        assert!(ValidatedBrowserAddress::normalize(&"x".repeat(8193)).is_err());
+    }
+
+    #[test]
+    fn native_url_policy_navigation_has_no_search_or_host_fallback() {
+        for value in [
+            "hello world",
+            "example.com",
+            "site:example.com cats",
+            "Rust: ownership guide",
+            "javascript:alert(1)",
+            "file:///private/tmp/a",
+            "data:text/html,x",
+            "custom:search",
+            "custom://example.com",
+            "https:example.com",
+            "https:///example.com",
+            "https://@example.com/",
+        ] {
+            assert!(ValidatedBrowserAddress::validate(value).is_err(), "{value}");
+        }
+        for value in [
+            "https://example.com?q=a@b",
+            "https://example.com#someone@example.org",
+            "https://example.com/?next=https://other.example",
+            "http://localhost:8080/",
+            "https://[::1]:8443/path",
+            "about:blank",
+        ] {
+            assert!(ValidatedBrowserAddress::validate(value).is_ok(), "{value}");
         }
     }
 }

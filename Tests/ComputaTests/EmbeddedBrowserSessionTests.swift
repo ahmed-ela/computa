@@ -223,18 +223,43 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertThrowsError(try session.createTab())
     }
 
-    func testAddressNormalizationDoesNotInventSearchesOrPermitExternalSchemes() throws {
+    func testAddressNormalizationAddsHTTPSAndPreservesExplicitWebAddresses() throws {
         for (input, expected) in [
             ("example.com", "https://example.com"),
             ("  https://example.com/path?q=1  ", "https://example.com/path?q=1"),
             ("localhost:5181", "https://localhost:5181"),
+            ("example.com:443/path?q=1", "https://example.com:443/path?q=1"),
+            ("example.com?hello=world", "https://example.com?hello=world"),
+            ("example.com/?next=https://example.org", "https://example.com/?next=https://example.org"),
+            ("[::1]:5181", "https://[::1]:5181"),
             ("http://127.0.0.1:5181", "http://127.0.0.1:5181"),
             ("about:blank", "about:blank"),
         ] {
             XCTAssertEqual(try EmbeddedBrowserURLPolicy.normalize(input).absoluteString, expected)
         }
-        for input in ["", "search for papers", "javascript:alert(1)", "file:///tmp/test", "data:text/html,x", "mailto:user@example.com", "about:config", "https://user:secret@example.com", "https://", "https://example.com:70000"] {
+    }
+
+    func testAddressNormalizationSearchesWordsAndEncodesQueriesWithoutLosingCharacters() throws {
+        for input in ["hello", "search for papers", "site:example.com", "site:example.com cats", "Rust: ownership guide", "compare https://example.com and https://example.org", "C++ & Swift #1", "café 東京", "  two words  "] {
+            let url = try EmbeddedBrowserURLPolicy.normalize(input)
+            XCTAssertEqual(url.scheme, "https")
+            XCTAssertEqual(url.host, "www.google.com")
+            XCTAssertEqual(url.path, "/search")
+            XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "q", value: input.trimmingCharacters(in: .whitespacesAndNewlines))])
+        }
+        XCTAssertTrue(try EmbeddedBrowserURLPolicy.normalize("C++ & Swift #1").absoluteString.contains("C%2B%2B"))
+    }
+
+    func testAddressNormalizationStillRejectsExternalSchemesAndInvalidAddresses() throws {
+        for input in ["", "  ", "javascript:alert(1)", "javascript:alert('hello world')", "file:///tmp/test", "data:text/html,x", "mailto:user@example.com", "about:config", "https://user:secret@example.com", "https://", "https://example.com:70000", "example.com:abc"] {
             XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.normalize(input), input)
+        }
+    }
+
+    func testWebsiteNavigationDoesNotUseSearchFallback() throws {
+        for input in ["javascript:alert(1)", "file:///tmp/test", "data:text/html,x", "custom:search"] {
+            XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validate(XCTUnwrap(URL(string: input))), input)
         }
     }
 }

@@ -141,7 +141,7 @@ struct EmbeddedBrowserPane: View {
             .help(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
             .accessibilityLabel(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
 
-            TextField("Enter a website address", text: $address)
+            TextField("Search or enter a website address", text: $address)
                 .textFieldStyle(.roundedBorder)
                 .focused($addressFocused)
                 .onSubmit(navigate)
@@ -163,7 +163,7 @@ struct EmbeddedBrowserPane: View {
                 .foregroundStyle(.secondary)
             Text(hasTab ? "New tab" : "Your browser, inside Computa")
                 .font(.headline)
-            Text("Enter a website address to get started.\nSign in here separately from Chrome.")
+            Text("Search or enter a website address to get started.\nSign in here separately from Chrome.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

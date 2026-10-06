@@ -1,6 +1,6 @@
 import Foundation
 
-/// A navigation policy, not a search provider or an authority to open external applications.
+/// Resolves human address-bar input while restricting navigation to web pages.
 enum EmbeddedBrowserURLPolicy {
     enum Rejection: Error, LocalizedError, Equatable {
         case invalidAddress
@@ -9,7 +9,7 @@ enum EmbeddedBrowserURLPolicy {
 
         var errorDescription: String? {
             switch self {
-            case .invalidAddress: "Enter a website address, such as https://example.com."
+            case .invalidAddress: "Enter a search or website address."
             case .unsupportedScheme: "This browser supports only HTTP, HTTPS, and about:blank. No external application or file was opened."
             case .embeddedCredentials: "Addresses containing a username or password are not supported."
             }
@@ -34,26 +34,45 @@ enum EmbeddedBrowserURLPolicy {
 
     static func normalize(_ address: String) throws -> URL {
         let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty,
-              !value.unicodeScalars.contains(where: CharacterSet.whitespacesAndNewlines.contains) else {
-            throw Rejection.invalidAddress
+        guard !value.isEmpty else { throw Rejection.invalidAddress }
+        if let colon = value.firstIndex(of: ":"),
+           ["site", "inurl", "intitle", "intext", "filetype", "before", "after"].contains(value[..<colon].lowercased()) {
+            return try searchURL(for: value)
         }
         let candidate: String
-        if value == "about:blank" || value.contains("://") {
+        if value == "about:blank" || value.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*://"#, options: .regularExpression) != nil {
             candidate = value
-        } else {
+        } else if !value.unicodeScalars.contains(where: CharacterSet.whitespacesAndNewlines.contains) {
             // A host:port is an address; an arbitrary scheme is never reinterpreted as a host.
-            let authority = value.split(separator: "/", maxSplits: 1).first.map(String.init) ?? value
+            let authority = value.prefix { !"/?#".contains($0) }
             if let colon = authority.lastIndex(of: ":"), !authority.hasPrefix("[") {
                 let port = authority[authority.index(after: colon)...]
                 guard !port.isEmpty, port.allSatisfy(\.isNumber) else { throw Rejection.unsupportedScheme }
             }
-            guard authority == "localhost" || authority.hasPrefix("localhost:") || authority.contains(".") || authority.hasPrefix("[") else {
-                throw Rejection.invalidAddress
+            if authority == "localhost" || authority.hasPrefix("localhost:") || authority.contains(".") || authority.hasPrefix("[") {
+                candidate = "https://" + value
+            } else {
+                return try searchURL(for: value)
             }
-            candidate = "https://" + value
+        } else {
+            // Keep executable/external URL schemes blocked while allowing phrases with a colon.
+            if let colon = value.firstIndex(of: ":"),
+               ["javascript", "data", "file", "mailto", "tel", "ftp", "about", "http", "https"].contains(value[..<colon].lowercased()) {
+                throw Rejection.unsupportedScheme
+            }
+            return try searchURL(for: value)
         }
         guard let url = URL(string: candidate) else { throw Rejection.invalidAddress }
+        try validate(url)
+        return url
+    }
+
+    private static func searchURL(for query: String) throws -> URL {
+        var components = URLComponents(string: "https://www.google.com/search")!
+        components.queryItems = [URLQueryItem(name: "q", value: query)]
+        // Search engines interpret a literal plus as a space in query parameters.
+        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        guard let url = components.url else { throw Rejection.invalidAddress }
         try validate(url)
         return url
     }
