@@ -68,6 +68,8 @@ An idle failed website task exposes **Retry website cleanup**. This action pause
 
 The store uses bounded private files and atomic publication. Records are observations, not authorization to retry an inference. Live qualification checks automatic cleanup separately from the provider response and selected-model proof.
 
+History loading restores the outcome of the latest actual user turn. Saved terminal errors or interruptions remain Waiting, while a later successful user turn supersedes an older failure. Active turns with transient errors remain Running. Rejected assistant claims are excluded, and missing output alone does not prove failure. Older chats display the engine error actually retained in their history; unrecorded website diagnostics are not reconstructed. Future supported finite website diagnostics are saved privately under `WebsiteTurnFailureStore-v1`, correlated to the original thread, turn and model and admitted only after exact native error reconstruction. Both terminal error and completion events use this path. A restored error never recreates browser session ownership.
+
 ## ChatGPT normal Chat product mode
 
 ChatGPT model labels can appear in both normal Chat and Work. A model label, root URL, or `temporary-chat=true` query alone cannot establish which product mode produced an answer. Embedded ChatGPT sessions start on the empty `https://chatgpt.com/` page. Before discovery or inference, the fixed adapter observes one semantic **Composer mode** group with enabled, unambiguous Chat and Work controls and their role-appropriate selected states. Chat must be selected and Work unselected. If the owned empty root currently selects Work, the adapter may claim one actual Chat click; a later fresh observation must acknowledge the change. Missing or conflicting controls fail rather than imply Chat.
@@ -211,9 +213,15 @@ Claude closure verification tracks the exact associated popup nodes observed dur
 
 Candidate25 (0.5.0 build25) passed 299 native tests and 283 adapter/version tests. Its signed installed ChatGPT GPT-5.6 Sol and Gemini 3.1 Pro tasks each produced an independently verified native file read, clean final and two paired website-selection proofs. Sonnet 5 stopped at `close_unconfirmed` in the insertion final guard, before any admitted local tool call. This is separate from the earlier format refusal. The refreshed selector exposed Haiku 5.5 alongside the legacy Haiku 4.5; both require fresh qualification. These candidate25 results do not qualify the subsequent closure change.
 
+### Candidate30 saved failure validation
+
+Candidate30 restores failed saved user turns as Waiting with a stable Agent error and permits exact-task cleanup recovery. Its private bounded diagnostic store retains only known native website errors. The final 368-test native regression suite passed with zero failures, including actual bundled-engine restart and completion-only failure tests; 21 version/product checks passed. The unchanged browser adapters and frontend retain candidate29's passing checks and matching frozen source hashes. Seven fresh wire artifacts passed the pinned official schemas and lifecycle validator. Signed installed recovery and all eleven current model choices still require live qualification.
+
 ### Candidate29 cleanup automated validation
 
 Candidate29's exact-task cleanup recovery and finite automatic receipts passed 355 native tests with zero failures, including a real bundled-engine failed turn, original transport/token retention, in-process history reload, duplicate and submission/compaction/shutdown guards, private persistence and six AppState cases. The 293 provider-adapter tests, 21 version/product checks and 123 frontend tests passed; frontend typechecking and production bundling passed. The retained seven JSON/SSE artifacts passed the separate official-schema and lifecycle checks. The initial focused shutdown assertion raced the test's shutdown task; an explicit test-only shutdown-start signal replaced that timing assumption, and the final focused run passed all 49 tests. These results do not establish signed installation or live provider qualification for this candidate.
+
+Signed installed candidate29 (source `24f41d589904a401453fb9c49f20893f3eafc798`) passed independent installation, process, resource and signature checks. Its first live recovery check failed: the exact old Haiku 4.5 chat reloaded as Completed with only its original user prompt and no error or cleanup control. The saved engine history contains an error for that turn, but the loader did not restore it. No candidate29 model prompt or cleanup action was submitted. The original candidate28 rollout, model evidence and failed receipt remain unchanged; this is a failure-restoration regression, not model qualification or evidence of past deletion.
 
 ### Candidate27 normal Chat automated validation
 
