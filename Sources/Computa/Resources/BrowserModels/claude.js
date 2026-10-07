@@ -252,6 +252,7 @@ function websiteModelDiagnostic(state, readObservation = null) {
   if (readObservation) {
     diagnostic.readStage = readObservation.readStage;
     diagnostic.readAttempt = readObservation.readAttempt;
+    diagnostic.readContext = readObservation.readContext;
   }
   const responseRoots = state.provider === 'chatgpt' ? chatGPTMessageRoots('assistant')
     : [...document.querySelectorAll(state.provider === 'claude' ? '[data-testid="assistant-message"]' : 'model-response')];
@@ -307,7 +308,7 @@ function websiteModelWaitForChange(until, condition) {
     };
     observer.observe(document.documentElement || document, { subtree: true, childList: true, characterData: true,
       attributes: true, attributeFilter: ['aria-expanded', 'aria-hidden', 'aria-controls', 'aria-labelledby', 'aria-checked',
-        'aria-selected', 'aria-label', 'role', 'class', 'style', 'hidden', 'inert'] });
+        'aria-selected', 'aria-label', 'aria-disabled', 'disabled', 'data-state', 'role', 'class', 'style', 'hidden', 'inert'] });
     timer = setTimeout(() => finish(false), Math.max(1, until - Date.now()));
     if (condition()) finish(true); // A synchronous mount cannot fall between read and arm.
   });
@@ -407,7 +408,7 @@ function websiteModelIgnoreOwnPickerMutation(record) {
   return changed.every(node => portal(node) || belongs(target)
     && !(node.nodeType === 1 && (node.closest?.(boundary) || node.querySelector?.(boundary))));
 }
-async function websiteModelReadEvidence(provider, expected, openingRecovery = null) {
+async function websiteModelReadEvidence(provider, expected, openingRecovery = null, context = null) {
   if (!websiteModelChoiceValid(expected)) return { error: 'model_unverified' };
   const owner = globalThis.__computaModelOwner, url = document.URL;
   const recovery = provider === 'chatgpt' && openingRecovery?.attempt?.clicked === true
@@ -421,26 +422,51 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   let state = websiteModelPickerState(provider);
   const failure = error => {
     const current = websiteModelPickerState(provider);
+    const selection = globalThis.__computaModelSelection;
+    const selectionPresent = !!selection && typeof selection === 'object';
     return { error, modelDiagnostic: websiteModelDiagnostic(current, { readStage,
+      readContext: {
+        scope: ['action_precheck', 'action_final_guard', 'completed_selection', 'post_selection'].includes(context?.scope)
+          ? context.scope : 'unknown',
+        action: ['inspect', 'enableTemporary', 'prepare', 'insert', 'sendReady', 'submit', 'stop', 'discoverModels',
+          'selectModel', 'modelDiagnostic', 'verifyModel'].includes(context?.action) ? context.action : 'unknown',
+        selectionAttemptPresent: selectionPresent, selectionClicked: selectionPresent && selection.clicked === true,
+        selectionSettled: selectionPresent && selection.settled === true, selectionCompleted: selectionPresent && selection.completed === true,
+        recoveryEligible: !!recovery },
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof: !!captured,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }),
       ...(captured ? { modelEvidence: captured } : {}) };
   };
+  const pickerClosed = current => !!trigger && current.trigger === trigger && current.enabled(trigger)
+    && current.allMenus.length === 0
+    && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+    && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+  const waitForClosedPicker = async () => {
+    const acknowledged = await websiteModelWaitForChange(until,
+      () => !unchanged() || pickerClosed(websiteModelPickerState(provider)));
+    const closed = acknowledged && unchanged() && pickerClosed(websiteModelPickerState(provider));
+    readStage = closed ? 'close_acknowledged' : 'close_unconfirmed';
+    return closed;
+  };
   const closeOwned = async () => {
     const current = websiteModelPickerState(provider);
     if (!unchanged()) return false;
-    if (!current.topMenu) return true;
     if (!trigger || current.trigger !== trigger || !current.physical(trigger) || trigger.disabled
       || trigger.getAttribute('aria-disabled') === 'true') return false;
+    if (!current.topMenu) {
+      if (pickerClosed(current)) return true;
+      readStage = 'close_settlement_pending';
+      return waitForClosedPicker();
+    }
     // This exact controlled picker may be aria-hidden while its modal portal is
     // open. Its previously verified association, not background text, owns close.
     if (closeAttempted) return false;
     closeAttempted = true; // A lost close acknowledgment cannot toggle this picker open again.
     readStage = 'close_requested';
     if (!websiteModelDismissOwnedPicker(provider, trigger, current.nestedMenu || current.topMenu)) return false;
-    const closed = await websiteModelWaitForChange(until, () => !unchanged() || !websiteModelPickerState(provider).topMenu);
-    readStage = closed ? 'close_acknowledged' : 'close_unconfirmed';
-    return closed;
+    // Portal removal can precede the trigger's closing commit. Wait for both
+    // observed states before another proof read may open this picker.
+    return waitForClosedPicker();
   };
   try {
     while (Date.now() < until) {
@@ -535,7 +561,8 @@ async function websiteModelPickerAction(state, request, fresh, freshGuard = null
   if (!attempt) attempt = globalThis[slot] = { choice, primaryOpened: false, secondaryOpened: false, clicked: false, closed: false, choices: [] };
   if (attempt.completed) {
     if (!discovery) {
-      const proof = await websiteModelReadEvidence(state.provider, choice);
+      const proof = await websiteModelReadEvidence(state.provider, choice, null,
+        { scope: 'completed_selection', action: request.action });
       if (proof.error) return proof;
       return { selected: true, ...proof };
     }
@@ -554,7 +581,7 @@ async function websiteModelPickerAction(state, request, fresh, freshGuard = null
       attempt.verificationAttempted = true;
     }
     const proof = await websiteModelReadEvidence(state.provider, choice, state.provider === 'chatgpt'
-      ? { attempt, guard: freshGuard, until } : null);
+      ? { attempt, guard: freshGuard, until } : null, { scope: 'post_selection', action: request.action });
     if (proof.error) return proof;
     attempt.completed = true;
     return { selected: true, ...proof };
@@ -616,7 +643,8 @@ async function websiteModelPickerAction(state, request, fresh, freshGuard = null
 async function websiteModelFinalGuard(provider, request, observed, currentTemporary = null) {
   if (observed.error || request.action === 'stop' || request.expectedModelChoice == null
     || ['discoverModels', 'selectModel', 'modelDiagnostic'].includes(request.action)) return observed;
-  const proof = await websiteModelReadEvidence(provider, request.expectedModelChoice);
+  const proof = await websiteModelReadEvidence(provider, request.expectedModelChoice, null,
+    { scope: 'action_final_guard', action: request.action });
   if (proof.error) return proof;
   // The picker can hide the mode control while open. Reinspect its actual
   // restored temporary state only after this final owned-popup close.
@@ -1027,7 +1055,8 @@ async function providerPageAction() {
       && globalThis.__computaModelFirstSubmitted !== true
       && document.querySelectorAll('[data-testid="assistant-message"]').length === 0);
   if (input.action !== 'stop' && input.expectedModelChoice != null) {
-    const proof = await websiteModelReadEvidence('claude', input.expectedModelChoice);
+    const proof = await websiteModelReadEvidence('claude', input.expectedModelChoice, null,
+      { scope: 'action_precheck', action: input.action });
     if (proof.error) return proof;
     // Reading a freshly mounted picker yields. Before any editor mutation,
     // recheck the same native ownership and first-message snapshot again.

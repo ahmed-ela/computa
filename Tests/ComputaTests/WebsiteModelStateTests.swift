@@ -4,6 +4,85 @@ import XCTest
 
 @MainActor
 final class WebsiteModelStateTests: XCTestCase {
+    func testRetiredLatestDefaultAndIdleChatMigrateToCachedSolWithoutChangingHistory() throws {
+        let preferences = isolatedTestPreferences()
+        let latest = WebsiteModelChoice(provider: "chatgpt", key: "Latest", label: "Latest")
+        let other = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")
+        let sol = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.6 Sol", label: "GPT-5.6 Sol")
+        let gemini = WebsiteModelChoice(provider: "gemini", key: "Pro", label: "Pro")
+        preferences.set(try JSONEncoder().encode([latest, other, sol, gemini]), forKey: WebsiteModelCatalog.preferenceKey)
+        preferences.set(latest.modelID, forKey: "LocalCodex.defaultModelID")
+        let entry = TimelineEntry(kind: .assistant, title: "Recorded answer", body: "Keep this history", turnID: "historic-turn")
+        let old = AgentTask(id: "latest-chat", title: "Existing chat", summary: "", status: .completed, workspace: "/tmp", model: latest.modelID, entries: [entry])
+        let state = AppState(tasks: [old], preferences: preferences)
+
+        XCTAssertEqual(state.defaultModel, sol.modelID)
+        XCTAssertEqual(preferences.string(forKey: "LocalCodex.defaultModelID"), sol.modelID)
+        XCTAssertEqual(state.selectedTask?.model, sol.modelID)
+        XCTAssertEqual(state.selectedTask?.entries, [entry])
+        XCTAssertFalse(WebUISnapshot(state: state).modelOptions.contains { $0.id == latest.modelID })
+        XCTAssertFalse(state.setDefaultModel(latest.modelID))
+        XCTAssertFalse(state.setTaskModel(latest.modelID, taskID: old.id))
+        XCTAssertEqual(WebsiteModelCatalog.choice(for: latest.modelID), latest)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), [other, sol, gemini])
+
+        state.replaceTasks(with: [old])
+        XCTAssertEqual(state.selectedTask?.model, sol.modelID)
+        XCTAssertEqual(state.selectedTask?.entries, [entry])
+        state.apply(.taskUpserted(old))
+        XCTAssertEqual(state.selectedTask?.model, sol.modelID)
+        XCTAssertEqual(state.selectedTask?.entries, [entry])
+    }
+
+    func testRetiredLatestWithoutConcreteCatalogUsesChatGPTWebsiteDefault() {
+        let preferences = isolatedTestPreferences()
+        let latest = WebsiteModelChoice(provider: "chatgpt", key: "Latest", label: "Latest")
+        preferences.set(latest.modelID, forKey: "LocalCodex.defaultModelID")
+        let state = AppState(tasks: [], preferences: preferences)
+        XCTAssertEqual(state.defaultModel, "browser/chatgpt")
+        state.createTask()
+        XCTAssertEqual(state.selectedTask?.model, "browser/chatgpt")
+        XCTAssertFalse(state.modelOptions.contains { $0.id == latest.modelID })
+    }
+
+    func testDiscoveryFiltersLatestAndActiveChatMigratesOnlyAfterCompletion() async {
+        let latest = WebsiteModelChoice(provider: "chatgpt", key: "Latest", label: "Latest")
+        let sol = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.6 Sol", label: "GPT-5.6 Sol")
+        let preferences = isolatedTestPreferences()
+        let busy = AgentTask(id: "active-latest", title: "Active", summary: "", status: .running, workspace: "/tmp", model: latest.modelID)
+        let state = AppState(tasks: [busy], preferences: preferences, websiteModelDiscovery: { provider in
+            provider == "chatgpt" ? [latest, sol] : [WebsiteModelChoice(provider: provider, key: "fixture", label: "Fixture")]
+        })
+        await state.refreshWebsiteModels()
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "chatgpt" }, [sol])
+        XCTAssertFalse(state.modelOptions.contains { $0.id == latest.modelID })
+        XCTAssertEqual(state.selectedTask?.model, latest.modelID)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+        state.apply(.taskStatusChanged(taskID: busy.id, status: .completed))
+        XCTAssertEqual(state.selectedTask?.model, sol.modelID)
+    }
+
+    func testDeletingFinalPausedPromptReleasesRetiredModelWithoutDispatchingIt() async throws {
+        let latest = WebsiteModelChoice(provider: "chatgpt", key: "Latest", label: "Latest")
+        let sol = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.6 Sol", label: "GPT-5.6 Sol")
+        let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save([sol], to: preferences)
+        let busy = AgentTask(id: "queued-latest", title: "Queued", summary: "", status: .running, workspace: "/tmp", model: latest.modelID)
+        let state = AppState(tasks: [busy], preferences: preferences)
+        let accepted = await state.submitOrQueue(prompt: "Keep pending", toTaskID: busy.id)
+        XCTAssertTrue(accepted)
+        state.apply(.taskStatusChanged(taskID: busy.id, status: .waiting))
+        let pending = try XCTUnwrap(state.queuedPrompts[busy.id]?.first)
+        XCTAssertEqual(state.selectedTask?.model, latest.modelID)
+        XCTAssertFalse(state.canChangeModel(for: busy.id))
+        XCTAssertTrue(state.deleteQueuedPrompt(taskID: busy.id, id: pending.id))
+        XCTAssertTrue(state.canChangeModel(for: busy.id))
+        XCTAssertEqual(state.selectedTask?.model, sol.modelID)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(state.selectedTask?.entries.isEmpty == true)
+        XCTAssertTrue(state.queuedPrompts[busy.id]?.isEmpty == true)
+    }
+
     func testStartupUsesCompleteCachedCatalogWithoutDiscovery() async {
         let preferences = isolatedTestPreferences()
         let cached = WebsiteModelCatalog.providers.map {

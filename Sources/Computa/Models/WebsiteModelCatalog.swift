@@ -12,6 +12,11 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
             && Self.validField(key) && Self.validField(label)
     }
 
+    /// Retired choices retain their canonical identity for existing history,
+    /// but cannot return through discovery, cache restoration or selection.
+    var isRetired: Bool { provider == "chatgpt" && (key == "Latest" || label == "Latest") }
+    var isSelectable: Bool { isValid && !isRetired }
+
     /// Self-contained identity preserves the exact website key and label across
     /// history/default restoration without a mutable global model registry.
     var modelID: String {
@@ -110,12 +115,15 @@ enum WebsiteModelCatalog {
     static func choice(for modelID: String) -> WebsiteModelChoice? { selection(for: modelID)?.choice }
 
     static func option(for choice: WebsiteModelChoice, available: Bool = true) -> LocalModelOption {
-        LocalModelOption(id: choice.modelID,
+        let selectable = available && choice.isSelectable
+        return LocalModelOption(id: choice.modelID,
             label: "\(providerLabel(choice.provider)) / \(choice.label) · Built-in browser",
-            detail: available
+            detail: choice.isRetired
+                ? "This website model choice has been removed. Choose another model to continue."
+                : selectable
                 ? "Selects \(choice.label) in signed-in \(providerLabel(choice.provider)). Computa verifies the website's selected model before sending and accepting a response. Website limits still apply."
                 : "Saved website choice: \(choice.label). It is absent from the latest observed menu. Refresh website models after signing in; Computa will not substitute another model.",
-            highMemory: false, available: available)
+            highMemory: false, available: selectable)
     }
 
     static func validate(_ choices: [WebsiteModelChoice], provider: String) throws {
@@ -136,7 +144,11 @@ enum WebsiteModelCatalog {
             }
         }
         guard choices.allSatisfy(\.isValid) else { return [] }
-        return choices
+        // Validate the complete stored catalog first: retiring a choice must
+        // not hide duplicate or malformed entries from cache validation.
+        let selectable = choices.filter(\.isSelectable)
+        if selectable.count != choices.count { save(selectable, to: preferences) }
+        return selectable
     }
 
     static func save(_ choices: [WebsiteModelChoice], to preferences: UserDefaults) {
@@ -147,7 +159,7 @@ enum WebsiteModelCatalog {
                 do { try validate(subset, provider: provider) } catch { return }
             }
         }
-        guard let data = try? WebsiteModelChoice.encoder.encode(choices) else { return }
+        guard let data = try? WebsiteModelChoice.encoder.encode(choices.filter(\.isSelectable)) else { return }
         preferences.set(data, forKey: preferenceKey)
     }
 }

@@ -1223,7 +1223,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         do {
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must reject a user append without a pending Send"])
             XCTFail("A retained private submit claim cannot admit an unsolicited user count increment")
-        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptUserCount)) }
         try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
         let race = try await evaluate(view, "return {opens: window.fixtureDelayedPickerOpens, renderedCounts: window.fixtureRaceRenderedCounts};") as? [String: Any]
         XCTAssertEqual(race?["opens"] as? Int, 2)
@@ -1412,8 +1412,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let id = try XCTUnwrap(fixture.createdTabs.last)
             let view = try XCTUnwrap(fixture.browser.webView(for: id))
             let choices = try await discovery.value
-            XCTAssertEqual(choices.map(\.label), Self.choiceLabels(provider))
-            XCTAssertEqual(choices.map(\.key), Self.choiceLabels(provider))
+            let advertised = Self.choiceLabels(provider).filter { provider != .chatgpt || $0 != "Latest" }
+            XCTAssertEqual(choices.map(\.label), advertised)
+            XCTAssertEqual(choices.map(\.key), advertised)
             XCTAssertTrue(choices.allSatisfy { $0.provider == provider.rawValue && $0.isValid })
             try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
             let clicks = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
@@ -1528,7 +1529,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
         release?.resume(); release = nil
         let choices = try await discovery.value
-        XCTAssertEqual(choices.map(\.label), Self.choiceLabels(.chatgpt))
+        XCTAssertEqual(choices.map(\.label), Self.choiceLabels(.chatgpt).filter { $0 != "Latest" })
         XCTAssertNil(fixture.browser.webView(for: discoveryID))
         XCTAssertTrue(inferenceIDs.allSatisfy { fixture.browser.webView(for: $0) != nil })
         fixture.transport.setBeforePageResultValidationForTesting(nil)

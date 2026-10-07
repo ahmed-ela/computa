@@ -135,6 +135,7 @@ final class AppState {
         self.tasks = tasks
         selectedTaskID = tasks.first?.id
         selectedEntryID = tasks.first?.entries.last?.id
+        retireWebsiteModelSelections()
         if enableChromeExtensionBridge {
             extensionBridge = BrowserExtensionCoordinator(preferences: preferences, onAdmission: { [weak self] request in
                 guard let self, self.canConnectChrome else { request.consent.revoke(); return false }
@@ -154,11 +155,12 @@ final class AppState {
     var modelOptions: [LocalModelOption] {
         var options = LocalModelCatalog.options.flatMap { option -> [LocalModelOption] in
             guard let provider = LocalModelCatalog.webProvider(for: option.id) else { return [option] }
-            return [option] + websiteModelChoices.filter { $0.provider == provider }.map { WebsiteModelCatalog.option(for: $0) }
+            return [option] + websiteModelChoices.filter { $0.provider == provider && $0.isSelectable }.map { WebsiteModelCatalog.option(for: $0) }
         }
         for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
             where id.hasPrefix("browser/") && !options.contains(where: { $0.id == id }) {
             if let choice = WebsiteModelCatalog.choice(for: id) {
+                guard !choice.isRetired else { continue }
                 options.append(WebsiteModelCatalog.option(for: choice, available: false))
             } else {
                 options.append(LocalModelOption(id: id, label: "Unavailable website choice",
@@ -167,6 +169,25 @@ final class AppState {
             }
         }
         return options
+    }
+
+    /// Explicitly removed choices migrate only the next inference's selection.
+    /// Recorded messages and active/queued turns retain their original identity.
+    private func retireWebsiteModelSelections() {
+        let choices = websiteModelChoices.filter { $0.provider == "chatgpt" && $0.isSelectable }
+        let replacement = choices.first { $0.key == "GPT-5.6 Sol" }?.modelID
+            ?? choices.first?.modelID ?? "browser/chatgpt"
+        if WebsiteModelCatalog.choice(for: defaultModel)?.isRetired == true {
+            defaultModel = replacement
+            preferences.set(replacement, forKey: Self.defaultModelPreferenceKey)
+        }
+        for index in tasks.indices where WebsiteModelCatalog.choice(for: tasks[index].model)?.isRetired == true {
+            let taskID = tasks[index].id
+            guard canChangeModel(for: taskID) else { continue }
+            tasks[index].model = replacement
+            contextUsageByTask.removeValue(forKey: taskID)
+            compactionStateByTask.removeValue(forKey: taskID)
+        }
     }
 
     private func websiteTransport() -> EmbeddedWebModelTransport {
@@ -233,8 +254,9 @@ final class AppState {
                           self.websiteModelRefreshGeneration == generation else { break }
                     try WebsiteModelCatalog.validate(choices, provider: provider)
                     self.websiteModelChoices.removeAll { $0.provider == provider }
-                    self.websiteModelChoices.append(contentsOf: choices)
+                    self.websiteModelChoices.append(contentsOf: choices.filter(\.isSelectable))
                     WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
+                    self.retireWebsiteModelSelections()
                 } catch is CancellationError {
                     break
                 } catch {
@@ -1137,6 +1159,7 @@ final class AppState {
         }
         contextUsageByTask = contextUsageByTask.filter { liveTaskIDs.contains($0.key) }
         compactionStateByTask = compactionStateByTask.filter { liveTaskIDs.contains($0.key) }
+        retireWebsiteModelSelections()
     }
 
     func apply(_ event: AgentRuntimeEvent) {
@@ -1152,6 +1175,7 @@ final class AppState {
             } else {
                 tasks.insert(task, at: 0)
             }
+            retireWebsiteModelSelections()
 
         case .turnDiffUpdated(let taskID, let turnID, let diff):
             guard let index = tasks.firstIndex(where: { $0.id == taskID }), !turnID.isEmpty else { return }
@@ -1332,6 +1356,7 @@ final class AppState {
                 activeTurnTaskIDs.remove(taskID)
                 interruptingTaskIDs.remove(taskID)
                 pendingApprovals.removeAll { $0.taskID == taskID }
+                retireWebsiteModelSelections()
                 automaticApprovalAttemptedRequests = automaticApprovalAttemptedRequests.filter {
                     $0.taskID != taskID
                 }
@@ -1494,6 +1519,7 @@ final class AppState {
         if let pendingConnection = chromeConnectionTask { await pendingConnection.value }
         if let cleanup = chromeCleanupTask { await cleanup.value }
         guard !Task.isCancelled else { return .notDelivered("Submission was cancelled before delivery.") }
+        retireWebsiteModelSelections()
         let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty,
               !isShuttingDown,
@@ -1672,6 +1698,7 @@ final class AppState {
     private func enqueuePrompt(prompt rawPrompt: String, taskID: String) -> Bool {
         guard let prompt = validatedPrompt(rawPrompt), !isShuttingDown,
               tasks.contains(where: { $0.id == taskID }) else { return false }
+        retireWebsiteModelSelections()
         if queuedPrompts[taskID, default: []].isEmpty && !isBusy(taskID: taskID) {
             pausedQueueTaskIDs.remove(taskID)
         }
@@ -1738,6 +1765,7 @@ final class AppState {
     func deleteQueuedPrompt(taskID: String, id: String) -> Bool {
         guard let index = editableQueueIndex(taskID: taskID, id: id) else { return false }
         queuedPrompts[taskID]?.remove(at: index)
+        retireWebsiteModelSelections()
         scheduleQueueDrain(taskID: taskID)
         return true
     }
@@ -1811,7 +1839,10 @@ final class AppState {
         let taskID = submission.taskID
         let item = submission.item
         let id = item.id
-        defer { steeringTaskIDs.remove(taskID) }
+        defer {
+            steeringTaskIDs.remove(taskID)
+            retireWebsiteModelSelections()
+        }
         guard let runtime, !isShuttingDown else {
             failQueuedPrompt(taskID: taskID, id: id, message: "Steering was cancelled before delivery.")
             return false
@@ -1874,6 +1905,7 @@ final class AppState {
             }
         }
         dispatchingQueueTaskIDs.remove(taskID)
+        retireWebsiteModelSelections()
         if delivered, tasks.first(where: { $0.id == taskID })?.status == .completed {
             scheduleQueueDrain(taskID: taskID)
         }
