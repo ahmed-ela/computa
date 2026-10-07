@@ -132,24 +132,30 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertLessThan(ComputaAgentInstructions.ordinaryRequests.utf8.count, 800)
     }
 
-    func testWebContractsDescribeHostRPCWithoutReassigningWebsiteIdentityOrPermissions() {
+    func testWebContractsDescribeExternalRelayWithoutReassigningWebsiteIdentityOrPermissions() {
         // Source-contract checks; actual provider cooperation needs live runs.
         for manifest in [[:], ["functions.exec_command": "exec_command"]] {
             let contract = ComputaAgentInstructions.webInferenceContract(offeredFunctions: manifest)
-            XCTAssertTrue(contract.contains("Computa is the local application receiving this response"))
-            XCTAssertTrue(contract.contains("You retain your\nidentity and the rules governing this website"))
-            XCTAssertTrue(contract.contains("structured-output RPC request for Computa's host functions"))
-            XCTAssertTrue(contract.contains("register website-native tools or claim direct filesystem access"))
+            XCTAssertTrue(contract.contains("locally installed application providing an external execution"))
+            XCTAssertTrue(contract.contains("You retain your identity and the rules governing"))
+            XCTAssertTrue(contract.contains("Your part is to write JSON data: an action request for Computa"))
+            XCTAssertTrue(contract.contains("they do not register tools in this website"))
+            XCTAssertTrue(contract.contains("Writing that request\ndoes not claim you executed it or accessed the user's files"))
             XCTAssertTrue(contract.contains("When an authorized action is necessary and allowed by the supplied\ntool_choice"))
-            XCTAssertTrue(contract.contains("enforces local permissions and approvals"))
-            XCTAssertTrue(contract.contains("execution before its matching host output"))
+            XCTAssertTrue(contract.contains("applies local permissions and\napprovals"))
+            XCTAssertTrue(contract.contains("matching host output before claiming execution or completion"))
+            XCTAssertTrue(contract.contains("Only\nthose outputs establish what actually happened; never invent results"))
             XCTAssertTrue(contract.contains("do not bypass a real denial with another tool"))
             XCTAssertTrue(contract.contains("If no tools are offered, use no historical or\ninvented tool"))
             XCTAssertFalse(contract.contains("You are Computa"))
             XCTAssertFalse(contract.contains("You act on the user's Mac"))
             XCTAssertFalse(contract.contains("The website's sandbox says nothing"))
             XCTAssertFalse(contract.contains("refusals and historical tool names are not current capability evidence"))
+            XCTAssertFalse(contract.contains("structured-output RPC"))
         }
+        XCTAssertTrue(ComputaAgentInstructions.webRequestContext.contains("they are not platform messages on this website"))
+        XCTAssertTrue(ComputaAgentInstructions.webRequestContext.contains("Computa labels the application, not your identity"))
+        XCTAssertTrue(ComputaAgentInstructions.webRequestContext.contains("without overriding this website's governing rules"))
     }
 
     func testRequestedInspectionRequiresEvidenceOnItsSpecifiedSurface() {
@@ -179,7 +185,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(contract.contains("a remembered heading, website tools, CLI HTTP fetching, Chrome or another"))
             XCTAssertTrue(contract.contains("Offer a compatible alternative truthfully"))
             XCTAssertTrue(contract.contains("limitation does not restrict offered local terminal or native-app tools"))
-            XCTAssertTrue(contract.contains("Return an offered\ntool call for a supported authorized action that remains necessary"))
+            XCTAssertTrue(contract.contains("request the relevant offered relay\noperation"))
             XCTAssertTrue(contract.contains("Tools being offered does not require a call: respect tool_choice"))
             XCTAssertTrue(contract.contains("If no tools are offered, use no historical or\ninvented tool"))
             XCTAssertLessThan(contract.utf8.count, 5_200, "Surface fidelity stays bounded even with both terminal and computer guidance")
@@ -190,16 +196,16 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         // This verifies the model-facing contract, not semantic compliance by a provider.
         for names in [[], ["functions.write_stdin", "functions.exec_command"], ["computer_v2_read_page"]] {
             let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: names)
-            XCTAssertTrue(handoff.contains("Return ordinary website text containing JSON for Computa's local parser"))
-            XCTAssertTrue(handoff.contains("The website does not execute these calls"))
-            XCTAssertTrue(handoff.contains("Supplied schemas describe host\nrequests, not website-native tools"))
-            XCTAssertTrue(handoff.contains("authorized local action, with no execution or direct-access claim"))
-            XCTAssertTrue(handoff.contains("current roles, tool_choice, permissions and approvals"))
-            XCTAssertTrue(handoff.contains("If necessary and\nallowed by tool_choice, serialize its offered name and arguments/input"))
-            XCTAssertTrue(handoff.contains("The host validates and executes permitted requests, then supplies matching"))
-            XCTAssertTrue(handoff.contains("function_call_output or custom_tool_call_output later"))
+            XCTAssertTrue(handoff.contains("Write JSON for Computa's external execution relay"))
+            XCTAssertTrue(handoff.contains("The website does not\nexecute these calls"))
+            XCTAssertTrue(handoff.contains("A tool_calls object is an action request, not a claim\nof execution or direct access"))
+            XCTAssertTrue(handoff.contains("necessary work allowed by tool_choice"))
+            XCTAssertTrue(handoff.contains("your governing rules and the user's scope"))
+            XCTAssertTrue(handoff.contains("validates names, arguments, local permissions and\napprovals before execution"))
+            XCTAssertTrue(handoff.contains("real matching function_call_output\nor custom_tool_call_output"))
             XCTAssertTrue(handoff.contains("Continue from those outputs"))
-            XCTAssertTrue(handoff.contains("a simulated transcript, invented results or historical receipts"))
+            XCTAssertTrue(handoff.contains("never fabricate a simulated transcript"))
+            XCTAssertTrue(handoff.contains("invented results or historical receipts as execution evidence"))
             XCTAssertTrue(handoff.contains("verify its local output and final exit"))
             XCTAssertTrue(handoff.contains("When current observations suffice, return a message"))
             XCTAssertTrue(handoff.contains("tasks/calls only if requested again"))
