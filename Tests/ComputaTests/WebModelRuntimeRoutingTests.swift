@@ -68,6 +68,9 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
 
     private var websiteModels: [String] {
         [LocalModelCatalog.chatGPTBrowserModelID, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID]
+            + WebsiteModelCatalog.providers.map {
+                WebsiteModelChoice(provider: $0, key: "fixture-choice", label: "Fixture Choice").modelID
+            }
     }
 
     private func requestParameters(_ method: String, root: URL) throws -> [String: Any] {

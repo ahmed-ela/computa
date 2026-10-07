@@ -45,6 +45,7 @@ private struct ChromeWebModelTransport: WebModelTransport {
 actor WebModelServer {
     enum Failure: LocalizedError {
         case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
+        case modelUnverified, modelMismatch
         var errorDescription: String? {
             switch self {
             case .chromeRequired: "Connect the Computa Chrome extension, then sign in to the selected website in Chrome."
@@ -55,6 +56,8 @@ actor WebModelServer {
             case .preparationDeadline: "The website did not become ready before the 45-second preparation deadline. No prompt was sent."
             case .deadline: "The website did not finish its response before the five-minute deadline."
             case .cleanupFailed: "The web conversation cleanup could not be verified. Its local transcript has been retained."
+            case .modelUnverified: "The website's selected model could not be verified. No response was accepted and no prompt was replayed."
+            case .modelMismatch: "The website selected or reported a different model. No response was accepted and no prompt was replayed."
             }
         }
     }
@@ -66,6 +69,8 @@ actor WebModelServer {
     private struct Session: Sendable {
         let token: String
         let provider: String
+        let modelID: String
+        let modelChoice: WebsiteModelChoice?
         let route: Route
         let transport: any WebModelTransport
     }
@@ -83,6 +88,7 @@ actor WebModelServer {
     private var transport: (any WebModelTransport)?
     private var embeddedTransport: (any WebModelTransport)?
     private var sessions: [String: Session] = [:]
+    private var evidenceThreads: [String: String] = [:]
     private var active: [String: ActiveRequest] = [:]
     private var retiringTaskIDs = Set<String>()
     private var cleanupTasks: [String: Task<[String], Never>] = [:]
@@ -90,6 +96,7 @@ actor WebModelServer {
     private var shuttingDown = false
     private var readinessTimeout: Duration = .seconds(45)
     private var responseTimeout: Duration = .seconds(300)
+    private var evidenceDirectory: URL?
     private let queue = DispatchQueue(label: "wtf.computa.web-model-http")
     #if DEBUG
     private var beforeListenerStartForTesting: (@Sendable () async -> Void)?
@@ -102,6 +109,15 @@ actor WebModelServer {
         starting = startup
         defer { starting = nil }
         return try await startup.value
+    }
+
+    func configureEvidenceDirectory(_ url: URL) {
+        evidenceDirectory = url
+    }
+
+    func registerEvidenceThread(taskID: String, threadID: String) {
+        guard let task = UUID(uuidString: taskID), let thread = UUID(uuidString: threadID) else { return }
+        evidenceThreads[task.uuidString.lowercased()] = thread.uuidString.lowercased()
     }
 
     private func startListener() async throws -> URL {
@@ -248,16 +264,35 @@ actor WebModelServer {
 
     private func perform(_ request: WebModelResponseCodec.Request, provider: String,
                          route: Route, taskID: String, transport: any WebModelTransport) async throws -> Data {
+        let choice = WebsiteModelCatalog.choice(for: request.model)
+        let inferenceID = UUID()
         let session: Session
+        if let existing = sessions[taskID],
+           existing.provider != provider || existing.route != route || existing.modelID != request.model {
+            // A failed earlier cleanup can leave an owned session even after
+            // the UI changes provider. Retire it through its original transport
+            // and token before admitting any replacement provider or choice.
+            let closed = try await call(existing.transport, operation: "webProviderFinish", params: ["sessionToken": existing.token])
+            guard ["deleted", "not_created"].contains(closed["cleanup"] as? String ?? "") else { throw Failure.cleanupFailed }
+            try Task.checkCancellation()
+            guard sessions[taskID]?.token == existing.token else { throw Failure.invalidRequest }
+            sessions.removeValue(forKey: taskID)
+        }
         if let existing = sessions[taskID] {
-            guard existing.provider == provider, existing.route == route else { throw Failure.invalidRequest }
+            guard existing.provider == provider, existing.route == route, existing.modelID == request.model else { throw Failure.invalidRequest }
             session = existing
         } else {
-            let reply = try await call(transport, operation: "webProviderStart", params: ["provider": provider])
+            var params = ["provider": provider]
+            if let choice {
+                guard let encoded = choice.canonicalJSONString else { throw Failure.invalidRequest }
+                params["modelChoice"] = encoded
+            }
+            let reply = try await call(transport, operation: "webProviderStart", params: params)
             guard let token = reply["sessionToken"] as? String, UUID(uuidString: token) != nil,
                   ["ready", "loading"].contains(reply["state"] as? String ?? "") else { throw Self.snapshotFailure(reply) }
-            session = Session(token: token, provider: provider, route: route, transport: transport)
+            session = Session(token: token, provider: provider, modelID: request.model, modelChoice: choice, route: route, transport: transport)
             sessions[taskID] = session
+            if reply["state"] as? String == "ready" { _ = try Self.modelEvidence(reply, session: session) }
             let readinessDeadline = ContinuousClock.now + readinessTimeout
             var ready = reply["state"] as? String == "ready"
             while !ready, ContinuousClock.now < readinessDeadline {
@@ -266,6 +301,7 @@ actor WebModelServer {
                 guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
                 let state = try await call(transport, operation: "webProviderPoll", params: ["sessionToken": token])
                 guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
+                if ["ready", "running"].contains(state["state"] as? String ?? "") { _ = try Self.modelEvidence(state, session: session) }
                 if state["state"] as? String == "ready" { ready = true }
                 else if !["loading", "running"].contains(state["state"] as? String ?? "") { throw Self.snapshotFailure(state) }
                 if !ready { try await waitForNextPoll(session, after: revision, until: readinessDeadline) }
@@ -276,6 +312,8 @@ actor WebModelServer {
         let sent = try await call(session.transport, operation: "webProviderSend",
                                   params: ["sessionToken": session.token, "prompt": request.prompt])
         guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
+        let submittedEvidence = try Self.modelEvidence(sent, session: session)
+        recordEvidence(submittedEvidence, snapshot: sent, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
         let end = ContinuousClock.now + responseTimeout
         while ContinuousClock.now < end {
             try Task.checkCancellation()
@@ -285,10 +323,14 @@ actor WebModelServer {
             guard ContinuousClock.now < end else { throw Failure.deadline }
             switch value["state"] as? String {
             case "complete":
+                let evidence = try Self.modelEvidence(value, session: session)
                 guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
                 let reply = try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: session.route == .embedded)
-                return try WebModelResponseCodec.streamData(for: reply, request: request)
-            case "running": try await waitForNextPoll(session, after: revision, until: end)
+                recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "complete")
+                return try WebModelResponseCodec.streamData(for: reply, request: request, websiteModelEvidence: evidence)
+            case "running":
+                _ = try Self.modelEvidence(value, session: session)
+                try await waitForNextPoll(session, after: revision, until: end)
             default: throw Self.snapshotFailure(value)
             }
         }
@@ -309,6 +351,65 @@ actor WebModelServer {
 
     static func provider(for model: String) -> String? {
         LocalModelCatalog.webProvider(for: model)
+    }
+
+    private static func modelEvidence(_ snapshot: [String: Any], session: Session) throws -> WebsiteModelEvidence? {
+        guard session.modelChoice != nil || snapshot["modelEvidence"] != nil && !(snapshot["modelEvidence"] is NSNull) else { return nil }
+        do { return try WebsiteModelEvidence.parse(snapshot["modelEvidence"], provider: session.provider, expected: session.modelChoice) }
+        catch WebsiteModelEvidence.Failure.mismatch { throw Failure.modelMismatch }
+        catch { throw Failure.modelUnverified }
+    }
+
+    private func recordEvidence(_ evidence: WebsiteModelEvidence?, snapshot: [String: Any], taskID: String,
+                                inferenceID: UUID, session: Session, phase: String) {
+        guard let evidence, let directory = evidenceDirectory,
+              let task = UUID(uuidString: taskID), let context = snapshot["modelProofContext"] as? [String: Any],
+              let generation = context["documentGeneration"] as? String, UUID(uuidString: generation) != nil,
+              let sequence = Self.receiptInteger(snapshot["sequence"], range: 1...10_000),
+              let responseCount = Self.receiptInteger(context["responseCount"], range: 0...10_000),
+              let baseline = Self.receiptInteger(context["baselineResponseCount"], range: 0...10_000),
+              responseCount >= baseline else { return }
+        let fingerprint = context["firstUserFingerprint"] as? String
+        if let fingerprint, !fingerprint.isEmpty {
+            guard fingerprint.utf8.count == 64, fingerprint.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return }
+        } else if context["firstUserFingerprint"] != nil && fingerprint == nil { return }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var record: [String: Any] = ["schemaVersion": 1, "timestamp": formatter.string(from: Date()),
+                                    "taskID": task.uuidString.lowercased(), "modelID": session.modelID, "provider": session.provider,
+                                    "inferenceID": inferenceID.uuidString.lowercased(), "phase": phase, "sessionToken": session.token,
+                                    "sequence": sequence, "documentGeneration": generation,
+                                    "responseCount": responseCount, "baselineResponseCount": baseline,
+                                    "modelEvidence": evidence.dictionary]
+        if let threadID = evidenceThreads[task.uuidString.lowercased()] { record["threadID"] = threadID }
+        if let fingerprint, !fingerprint.isEmpty { record["firstUserFingerprint"] = fingerprint }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]), encoded.count <= 4_096 else { return }
+        // Model identity receipts contain no prompt, tool payload, response
+        // text, cookies or credentials. They are private and bounded.
+        let file = directory.appendingPathComponent(task.uuidString.lowercased() + ".jsonl")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            guard (try? directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+                  (try? file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { return }
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            guard size <= 1_048_576 else { return }
+            if size == 0 {
+                let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+                guard files.count < 256 else { return }
+            }
+            var data = (try? Data(contentsOf: file)) ?? Data()
+            guard data.count + encoded.count + 1 <= 1_048_576 else { return }
+            data.append(encoded); data.append(0x0A)
+            try data.write(to: file, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        } catch { }
+    }
+
+    private static func receiptInteger(_ value: Any?, range: ClosedRange<Int>) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let integer = value as? Int, number.doubleValue == Double(integer), range.contains(integer) else { return nil }
+        return integer
     }
 
     private static func snapshotFailure(_ value: [String: Any], fallback: Failure = .providerFailed) -> any Error {

@@ -4,6 +4,10 @@ import Foundation
 /// executor for website providers. Local MLX keeps its existing function-only
 /// producer contract and command editing support. Other fields mirror pinned
 /// fallback metadata; context/provider configuration remain in thread config.
+/// The pinned engine's models-manager matches the longest catalog slug prefix,
+/// then retains the complete requested slug. Thus browser/<provider>/choice/...
+/// inherits the already-admitted browser/<provider> freeform patch metadata even
+/// when discovered after launch. No cached catalog reload or restart is assumed.
 enum ComputaModelToolCatalog {
     static func catalogData(additionalModelID: String? = nil) throws -> Data {
         var ids = Set(LocalModelCatalog.options.map(\.id))

@@ -130,6 +130,7 @@ export interface ModelOption {
   label: string;
   detail: string;
   highMemory: boolean;
+  available?: boolean;
 }
 
 export interface AppSnapshot {
@@ -145,6 +146,8 @@ export interface AppSnapshot {
   accessMode: 'askEveryTime' | 'fullAccess';
   defaultModel: string;
   modelOptions: ModelOption[];
+  websiteModelsRefreshing?: boolean;
+  websiteModelsError?: string;
   showToolPayloads: boolean;
   isInspectorPresented: boolean;
   isBrowserPresented: boolean;
@@ -181,6 +184,7 @@ export type NativeAction =
   | { action: 'setAppearance'; value: 'system' | 'light' | 'dark' }
   | { action: 'setDefaultModel'; modelID: string }
   | { action: 'setTaskModel'; taskID: string; modelID: string }
+  | { action: 'refreshWebsiteModels' }
   | { action: 'setShowToolPayloads'; value: boolean }
   | { action: 'refreshPermissions' }
   | { action: 'requestAccessibilityPermission' }

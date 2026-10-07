@@ -694,6 +694,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         }
         func validateSelectedModel(_ modelID: String) throws {
             if LocalModelCatalog.isWebBrowser(modelID) { return }
+            if modelID.hasPrefix("browser/") { throw WebsiteModelCatalog.Failure.invalidModelID }
             guard effectiveBackend == .headlessMLX,
                   !LocalModelCatalog.supportsHeadlessMLX(modelID) else { return }
             throw HeadlessMLXServer.Failure.unsupportedModel
@@ -1388,6 +1389,8 @@ private extension CodexAppServerRuntime {
         func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
             guard !isShuttingDown, !isPreparingCommandShutdown else { return }
             await webModelServer.configureEmbeddedTransport(transport)
+            await webModelServer.configureEvidenceDirectory(URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                .appendingPathComponent("WebsiteModelEvidence-v1", isDirectory: true))
             embeddedWebModelConfigured = true
         }
 
@@ -1843,6 +1846,9 @@ private extension CodexAppServerRuntime {
             guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                   !cancelledSubmissions.contains(claim) else { throw CancellationError() }
             let previousModel = modelForTask.updateValue(modelID, forKey: taskID)
+            if LocalModelCatalog.isWebBrowser(modelID) {
+                await webModelServer.registerEvidenceThread(taskID: taskID, threadID: threadID)
+            }
             if previousModel != nil, previousModel != modelID { measuredContext.removeValue(forKey: taskID) }
             let compactLimit = (threadConfig(for: modelID)["model_auto_compact_token_limit"] as? Int) ?? 3_072
             if resumedWithoutUsage || (measuredContext[taskID]?.usedTokens ?? 0) >= compactLimit {

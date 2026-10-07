@@ -22,6 +22,275 @@ final class WebModelServerTests: XCTestCase {
         _ = await server.shutdown()
     }
 
+    func testConcreteWebsiteChoicesRouteTheirExactChoiceAndReuseOnlyItsSession() async throws {
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let choice = WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
+            let transport = ChoiceWebModelTransport()
+            let server = WebModelServer()
+            await server.configureEmbeddedTransport(transport)
+            let input = try choiceRequest(choice)
+            _ = try await server.infer(input, taskID: "choice")
+            _ = try await server.infer(input, taskID: "choice")
+            let starts = await transport.starts()
+            XCTAssertEqual(starts.count, 1, "Tool continuations must reuse the same precise website choice")
+            XCTAssertEqual(starts[0]["provider"], provider)
+            XCTAssertEqual(starts[0]["modelChoice"], choice.canonicalJSONString)
+            let operations = await transport.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 2)
+            let issues = await server.finish(taskID: "choice")
+            XCTAssertTrue(issues.isEmpty)
+            _ = await server.shutdown()
+        }
+    }
+
+    func testSameProviderChoiceSwitchCleansTheOldTokenBeforeStartingTheNewChoice() async throws {
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let fast = WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
+            let careful = WebsiteModelChoice(provider: provider, key: "fixture-careful", label: "Fixture Careful")
+            let transport = ChoiceWebModelTransport()
+            let server = WebModelServer()
+            await server.configureEmbeddedTransport(transport)
+            _ = try await server.infer(choiceRequest(fast), taskID: "switch")
+            _ = try await server.infer(choiceRequest(careful), taskID: "switch")
+            let starts = await transport.starts()
+            XCTAssertEqual(starts.map { $0["modelChoice"] }, [fast.canonicalJSONString, careful.canonicalJSONString])
+            let operations = await transport.operations()
+            XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll",
+                                        "webProviderFinish", "webProviderStart", "webProviderSend", "webProviderPoll"])
+            let createdTokens = await transport.createdTokens()
+            let firstToken = try XCTUnwrap(createdTokens.first)
+            let cleanupTokens = await transport.cleanupTokens()
+            XCTAssertEqual(cleanupTokens, [firstToken])
+            let issues = await server.shutdown()
+            XCTAssertTrue(issues.isEmpty)
+            let finalCleanup = await transport.cleanupTokens()
+            XCTAssertEqual(finalCleanup.count, 2)
+            XCTAssertEqual(Set(finalCleanup).count, 2, "Cleanup must dispose each exact owned session")
+        }
+    }
+
+    func testUnconfirmedOldChoiceCleanupBlocksSwitchWithoutStartingOrSendingAnotherChoice() async throws {
+        let fast = WebsiteModelChoice(provider: "chatgpt", key: "fixture-fast", label: "Fixture Fast")
+        let careful = WebsiteModelChoice(provider: "chatgpt", key: "fixture-careful", label: "Fixture Careful")
+        let transport = ChoiceWebModelTransport(cleanupFailsOnce: true)
+        let server = WebModelServer()
+        await server.configureEmbeddedTransport(transport)
+        _ = try await server.infer(choiceRequest(fast), taskID: "switch")
+        do {
+            _ = try await server.infer(choiceRequest(careful), taskID: "switch")
+            XCTFail("A retained old-choice session cannot authorize a replacement")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.cleanupFailed.localizedDescription)
+        }
+        let starts = await transport.starts()
+        XCTAssertEqual(starts.count, 1)
+        let operations = await transport.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+        let issues = await server.shutdown()
+        XCTAssertTrue(issues.isEmpty)
+        let cleanupTokens = await transport.cleanupTokens()
+        XCTAssertEqual(cleanupTokens.count, 2)
+        XCTAssertEqual(Set(cleanupTokens).count, 1, "Only the retained old token may be retried for cleanup")
+    }
+
+    func testCrossProviderConcreteChoiceSwitchCleansOldTokenBeforeStartingTheNewProvider() async throws {
+        let providers = ["chatgpt", "gemini", "claude"]
+        for oldProvider in providers {
+            for newProvider in providers where newProvider != oldProvider {
+                let oldChoice = WebsiteModelChoice(provider: oldProvider, key: "fixture-old", label: "Fixture Old")
+                let newChoice = WebsiteModelChoice(provider: newProvider, key: "fixture-new", label: "Fixture New")
+                let transport = ChoiceWebModelTransport()
+                let server = WebModelServer()
+                await server.configureEmbeddedTransport(transport)
+                _ = try await server.infer(choiceRequest(oldChoice), taskID: "switch-provider")
+                _ = try await server.infer(choiceRequest(newChoice), taskID: "switch-provider")
+                let operations = await transport.operations()
+                XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll",
+                                            "webProviderFinish", "webProviderStart", "webProviderSend", "webProviderPoll"])
+                let starts = await transport.starts()
+                XCTAssertEqual(starts.map { $0["provider"] }, [oldProvider, newProvider])
+                XCTAssertEqual(starts.map { $0["modelChoice"] }, [oldChoice.canonicalJSONString, newChoice.canonicalJSONString])
+                let sentChoices = await transport.sentChoices()
+                XCTAssertEqual(sentChoices, [oldChoice, newChoice], "A replacement cannot Send on the previous provider's session")
+                let tokens = await transport.createdTokens()
+                let cleanup = await transport.cleanupTokens()
+                XCTAssertEqual(cleanup, [try XCTUnwrap(tokens.first)])
+                let issues = await server.shutdown()
+                XCTAssertTrue(issues.isEmpty)
+            }
+        }
+    }
+
+    func testCrossProviderCleanupFailureBlocksNewTransportThenRetriesOnlyTheOriginalToken() async throws {
+        let oldChoice = WebsiteModelChoice(provider: "chatgpt", key: "fixture-old", label: "Fixture Old")
+        let newChoice = WebsiteModelChoice(provider: "claude", key: "fixture-new", label: "Fixture New")
+        let original = ChoiceWebModelTransport(cleanupFailsOnce: true)
+        let replacement = ChoiceWebModelTransport()
+        let server = WebModelServer()
+        await server.configureEmbeddedTransport(original)
+        _ = try await server.infer(choiceRequest(oldChoice), taskID: "switch-provider")
+        await server.configureEmbeddedTransport(replacement)
+        do {
+            _ = try await server.infer(choiceRequest(newChoice), taskID: "switch-provider")
+            XCTFail("Unconfirmed original-provider cleanup must block every replacement Start and Send")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.cleanupFailed.localizedDescription)
+        }
+        let blockedOperations = await replacement.operations()
+        XCTAssertTrue(blockedOperations.isEmpty)
+        _ = try await server.infer(choiceRequest(newChoice), taskID: "switch-provider")
+        let originalTokens = await original.createdTokens()
+        let cleanup = await original.cleanupTokens()
+        XCTAssertEqual(cleanup, [try XCTUnwrap(originalTokens.first), try XCTUnwrap(originalTokens.first)])
+        let originalSends = await original.sentChoices()
+        let replacementSends = await replacement.sentChoices()
+        XCTAssertEqual(originalSends, [oldChoice]); XCTAssertEqual(replacementSends, [newChoice])
+        let replacementOperations = await replacement.operations()
+        XCTAssertEqual(replacementOperations, ["webProviderStart", "webProviderSend", "webProviderPoll"])
+        let issues = await server.shutdown()
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    func testCrossProviderSwitchRecoversSessionRetainedByPreviousTurnCleanup() async throws {
+        for (oldProvider, newProvider) in [("chatgpt", "gemini"), ("gemini", "claude"), ("claude", "chatgpt")] {
+            let oldChoice = WebsiteModelChoice(provider: oldProvider, key: "fixture-old", label: "Fixture Old")
+            let newChoice = WebsiteModelChoice(provider: newProvider, key: "fixture-new", label: "Fixture New")
+            let original = ChoiceWebModelTransport(cleanupFailsOnce: true)
+            let replacement = ChoiceWebModelTransport()
+            let server = WebModelServer()
+            await server.configureEmbeddedTransport(original)
+            _ = try await server.infer(choiceRequest(oldChoice), taskID: "retained")
+            let priorIssues = await server.finish(taskID: "retained")
+            XCTAssertEqual(priorIssues, [WebModelServer.Failure.cleanupFailed.localizedDescription])
+            await server.configureEmbeddedTransport(replacement)
+            _ = try await server.infer(choiceRequest(newChoice), taskID: "retained")
+            let cleanup = await original.cleanupTokens()
+            XCTAssertEqual(cleanup.count, 2); XCTAssertEqual(Set(cleanup).count, 1)
+            let sentChoices = await replacement.sentChoices()
+            XCTAssertEqual(sentChoices, [newChoice])
+            let originalOperations = await original.operations()
+            XCTAssertEqual(originalOperations, ["webProviderStart", "webProviderSend", "webProviderPoll",
+                                                "webProviderFinish", "webProviderFinish"])
+            let issues = await server.shutdown()
+            XCTAssertTrue(issues.isEmpty)
+        }
+    }
+
+    func testConcreteGeminiAcceptsExplicitSelectedModelIndicatorAsSelectionOnlyEvidence() async throws {
+        let choice = WebsiteModelChoice(provider: "gemini", key: "fixture-family", label: "Fixture Family")
+        let transport = ChoiceWebModelTransport(selectionSource: "selected_model_indicator")
+        let server = WebModelServer()
+        await server.configureEmbeddedTransport(transport)
+        let output = try await server.infer(choiceRequest(choice), taskID: "indicator")
+        XCTAssertTrue(String(decoding: output, as: UTF8.self).contains("selected_model_indicator"))
+        let evidence = await transport.completedEvidence()
+        XCTAssertEqual(evidence.verification, "website_selection")
+        XCTAssertFalse(evidence.hasResponse)
+        _ = await server.shutdown()
+    }
+
+    func testConcreteWebsiteChoiceRejectsWrongSelectionAtEveryAdmittedSnapshotWithoutReplay() async throws {
+        for provider in ["chatgpt", "gemini", "claude"] {
+            for point in ChoiceSnapshotPoint.allCases {
+                for mutation in [ChoiceEvidenceMutation.wrongSelectedKey, .wrongSelectedLabel] {
+                    let choice = WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
+                    let transport = ChoiceWebModelTransport(point: point, mutation: mutation)
+                    let server = WebModelServer()
+                    await server.configureEmbeddedTransport(transport)
+                    do {
+                        _ = try await server.infer(choiceRequest(choice), taskID: "mismatch")
+                        XCTFail("A different selected choice at \(point) must not admit a response")
+                    } catch {
+                        XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.modelMismatch.localizedDescription)
+                        XCTAssertFalse(error.localizedDescription.contains(ChoiceWebModelTransport.privateCanary))
+                    }
+                    let operations = await transport.operations()
+                    XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, point.beforeSend ? 0 : 1)
+                    XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
+                    let issues = await server.shutdown()
+                    XCTAssertTrue(issues.isEmpty)
+                }
+            }
+        }
+    }
+
+    func testConcreteWebsiteChoiceRequiresWellFormedSelectionProofAtEveryAdmittedSnapshot() async throws {
+        let choice = WebsiteModelChoice(provider: "gemini", key: "fixture-fast", label: "Fixture Fast")
+        for point in ChoiceSnapshotPoint.allCases {
+            for mutation in [ChoiceEvidenceMutation.missing, .invalidVerification, .malformedSelected] {
+                let transport = ChoiceWebModelTransport(point: point, mutation: mutation)
+                let server = WebModelServer()
+                await server.configureEmbeddedTransport(transport)
+                do {
+                    _ = try await server.infer(choiceRequest(choice), taskID: "unverified")
+                    XCTFail("Missing or malformed model proof at \(point) must fail closed")
+                } catch {
+                    XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.modelUnverified.localizedDescription)
+                    XCTAssertFalse(error.localizedDescription.contains(ChoiceWebModelTransport.privateCanary))
+                }
+                let operations = await transport.operations()
+                XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, point.beforeSend ? 0 : 1)
+                let issues = await server.shutdown()
+                XCTAssertTrue(issues.isEmpty)
+            }
+        }
+    }
+
+    func testContradictoryResponseModelCannotBeAdmittedEvenWhenPickerStillMatches() async throws {
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let choice = WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
+            let transport = ChoiceWebModelTransport(point: .complete, mutation: .wrongResponse)
+            let server = WebModelServer()
+            await server.configureEmbeddedTransport(transport)
+            do {
+                _ = try await server.infer(choiceRequest(choice), taskID: "fallback")
+                XCTFail("A response reported as another model cannot inherit the matching picker selection")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.modelMismatch.localizedDescription)
+            }
+            let operations = await transport.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            _ = await server.shutdown()
+        }
+    }
+
+    func testMalformedResponseModelEvidenceFailsClosedWithoutRetryingTheReply() async throws {
+        let choice = WebsiteModelChoice(provider: "claude", key: "fixture-fast", label: "Fixture Fast")
+        let transport = ChoiceWebModelTransport(point: .complete, mutation: .malformedResponse)
+        let server = WebModelServer()
+        await server.configureEmbeddedTransport(transport)
+        do {
+            _ = try await server.infer(choiceRequest(choice), taskID: "response-proof")
+            XCTFail("Presence of malformed response evidence must not be treated as absence")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.modelUnverified.localizedDescription)
+            XCTAssertFalse(error.localizedDescription.contains(ChoiceWebModelTransport.privateCanary))
+        }
+        let operations = await transport.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+        _ = await server.shutdown()
+    }
+
+    func testSelectionOnlyProofAndMatchingResponseProofRemainDistinctSupportedCases() async throws {
+        for responseProof in [false, true] {
+            let choice = WebsiteModelChoice(provider: "chatgpt", key: "fixture-fast", label: "Fixture Fast")
+            let transport = ChoiceWebModelTransport(includeResponseProof: responseProof)
+            let server = WebModelServer()
+            await server.configureEmbeddedTransport(transport)
+            let output = try await server.infer(choiceRequest(choice), taskID: "proof-level")
+            XCTAssertTrue(String(decoding: output, as: UTF8.self).contains("response.completed"))
+            let evidence = await transport.completedEvidence()
+            XCTAssertEqual(evidence.verification, responseProof ? "response_reported" : "website_selection")
+            XCTAssertEqual(evidence.hasResponse, responseProof,
+                           "Selection-only support must not synthesize a response-reported model")
+            _ = await server.shutdown()
+        }
+    }
+
+    private func choiceRequest(_ choice: WebsiteModelChoice) throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "input": "Say OK", "tools": [], "stream": true])
+    }
+
     func testEmbeddedInferenceRecordsRevisionBeforeReadAndWaitsForChanges() async throws {
         let transport = EventWebModelTransport()
         let server = WebModelServer()
@@ -660,5 +929,131 @@ private actor FixtureWebModelTransport: WebModelTransport {
             }
         }
         return try JSONSerialization.data(withJSONObject: response)
+    }
+}
+
+private enum ChoiceSnapshotPoint: CaseIterable, Sendable {
+    case initialReady, readinessReady, sendRunning, responseRunning, complete
+
+    var beforeSend: Bool { self == .initialReady || self == .readinessReady }
+}
+
+private enum ChoiceEvidenceMutation: Sendable {
+    case missing, invalidVerification, malformedSelected
+    case wrongSelectedKey, wrongSelectedLabel, wrongResponse, malformedResponse
+}
+
+/// Exact-choice contract fixture. It records serialized requests independently
+/// of server routing and can contradict one individual admitted snapshot.
+private actor ChoiceWebModelTransport: WebModelTransport {
+    static let privateCanary = "PRIVATE_MODEL_PAGE_CANARY"
+    private struct Owned: Sendable {
+        let choice: WebsiteModelChoice
+        var submitted = false
+        var responseRunningRead = false
+    }
+
+    private let point: ChoiceSnapshotPoint?
+    private let mutation: ChoiceEvidenceMutation?
+    private let includeResponseProof: Bool
+    private let selectionSource: String?
+    private var cleanupFailsOnce: Bool
+    private var ledger: [String] = []
+    private var startRequests: [[String: String]] = []
+    private var orderedTokens: [String] = []
+    private var disposedTokens: [String] = []
+    private var submittedChoices: [WebsiteModelChoice] = []
+    private var sessions: [String: Owned] = [:]
+    private var finalEvidence: (verification: String?, hasResponse: Bool) = (nil, false)
+
+    init(point: ChoiceSnapshotPoint? = nil, mutation: ChoiceEvidenceMutation? = nil,
+         includeResponseProof: Bool = false, cleanupFailsOnce: Bool = false, selectionSource: String? = nil) {
+        self.point = point; self.mutation = mutation
+        self.includeResponseProof = includeResponseProof; self.cleanupFailsOnce = cleanupFailsOnce
+        self.selectionSource = selectionSource
+    }
+
+    func operations() -> [String] { ledger }
+    func starts() -> [[String: String]] { startRequests }
+    func createdTokens() -> [String] { orderedTokens }
+    func cleanupTokens() -> [String] { disposedTokens }
+    func sentChoices() -> [WebsiteModelChoice] { submittedChoices }
+    func completedEvidence() -> (verification: String?, hasResponse: Bool) { finalEvidence }
+
+    func request(operation: String, params: Data) throws -> Data {
+        ledger.append(operation)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+        let response: [String: Any]
+        if operation == "webProviderStart" {
+            startRequests.append(object)
+            let serialized = try XCTUnwrap(object["modelChoice"])
+            let choice = try XCTUnwrap(WebsiteModelChoice.parse(serialized))
+            XCTAssertEqual(choice.provider, object["provider"])
+            let token = UUID().uuidString
+            orderedTokens.append(token); sessions[token] = Owned(choice: choice)
+            if point == .readinessReady {
+                response = ["sessionToken": token, "state": "loading"]
+            } else {
+                response = snapshot(state: "ready", choice: choice, at: .initialReady)
+                    .merging(["sessionToken": token]) { _, value in value }
+            }
+        } else {
+            let token = try XCTUnwrap(object["sessionToken"])
+            var owned = try XCTUnwrap(sessions[token])
+            switch operation {
+            case "webProviderSend":
+                _ = try XCTUnwrap(object["prompt"])
+                submittedChoices.append(owned.choice)
+                owned.submitted = true; sessions[token] = owned
+                response = snapshot(state: "running", choice: owned.choice, at: .sendRunning)
+            case "webProviderPoll":
+                if !owned.submitted {
+                    response = snapshot(state: "ready", choice: owned.choice, at: .readinessReady)
+                } else if point == .responseRunning && !owned.responseRunningRead {
+                    owned.responseRunningRead = true; sessions[token] = owned
+                    response = snapshot(state: "running", choice: owned.choice, at: .responseRunning)
+                } else {
+                    response = snapshot(state: "complete", choice: owned.choice, at: .complete)
+                        .merging(["text": #"{"type":"message","text":"OK"}"#]) { _, value in value }
+                }
+            case "webProviderFinish", "webProviderCancel":
+                disposedTokens.append(token)
+                if cleanupFailsOnce {
+                    cleanupFailsOnce = false; response = ["cleanup": "failed"]
+                } else {
+                    sessions.removeValue(forKey: token); response = ["cleanup": "not_created"]
+                }
+            default: throw WebModelServer.Failure.invalidRequest
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: response)
+    }
+
+    private func snapshot(state: String, choice: WebsiteModelChoice, at current: ChoiceSnapshotPoint) -> [String: Any] {
+        let selected: [String: Any] = ["key": choice.key, "label": choice.label]
+        var evidence: [String: Any] = ["selected": selected, "verification": "website_selection"]
+        if let selectionSource { evidence["source"] = selectionSource }
+        if current == .complete && includeResponseProof {
+            evidence["response"] = selected.merging(["source": "response_label"]) { _, value in value }
+            evidence["verification"] = "response_reported"
+        }
+        if current == point, let mutation {
+            switch mutation {
+            case .missing: return ["state": state]
+            case .invalidVerification: evidence["verification"] = Self.privateCanary
+            case .malformedSelected: evidence["selected"] = ["key": choice.key, "label": 17]
+            case .wrongSelectedKey: evidence["selected"] = ["key": "fixture-careful", "label": choice.label]
+            case .wrongSelectedLabel: evidence["selected"] = ["key": choice.key, "label": Self.privateCanary]
+            case .wrongResponse:
+                evidence["response"] = ["key": "fixture-careful", "label": "Fixture Careful", "source": "response_label"]
+                evidence["verification"] = "response_reported"
+            case .malformedResponse:
+                evidence["response"] = ["key": choice.key, "label": choice.label, "source": Self.privateCanary]
+            }
+        }
+        if current == .complete {
+            finalEvidence = (evidence["verification"] as? String, evidence["response"] != nil)
+        }
+        return ["state": state, "modelEvidence": evidence]
     }
 }

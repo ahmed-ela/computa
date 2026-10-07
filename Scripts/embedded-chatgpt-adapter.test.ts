@@ -1,20 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { installObservedModelPicker } from "./embedded-provider-adapter-fixture";
+import { defineWebsiteModelChoiceTests } from "./embedded-model-choice-tests";
 
 const source = readFileSync(new URL("../Sources/Computa/Resources/BrowserModels/chatgpt.js", import.meta.url), "utf8");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const execute = new AsyncFunction("input", "document", "window", "location", "getComputedStyle", "MutationObserver", "setTimeout", "globalThis", "crypto", "HTMLTextAreaElement", source);
+const execute = new AsyncFunction("input", "document", "window", "location", "getComputedStyle", "MutationObserver", "setTimeout", "globalThis", "crypto", "HTMLTextAreaElement", "Date", source);
 const firstMarker = "23b7752b-6a64-4b88-b886-f0d0584ca9de";
 const markerLine = `Computa session marker: ${firstMarker}`;
 
 class Element {
   parentElement: Element | null = null;
   children: Element[] = [];
-  isConnected = true;
+  connected = true;
+  get isConnected(): boolean { return this.connected && (!this.parentElement || this.parentElement.isConnected); }
+  set isConnected(value: boolean) { this.connected = value; }
   disabled = false;
   clicks = 0;
   onClick?: () => void;
+  onDispatch?: (event: any) => void;
+  events: any[] = [];
   click() { this.clicks++; this.onClick?.(); }
+  dispatchEvent(event: any) { this.events.push(event); this.onDispatch?.(event); return true; }
   constructor(public tagName: string, public values: Record<string, string> = {}, public text = "") {}
   get nodeType() { return 1; }
   get childElementCount() { return this.children.length; }
@@ -24,7 +31,7 @@ class Element {
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(""); }
   get innerText() { return this.textContent; }
   getAttribute(name: string) { return this.values[name] ?? null; }
-  getClientRects() { return this.isConnected ? [{}] : []; }
+  getClientRects() { return this.isConnected && !this.closest('[hidden]') ? [{}] : []; }
   append(...children: Element[]) { children.forEach(child => { child.parentElement = this; this.children.push(child); }); }
   contains(node: Element | null): boolean { return node === this || !!node && this.children.some(child => child.contains(node)); }
   closest(selector: string): Element | null {
@@ -116,7 +123,15 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     constructor(public callback: (records: unknown[]) => void) { observers.push(this); }
     observe(_target: unknown, options: Record<string, unknown>) { this.options = options; }
   }
-  const window: Record<string, unknown> = { webkit: { messageHandlers: { computaChatGPTSignal: { postMessage: (value: unknown) => posted.push(value) } } } };
+  let frameID = 0;
+  const frames = new Map<number, (time: number) => void>();
+  const window: Record<string, unknown> = { webkit: { messageHandlers: { computaChatGPTSignal: { postMessage: (value: unknown) => posted.push(value) } } },
+    requestAnimationFrame: (callback: (time: number) => void) => {
+      const id = ++frameID; frames.set(id, callback);
+      queueMicrotask(() => { if (frames.delete(id)) callback(performance.now()); });
+      return id;
+    }, cancelAnimationFrame: (id: number) => { frames.delete(id); },
+    KeyboardEvent: class { constructor(public type: string, options: any) { Object.assign(this, options); } } };
   window.top = window;
   const document = { URL: "https://chatgpt.com/?temporary-chat=true", documentElement: html,
     querySelectorAll: (selector: string) => html.querySelectorAll(selector) };
@@ -128,8 +143,14 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
   }
   const ownerToken = "f33c8869-a5d3-4b9d-b29e-7b6f591a8e30";
   let nativeFingerprint: string | undefined;
+  let adapterClockOffset = 0;
   let digestHook: (() => void) | undefined;
-  return { posted, observers, location, document, world, body, temporary, composer, scheduledDelays, userBody, answer: outer,
+  return { posted, observers, location, document, world, window, body, temporary, composer, scheduledDelays, userBody, answer: outer,
+    advanceTime: (milliseconds: number) => { adapterClockOffset += milliseconds; },
+    appendUser: (prompt: string) => {
+      const root = new Element('ARTICLE', { 'data-turn': 'user', 'data-testid': 'conversation-turn-appended' });
+      root.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, prompt)); messages.append(root);
+    },
     onDigest: (hook: () => void) => { digestHook = hook; },
     inspect: async (overrides: Record<string, unknown> = {}, adopt = true) => {
       const result = await execute({ provider: "chatgpt", action: "inspect", expectedURL: document.URL,
@@ -142,7 +163,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
         const digest = await crypto.subtle.digest(algorithm, data);
         digestHook?.(); digestHook = undefined;
         return digest;
-      } } }, class TextArea extends Element {});
+      } } }, class TextArea extends Element {}, { now: () => Date.now() + adapterClockOffset });
       if (adopt && result.firstUserVerified) nativeFingerprint = result.firstUserFingerprint;
       return result;
     },
@@ -165,6 +186,11 @@ function observedChatGPTCodeBlock(f: ReturnType<typeof fixture>, raw: string, op
   Object.defineProperty(f.answer, "innerText", { get: () => "JSON\n" + raw });
   return { outer, wrapper, header, label, copy, wrap, pre, code, content };
 }
+
+defineWebsiteModelChoiceTests('chatgpt', (owned = false) => {
+  const f = fixture({ response: owned, ...(owned ? { userPrompt: 'Synthetic owned prompt' } : {}) });
+  return { ...f, run: (action: string, overrides: Record<string, unknown> = {}) => f.inspect({ ...overrides, action }) };
+}, Element);
 
 describe("embedded ChatGPT fixed adapter", () => {
   test("a sole fenced envelope preserves literal JSON escapes and code-block controls", async () => {

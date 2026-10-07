@@ -1,0 +1,1120 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { firstMarker, markerLine, installObservedModelPicker } from './embedded-provider-adapter-fixture';
+
+export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | 'claude', make: (owned?: boolean) => any, Node: any) {
+  const target = provider === 'chatgpt' ? 'GPT-5.5' : provider === 'gemini' ? '3.8 Flash' : 'Sonnet 4.6';
+  const initial = provider === 'chatgpt' ? 'GPT-5.6 Sol' : provider === 'gemini' ? '3.1 Pro' : 'Sonnet 5.5';
+  const choice = (label: string) => ({ key: label, label });
+  const setup = (owned = false, behavior: { genericHeader?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean;
+    geminiMenuitemMarkers?: boolean; escapeOnlyClose?: boolean; inlineFamilyPanel?: boolean; parentReturnAfterSelection?: boolean } = {}) => {
+    const f = make(owned); return { f, picker: installObservedModelPicker(f, provider, Node, behavior) };
+  };
+  const advance = async (f: any, action: string, overrides: Record<string, unknown> = {}) => {
+    let result: any;
+    for (let step = 0; step < 6; step++) {
+      result = await f.run(action, overrides);
+      if (!result.pending) return result;
+    }
+    return result;
+  };
+  const replaceFirstRoot = (f: any, originalRoot: any, originalBody: any) => {
+    let replacementBody: any;
+    const clone = (node: any): any => {
+      const copy = new Node(node.tagName, { ...node.values }, node.text);
+      if (node === originalBody) replacementBody = copy;
+      copy.append(...node.children.map(clone)); return copy;
+    };
+    const root = clone(originalRoot), parent = originalRoot.parentElement;
+    parent.children[parent.children.indexOf(originalRoot)] = root; root.parentElement = parent;
+    originalRoot.connected = false; originalRoot.parentElement = null;
+    return { root, body: replacementBody, parent };
+  };
+  const firstRoot = (f: any) => provider === 'chatgpt' ? f.userBody.parentElement : f.userRoot;
+  describe(`${provider} exact website model choices`, () => {
+    test('standalone adapter embeds the audited shared model-control source exactly', () => {
+      const helper = readFileSync(new URL('./embedded-model-choice-helper.js', import.meta.url), 'utf8');
+      const source = readFileSync(new URL(`../Sources/Computa/Resources/BrowserModels/${provider}.js`, import.meta.url), 'utf8');
+      expect(source.startsWith(helper + '\n')).toBe(true);
+    });
+
+    test('discovery exposes enabled family leaves and excludes descriptions, effort and upgrades', async () => {
+      const { f, picker } = setup();
+      const result = await advance(f, 'discoverModels');
+      const expected = provider === 'chatgpt' ? ['Latest', 'GPT-5.6 Sol', 'GPT-5.5']
+        : provider === 'gemini' ? ['3.5 Flash-Lite', '3.8 Flash', '3.1 Pro']
+          : ['Sonnet 5.5', 'Haiku 4.5', 'Sonnet 5', 'Sonnet 4.6'];
+      expect(result.modelChoices).toEqual(expected.map(choice));
+      expect(result.modelChoices.some((item: any) => /Medium|thinking|Upgrade|Leaving|answers|reasoning|help/.test(item.label))).toBe(false);
+      expect(picker.options.reduce((sum: number, option: any) => sum + option.clicks, 0)).toBe(0);
+      expect(picker.trigger.clicks).toBeLessThanOrEqual(2);
+      if (picker.secondary) expect(picker.secondary.clicks).toBe(1);
+      expect((await f.run('discoverModels')).modelChoices).toEqual(result.modelChoices);
+      expect(picker.trigger.clicks).toBeLessThanOrEqual(2);
+    });
+
+    test('one exact choice is clicked once and reinspection confirms its website label', async () => {
+      const { f, picker } = setup();
+      const result = await advance(f, 'selectModel', { modelChoice: choice(target) });
+      expect(result).toMatchObject({ selected: true, modelEvidence: { selected: choice(target), verification: 'website_selection' } });
+      const selected = picker.options.find((option: any) => option.children[0].text === target);
+      expect(selected.clicks).toBe(1);
+      expect((await f.run('verifyModel', { expectedModelChoice: choice(target) })).modelEvidence.selected).toEqual(choice(target));
+      expect(await f.run('selectModel', { modelChoice: choice(target) })).toMatchObject({ selected: true });
+      expect(selected.clicks).toBe(1);
+      expect(picker.options.reduce((sum: number, option: any) => sum + option.clicks, 0)).toBe(1);
+    });
+
+    test('picker hydration waits for events without clicking or treating composer readiness as model proof', async () => {
+      const { f, picker } = setup(); picker.trigger.connected = false;
+      for (let step = 0; step < 3; step++) {
+        const result = await f.run('discoverModels');
+        expect(result).toMatchObject({ pending: true, modelDiagnostic: { triggerCount: 0, triggerCandidates: [] } });
+      }
+      expect(picker.trigger.clicks).toBe(0);
+      picker.trigger.connected = true;
+      expect((await advance(f, 'discoverModels')).modelChoices.length).toBeGreaterThan(0);
+      expect(picker.trigger.clicks).toBeLessThanOrEqual(2);
+    });
+
+    test('successful discovery retains bounded menu-shape evidence before it closes the picker', async () => {
+      const { f, picker } = setup();
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelDiagnostic.triggerCount).toBe(1);
+      expect(result.modelDiagnostic.associatedMenus.every((menu: any) => menu.visible)).toBe(true);
+      expect(result.modelDiagnostic.candidates.some((candidate: any) => candidate.primaryFamily === initial)).toBe(true);
+      expect(result.modelDiagnostic.rawFamilySummary.some((candidate: any) => candidate.primaryFamily === initial)).toBe(true);
+      expect(JSON.stringify(result.modelDiagnostic).length).toBeLessThanOrEqual(8192);
+      expect(picker.menu.values.hidden).toBe('');
+    });
+
+    if (provider === 'gemini') test('Gemini mode triggers support the observed label without an optional brand', async () => {
+      for (const label of ['Open mode picker, currently Pro', 'Open mode picker, currently Flash',
+        'Open mode picker, currently 3.1 Pro', 'Open mode picker, currently Gemini Pro']) {
+        const { f, picker } = setup(); picker.trigger.values['aria-label'] = label;
+        const result = await advance(f, 'discoverModels');
+        expect(result.modelChoices).toEqual(['3.5 Flash-Lite', '3.8 Flash', '3.1 Pro'].map(choice));
+        expect(result.modelDiagnostic.triggerCount).toBe(1);
+        expect(result.modelDiagnostic.triggerCandidates[0].safeLabel).toBe(label);
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      }
+    });
+
+    if (provider === 'claude') test('the observed Haiku Extended effort suffix verifies the same family and is not a model choice', async () => {
+      const { f, picker } = setup(); picker.selected('Haiku 4.5');
+      picker.trigger.values['aria-label'] = 'Model: Haiku 4.5 Extended';
+      expect((await f.run('verifyModel', { expectedModelChoice: choice('Haiku 4.5') })).modelEvidence.selected).toEqual(choice('Haiku 4.5'));
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelDiagnostic.triggerCandidates[0].safeLabel).toBe('Model: Haiku 4.5 Extended');
+      expect(result.modelChoices.some((model: any) => model.label.includes('Extended'))).toBe(false);
+      picker.trigger.values['aria-label'] = 'Model: Haiku 4.5 PRIVATE EFFORT';
+      expect((await f.run('verifyModel', { expectedModelChoice: choice('Haiku 4.5') })).error).toBe('model_unverified');
+    });
+
+    if (provider === 'gemini') {
+      test('observed menuitem Selected icons and selected classes prove Gemini choices without radio attributes', async () => {
+        const discovery = setup(false, { genericHeader: true, unmountMenus: true, geminiMenuitemMarkers: true });
+        expect((await advance(discovery.f, 'discoverModels')).modelChoices)
+          .toEqual(['3.5 Flash-Lite', '3.8 Flash', '3.1 Pro'].map(choice));
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, geminiMenuitemMarkers: true });
+        expect(await advance(f, 'selectModel', { modelChoice: choice(target) })).toMatchObject({ selected: true,
+          modelEvidence: { selected: choice(target), source: 'selected_model_indicator', verification: 'website_selection' } });
+        const selected = picker.options.find((option: any) => option.children[0].text === target);
+        expect(selected.clicks).toBe(1);
+        expect((await f.run('verifyModel', { expectedModelChoice: choice(target) })).modelEvidence.source).toBe('selected_model_indicator');
+        picker.selected(initial);
+        expect((await f.run('verifyModel', { expectedModelChoice: choice(target) })).error).toBe('model_mismatch');
+        expect(selected.clicks).toBe(1);
+      });
+
+      test('Gemini active and focused rows never override the separate Selected marker', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, geminiMenuitemMarkers: true });
+        picker.options[0].values.class = 'ng-star-inserted active focused';
+        expect((await f.run('verifyModel', { expectedModelChoice: choice(initial) })).modelEvidence)
+          .toMatchObject({ selected: choice(initial), source: 'selected_model_indicator' });
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      });
+
+      test('Gemini missing, duplicate, hidden and contradictory Selected indicators fail closed', async () => {
+        for (const change of [
+          (p: any, selected: any, marker: any) => { selected.children = selected.children.filter((node: any) => node !== marker); },
+          (p: any, selected: any, marker: any) => { marker.values.hidden = ''; },
+          (p: any, selected: any, marker: any) => { marker.values['aria-hidden'] = 'true'; },
+          (p: any, selected: any) => { selected.append(new Node('GEM-ICON', { 'aria-label': 'Selected' })); },
+          (p: any, selected: any) => { selected.values.class = 'ng-star-inserted focused'; },
+          (p: any, selected: any) => { selected.values['aria-checked'] = 'false'; },
+          (p: any, selected: any) => { selected.values['aria-selected'] = 'true'; },
+          (p: any) => { p.options[0].values.class = 'selected'; p.options[0].append(new Node('GEM-ICON', { 'aria-label': 'Selected' })); },
+          (p: any) => { p.options[0].append(new Node('GEM-ICON', { 'aria-label': 'Selected' })); },
+          (p: any, selected: any) => { selected.children[0].text = 'Unknown family'; },
+        ]) {
+          const { f, picker } = setup(false, { genericHeader: true, geminiMenuitemMarkers: true }); picker.open();
+          const selected = picker.options.find((option: any) => option.children[0].text === initial);
+          const marker = selected.children.find((node: any) => node.values['aria-label'] === 'Selected');
+          change(picker, selected, marker);
+          expect((await f.run('verifyModel', { expectedModelChoice: choice(initial) })).error).toBe('model_unverified');
+          expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+        }
+      });
+    }
+
+    if (provider === 'claude') test('nested navigation labels survive decorative SVG content but need their own popup association', async () => {
+      const { f, picker } = setup();
+      const name = provider === 'chatgpt' ? 'Select model' : 'More models';
+      delete picker.secondary.values['aria-label']; picker.secondary.values.role = 'menuitem';
+      picker.secondary.append(new Node('SPAN', {}, name), new Node('SVG', {}, 'Decorative arrow text'));
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelChoices.some((model: any) => model.label === target)).toBe(true);
+      expect(picker.secondary.clicks).toBe(1);
+      const ambiguous = setup(); ambiguous.picker.open();
+      const second = new Node('DIV', { role: 'menuitem', 'aria-haspopup': 'menu' }); second.append(new Node('SPAN', {}, name));
+      ambiguous.picker.menu.append(second);
+      expect((await ambiguous.f.run('discoverModels')).error).toBe('model_unverified');
+      expect(second.clicks).toBe(0); expect(ambiguous.picker.secondary.clicks).toBe(0);
+      const detached = setup(); detached.picker.open();
+      delete detached.picker.secondary.values['aria-haspopup'];
+      expect(((await advance(detached.f, 'discoverModels')).modelChoices || []).some((model: any) => model.label === target)).toBe(false);
+      expect(detached.picker.secondary.clicks).toBe(0);
+    });
+
+    test('diagnostic trigger labels expose only finite provider mode grammar', async () => {
+      const { f, picker } = setup();
+      const prefix = provider === 'chatgpt' ? 'Select ChatGPT model ' : provider === 'gemini' ? 'Open mode picker, currently ' : 'Model: ';
+      picker.trigger.values['aria-label'] = prefix + 'PRIVATE ACCOUNT SENTINEL';
+      let result = await f.run('modelDiagnostic');
+      expect(result.modelDiagnostic.triggerCount).toBe(0);
+      expect(result.modelDiagnostic.triggerCandidates[0].safeLabel).toBe(null);
+      expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
+      picker.trigger.values['aria-label'] = provider === 'chatgpt' ? 'Select ChatGPT model ' + '0'.repeat(10000)
+        : provider === 'gemini' ? 'Open mode picker, currently ' + '0'.repeat(10000) + ' Pro' : 'Model: Sonnet ' + '0'.repeat(10000);
+      result = await f.run('modelDiagnostic');
+      expect(result.modelDiagnostic.triggerCount).toBe(0);
+      expect(result.modelDiagnostic.triggerCandidates[0].safeLabel).toBe(null);
+      expect(JSON.stringify(result.modelDiagnostic).length).toBeLessThanOrEqual(8192);
+      expect(picker.trigger.clicks).toBe(0);
+    });
+
+    test('raw option diagnostics recognize nested family containers without granting selection authority', async () => {
+      const { f, picker } = setup(); picker.open();
+      const row = new Node('DIV', { role: 'menuitem', 'data-state': 'checked', 'aria-selected': 'true' });
+      const label = new Node('DIV');
+      const split = Math.floor(target.length / 2);
+      label.append(new Node('SPAN', {}, target.slice(0, split)), new Node('SPAN', {}, target.slice(split)));
+      const marker = new Node('SVG', { 'aria-label': 'Selected', 'data-account-id': 'PRIVATE ACCOUNT' });
+      row.append(label, marker, new Node('SPAN', {}, 'PRIVATE DESCRIPTION'));
+      picker.menu.children.forEach((child: any) => { child.connected = false; });
+      picker.menu.children = []; picker.menu.text = ''; picker.menu.append(row);
+      if (picker.nested) picker.nested.values.hidden = '';
+      const result = await f.run('modelDiagnostic');
+      expect(result.modelDiagnostic.rawOptionCount).toBe(1);
+      expect(result.modelDiagnostic.rawOptions[0]).toMatchObject({ role: 'menuitem', primaryFamily: null,
+        checkedAttribute: null, dataState: 'checked', recognizedContainers: [{ family: target, childElementCount: 2 }],
+        selectedMarkers: [{ tag: 'svg', kind: 'selected_label' }] });
+      expect(result.modelDiagnostic.rawFamilySummary).toEqual([{ role: 'menuitem', primaryFamily: null,
+        recognizedFamily: target, visible: true, enabled: true, checkedAttribute: null, dataState: 'checked', selectedMarkerCount: 1 }]);
+      expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
+      expect(['model_unavailable', 'model_unverified']).toContain((await f.run('selectModel', { modelChoice: choice(target) })).error);
+      expect(row.clicks).toBe(0);
+    });
+
+    test('a Selected icon and presentation data cannot prove a generic-header family choice', async () => {
+      const { f, picker } = setup(false, { genericHeader: true }); picker.open();
+      for (const option of picker.options) delete option.values['aria-checked'];
+      const other = picker.options.find((option: any) => option.children[0].text === target);
+      other.values['data-state'] = 'checked'; other.append(new Node('SVG', { 'aria-label': 'Selected' }));
+      expect((await f.run('verifyModel', { expectedModelChoice: choice(target) })).error).toBe('model_unverified');
+      expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+    });
+
+    test('an already selected choice needs no click and a later drift is rejected', async () => {
+      const { f, picker } = setup();
+      expect(await f.run('selectModel', { modelChoice: choice(initial) })).toMatchObject({ selected: true });
+      expect(picker.trigger.clicks).toBe(0);
+      picker.selected(target);
+      expect(await f.run('selectModel', { modelChoice: choice(initial) })).toMatchObject({ error: 'model_mismatch' });
+      expect(picker.trigger.clicks).toBe(0);
+    });
+
+    test('strict model drift blocks every editor action before any click or insertion', async () => {
+      const { f, picker } = setup();
+      for (const action of ['prepare', 'insert', 'sendReady', 'submit', 'inspect', 'verifyModel']) {
+        const result = await f.run(action, { expectedModelChoice: choice(target), prompt: 'PRIVATE PROMPT SENTINEL' });
+        expect(result).toMatchObject({ error: 'model_mismatch', modelEvidence: { selected: choice(initial) } });
+        expect(result.text).toBeUndefined();
+        expect(JSON.stringify(result)).not.toContain('PRIVATE PROMPT SENTINEL');
+      }
+      expect(picker.trigger.clicks).toBe(0);
+      expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      if (f.send) expect(f.send.clicks).toBe(0);
+      expect(f.composer.textContent).toBe('');
+    });
+
+    test('missing, hidden, inert or message-authored picker cannot verify exact models', async () => {
+      for (const change of [
+        (f: any, p: any) => { p.trigger.connected = false; },
+        (f: any, p: any) => { p.trigger.values.hidden = ''; },
+        (f: any, p: any) => { p.trigger.values.inert = ''; },
+        (f: any, p: any) => { p.trigger.values['aria-hidden'] = 'true'; },
+        (f: any, p: any) => { f.body.children = f.body.children.filter((node: any) => node !== p.trigger); f.answer.append(p.trigger); },
+      ]) {
+        const { f, picker } = setup(true); change(f, picker);
+        const result = await f.run('inspect', { expectedModelChoice: choice(initial) });
+        expect(result).toMatchObject({ error: 'model_unverified' });
+        expect(result.text).toBeUndefined(); expect(picker.trigger.clicks).toBe(0);
+      }
+    });
+
+    test('duplicate visible pickers and conflicting checked model evidence fail closed', async () => {
+      const first = setup();
+      installObservedModelPicker(first.f, provider, Node);
+      expect(await first.f.run('inspect', { expectedModelChoice: choice(initial) })).toMatchObject({ error: 'model_unverified' });
+      const { f, picker } = setup(); picker.open();
+      picker.options.forEach((option: any) => { option.values['aria-checked'] = option.children[0].text === target ? 'true' : 'false'; });
+      expect(await f.run('inspect', { expectedModelChoice: choice(initial) })).toMatchObject({ error: 'model_unverified' });
+      expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      picker.options.forEach((option: any) => { option.values['aria-checked'] = 'true'; });
+      expect((await f.run('verifyModel', { expectedModelChoice: choice(initial) })).error).toBe('model_unverified');
+    });
+
+    test('focus and presentation selection never substitute for the checked model radio', async () => {
+      const { f, picker } = setup(); picker.open();
+      const other = picker.options.find((option: any) => option.children[0].text === target);
+      other.values.class = 'selected focused'; other.values['data-state'] = 'checked'; other.values['aria-current'] = 'true';
+      other.values['aria-selected'] = 'true';
+      const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+      expect(result.modelEvidence.selected).toEqual(choice(initial));
+      expect(other.clicks).toBe(0);
+    });
+
+    test('lost primary and target-choice acknowledgments never replay any clicked stage', async () => {
+      const primary = setup();
+      primary.picker.trigger.onClick = () => { throw new Error('lost primary acknowledgment'); };
+      await expect(primary.f.run('selectModel', { modelChoice: choice(target) })).rejects.toThrow('lost primary');
+      for (let i = 0; i < 3; i++) expect(await primary.f.run('selectModel', { modelChoice: choice(target) })).toMatchObject({ pending: true });
+      expect(primary.picker.trigger.clicks).toBe(1);
+      const { f, picker } = setup(); picker.open();
+      const selected = picker.options.find((option: any) => option.children[0].text === target);
+      selected.onClick = () => { throw new Error('lost choice acknowledgment'); };
+      await expect(f.run('selectModel', { modelChoice: choice(target) })).rejects.toThrow('lost choice');
+      for (let i = 0; i < 3; i++) {
+        const observing = f.run('selectModel', { modelChoice: choice(target) });
+        if (provider === 'chatgpt') for (let tick = 0; tick < 8; tick++) { await Promise.resolve(); f.flush(); }
+        const rejected = await observing;
+        expect(provider === 'chatgpt' ? ['model_unverified', 'model_mismatch'] : ['model_mismatch']).toContain(rejected.error);
+        expect(rejected.selected).toBeUndefined();
+      }
+      expect(selected.clicks).toBe(1);
+      expect(picker.options.reduce((sum: number, option: any) => sum + option.clicks, 0)).toBe(1);
+    });
+
+    test('unavailable, disabled and duplicate exact choices are never clicked', async () => {
+      for (const change of [
+        (p: any) => { p.options.find((option: any) => option.children[0].text === target).disabled = true; },
+        (p: any) => { p.options.find((option: any) => option.children[0].text === target).values['aria-disabled'] = 'true'; },
+        (p: any) => { p.options.find((option: any) => option.children[0].text === target).append(new Node('SPAN', {}, 'Upgrade')); },
+        (p: any) => { p.add(p.nested || p.menu, target); },
+      ]) {
+        const { f, picker } = setup(); picker.open(); change(picker);
+        const result = await f.run('selectModel', { modelChoice: choice(target) });
+        expect(['model_unavailable', 'model_unverified']).toContain(result.error);
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      }
+    });
+
+    test('unknown or malformed native choices cannot be coerced from label-only matches', async () => {
+      for (const malformed of [null, { key: initial }, { key: initial, label: target }, { key: initial, label: initial, extra: true },
+        { key: ' ' + initial, label: initial }, { key: initial, label: initial + ' ' }, { key: initial, label: '' },
+        { key: 'x'.repeat(161), label: initial }]) {
+        const { f, picker } = setup();
+        const result = await advance(f, 'selectModel', { modelChoice: malformed });
+        expect(['model_unverified', 'model_unavailable']).toContain(result.error);
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      }
+    });
+
+    test('unassociated menus provide structure diagnostics but never model choice authority', async () => {
+      const { f, picker } = setup();
+      delete picker.trigger.values['aria-controls']; delete picker.menu.values['aria-labelledby']; picker.open();
+      const result = await f.run('discoverModels');
+      expect(result.modelChoices).toBeUndefined();
+      expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      const next = await f.run('discoverModels');
+      expect(next).toMatchObject({ error: 'model_unverified' });
+      expect(next.modelDiagnostic.unassociatedMenus.length).toBeGreaterThan(0);
+      expect(next.modelDiagnostic.unassociatedMenus.every((menu: any) => menu.primaryFamily === null)).toBe(true);
+    });
+
+    test('response prose cannot grant attribution and ordinary inspections never reopen pickers', async () => {
+      const { f, picker } = setup(true);
+      f.answer.append(new Node('SPAN', {}, 'I am ' + target));
+      for (let i = 0; i < 3; i++) {
+        const result = await f.run('inspect', { expectedModelChoice: choice(initial) });
+        expect(result.modelEvidence).toMatchObject({ selected: choice(initial), verification: 'website_selection' });
+        expect(result.modelEvidence.response).toBeUndefined();
+        expect(result.modelEvidence.source).toBe('model_picker_label');
+      }
+      expect(picker.trigger.clicks).toBe(0);
+    });
+
+    test('a digest yield cannot admit a response after the website model changed', async () => {
+      const { f, picker } = setup(true);
+      f.onDigest(() => picker.selected(target));
+      expect(await f.run('inspect', { expectedModelChoice: choice(initial) })).toMatchObject({ error: 'model_mismatch' });
+      expect(picker.trigger.clicks).toBe(0);
+    });
+
+    test('the final concrete verification must observe current temporary mode after its picker await', async () => {
+      const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+      const click = picker.trigger.onClick; let opens = 0;
+      picker.trigger.onClick = () => {
+        const opening = picker.menu.values.hidden !== undefined; click();
+        if (opening && ++opens === 2) {
+          if (provider === 'chatgpt') f.temporary.connected = false;
+          else { f.badge.connected = false; f.exit.connected = false; }
+        }
+      };
+      const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+      expect(result.error).toBe('temporary_mode_unverified'); expect(result.modelEvidence).toBeUndefined();
+      expect(opens).toBe(2); expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      expect(f.composer.textContent).toBe(''); if (f.send) expect(f.send.clicks).toBe(0);
+    });
+
+    test('final concrete verification accepts mode controls hidden only by the associated open modal', async () => {
+      const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+      const modes = provider === 'chatgpt' ? [f.temporary] : [f.header, f.exit];
+      const background = new Node('DIV'); f.body.children = f.body.children.filter((node: any) => !modes.includes(node));
+      background.append(...modes); f.body.append(background);
+      const click = picker.trigger.onClick; let opens = 0;
+      picker.trigger.onClick = () => {
+        const opening = picker.menu.values.hidden !== undefined; click();
+        if (opening) { opens++; background.values['aria-hidden'] = 'true'; }
+        else delete background.values['aria-hidden'];
+      };
+      if (provider === 'chatgpt') {
+        for (const menu of [picker.menu, picker.nested].filter(Boolean)) {
+          const escape = menu.onDispatch;
+          menu.onDispatch = (event: any) => { escape(event); delete background.values['aria-hidden']; };
+        }
+      }
+      const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+      expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(choice(initial));
+      expect(opens).toBe(2); expect(background.values['aria-hidden']).toBeUndefined();
+      expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      if (f.send) expect(f.send.clicks).toBe(0);
+    });
+
+    test('first acknowledged bubbles during either fresh model read discard only the read observation', async () => {
+      for (const action of ['inspect', 'verifyModel']) for (const appendOnOpen of [1, 2]) {
+        const { f, picker } = setup(false, { genericHeader: true });
+        const prompt = 'Synthetic pending first\n\n' + markerLine;
+        Object.assign(f.world, { __computaModelFirstSubmitted: true, __computaModelFirstMarker: firstMarker,
+          __computaModelFirstPrompt: prompt, __computaModelLastSubmissionCount: 0 });
+        const click = picker.trigger.onClick; let opens = 0, appended = false;
+        picker.trigger.onClick = () => {
+          const opening = picker.menu.values.hidden !== undefined; click();
+          if (opening && ++opens === appendOnOpen) { appended = true; f.appendUser(prompt); }
+        };
+        const discarded = await f.run(action, { expectedUserCounts: [0, 1], expectedModelChoice: choice(initial) });
+        expect(discarded).toEqual({ error: 'acknowledged_user_append', detail: 'readonly_model_observation' });
+        expect(appended).toBe(true); expect(f.world.__computaModelFirstProof).toBeUndefined();
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+        expect((await f.run('inspect', { expectedUserCounts: [0, 1], expectedModelChoice: choice(initial) })).firstUserVerified).toBe(true);
+        if (f.send) expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    test('acknowledged continuation bubbles during either model read retain exact first-message pins', async () => {
+      for (const action of ['inspect', 'verifyModel']) for (const appendOnOpen of [1, 2]) {
+        const { f, picker } = setup(true, { genericHeader: true });
+        const first = await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        const pin = f.world.__computaModelFirstProof;
+        f.world.__computaModelLastSubmissionCount = 1;
+        const click = picker.trigger.onClick; let opens = 0;
+        picker.trigger.onClick = () => {
+          const opening = picker.menu.values.hidden !== undefined; click();
+          if (opening && ++opens === appendOnOpen) f.appendUser('Synthetic acknowledged continuation');
+        };
+        expect(await f.run(action, { expectedUserCounts: [1, 2], expectedModelChoice: choice(initial) }))
+          .toEqual({ error: 'acknowledged_user_append', detail: 'readonly_model_observation' });
+        expect(f.world.__computaModelFirstProof).toBe(pin);
+        const fresh = await f.run('inspect', { expectedUserCounts: [1, 2], expectedModelChoice: choice(initial) });
+        expect(fresh.firstUserFingerprint).toBe(first.firstUserFingerprint); expect(fresh.firstUserVerified).toBe(true);
+        if (f.send) expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    test('digest-time acknowledged appends keep the same exact model-read constraints', async () => {
+      for (const foreignMarker of [false, true]) {
+        const { f } = setup(true);
+        await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        f.world.__computaModelLastSubmissionCount = 1;
+        f.onDigest(() => {
+          f.appendUser('Synthetic digest continuation');
+          if (foreignMarker) f.world.__computaModelFirstMarker = '00000000-0000-0000-0000-000000000000';
+        });
+        const result = await f.run('inspect', { expectedUserCounts: [1, 2], expectedModelChoice: choice(initial) });
+        if (foreignMarker) expect(result.error).toBe('conversation_changed');
+        else expect(result).toEqual({ error: 'acknowledged_user_append', detail: 'readonly_model_observation' });
+      }
+    });
+
+    test('an exact disconnected first-root replacement during either model read is discarded for a fresh pinned inspect', async () => {
+      for (const action of ['inspect', 'verifyModel']) for (const replaceOnOpen of [1, 2]) {
+        const { f, picker } = setup(true, { genericHeader: true });
+        const first = await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        const originalRoot = firstRoot(f), originalBody = f.userBody, pin = f.world.__computaModelFirstProof;
+        const click = picker.trigger.onClick; let opens = 0;
+        picker.trigger.onClick = () => {
+          const opening = picker.menu.values.hidden !== undefined; click();
+          if (opening && ++opens === replaceOnOpen) replaceFirstRoot(f, originalRoot, originalBody);
+        };
+        expect(await f.run(action, { expectedUserCounts: [1], expectedModelChoice: choice(initial) }))
+          .toEqual({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+        expect(originalRoot.isConnected).toBe(false); expect(originalBody.isConnected).toBe(false);
+        expect(f.world.__computaModelFirstProof).toBe(pin);
+        const fresh = await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        expect(fresh.firstUserVerified).toBe(true); expect(fresh.firstUserFingerprint).toBe(first.firstUserFingerprint);
+        if (f.send) expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    test('replacement retry requires disconnected exact scoped bytes, marker, count, owner, pins and temporary state', async () => {
+      for (const change of [
+        (f: any, oldRoot: any, pair: any) => { pair.body.text += ' Changed payload'; },
+        (f: any, oldRoot: any, pair: any) => { pair.body.text = pair.body.text.replace(firstMarker, '00000000-0000-0000-0000-000000000000'); },
+        (f: any) => { f.world.__computaModelFirstProof.fingerprint = '0'.repeat(64); },
+        (f: any) => { f.world.__computaModelFirstMarker = '00000000-0000-0000-0000-000000000000'; },
+        (f: any) => { f.world.__computaModelOwner = 'foreign'; },
+        (f: any) => { f.document.URL += '&changed=1'; },
+        (f: any) => { if (provider === 'chatgpt') f.temporary.connected = false; else f.temporary(false); },
+        (f: any) => { f.appendUser('Unexpected count append'); },
+        (f: any, oldRoot: any) => { oldRoot.connected = true; oldRoot.values = {}; oldRoot.tagName = 'SECTION'; f.body.append(oldRoot); },
+        ...(provider === 'claude' ? [(f: any, oldRoot: any, pair: any) => { pair.parent.values.id = 'different-provider-identity'; }] : []),
+      ]) {
+        const { f, picker } = setup(true, { genericHeader: true });
+        await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        const root = firstRoot(f), body = f.userBody, click = picker.trigger.onClick; let replaced = false;
+        picker.trigger.onClick = () => {
+          const opening = picker.menu.values.hidden !== undefined; click();
+          if (opening && !replaced) { replaced = true; const pair = replaceFirstRoot(f, root, body); change(f, root, pair); }
+        };
+        const result = await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        expect(result.error).toBeDefined(); expect(result.error).not.toBe('first_user_observation_replaced');
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+        if (f.send) expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    test('a second replacement during replacement SHA is rejected and every editor action remains strict', async () => {
+      for (const action of ['inspect', 'prepare', 'insert', 'sendReady', 'submit']) {
+        const { f, picker } = setup(true, { genericHeader: true });
+        await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        const root = firstRoot(f), body = f.userBody, click = picker.trigger.onClick; let replaced = false;
+        picker.trigger.onClick = () => {
+          const opening = picker.menu.values.hidden !== undefined; click();
+          if (opening && !replaced) {
+            replaced = true; const pair = replaceFirstRoot(f, root, body);
+            if (action === 'inspect') f.onDigest(() => replaceFirstRoot(f, pair.root, pair.body));
+          }
+        };
+        const result = await f.run(action, { expectedUserCounts: [1], expectedModelChoice: choice(initial), prompt: 'PRIVATE INSERT' });
+        expect(result.error).toBe('conversation_changed'); expect(result.error).not.toBe('first_user_observation_replaced');
+        expect(f.composer.textContent).toBe(''); if (f.send) expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    test('changed bodies, foreign markers, unexpected counts and unclaimed appends never get read retry authority', async () => {
+      for (const change of [
+        (f: any, body: any) => { body.text += ' Changed first body'; },
+        (f: any) => { f.world.__computaModelFirstMarker = '00000000-0000-0000-0000-000000000000'; },
+        (f: any) => { delete f.world.__computaModelLastSubmissionCount; },
+        (f: any) => { f.appendUser('Unexpected second append'); },
+        (f: any) => { f.world.__computaModelOwner = 'foreign'; },
+      ]) {
+        const { f, picker } = setup(true, { genericHeader: true });
+        await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        const body = f.userBody; f.world.__computaModelLastSubmissionCount = 1;
+        const click = picker.trigger.onClick; let appended = false;
+        picker.trigger.onClick = () => {
+          const opening = picker.menu.values.hidden !== undefined; click();
+          if (opening && !appended) { appended = true; f.appendUser('Synthetic continuation'); change(f, body); }
+        };
+        const rejected = await f.run('inspect', { expectedUserCounts: [1, 2], expectedModelChoice: choice(initial) });
+        expect(rejected.error).not.toBe('acknowledged_user_append'); expect(rejected.error).toBeDefined();
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+        if (f.send) expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    test('acknowledged appends during model reads never authorize an editor mutation', async () => {
+      for (const action of ['prepare', 'insert', 'sendReady', 'submit']) {
+        const { f, picker } = setup(true, { genericHeader: true });
+        await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        f.world.__computaModelLastSubmissionCount = 1;
+        const click = picker.trigger.onClick; let appended = false;
+        picker.trigger.onClick = () => {
+          const opening = picker.menu.values.hidden !== undefined; click();
+          if (opening && !appended) { appended = true; f.appendUser('Synthetic continuation'); }
+        };
+        const rejected = await f.run(action, { expectedUserCounts: [1, 2], expectedModelChoice: choice(initial), prompt: 'PRIVATE INSERT SENTINEL' });
+        expect(rejected.error).toBe('conversation_changed'); expect(rejected.error).not.toBe('acknowledged_user_append');
+        expect(f.composer.textContent).toBe('');
+        if (f.send) expect(f.send.clicks).toBe(0);
+      }
+    });
+
+    if (provider === 'claude') test('Claude first-user diagnostics distinguish model-read body drift without private text', async () => {
+      const { f, picker } = setup(true, { genericHeader: true });
+      await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+      const body = f.userBody, click = picker.trigger.onClick; let changed = false;
+      picker.trigger.onClick = () => { click(); if (!changed) { changed = true; body.text += ' PRIVATE BODY CHANGE'; } };
+      const result = await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+      expect(JSON.parse(result.debugStructure)).toMatchObject({ kind: 'first_user_structure', provider: 'claude',
+        root: { tag: 'div', classes: [] }, body: { tag: 'div', classes: [] }, controlDescendants: 0,
+        snapshot: { rootSame: true, bodySame: true, bodyConnected: true, textSame: false, identitySame: true, countSame: true,
+          urlSame: true, originSame: true, ownerSame: true } });
+      expect(Number.isInteger(JSON.parse(result.debugStructure).lineCount)).toBe(true);
+      expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
+      expect(result.debugStructure.length).toBeLessThanOrEqual(8192);
+    });
+
+    test('generic closed headers freshly read checked family radios after portal unmount', async () => {
+      const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+      const result = await advance(f, 'selectModel', { modelChoice: choice(target) });
+      expect(result).toMatchObject({ selected: true, modelEvidence: { selected: choice(target), source: 'checked_model_option' } });
+      expect(picker.menu.isConnected).toBe(false);
+      const selected = picker.options.find((option: any) => option.children[0].text === target);
+      expect(selected.clicks).toBe(1);
+      for (let i = 0; i < 3; i++) {
+        const proof = await f.run('verifyModel', { expectedModelChoice: choice(target) });
+        expect(proof.modelEvidence).toMatchObject({ selected: choice(target), source: 'checked_model_option' });
+        expect(picker.menu.isConnected).toBe(false);
+      }
+      expect(selected.clicks).toBe(1);
+      picker.selected(initial);
+      expect(await f.run('verifyModel', { expectedModelChoice: choice(target) })).toMatchObject({ error: 'model_mismatch' });
+      expect(selected.clicks).toBe(1);
+    });
+
+    if (provider === 'chatgpt') {
+      const clickedFamily = async (f: any) => {
+        for (let stage = 0; stage < 3; stage++) expect((await f.run('selectModel', { modelChoice: choice(target) })).pending).toBe(true);
+      };
+      const microtasks = async () => { for (let tick = 0; tick < 10; tick++) await Promise.resolve(); };
+
+      test('a family panel returning to its associated parent is closed once before fresh checked proof', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true,
+          inlineFamilyPanel: true, parentReturnAfterSelection: true });
+        const background = new Node('DIV'); f.body.children = f.body.children.filter((node: any) => node !== f.temporary);
+        background.append(f.temporary); f.body.append(background);
+        const selected = picker.options.find((option: any) => option.children[0].text === target), click = selected.onClick;
+        selected.onClick = () => { click(); background.values['aria-hidden'] = 'true'; };
+        const escape = picker.menu.onDispatch;
+        picker.menu.onDispatch = (event: any) => { escape(event); delete background.values['aria-hidden']; };
+        await clickedFamily(f);
+        expect(picker.menu.isConnected).toBe(true); expect(picker.menu.values.hidden).toBeUndefined();
+        expect(picker.inlinePanel.values.hidden).toBe('');
+        expect((await f.run('modelDiagnostic')).modelEvidence).toBeFalsy();
+        const before = picker.trigger.clicks;
+        const result = await f.run('selectModel', { modelChoice: choice(target) });
+        expect(result).toMatchObject({ selected: true, modelEvidence: { selected: choice(target), source: 'checked_model_option' } });
+        expect(picker.menu.events.filter((event: any) => event.key === 'Escape').length).toBe(2);
+        expect(picker.trigger.clicks - before).toBe(1); expect(selected.clicks).toBe(1);
+        expect(f.world.__computaModelSelection.selectionCloseAttempted).toBe(true);
+        expect(f.world.__computaModelSelection.openingRecoveryAttempted).toBeUndefined();
+        expect(picker.menu.isConnected).toBe(false);
+      });
+
+      test('an ignored post-family parent close is attempted once and cannot admit selection or reopen', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true,
+          inlineFamilyPanel: true, parentReturnAfterSelection: true });
+        await clickedFamily(f); picker.menu.onDispatch = () => {};
+        const before = picker.trigger.clicks, observing = f.run('selectModel', { modelChoice: choice(target) });
+        await microtasks(); f.advanceTime(1_800); f.flush();
+        expect(await observing).toMatchObject({ error: 'model_unverified', modelDiagnostic: { readStage: 'selection_commit_unconfirmed',
+          readAttempt: { closeAttempted: true, observedProof: false, sameTrigger: true, popupStillAssociated: true } } });
+        for (let retry = 0; retry < 3; retry++) expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
+        expect(picker.menu.events.filter((event: any) => event.key === 'Escape').length).toBe(1);
+        expect(picker.trigger.clicks).toBe(before); expect(f.world.__computaModelSelection.completed).toBeUndefined();
+        expect(picker.options.find((option: any) => option.children[0].text === target).clicks).toBe(1);
+        expect(f.composer.textContent).toBe('');
+      });
+
+      test('a lost post-family Escape acknowledgment cannot replay the claimed parent close', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true,
+          inlineFamilyPanel: true, parentReturnAfterSelection: true });
+        await clickedFamily(f); const escape = picker.menu.onDispatch;
+        picker.menu.onDispatch = (event: any) => { escape(event); throw new Error('lost parent Escape'); };
+        await expect(f.run('selectModel', { modelChoice: choice(target) })).rejects.toThrow('lost parent Escape');
+        for (let retry = 0; retry < 3; retry++) expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
+        expect(picker.menu.events.filter((event: any) => event.key === 'Escape').length).toBe(1);
+        expect(f.world.__computaModelSelection.completed).toBeUndefined();
+        expect(picker.options.find((option: any) => option.children[0].text === target).clicks).toBe(1);
+      });
+
+      test('post-family parent ownership, root and association drift rejects before any close', async () => {
+        for (const change of [
+          (f: any) => { f.world.__computaModelOwner = 'foreign-owner'; },
+          (f: any) => { f.document.URL += '&foreign-route=true'; },
+          (f: any) => { f.location.origin = 'https://foreign.invalid'; },
+          (f: any) => { f.appendUser('Unclaimed user before parent close'); },
+          (f: any) => { f.body.append(new Node('ARTICLE', { 'data-turn': 'assistant' }, 'Unclaimed assistant')); },
+          (f: any) => { f.world.__computaModelFirstProof = { marker: firstMarker, fingerprint: 'a'.repeat(64) }; },
+          (f: any, p: any) => { p.trigger.connected = false; },
+          (f: any, p: any) => { p.trigger.disabled = true; },
+          (f: any) => { f.body.append(new Node('DIV', { role: 'menu', id: 'foreign-menu' })); },
+          (f: any, p: any) => { delete p.trigger.values['aria-controls']; delete p.menu.values['aria-labelledby']; },
+          (f: any, p: any) => { const duplicate = new Node('DIV', { role: 'menuitem', 'aria-label': 'Select model' }); p.menu.append(duplicate); },
+          (f: any, p: any) => { delete p.inlinePanel.values.hidden; p.options[0].values['aria-checked'] = 'true'; },
+        ]) {
+          const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true,
+            inlineFamilyPanel: true, parentReturnAfterSelection: true });
+          await clickedFamily(f); const before = picker.trigger.clicks; change(f, picker);
+          const result = await f.run('selectModel', { modelChoice: choice(target) });
+          expect(result.error).toBeDefined(); expect(result.selected).toBeUndefined();
+          expect(picker.menu.events.filter((event: any) => event.key === 'Escape').length).toBe(0);
+          expect(picker.trigger.clicks).toBe(before); expect(f.composer.textContent).toBe('');
+          expect(picker.options.find((option: any) => option.children[0].text === target).clicks).toBe(1);
+        }
+      });
+
+      test('post-family parent close never turns stale model or temporary mode into proof', async () => {
+        for (const driftModel of [false, true]) {
+          const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true,
+            inlineFamilyPanel: true, parentReturnAfterSelection: true });
+          await clickedFamily(f); const escape = picker.menu.onDispatch;
+          picker.menu.onDispatch = (event: any) => {
+            escape(event);
+            if (driftModel) { picker.selected(initial); picker.primary.text = initial; }
+            else f.temporary.connected = false;
+          };
+          const before = picker.trigger.clicks, observing = f.run('selectModel', { modelChoice: choice(target) });
+          await microtasks(); if (!driftModel) { f.advanceTime(1_800); f.flush(); }
+          const result = await observing;
+          expect(result.error).toBe(driftModel ? 'model_mismatch' : 'model_unverified');
+          expect(result.selected).toBeUndefined(); expect(picker.trigger.clicks).toBe(before);
+          expect(picker.menu.events.filter((event: any) => event.key === 'Escape').length).toBe(1);
+          expect(picker.options.find((option: any) => option.children[0].text === target).clicks).toBe(1);
+        }
+      });
+
+      test('one consumed post-family opening recovers actual checked proof without any render callbacks', async () => {
+        for (const frameAPI of [undefined, () => { throw new Error('rAF must not be used'); }]) {
+          const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true, inlineFamilyPanel: true });
+          f.window.requestAnimationFrame = frameAPI;
+          const selected = picker.options.find((option: any) => option.children[0].text === target), click = picker.trigger.onClick;
+          let consumed = 0;
+          picker.trigger.onClick = () => { if (selected.clicks === 1 && consumed === 0) consumed++; else click(); };
+          await clickedFamily(f);
+          const before = picker.trigger.clicks, observing = f.run('selectModel', { modelChoice: choice(target) });
+          await microtasks();
+          expect(picker.trigger.clicks - before).toBe(1); expect(f.world.__computaModelSelection.completed).toBeUndefined();
+          expect(f.scheduledDelays.at(-1)).toBeLessThanOrEqual(900);
+          f.advanceTime(900); f.flush();
+          expect(await observing).toMatchObject({ selected: true, modelEvidence: { selected: choice(target), source: 'checked_model_option' } });
+          expect(picker.trigger.clicks - before).toBe(2); expect(consumed).toBe(1); expect(selected.clicks).toBe(1);
+          expect(f.world.__computaModelSelection.openingRecoveryAttempted).toBe(true);
+          expect(picker.menu.isConnected).toBe(false);
+        }
+      });
+
+      test('a family-change popup closure must be acknowledged before any fresh opening', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, escapeOnlyClose: true, inlineFamilyPanel: true });
+        const selected = picker.options.find((option: any) => option.children[0].text === target), click = selected.onClick;
+        selected.onClick = () => { click(); delete picker.menu.values.hidden; picker.trigger.values['aria-expanded'] = 'true'; };
+        const escape = picker.menu.onDispatch; let delayedClose = true;
+        picker.menu.onDispatch = (event: any) => { if (delayedClose) { delayedClose = false; return; } escape(event); };
+        await clickedFamily(f);
+        const before = picker.trigger.clicks, observing = f.run('selectModel', { modelChoice: choice(target) });
+        await microtasks(); expect(picker.trigger.clicks).toBe(before);
+        picker.menu.values.hidden = ''; picker.trigger.values['aria-expanded'] = 'false';
+        for (const observer of f.observers) observer.callback([{ type: 'attributes', target: picker.menu, attributeName: 'hidden' }]);
+        expect(await observing).toMatchObject({ selected: true, modelEvidence: { selected: choice(target), source: 'checked_model_option' } });
+        expect(selected.clicks).toBe(1); expect(picker.trigger.clicks - before).toBe(1);
+        expect(f.world.__computaModelSelection.openingRecoveryAttempted).toBeUndefined();
+      });
+
+      test('two unacknowledged fresh openings share one deadline and become a terminal failure', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+        const selected = picker.options.find((option: any) => option.children[0].text === target), click = picker.trigger.onClick;
+        picker.trigger.onClick = () => { if (selected.clicks === 0) click(); };
+        await clickedFamily(f);
+        const before = picker.trigger.clicks, observing = f.run('selectModel', { modelChoice: choice(target) });
+        await microtasks(); f.advanceTime(900); f.flush(); await microtasks();
+        expect(picker.trigger.clicks - before).toBe(2);
+        expect(f.scheduledDelays.at(-1)).toBeLessThanOrEqual(900);
+        f.advanceTime(900); f.flush();
+        expect(await observing).toMatchObject({ error: 'model_unverified', modelDiagnostic: { readStage: 'primary_open_recovery_requested' } });
+        for (let retry = 0; retry < 3; retry++) expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
+        expect(picker.trigger.clicks - before).toBe(2); expect(selected.clicks).toBe(1);
+        expect(f.world.__computaModelSelection.completed).toBeUndefined(); expect(f.composer.textContent).toBe('');
+      });
+
+      test('fresh recovery guards reject crossed ownership, mode, roots and closed picker state before the extra click', async () => {
+        for (const change of [
+          (f: any) => { f.world.__computaModelOwner = 'changed-owner'; },
+          (f: any) => { f.document.URL += '&foreign-route=true'; },
+          (f: any) => { f.location.origin = 'https://foreign.invalid'; },
+          (f: any, p: any) => { p.trigger.connected = false; },
+          (f: any, p: any) => { p.trigger.disabled = true; },
+          (f: any) => { f.temporary.connected = false; },
+          (f: any) => { f.appendUser('Foreign user while opening'); },
+          (f: any) => { f.body.append(new Node('ARTICLE', { 'data-turn': 'assistant' }, 'Foreign assistant')); },
+          (f: any) => { f.world.__computaModelFirstSubmitted = true; },
+          (f: any) => { f.world.__computaModelFirstProof = { marker: firstMarker, fingerprint: 'a'.repeat(64) }; },
+          (f: any, p: any) => { p.trigger.values['data-state'] = 'open'; },
+          (f: any, p: any) => { p.trigger.values['aria-expanded'] = 'true'; },
+          (f: any) => { f.body.append(new Node('DIV', { id: 'foreign-menu', role: 'menu' })); },
+          (f: any, p: any) => { const duplicate = new Node('BUTTON', { ...p.trigger.values }); f.body.append(duplicate); },
+        ]) {
+          const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+          const selected = picker.options.find((option: any) => option.children[0].text === target), click = picker.trigger.onClick;
+          picker.trigger.onClick = () => { if (selected.clicks === 0) click(); };
+          await clickedFamily(f);
+          const before = picker.trigger.clicks, observing = f.run('selectModel', { modelChoice: choice(target) });
+          await microtasks(); change(f, picker); f.advanceTime(900); f.flush();
+          const result = await observing;
+          expect(result.error).toBeDefined(); expect(result.selected).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(picker.trigger.clicks - before).toBe(1); expect(selected.clicks).toBe(1);
+          expect(f.world.__computaModelSelection.openingRecoveryAttempted).toBeUndefined();
+          expect(f.composer.textContent).toBe('');
+        }
+      });
+
+      test('model mismatch discovered after a consumed opening rejects without an extra opening', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+        const selected = picker.options.find((option: any) => option.children[0].text === target), click = picker.trigger.onClick;
+        picker.trigger.onClick = () => { if (selected.clicks === 0) click(); };
+        await clickedFamily(f);
+        const before = picker.trigger.clicks, observing = f.run('selectModel', { modelChoice: choice(target) });
+        await microtasks(); picker.primary.text = initial; f.advanceTime(900); f.flush();
+        expect(await observing).toMatchObject({ error: 'model_mismatch', modelEvidence: { selected: choice(initial) } });
+        expect(picker.trigger.clicks - before).toBe(1); expect(selected.clicks).toBe(1);
+        expect(f.world.__computaModelSelection.openingRecoveryAttempted).toBeUndefined();
+      });
+
+      test('an acknowledged associated menu still requires exact current checked proof after recovery', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+        const selected = picker.options.find((option: any) => option.children[0].text === target), click = picker.trigger.onClick;
+        let consumed = false;
+        picker.trigger.onClick = () => {
+          if (selected.clicks === 0) return click();
+          if (!consumed) { consumed = true; return; }
+          picker.selected(initial); click();
+        };
+        await clickedFamily(f);
+        const observing = f.run('selectModel', { modelChoice: choice(target) });
+        await microtasks(); f.advanceTime(900); f.flush();
+        expect(await observing).toMatchObject({ error: 'model_mismatch', modelEvidence: { selected: choice(initial) } });
+        expect(selected.clicks).toBe(1); expect(f.world.__computaModelSelection.completed).toBeUndefined();
+      });
+
+      test('a recovered opening crossed by new message roots or owner state cannot return proof', async () => {
+        for (const change of [
+          (f: any) => { f.appendUser('Unclaimed new user'); },
+          (f: any) => { f.body.append(new Node('ARTICLE', { 'data-turn': 'assistant' }, 'Unclaimed new answer')); },
+          (f: any) => { f.world.__computaModelFirstSubmitted = true; },
+          (f: any) => { f.world.__computaModelOwner = 'foreign-owner'; },
+        ]) {
+          const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+          const selected = picker.options.find((option: any) => option.children[0].text === target), click = picker.trigger.onClick;
+          let consumed = false;
+          picker.trigger.onClick = () => {
+            if (selected.clicks === 0) return click();
+            if (!consumed) { consumed = true; return; }
+            click(); change(f);
+          };
+          await clickedFamily(f);
+          const observing = f.run('selectModel', { modelChoice: choice(target) });
+          await microtasks(); f.advanceTime(900); f.flush();
+          const result = await observing;
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(result.selected).toBeUndefined(); expect(selected.clicks).toBe(1); expect(f.composer.textContent).toBe('');
+        }
+      });
+
+      test('temporary mode can be hidden by its associated modal but must verify again after owned close', async () => {
+        for (const driftMode of [false, true]) {
+          const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true, inlineFamilyPanel: true });
+          await clickedFamily(f);
+          const click = picker.trigger.onClick, escape = picker.menu.onDispatch;
+          picker.trigger.onClick = () => { click(); f.temporary.values['aria-hidden'] = 'true'; };
+          picker.menu.onDispatch = (event: any) => { escape(event); delete f.temporary.values['aria-hidden']; if (driftMode) f.temporary.connected = false; };
+          const result = await f.run('selectModel', { modelChoice: choice(target) });
+          expect(result.selected).toBe(driftMode ? undefined : true);
+          if (driftMode) expect(result.error).toBe('model_unverified');
+          else expect(result.modelEvidence).toMatchObject({ selected: choice(target), source: 'checked_model_option' });
+          expect(picker.menu.events.filter((event: any) => event.key === 'Escape').length).toBe(1);
+          expect(picker.options.find((option: any) => option.children[0].text === target).clicks).toBe(1);
+        }
+      });
+
+      test('the fresh-opening recovery is never available to generic or established conversation reads', async () => {
+        for (const owned of [false, true]) {
+          const { f, picker } = setup(owned, { genericHeader: true, unmountMenus: true });
+          if (owned) expect((await f.run('inspect', { expectedModelChoice: choice(initial) })).firstUserVerified).toBe(true);
+          const before = picker.trigger.clicks;
+          picker.trigger.onClick = () => { queueMicrotask(() => f.flush()); };
+          const observing = f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          await microtasks(); f.flush(); await microtasks(); f.flush();
+          expect((await observing).error).toBe('model_unverified'); expect(picker.trigger.clicks - before).toBe(1);
+          expect(f.world.__computaModelSelection).toBeUndefined();
+          expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+        }
+      });
+
+      test('a lost first post-selection read acknowledgment cannot replay its opening click', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+        const selected = picker.options.find((option: any) => option.children[0].text === target), click = picker.trigger.onClick;
+        picker.trigger.onClick = () => { if (selected.clicks === 1) throw new Error('lost fresh opening'); else click(); };
+        await f.run('selectModel', { modelChoice: choice(target) }); await f.run('selectModel', { modelChoice: choice(target) });
+        await f.run('selectModel', { modelChoice: choice(target) });
+        await expect(f.run('selectModel', { modelChoice: choice(target) })).rejects.toThrow('lost fresh opening');
+        const after = picker.trigger.clicks;
+        for (let retry = 0; retry < 3; retry++) expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
+        expect(picker.trigger.clicks).toBe(after); expect(selected.clicks).toBe(1);
+        expect(f.world.__computaModelSelection.completed).toBeUndefined();
+      });
+
+      test('the observed Select model menuitem needs no popup attribute to expose inline family radios', async () => {
+        const discovery = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true, inlineFamilyPanel: true });
+        expect(discovery.picker.secondary.values['aria-haspopup']).toBeUndefined();
+        expect(discovery.picker.secondary.childElementCount).toBeGreaterThan(0);
+        const found = await advance(discovery.f, 'discoverModels');
+        expect(found.modelChoices).toEqual(['Latest', 'GPT-5.6 Sol', 'GPT-5.5'].map(choice));
+        expect(found.modelDiagnostic.associatedMenus.length).toBe(1);
+        expect(discovery.picker.secondary.clicks).toBe(1);
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true, inlineFamilyPanel: true });
+        expect(await advance(f, 'selectModel', { modelChoice: choice('Latest') })).toMatchObject({ selected: true,
+          modelEvidence: { selected: choice('Latest'), source: 'checked_model_option' } });
+        expect((await f.run('verifyModel', { expectedModelChoice: choice('Latest') })).modelEvidence.selected).toEqual(choice('Latest'));
+        expect(picker.options.find((option: any) => option.children[0].text === 'Latest').clicks).toBe(1);
+        expect(picker.menu.events.every((event: any) => event.type === 'keydown' && event.key === 'Escape' && event.code === 'Escape'
+          && event.bubbles && event.cancelable)).toBe(true);
+        expect(picker.menu.isConnected).toBe(false);
+      });
+
+      test('a family popup replacing the power menu supplies fresh associated checked proof', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, replacePrimaryOnSecondary: true, escapeOnlyClose: true });
+        for (let index = 0; index < 3; index++) {
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          expect(result.modelEvidence).toMatchObject({ selected: choice(initial), source: 'checked_model_option' });
+          expect(picker.menu.isConnected).toBe(false); expect(picker.nested.isConnected).toBe(false);
+        }
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+        expect(picker.secondary.clicks).toBe(6); expect(picker.trigger.clicks).toBe(6);
+        expect(picker.nested.events.filter((event: any) => event.key === 'Escape').length).toBe(6);
+        picker.selected(target);
+        expect((await f.run('verifyModel', { expectedModelChoice: choice(initial) })).error).toBe('model_mismatch');
+      });
+
+      test('discovery and single-click target selection survive a replacement family menu', async () => {
+        const discovery = setup(false, { genericHeader: true, unmountMenus: true, replacePrimaryOnSecondary: true, escapeOnlyClose: true });
+        const result = await advance(discovery.f, 'discoverModels');
+        expect(result.modelChoices).toEqual(['Latest', 'GPT-5.6 Sol', 'GPT-5.5'].map(choice));
+        expect(result.modelDiagnostic.associatedMenus.length).toBe(1);
+        expect(discovery.picker.secondary.clicks).toBe(1);
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, replacePrimaryOnSecondary: true, escapeOnlyClose: true });
+        expect(await advance(f, 'selectModel', { modelChoice: choice(target) })).toMatchObject({ selected: true,
+          modelEvidence: { selected: choice(target), source: 'checked_model_option' } });
+        const selected = picker.options.find((option: any) => option.children[0].text === target);
+        expect(selected.clicks).toBe(1);
+        expect((await f.run('selectModel', { modelChoice: choice(target) })).selected).toBe(true);
+        expect(selected.clicks).toBe(1);
+        picker.trigger.onClick(); picker.secondary.onClick();
+        delete picker.trigger.values['aria-controls']; delete picker.nested.values['aria-labelledby'];
+        expect((await f.run('verifyModel', { expectedModelChoice: choice(target) })).error).toBe('model_unverified');
+        expect(selected.clicks).toBe(1);
+      });
+
+      test('an ignored Escape leaves fresh categorical diagnostics and never retries dismissal', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, escapeOnlyClose: true }); picker.open();
+        picker.nested.onDispatch = () => {};
+        const pending = f.run('verifyModel', { expectedModelChoice: choice(initial) });
+        for (let tick = 0; tick < 12; tick++) { await Promise.resolve(); f.flush(); }
+        const result = await pending;
+        expect(result).toMatchObject({ error: 'model_unverified', modelDiagnostic: { readStage: 'close_unconfirmed',
+          readAttempt: { primaryOpened: false, secondaryOpened: false, closeAttempted: true, observedProof: true,
+            sameTrigger: true, popupStillAssociated: true } } });
+        expect(result.modelDiagnostic.associatedMenus.every((menu: any) => menu.visible)).toBe(true);
+        expect(JSON.stringify(result.modelDiagnostic).length).toBeLessThanOrEqual(8192);
+        expect(picker.nested.events.filter((event: any) => event.key === 'Escape').length).toBe(1);
+        expect(picker.trigger.clicks).toBe(0);
+      });
+
+      test('a lost Escape acknowledgment cannot replay the close event in final cleanup', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true, escapeOnlyClose: true }); picker.open();
+        const close = picker.nested.onDispatch;
+        picker.nested.onDispatch = (event: any) => { close(event); throw new Error('lost Escape acknowledgment'); };
+        await expect(f.run('verifyModel', { expectedModelChoice: choice(initial) })).rejects.toThrow('lost Escape acknowledgment');
+        expect(picker.nested.isConnected).toBe(false);
+        expect(picker.nested.events.filter((event: any) => event.key === 'Escape').length).toBe(1);
+        expect(picker.trigger.clicks).toBe(0);
+      });
+
+      test('failed discovery closure cannot replay its one claimed Escape', async () => {
+        const { f, picker } = setup(false, { genericHeader: true, escapeOnlyClose: true }); picker.open();
+        picker.nested.onDispatch = () => {};
+        const pending = f.run('discoverModels');
+        for (let tick = 0; tick < 12; tick++) { await Promise.resolve(); f.flush(); }
+        expect((await pending).error).toBe('model_unverified');
+        expect((await f.run('discoverModels')).error).toBe('model_unverified');
+        expect(picker.nested.events.filter((event: any) => event.key === 'Escape').length).toBe(1);
+        expect(picker.trigger.clicks).toBe(0);
+      });
+    }
+
+    test('a generic header cannot reuse selection evidence when its menu association changed', async () => {
+      const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+      await advance(f, 'selectModel', { modelChoice: choice(target) });
+      delete picker.trigger.values['aria-controls']; delete picker.menu.values['aria-labelledby']; picker.open();
+      expect(await f.run('verifyModel', { expectedModelChoice: choice(target) })).toMatchObject({ error: 'model_unverified' });
+      expect(picker.options.find((option: any) => option.children[0].text === target).clicks).toBe(1);
+    });
+
+    test('generic-header verification catches drift during digest and does not admit a response', async () => {
+      const { f, picker } = setup(true, { genericHeader: true, unmountMenus: true });
+      f.onDigest(() => picker.selected(target));
+      const result = await f.run('inspect', { expectedModelChoice: choice(initial) });
+      expect(result).toMatchObject({ error: 'model_mismatch' }); expect(result.text).toBeUndefined();
+      expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+    });
+
+    test('fresh picker reads do not generate a transport wake loop but real model and response changes wake', async () => {
+      const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+      await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+      const observer = f.observers[0];
+      observer.callback([{ type: 'childList', target: f.body, addedNodes: [picker.menu], removedNodes: [] },
+        { type: 'attributes', target: picker.trigger, attributeName: 'aria-expanded' }]);
+      f.flush(); expect(f.posted.length).toBe(0);
+      observer.callback([{ type: 'attributes', target: picker.options[0], attributeName: 'aria-checked' }]);
+      f.flush(); expect(f.posted.length).toBe(1);
+      observer.callback([{ type: 'childList', target: f.answer, addedNodes: [new Node('SPAN', {}, 'PRIVATE RESPONSE')], removedNodes: [] },
+        { type: 'childList', target: f.body, addedNodes: [], removedNodes: [picker.menu] }]);
+      f.flush(); expect(f.posted.length).toBe(2);
+      expect(JSON.stringify(f.posted)).not.toContain('PRIVATE');
+    });
+
+    if (provider === 'gemini') test('real Gemini selection class and marker changes wake while active-only chrome and portal changes do not', async () => {
+      const { f, picker } = setup(false, { genericHeader: true, geminiMenuitemMarkers: true });
+      await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+      expect(f.observers[0].options.attributeOldValue).toBe(true);
+      picker.open();
+      const observer = f.observers[0], row = picker.options[0];
+      row.values.class = 'ng-star-inserted active focused';
+      observer.callback([{ type: 'attributes', target: row, attributeName: 'class', oldValue: 'ng-star-inserted' }]);
+      f.flush(); expect(f.posted.length).toBe(0);
+      row.values.class += ' selected';
+      observer.callback([{ type: 'attributes', target: row, attributeName: 'class', oldValue: 'ng-star-inserted active focused' }]);
+      f.flush(); expect(f.posted.length).toBe(1);
+      const marker = new Node('GEM-ICON', { 'aria-label': 'Selected' }); row.append(marker);
+      observer.callback([{ type: 'childList', target: row, addedNodes: [marker], removedNodes: [] }]);
+      f.flush(); expect(f.posted.length).toBe(2);
+      row.children = row.children.filter((node: any) => node !== marker);
+      observer.callback([{ type: 'childList', target: row, addedNodes: [], removedNodes: [marker] }]);
+      f.flush(); expect(f.posted.length).toBe(3);
+      row.values.class = 'ng-star-inserted active';
+      observer.callback([{ type: 'attributes', target: row, attributeName: 'class', oldValue: 'ng-star-inserted active focused selected' }]);
+      f.flush(); expect(f.posted.length).toBe(4);
+      observer.callback([{ type: 'childList', target: f.body, addedNodes: [picker.menu], removedNodes: [] },
+        { type: 'attributes', target: picker.menu, attributeName: 'class', oldValue: 'closed' }]);
+      f.flush(); expect(f.posted.length).toBe(4);
+      picker.menu.connected = false;
+      observer.callback([{ type: 'childList', target: f.body, addedNodes: [], removedNodes: [picker.menu] },
+        { type: 'childList', target: row, addedNodes: [marker], removedNodes: [] }]);
+      f.flush(); expect(f.posted.length).toBe(4);
+    });
+
+    if (provider === 'chatgpt') test('actual ChatGPT Send claims its old count before click and a lost acknowledgment cannot replay', async () => {
+      const { f } = setup();
+      const prompt = 'Synthetic first submit\n\n' + markerLine;
+      f.composer.text = prompt; f.world.__computaModelFirstPrompt = prompt;
+      const send = new Node('BUTTON', { 'data-testid': 'send-button' }); f.body.append(send);
+      send.onClick = () => { expect(f.world.__computaModelLastSubmissionCount).toBe(0); throw new Error('lost Send acknowledgment'); };
+      await expect(f.run('submit', { expectedUserCounts: [0, 1], expectedModelChoice: choice(initial), prompt }))
+        .rejects.toThrow('lost Send acknowledgment');
+      expect(f.world.__computaModelLastSubmissionCount).toBe(0); expect(send.clicks).toBe(1);
+      expect((await f.run('submit', { expectedUserCounts: [0, 1], expectedModelChoice: choice(initial), prompt })).error).toBe('conversation_changed');
+      expect(send.clicks).toBe(1);
+    });
+
+    test('more than twenty replaced portal IDs keep newest ownership bounded and never suppress unrelated events', async () => {
+      const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+      let latest: any;
+      for (let index = 0; index < 24; index++) {
+        latest = new Node('DIV', { id: `fresh-model-menu-${index}`, role: 'menu', 'aria-labelledby': 'model-picker-button', hidden: '' });
+        latest.connected = false;
+        const selected = new Node('DIV', { role: 'menuitemradio', 'aria-checked': 'true' });
+        selected.append(new Node('SPAN', {}, initial)); latest.append(selected); f.body.append(latest);
+        picker.trigger.values['aria-controls'] = latest.values.id;
+        const current = latest;
+        picker.trigger.onClick = () => {
+          if (current.values.hidden === undefined) { current.values.hidden = ''; current.connected = false; }
+          else { delete current.values.hidden; current.connected = true; }
+        };
+        if (provider === 'chatgpt') current.onDispatch = (event: any) => {
+          if (event.key === 'Escape') { current.values.hidden = ''; current.connected = false; }
+        };
+        expect((await f.run('verifyModel', { expectedModelChoice: choice(initial) })).modelEvidence.selected).toEqual(choice(initial));
+        const scope = f.world.__computaModelReadUI;
+        expect(scope.roots.length).toBeLessThanOrEqual(16); expect(scope.ids.length).toBeLessThanOrEqual(16);
+        expect(scope.roots.includes(current)).toBe(true); expect(scope.roots.includes(picker.trigger)).toBe(true);
+        expect(scope.ids.includes(current.values.id)).toBe(true);
+        const before = f.posted.length;
+        f.observers[0].callback([{ type: 'childList', target: f.body, addedNodes: [current], removedNodes: [] }]);
+        f.flush(); expect(f.posted.length).toBe(before);
+      }
+      const before = f.posted.length;
+      f.observers[0].callback([{ type: 'childList', target: f.answer, addedNodes: [new Node('SPAN', {}, 'PRIVATE RESPONSE')], removedNodes: [] }]);
+      f.flush(); expect(f.posted.length).toBe(before + 1);
+      f.observers[0].callback([{ type: 'attributes', target: picker.trigger, attributeName: 'aria-label' }]);
+      f.flush(); expect(f.posted.length).toBe(before + 2);
+    });
+
+    test('response metadata diagnostics report model attribute names without promoting opaque values or prose', async () => {
+      const { f } = setup(true);
+      await f.run('inspect');
+      const root = provider === 'chatgpt' ? f.answer.parentElement : f.response;
+      root.values['data-model-id'] = 'PRIVATE OPAQUE BACKEND ID';
+      root.values['data-model-label'] = initial;
+      f.answer.append(new Node('SPAN', {}, 'I am ' + target));
+      const result = await f.run('modelDiagnostic');
+      expect(result.modelDiagnostic.responseMetadata).toMatchObject({ present: true,
+        modelAttributes: [{ name: 'data-model-id', recognizedFamily: null, valueLength: 25 },
+          { name: 'data-model-label', recognizedFamily: initial, valueLength: initial.length }] });
+      expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
+      expect(result.modelEvidence.response).toBeUndefined();
+      const completed = await f.run('inspect', { expectedModelChoice: choice(initial) });
+      expect(completed.modelDiagnostic.responseMetadata.modelAttributes).toEqual(result.modelDiagnostic.responseMetadata.modelAttributes);
+      expect(completed.modelEvidence.verification).toBe('website_selection');
+    });
+
+    test('cleanup Stop remains usable after selected-model drift', async () => {
+      const { f, picker } = setup();
+      const stop = f.stop || new Node('BUTTON', { 'aria-label': 'Stop streaming' });
+      if (!f.stop) f.body.append(stop); else stop.connected = true;
+      expect(await f.run('stop', { expectedModelChoice: choice(target) })).toMatchObject({ stopped: true });
+      expect(stop.clicks).toBe(1); expect(picker.trigger.clicks).toBe(0);
+    });
+
+    test('discovery and selection cannot mutate nonempty conversations', async () => {
+      const { f, picker } = setup(true);
+      await f.run('inspect');
+      for (const action of ['discoverModels', 'selectModel'])
+        expect(await f.run(action, { modelChoice: choice(target) })).toMatchObject({ error: 'not_fresh' });
+      expect(picker.trigger.clicks).toBe(0);
+    });
+
+    test('bounded diagnostics omit private prompt, reply and account data', async () => {
+      const { f, picker } = setup(true);
+      await f.run('inspect');
+      f.answer.append(new Node('SPAN', {}, 'PRIVATE REPLY SENTINEL'));
+      picker.trigger.values['data-account-id'] = 'PRIVATE ACCOUNT SENTINEL';
+      const result = await f.run('modelDiagnostic');
+      const serialized = JSON.stringify(result.modelDiagnostic);
+      expect(serialized).not.toContain('PRIVATE'); expect(serialized).not.toContain('Computa session marker');
+      expect(serialized.length).toBeLessThanOrEqual(8192);
+    });
+  });
+}

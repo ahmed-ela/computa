@@ -13,11 +13,13 @@ export class Element {
   disabled = false;
   clicks = 0;
   onClick?: () => void;
+  onDispatch?: (event: any) => void;
   onFocus?: () => void;
   events: unknown[] = [];
   constructor(public tagName: string, public values: Record<string, string> = {}, public text = "") {}
   get nodeType() { return this.tagName === "#text" ? 3 : 1; }
   get childElementCount() { return this.children.filter(child => child.nodeType === 1).length; }
+  get attributes() { return Object.entries(this.values).map(([name, value]) => ({ name, value })); }
   get childNodes(): any[] { return [...(this.text ? [{ nodeType: 3, textContent: this.text, parentElement: this }] : []), ...this.children]; }
   get isConnected(): boolean { return this.connected && (!this.parentElement || this.parentElement.isConnected); }
   set isConnected(value: boolean) { this.connected = value; }
@@ -29,7 +31,7 @@ export class Element {
   }
   get classList() { const names = (this.values.class || "").split(/\s+/).filter(Boolean); return { contains: (name: string) => names.includes(name), [Symbol.iterator]: () => names[Symbol.iterator]() }; }
   getAttribute(name: string) { return this.values[name] ?? null; }
-  getClientRects() { return this.isConnected && this.values.hidden === undefined ? [{}] : []; }
+  getClientRects() { return this.isConnected && !this.closest('[hidden]') ? [{}] : []; }
   append(...children: Element[]) { children.forEach(child => { child.parentElement = this; this.children.push(child); }); }
   appendChild(child: Element) { this.append(child); return child; }
   replaceChildren(...children: Element[]) { this.children.forEach(child => { child.connected = false; }); this.children = []; this.text = ""; this.append(...children); }
@@ -45,7 +47,127 @@ export class Element {
   querySelector(selector: string) { return this.querySelectorAll(selector)[0] ?? null; }
   click() { this.clicks++; this.onClick?.(); }
   focus() { this.onFocus?.(); }
-  dispatchEvent(event: unknown) { this.events.push(event); return true; }
+  dispatchEvent(event: unknown) { this.events.push(event); this.onDispatch?.(event); return true; }
+}
+
+// Selector fixtures mirror the observed native picker semantics. They qualify
+// selection/ownership behavior; live DOM diagnostics separately qualify shape.
+export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini' | 'claude', Node: any = Element,
+  behavior: { genericHeader?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean; geminiMenuitemMarkers?: boolean;
+    escapeOnlyClose?: boolean; inlineFamilyPanel?: boolean; parentReturnAfterSelection?: boolean } = {}) {
+  const initial = provider === 'chatgpt' ? 'GPT-5.6 Sol' : provider === 'gemini' ? '3.1 Pro' : 'Sonnet 5.5';
+  let selectedLabel = initial;
+  const triggerLabel = () => provider === 'chatgpt' ? 'Select ChatGPT model'
+    : provider === 'gemini' ? 'Open mode picker, currently Gemini Pro' : `Model: ${selectedLabel} Medium`;
+  const primary = new Node('SPAN', {}, behavior.genericHeader ? '' : initial);
+  const trigger = new Node('BUTTON', { id: 'model-picker-button', 'aria-controls': 'model-picker-menu', 'aria-haspopup': 'menu', 'aria-label': '' });
+  trigger.values['aria-label'] = triggerLabel();
+  trigger.append(primary, new Node('SPAN', {}, 'Medium'));
+  const menu = new Node('DIV', { id: 'model-picker-menu', role: 'menu', 'aria-labelledby': 'model-picker-button', hidden: '' });
+  const secondary = provider === 'gemini' ? null : new Node('BUTTON', { id: 'model-family-button', 'aria-label': provider === 'chatgpt' ? 'Select model' : 'More models', 'aria-controls': 'model-family-menu', 'aria-haspopup': 'menu' });
+  const nested = secondary ? new Node('DIV', { id: 'model-family-menu', role: 'menu', 'aria-labelledby': 'model-family-button', hidden: '' }) : null;
+  let inlinePanel: any;
+  const options: any[] = [];
+  const syncIndicators = () => {
+    if (provider !== 'gemini' || !behavior.geminiMenuitemMarkers) return;
+    for (const option of options) {
+      option.values.role = 'menuitem'; delete option.values['aria-checked'];
+      option.children = option.children.filter((child: any) => child.values['aria-label'] !== 'Selected');
+      option.values.class = option.children[0].text === selectedLabel ? 'ng-star-inserted selected' : 'ng-star-inserted';
+      if (option.children[0].text === selectedLabel) option.append(new Node('GEM-ICON', { 'aria-label': 'Selected', class: 'ng-star-inserted' }));
+    }
+  };
+  const add = (scope: any, label: string, description = '', extra: Record<string, string> = {}) => {
+    const option = new Node('DIV', { role: 'menuitemradio', 'aria-checked': label === initial ? 'true' : 'false', ...extra });
+    option.append(new Node('SPAN', {}, label), new Node('SPAN', {}, description));
+    options.push(option); scope.append(option);
+    option.onClick = () => {
+      selectedLabel = label;
+      if (!behavior.genericHeader) primary.text = label;
+      trigger.values['aria-label'] = triggerLabel();
+      options.forEach(other => { other.values['aria-checked'] = other === option ? 'true' : 'false'; });
+      syncIndicators();
+      menu.values.hidden = ''; if (nested) nested.values.hidden = '';
+      if (behavior.unmountMenus) { menu.connected = false; if (nested) nested.connected = false; }
+      trigger.values['aria-expanded'] = 'false';
+      if (provider === 'chatgpt' && behavior.parentReturnAfterSelection) {
+        menu.connected = true; delete menu.values.hidden; trigger.values['aria-expanded'] = 'true';
+        trigger.values['aria-controls'] = 'model-picker-menu';
+        if (inlinePanel) {
+          inlinePanel.values.hidden = ''; delete secondary.values.hidden;
+          for (const child of menu.children) if (child !== inlinePanel && child !== secondary) delete child.values.hidden;
+        }
+      }
+    };
+    return option;
+  };
+  if (provider === 'chatgpt') {
+    menu.append(new Node('DIV', { role: 'radio', 'aria-checked': 'true' }, 'Medium'));
+    add(nested, 'Latest'); add(nested, 'GPT-5.6 Sol'); add(nested, 'GPT-5.5', 'Leaving October 14');
+  } else if (provider === 'gemini') {
+    add(menu, '3.5 Flash-Lite', 'Fastest answers'); add(menu, '3.8 Flash', 'All-around help'); add(menu, '3.1 Pro', 'Advanced reasoning');
+    menu.append(new Node('DIV', { role: 'menuitemcheckbox', 'aria-checked': 'true' }, 'Extended thinking'));
+  } else {
+    add(menu, 'Sonnet 5.5'); add(menu, 'Haiku 4.5'); add(menu, 'Fable 6', 'Upgrade');
+    add(nested, 'Sonnet 5'); add(nested, 'Sonnet 4.6'); add(nested, 'Opus 4.8', 'Upgrade');
+  }
+  syncIndicators();
+  if (provider === 'chatgpt' && behavior.inlineFamilyPanel) {
+    inlinePanel = new Node('DIV', { hidden: '' });
+    inlinePanel.append(...nested.children); nested.children = [];
+    menu.append(inlinePanel);
+    secondary.tagName = 'DIV'; secondary.values.role = 'menuitem';
+    delete secondary.values['aria-haspopup']; delete secondary.values['aria-controls'];
+    const text = new Node('DIV'); text.append(new Node('SPAN', {}, 'Select model'), new Node('SVG', {}, 'Decorative arrow'));
+    secondary.append(text);
+  }
+  if (secondary) menu.append(secondary);
+  f.body.append(trigger, menu); if (nested) f.body.append(nested);
+  trigger.onClick = () => {
+    if (menu.values.hidden === undefined || behavior.replacePrimaryOnSecondary && nested?.values.hidden === undefined) {
+      if (provider === 'chatgpt' && behavior.escapeOnlyClose) return;
+      menu.values.hidden = ''; if (nested) nested.values.hidden = ''; trigger.values['aria-expanded'] = 'false';
+      if (behavior.unmountMenus) { menu.connected = false; if (nested) nested.connected = false; }
+    } else {
+      trigger.values['aria-controls'] = 'model-picker-menu';
+      if (inlinePanel) {
+        inlinePanel.values.hidden = ''; delete secondary.values.hidden;
+        for (const child of menu.children) if (child !== inlinePanel && child !== secondary) delete child.values.hidden;
+      }
+      menu.connected = true; delete menu.values.hidden; trigger.values['aria-expanded'] = 'true';
+    }
+  };
+  if (secondary) secondary.onClick = () => {
+    if (inlinePanel) {
+      for (const child of menu.children) if (child !== inlinePanel) child.values.hidden = '';
+      delete inlinePanel.values.hidden;
+      return;
+    }
+    if (behavior.replacePrimaryOnSecondary) {
+      menu.values.hidden = ''; if (behavior.unmountMenus) menu.connected = false;
+      nested.values['aria-labelledby'] = 'model-picker-button';
+      trigger.values['aria-controls'] = 'model-family-menu';
+    }
+    nested.connected = true; delete nested.values.hidden;
+  };
+  if (provider === 'chatgpt') {
+    const dismiss = (event: any) => {
+      if (event.type !== 'keydown' || event.key !== 'Escape') return;
+      menu.values.hidden = ''; if (nested) nested.values.hidden = '';
+      if (behavior.unmountMenus) { menu.connected = false; if (nested) nested.connected = false; }
+      trigger.values['aria-expanded'] = 'false';
+    };
+    menu.onDispatch = dismiss; if (nested) nested.onDispatch = dismiss;
+  }
+  if (behavior.unmountMenus) { menu.connected = false; if (nested) nested.connected = false; }
+  return { trigger, primary, menu, secondary, nested, inlinePanel, options, add, initial,
+    choice: (label: string) => ({ key: label, label }),
+    open: () => { menu.connected = true; delete menu.values.hidden; if (nested) { nested.connected = true; delete nested.values.hidden; } },
+    selected: (label: string) => {
+      selectedLabel = label; if (!behavior.genericHeader) primary.text = label; trigger.values['aria-label'] = triggerLabel();
+      options.forEach(option => { option.values['aria-checked'] = option.children[0].text === label ? 'true' : 'false'; });
+      syncIndicators();
+    } };
 }
 function selectorParts(selector: string): string[] {
   const parts: string[] = []; let start = 0, bracket = 0, quote = "";
@@ -134,7 +256,8 @@ export function fixture(provider: Provider, options: { temporary?: boolean; user
     constructor(public callback: (records: unknown[]) => void) { observers.push(this); }
     observe(_target: unknown, values: Record<string, unknown>) { this.options = values; }
   }
-  const window: any = { webkit: { messageHandlers: { computaChatGPTSignal: { postMessage: (value: unknown) => posted.push(value) } } }, getSelection: () => selection }; window.top = window;
+  const window: any = { webkit: { messageHandlers: { computaChatGPTSignal: { postMessage: (value: unknown) => posted.push(value) } } }, getSelection: () => selection,
+    KeyboardEvent: class { constructor(public type: string, options: any) { Object.assign(this, options); } } }; window.top = window;
   const world: Record<string, any> = {};
   let userBody: Element | undefined, userRoot: Element | undefined, nativeFingerprint: string | undefined, digestHook: (() => void) | undefined;
   let expectedCounts = options.userPrompt === undefined ? [0] : [1];
@@ -165,7 +288,7 @@ export function fixture(provider: Provider, options: { temporary?: boolean; user
     } else userBody = userRoot;
     userBody.text = options.renderedMarkdown ? prompt.replace(/`([^`]+)`/g, "$1") : prompt;
     wrapper.append(userRoot);
-    if (provider === "gemini") messages.append(wrapper);
+    if (provider === "gemini" || messages.querySelector('[data-testid="user-message"]')) messages.append(wrapper);
     else { messages.children.unshift(wrapper); wrapper.parentElement = messages; }
     return userRoot;
   }

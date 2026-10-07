@@ -124,6 +124,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case signInRequired, temporaryUnverified, notFresh, composerUnavailable
         case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
         case submissionObservationPending
+        case modelUnverified, modelMismatch, modelUnavailable, discoveryCleanupFailed
         case usageLimited(Provider)
         case editorFailure(String)
         case ownershipFailure(OwnershipReason)
@@ -143,6 +144,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .editorFailure(let reason): "The website's message editor could not accept the exact prompt (\(reason)). No send was retried."
             case .pageUnavailable: "The model page could not be inspected in the built-in browser."
             case .submissionObservationPending: "The submitted message is still appearing on the model page."
+            case .modelUnverified: "The website's selected model could not be verified. No prompt was replayed. Refresh the website models and retry."
+            case .modelMismatch: "The website changed or reported a different model. Its response was not accepted, and no prompt was replayed."
+            case .modelUnavailable: "That model is not available in the website's current account. Refresh the website models and choose an available model."
+            case .discoveryCleanupFailed: "The model menu session could not be closed. Restart Computa to refresh website models."
             case .responseTooLarge: "The website's response exceeded the local browser transport limit."
             case .responseInterrupted: "The website interrupted its response. No send was retried."
             case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. Try again after your account's limit resets."
@@ -157,6 +162,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let firstUserMarker = UUID().uuidString
         let tabID: UUID
         let provider: Provider
+        let modelChoice: WebsiteModelChoice?
+        let isDiscovery: Bool
         let view: WKWebView
         let initialDocumentGeneration: UUID
         let created = ContinuousClock.now
@@ -188,9 +195,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedCodeResponseCount: Int?
         var loggedFirstUserStructure = false
         var lastQuotaDiagnostic: [String]?
+        var modelSelectionRequested = false
+        var modelSelectionVerified = false
+        var modelEvidence: WebsiteModelEvidence?
+        var lastModelDiagnostic: String?
+        var observedResponseCount = 0
 
-        init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID) {
+        init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil,
+             isDiscovery: Bool = false) {
             self.provider = provider
+            self.modelChoice = modelChoice
+            self.isDiscovery = isDiscovery
             self.tabID = tabID
             self.view = view
             initialDocumentGeneration = documentGeneration
@@ -241,17 +256,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         if operation == "webProviderStart" {
             try Task.checkCancellation()
-            guard Set(values.keys) == ["provider"] else { throw Failure.invalidRequest }
+            guard Set(values.keys) == ["provider"] || Set(values.keys) == ["provider", "modelChoice"] else { throw Failure.invalidRequest }
             guard let raw = values["provider"], let provider = Provider(rawValue: raw) else { throw Failure.unsupportedProvider }
-            guard sessions.count < 4 else { throw Failure.capacity }
-            guard script(for: provider) != nil else { throw Failure.pageUnavailable }
-            let id = try createTab(provider.startURL)
-            guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else {
-                throw Failure.staleSession
-            }
-            let session = Session(provider: provider, tabID: id, view: view, documentGeneration: generation)
-            try browser.installModelChangeSignal(tabID: id, ownerToken: session.token, world: world, originHost: provider.host)
-            sessions[session.token] = session
+            let choice: WebsiteModelChoice?
+            if let encoded = values["modelChoice"] {
+                guard let parsed = WebsiteModelChoice.parse(encoded), parsed.provider == raw else { throw Failure.invalidRequest }
+                choice = parsed
+            } else { choice = nil }
+            let session = try createSession(provider: provider, choice: choice, isDiscovery: false)
             return try snapshot(session)
         }
         guard ["webProviderPoll", "webProviderSend", "webProviderFinish", "webProviderCancel"].contains(operation),
@@ -261,6 +273,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case "webProviderFinish", "webProviderCancel":
             return await finish(session, cancel: operation == "webProviderCancel")
         case "webProviderSend":
+            guard !session.isDiscovery else { throw Failure.invalidRequest }
             try Task.checkCancellation()
             guard let prompt = values["prompt"], !prompt.isEmpty, prompt.utf8.count <= 180_000,
                   ["ready", "complete"].contains(session.state), !session.pendingSubmission else {
@@ -307,13 +320,72 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return try browser.modelChangeRevision(for: session.tabID)
     }
 
+    private func createSession(provider: Provider, choice: WebsiteModelChoice?, isDiscovery: Bool) throws -> Session {
+        let admitted = sessions.values.filter { $0.isDiscovery == isDiscovery }.count
+        guard admitted < (isDiscovery ? 1 : 4) else { throw Failure.capacity }
+        guard script(for: provider) != nil else { throw Failure.pageUnavailable }
+        let id = try createTab(provider.startURL)
+        guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else { throw Failure.staleSession }
+        let session = Session(provider: provider, tabID: id, view: view, documentGeneration: generation,
+                              modelChoice: choice, isDiscovery: isDiscovery)
+        do { try browser.installModelChangeSignal(tabID: id, ownerToken: session.token, world: world, originHost: provider.host) }
+        catch { browser.closeTab(id); throw error }
+        sessions[session.token] = session
+        return session
+    }
+
+    /// Read available choices on an empty owned page, without sending a prompt.
+    func discoverModels(provider rawProvider: String) async throws -> [WebsiteModelChoice] {
+        try Task.checkCancellation()
+        guard let provider = Provider(rawValue: rawProvider) else { throw Failure.unsupportedProvider }
+        let session = try createSession(provider: provider, choice: nil, isDiscovery: true)
+        let token = session.token
+        do {
+            let deadline = session.created + preparationTimeout
+            while session.state != "ready" {
+                try Task.checkCancellation()
+                let revision = try browser.modelChangeRevision(for: session.tabID)
+                _ = try await poll(session)
+                guard ContinuousClock.now < deadline else { throw Failure.preparationDeadline }
+                if session.state != "ready" { _ = try await waitForChange(sessionToken: token, after: revision, until: deadline) }
+            }
+            while ContinuousClock.now < deadline {
+                try Task.checkCancellation()
+                let revision = try browser.modelChangeRevision(for: session.tabID)
+                session.modelSelectionRequested = true
+                let result = try await page(session, action: "discoverModels", maximumWait: min(.seconds(10), deadline - .now))
+                if result["pending"] as? Bool != true {
+                    guard let choices = result["modelChoices"] as? [[String: String]], !choices.isEmpty, choices.count <= 32 else { throw Failure.modelUnverified }
+                    let parsed = try choices.map { choice -> WebsiteModelChoice in
+                        guard Set(choice.keys) == ["key", "label"], let key = choice["key"], let label = choice["label"] else { throw Failure.modelUnverified }
+                        let model = WebsiteModelChoice(provider: rawProvider, key: key, label: label)
+                        guard model.isValid else { throw Failure.modelUnverified }
+                        return model
+                    }
+                    guard Set(parsed.map(\.key)).count == parsed.count, Set(parsed.map(\.label)).count == parsed.count else { throw Failure.modelUnverified }
+                    let cleanup = await finish(session, cancel: false)
+                    guard let closed = try JSONSerialization.jsonObject(with: cleanup) as? [String: Any],
+                          closed["cleanup"] as? String == "not_created" else { throw Failure.modelUnverified }
+                    return parsed
+                }
+                _ = try await waitForChange(sessionToken: token, after: revision, until: deadline)
+            }
+            throw Failure.preparationDeadline
+        } catch {
+            let cleanup = await finish(session, cancel: true)
+            guard let result = try? JSONSerialization.jsonObject(with: cleanup) as? [String: Any],
+                  result["cleanup"] as? String == "not_created" else { throw Failure.discoveryCleanupFailed }
+            throw error
+        }
+    }
+
     func waitForChange(sessionToken: String, after revision: UInt64,
                        until deadline: ContinuousClock.Instant) async throws -> UInt64? {
         guard let session = sessions[sessionToken] else { throw Failure.staleSession }
         var wake = deadline
         if session.state == "loading" { wake = min(wake, session.created + preparationTimeout) }
         else if session.state == "running" { wake = min(wake, session.turnStarted + responseTimeout) }
-        if session.completionCandidate, let since = session.candidateSince {
+        if session.state == "running", session.completionCandidate, let since = session.candidateSince {
             wake = min(wake, max(since, session.lastChanged) + .milliseconds(1_600))
         }
         if let retry = session.initialReadRetry { wake = min(wake, retry) }
@@ -368,7 +440,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try snapshot(session)
             }
             // Retry only the initial read, before any mode toggle or submission.
-            if session.state == "loading", !session.temporaryRequested,
+            if session.state == "loading", !session.temporaryRequested, !session.modelSelectionRequested,
                !session.submitted, ContinuousClock.now - session.created < preparationTimeout,
                (error as? Failure) == .pageUnavailable, session.initialReadFailures < 3 {
                 // Before the first observer exists, an inspection failure may
@@ -386,10 +458,39 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard count(observed, "responseCount") == 0, count(observed, "userCount") == 0,
                   session.provider.conversationURL(observed["url"] as? String) == nil else { throw Failure.notFresh }
             if observed["signIn"] as? Bool == true { throw Failure.signInRequired }
-            if observed["composer"] as? Bool == true {
+            if session.modelSelectionRequested, !session.modelSelectionVerified {
+                // An owned model popup can make the already-verified temporary
+                // controls or composer aria-hidden. Advance this claimed phase
+                // so its adapter can close the popup. Only fresh checked model
+                // proof and restored temporary mode can finish preparation.
+                guard session.temporary, session.modelChoice != nil else { throw Failure.modelUnverified }
+                let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
+                if selected["pending"] as? Bool != true {
+                    session.modelEvidence = try validatedModelEvidence(selected, session: session)
+                    session.modelSelectionVerified = true
+                    _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
+                    session.state = "ready"
+                }
+            } else if observed["composer"] as? Bool == true {
                 if observed["temporary"] as? Bool == true {
                     session.temporary = true
-                    session.state = "ready"
+                    if let choice = session.modelChoice {
+                        if let evidence = try? WebsiteModelEvidence.parse(observed["modelEvidence"], provider: session.provider.rawValue, expected: choice) {
+                            session.modelEvidence = evidence
+                            session.modelSelectionVerified = true
+                            _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
+                            session.state = "ready"
+                        } else {
+                            session.modelSelectionRequested = true
+                            let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
+                            if selected["pending"] as? Bool != true {
+                                session.modelEvidence = try validatedModelEvidence(selected, session: session)
+                                session.modelSelectionVerified = true
+                                _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
+                                session.state = "ready"
+                            }
+                        }
+                    } else { session.state = "ready" }
                 } else if !session.temporaryRequested, observed["temporaryActionAvailable"] as? Bool == true {
                     session.temporaryRequested = true
                     _ = try await page(session, action: "enableTemporary")
@@ -759,15 +860,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return "; first difference \(index); actual/expected scalars \(actual)/\(expected)"
     }
 
-    private func page(_ session: Session, action: String, prompt: String? = nil,
-                      refreshChangedRoute: Bool = true, maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
+    private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
+                      refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true,
+                      refreshReadOnlyObservation: Bool = true,
+                      maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
         guard let generation = browser.documentGeneration(for: session.tabID),
               session.documentGeneration == nil || session.documentGeneration == generation else {
             throw Failure.ownershipFailure(.documentGenerationBefore)
         }
         let provider = session.provider
-        guard let script = script(for: provider), let url = session.view.url, provider.accepts(url.absoluteString) else { throw Failure.pageUnavailable }
+        guard let script = script(for: provider) else { throw Failure.pageUnavailable }
+        guard let url = session.view.url, provider.accepts(url.absoluteString) else {
+            // This can precede JavaScript execution after a failed navigation.
+            // Record classifications only, without publishing the page URL.
+            let candidate = session.view.url
+            Self.inspectionLog.error("adapterContextUnavailable provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) urlPresent=\(candidate != nil) https=\(candidate?.scheme == "https") hostMatches=\(candidate?.host == provider.host) loading=\(session.view.isLoading)")
+            throw Failure.pageUnavailable
+        }
         let context = provider.routeContext(url.absoluteString)
         if let pinned = session.routeContext, context != pinned { throw Failure.ownershipFailure(.routeBefore) }
         let current = provider.conversationURL(url.absoluteString)
@@ -785,6 +895,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowFirstUserBinding": action == "inspect" && session.sequence == 1
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
         ]
+        if let choice = session.modelChoice {
+            if action == "selectModel" { input["modelChoice"] = ["key": choice.key, "label": choice.label] }
+            if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
+                input["expectedModelChoice"] = ["key": choice.key, "label": choice.label]
+            }
+        }
         if let fingerprint = session.firstUserFingerprint { input["expectedFirstUserFingerprint"] = fingerprint }
         if let conversation = session.conversation, !promotion { input["expectedConversation"] = conversation }
         // Website selection IDs can change during ordinary re-rendering.
@@ -800,6 +916,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let timeout = Task {
                     do {
                         try await Task.sleep(for: maximumWait)
+                        Self.inspectionLog.error("adapterTimeout provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence)")
                         result.complete(.failure(Failure.pageUnavailable))
                     } catch { }
                 }
@@ -809,8 +926,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     switch reply {
                     case .success(let value):
                         do { result.complete(.success(try JSONSerialization.data(withJSONObject: value))) }
-                        catch { result.complete(.failure(Failure.pageUnavailable)) }
-                    case .failure: result.complete(.failure(Failure.pageUnavailable))
+                        catch {
+                            Self.inspectionLog.error("adapterResultInvalid provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence)")
+                            result.complete(.failure(Failure.pageUnavailable))
+                        }
+                    case .failure(let error):
+                        let native = error as NSError
+                        let message = native.userInfo["WKJavaScriptExceptionMessage"] as? String ?? ""
+                        let kind = ["TypeError", "ReferenceError", "SyntaxError", "RangeError"].first {
+                            message.hasPrefix($0 + ":")
+                        } ?? "unknown"
+                        let rawLine = native.userInfo["WKJavaScriptExceptionLineNumber"] as? Int ?? -1
+                        let rawColumn = native.userInfo["WKJavaScriptExceptionColumnNumber"] as? Int ?? -1
+                        let line = (0...999_999).contains(rawLine) ? rawLine : -1
+                        let column = (0...99_999).contains(rawColumn) ? rawColumn : -1
+                        // Log finite categories and source positions only.
+                        // Exception messages can contain page or prompt data.
+                        Self.inspectionLog.error("adapterFailure provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) code=\(native.code) kind=\(kind, privacy: .public) line=\(line) column=\(column)")
+                        result.complete(.failure(Failure.pageUnavailable))
                     }
                 }
             }
@@ -843,10 +976,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let promotedConversation = provider.isLocalConversation(session.conversation)
                 && nextConversation != nil && nextConversation != session.conversation
                 && !provider.isLocalConversation(nextConversation) && !session.promoted
-            if action == "inspect", refreshChangedRoute, firstConversation || promotedConversation {
-                // A read may race the site's normal SPA route promotion. Read
-                // the current route once; never accept the old result or replay a mutation.
-                return try await page(session, action: action, refreshChangedRoute: false, maximumWait: maximumWait)
+            Self.inspectionLog.info("routeTransition provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) submitted=\(session.submitted) oldConversation=\(current != nil) newConversation=\(nextConversation != nil) oldLocal=\(provider.isLocalConversation(current)) newLocal=\(provider.isLocalConversation(nextConversation)) refresh=\(refreshChangedRoute) first=\(firstConversation) promotion=\(promotedConversation)")
+            if ["inspect", "verifyModel"].contains(action), refreshChangedRoute, firstConversation || promotedConversation {
+                // Discard every crossed read. ChatGPT can create a local route
+                // and promote it during the next read before either result can
+                // bind the conversation. Only that first empty-to-local edge
+                // leaves one refresh for its monotonic public promotion. The
+                // predicates above reject another local or public conversation.
+                let awaitingLocalPromotion = firstConversation && current == nil
+                    && provider.isLocalConversation(nextConversation)
+                return try await page(session, action: "inspect", enforceModel: enforceModel,
+                                      refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait,
+                                      refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                      maximumWait: maximumWait)
             }
             let temporaryToggle = action == "enableTemporary" && session.state == "loading"
                 && !session.submitted && current == nil && nextConversation == nil
@@ -856,6 +998,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard action == "submit" && firstConversation || temporaryToggle else { throw Failure.ownershipFailure(.routeAfter) }
         }
         guard let observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        logModelDiagnostic(observed, session: session)
         if let error = observed["error"] as? String {
             if ["temporary_mode_unavailable", "temporary_mode_unverified"].contains(error),
                let raw = observed["quotaDiagnostic"] as? String {
@@ -870,6 +1013,37 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 throw Failure.editorFailure("\(detail); \(actual)/\(expected) characters; \(actualLines)/\(expectedLines) lines\(difference)")
             }
             switch error {
+            case "model_unverified": throw Failure.modelUnverified
+            case "model_mismatch": throw Failure.modelMismatch
+            case "model_unavailable": throw Failure.modelUnavailable
+            case "acknowledged_user_append":
+                // A read-only picker observation can cross the DOM append for
+                // our already acknowledged Send. Discard that observation and
+                // inspect once from the current page, including the exact first
+                // marker/fingerprint checks. Never replay an editor operation.
+                guard refreshReadOnlyObservation, ["inspect", "verifyModel"].contains(action),
+                      observed["detail"] as? String == "readonly_model_observation",
+                      session.submitted, session.pendingSubmission,
+                      session.confirmedUsers + 1 == session.sequence else {
+                    throw Failure.ownershipFailure(.javaScriptUserCount)
+                }
+                return try await page(session, action: "inspect", enforceModel: enforceModel,
+                                      refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait,
+                                      refreshReadOnlyObservation: false, maximumWait: maximumWait)
+            case "first_user_observation_replaced":
+                // Provider frameworks can replace an unchanged message while
+                // its model picker is being read. The adapter only signals a
+                // discard after checking both pinned hashes and the exact
+                // marker on the disconnected node's replacement. Admit nothing
+                // from that read; use the same one-inspect budget as an append.
+                guard refreshReadOnlyObservation, ["inspect", "verifyModel"].contains(action),
+                      observed["detail"] as? String == "readonly_model_observation",
+                      session.submitted, session.firstUserFingerprint != nil else {
+                    throw Failure.ownershipFailure(.javaScriptFirstUser)
+                }
+                return try await page(session, action: "inspect", enforceModel: enforceModel,
+                                      refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait,
+                                      refreshReadOnlyObservation: false, maximumWait: maximumWait)
             case "document_changed", "conversation_changed":
                 if observed["detail"] as? String == "first_user_message",
                    let raw = observed["debugStructure"] as? String,
@@ -915,6 +1089,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard provider.accepts(observedURL), provider.routeContext(observedURL) == currentContext else { throw Failure.documentChanged }
             if session.documentGeneration == nil { session.documentGeneration = generation }
             if session.routeContext == nil { session.routeContext = currentContext }
+            session.observedResponseCount = count(observed, "responseCount")
             if count(observed, "userCount") > 0 {
                 guard observed["firstUserVerified"] as? Bool == true,
                       observed["firstUserMarkerVerified"] as? Bool == true,
@@ -940,6 +1115,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
             }
             if action == "inspect", session.pendingSubmission, count(observed, "userCount") == 0 {
+                try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
+                                                       enforceModel: enforceModel, recheck: recheckModelAfterAwait,
+                                                       refreshChangedRoute: refreshChangedRoute,
+                                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                                       maximumWait: maximumWait)
                 if !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
                     // a later promotion still requires the first-message proof.
@@ -947,10 +1127,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 // Neither answers nor cleanup can be admitted before the
                 // submitted first message has established owned lineage.
-                return ["temporary": observed["temporary"] as? Bool ?? false,
+                var pending: [String: Any] = ["temporary": observed["temporary"] as? Bool ?? false,
                         "userCount": 0, "responseCount": session.baseline, "text": "", "busy": true,
                         "answerComplete": false, "ownershipPending": true,
                         "debugStructure": observed["debugStructure"] as? String ?? ""]
+                if let evidence = session.modelEvidence { pending["modelEvidence"] = evidence.dictionary }
+                return pending
             }
             if promotion {
                 guard session.temporary, observed["temporary"] as? Bool == true else {
@@ -982,14 +1164,72 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.pendingSubmission = false
             }
         }
+        try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
+                                               enforceModel: enforceModel, recheck: recheckModelAfterAwait,
+                                               refreshChangedRoute: refreshChangedRoute,
+                                               refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                               maximumWait: maximumWait)
         return observed
+    }
+
+    private func verifyModelEvidenceAfterAwait(_ observed: [String: Any], session: Session, action: String,
+                                              enforceModel: Bool, recheck: Bool, refreshChangedRoute: Bool,
+                                              refreshReadOnlyObservation: Bool,
+                                              maximumWait: Duration) async throws {
+        if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
+            let evidence = try validatedModelEvidence(observed, session: session)
+            // A native await can cross a model change without navigation. Read
+            // the fixed proof again, rather than accepting the earlier result.
+            if recheck, action != "verifyModel" {
+                // The first Send can render its user message before native
+                // acknowledges it. Only inspect may bind that exact lineage;
+                // a fresh model-only read cannot acquire an unbound message.
+                let freshAction = session.pendingSubmission && session.firstUserFingerprint == nil ? "inspect" : "verifyModel"
+                let fresh = try await page(session, action: freshAction, enforceModel: enforceModel,
+                                           refreshChangedRoute: refreshChangedRoute, recheckModelAfterAwait: false,
+                                           refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                           maximumWait: maximumWait)
+                let currentEvidence = try validatedModelEvidence(fresh, session: session)
+                guard evidence.selected == currentEvidence.selected else { throw Failure.modelMismatch }
+            }
+            session.modelEvidence = evidence
+        }
+    }
+
+    private func validatedModelEvidence(_ observation: [String: Any], session: Session) throws -> WebsiteModelEvidence {
+        do { return try WebsiteModelEvidence.parse(observation["modelEvidence"], provider: session.provider.rawValue, expected: session.modelChoice) }
+        catch WebsiteModelEvidence.Failure.mismatch { throw Failure.modelMismatch }
+        catch { throw Failure.modelUnverified }
+    }
+
+    private func logModelDiagnostic(_ observation: [String: Any], session: Session) {
+        guard let value = observation["modelDiagnostic"], JSONSerialization.isValidJSONObject(value),
+              let bytes = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), bytes.count <= 16_384 else { return }
+        let line = String(decoding: bytes, as: UTF8.self)
+        guard line != session.lastModelDiagnostic else { return }
+        session.lastModelDiagnostic = line
+        // Unified Logging truncates long interpolated strings. Small numbered
+        // byte chunks preserve the bounded sanitized JSON without publishing
+        // page, prompt or response text.
+        let identifier = UUID().uuidString
+        let chunks = stride(from: 0, to: bytes.count, by: 512).map { offset in
+            bytes.subdata(in: offset..<min(offset + 512, bytes.count)).base64EncodedString()
+        }
+        for (index, chunk) in chunks.enumerated() {
+            Self.inspectionLog.info("modelDiagnostic provider=\(session.provider.rawValue, privacy: .public) id=\(identifier, privacy: .public) part=\(index + 1)/\(chunks.count) base64=\(chunk, privacy: .public)")
+        }
     }
 
     private func finish(_ session: Session, cancel: Bool) async -> Data {
         do {
-            if session.submitted || session.temporaryRequested || session.temporary {
+            if session.isDiscovery {
+                // Discovery cannot Send and its private view cannot be adopted
+                // by a human tab. Close exactly this read-only view even after
+                // a sign-in redirect; inference cleanup authority is unchanged.
+                guard !session.submitted, browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+            } else if session.submitted || session.temporaryRequested || session.temporary {
                 let observed: [String: Any]
-                do { observed = try await page(session, action: "inspect") }
+                do { observed = try await page(session, action: "inspect", enforceModel: false) }
                 catch {
                     guard let failure = error as? Failure, case .usageLimited(let provider) = failure,
                           provider == session.provider, session.submitted, session.firstUserFingerprint != nil else { throw error }
@@ -1035,6 +1275,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func snapshot(_ session: Session, cleanup: String? = nil) throws -> Data {
         var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
                                   "state": session.state, "text": session.response, "sequence": session.sequence]
+        if let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
+        if let generation = session.documentGeneration {
+            value["modelProofContext"] = ["documentGeneration": generation.uuidString, "sequence": session.sequence,
+                                            "firstUserFingerprint": session.firstUserFingerprint ?? "",
+                                            "responseCount": session.observedResponseCount,
+                                            "baselineResponseCount": session.baseline]
+        }
         if let cleanup { value["cleanup"] = cleanup }
         return try JSONSerialization.data(withJSONObject: value)
     }

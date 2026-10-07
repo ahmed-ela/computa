@@ -558,6 +558,10 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
       case 'setShowToolPayloads':
         publish({ ...snapshot, showToolPayloads: action.value });
         return;
+      case 'refreshWebsiteModels':
+        // Preview has no signed-in browser. Never invent provider availability.
+        publish({ ...snapshot, websiteModelsRefreshing: false, websiteModelsError: 'Website discovery is available in the desktop app.' });
+        return;
     }
   };
 

@@ -22,6 +22,11 @@ final class AppState {
     @ObservationIgnored private var chromePreferenceGeneration: UInt64 = 0
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
     @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored private var embeddedModelTransport: EmbeddedWebModelTransport?
+    @ObservationIgnored private let websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])?
+    @ObservationIgnored private var websiteModelRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var websiteModelRefreshGeneration: UUID?
+    @ObservationIgnored private var didStartWebsiteModelDiscovery = false
     // Keep the persisted key across the Computa rename.
     private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
     private static let accessModePreferenceKey = "HeyDash.accessMode"
@@ -50,6 +55,9 @@ final class AppState {
 
     var appearance: AppAppearance = .system
     var defaultModel: String
+    private(set) var websiteModelChoices: [WebsiteModelChoice]
+    private(set) var websiteModelsRefreshing = false
+    private(set) var websiteModelsError: String?
     var showToolPayloads = false
     var connectionState: RuntimeConnectionState = .disconnected
     private(set) var chromeConnectionState: ChromeConnectionState = .disconnected
@@ -100,6 +108,7 @@ final class AppState {
         preferences: UserDefaults = .standard,
         browserSession: EmbeddedBrowserSession? = nil,
         enableChromeExtensionBridge: Bool = false,
+        websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])? = nil,
         chromeTargetProvider: @escaping @MainActor () throws -> NativeChromeConnectionTarget = {
             try NativeChromeConnectionTarget.prepare()
         }
@@ -107,14 +116,19 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        self.websiteModelDiscovery = websiteModelDiscovery
         self.browserSession = browserSession ?? EmbeddedBrowserSession(defaults: preferences)
         self.chromeTargetProvider = chromeTargetProvider
         remembersChromeConnection = RememberedChromeConnection.load(from: preferences) != nil
         let storedAccessMode = preferences.object(forKey: Self.accessModePreferenceKey) as? String
         accessMode = storedAccessMode.flatMap(AccessMode.init(rawValue:)) ?? .askEveryTime
         let storedModel = preferences.string(forKey: Self.defaultModelPreferenceKey)
-        defaultModel = storedModel.flatMap(LocalModelCatalog.option(for:))?.id
-            ?? LocalModelCatalog.defaultModelID
+        defaultModel = storedModel.flatMap { id in
+            // Saved website choices remain selected if an account/menu changes.
+            // Invalid ones are visible and rejected, never replaced with Qwen.
+            id.hasPrefix("browser/") ? id : LocalModelCatalog.option(for: id)?.id
+        } ?? LocalModelCatalog.defaultModelID
+        websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()
         self.tasks = tasks
         selectedTaskID = tasks.first?.id
@@ -133,6 +147,78 @@ final class AppState {
     var selectedTask: AgentTask? {
         guard let selectedTaskID else { return nil }
         return tasks.first { $0.id == selectedTaskID }
+    }
+
+    var modelOptions: [LocalModelOption] {
+        var options = LocalModelCatalog.options.flatMap { option -> [LocalModelOption] in
+            guard let provider = LocalModelCatalog.webProvider(for: option.id) else { return [option] }
+            return [option] + websiteModelChoices.filter { $0.provider == provider }.map { WebsiteModelCatalog.option(for: $0) }
+        }
+        for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
+            where id.hasPrefix("browser/") && !options.contains(where: { $0.id == id }) {
+            if let choice = WebsiteModelCatalog.choice(for: id) {
+                options.append(WebsiteModelCatalog.option(for: choice, available: false))
+            } else {
+                options.append(LocalModelOption(id: id, label: "Unavailable website choice",
+                    detail: WebsiteModelCatalog.Failure.invalidModelID.localizedDescription,
+                    highMemory: false, available: false))
+            }
+        }
+        return options
+    }
+
+    private func websiteTransport() -> EmbeddedWebModelTransport {
+        if let embeddedModelTransport { return embeddedModelTransport }
+        let transport = EmbeddedWebModelTransport(browser: browserSession)
+        embeddedModelTransport = transport
+        return transport
+    }
+
+    /// Called after the privileged WebUI is ready and its background render host
+    /// is attached. Each website performs one bounded discovery, sequentially.
+    func refreshWebsiteModelsIfNeeded() {
+        guard !didStartWebsiteModelDiscovery, runtime != nil || websiteModelDiscovery != nil else { return }
+        didStartWebsiteModelDiscovery = true
+        Task { @MainActor [weak self] in await self?.refreshWebsiteModels() }
+    }
+
+    func refreshWebsiteModels() async {
+        guard !isShuttingDown, !approvalGateBlocksInteraction else { return }
+        if let websiteModelRefreshTask { await websiteModelRefreshTask.value; return }
+        let generation = UUID()
+        websiteModelRefreshGeneration = generation
+        websiteModelsRefreshing = true
+        websiteModelsError = nil
+        let refresh = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var errors: [String] = []
+            for provider in WebsiteModelCatalog.providers {
+                guard !Task.isCancelled, !self.isShuttingDown else { break }
+                do {
+                    let choices: [WebsiteModelChoice]
+                    if let discovery = self.websiteModelDiscovery { choices = try await discovery(provider) }
+                    else { choices = try await self.websiteTransport().discoverModels(provider: provider) }
+                    guard !Task.isCancelled, !self.isShuttingDown,
+                          self.websiteModelRefreshGeneration == generation else { break }
+                    try WebsiteModelCatalog.validate(choices, provider: provider)
+                    self.websiteModelChoices.removeAll { $0.provider == provider }
+                    self.websiteModelChoices.append(contentsOf: choices)
+                    WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
+                } catch is CancellationError {
+                    break
+                } catch {
+                    guard !self.isShuttingDown, self.websiteModelRefreshGeneration == generation else { break }
+                    errors.append("\(WebsiteModelCatalog.providerLabel(provider)): \(error.localizedDescription)")
+                }
+            }
+            guard self.websiteModelRefreshGeneration == generation else { return }
+            self.websiteModelsError = errors.isEmpty ? nil : errors.joined(separator: "\n")
+            self.websiteModelsRefreshing = false
+            self.websiteModelRefreshTask = nil
+            self.websiteModelRefreshGeneration = nil
+        }
+        websiteModelRefreshTask = refresh
+        await refresh.value
     }
 
     /// Settings is rendered inside the privileged UI document. Temporarily
@@ -549,7 +635,7 @@ final class AppState {
 
     @discardableResult
     func setDefaultModel(_ modelID: String) -> Bool {
-        guard LocalModelCatalog.option(for: modelID) != nil else { return false }
+        guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false else { return false }
         defaultModel = modelID
         preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
         return true
@@ -557,7 +643,7 @@ final class AppState {
 
     @discardableResult
     func setTaskModel(_ modelID: String, taskID: AgentTask.ID) -> Bool {
-        guard LocalModelCatalog.option(for: modelID) != nil,
+        guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false,
               let index = tasks.firstIndex(where: { $0.id == taskID }),
               canChangeModel(for: taskID)
         else { return false }
@@ -921,7 +1007,7 @@ final class AppState {
         connectionState = .connecting
 
         do {
-            await runtime.configureEmbeddedWebModelTransport(EmbeddedWebModelTransport(browser: browserSession))
+            await runtime.configureEmbeddedWebModelTransport(websiteTransport())
             guard !Task.isCancelled, !isShuttingDown else { return }
             let snapshot = try await runtime.loadTasks()
             guard !isShuttingDown else { return }
@@ -946,6 +1032,10 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        websiteModelRefreshTask?.cancel()
+        let websiteRefresh = websiteModelRefreshTask
+        websiteModelRefreshGeneration = nil
+        websiteModelsRefreshing = false
         reviewGeneration &+= 1
         reviewRefresh?.cancel()
         reviewNeedsRefresh.removeAll()
@@ -963,6 +1053,7 @@ final class AppState {
         let browserSession = self.browserSession
         let chromeCleanup = chromeCleanupTask
         let task = Task {
+            await websiteRefresh?.value
             await chromeCleanup?.value
             let report = await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
             browserSession.shutdown()
@@ -970,6 +1061,7 @@ final class AppState {
         }
         runtimeShutdown = task
         let report = await task.value
+        websiteModelRefreshTask = nil
         pendingApprovals.removeAll()
         resolvingApprovalIDs.removeAll()
         approvalAttemptTaskIDs.removeAll()

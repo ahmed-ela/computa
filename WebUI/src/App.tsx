@@ -14,6 +14,7 @@ import {
 } from '@octanejs/shadcn/DropdownMenu';
 import { Icon } from './Icon';
 import { ReviewPanel } from './ReviewPanel';
+import { ModelSelector, WebsiteModelsRefresh } from './ModelSelector';
 import { fileChangeSummary } from './reviewDiff';
 import { ResponseMarkdown } from './ResponseMarkdown';
 import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
@@ -576,18 +577,17 @@ function Composer({
         <div className="composer-controls">
           <div className="composer-left">
             {/* Capture input before controlled restoration while the native host acknowledges the choice. */}
-            <NativeSelect
+            <ModelSelector
               key={`${task.id}:${task.model}`}
               className="model-picker"
-              aria-label="Task model"
-              title={selectedModel?.detail ?? task.model}
-              value={task.model}
+              label="Task model"
+              model={task.model}
+              options={snapshot.modelOptions}
               disabled={!task.modelSelectable}
-              onInput={(event: Event) => post({ action: 'setTaskModel', taskID: task.id, modelID: (event.currentTarget as HTMLSelectElement).value })}
-            >
-              {!selectedModel && <NativeSelectOption value={task.model}>{task.model}</NativeSelectOption>}
-              {snapshot.modelOptions.map((option) => <NativeSelectOption key={option.id} value={option.id}>{option.label.split(' · ')[0]}</NativeSelectOption>)}
-            </NativeSelect>
+              onSelect={(modelID) => post({ action: 'setTaskModel', taskID: task.id, modelID })}
+            />
+            {task.model.startsWith('browser/') && <WebsiteModelsRefresh refreshing={snapshot.websiteModelsRefreshing}
+              onRefresh={() => post({ action: 'refreshWebsiteModels' })} />}
           </div>
           <div className="composer-right">
             <span className="send-shortcut" title="Enter sends · Shift+Enter inserts a newline"><kbd>↵</kbd></span>
@@ -884,19 +884,22 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
             </label>
           </section>
           <section>
-            <h2>Local runtime</h2>
+            <h2>Models and runtime</h2>
             <label className="setting-row">
               <span><strong>Default model</strong><small>Used for new tasks. You can choose another in the composer.</small></span>
-              <NativeSelect
+              <ModelSelector
                 key={snapshot.defaultModel}
-                aria-label="Default model for new tasks"
-                value={snapshot.defaultModel}
-                onInput={(event: Event) => post({ action: 'setDefaultModel', modelID: (event.currentTarget as HTMLSelectElement).value })}
-              >
-                {snapshot.modelOptions.map((option) => <NativeSelectOption key={option.id} value={option.id}>{option.label.split(' · ')[0]}</NativeSelectOption>)}
-              </NativeSelect>
+                label="Default model for new tasks"
+                model={snapshot.defaultModel}
+                options={snapshot.modelOptions}
+                onSelect={(modelID) => post({ action: 'setDefaultModel', modelID })}
+              />
             </label>
             <p className={defaultModel?.highMemory ? 'model-note high-memory' : 'model-note'}>{defaultModel?.detail}</p>
+            <div className="setting-row"><span><strong>Website models</strong><small>Choices come from your signed-in ChatGPT, Gemini and Claude menus.</small></span>
+              <WebsiteModelsRefresh refreshing={snapshot.websiteModelsRefreshing} onRefresh={() => post({ action: 'refreshWebsiteModels' })} />
+            </div>
+            {snapshot.websiteModelsError && <p className="model-note" role="status">{snapshot.websiteModelsError}</p>}
             <div className="setting-row"><span><strong>Connection</strong><small>{snapshot.connection.label}</small></span><span className={`setting-state ${toneClass(snapshot.connection.tone)}`}><span />{snapshot.connection.state}</span></div>
           </section>
           <section>
