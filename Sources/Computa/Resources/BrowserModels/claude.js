@@ -655,18 +655,26 @@ async function websiteModelFinalGuard(provider, request, observed, currentTempor
 
 // A fenced envelope keeps JSON escapes out of the website's Markdown parser.
 // Admit only one literal code body with no author prose elsewhere in this answer.
-function modelResponseText(answer) {
-  if (!answer) return '';
-  const rendered = (answer.innerText || answer.textContent || '').trim();
-  const blocks = [...answer.querySelectorAll('pre')];
-  if (blocks.length !== 1) return rendered;
+function modelResponseExtraction(answer) {
+  const flags = { literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null,
+    selectedExtraction: 'rendered_fallback', extractionReason: 'absent_answer' };
+  let rendered = '', blocks = [], code = null;
+  const fallback = reason => ({ text: rendered, blocks, code, flags: { ...flags, extractionReason: reason } });
+  if (!answer) return fallback('absent_answer');
+  rendered = (answer.innerText || answer.textContent || '').trim();
+  blocks = [...answer.querySelectorAll('pre')];
+  if (blocks.length !== 1) return fallback(blocks.length ? 'multiple_pre' : 'missing_pre');
   const codes = [...blocks[0].querySelectorAll('code')];
-  if (codes.length !== 1) return rendered;
-  const code = codes[0], raw = code.textContent || '';
-  if (raw.length > 220_000) return rendered;
+  if (codes.length !== 1) return fallback(codes.length ? 'multiple_code' : 'missing_code');
+  code = codes[0];
+  const raw = code.textContent || '';
+  if (raw.length > 220_000) return fallback('oversized_code');
   let envelope;
-  try { envelope = JSON.parse(raw); } catch { return rendered; }
-  if (!envelope || Array.isArray(envelope) || !['message', 'tool_calls'].includes(envelope.type)) return rendered;
+  try { envelope = JSON.parse(raw); flags.literalCodeValidJSON = true; }
+  catch { flags.literalCodeValidJSON = false; return fallback('invalid_json'); }
+  const knownType = envelope && !Array.isArray(envelope) && ['message', 'tool_calls'].includes(envelope.type);
+  flags.literalCodeKnownEnvelopeType = knownType ? envelope.type : 'unknown';
+  if (!knownType) return fallback('unknown_envelope_type');
   // Observed Claude code chrome: the language label and icon control are
   // siblings of this sole pre inside the provider's exact code-block wrapper.
   // Only these verified nodes can be skipped; authored surrounding text cannot.
@@ -680,9 +688,9 @@ function modelResponseText(answer) {
       .filter(node => modelVisible(node) && !node.closest('pre') && /^[\uE000-\uF8FF]$/u.test((node.textContent || '').trim()));
     if (labels.length === 1 && controls.length === 1) { chrome.add(labels[0]); chrome.add(controls[0]); }
   }
-  let visited = 0;
+  let visited = 0, scanLimit = false;
   const onlyCodeAndWhitespace = node => {
-    if (++visited > 10_000) return false;
+    if (++visited > 10_000) { scanLimit = true; return false; }
     if (node === code || chrome.has(node)) return true;
     if (node.nodeType === 3) return /^\s*$/.test(node.textContent || '');
     if (node.nodeType !== 1) return true;
@@ -690,15 +698,18 @@ function modelResponseText(answer) {
     if (node.tagName.toLowerCase() === 'button' && blocks[0].contains(node)) return true;
     return [...node.childNodes].every(onlyCodeAndWhitespace);
   };
-  return onlyCodeAndWhitespace(answer) ? raw : rendered;
+  if (!onlyCodeAndWhitespace(answer)) return fallback(scanLimit ? 'outside_scan_limit' : 'outside_content');
+  return { text: raw, blocks, code, flags: { ...flags, selectedExtraction: 'raw_code', extractionReason: 'accepted_literal_code' } };
+}
+
+function modelResponseText(answer, extraction = modelResponseExtraction(answer)) {
+  return extraction.text;
 }
 
 // Diagnostic counts describe only this scoped answer; no response bytes leave this function.
-function modelResponseStructure(answer) {
-  const blocks = answer ? [...answer.querySelectorAll('pre')] : [];
+function modelResponseStructure(answer, extraction = modelResponseExtraction(answer)) {
+  const { blocks, code } = extraction;
   const allCodes = answer ? [...answer.querySelectorAll('code')] : [];
-  const codes = blocks.length === 1 ? [...blocks[0].querySelectorAll('code')] : [];
-  const code = codes.length === 1 ? codes[0] : null;
   let visited = 0, outsideTextLength = 0, outsideTruncated = false;
   const outsideNodes = [];
   const nodeShape = node => ({ tag: /^[a-zA-Z][a-zA-Z0-9-]{0,31}$/.test(node.tagName) ? node.tagName.toLowerCase() : 'other',
@@ -732,7 +743,8 @@ function modelResponseStructure(answer) {
     if (node === answer) break;
   }
   const result = { preCount: Math.min(blocks.length, 1_000), codeCount: Math.min(allCodes.length, 1_000),
-    codeTextLength: Math.min((code?.textContent || '').length, 220_001), outsideTextLength, outsideTruncated, preParentTags, outsideNodes };
+    codeTextLength: Math.min((code?.textContent || '').length, 220_001), outsideTextLength, outsideTruncated, preParentTags, outsideNodes,
+    ...extraction.flags };
   while (JSON.stringify(result).length > 8_192 && result.outsideNodes.length) result.outsideNodes.pop();
   return result;
 }
@@ -1094,11 +1106,12 @@ async function providerPageAction() {
   const answerComplete = !busy && !interrupted && message?.getAttribute('data-is-streaming') === 'false' && enabledCopies > 0;
   const temporary = modelTemporaryVerified();
   const temporaryActionAvailable = modelEnabled(modelFind(['button[aria-label="Use incognito"]']));
+  const responseExtraction = modelResponseExtraction(answer);
   const state = { modelEvidence: modelState.evidence, url: document.URL, temporary, temporaryActionAvailable, conversationIdentity: null, composer: !!composer,
     responseCount: answers.length, userCount: ownedUserCount, firstUserIdentity, firstUserFingerprint,
     firstUserVerified: ownedUserCount > 0, firstUserMarkerVerified: ownedUserCount > 0,
-    busy, interrupted, text: modelResponseText(answer).slice(0, 220_001),
-    answerComplete, completionEvidence: { codeStructure: modelResponseStructure(answer), modernMarkers: 0, logicalAnswers: answers.length,
+    busy, interrupted, text: modelResponseText(answer, responseExtraction).slice(0, 220_001),
+    answerComplete, completionEvidence: { codeStructure: modelResponseStructure(answer, responseExtraction), modernMarkers: 0, logicalAnswers: answers.length,
       scopedCopies, enabledCopies, depth: -1 } };
   if (action === 'inspect') {
     const signIn = !composer && [...document.querySelectorAll('a, button')].filter(modelVisible)

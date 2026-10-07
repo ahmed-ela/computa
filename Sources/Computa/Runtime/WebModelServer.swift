@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 @preconcurrency import Network
 
 /// Inference transport is separate from the agent loop and transcript store.
@@ -110,10 +111,17 @@ actor WebModelServer {
     private var readinessTimeout: Duration = .seconds(45)
     private var responseTimeout: Duration = .seconds(300)
     private var evidenceDirectory: URL?
+    private let rejectedReplyDirectory: URL?
     private let queue = DispatchQueue(label: "wtf.computa.web-model-http")
     #if DEBUG
     private var beforeListenerStartForTesting: (@Sendable () async -> Void)?
     #endif
+
+    /// A configured directory alone never enables response-content capture.
+    /// Its private arm.json must explicitly name the exact local task.
+    init(rejectedReplyDirectory: URL? = nil) {
+        self.rejectedReplyDirectory = rejectedReplyDirectory
+    }
 
     func start() async throws -> URL {
         if let baseURL { return baseURL }
@@ -354,6 +362,9 @@ actor WebModelServer {
                 } catch {
                     if let diagnostic = WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: request,
                                                                                          requireEnvelope: session.route == .embedded) {
+                        captureRejectedReply(text, diagnostic: diagnostic, taskID: taskID,
+                                             inferenceID: inferenceID, session: session,
+                                             evidence: evidence, snapshot: value)
                         throw Failure.malformedReply(diagnostic)
                     }
                     throw error
@@ -392,6 +403,73 @@ actor WebModelServer {
         do { return try WebsiteModelEvidence.parse(snapshot["modelEvidence"], provider: session.provider, expected: session.modelChoice) }
         catch WebsiteModelEvidence.Failure.mismatch { throw Failure.modelMismatch }
         catch { throw Failure.modelUnverified }
+    }
+
+    private func captureRejectedReply(_ text: String, diagnostic: WebModelResponseCodec.MalformedEnvelopeDiagnostic,
+                                      taskID: String, inferenceID: UUID, session: Session,
+                                      evidence: WebsiteModelEvidence?, snapshot: [String: Any]) {
+        guard let directory = rejectedReplyDirectory, let task = UUID(uuidString: taskID),
+              let token = UUID(uuidString: session.token),
+              text.utf8.count <= WebModelRejectedReplyCapture.maximumReplyBytes,
+              diagnostic.utf8Bytes == text.utf8.count, session.modelID.utf8.count <= 2_048,
+              ["chatgpt", "claude", "gemini"].contains(session.provider) else { return }
+        var record: [String: Any] = ["schemaVersion": 1, "timestamp": ISO8601DateFormatter().string(from: Date()),
+                                    "taskID": task.uuidString.lowercased(), "inferenceID": inferenceID.uuidString.lowercased(),
+                                    "sessionToken": token.uuidString.lowercased(), "provider": session.provider,
+                                    "modelID": session.modelID, "replyText": text,
+                                    "diagnostic": ["reason": diagnostic.reason.rawValue, "utf8Bytes": diagnostic.utf8Bytes,
+                                                   "fenced": diagnostic.fenced], "automaticReplay": false]
+        if let thread = evidenceThreads[task.uuidString.lowercased()] { record["threadID"] = thread }
+        if let evidence { record["modelEvidence"] = evidence.dictionary }
+        if let context = snapshot["modelProofContext"] as? [String: Any],
+           let rawGeneration = context["documentGeneration"] as? String, let generation = UUID(uuidString: rawGeneration) {
+            record["documentGeneration"] = generation.uuidString.lowercased()
+        }
+        if let sequence = Self.receiptInteger(snapshot["sequence"], range: 1...10_000) { record["sequence"] = sequence }
+        if let completion = snapshot["completionEvidence"] as? [String: Any],
+           let raw = completion["codeStructure"] as? [String: Any] {
+            record["codeStructure"] = Self.rejectedReplyCodeStructure(raw)
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]) else { return }
+        // A capture failure changes neither parser acceptance nor the original
+        // error, execution, cleanup or retry policy. Content never enters logs.
+        WebModelRejectedReplyCapture.capture(directory: directory, taskID: task, record: bytes)
+    }
+
+    private static func rejectedReplyCodeStructure(_ raw: [String: Any]) -> [String: Any] {
+        var safe: [String: Any] = [:]
+        for key in ["preCount", "codeCount"] {
+            if let number = receiptInteger(raw[key], range: 0...1_000) { safe[key] = number }
+        }
+        for key in ["codeTextLength", "outsideTextLength"] {
+            if let number = receiptInteger(raw[key], range: 0...220_001) { safe[key] = number }
+        }
+        if let value = raw["outsideTruncated"] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() {
+            safe["outsideTruncated"] = value.boolValue
+        }
+        if raw["literalCodeValidJSON"] is NSNull {
+            safe["literalCodeValidJSON"] = NSNull()
+        } else if let value = raw["literalCodeValidJSON"] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() {
+            safe["literalCodeValidJSON"] = value.boolValue
+        }
+        if raw["literalCodeKnownEnvelopeType"] is NSNull {
+            safe["literalCodeKnownEnvelopeType"] = NSNull()
+        } else if let kind = raw["literalCodeKnownEnvelopeType"] as? String, ["message", "tool_calls", "unknown"].contains(kind) {
+            safe["literalCodeKnownEnvelopeType"] = kind
+        }
+        if let extraction = raw["selectedExtraction"] as? String, ["raw_code", "rendered_fallback"].contains(extraction) {
+            safe["selectedExtraction"] = extraction
+        }
+        if let reason = raw["extractionReason"] as? String,
+           ["absent_answer", "missing_pre", "multiple_pre", "missing_code", "multiple_code", "oversized_code", "invalid_json",
+            "unknown_envelope_type", "outside_content", "outside_scan_limit", "accepted_literal_code"].contains(reason) {
+            safe["extractionReason"] = reason
+        }
+        if let tags = raw["preParentTags"] as? [String], tags.count <= 3,
+           tags.allSatisfy({ ["div", "pre", "code", "span", "p", "section", "article", "main", "li", "ul", "ol", "blockquote", "other"].contains($0) }) {
+            safe["preParentTags"] = tags
+        }
+        return safe
     }
 
     private func recordEvidence(_ evidence: WebsiteModelEvidence?, snapshot: [String: Any], taskID: String,
@@ -742,6 +820,172 @@ final class WebModelFailureDiagnosticStore: @unchecked Sendable {
         guard slots.count >= Self.maximumEntries,
               let oldest = slots.min(by: { $0.value.order < $1.value.order })?.key else { return }
         slots.removeValue(forKey: oldest)
+    }
+}
+
+/// Explicit, one-shot local debugging only. It never creates, repairs or logs
+/// an arm, replaces existing evidence, or follows a symlink. A directory is
+/// provisioned by the operator with mode0700; arm.json is mode0600 and contains
+/// only {"taskID":"<exact local UUID>"}. Remove a prior rejected-reply.json
+/// deliberately before arming another capture. All failures are silent.
+enum WebModelRejectedReplyCapture {
+    static let maximumReplyBytes = 220_000
+    static let maximumRecordBytes = maximumReplyBytes * 6 + 16_384
+    private static let maximumArmBytes = 512
+
+    @discardableResult
+    static func capture(directory: URL, taskID: UUID, record: Data) -> Bool {
+        capture(directory: directory, taskID: taskID, record: record, beforeArmClaim: nil)
+    }
+
+    #if DEBUG
+    static func capture(directory: URL, taskID: UUID, record: Data,
+                        beforeArmClaimForTesting: @escaping @Sendable () -> Void) -> Bool {
+        capture(directory: directory, taskID: taskID, record: record, beforeArmClaim: beforeArmClaimForTesting)
+    }
+    #endif
+
+    private static func capture(directory: URL, taskID: UUID, record: Data,
+                                beforeArmClaim: (@Sendable () -> Void)?) -> Bool {
+        guard !record.isEmpty, record.count <= maximumRecordBytes,
+              let object = try? JSONSerialization.jsonObject(with: record) as? [String: Any],
+              object["taskID"] as? String == taskID.uuidString.lowercased(),
+              let reply = object["replyText"] as? String, reply.utf8.count <= maximumReplyBytes else { return false }
+        let directoryFD = openDirectoryWithoutSymlinks(directory)
+        guard directoryFD >= 0 else { return false }
+        defer { close(directoryFD) }
+        var directoryInfo = stat()
+        guard fstat(directoryFD, &directoryInfo) == 0, privateDirectory(directoryInfo),
+              flock(directoryFD, LOCK_EX | LOCK_NB) == 0 else { return false }
+        let armFD = openat(directoryFD, "arm.json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard armFD >= 0 else { return false }
+        defer { close(armFD) }
+        var before = stat()
+        guard fstat(armFD, &before) == 0, privateFile(before), before.st_size > 0,
+              before.st_size <= maximumArmBytes, let arm = readArm(armFD), arm.count == before.st_size,
+              let armText = String(data: arm, encoding: .utf8),
+              armText.range(of: #"^\s*\{\s*"taskID"\s*:\s*"[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"\s*\}\s*$"#, options: .regularExpression) != nil,
+              let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any], Set(value.keys) == ["taskID"],
+              let rawTask = value["taskID"] as? String, UUID(uuidString: rawTask) == taskID else { return false }
+        var after = stat(), named = stat(), output = stat()
+        guard fstat(armFD, &after) == 0, sameUnchangedFile(before, after),
+              fstatat(directoryFD, "arm.json", &named, AT_SYMLINK_NOFOLLOW) == 0, sameUnchangedFile(before, named),
+              fstatat(directoryFD, "rejected-reply.json", &output, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT,
+              directoryStillMatches(directory, descriptor: directoryFD, initial: directoryInfo) else { return false }
+        let claimed = ".claimed-arm-" + UUID().uuidString.lowercased()
+        beforeArmClaim?()
+        guard renameatx_np(directoryFD, "arm.json", directoryFD, claimed, UInt32(RENAME_EXCL)) == 0 else { return false }
+        var claimedInfo = stat()
+        // A replaced arm must never grant capture authority to its old reader.
+        // Preserve a raced replacement: restore it exclusively, or leave its
+        // private claimed file recoverable if another new arm already exists.
+        guard fstatat(directoryFD, claimed, &claimedInfo, AT_SYMLINK_NOFOLLOW) == 0,
+              privateFile(claimedInfo), before.st_dev == claimedInfo.st_dev, before.st_ino == claimedInfo.st_ino,
+              before.st_size == claimedInfo.st_size,
+              before.st_mtimespec.tv_sec == claimedInfo.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == claimedInfo.st_mtimespec.tv_nsec,
+              lseek(armFD, 0, SEEK_SET) == 0, readArm(armFD) == arm,
+              fstat(armFD, &after) == 0, sameUnchangedFile(claimedInfo, after),
+              fstatat(directoryFD, claimed, &named, AT_SYMLINK_NOFOLLOW) == 0, sameUnchangedFile(after, named) else {
+            _ = renameatx_np(directoryFD, claimed, directoryFD, "arm.json", UInt32(RENAME_EXCL))
+            return false
+        }
+        let authorizedClaim = after
+        defer {
+            var remaining = stat()
+            if fstatat(directoryFD, claimed, &remaining, AT_SYMLINK_NOFOLLOW) == 0,
+               sameUnchangedFile(authorizedClaim, remaining) { _ = unlinkat(directoryFD, claimed, 0) }
+        }
+        let temporary = ".rejected-reply-" + UUID().uuidString.lowercased() + ".tmp"
+        let outputFD = openat(directoryFD, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard outputFD >= 0 else { return false }
+        defer {
+            var held = stat(), remaining = stat()
+            if fstat(outputFD, &held) == 0,
+               fstatat(directoryFD, temporary, &remaining, AT_SYMLINK_NOFOLLOW) == 0,
+               sameUnchangedFile(held, remaining) { _ = unlinkat(directoryFD, temporary, 0) }
+            close(outputFD)
+        }
+        guard fchmod(outputFD, 0o600) == 0, writeAll(record, descriptor: outputFD), fsync(outputFD) == 0,
+              directoryStillMatches(directory, descriptor: directoryFD, initial: directoryInfo) else { return false }
+        var written = stat(), temporaryInfo = stat()
+        guard fstat(outputFD, &written) == 0, privateFile(written), written.st_size == record.count,
+              fstatat(directoryFD, temporary, &temporaryInfo, AT_SYMLINK_NOFOLLOW) == 0,
+              sameUnchangedFile(written, temporaryInfo),
+              renameatx_np(directoryFD, temporary, directoryFD, "rejected-reply.json", UInt32(RENAME_EXCL)) == 0 else { return false }
+        _ = fsync(directoryFD)
+        return true
+    }
+
+    private static func openDirectoryWithoutSymlinks(_ url: URL) -> Int32 {
+        guard url.isFileURL, url.path.hasPrefix("/") else { return -1 }
+        let components = url.path.split(separator: "/").map(String.init)
+        guard !components.isEmpty, components.allSatisfy({ $0 != "." && $0 != ".." }) else { return -1 }
+        var descriptor = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return -1 }
+        for component in components {
+            let next = openat(descriptor, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            close(descriptor)
+            guard next >= 0 else { return -1 }
+            descriptor = next
+        }
+        return descriptor
+    }
+
+    private static func directoryStillMatches(_ directory: URL, descriptor: Int32, initial: stat) -> Bool {
+        let currentFD = openDirectoryWithoutSymlinks(directory)
+        guard currentFD >= 0 else { return false }
+        defer { close(currentFD) }
+        var current = stat(), held = stat()
+        return fstat(currentFD, &current) == 0 && fstat(descriptor, &held) == 0
+            && privateDirectory(current) && privateDirectory(held)
+            && current.st_dev == initial.st_dev && current.st_ino == initial.st_ino
+            && held.st_dev == initial.st_dev && held.st_ino == initial.st_ino
+    }
+
+    private static func privateDirectory(_ value: stat) -> Bool {
+        value.st_mode & S_IFMT == S_IFDIR && value.st_uid == geteuid() && value.st_mode & 0o7777 == 0o700
+    }
+
+    private static func privateFile(_ value: stat) -> Bool {
+        value.st_mode & S_IFMT == S_IFREG && value.st_nlink == 1
+            && value.st_uid == geteuid() && value.st_mode & 0o7777 == 0o600
+    }
+
+    private static func sameUnchangedFile(_ lhs: stat, _ rhs: stat) -> Bool {
+        privateFile(rhs) && lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino && lhs.st_size == rhs.st_size
+            && lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec
+            && lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
+    }
+
+    private static func readArm(_ descriptor: Int32) -> Data? {
+        var bytes = Data(count: maximumArmBytes + 1)
+        let count = bytes.withUnsafeMutableBytes { buffer -> Int? in
+            var count = 0
+            while count < buffer.count {
+                let result = Darwin.read(descriptor, buffer.baseAddress!.advanced(by: count), buffer.count - count)
+                if result < 0 { if errno == EINTR { continue }; return nil }
+                if result == 0 { return count }
+                count += result
+            }
+            return count
+        }
+        guard let count, count <= maximumArmBytes else { return nil }
+        bytes.count = count
+        return bytes
+    }
+
+    private static func writeAll(_ bytes: Data, descriptor: Int32) -> Bool {
+        bytes.withUnsafeBytes { buffer in
+            var count = 0
+            while count < buffer.count {
+                let result = Darwin.write(descriptor, buffer.baseAddress!.advanced(by: count), buffer.count - count)
+                if result < 0 { if errno == EINTR { continue }; return false }
+                guard result > 0 else { return false }
+                count += result
+            }
+            return true
+        }
     }
 }
 

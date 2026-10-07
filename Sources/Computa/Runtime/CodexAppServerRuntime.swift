@@ -1148,7 +1148,7 @@ private extension CodexAppServerRuntime {
         private var retryReportedForTurn: [AgentTask.ID: String] = [:]
         private var localProviderLaunchEnvironment: [String: String] = [:]
         private var inferenceServer: HeadlessMLXServer?
-        private let webModelServer = WebModelServer()
+        private let webModelServer: WebModelServer
         private var embeddedWebModelConfigured = false
         private var webProviderBaseURL: URL?
         private var webCleanupTasks: [AgentTask.ID: Task<[String], Never>] = [:]
@@ -1189,6 +1189,11 @@ private extension CodexAppServerRuntime {
             self.browserBroker = browserBroker
             self.visualGrounder = visualGrounder
             self.borrowedChromeConnector = borrowedChromeConnector
+            // Captures stay disabled unless a private, exact-task one-shot arm
+            // is explicitly created in this local diagnostic directory.
+            self.webModelServer = WebModelServer(rejectedReplyDirectory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("WebsiteReplyDiagnostics-v1", isDirectory: true))
         }
 
         func start() async throws {

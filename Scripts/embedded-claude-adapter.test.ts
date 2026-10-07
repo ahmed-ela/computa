@@ -63,7 +63,9 @@ describe("embedded Claude fixed adapter", () => {
       expect(JSON.parse(result.text)).toEqual(envelope);
       expect(result.text).not.toContain("Copy code");
       expect(result.completionEvidence.codeStructure).toMatchObject({ preCount: 1, codeCount: 1,
-        codeTextLength: raw.length, outsideTextLength: 0, outsideTruncated: false });
+        codeTextLength: raw.length, outsideTextLength: 0, outsideTruncated: false,
+        literalCodeValidJSON: true, literalCodeKnownEnvelopeType: envelope.type,
+        selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
       expect(JSON.stringify(result.completionEvidence.codeStructure)).not.toContain('quoted');
     }
   });
@@ -78,6 +80,8 @@ describe("embedded Claude fixed adapter", () => {
       const result = await f.run();
       expect(result.text).toBe(raw); expect(JSON.parse(result.text)).toEqual(envelope);
       expect(result.text).not.toContain("\uE056"); expect(result.text).not.toContain("json\n");
+      expect(result.completionEvidence.codeStructure).toMatchObject({ literalCodeValidJSON: true,
+        literalCodeKnownEnvelopeType: envelope.type, selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
     }
   });
 
@@ -144,6 +148,60 @@ describe("embedded Claude fixed adapter", () => {
       expect(result.completionEvidence.codeStructure.preCount).toBeGreaterThanOrEqual(1);
       expect(JSON.stringify(result.completionEvidence.codeStructure)).not.toContain('Author prose');
     }
+  });
+
+  test("finite extraction evidence distinguishes rejected structure without exposing response content", async () => {
+    const privateText = "PRIVATE_RESPONSE_PROMPT_HEADER_ACCOUNT_938475";
+    const cases: { reason: string; validJSON: boolean | null; type: string | null;
+      configure: (f: ReturnType<typeof fixture>, pre: Element, code: Element) => void }[] = [
+      { reason: "missing_pre", validJSON: null, type: null,
+        configure: f => { f.answer.children = []; f.answer.text = privateText; } },
+      { reason: "multiple_pre", validJSON: null, type: null,
+        configure: f => { const extra = new Element("PRE"); extra.append(new Element("CODE", {}, privateText)); f.answer.append(extra); } },
+      { reason: "missing_code", validJSON: null, type: null,
+        configure: (_f, pre) => { pre.children = []; pre.text = privateText; } },
+      { reason: "multiple_code", validJSON: null, type: null,
+        configure: (_f, pre) => { pre.append(new Element("CODE", {}, privateText)); } },
+      { reason: "oversized_code", validJSON: null, type: null,
+        configure: (_f, _pre, code) => { code.text = JSON.stringify({ type: "message", text: privateText + "x".repeat(220_000) }); } },
+      { reason: "invalid_json", validJSON: false, type: null,
+        configure: (_f, _pre, code) => { code.text = '{"type":"message","text":"' + privateText + '"unescaped""}'; } },
+      { reason: "unknown_envelope_type", validJSON: true, type: "unknown",
+        configure: (_f, _pre, code) => { code.text = JSON.stringify({ type: privateText, text: privateText }); } },
+      { reason: "unknown_envelope_type", validJSON: true, type: "unknown",
+        configure: (_f, _pre, code) => { code.text = JSON.stringify([{ type: "message", text: privateText }]); } },
+      { reason: "unknown_envelope_type", validJSON: true, type: "unknown",
+        configure: (_f, _pre, code) => { code.text = "null"; } },
+      { reason: "outside_content", validJSON: true, type: "message",
+        configure: f => { f.answer.append(new Element("P", { id: privateText, "data-private-header": privateText }, privateText)); } },
+      { reason: "outside_scan_limit", validJSON: true, type: "message",
+        configure: f => { for (let index = 0; index < 10_001; index++) f.answer.append(new Element("#text", {}, " ")); } },
+    ];
+    for (const { reason, validJSON, type, configure } of cases) {
+      const f = fixture(provider, { userPrompt: privateText });
+      f.answer.text = ""; f.answer.children = [];
+      const pre = new Element("PRE"), code = new Element("CODE", {}, JSON.stringify({ type: "message", text: privateText }));
+      pre.append(code); f.answer.append(pre); configure(f, pre, code);
+      const rendered = "Rendered whole answer " + privateText;
+      Object.defineProperty(f.answer, "innerText", { get: () => rendered });
+      const result = await f.run(), evidence = result.completionEvidence.codeStructure;
+      expect(result.text).toBe(rendered);
+      expect(evidence).toMatchObject({ literalCodeValidJSON: validJSON, literalCodeKnownEnvelopeType: type,
+        selectedExtraction: "rendered_fallback", extractionReason: reason });
+      const encoded = JSON.stringify(evidence);
+      expect(encoded).not.toContain(privateText); expect(encoded).not.toContain(firstMarker);
+      expect(encoded).not.toContain("data-private-header"); expect(encoded).not.toContain("unescaped");
+      expect(encoded.length).toBeLessThanOrEqual(8192); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("absent answers leave literal JSON facts unobserved and keep empty extraction", async () => {
+    const f = fixture(provider, { userPrompt: prompt, response: false });
+    const result = await f.run();
+    expect(result.text).toBe("");
+    expect(result.completionEvidence.codeStructure).toMatchObject({ preCount: 0, codeCount: 0,
+      literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null,
+      selectedExtraction: "rendered_fallback", extractionReason: "absent_answer" });
   });
 
   test("an owned fresh page enables temporary mode once and verifies real UI evidence", async () => {

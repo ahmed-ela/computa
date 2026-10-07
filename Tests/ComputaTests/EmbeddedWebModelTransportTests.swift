@@ -2280,6 +2280,32 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
     }
 
+    func testCodeStructureExtractionFlagsAreFiniteAndCannotCarryReplyContent() throws {
+        let base: [String: Any] = ["preCount": 1, "codeCount": 1, "codeTextLength": 321,
+            "outsideTextLength": 5, "outsideTruncated": false, "preParentTags": ["div"]]
+        var source = base
+        source.merge(["literalCodeValidJSON": true, "literalCodeKnownEnvelopeType": "tool_calls",
+            "selectedExtraction": "rendered_fallback", "extractionReason": "outside_content",
+            "reply": "private_canary"]) { _, new in new }
+        let projected = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projected.utf8)) as? [String: Any])
+        XCTAssertEqual(value["literalCodeValidJSON"] as? Bool, true)
+        XCTAssertEqual(value["literalCodeKnownEnvelopeType"] as? String, "tool_calls")
+        XCTAssertEqual(value["selectedExtraction"] as? String, "rendered_fallback")
+        XCTAssertEqual(value["extractionReason"] as? String, "outside_content")
+        XCTAssertFalse(projected.contains("private_canary"))
+        for key in ["literalCodeValidJSON", "literalCodeKnownEnvelopeType", "selectedExtraction", "extractionReason"] {
+            var poisoned = source
+            poisoned[key] = "private_canary"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(poisoned))
+        }
+        source["literalCodeValidJSON"] = 1
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+        source["literalCodeValidJSON"] = NSNull()
+        source["literalCodeKnownEnvelopeType"] = NSNull()
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+    }
+
     func testFirstUserDiagnosticsDropUnknownStringsAndRejectUnboundedMetadata() throws {
         func encode(_ value: [String: Any]) throws -> String {
             String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)

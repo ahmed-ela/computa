@@ -256,6 +256,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var modelEvidence: WebsiteModelEvidence?
         var lastModelDiagnostic: String?
         var observedResponseCount = 0
+        var responseCodeStructure: [String: Any]?
 
         init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil,
              isDiscovery: Bool = false, isRecoveryProbe: Bool = false) {
@@ -366,6 +367,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 try await waitForSendReady(session, prompt: outbound)
                 try Task.checkCancellation()
                 session.response = ""
+                session.responseCodeStructure = nil
                 session.completionCandidate = false
                 session.candidateSince = nil
                 session.lastChanged = .now
@@ -632,6 +634,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.response = response; session.lastChanged = .now; session.candidateSince = nil
                 }
                 if observed["busy"] as? Bool == false, observed["answerComplete"] as? Bool == true {
+                    // Retain only the finite projection from this owned answer,
+                    // alongside the exact response selected for strict parsing.
+                    session.responseCodeStructure = nil
+                    if let completion = observed["completionEvidence"] as? [String: Any],
+                       let structure = completion["codeStructure"] as? [String: Any],
+                       let safe = Self.sanitizedCodeStructure(structure),
+                       let projected = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] {
+                        session.responseCodeStructure = projected
+                    }
                     if !previouslyCandidate || session.candidateSince == nil { session.candidateSince = .now }
                     session.completionCandidate = true
                     if let since = session.candidateSince,
@@ -851,6 +862,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               tags.allSatisfy({ $0.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) != nil }) else { return nil }
         safe["outsideTruncated"] = truncated
         safe["preParentTags"] = tags
+        if let valid = source["literalCodeValidJSON"] {
+            guard valid is NSNull || CFGetTypeID(valid as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
+            safe["literalCodeValidJSON"] = valid
+        }
+        if let known = source["literalCodeKnownEnvelopeType"] {
+            guard known is NSNull || ["message", "tool_calls", "unknown"].contains(known as? String ?? "") else { return nil }
+            safe["literalCodeKnownEnvelopeType"] = known
+        }
+        if let extraction = source["selectedExtraction"] {
+            guard ["raw_code", "rendered_fallback"].contains(extraction as? String ?? "") else { return nil }
+            safe["selectedExtraction"] = extraction
+        }
+        if let reason = source["extractionReason"] {
+            guard ["absent_answer", "missing_pre", "multiple_pre", "missing_code", "multiple_code",
+                   "oversized_code", "invalid_json", "unknown_envelope_type", "outside_content",
+                   "outside_scan_limit", "accepted_literal_code"].contains(reason as? String ?? "") else { return nil }
+            safe["extractionReason"] = reason
+        }
         if let nodes = source["outsideNodes"] as? [[String: Any]] {
             guard nodes.count <= 4 else { return nil }
             var projected: [[String: Any]] = []
@@ -1425,6 +1454,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
                                   "state": session.state, "text": session.response, "sequence": session.sequence]
         if let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
+        if session.state == "complete", let structure = session.responseCodeStructure {
+            value["completionEvidence"] = ["codeStructure": structure]
+        }
         if let generation = session.documentGeneration {
             value["modelProofContext"] = ["documentGeneration": generation.uuidString, "sequence": session.sequence,
                                             "firstUserFingerprint": session.firstUserFingerprint ?? "",
