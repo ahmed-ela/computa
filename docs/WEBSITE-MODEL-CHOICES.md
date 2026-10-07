@@ -87,6 +87,8 @@ For a supported authorized operation that remains necessary, the model can retur
 
 For a final reply, Computa unwraps the `text` value of the `message` envelope before displaying it to the user. A user's instruction to return only file contents therefore applies to that value; the website transport still requires the single JSON envelope. The fresh handoff states this explicitly. It does not relax the strict parser, repair malformed output, change the original request serialization, or allow a plain-text answer to replace the required envelope.
 
+Malformed reply diagnostics add `code: malformed_website_reply`, `retryable: false`, a finite `reason`, the reply's UTF-8 byte count as `reply_bytes`, and `json_fenced` indicating whether the existing parser removed a supported JSON fence. Reasons are limited to `invalid_json`, `not_object`, `missing_or_unknown_type`, `invalid_message_text`, `invalid_calls`, and `invalid_call_name`. Classification first confirms the existing parser's malformed-envelope failure; valid replies and other parser failures retain their behavior. Diagnostics contain no reply text, arbitrary JSON keys, tool names, arguments, prompts, or credentials. They do not repair output, dispatch rejected tool calls, or retry inference.
+
 This handoff does not register website-native tools or give the website direct filesystem access. The owned model conversation is not a computer-tool target. The current built-in WebKit browser has no general tab driver; ordinary browser tools, when offered, use an authorized Chrome connection. Local terminal and native-app capabilities depend on the schemas and permissions actually offered for the inference. Full Access changes eligible approval handling, not sandbox or macOS access boundaries.
 
 ## What model verification proves
@@ -167,11 +169,29 @@ Raw exports and their digests must be retained before later turns append records
 
 Negative live and fixture checks must include unavailable choices, changed selections before Send and before response admission, conflicting attribution, stale documents, invalid IDs, unsupported menus, interrupted cleanup, and uncertain acknowledgment. They must confirm failure without silent fallback, automatic replay, or unverified response admission. Synthetic negative coverage and a completed positive marker turn are separate evidence.
 
-### Candidate18 status
+### Candidate19 status
+
+Candidate19 adds the content-free malformed reply diagnostics above. Its focused codec/server run passed 72 tests. The full nine-class run completed 198 tests: 197 passed and one fixture-readiness test failed with two reported failures, including an unexpected `InvalidTransition` during teardown. The failing test was `testAcknowledgedDelayedUserAppendDuringModelPickerReadRetainsChoiceAcrossToolContinuation`; its initial synthetic document readiness timed out before model selection or the tested append race. The same test passed in 4.653 seconds when run alone on unchanged code. The precise cause remains unknown, and no production regression is established; the isolated pass does not make the full suite passing. Log bytes and SHA-256 digests were retained in the candidate19 native test audit. Release 0.4.0 (19) was built, Developer ID signed and installed. Source/staged/installed resource inventories, staged/installed executable and runtime hashes, version/build and deep signature checks passed. The running installed executable was observed independently and reconnected to its local runtime. Fresh per-model results are below; earlier candidate receipts do not establish those results.
+
+
+| Provider | Website family | Candidate19 live result |
+| --- | --- | --- |
+| ChatGPT | GPT-5.5, GPT-5.6 Sol | Verified native file read, exact final marker, two paired selection-only inferences each. |
+| Gemini | 3.1 Pro | Verified native file read, exact final marker, two paired selection-only inferences. |
+| ChatGPT | Latest | Failed model verification before any recorded verified submission or native tool call. |
+| Gemini | 3.8 Flash | Human-verification error in 594 ms, with `website_verification_required`, `retryable: false`, and `complete_website_verification`. |
+| Gemini | 3.5 Flash-Lite | Unattempted after the verification gate returned. |
+| Claude | Sonnet 5.5, Haiku 4.5, Sonnet 5, Sonnet 4.6 | Unattempted while quota-limited; a separate candidate19 human-tab check again displayed free messages returning at `12:00 PM`, timezone unverified. |
+
+The five attempted tasks have immutable native rollouts and strict receipts; the three positive tasks also have matched native sidecar proof. Selection-only evidence does not establish independent response attribution or an immutable backend version. Latest's finite diagnostics show an enabled model trigger still closed after an unacknowledged opening, with no associated menu or conflicting selection. They do not establish why the website ignored or closed it. Neither that failed task nor the verification-gated task was retried. No CAPTCHA was completed. Absent sidecars in the failed tasks do not independently prove zero website Sends or successful cleanup. Three choices are verified, two failed, and five remain unattempted; complete qualification is blocked by the account gates and the unresolved Latest picker failure.
+
+### Recorded candidate18 qualification
 
 Candidate18 adds the external-gate classification and terminal session behavior above. The completed nine-class native feature suite passed all 194 unique tests, including five new transport tests and two server tests (16 HTTP gate/phase combinations). Initial unbound blank-page hydration, recognized and unknown redirects across awaits, blocked response admission, repeated Poll/Send rejection, exact finite error metadata and unchanged cleanup ownership are covered. Earlier failed runs remain recorded separately: one corrected retained-tab fixture assertion and intermittent fixture `InvalidTransition` failures do not count as passes. The last isolated full run completed with zero failures.
 
-The 0.4.0 (18) Release candidate was built, Developer ID signed and installed. Source/staged/installed resource inventories, staged/installed executable and runtime hashes, expected version/build, and strict deep code-signature checks passed. The running installed executable was observed separately, and the app reconnected to its local runtime. No fresh candidate18 per-model live qualification has been recorded yet. All candidate17 receipts below remain historical and cannot substitute for fresh candidate18 receipts.
+The 0.4.0 (18) Release candidate was built, Developer ID signed and installed. Source/staged/installed resource inventories, staged/installed executable and runtime hashes, expected version/build, and strict deep code-signature checks passed. The running installed executable was observed separately, and the app reconnected to its local runtime.
+
+Fresh candidate18 tasks verified ChatGPT Latest and GPT-5.6 Sol. Each completed one correlated native file read, returned the exact unknown marker, and exported two contiguous submission/completion pairs with selection-only proof. GPT-5.5 failed with a malformed response envelope before any native tool call and produced no final answer. Its single submission record verified the selected GPT-5.5 family; it did not establish a successful response or continuation. The raw website reply was not retained, so the precise malformed shape remains unknown. All three raw native rollouts and matching sidecars were archived with strict receipts. The other seven choices were unattempted on candidate18. Candidate17 receipts below remain historical and cannot substitute for fresh candidate18 or candidate19 receipts.
 
 ### Recorded candidate17 qualification
 

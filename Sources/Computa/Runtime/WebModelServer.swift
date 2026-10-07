@@ -46,6 +46,7 @@ actor WebModelServer {
     enum Failure: LocalizedError {
         case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
         case modelUnverified, modelMismatch
+        case malformedReply(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         var errorDescription: String? {
             switch self {
             case .chromeRequired: "Connect the Computa Chrome extension, then sign in to the selected website in Chrome."
@@ -58,6 +59,8 @@ actor WebModelServer {
             case .cleanupFailed: "The web conversation cleanup could not be verified. Its local transcript has been retained."
             case .modelUnverified: "The website's selected model could not be verified. No response was accepted and no prompt was replayed."
             case .modelMismatch: "The website selected or reported a different model. No response was accepted and no prompt was replayed."
+            case let .malformedReply(diagnostic):
+                "The website returned a malformed model response envelope (\(diagnostic.reason.rawValue)). No tool calls from this reply were dispatched."
             }
         }
     }
@@ -325,7 +328,16 @@ actor WebModelServer {
             case "complete":
                 let evidence = try Self.modelEvidence(value, session: session)
                 guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
-                let reply = try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: session.route == .embedded)
+                let reply: WebModelResponseCodec.Reply
+                do {
+                    reply = try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: session.route == .embedded)
+                } catch {
+                    if let diagnostic = WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: request,
+                                                                                         requireEnvelope: session.route == .embedded) {
+                        throw Failure.malformedReply(diagnostic)
+                    }
+                    throw error
+                }
                 recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "complete")
                 return try WebModelResponseCodec.streamData(for: reply, request: request, websiteModelEvidence: evidence)
             case "running":
@@ -473,6 +485,13 @@ actor WebModelServer {
             fields["code"] = code
             fields["retryable"] = false
             fields["required_action"] = action
+        }
+        if case let .malformedReply(diagnostic) = error as? Failure {
+            fields["code"] = "malformed_website_reply"
+            fields["retryable"] = false
+            fields["reason"] = diagnostic.reason.rawValue
+            fields["reply_bytes"] = diagnostic.utf8Bytes
+            fields["json_fenced"] = diagnostic.fenced
         }
         return try JSONSerialization.data(withJSONObject: ["error": fields])
     }

@@ -468,6 +468,106 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testMalformedEnvelopeDiagnosticsClassifyEveryRejectionShapeWithoutRepair() throws {
+        let prepared = try request()
+        let cases: [(String, WebModelResponseCodec.MalformedEnvelopeDiagnostic.Reason)] = [
+            ("The requested action finished.", .invalidJSON),
+            ("json\n{\"type\":\"message\",\"text\":\"value\"}", .invalidJSON),
+            (#"{"type":"message","text":"unescaped "quote""}"#, .invalidJSON),
+            (#"{"type":"tool_calls","calls":["#, .invalidJSON),
+            (#"[{"type":"message","text":"value"}]"#, .notObject),
+            (#""private scalar value""#, .notObject),
+            ("null", .notObject),
+            ("true", .notObject),
+            ("42", .notObject),
+            (#"{}"#, .missingOrUnknownType),
+            (#"{"type":27}"#, .missingOrUnknownType),
+            (#"{"type":"private_unknown_type","text":"value"}"#, .missingOrUnknownType),
+            (#"{"type":"message"}"#, .invalidMessageText),
+            (#"{"type":"message","text":null}"#, .invalidMessageText),
+            (#"{"type":"message","text":{"private_key":"private_value"}}"#, .invalidMessageText),
+            (#"{"type":"tool_calls"}"#, .invalidCalls),
+            (#"{"type":"tool_calls","calls":[]}"#, .invalidCalls),
+            (#"{"type":"tool_calls","calls":{}}"#, .invalidCalls),
+            (#"{"type":"tool_calls","calls":[27]}"#, .invalidCalls),
+            (#"{"type":"tool_calls","calls":[{}]}"#, .invalidCallName),
+            (#"{"type":"tool_calls","calls":[{"name":"","arguments":{}}]}"#, .invalidCallName),
+            (#"{"type":"tool_calls","calls":[{"name":27,"arguments":{}}]}"#, .invalidCallName),
+            (#"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}},{}]}"#, .invalidCallName),
+        ]
+        XCTAssertEqual(Set(cases.map { $0.1 }), Set(WebModelResponseCodec.MalformedEnvelopeDiagnostic.Reason.allCases))
+        for (body, reason) in cases {
+            for fence in [nil, "json", "JSON", ""] as [String?] {
+                let text = fence.map { " \n```" + $0 + "\n" + body + "\n```\n " } ?? body
+                let diagnostic = try XCTUnwrap(WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: prepared))
+                XCTAssertEqual(diagnostic.reason, reason)
+                XCTAssertEqual(diagnostic.utf8Bytes, text.utf8.count)
+                XCTAssertEqual(diagnostic.fenced, fence != nil)
+                XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared, requireEnvelope: true)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope,
+                                   "Diagnostics must not repair or change the parser's public failure")
+                }
+            }
+        }
+        for text in ["```javascript\n{}\n```", "```json\n{}", "Prefix\n```json\n{}\n```"] {
+            let diagnostic = try XCTUnwrap(WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: prepared))
+            XCTAssertEqual(diagnostic.reason, .invalidJSON)
+            XCTAssertFalse(diagnostic.fenced, "Only the existing parser's exact accepted fence may be reported")
+        }
+    }
+
+    func testMalformedEnvelopeDiagnosticsExcludeValidRepliesAndDifferentParserFailures() throws {
+        let prepared = try request(tools: [function, ["type": "custom", "name": "apply_patch"]])
+        for text in [#"{"type":"message","text":"private reply"}"#,
+                     #"{"type":"message","text":""}"#,
+                     #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}}]}"#,
+                     #"{"type":"tool_calls","calls":[{"name":"apply_patch","input":"private patch"}]}"#] {
+            for value in [text, "```json\n" + text + "\n```"] {
+                XCTAssertNoThrow(try WebModelResponseCodec.parseReply(value, request: prepared, requireEnvelope: true))
+                XCTAssertNil(WebModelResponseCodec.malformedEnvelopeDiagnostic(value, request: prepared))
+            }
+        }
+        let otherFailures: [(String, WebModelResponseCodec.Failure)] = [
+            (" \n ", .emptyReply),
+            (#"{"type":"tool_calls","calls":[{"name":"private_tool","arguments":{}}]}"#, .unknownTool("private_tool")),
+            (#"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":"private_argument"}]}"#, .argumentsMustBeObject),
+            (#"{"type":"tool_calls","calls":[{"name":"apply_patch","input":27}]}"#, .customInputMustBeString),
+            (#"{"type":"tool_calls","calls":[{"name":"private_tool","arguments":{}},{}]}"#, .unknownTool("private_tool")),
+        ]
+        for (text, failure) in otherFailures {
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared, requireEnvelope: true)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, failure)
+            }
+            XCTAssertNil(WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: prepared),
+                         "A later malformed entry cannot replace the parser's first actual failure")
+        }
+        for text in ["ordinary reply", #"{"unrelated":"JSON"}"#, "```swift\nlet x = 1\n```"] {
+            XCTAssertNil(WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: prepared, requireEnvelope: false))
+        }
+    }
+
+    func testMalformedEnvelopeDiagnosticsEncodeOnlyFiniteContentFreeFields() throws {
+        let prepared = try request()
+        let privateText = "PRIVATE_REPLY_CANARY_🧪"
+        let examples = [String(repeating: privateText, count: 4_096),
+                        #"{"type":"message","text":{"PRIVATE_JSON_KEY":"PRIVATE_ARGUMENT_VALUE"}}"#,
+                        #"{"type":"PRIVATE_TYPE_VALUE"}"#,
+                        "```json\n" + privateText + "\n```"]
+        for text in examples {
+            let diagnostic = try XCTUnwrap(WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: prepared))
+            let encoded = try JSONEncoder().encode(diagnostic)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            XCTAssertEqual(Set(fields.keys), ["reason", "utf8Bytes", "fenced"])
+            XCTAssertEqual(fields["utf8Bytes"] as? Int, text.utf8.count)
+            XCTAssertLessThan(encoded.count, 128, "Diagnostic size is independent of private response size")
+            let rendered = String(decoding: encoded, as: UTF8.self)
+            for forbidden in ["PRIVATE", "computer_v2_snapshot", "apply_patch", "arguments", "prompt"] {
+                XCTAssertFalse(rendered.contains(forbidden))
+            }
+            XCTAssertEqual(try JSONDecoder().decode(WebModelResponseCodec.MalformedEnvelopeDiagnostic.self, from: encoded), diagnostic)
+        }
+    }
+
     func testFencedToolEnvelopeBecomesOfferedToolWithJSONArguments() throws {
         let prepared = try request()
         let text = "```JSON\n" + #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{"view":"content","path":"https://example.com/α","nested":{"x":[true,null,3]}}}]}"# + "\n```"

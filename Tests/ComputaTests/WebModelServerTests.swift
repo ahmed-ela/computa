@@ -425,7 +425,11 @@ final class WebModelServerTests: XCTestCase {
                     let stream = try await server.infer(input, taskID: provider)
                     XCTFail("A malformed embedded reply must not return final success or tool events: \(stream.count) bytes")
                 } catch {
-                    XCTAssertEqual(error as? WebModelResponseCodec.Failure, .malformedEnvelope)
+                    guard case let .malformedReply(diagnostic) = error as? WebModelServer.Failure else {
+                        return XCTFail("Expected a finite malformed-reply diagnostic")
+                    }
+                    XCTAssertEqual(diagnostic.reason, .invalidJSON)
+                    XCTAssertEqual(diagnostic.utf8Bytes, response.utf8.count)
                 }
                 let operations = await transport.operations()
                 XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1,
@@ -661,6 +665,45 @@ final class WebModelServerTests: XCTestCase {
             XCTAssertNil(error["code"])
             XCTAssertNil(error["retryable"])
             XCTAssertNil(error["required_action"])
+        }
+    }
+
+    func testMalformedReplyHTTPDiagnosticsExposeOnlyFiniteStructureAndNeverRetry() async throws {
+        let cases: [(String, String)] = [
+            ("private malformed content", "invalid_json"),
+            (#"["private content"]"#, "not_object"),
+            (#"{"type":"private type"}"#, "missing_or_unknown_type"),
+            (#"{"type":"message","text":{"private":"content"}}"#, "invalid_message_text"),
+            (#"{"type":"tool_calls","calls":"private content"}"#, "invalid_calls"),
+            (#"{"type":"tool_calls","calls":[{"name":3,"arguments":{"private":"content"}}]}"#, "invalid_call_name"),
+        ]
+        for (reply, reason) in cases {
+            let transport = FixtureWebModelTransport(replyTexts: [reply])
+            let server = WebModelServer()
+            await server.configureEmbeddedTransport(transport)
+            let endpoint = try await server.start().appendingPathComponent("responses")
+            var urlRequest = URLRequest(url: endpoint)
+            urlRequest.httpMethod = "POST"
+            urlRequest.httpBody = request
+            urlRequest.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
+            urlRequest.setValue("malformed-reply-task", forHTTPHeaderField: "X-Computa-Task-ID")
+            let (data, response) = try await URLSession.shared.data(for: urlRequest)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let error = try XCTUnwrap(body["error"] as? [String: Any])
+            XCTAssertEqual(Set(error.keys), ["type", "message", "code", "retryable", "reason", "reply_bytes", "json_fenced"])
+            XCTAssertEqual(error["code"] as? String, "malformed_website_reply")
+            XCTAssertEqual(error["retryable"] as? Bool, false)
+            XCTAssertEqual(error["reason"] as? String, reason)
+            XCTAssertEqual(error["reply_bytes"] as? Int, reply.utf8.count)
+            XCTAssertEqual(error["json_fenced"] as? Bool, false)
+            let encoded = String(decoding: data, as: UTF8.self)
+            XCTAssertFalse(encoded.contains("private"))
+            XCTAssertFalse(encoded.contains("response.completed"))
+            XCTAssertFalse(encoded.contains("function_call"))
+            let operations = await transport.operations()
+            XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll"])
+            _ = await server.shutdown()
         }
     }
 

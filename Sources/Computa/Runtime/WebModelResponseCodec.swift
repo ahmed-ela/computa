@@ -33,6 +33,25 @@ enum WebModelResponseCodec {
         case toolCalls([ToolCall])
     }
 
+    /// Content-free diagnostics for a reply already rejected by the parser.
+    /// Only finite classifications and scalar measurements may leave this type;
+    /// reply text, JSON keys, tool names and arguments are never retained.
+    struct MalformedEnvelopeDiagnostic: Codable, Equatable, Sendable {
+        enum Reason: String, Codable, CaseIterable, Sendable {
+            case invalidJSON = "invalid_json"
+            case notObject = "not_object"
+            case missingOrUnknownType = "missing_or_unknown_type"
+            case invalidMessageText = "invalid_message_text"
+            case invalidCalls = "invalid_calls"
+            case invalidCallName = "invalid_call_name"
+        }
+
+        let reason: Reason
+        let utf8Bytes: Int
+        /// True only when the existing parser removed a supported JSON fence.
+        let fenced: Bool
+    }
+
     enum Modality: String, Equatable, Sendable {
         case image
         case audio
@@ -189,6 +208,44 @@ enum WebModelResponseCodec {
         default:
             if requireEnvelope { throw Failure.malformedEnvelope }
             return .message(text)
+        }
+    }
+
+    /// Diagnose exactly the existing malformed-envelope failure without
+    /// changing acceptance, repairing JSON, or exposing provider response data.
+    /// Other failures (including unoffered tools) keep their existing identity.
+    static func malformedEnvelopeDiagnostic(_ text: String, request: Request,
+                                            requireEnvelope: Bool = true) -> MalformedEnvelopeDiagnostic? {
+        do {
+            _ = try parseReply(text, request: request, requireEnvelope: requireEnvelope)
+            return nil
+        } catch {
+            guard (error as? Failure) == .malformedEnvelope else { return nil }
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = removingJSONFence(trimmed)
+        let diagnostic: (MalformedEnvelopeDiagnostic.Reason) -> MalformedEnvelopeDiagnostic = {
+            .init(reason: $0, utf8Bytes: text.utf8.count, fenced: candidate != trimmed)
+        }
+        // Fragments distinguish valid scalar/array JSON from invalid JSON for
+        // diagnostics only. parseReply above remains the acceptance authority.
+        guard let object = try? JSONSerialization.jsonObject(with: Data(candidate.utf8), options: .fragmentsAllowed) else {
+            return diagnostic(.invalidJSON)
+        }
+        guard let envelope = object as? [String: Any] else { return diagnostic(.notObject) }
+        switch envelope["type"] as? String {
+        case "message":
+            return envelope["text"] is String ? nil : diagnostic(.invalidMessageText)
+        case "tool_calls":
+            guard let calls = envelope["calls"] as? [[String: Any]], !calls.isEmpty else {
+                return diagnostic(.invalidCalls)
+            }
+            if calls.contains(where: { ($0["name"] as? String)?.isEmpty != false }) {
+                return diagnostic(.invalidCallName)
+            }
+            return nil
+        default:
+            return diagnostic(.missingOrUnknownType)
         }
     }
 
