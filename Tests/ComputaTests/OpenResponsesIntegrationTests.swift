@@ -216,6 +216,6 @@ private actor OpenResponsesFixtureTransport: WebModelTransport {
         case "webProviderFinish", "webProviderCancel": response = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: response)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
     }
 }

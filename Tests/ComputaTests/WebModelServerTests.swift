@@ -846,7 +846,7 @@ private actor EventWebModelTransport: WebModelTransport {
         case "webProviderCancel", "webProviderFinish": response = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: response)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
     }
 }
 
@@ -868,7 +868,7 @@ private actor LateWebModelTransport: WebModelTransport {
         case "webProviderFinish", "webProviderCancel": response = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: response)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
     }
 }
 
@@ -903,7 +903,7 @@ private actor NeverReadyWebModelTransport: WebModelTransport {
             default: throw WebModelServer.Failure.invalidRequest
             }
         }
-        return try JSONSerialization.data(withJSONObject: response)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
     }
 }
 
@@ -941,7 +941,7 @@ private actor ExternalGateWebModelTransport: WebModelTransport {
         case "webProviderFinish", "webProviderCancel": response = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: response)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
     }
 }
 
@@ -1005,7 +1005,7 @@ private actor DiagnosticWebModelTransport: WebModelTransport {
             } else { response = ["cleanup": "not_created"] }
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: response)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
     }
 }
 
@@ -1076,7 +1076,7 @@ private actor FixtureWebModelTransport: WebModelTransport {
             default: throw WebModelServer.Failure.invalidRequest
             }
         }
-        return try JSONSerialization.data(withJSONObject: response)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
     }
 }
 
@@ -1174,7 +1174,7 @@ private actor ChoiceWebModelTransport: WebModelTransport {
             default: throw WebModelServer.Failure.invalidRequest
             }
         }
-        return try JSONSerialization.data(withJSONObject: response)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
     }
 
     private func snapshot(state: String, choice: WebsiteModelChoice, at current: ChoiceSnapshotPoint) -> [String: Any] {

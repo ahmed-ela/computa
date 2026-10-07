@@ -13,9 +13,15 @@ function websiteModelChoiceEqual(left, right) {
   return websiteModelChoiceValid(left) && websiteModelChoiceValid(right)
     && left.key === right.key && left.label === right.label;
 }
+function websiteModelReadonlyChoiceValid(request) {
+  return websiteModelChoiceValid(request.expectedModelChoice)
+    || request.provider === 'chatgpt' && request.action === 'verifyProductMode'
+      && typeof chatGPTProductModeProof === 'function'
+      && chatGPTProductModeProof()?.temporaryTransition === 'acknowledged';
+}
 function websiteModelAcknowledgedUserAppend(request, capturedCount, currentCount, lineage = null, temporary = false) {
   const expected = request.expectedUserCounts;
-  if (!['inspect', 'verifyModel'].includes(request.action) || !websiteModelChoiceValid(request.expectedModelChoice)
+  if (!['inspect', 'verifyModel', 'verifyProductMode'].includes(request.action) || !websiteModelReadonlyChoiceValid(request)
     || !Number.isInteger(capturedCount) || capturedCount < 0 || capturedCount >= 1_000
     || !Array.isArray(expected) || expected.length !== 2 || expected[0] !== capturedCount || expected[1] !== capturedCount + 1
     || currentCount !== capturedCount + 1 || globalThis.__computaModelLastSubmissionCount !== capturedCount
@@ -41,7 +47,7 @@ async function websiteModelReplacementObservation(request, capturedCount, snapsh
   const expected = request.expectedUserCounts, pinned = globalThis.__computaModelFirstProof;
   const origin = ({ chatgpt: 'https://chatgpt.com', gemini: 'https://gemini.google.com', claude: 'https://claude.ai' })[request.provider];
   const marker = request.expectedFirstUserMarker, fingerprint = request.expectedFirstUserFingerprint;
-  if (!['inspect', 'verifyModel'].includes(request.action) || !websiteModelChoiceValid(request.expectedModelChoice)
+  if (!['inspect', 'verifyModel', 'verifyProductMode'].includes(request.action) || !websiteModelReadonlyChoiceValid(request)
     || !snapshot || !Number.isInteger(capturedCount) || capturedCount < 1 || capturedCount > 1_000
     || !Array.isArray(expected) || expected.length < 1 || expected.length > 2 || !expected.includes(capturedCount)
     || expected.some(count => !Number.isInteger(count) || count < 0 || count > 1_000)
@@ -830,13 +836,181 @@ function chatGPTUserBody(root) {
   return root.querySelector('[data-markdown-text-style="user-message"]')
     || root.querySelector('.whitespace-pre-wrap') || root.querySelector('[data-message-author-role="user"]') || root;
 }
-function chatGPTTemporaryVerified() {
+function chatGPTRenderedTemporary() {
   const visible = node => node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== "hidden" && !node.closest('[inert], [aria-hidden="true"]');
   const buttons = [...document.querySelectorAll('button')].filter(visible);
   return buttons.some(node => node.getAttribute('aria-label') === 'Turn off temporary chat')
     || new URL(document.URL).searchParams.get('temporary-chat') === 'true'
       && buttons.some(node => node.getAttribute('aria-label') === 'Save chat' || (node.innerText || '').trim() === 'Save chat');
+}
+// Product mode is independent of the family picker: normal Chat and Work can
+// offer the same models. Only a fresh, empty normal root may establish Chat
+// provenance, followed by this owner's actual temporary-chat transition.
+function chatGPTProductModeState() {
+  const boundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
+  const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden';
+  const visible = node => physical(node) && !node.closest('[inert], [aria-hidden="true"]');
+  const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+  const label = node => websiteModelNormalize(node.getAttribute('aria-label') || node.innerText || node.textContent);
+  const labelledGroup = node => {
+    if (node.getAttribute('aria-label') != null) return websiteModelNormalize(node.getAttribute('aria-label')) === 'Composer mode';
+    const id = node.getAttribute('aria-labelledby');
+    if (typeof id !== 'string' || !id || id.length > 256 || /\s/.test(id)) return false;
+    const labels = [...document.querySelectorAll('[id]')].slice(0, 512).filter(item => item.getAttribute('id') === id);
+    return labels.length === 1 && physical(labels[0]) && websiteModelNormalize(labels[0].textContent) === 'Composer mode';
+  };
+  const groups = [...document.querySelectorAll('[aria-label], [aria-labelledby]')].slice(0, 1_024)
+    .filter(node => physical(node) && !node.closest(boundary) && labelledGroup(node));
+  const group = groups.length === 1 ? groups[0] : null;
+  const controls = group ? [...group.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 32)
+    .filter(node => physical(node) && !node.closest(boundary) && ['Chat', 'Work'].includes(label(node))) : [];
+  const chat = controls.filter(node => label(node) === 'Chat'), work = controls.filter(node => label(node) === 'Work');
+  const state = node => {
+    const role = node.getAttribute('role');
+    const pressed = node.getAttribute('aria-pressed'), checked = node.getAttribute('aria-checked');
+    // Mixed states or competing state attributes never imply a product choice.
+    if (pressed != null && checked != null) return null;
+    const value = pressed != null && (node.tagName.toLowerCase() === 'button' && (!role || role === 'button') || role === 'button')
+      ? pressed : checked != null && ['radio', 'switch', 'checkbox'].includes(role) ? checked : null;
+    return value === 'true' ? true : value === 'false' ? false : null;
+  };
+  const pair = chat.length === 1 && work.length === 1;
+  const chatSelected = pair ? state(chat[0]) : null, workSelected = pair ? state(work[0]) : null;
+  const recognized = pair && chatSelected != null && workSelected != null && chatSelected !== workSelected;
+  return { group, groups, chat: chat[0] || null, work: work[0] || null, recognized, chatSelected, workSelected,
+    ready: recognized && enabled(chat[0]) && enabled(work[0]),
+    contradictory: groups.length > 1 || !!group && (!recognized || workSelected === true), physical, visible, enabled,
+    outside: node => !!node && node.nodeType === 1 && !node.closest(boundary),
+    namedGroup: node => !!node && node.nodeType === 1 && !node.closest(boundary) && labelledGroup(node),
+    modeControl: node => !!node && node.nodeType === 1 && !node.closest(boundary) && label(node) === 'Work'
+      && (node.tagName.toLowerCase() === 'button' || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role'))) };
+}
+function chatGPTProductModeDiagnostic(state) {
+  const control = node => !node ? null : {
+    tag: node.tagName.toLowerCase() === 'button' ? 'button' : 'other',
+    role: ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role')) ? node.getAttribute('role') : null,
+    pressed: ['true', 'false', 'mixed'].includes(node.getAttribute('aria-pressed')) ? node.getAttribute('aria-pressed') : null,
+    checked: ['true', 'false', 'mixed'].includes(node.getAttribute('aria-checked')) ? node.getAttribute('aria-checked') : null,
+    visible: state.visible(node), enabled: state.enabled(node) };
+  return { kind: 'chatgpt_product_mode_structure', groupCount: Math.min(state.groups.length, 16),
+    groupVisible: state.visible(state.group), recognized: state.recognized, contradictory: state.contradictory,
+    chat: control(state.chat), work: control(state.work),
+    proofPresent: !!globalThis.__computaChatProductMode, proofInvalidated: globalThis.__computaChatProductMode?.invalidated === true,
+    chatClickClaimed: globalThis.__computaChatModeClickClaimed === true };
+}
+function chatGPTControlExposed(node) {
+  if (!node || typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return false;
+  const rect = node.getBoundingClientRect();
+  if (![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) return false;
+  const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+  if (x < 0 || y < 0 || Number.isFinite(window.innerWidth) && x >= window.innerWidth
+    || Number.isFinite(window.innerHeight) && y >= window.innerHeight || getComputedStyle(node).pointerEvents === 'none') return false;
+  const hit = document.elementFromPoint(x, y);
+  return hit === node || !!hit && node.contains(hit);
+}
+function chatGPTObserveProductMutations(proof, state, records) {
+  const groups = proof.groups, works = proof.works;
+  const trackWork = node => {
+    if (!state.modeControl(node)) return;
+    works.add(node);
+    if (node.getAttribute('aria-pressed') === 'true' || node.getAttribute('aria-checked') === 'true') proof.invalidated = true;
+  };
+  const register = node => {
+    if (!node || node.nodeType !== 1) return;
+    const candidates = [node, ...node.querySelectorAll('[aria-label], [aria-labelledby]')].slice(0, 128);
+    for (const candidate of candidates) if (state.namedGroup(candidate)) groups.add(candidate);
+    const owned = groups.has(node) || [...groups].some(group => group.contains(node));
+    if (owned) for (const candidate of [node, ...node.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 128))
+      trackWork(candidate);
+  };
+  if (state.group) groups.add(state.group);
+  if (state.work) trackWork(state.work);
+  // Process structural provenance before attribute records. A control can be
+  // mounted, switched to Work, switched back and detached within one batch.
+  for (const record of records.slice(0, 512)) if (record.type === 'childList' && state.outside(record.target)) {
+    register(record.target);
+    const ownedTarget = groups.has(record.target) || [...groups].some(group => group.contains(record.target));
+    for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])].slice(0, 128)) {
+      register(node);
+      if (ownedTarget && node?.nodeType === 1) for (const candidate of [node,
+        ...node.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 128))
+        trackWork(candidate);
+    }
+  }
+  if (groups.size > 64 || works.size > 128 || records.length > 512) { proof.invalidated = true; return; }
+  if (state.contradictory || records.some(record => record.type === 'attributes'
+    && ['aria-pressed', 'aria-checked'].includes(record.attributeName) && record.oldValue === 'true'
+    && works.has(record.target))) proof.invalidated = true;
+}
+function chatGPTProductModeProof() {
+  const proof = globalThis.__computaChatProductMode;
+  const state = chatGPTProductModeState();
+  if (!proof || proof.invalidated || proof.owner !== globalThis.__computaModelOwner || proof.document !== document
+    || window !== window.top || location.origin !== 'https://chatgpt.com'
+    || !/^\/(?:c\/(?:[A-Za-z0-9-]+|local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+)\/?)?$/.test(new URL(document.URL).pathname)
+    || state.contradictory) {
+    if (proof) proof.invalidated = true;
+    return null;
+  }
+  if (!proof.temporaryRequested && (!state.ready || state.chatSelected !== true)) {
+    proof.invalidated = true;
+    return null;
+  }
+  if (proof.temporaryRequested && chatGPTRenderedTemporary()) proof.temporaryAcknowledged = true;
+  if (chatGPTRenderedTemporary() && !proof.temporaryAcknowledged) return null;
+  return { product: 'chatgpt', mode: 'chat', source: 'composer_mode_control',
+    temporaryTransition: proof.temporaryAcknowledged ? 'acknowledged' : 'not_requested' };
+}
+function chatGPTTemporaryVerified() {
+  return chatGPTRenderedTemporary() && chatGPTProductModeProof()?.temporaryTransition === 'acknowledged';
+}
+function chatGPTProductModeAction(request) {
+  const state = chatGPTProductModeState();
+  const reject = () => ({ error: 'product_mode_unverified', productModeDiagnostic: chatGPTProductModeDiagnostic(chatGPTProductModeState()) });
+  const fresh = chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
+    && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof;
+  const root = new URL(document.URL).pathname === '/' && !chatGPTRenderedTemporary()
+    && new URL(document.URL).searchParams.get('temporary-chat') !== 'true';
+  let proof = chatGPTProductModeProof();
+  if (!proof && !globalThis.__computaChatProductMode && fresh && root && state.ready && state.chatSelected === true) {
+    // Pending mode mutations belong to the pre-proof phase. The next observed
+    // mutation can revoke this proof even if Work immediately switches back.
+    globalThis.__computaModelSignal?.observer?.takeRecords?.();
+    globalThis.__computaChatProductMode = { owner: globalThis.__computaModelOwner, document,
+      groups: new Set([state.group]), works: new Set([state.work]), invalidated: false,
+      temporaryRequested: false, temporaryAcknowledged: false };
+    proof = chatGPTProductModeProof();
+  }
+  const actionAvailable = !globalThis.__computaChatProductMode && fresh && root && state.ready && state.workSelected === true
+    && globalThis.__computaChatModeClickClaimed !== true;
+  if (request.action === 'ensureChatMode' && !proof) {
+    if (!actionAvailable || !chatGPTControlExposed(state.chat)) return reject();
+    globalThis.__computaChatModeClickClaimed = true;
+    state.chat.click();
+    return { chatModeReady: false, chatModeActionAvailable: false, pending: true };
+  }
+  if (proof) return { chatModeReady: true, chatModeActionAvailable: false, productModeEvidence: proof };
+  if (request.action === 'inspect' && fresh && root && state.ready && state.workSelected === true
+    && globalThis.__computaChatModeClickClaimed === true)
+    return { chatModeReady: false, chatModeActionAvailable: false, pending: true };
+  if (request.action === 'inspect' && fresh && root && actionAvailable)
+    return { chatModeReady: false, chatModeActionAvailable: true };
+  if (request.action === 'inspect' && fresh && root && !state.group && !document.querySelectorAll('#prompt-textarea, [contenteditable="true"]').length)
+    return { chatModeReady: false, chatModeActionAvailable: false };
+  return reject();
+}
+async function chatGPTGuardedPageAction(request, fingerprint = null) {
+  const product = chatGPTProductModeAction(request);
+  if (product.error) return product;
+  if (['ensureChatMode', 'verifyProductMode'].includes(request.action)) return { ...product, temporary: chatGPTTemporaryVerified() };
+  if (!product.chatModeReady && request.action !== 'inspect') return { error: 'product_mode_unverified' };
+  const result = await providerPageAction(request, fingerprint);
+  if (result.error) return result;
+  const finalProduct = chatGPTProductModeAction({ ...request, action: 'verifyProductMode' });
+  if (finalProduct.error && product.chatModeReady) return finalProduct;
+  return { ...result, ...(finalProduct.error ? product : finalProduct), temporary: chatGPTTemporaryVerified() };
 }
 function chatGPTStructure(visible) {
   const buttons = [...document.querySelectorAll('button')].filter(visible).filter(button =>
@@ -926,6 +1100,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     const proof = await websiteModelReadEvidence('chatgpt', input.expectedModelChoice, null,
       { scope: 'action_precheck', action: input.action });
     if (proof.error) return proof;
+    if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
     // Reading a freshly mounted picker yields. Before any editor mutation,
     // recheck the same native ownership and first-message snapshot again.
     const currentCount = chatGPTMessageRoots('user').length;
@@ -1058,12 +1233,17 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     const toggle = provider === "claude" ? find(['button[aria-label="Use incognito"]'])
       : find(['button[aria-label="Temporary chat"]']);
     if (!enabled(toggle)) return { error: "temporary_mode_unavailable" };
+    if (!chatGPTControlExposed(toggle)) return { error: "temporary_mode_unavailable" };
+    const mode = chatGPTProductModeProof();
+    if (!mode || mode.temporaryTransition !== 'not_requested') return { error: 'product_mode_unverified' };
     globalThis.__computaModelTemporaryRequested = true;
+    globalThis.__computaChatProductMode.temporaryRequested = true;
     toggle.click(); return { ...state, enabled: false };
   }
   if (["prepare", "insert", "sendReady", "submit", "stop"].includes(action) && !temporary)
     return { error: "temporary_mode_unverified" };
   if (action === "insert") {
+    if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
     if (!enabled(composer) || stop) return { error: "composer_unavailable" };
     const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
     if (value?.trim() || typeof prompt !== "string" || prompt.length > 180000)
@@ -1113,6 +1293,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     return { ...state, inserted: true };
   }
   if (action === "prepare") {
+    if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
     if (!enabled(composer) || stop || claudeStreaming) return { error: "composer_unavailable" };
     const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
     if (value?.trim()) return { error: "composer_not_empty" };
@@ -1120,6 +1301,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     return { ...state, prepared: document.activeElement === composer || composer.contains(document.activeElement) };
   }
   if (action === "submit" || action === "sendReady") {
+    if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
     if (!enabled(composer) || stop || claudeStreaming) return { error: "composer_unavailable" };
     const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
     const actual = (value || "").replace(/\r\n/g, "\n").trim();
@@ -1165,6 +1347,9 @@ if (globalThis.__computaModelOwner !== input.ownerToken) {
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
   const signal = { ownerToken: input.ownerToken, queued: false, observer: null };
   signal.observer = new MutationObserver(records => {
+    const productProof = globalThis.__computaChatProductMode;
+    const mode = productProof ? chatGPTProductModeState() : null;
+    if (productProof) chatGPTObserveProductMutations(productProof, mode, records);
     if (!records.some(record => !websiteModelIgnoreOwnPickerMutation(record)) || signal.queued) return;
     signal.queued = true;
     // Batch streaming mutations into one wake-up; this timer is scheduled
@@ -1185,7 +1370,7 @@ if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
   signal.observer.observe(document.documentElement || document, {
     subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true,
     attributeFilter: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style",
-      "aria-checked", "aria-selected", "aria-controls", "aria-labelledby", "aria-expanded", "title", "hidden", "inert", "contenteditable", "data-testid", "data-is-streaming",
+      "aria-checked", "aria-pressed", "aria-selected", "aria-controls", "aria-labelledby", "aria-expanded", "title", "hidden", "inert", "contenteditable", "data-testid", "data-is-streaming",
       "data-message-author-role", "data-markdown-text-style", "data-chatgpt-selection-conversation-id", "data-turn",
       "data-user-message-bubble"]
   });
@@ -1212,7 +1397,8 @@ const snapshotUnchanged = (allowSubmittedUser = false) => {
 const finalReadContextFailure = observed => {
   // A rejected picker read already prevents admission. Preserve its precise
   // diagnostics and the existing outer lineage-error ordering.
-  if (observed.error || input.expectedModelChoice == null || !['prepare', 'verifyModel'].includes(input.action)) return null;
+  if (observed.error || input.expectedModelChoice == null && input.action !== 'verifyProductMode'
+    || !['prepare', 'verifyModel', 'verifyProductMode'].includes(input.action)) return null;
   if (window !== window.top || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL
     || globalThis.__computaModelOwner !== input.ownerToken)
     return { error: 'document_changed', detail: 'model_read_context' };
@@ -1220,6 +1406,15 @@ const finalReadContextFailure = observed => {
   // Preparation cannot acquire a new message while its final proof awaits.
   if (input.action === 'prepare' && chatGPTMessageRoots('user').length !== ownedUserCount)
     return { error: 'conversation_changed', detail: 'user_count' };
+  if (input.action === 'verifyProductMode') {
+    const product = chatGPTProductModeProof();
+    if (!product) return { error: 'product_mode_unverified' };
+    // Product-only reads retain provenance before the actual temporary click
+    // and while an owned model popup hides its off-temp control. The returned
+    // physical temporary boolean is independent; native permits only its
+    // narrowly claimed pending picker phase to progress with it false.
+    return null;
+  }
   if (!chatGPTTemporaryVerified()) return { error: 'temporary_mode_unverified' };
   return null;
 };
@@ -1244,6 +1439,7 @@ if (ownedUserCount > 0) {
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
         identity: () => null, temporary: chatGPTTemporaryVerified })
     || { error: "conversation_changed", detail: "first_user_message" };
+  if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
   firstUserFingerprint = fingerprint;
   const pinned = globalThis.__computaModelFirstProof;
@@ -1261,11 +1457,12 @@ if (ownedUserCount > 0) {
       return { error: "conversation_changed", detail: "first_user_message" };
   }
   // Pin only after this same document still confirms the owned temporary chat.
-  const observed = await websiteModelFinalGuard('chatgpt', input, await providerPageAction(input, firstUserFingerprint), chatGPTTemporaryVerified);
+  const observed = await websiteModelFinalGuard('chatgpt', input, await chatGPTGuardedPageAction(input, firstUserFingerprint), chatGPTTemporaryVerified);
+  if (!observed.error && !chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   const readContextFailure = finalReadContextFailure(observed);
   if (readContextFailure) return readContextFailure;
   if (observed.error === 'first_user_observation_replaced') return observed;
-  if (['inspect', 'verifyModel'].includes(input.action) && chatGPTMessageRoots('user').length !== ownedUserCount) {
+  if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && chatGPTMessageRoots('user').length !== ownedUserCount) {
     const append = websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length,
       { snapshotIntact: snapshotUnchanged(true), fingerprint: firstUserFingerprint }, chatGPTTemporaryVerified());
     if (append) return append;
@@ -1274,8 +1471,9 @@ if (ownedUserCount > 0) {
     return await websiteModelReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
         identity: () => null, temporary: chatGPTTemporaryVerified }) || { error: "conversation_changed", detail: "first_user_message" };
-  if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
   if (observed.error) return observed;
+  if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
+  if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
   if (!pinned) {
     if (observed.temporary !== true) return { error: "temporary_mode_unverified" };
     globalThis.__computaModelFirstProof = { marker, fingerprint: firstUserFingerprint };
@@ -1285,10 +1483,11 @@ if (ownedUserCount > 0) {
 }
 if (input.expectedFirstUserFingerprint != null)
   return { error: "conversation_changed", detail: "first_user_message" };
-const observed = await websiteModelFinalGuard('chatgpt', input, await providerPageAction(input), chatGPTTemporaryVerified);
+const observed = await websiteModelFinalGuard('chatgpt', input, await chatGPTGuardedPageAction(input), chatGPTTemporaryVerified);
+if (!observed.error && observed.chatModeReady && !chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
 const readContextFailure = finalReadContextFailure(observed);
 if (readContextFailure) return readContextFailure;
-if (['inspect', 'verifyModel'].includes(input.action) && chatGPTMessageRoots('user').length !== ownedUserCount)
+if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && chatGPTMessageRoots('user').length !== ownedUserCount)
   return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length, null, chatGPTTemporaryVerified())
     || { error: 'conversation_changed', detail: 'user_count' };
 return { ...observed, firstUserVerified, firstUserFingerprint };

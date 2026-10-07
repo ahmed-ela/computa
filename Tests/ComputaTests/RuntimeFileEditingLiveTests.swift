@@ -254,7 +254,7 @@ private actor NativePatchInferenceFixture: WebModelTransport {
         case "webProviderFinish", "webProviderCancel": result = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: result)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result))
     }
 
     private func patchReply(name: String, patch: String) throws -> String {

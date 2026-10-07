@@ -46,7 +46,7 @@ private struct ChromeWebModelTransport: WebModelTransport {
 actor WebModelServer {
     enum Failure: LocalizedError {
         case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
-        case modelUnverified, modelMismatch
+        case modelUnverified, modelMismatch, productModeUnverified
         case modelNotFound
         case malformedReply(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         var errorDescription: String? {
@@ -59,6 +59,7 @@ actor WebModelServer {
             case .preparationDeadline: "The website did not become ready before the 45-second preparation deadline. No prompt was sent."
             case .deadline: "The website did not finish its response before the five-minute deadline."
             case .cleanupFailed: "The web conversation cleanup could not be verified. Its local transcript has been retained."
+            case .productModeUnverified: "ChatGPT normal Chat mode could not be verified. No response was accepted and no prompt was replayed. Refresh website models before retrying."
             case .modelUnverified: "The website's selected model could not be verified. No response was accepted and no prompt was replayed."
             case .modelMismatch: "The website selected or reported a different model. No response was accepted and no prompt was replayed."
             case .modelNotFound: "The requested website model is not supported. Choose a model from Computa's selector."
@@ -399,6 +400,11 @@ actor WebModelServer {
     }
 
     private static func modelEvidence(_ snapshot: [String: Any], session: Session) throws -> WebsiteModelEvidence? {
+        if session.route == .embedded, session.provider == "chatgpt" {
+            guard (try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true)) != nil else {
+                throw Failure.productModeUnverified
+            }
+        }
         guard session.modelChoice != nil || snapshot["modelEvidence"] != nil && !(snapshot["modelEvidence"] is NSNull) else { return nil }
         do { return try WebsiteModelEvidence.parse(snapshot["modelEvidence"], provider: session.provider, expected: session.modelChoice) }
         catch WebsiteModelEvidence.Failure.mismatch { throw Failure.modelMismatch }
@@ -493,6 +499,10 @@ actor WebModelServer {
                                     "sequence": sequence, "documentGeneration": generation,
                                     "responseCount": responseCount, "baselineResponseCount": baseline,
                                     "modelEvidence": evidence.dictionary]
+        if session.provider == "chatgpt", session.route == .embedded,
+           let product = try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true) {
+            record["productModeEvidence"] = product.dictionary
+        }
         if let threadID = evidenceThreads[task.uuidString.lowercased()] { record["threadID"] = threadID }
         if let fingerprint, !fingerprint.isEmpty { record["firstUserFingerprint"] = fingerprint }
         guard let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]), encoded.count <= 4_096 else { return }
@@ -653,6 +663,7 @@ actor WebModelServer {
             switch failure {
             case .invalidRequest: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_request")
             case .modelNotFound: return .init(status: "404 Not Found", type: "not_found", code: "model_not_found", param: "model")
+            case .productModeUnverified: return .init(status: "500 Internal Server Error", type: "model_error", code: "product_mode_unverified")
             case .busy: return .init(status: "429 Too Many Requests", type: "too_many_requests", code: "provider_busy")
             case .deadline, .preparationDeadline: return .init(status: "504 Gateway Timeout", type: "server_error", code: "provider_timeout")
             case .chromeRequired, .embeddedRequired: return .init(status: "503 Service Unavailable", type: "server_error", code: "provider_unavailable")
@@ -687,6 +698,10 @@ actor WebModelServer {
             fields["code"] = code
             fields["retryable"] = false
             fields["required_action"] = action
+        }
+        if case .productModeUnverified = error as? Failure {
+            fields["retryable"] = false
+            fields["required_action"] = "refresh_website_models"
         }
         if case let .malformedReply(diagnostic) = error as? Failure {
             fields["code"] = "malformed_website_reply"

@@ -65,7 +65,8 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
 enum WebsiteModelCatalog {
     static let providers = ["chatgpt", "gemini", "claude"]
     static let maximumChoicesPerProvider = 32
-    static let preferenceKey = "Computa.websiteModelChoices.v1"
+    static let preferenceKey = "Computa.websiteModelChoices.v2-chat-product"
+    static let legacyPreferenceKey = "Computa.websiteModelChoices.v1"
 
     struct Selection: Equatable, Sendable {
         let provider: String
@@ -134,7 +135,8 @@ enum WebsiteModelCatalog {
     }
 
     static func load(from preferences: UserDefaults) -> [WebsiteModelChoice] {
-        guard let data = preferences.data(forKey: preferenceKey), data.count <= 100 * 1_024,
+        let legacy = preferences.data(forKey: preferenceKey) == nil
+        guard let data = preferences.data(forKey: legacy ? legacyPreferenceKey : preferenceKey), data.count <= 100 * 1_024,
               let choices = try? JSONDecoder().decode([WebsiteModelChoice].self, from: data),
               choices.count <= providers.count * maximumChoicesPerProvider else { return [] }
         for provider in providers {
@@ -146,8 +148,10 @@ enum WebsiteModelCatalog {
         guard choices.allSatisfy(\.isValid) else { return [] }
         // Validate the complete stored catalog first: retiring a choice must
         // not hide duplicate or malformed entries from cache validation.
-        let selectable = choices.filter(\.isSelectable)
-        if selectable.count != choices.count { save(selectable, to: preferences) }
+        // The previous catalog never proved Chat versus Work. Retire only
+        // those ChatGPT entries until an explicit guarded discovery refresh.
+        let selectable = choices.filter { $0.isSelectable && (!legacy || $0.provider != "chatgpt") }
+        if legacy || selectable.count != choices.count { save(selectable, to: preferences) }
         return selectable
     }
 

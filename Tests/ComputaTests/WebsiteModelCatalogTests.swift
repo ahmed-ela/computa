@@ -3,6 +3,29 @@ import XCTest
 @testable import Computa
 
 final class WebsiteModelCatalogTests: XCTestCase {
+    func testPriorCatalogDropsOnlyUnprovenChatGPTChoicesBeforeGuardedRefresh() throws {
+        let preferences = isolatedTestPreferences()
+        let normalLabelAlsoOfferedInWork = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")
+        let others = [WebsiteModelChoice(provider: "gemini", key: "3.1 Pro", label: "3.1 Pro"),
+                      WebsiteModelChoice(provider: "claude", key: "Sonnet 5.5", label: "Sonnet 5.5")]
+        preferences.set(try JSONEncoder().encode([normalLabelAlsoOfferedInWork] + others), forKey: WebsiteModelCatalog.legacyPreferenceKey)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
+        XCTAssertNotNil(preferences.data(forKey: WebsiteModelCatalog.preferenceKey))
+        WebsiteModelCatalog.save([normalLabelAlsoOfferedInWork] + others, to: preferences)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), [normalLabelAlsoOfferedInWork] + others,
+                       "The label is valid after guarded normal-Chat discovery; it must not be blacklisted")
+    }
+
+    func testLegacyCatalogValidationCannotBeHiddenByProductMigration() throws {
+        let preferences = isolatedTestPreferences()
+        let duplicate = WebsiteModelChoice(provider: "chatgpt", key: "same", label: "Same")
+        let raw = try JSONEncoder().encode([duplicate, duplicate])
+        preferences.set(raw, forKey: WebsiteModelCatalog.legacyPreferenceKey)
+        XCTAssertTrue(WebsiteModelCatalog.load(from: preferences).isEmpty)
+        XCTAssertNil(preferences.data(forKey: WebsiteModelCatalog.preferenceKey))
+        XCTAssertEqual(preferences.data(forKey: WebsiteModelCatalog.legacyPreferenceKey), raw)
+    }
+
     func testConcreteChoicesRoundTripWithoutARegisteredOrGuessedModelList() throws {
         let configuration = CodexAppServerRuntime.Configuration.localQwen
         for provider in WebsiteModelCatalog.providers {

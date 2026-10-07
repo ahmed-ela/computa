@@ -31,7 +31,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
         var startURL: URL {
             switch self {
-            case .chatgpt: URL(string: "https://chatgpt.com/?temporary-chat=true")!
+            case .chatgpt: URL(string: "https://chatgpt.com/")!
             case .claude: URL(string: "https://claude.ai/new?incognito")!
             case .gemini: URL(string: "https://gemini.google.com/app")!
             }
@@ -83,7 +83,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
         func acceptsUnboundStart(_ url: URL) -> Bool {
             guard accepts(url.absoluteString), conversationURL(url.absoluteString) == nil else { return false }
-            return self == .gemini ? true : acceptsTemporaryToggle(url)
+            return self == .gemini || self == .chatgpt ? true : acceptsTemporaryToggle(url)
         }
 
         /// Abort-only classification of known provider checkpoints. Never run
@@ -145,7 +145,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case signInRequired, temporaryUnverified, notFresh, composerUnavailable
         case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
         case submissionObservationPending
-        case modelUnverified, modelMismatch, modelUnavailable, discoveryCleanupFailed
+        case modelUnverified, modelMismatch, modelUnavailable, productModeUnverified, discoveryCleanupFailed
         case usageLimited(Provider)
         case humanVerificationRequired(Provider), unexpectedPage(Provider)
         case editorFailure(String)
@@ -157,6 +157,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .signInRequired: "sign_in_required"
             case .usageLimited: "website_usage_limit"
             case .unexpectedPage: "unexpected_website_page"
+            case .productModeUnverified: "product_mode_unverified"
             default: nil
             }
         }
@@ -167,6 +168,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .signInRequired: "sign_in"
             case .usageLimited: "wait_for_quota_reset"
             case .unexpectedPage: "inspect_website"
+            case .productModeUnverified: "refresh_website_models"
             default: nil
             }
         }
@@ -198,6 +200,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .submissionObservationPending: "The submitted message is still appearing on the model page."
             case .modelUnverified: "The website's selected model could not be verified. No prompt was replayed. Refresh the website models and retry."
             case .modelMismatch: "The website changed or reported a different model. Its response was not accepted, and no prompt was replayed."
+            case .productModeUnverified: "ChatGPT normal Chat mode could not be verified. No response was accepted and no prompt was replayed. Refresh website models before retrying."
             case .modelUnavailable: "That model is not available in the website's current account. Refresh the website models and choose an available model."
             case .discoveryCleanupFailed: "The model menu session could not be closed. Restart Computa to refresh website models."
             case .responseTooLarge: "The website's response exceeded the local browser transport limit."
@@ -227,6 +230,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var submitted = false
         var temporary = false
         var temporaryRequested = false
+        var chatModeRequested = false
+        var productModeEvidence: WebsiteProductModeEvidence?
         var sequence = 0
         var confirmedUsers = 0
         var pendingSubmission = false
@@ -255,6 +260,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var modelSelectionVerified = false
         var modelEvidence: WebsiteModelEvidence?
         var lastModelDiagnostic: String?
+        var lastProductModeDiagnostic: String?
         var observedResponseCount = 0
         var responseCodeStructure: [String: Any]?
 
@@ -292,6 +298,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
     #if DEBUG
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
+    private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     #endif
 
     init(browser: EmbeddedBrowserSession) {
@@ -307,6 +314,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setBeforePageResultValidationForTesting(_ hook: (@MainActor (String) async -> Void)?) {
         beforePageResultValidationForTesting = hook
+    }
+
+    /// Separate model-enforced reads from product-only lineage observations.
+    func setBeforePageResultValidationDetailedForTesting(_ hook: (@MainActor (String, Bool) async -> Void)?) {
+        beforePageResultValidationDetailedForTesting = hook
     }
 
     func setTimeoutsForTesting(preparation: Duration, response: Duration) {
@@ -580,6 +592,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard count(observed, "responseCount") == 0, count(observed, "userCount") == 0,
                   session.provider.conversationURL(observed["url"] as? String) == nil else { throw Failure.notFresh }
             if observed["signIn"] as? Bool == true { throw Failure.signInRequired }
+            if session.provider == .chatgpt, observed["chatModeReady"] as? Bool != true {
+                guard !session.temporaryRequested, !session.temporary else { throw Failure.productModeUnverified }
+                if observed["chatModeActionAvailable"] as? Bool == true {
+                    if !session.chatModeRequested {
+                        session.chatModeRequested = true
+                        _ = try await page(session, action: "ensureChatMode", maximumWait: min(.seconds(10), deadline - .now))
+                    }
+                } else if observed["composer"] as? Bool == true,
+                          !(session.chatModeRequested && observed["pending"] as? Bool == true) { throw Failure.productModeUnverified }
+                return try snapshot(session)
+            }
             if session.modelSelectionRequested, !session.modelSelectionVerified {
                 // An owned model popup can make the already-verified temporary
                 // controls or composer aria-hidden. Advance this claimed phase
@@ -1019,9 +1042,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
-                      refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true,
+                      refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true, recheckProductAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
-                      allowBlockedProvider: Bool = false,
+                      allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         if !allowBlockedProvider { try checkProviderGate(session) }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
@@ -1122,6 +1145,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         #if DEBUG
         await beforePageResultValidationForTesting?(action)
+        await beforePageResultValidationDetailedForTesting?(action, enforceModel)
         #endif
         if !allowBlockedProvider { try checkProviderGate(session) }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
@@ -1151,7 +1175,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && nextConversation != nil && nextConversation != session.conversation
                 && !provider.isLocalConversation(nextConversation) && !session.promoted
             Self.inspectionLog.info("routeTransition provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) submitted=\(session.submitted) oldConversation=\(current != nil) newConversation=\(nextConversation != nil) oldLocal=\(provider.isLocalConversation(current)) newLocal=\(provider.isLocalConversation(nextConversation)) refresh=\(refreshChangedRoute) first=\(firstConversation) promotion=\(promotedConversation)")
-            if ["inspect", "verifyModel"].contains(action), refreshChangedRoute, firstConversation || promotedConversation {
+            if ["inspect", "verifyModel", "verifyProductMode"].contains(action), refreshChangedRoute, firstConversation || promotedConversation {
                 // Discard every crossed read. ChatGPT can create a local route
                 // and promote it during the next read before either result can
                 // bind the conversation. Only that first empty-to-local edge
@@ -1160,7 +1184,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let awaitingLocalPromotion = firstConversation && current == nil
                     && provider.isLocalConversation(nextConversation)
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
-                                      refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait,
+                                      refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
                                       allowBlockedProvider: allowBlockedProvider,
                                       maximumWait: maximumWait)
@@ -1174,6 +1198,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         guard let observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
         logModelDiagnostic(observed, session: session)
+        if let safe = Self.sanitizedProductModeDiagnostic(observed["productModeDiagnostic"]),
+           safe != session.lastProductModeDiagnostic {
+            session.lastProductModeDiagnostic = safe
+            Self.inspectionLog.error("productModeDiagnostic provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) structure=\(safe, privacy: .public)")
+        }
         if let error = observed["error"] as? String {
             if ["temporary_mode_unavailable", "temporary_mode_unverified"].contains(error),
                let raw = observed["quotaDiagnostic"] as? String {
@@ -1188,6 +1217,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 throw Failure.editorFailure("\(detail); \(actual)/\(expected) characters; \(actualLines)/\(expectedLines) lines\(difference)")
             }
             switch error {
+            case "product_mode_unverified": throw Failure.productModeUnverified
             case "model_unverified": throw Failure.modelUnverified
             case "model_mismatch": throw Failure.modelMismatch
             case "model_unavailable": throw Failure.modelUnavailable
@@ -1196,14 +1226,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // our already acknowledged Send. Discard that observation and
                 // inspect once from the current page, including the exact first
                 // marker/fingerprint checks. Never replay an editor operation.
-                guard refreshReadOnlyObservation, ["inspect", "verifyModel"].contains(action),
+                guard refreshReadOnlyObservation, ["inspect", "verifyModel", "verifyProductMode"].contains(action),
                       observed["detail"] as? String == "readonly_model_observation",
                       session.submitted, session.pendingSubmission,
                       session.confirmedUsers + 1 == session.sequence else {
                     throw Failure.ownershipFailure(.javaScriptUserCount)
                 }
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
-                                      refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait,
+                                      refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
                                       maximumWait: maximumWait)
             case "first_user_observation_replaced":
@@ -1212,13 +1242,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // discard after checking both pinned hashes and the exact
                 // marker on the disconnected node's replacement. Admit nothing
                 // from that read; use the same one-inspect budget as an append.
-                guard refreshReadOnlyObservation, ["inspect", "verifyModel"].contains(action),
+                guard refreshReadOnlyObservation, ["inspect", "verifyModel", "verifyProductMode"].contains(action),
                       observed["detail"] as? String == "readonly_model_observation",
                       session.submitted, session.firstUserFingerprint != nil else {
                     throw Failure.ownershipFailure(.javaScriptFirstUser)
                 }
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
-                                      refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait,
+                                      refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
                                       maximumWait: maximumWait)
             case "document_changed", "conversation_changed":
@@ -1262,6 +1292,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             default: throw Failure.composerUnavailable
             }
         }
+        try await verifyProductModeAfterAwait(observed, session: session, action: action,
+                                             recheck: recheckProductAfterAwait,
+                                             refreshChangedRoute: refreshChangedRoute,
+                                             refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                             maximumWait: maximumWait,
+                                             allowBlockedProvider: allowBlockedProvider,
+                                             allowPendingModelTemporary: allowPendingModelTemporary)
         // Submit returns only its acknowledgment; observations carry ownership state.
         if let observedURL = observed["url"] as? String {
             guard provider.accepts(observedURL), provider.routeContext(observedURL) == currentContext else { throw Failure.documentChanged }
@@ -1310,6 +1347,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         "answerComplete": false, "ownershipPending": true,
                         "debugStructure": observed["debugStructure"] as? String ?? ""]
                 if let evidence = session.modelEvidence { pending["modelEvidence"] = evidence.dictionary }
+                if let evidence = session.productModeEvidence { pending["productModeEvidence"] = evidence.dictionary }
                 return pending
             }
             if promotion {
@@ -1350,6 +1388,59 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return observed
     }
 
+    private func verifyProductModeAfterAwait(_ observed: [String: Any], session: Session, action: String,
+                                            recheck: Bool, refreshChangedRoute: Bool,
+                                            refreshReadOnlyObservation: Bool, maximumWait: Duration,
+                                            allowBlockedProvider: Bool, allowPendingModelTemporary: Bool) async throws {
+        guard session.provider == .chatgpt else { return }
+        // Before hydration or the explicitly claimed Chat click, an untouched
+        // root can report pending readiness. That never authorizes temporary
+        // mode, model discovery, insertion or Send.
+        let initialPending = session.state == "loading" && !session.temporaryRequested && !session.submitted
+            && session.productModeEvidence == nil && ["inspect", "ensureChatMode"].contains(action)
+        if observed["productModeEvidence"] == nil, initialPending {
+            guard observed["chatModeReady"] as? Bool != true else { throw Failure.productModeUnverified }
+            return
+        }
+        // The owned picker can hide the already verified temporary control.
+        // Permit only its claimed pending phase to finish closing; readiness
+        // and every editor/Send/response admission still require physical mode.
+        let pendingPicker = session.temporary && session.modelSelectionRequested
+            && session.productModeEvidence?.temporaryTransition == .acknowledged
+            && (allowPendingModelTemporary
+                || ["selectModel", "discoverModels"].contains(action) && observed["pending"] as? Bool == true
+                || session.state == "loading" && !session.modelSelectionVerified && ["inspect", "verifyProductMode"].contains(action))
+        let evidence: WebsiteProductModeEvidence
+        do { evidence = try WebsiteProductModeEvidence.parse(observed["productModeEvidence"],
+                    requireTemporary: session.temporary || observed["temporary"] as? Bool == true) }
+        catch { throw Failure.productModeUnverified }
+        if evidence.temporaryTransition == .acknowledged {
+            guard session.temporaryRequested, observed["temporary"] as? Bool == true || pendingPicker else { throw Failure.productModeUnverified }
+        }
+        if session.productModeEvidence?.temporaryTransition == .acknowledged,
+           evidence.temporaryTransition != .acknowledged { throw Failure.productModeUnverified }
+        session.productModeEvidence = evidence
+        // Native awaits can cross a Work-mode change without a navigation.
+        // Re-read only the fixed product controls; never replay a click or Send.
+        if recheck, !["verifyProductMode", "ensureChatMode", "stop", "cleanup"].contains(action) {
+            let freshAction = session.pendingSubmission && session.firstUserFingerprint == nil ? "inspect" : "verifyProductMode"
+            let fresh = try await page(session, action: freshAction, enforceModel: false,
+                                       refreshChangedRoute: refreshChangedRoute,
+                                       recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                       allowBlockedProvider: allowBlockedProvider, allowPendingModelTemporary: pendingPicker,
+                                       maximumWait: maximumWait)
+            let current: WebsiteProductModeEvidence
+            do { current = try WebsiteProductModeEvidence.parse(fresh["productModeEvidence"],
+                    requireTemporary: session.temporary || fresh["temporary"] as? Bool == true) }
+            catch { throw Failure.productModeUnverified }
+            guard evidence.temporaryTransition != .acknowledged || current.temporaryTransition == .acknowledged else {
+                throw Failure.productModeUnverified
+            }
+            session.productModeEvidence = current
+        }
+    }
+
     private func verifyModelEvidenceAfterAwait(_ observed: [String: Any], session: Session, action: String,
                                               enforceModel: Bool, recheck: Bool, refreshChangedRoute: Bool,
                                               refreshReadOnlyObservation: Bool,
@@ -1378,6 +1469,40 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         do { return try WebsiteModelEvidence.parse(observation["modelEvidence"], provider: session.provider.rawValue, expected: session.modelChoice) }
         catch WebsiteModelEvidence.Failure.mismatch { throw Failure.modelMismatch }
         catch { throw Failure.modelUnverified }
+    }
+
+    static func sanitizedProductModeDiagnostic(_ raw: Any?) -> String? {
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["kind", "groupCount", "groupVisible", "recognized", "contradictory", "chat", "work",
+                                  "proofPresent", "proofInvalidated", "chatClickClaimed"],
+              value["kind"] as? String == "chatgpt_product_mode_structure",
+              let count = value["groupCount"] as? NSNumber,
+              CFGetTypeID(count) != CFBooleanGetTypeID(), (0...16).contains(count.intValue),
+              count.doubleValue == Double(count.intValue) else { return nil }
+        func boolean(_ raw: Any?) -> Bool? {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+            return number.boolValue
+        }
+        var safe: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": count.intValue]
+        for key in ["groupVisible", "recognized", "contradictory", "proofPresent", "proofInvalidated", "chatClickClaimed"] {
+            guard let flag = boolean(value[key]) else { return nil }; safe[key] = flag
+        }
+        for key in ["chat", "work"] {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let control = value[key] as? [String: Any],
+                  Set(control.keys) == ["tag", "role", "pressed", "checked", "visible", "enabled"],
+                  let tag = control["tag"] as? String, ["button", "other"].contains(tag),
+                  let visible = boolean(control["visible"]), let enabled = boolean(control["enabled"]) else { return nil }
+            var item: [String: Any] = ["tag": tag, "visible": visible, "enabled": enabled]
+            for field in ["role", "pressed", "checked"] {
+                if control[field] is NSNull { item[field] = NSNull(); continue }
+                let allowed = field == "role" ? ["button", "radio", "switch", "checkbox"] : ["true", "false", "mixed"]
+                guard let state = control[field] as? String, allowed.contains(state) else { return nil }; item[field] = state
+            }
+            safe[key] = item
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys]), data.count <= 2_048 else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func logModelDiagnostic(_ observation: [String: Any], session: Session) {
@@ -1454,6 +1579,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
                                   "state": session.state, "text": session.response, "sequence": session.sequence]
         if let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
+        if let evidence = session.productModeEvidence { value["productModeEvidence"] = evidence.dictionary }
         if session.state == "complete", let structure = session.responseCodeStructure {
             value["completionEvidence"] = ["codeStructure": structure]
         }

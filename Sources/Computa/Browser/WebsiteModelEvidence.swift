@@ -64,3 +64,28 @@ struct WebsiteModelEvidence: Codable, Equatable, Sendable {
         return value
     }
 }
+
+/// Product mode is separate from the model label: the same model can appear
+/// in both ChatGPT Chat and Work. The fixed adapter obtains this proof on the
+/// owned empty root page before it claims the temporary-chat transition.
+struct WebsiteProductModeEvidence: Codable, Equatable, Sendable {
+    enum TemporaryTransition: String, Codable, Sendable { case notRequested = "not_requested", acknowledged }
+    enum Failure: Error { case unverified }
+    let temporaryTransition: TemporaryTransition
+
+    static func parse(_ raw: Any?, requireTemporary: Bool = false) throws -> Self {
+        guard let value = raw as? [String: String],
+              Set(value.keys) == ["product", "mode", "source", "temporaryTransition"],
+              value["product"] == "chatgpt", value["mode"] == "chat",
+              value["source"] == "composer_mode_control",
+              let rawTransition = value["temporaryTransition"],
+              let transition = TemporaryTransition(rawValue: rawTransition),
+              !requireTemporary || transition == .acknowledged else { throw Failure.unverified }
+        return Self(temporaryTransition: transition)
+    }
+
+    var dictionary: [String: String] {
+        ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control",
+         "temporaryTransition": temporaryTransition.rawValue]
+    }
+}

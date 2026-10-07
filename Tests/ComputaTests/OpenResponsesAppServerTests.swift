@@ -245,7 +245,7 @@ private actor EngineInferenceTransport: WebModelTransport {
             result = ["cleanup": "not_created"]
         default: throw EngineTestFailure("Unexpected deterministic transport operation")
         }
-        return try JSONSerialization.data(withJSONObject: result)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result))
     }
 }
 

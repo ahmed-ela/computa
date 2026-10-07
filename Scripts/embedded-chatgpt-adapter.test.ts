@@ -10,6 +10,8 @@ const firstMarker = "23b7752b-6a64-4b88-b886-f0d0584ca9de";
 const markerLine = `Computa session marker: ${firstMarker}`;
 
 class Element {
+  private static nextRect = 0;
+  private readonly rect = Element.nextRect++;
   parentElement: Element | null = null;
   children: Element[] = [];
   connected = true;
@@ -32,6 +34,7 @@ class Element {
   get innerText() { return this.textContent; }
   getAttribute(name: string) { return this.values[name] ?? null; }
   getClientRects() { return this.isConnected && !this.closest('[hidden]') ? [{}] : []; }
+  getBoundingClientRect() { return { left: 0, top: this.rect * 40, width: 100, height: 30 }; }
   append(...children: Element[]) { children.forEach(child => { child.parentElement = this; this.children.push(child); }); }
   contains(node: Element | null): boolean { return node === this || !!node && this.children.some(child => child.contains(node)); }
   closest(selector: string): Element | null {
@@ -79,12 +82,17 @@ function simpleMatches(node: Element, target: string) {
     ? node.getAttribute(name) !== null : node.getAttribute(name) === value);
 }
 
-function fixture(options: { articleOnly?: boolean; userPrompt?: string; renderedMarkdown?: boolean; userBubble?: boolean; sharedCopy?: boolean; response?: boolean } = {}) {
+function fixture(options: { articleOnly?: boolean; userPrompt?: string; renderedMarkdown?: boolean; userBubble?: boolean; sharedCopy?: boolean; response?: boolean;
+  normalRoot?: boolean; unprovenProduct?: boolean } = {}) {
   const html = new Element("HTML"), body = new Element("BODY"), messages = new Element("MAIN");
   html.append(body); body.append(messages);
   const temporary = new Element("BUTTON", { "aria-label": "Turn off temporary chat" }, "Temporary");
   const composer = new Element("DIV", { id: "prompt-textarea", contenteditable: "true" });
-  body.append(temporary, composer);
+  const modeGroup = new Element('DIV', { 'aria-label': 'Composer mode', role: 'group' });
+  const chatMode = new Element('BUTTON', { 'aria-pressed': 'true' }, 'Chat');
+  const workMode = new Element('BUTTON', { 'aria-pressed': 'false' }, 'Work');
+  modeGroup.append(chatMode, workMode); body.append(modeGroup, temporary, composer);
+  chatMode.onClick = () => { chatMode.values['aria-pressed'] = 'true'; workMode.values['aria-pressed'] = 'false'; };
   const article = new Element("ARTICLE", { "data-turn": "assistant", "data-testid": "conversation-turn-2" });
   const outer = new Element("DIV", options.articleOnly ? { class: "markdown" }
     : { "data-markdown-text-style": "assistant-message" });
@@ -133,8 +141,15 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     }, cancelAnimationFrame: (id: number) => { frames.delete(id); },
     KeyboardEvent: class { constructor(public type: string, options: any) { Object.assign(this, options); } } };
   window.top = window;
+  let hitOverride: Element | null | undefined;
   const document = { URL: "https://chatgpt.com/?temporary-chat=true", documentElement: html,
+    elementFromPoint: (x: number, y: number) => hitOverride !== undefined ? hitOverride : html.descendants().find(node => {
+      const rect = node.getBoundingClientRect(); return node.isConnected && !node.closest('[hidden], [aria-hidden="true"], [inert]')
+        && x >= rect.left && x < rect.left + rect.width && y >= rect.top && y < rect.top + rect.height;
+    }) || null,
     querySelectorAll: (selector: string) => html.querySelectorAll(selector) };
+  temporary.onClick = () => { temporary.values['aria-label'] = 'Turn off temporary chat'; document.URL = 'https://chatgpt.com/?temporary-chat=true'; };
+  if (options.normalRoot) { document.URL = 'https://chatgpt.com/'; temporary.values['aria-label'] = 'Temporary chat'; }
   const world: Record<string, unknown> = {};
   if (options.userPrompt !== undefined) {
     world.__computaModelFirstPrompt = options.userPrompt + "\n\n" + markerLine;
@@ -145,25 +160,54 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
   let nativeFingerprint: string | undefined;
   let adapterClockOffset = 0;
   let digestHook: (() => void) | undefined;
-  return { posted, observers, location, document, world, window, body, temporary, composer, scheduledDelays, userBody, answer: outer,
+  let productBootstrapped = false;
+  const invoke = (request: Record<string, unknown>, useHook = true) => execute({ provider: 'chatgpt', ownerToken, bindOwner: true,
+    expectedURL: document.URL, expectedUserCounts: [options.userPrompt === undefined ? 0 : 1],
+    expectedFirstUserMarker: firstMarker, expectedFirstUserFingerprint: nativeFingerprint,
+    allowFirstUserBinding: nativeFingerprint === undefined, ...request },
+    document, window, location, () => ({ visibility: 'visible' }), Observer, (callback: () => void, delay: number) => {
+      timers.push(callback); scheduledDelays.push(delay);
+    }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
+      const digest = await crypto.subtle.digest(algorithm, data);
+      if (useHook) { digestHook?.(); digestHook = undefined; }
+      return digest;
+    } } }, class TextArea extends Element {}, { now: () => Date.now() + adapterClockOffset });
+  return { posted, observers, location, document, world, window, body, temporary, composer, modeGroup, chatMode, workMode, scheduledDelays, userBody, answer: outer,
     advanceTime: (milliseconds: number) => { adapterClockOffset += milliseconds; },
+    setHit: (node: Element | null | undefined) => { hitOverride = node; },
     appendUser: (prompt: string) => {
       const root = new Element('ARTICLE', { 'data-turn': 'user', 'data-testid': 'conversation-turn-appended' });
       root.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, prompt)); messages.append(root);
     },
     onDigest: (hook: () => void) => { digestHook = hook; },
     inspect: async (overrides: Record<string, unknown> = {}, adopt = true) => {
-      const result = await execute({ provider: "chatgpt", action: "inspect", expectedURL: document.URL,
-      expectedUserCounts: [options.userPrompt === undefined ? 0 : 1], ownerToken, bindOwner: true,
-      expectedFirstUserMarker: firstMarker, expectedFirstUserFingerprint: nativeFingerprint,
-      allowFirstUserBinding: nativeFingerprint === undefined, ...overrides },
-      document, window, location, () => ({ visibility: "visible" }), Observer, (callback: () => void, delay: number) => {
-        timers.push(callback); scheduledDelays.push(delay);
-      }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
-        const digest = await crypto.subtle.digest(algorithm, data);
-        digestHook?.(); digestHook = undefined;
-        return digest;
-      } } }, class TextArea extends Element {}, { now: () => Date.now() + adapterClockOffset });
+      if (!productBootstrapped && !options.normalRoot && !options.unprovenProduct) {
+        // Existing response/lineage fixtures begin after a real empty-root
+        // bootstrap. Exercise the production mode and temporary actions, then
+        // restore the separately staged response DOM; never seed a fake proof.
+        productBootstrapped = true;
+        const savedURL = document.URL, savedTemporary = { ...temporary.values }, savedConnected = temporary.connected;
+        const savedChildren = [...body.children], savedWorld = { ...world };
+        body.children = [modeGroup, temporary, composer]; temporary.connected = true;
+        document.URL = 'https://chatgpt.com/'; temporary.values['aria-label'] = 'Temporary chat';
+        delete world.__computaModelFirstSubmitted; delete world.__computaModelFirstProof;
+        const mode = await invoke({ action: 'ensureChatMode', expectedUserCounts: [0] }, false);
+        if (!mode.chatModeReady) throw new Error('Fixture normal Chat bootstrap failed');
+        const transition = await invoke({ action: 'enableTemporary', expectedUserCounts: [0] }, false);
+        if (!transition.temporary || transition.productModeEvidence?.temporaryTransition !== 'acknowledged')
+          throw new Error('Fixture temporary transition failed');
+        document.URL = savedURL; temporary.values = savedTemporary; temporary.connected = savedConnected;
+        body.children = savedChildren;
+        Object.assign(world, savedWorld);
+        // A legacy delayed-toggle fixture stages a pre-temporary normal root.
+        if (!savedConnected) {
+          document.URL = 'https://chatgpt.com/';
+          delete world.__computaModelTemporaryRequested;
+          (world.__computaChatProductMode as any).temporaryRequested = false;
+          (world.__computaChatProductMode as any).temporaryAcknowledged = false;
+        }
+      }
+      const result = await invoke({ action: 'inspect', ...overrides });
       if (adopt && result.firstUserVerified) nativeFingerprint = result.firstUserFingerprint;
       return result;
     },
@@ -191,6 +235,250 @@ defineWebsiteModelChoiceTests('chatgpt', (owned = false) => {
   const f = fixture({ response: owned, ...(owned ? { userPrompt: 'Synthetic owned prompt' } : {}) });
   return { ...f, run: (action: string, overrides: Record<string, unknown> = {}) => f.inspect({ ...overrides, action }) };
 }, Element);
+
+describe('normal ChatGPT product provenance', () => {
+  test('normal Chat and Work share family labels; Chat is proven before one explicit temporary transition', async () => {
+    const f = fixture({ response: false, normalRoot: true });
+    const picker = installObservedModelPicker(f, 'chatgpt', Element);
+    expect(await f.inspect()).toMatchObject({ chatModeReady: true, temporary: false, productModeEvidence: {
+      product: 'chatgpt', mode: 'chat', source: 'composer_mode_control', temporaryTransition: 'not_requested' } });
+    expect(f.chatMode.clicks).toBe(0); expect(picker.options.some(option => option.textContent.includes('GPT-5.6 Sol'))).toBe(true);
+    expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ temporary: true,
+      productModeEvidence: { temporaryTransition: 'acknowledged' } });
+    expect(f.temporary.clicks).toBe(1);
+    f.modeGroup.values.hidden = '';
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: true,
+      productModeEvidence: { mode: 'chat', temporaryTransition: 'acknowledged' } });
+    expect(picker.trigger.clicks).toBe(0);
+  });
+
+  test('native product-only rechecks on the normal root do not require a temporary transition before it is claimed', async () => {
+    const f = fixture({ response: false, normalRoot: true });
+    expect(await f.inspect()).toMatchObject({ productModeEvidence: { temporaryTransition: 'not_requested' } });
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: false,
+      chatModeReady: true, productModeEvidence: { mode: 'chat', temporaryTransition: 'not_requested' } });
+    expect(f.temporary.clicks).toBe(0);
+    expect(await f.inspect({ action: 'prepare' })).toMatchObject({ error: 'temporary_mode_unverified' });
+    expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ temporary: true,
+      productModeEvidence: { temporaryTransition: 'acknowledged' } });
+    expect(f.temporary.clicks).toBe(1);
+  });
+
+  test('an initial temporary page cannot infer normal Chat from the URL, model labels, or visible mode pair', async () => {
+    for (const saveInstead of [false, true]) {
+      const f = fixture({ response: false, unprovenProduct: true });
+      if (saveInstead) f.temporary.values['aria-label'] = 'Save chat';
+      installObservedModelPicker(f, 'chatgpt', Element);
+      expect(await f.inspect()).toMatchObject({ error: 'product_mode_unverified' });
+      expect(f.world.__computaChatProductMode).toBeUndefined(); expect(f.temporary.clicks).toBe(0);
+    }
+  });
+
+  test('an owned empty Work root claims one Chat click and waits for the actual complementary states', async () => {
+    const f = fixture({ response: false, normalRoot: true });
+    f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true';
+    const change = f.chatMode.onClick!; f.chatMode.onClick = () => {};
+    expect(await f.inspect()).toMatchObject({ chatModeReady: false, chatModeActionAvailable: true });
+    expect(await f.inspect({ action: 'ensureChatMode' })).toMatchObject({ pending: true, chatModeReady: false });
+    expect(await f.inspect()).toMatchObject({ pending: true, chatModeReady: false, chatModeActionAvailable: false });
+    expect(await f.inspect({ action: 'ensureChatMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.chatMode.clicks).toBe(1); expect(f.temporary.clicks).toBe(0);
+    change();
+    expect(await f.inspect()).toMatchObject({ chatModeReady: true, productModeEvidence: { temporaryTransition: 'not_requested' } });
+    expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ temporary: true,
+      productModeEvidence: { mode: 'chat', temporaryTransition: 'acknowledged' } });
+  });
+
+  test('ambiguous, hidden, disabled and conflicting product controls never acquire proof or click', async () => {
+    const mutations = [
+      (f: ReturnType<typeof fixture>) => { f.workMode.values['aria-pressed'] = 'true'; },
+      (f: ReturnType<typeof fixture>) => { f.chatMode.values['aria-pressed'] = 'false'; },
+      (f: ReturnType<typeof fixture>) => { f.chatMode.values['aria-pressed'] = 'mixed'; },
+      (f: ReturnType<typeof fixture>) => { delete f.workMode.values['aria-pressed']; },
+      (f: ReturnType<typeof fixture>) => { f.chatMode.values['aria-checked'] = 'true'; },
+      (f: ReturnType<typeof fixture>) => { f.modeGroup.append(new Element('BUTTON', { 'aria-pressed': 'false' }, 'Work')); },
+      (f: ReturnType<typeof fixture>) => { f.body.append(new Element('DIV', { 'aria-label': 'Composer mode' })); },
+      (f: ReturnType<typeof fixture>) => { f.modeGroup.values.hidden = ''; },
+      (f: ReturnType<typeof fixture>) => { f.modeGroup.values.inert = ''; },
+      (f: ReturnType<typeof fixture>) => { f.chatMode.disabled = true; },
+      (f: ReturnType<typeof fixture>) => { f.workMode.values['aria-disabled'] = 'true'; },
+    ];
+    for (const mutate of mutations) {
+      const f = fixture({ response: false, normalRoot: true }); mutate(f);
+      expect(await f.inspect({ action: 'ensureChatMode' })).toMatchObject({ error: 'product_mode_unverified' });
+      expect(f.chatMode.clicks).toBe(0); expect(f.temporary.clicks).toBe(0);
+      expect(f.world.__computaChatProductMode).toBeUndefined();
+    }
+  });
+
+  test('role-appropriate checked controls and exact labelled group retain actual semantic proof', async () => {
+    const f = fixture({ response: false, normalRoot: true });
+    f.modeGroup.values['aria-labelledby'] = 'composer-mode-label'; delete f.modeGroup.values['aria-label'];
+    f.body.append(new Element('SPAN', { id: 'composer-mode-label' }, 'Composer mode'));
+    for (const [node, state] of [[f.chatMode, 'true'], [f.workMode, 'false']] as const) {
+      delete node.values['aria-pressed']; node.values.role = 'radio'; node.values['aria-checked'] = state;
+    }
+    expect(await f.inspect()).toMatchObject({ productModeEvidence: { mode: 'chat', temporaryTransition: 'not_requested' } });
+    expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ productModeEvidence: { temporaryTransition: 'acknowledged' } });
+  });
+
+  test('unrequested temporary appearance cannot acknowledge a product transition', async () => {
+    const f = fixture({ response: false, normalRoot: true }); await f.inspect();
+    f.temporary.values['aria-label'] = 'Turn off temporary chat'; f.document.URL = 'https://chatgpt.com/?temporary-chat=true';
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.temporary.clicks).toBe(0);
+  });
+
+  test('a vanished or replaced pre-temporary mode pair cannot reuse the earlier Chat proof', async () => {
+    for (const mutate of [
+      (f: ReturnType<typeof fixture>) => { f.modeGroup.connected = false; },
+      (f: ReturnType<typeof fixture>) => { f.modeGroup.children = []; },
+      (f: ReturnType<typeof fixture>) => { f.modeGroup.values['aria-hidden'] = 'true'; },
+    ]) {
+      const f = fixture({ response: false, normalRoot: true }); await f.inspect(); mutate(f);
+      expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ error: 'product_mode_unverified' });
+      expect(f.temporary.clicks).toBe(0);
+    }
+  });
+
+  test('an occluded Chat or Temporary control cannot claim a programmatic click', async () => {
+    const work = fixture({ response: false, normalRoot: true });
+    work.chatMode.values['aria-pressed'] = 'false'; work.workMode.values['aria-pressed'] = 'true';
+    work.setHit(new Element('DIV', { role: 'dialog' }, 'Overlay'));
+    expect(await work.inspect({ action: 'ensureChatMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(work.chatMode.clicks).toBe(0); expect(work.world.__computaChatModeClickClaimed).toBeUndefined();
+    const normal = fixture({ response: false, normalRoot: true }); await normal.inspect(); normal.setHit(null);
+    expect(await normal.inspect({ action: 'enableTemporary' })).toMatchObject({ error: 'temporary_mode_unavailable' });
+    expect(normal.temporary.clicks).toBe(0); expect(normal.world.__computaModelTemporaryRequested).toBeUndefined();
+  });
+
+  test('an owned pending model popup can hide temporary controls without inventing a physical temp proof', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    f.temporary.values['aria-hidden'] = 'true'; f.modeGroup.values['aria-hidden'] = 'true';
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: false,
+      productModeEvidence: { mode: 'chat', temporaryTransition: 'acknowledged' } });
+    expect(await f.inspect({ action: 'prepare' })).toMatchObject({ error: 'temporary_mode_unverified' });
+    expect(f.composer.events).toEqual([]);
+    delete f.temporary.values['aria-hidden']; delete f.modeGroup.values['aria-hidden'];
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: true,
+      productModeEvidence: { temporaryTransition: 'acknowledged' } });
+  });
+
+  test('Work or a disallowed product route revokes proof permanently, including a transient mode flip', async () => {
+    for (const mutate of [
+      (f: ReturnType<typeof fixture>) => { f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true'; },
+      (f: ReturnType<typeof fixture>) => { f.document.URL = 'https://chatgpt.com/work'; },
+      (f: ReturnType<typeof fixture>) => { f.observers[0].callback([{ type: 'attributes', attributeName: 'aria-pressed', oldValue: 'true', target: f.workMode }]); },
+    ]) {
+      const f = fixture({ response: false }); await f.inspect(); mutate(f);
+      expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+      f.chatMode.values['aria-pressed'] = 'true'; f.workMode.values['aria-pressed'] = 'false'; f.document.URL = 'https://chatgpt.com/?temporary-chat=true';
+      expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    }
+  });
+
+  test('a replacement Work control flipped and detached within one mutation batch still revokes the owned proof', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    const replacement = new Element('BUTTON', { 'aria-pressed': 'false' }, 'Work');
+    // React replaced the button, selected Work, restored Chat, then unmounted
+    // the replacement before this batched callback. Current DOM alone is normal.
+    replacement.connected = false;
+    f.observers[0].callback([
+      { type: 'childList', target: f.modeGroup, addedNodes: [replacement], removedNodes: [f.workMode] },
+      { type: 'attributes', target: replacement, attributeName: 'aria-pressed', oldValue: 'false' },
+      { type: 'attributes', target: replacement, attributeName: 'aria-pressed', oldValue: 'true' },
+      { type: 'childList', target: f.modeGroup, addedNodes: [f.workMode], removedNodes: [replacement] },
+    ]);
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.chatMode.clicks).toBe(0);
+  });
+
+  test('a replacement Work control created selected and detached in a structural-only batch also revokes proof', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    const replacement = new Element('BUTTON', { 'aria-pressed': 'true' }, 'Work'); replacement.connected = false;
+    f.observers[0].callback([
+      { type: 'childList', target: f.modeGroup, addedNodes: [replacement], removedNodes: [f.workMode] },
+      { type: 'childList', target: f.modeGroup, addedNodes: [f.workMode], removedNodes: [replacement] },
+    ]);
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.chatMode.clicks).toBe(0);
+  });
+
+  test('Work contradiction after first Send keeps its finite product error before first-lineage temporary checks', async () => {
+    const f = fixture({ userPrompt: 'Synthetic first submitted request' });
+    // Bootstrap the private owned mode without admitting the pending first
+    // message to native. The next product read must bind no lineage on error.
+    await f.inspect({ action: 'verifyProductMode' }, false);
+    expect(f.world.__computaModelFirstProof).toBeUndefined();
+    f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true';
+    expect(await f.inspect()).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(f.composer.events).toEqual([]);
+  });
+
+  test('a detached Work control from conversation content cannot revoke or establish product provenance', async () => {
+    const f = fixture({ userPrompt: 'Synthetic owned prompt' }); await f.inspect();
+    const authoredGroup = new Element('DIV', { 'aria-label': 'Composer mode' });
+    const authoredWork = new Element('BUTTON', { 'aria-pressed': 'false' }, 'Work'); authoredGroup.append(authoredWork);
+    authoredGroup.connected = false;
+    f.observers[0].callback([
+      { type: 'childList', target: f.answer, addedNodes: [authoredGroup], removedNodes: [] },
+      { type: 'attributes', target: authoredWork, attributeName: 'aria-pressed', oldValue: 'true' },
+      { type: 'childList', target: f.answer, addedNodes: [], removedNodes: [authoredGroup] },
+    ]);
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ temporary: true,
+      productModeEvidence: { mode: 'chat', temporaryTransition: 'acknowledged' } });
+  });
+
+  test('a product change during a fresh model proof cannot admit editor readiness or a Send', async () => {
+    const f = fixture({ response: false });
+    const picker = installObservedModelPicker(f, 'chatgpt', Element, { genericHeader: true });
+    await f.inspect();
+    const open = picker.trigger.onClick!;
+    picker.trigger.onClick = () => { open(); f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true'; };
+    f.composer.text = 'Owned synthetic request\n\n' + markerLine;
+    const send = new Element('BUTTON', { 'aria-label': 'Send prompt' }); f.body.append(send);
+    const result = await f.inspect({ action: 'sendReady', prompt: f.composer.text,
+      expectedModelChoice: { key: 'GPT-5.6 Sol', label: 'GPT-5.6 Sol' } });
+    expect(['product_mode_unverified', 'temporary_mode_unverified', 'model_unverified']).toContain(result.error);
+    expect(result.sendReady).toBeUndefined(); expect(send.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+  });
+
+  test('a product-only continuation read discards an acknowledged append without acquiring new lineage', async () => {
+    const f = fixture({ userPrompt: 'Synthetic owned prompt' }); await f.inspect();
+    const pinned = f.world.__computaModelFirstProof;
+    f.world.__computaModelLastSubmissionCount = 1;
+    f.onDigest(() => { f.appendUser('Exact second synthetic request'); });
+    expect(await f.inspect({ action: 'verifyProductMode', expectedUserCounts: [1, 2] })).toMatchObject({
+      error: 'acknowledged_user_append', detail: 'readonly_model_observation' });
+    expect(f.world.__computaModelFirstProof).toBe(pinned);
+    expect(f.composer.events).toEqual([]); expect(f.chatMode.clicks).toBe(0);
+  });
+
+  test('a product-only read discards an exact disconnected replacement under the existing first-message pins', async () => {
+    const f = fixture({ userPrompt: 'Synthetic owned prompt' }); await f.inspect();
+    const original = f.userBody!.parentElement!, parent = original.parentElement!;
+    const replacement = new Element(original.tagName, { ...original.values });
+    const body = new Element(f.userBody!.tagName, { ...f.userBody!.values }, f.userBody!.text);
+    replacement.append(body);
+    f.onDigest(() => {
+      parent.children[parent.children.indexOf(original)] = replacement; replacement.parentElement = parent; original.connected = false;
+    });
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({
+      error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+    expect(f.composer.events).toEqual([]);
+  });
+
+  test('product-mode rejection exposes finite structure without prompt, account or arbitrary control text', async () => {
+    const f = fixture({ response: false, normalRoot: true });
+    f.workMode.values['aria-label'] = 'Private account secret'; f.workMode.text = 'Another private value';
+    f.composer.text = 'Private user draft';
+    const rejected = await f.inspect({ action: 'ensureChatMode' });
+    expect(rejected).toMatchObject({ error: 'product_mode_unverified', productModeDiagnostic: {
+      kind: 'chatgpt_product_mode_structure', recognized: false, groupCount: 1 } });
+    expect(JSON.stringify(rejected)).not.toContain('Private'); expect(JSON.stringify(rejected)).not.toContain('private');
+    expect(f.chatMode.clicks).toBe(0);
+  });
+});
 
 describe("embedded ChatGPT fixed adapter", () => {
   test("a sole fenced envelope preserves literal JSON escapes and code-block controls", async () => {

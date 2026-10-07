@@ -13,9 +13,15 @@ function websiteModelChoiceEqual(left, right) {
   return websiteModelChoiceValid(left) && websiteModelChoiceValid(right)
     && left.key === right.key && left.label === right.label;
 }
+function websiteModelReadonlyChoiceValid(request) {
+  return websiteModelChoiceValid(request.expectedModelChoice)
+    || request.provider === 'chatgpt' && request.action === 'verifyProductMode'
+      && typeof chatGPTProductModeProof === 'function'
+      && chatGPTProductModeProof()?.temporaryTransition === 'acknowledged';
+}
 function websiteModelAcknowledgedUserAppend(request, capturedCount, currentCount, lineage = null, temporary = false) {
   const expected = request.expectedUserCounts;
-  if (!['inspect', 'verifyModel'].includes(request.action) || !websiteModelChoiceValid(request.expectedModelChoice)
+  if (!['inspect', 'verifyModel', 'verifyProductMode'].includes(request.action) || !websiteModelReadonlyChoiceValid(request)
     || !Number.isInteger(capturedCount) || capturedCount < 0 || capturedCount >= 1_000
     || !Array.isArray(expected) || expected.length !== 2 || expected[0] !== capturedCount || expected[1] !== capturedCount + 1
     || currentCount !== capturedCount + 1 || globalThis.__computaModelLastSubmissionCount !== capturedCount
@@ -41,7 +47,7 @@ async function websiteModelReplacementObservation(request, capturedCount, snapsh
   const expected = request.expectedUserCounts, pinned = globalThis.__computaModelFirstProof;
   const origin = ({ chatgpt: 'https://chatgpt.com', gemini: 'https://gemini.google.com', claude: 'https://claude.ai' })[request.provider];
   const marker = request.expectedFirstUserMarker, fingerprint = request.expectedFirstUserFingerprint;
-  if (!['inspect', 'verifyModel'].includes(request.action) || !websiteModelChoiceValid(request.expectedModelChoice)
+  if (!['inspect', 'verifyModel', 'verifyProductMode'].includes(request.action) || !websiteModelReadonlyChoiceValid(request)
     || !snapshot || !Number.isInteger(capturedCount) || capturedCount < 1 || capturedCount > 1_000
     || !Array.isArray(expected) || expected.length < 1 || expected.length > 2 || !expected.includes(capturedCount)
     || expected.some(count => !Number.isInteger(count) || count < 0 || count > 1_000)

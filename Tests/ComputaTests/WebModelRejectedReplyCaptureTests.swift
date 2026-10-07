@@ -287,7 +287,7 @@ private actor RejectedReplyTransport: WebModelTransport {
         case "webProviderFinish", "webProviderCancel": value["state"] = "finished"; value["cleanup"] = "not_created"
         default: throw CocoaError(.featureUnsupported)
         }
-        return try JSONSerialization.data(withJSONObject: value)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(value))
     }
 }
 

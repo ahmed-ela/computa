@@ -160,6 +160,6 @@ private actor FailureReceiptTransport: WebModelTransport {
         case "webProviderFinish", "webProviderCancel": result = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: result)
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result))
     }
 }

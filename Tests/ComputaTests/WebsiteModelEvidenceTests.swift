@@ -8,6 +8,55 @@ final class WebsiteModelEvidenceTests: XCTestCase {
     private let choice = WebsiteModelChoice(provider: "chatgpt", key: "fixture-fast", label: "Fixture Fast")
     private static let privateCanary = "PRIVATE_RAW_PROMPT_TOOL_AND_RESPONSE_CANARY"
 
+    func testNormalChatProductProofRequiresExactControlsAndOwnedTemporaryTransition() throws {
+        let initial: [String: String] = ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control",
+            "temporaryTransition": "not_requested"]
+        let ready = initial.merging(["temporaryTransition": "acknowledged"]) { _, new in new }
+        for raw in [initial, ready] {
+            let parsed = try WebsiteProductModeEvidence.parse(raw)
+            XCTAssertEqual(parsed.dictionary, raw)
+        }
+        XCTAssertThrowsError(try WebsiteProductModeEvidence.parse(initial, requireTemporary: true))
+        XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(ready, requireTemporary: true))
+        var invalid: [Any?] = [nil, NSNull(), [], "Chat", [:], ready.merging(["private": Self.privateCanary]) { _, new in new }]
+        for (key, replacement) in [("product", "chatgpt_work"), ("mode", "work"), ("source", "model_picker_label"),
+                                    ("temporaryTransition", "requested"), ("temporaryTransition", "acknowledged ")] {
+            invalid.append(ready.merging([key: replacement]) { _, new in new })
+            var missing = ready; missing.removeValue(forKey: key); invalid.append(missing)
+        }
+        invalid.append(["product": "chatgpt", "mode": "chat", "source": "composer_mode_control", "temporaryTransition": true])
+        for raw in invalid { XCTAssertThrowsError(try WebsiteProductModeEvidence.parse(raw, requireTemporary: true)) }
+    }
+
+    func testProductFailureKeepsFiniteNonRetryableRecoveryAtHTTPBoundary() throws {
+        for failure: any Error in [WebModelServer.Failure.productModeUnverified, EmbeddedWebModelTransport.Failure.productModeUnverified] {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: WebModelServer.errorBody(for: failure)) as? [String: Any])
+            let error = try XCTUnwrap(object["error"] as? [String: Any])
+            XCTAssertEqual(error["code"] as? String, "product_mode_unverified")
+            XCTAssertEqual(error["retryable"] as? Bool, false)
+            XCTAssertEqual(error["required_action"] as? String, "refresh_website_models")
+            XCTAssertTrue(error["param"] is NSNull)
+        }
+    }
+
+    func testEmbeddedServerRejectsMissingWorkAndUnacknowledgedProductAtEveryAdmissionBoundary() async throws {
+        for point in ProductSnapshotPoint.allCases {
+            for mutation in ProductSnapshotMutation.allCases {
+                let transport = ProductEvidenceTransport(point: point, mutation: mutation)
+                let server = WebModelServer()
+                await server.configureEmbeddedTransport(transport)
+                do {
+                    _ = try await server.infer(preparedData(choice), taskID: UUID().uuidString)
+                    XCTFail("A matching model label cannot authorize an unverified product mode")
+                } catch WebModelServer.Failure.productModeUnverified { }
+                catch { XCTFail("Product mode must retain its finite failure: \(error)") }
+                let count = await transport.sendCount()
+                XCTAssertEqual(count, point == .ready ? 0 : 1, "No Send or response may be replayed after product rejection")
+                _ = await server.shutdown()
+            }
+        }
+    }
+
     func testEveryProviderSelectionOnlyProofPreservesItsExplicitWeakerLevel() throws {
         for provider in WebsiteModelCatalog.providers {
             let expected = WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
@@ -173,6 +222,7 @@ final class WebsiteModelEvidenceTests: XCTestCase {
             XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(row["inferenceID"] as? String)))
             XCTAssertNotNil(row["timestamp"] as? String)
             XCTAssertNoThrow(try WebsiteModelEvidence.parse(row["modelEvidence"], provider: choice.provider, expected: choice))
+            XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(row["productModeEvidence"], requireTemporary: true))
             XCTAssertNil(row["prompt"]); XCTAssertNil(row["text"]); XCTAssertNil(row["arguments"])
             XCTAssertNil(row["threadID"], "An unregistered fixture task cannot fabricate an App Server thread mapping")
         }
@@ -418,6 +468,58 @@ private actor EvidenceExportTransport: WebModelTransport {
         }
         return ["state": state, "sequence": exposedSequence,
                 "modelEvidence": ["selected": selected, "verification": "website_selection"],
-                "modelProofContext": receipt]
+                "modelProofContext": receipt,
+                "productModeEvidence": ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control", "temporaryTransition": "acknowledged"]]
+    }
+}
+
+/// Synthetic loopback fixtures simulate a fully prepared normal Chat session.
+/// Actual WebKit fixtures acquire this evidence through real DOM actions.
+func syntheticPreparedWebsiteSnapshot(_ value: [String: Any]) -> [String: Any] {
+    guard ["ready", "running", "complete"].contains(value["state"] as? String ?? "") else { return value }
+    return value.merging(["productModeEvidence": ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control",
+        "temporaryTransition": "acknowledged"]]) { _, simulated in simulated }
+}
+
+private enum ProductSnapshotPoint: CaseIterable, Sendable { case ready, send, complete }
+private enum ProductSnapshotMutation: CaseIterable, Sendable { case missing, work, unacknowledged, extraField }
+
+/// Contradicts product mode independently of an otherwise matching model ID.
+private actor ProductEvidenceTransport: WebModelTransport {
+    private let token = UUID().uuidString
+    private let point: ProductSnapshotPoint
+    private let mutation: ProductSnapshotMutation
+    private var sends = 0
+    private var selected: [String: String] = [:]
+    init(point: ProductSnapshotPoint, mutation: ProductSnapshotMutation) { self.point = point; self.mutation = mutation }
+    func sendCount() -> Int { sends }
+    func request(operation: String, params: Data) throws -> Data {
+        var value: [String: Any]
+        let current: ProductSnapshotPoint?
+        switch operation {
+        case "webProviderStart":
+            let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            let choice = try XCTUnwrap(WebsiteModelChoice.parse(try XCTUnwrap(input["modelChoice"])))
+            selected = ["key": choice.key, "label": choice.label]
+            value = ["sessionToken": token, "state": "ready"]; current = .ready
+        case "webProviderSend": sends += 1; value = ["state": "running"]; current = .send
+        case "webProviderPoll": value = ["state": "complete", "text": #"{"type":"message","text":"OK"}"#]; current = .complete
+        case "webProviderFinish", "webProviderCancel": value = ["cleanup": "not_created"]; current = nil
+        default: throw WebModelServer.Failure.invalidRequest
+        }
+        if current != nil {
+            value["modelEvidence"] = ["selected": selected, "verification": "website_selection"]
+            var product = ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control", "temporaryTransition": "acknowledged"]
+            if current == point {
+                switch mutation {
+                case .missing: break
+                case .work: product["mode"] = "work"
+                case .unacknowledged: product["temporaryTransition"] = "not_requested"
+                case .extraField: product["private"] = "PRIVATE_CANARY"
+                }
+            }
+            if current != point || mutation != .missing { value["productModeEvidence"] = product }
+        }
+        return try JSONSerialization.data(withJSONObject: value)
     }
 }
