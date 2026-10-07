@@ -15,6 +15,7 @@ import {
 import { Icon } from './Icon';
 import { ReviewPanel } from './ReviewPanel';
 import { ModelSelector, WebsiteModelsRefresh } from './ModelSelector';
+import { WebsiteSessionCleanupControl } from './WebsiteSessionCleanupControl';
 import { fileChangeSummary } from './reviewDiff';
 import { ResponseMarkdown } from './ResponseMarkdown';
 import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
@@ -556,6 +557,7 @@ function Composer({
 
   return (
     <div className="composer-zone">
+      <WebsiteSessionCleanupControl task={task} blocked={snapshot.pendingApprovalCount > 0} post={post} />
       <PromptQueue task={task} />
       <div className="composer-shell">
         <Textarea

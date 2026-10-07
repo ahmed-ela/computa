@@ -106,7 +106,15 @@ actor WebModelServer {
     private var evidenceThreads: [String: String] = [:]
     private var active: [String: ActiveRequest] = [:]
     private var retiringTaskIDs = Set<String>()
-    private var cleanupTasks: [String: Task<[String], Never>] = [:]
+    private struct CleanupResult: Sendable {
+        let receipt: WebsiteSessionCleanupReceipt
+        let issues: [String]
+    }
+    private var cleanupTasks: [String: Task<CleanupResult, Never>] = [:]
+    private var cleanupTurns: [String: String] = [:]
+    private var cleanupReceiptStore: WebsiteSessionCleanupStore?
+    private var cleanupRuntimeGeneration = UUID()
+    private var cleanupReceiptObserver: (@Sendable (WebsiteSessionCleanupReceipt) async -> Void)?
     private var connections: [UUID: NWConnection] = [:]
     private var shuttingDown = false
     private var readinessTimeout: Duration = .seconds(45)
@@ -114,6 +122,52 @@ actor WebModelServer {
     private var evidenceDirectory: URL?
     private let rejectedReplyDirectory: URL?
     private let queue = DispatchQueue(label: "wtf.computa.web-model-http")
+
+    func configureCleanupReceipts(directory: URL, runtimeGeneration: UUID,
+                                  observer: @escaping @Sendable (WebsiteSessionCleanupReceipt) async -> Void) {
+        cleanupReceiptStore = WebsiteSessionCleanupStore(directory: directory)
+        cleanupRuntimeGeneration = runtimeGeneration
+        cleanupReceiptObserver = observer
+    }
+
+    func setCleanupRuntimeGeneration(_ generation: UUID) { cleanupRuntimeGeneration = generation }
+
+    func registerCleanupTurn(taskID: String, threadID: String?, turnID: String?) {
+        if let threadID { registerEvidenceThread(taskID: taskID, threadID: threadID) }
+        guard let turnID, UUID(uuidString: turnID) != nil else { return }
+        cleanupTurns[taskID] = turnID
+    }
+
+    func latestCleanupReceipts() -> [WebsiteSessionCleanupReceipt] { cleanupReceiptStore?.latest() ?? [] }
+
+    func recordCleanupRejection(taskID: String, runtimeGeneration: UUID, reason: WebsiteSessionCleanupReceipt.Reason) async -> WebsiteSessionCleanupReceipt {
+        let receipt = recordCleanupReceipt(taskID: taskID, session: sessions[taskID], runtimeGeneration: runtimeGeneration,
+            outcome: .unconfirmed, reason: reason, trigger: .manual)
+        await cleanupReceiptObserver?(receipt)
+        return receipt
+    }
+
+    func retryWebsiteSessionCleanup(taskID: String, runtimeGeneration: UUID) async -> WebsiteSessionCleanupReceipt {
+        guard !shuttingDown else { return await recordCleanupRejection(taskID: taskID, runtimeGeneration: runtimeGeneration, reason: .shuttingDown) }
+        guard active[taskID] == nil, cleanupTasks[taskID] == nil, !retiringTaskIDs.contains(taskID) else {
+            return await recordCleanupRejection(taskID: taskID, runtimeGeneration: runtimeGeneration, reason: .busy)
+        }
+        return await cleanup(taskID: taskID, cancel: true, runtimeGeneration: runtimeGeneration, trigger: .manual).receipt
+    }
+
+    private func recordCleanupReceipt(taskID: String, session: Session?, runtimeGeneration: UUID,
+                                      outcome: WebsiteSessionCleanupReceipt.Outcome, reason: WebsiteSessionCleanupReceipt.Reason,
+                                      trigger: WebsiteSessionCleanupReceipt.Trigger) -> WebsiteSessionCleanupReceipt {
+        let canonicalTask = UUID(uuidString: taskID)?.uuidString.lowercased() ?? taskID
+        var receipt = WebsiteSessionCleanupReceipt(taskID: taskID, threadID: evidenceThreads[canonicalTask],
+            turnID: cleanupTurns[taskID], runtimeGeneration: runtimeGeneration, outcome: outcome,
+            provider: session.flatMap { WebsiteSessionCleanupReceipt.Provider(rawValue: $0.provider) },
+            route: session.map { $0.route == .embedded ? .embedded : .chrome }, modelID: session?.modelID,
+            reason: reason, trigger: trigger)
+        receipt.receiptSaved = true
+        if cleanupReceiptStore?.save(receipt) != true { receipt.receiptSaved = false }
+        return receipt
+    }
     #if DEBUG
     private var beforeListenerStartForTesting: (@Sendable () async -> Void)?
     #endif
@@ -212,12 +266,12 @@ actor WebModelServer {
         return issues
     }
 
-    func finish(taskID: String) async -> [String] {
+    func finish(taskID: String, runtimeGeneration: UUID? = nil) async -> [String] {
         failureDiagnostics.clear(taskID: taskID)
-        return await cleanup(taskID: taskID, cancel: false)
+        return await cleanup(taskID: taskID, cancel: false, runtimeGeneration: runtimeGeneration ?? cleanupRuntimeGeneration, trigger: .automatic).issues
     }
 
-    func cancel(taskID: String) async -> [String] {
+    func cancel(taskID: String, runtimeGeneration: UUID? = nil) async -> [String] {
         failureDiagnostics.clear(taskID: taskID)
         retiringTaskIDs.insert(taskID)
         defer { retiringTaskIDs.remove(taskID) }
@@ -225,7 +279,8 @@ actor WebModelServer {
         request?.operation.cancel()
         if let request { _ = try? await request.operation.value }
         if active[taskID]?.id == request?.id { active.removeValue(forKey: taskID) }
-        return await cleanup(taskID: taskID, cancel: true)
+        return await cleanup(taskID: taskID, cancel: true, runtimeGeneration: runtimeGeneration ?? cleanupRuntimeGeneration,
+            trigger: shuttingDown ? .shutdown : .automatic).issues
     }
 
     func shutdown() async -> [String] {
@@ -243,17 +298,25 @@ actor WebModelServer {
         return issues
     }
 
-    private func cleanup(taskID: String, cancel: Bool) async -> [String] {
+    private func cleanup(taskID: String, cancel: Bool, runtimeGeneration: UUID,
+                         trigger: WebsiteSessionCleanupReceipt.Trigger) async -> CleanupResult {
         if let existing = cleanupTasks[taskID] { return await existing.value }
-        guard let session = sessions[taskID] else { return [] }
-        let cleanup = Task { await self.performCleanup(taskID: taskID, session: session, cancel: cancel) }
+        guard let session = sessions[taskID] else {
+            let receipt = recordCleanupReceipt(taskID: taskID, session: nil, runtimeGeneration: runtimeGeneration,
+                outcome: .noOwnedSession, reason: .noOwnedSession, trigger: trigger)
+            await cleanupReceiptObserver?(receipt)
+            return CleanupResult(receipt: receipt, issues: [])
+        }
+        let cleanup = Task { await self.performCleanup(taskID: taskID, session: session, cancel: cancel,
+            runtimeGeneration: runtimeGeneration, trigger: trigger) }
         cleanupTasks[taskID] = cleanup
-        let issues = await cleanup.value
+        let receipt = await cleanup.value
         cleanupTasks.removeValue(forKey: taskID)
-        return issues
+        return receipt
     }
 
-    private func performCleanup(taskID: String, session: Session, cancel: Bool) async -> [String] {
+    private func performCleanup(taskID: String, session: Session, cancel: Bool, runtimeGeneration: UUID,
+                                trigger: WebsiteSessionCleanupReceipt.Trigger) async -> CleanupResult {
         do {
             let reply = try await call(session.transport,
                 operation: cancel ? "webProviderCancel" : "webProviderFinish",
@@ -261,13 +324,23 @@ actor WebModelServer {
             guard ["deleted", "not_created"].contains(reply["cleanup"] as? String ?? "") else {
                 throw Self.snapshotFailure(reply, fallback: .cleanupFailed)
             }
+            let receipt = recordCleanupReceipt(taskID: taskID, session: session, runtimeGeneration: runtimeGeneration,
+                outcome: .closed, reason: reply["cleanup"] as? String == "deleted" ? .deleted : .notCreated, trigger: trigger)
             if sessions[taskID]?.token == session.token { sessions.removeValue(forKey: taskID) }
-            return []
+            await cleanupReceiptObserver?(receipt)
+            return CleanupResult(receipt: receipt, issues: [])
         } catch {
             // Retain exact ownership for another cleanup attempt; never claim
             // that closing a tab alone deleted a saved website conversation.
-            let cause = (error as? ChromeBridgeIPC.Failure)?.localizedDescription
-            return [Failure.cleanupFailed.localizedDescription + (cause.map { " " + $0 } ?? "")]
+            let receipt = recordCleanupReceipt(taskID: taskID, session: session, runtimeGeneration: runtimeGeneration,
+                outcome: .unconfirmed, reason: .cleanupUnverified, trigger: trigger)
+            await cleanupReceiptObserver?(receipt)
+            // Preserve only the existing finite bridge diagnostic, never raw
+            // transport text, in the user-facing warning.
+            let detail = error as? ChromeBridgeIPC.Failure
+            let issues = detail.map { [Failure.cleanupFailed.localizedDescription + " " + $0.localizedDescription] }
+                ?? [Failure.cleanupFailed.localizedDescription]
+            return CleanupResult(receipt: receipt, issues: issues)
         }
     }
 
@@ -304,11 +377,10 @@ actor WebModelServer {
             // A failed earlier cleanup can leave an owned session even after
             // the UI changes provider. Retire it through its original transport
             // and token before admitting any replacement provider or choice.
-            let closed = try await call(existing.transport, operation: "webProviderFinish", params: ["sessionToken": existing.token])
-            guard ["deleted", "not_created"].contains(closed["cleanup"] as? String ?? "") else { throw Failure.cleanupFailed }
+            let closed = await cleanup(taskID: taskID, cancel: false, runtimeGeneration: cleanupRuntimeGeneration, trigger: .replacement)
+            guard closed.receipt.outcome == .closed else { throw Failure.cleanupFailed }
             try Task.checkCancellation()
-            guard sessions[taskID]?.token == existing.token else { throw Failure.invalidRequest }
-            sessions.removeValue(forKey: taskID)
+            guard sessions[taskID] == nil else { throw Failure.invalidRequest }
         }
         if let existing = sessions[taskID] {
             guard existing.provider == provider, existing.route == route, existing.modelID == request.model else { throw Failure.invalidRequest }

@@ -60,6 +60,14 @@ Missing or malformed choice proof produces `modelUnverified`; an observed differ
 
 The embedded transport uses versioned page-change notifications to wake response reads. Reading a new snapshot still validates the choice; an event is not itself model evidence. Website usage limits and sign-in requirements continue to apply.
 
+## Cleanup receipts and recovery
+
+The runtime records automatic and manual website cleanup in the private `WebsiteSessionCleanup-v1` store. Each finite receipt identifies the original task, thread and turn when available, the app runtime generation, attempt, trigger and outcome. It contains no conversation URL, session token, prompt or reply. A `closed` receipt requires the original guarded transport to acknowledge `deleted` or `not_created`; the runtime saves the receipt before retiring that exact owner and publishing the result. An `unconfirmed` attempt retains the original session for another cleanup attempt. `no_owned_session` describes current app ownership only and cannot prove deletion of an earlier website conversation. If local persistence fails, the receipt explicitly reports `receiptSaved:false`.
+
+An idle failed website task exposes **Retry website cleanup**. This action pauses its prompt queue and asks the runtime to clean up only that task's original session. It sends no prompt, starts no model, resumes no failed turn and does not change the task's status or transcript. Duplicate requests, active turns, approval handling, compaction and shutdown are guarded before the asynchronous operation. Changing the selected model cannot redirect cleanup to the new provider. A saved receipt can be projected onto the same reloaded thread, but it never recreates live session ownership. Repeated in-process history loads preserve the original live task identity.
+
+The store uses bounded private files and atomic publication. Records are observations, not authorization to retry an inference. Live qualification checks automatic cleanup separately from the provider response and selected-model proof.
+
 ## ChatGPT normal Chat product mode
 
 ChatGPT model labels can appear in both normal Chat and Work. A model label, root URL, or `temporary-chat=true` query alone cannot establish which product mode produced an answer. Embedded ChatGPT sessions start on the empty `https://chatgpt.com/` page. Before discovery or inference, the fixed adapter observes one semantic **Composer mode** group with enabled, unambiguous Chat and Work controls and their role-appropriate selected states. Chat must be selected and Work unselected. If the owned empty root currently selects Work, the adapter may claim one actual Chat click; a later fresh observation must acknowledge the change. Missing or conflicting controls fail rather than imply Chat.
@@ -202,6 +210,10 @@ Website instructions now describe Computa as an external desktop execution relay
 Claude closure verification tracks the exact associated popup nodes observed during the current read. It requires those nodes to be physically hidden or disconnected, no remaining associated popup, and the same enabled trigger restored to its closed state. Loss of ARIA association alone is insufficient. An unrelated nonmodal dialog is never dismissed; accepting closure with such a dialog additionally requires a fresh hit-test proving the current composer is exposed. Modal dialogs, inert controls, missing geometry and occluded editor or Send targets fail closed. Other providers retain their existing closure rules.
 
 Candidate25 (0.5.0 build25) passed 299 native tests and 283 adapter/version tests. Its signed installed ChatGPT GPT-5.6 Sol and Gemini 3.1 Pro tasks each produced an independently verified native file read, clean final and two paired website-selection proofs. Sonnet 5 stopped at `close_unconfirmed` in the insertion final guard, before any admitted local tool call. This is separate from the earlier format refusal. The refreshed selector exposed Haiku 5.5 alongside the legacy Haiku 4.5; both require fresh qualification. These candidate25 results do not qualify the subsequent closure change.
+
+### Candidate29 cleanup automated validation
+
+Candidate29's exact-task cleanup recovery and finite automatic receipts passed 355 native tests with zero failures, including a real bundled-engine failed turn, original transport/token retention, in-process history reload, duplicate and submission/compaction/shutdown guards, private persistence and six AppState cases. The 293 provider-adapter tests, 21 version/product checks and 123 frontend tests passed; frontend typechecking and production bundling passed. The retained seven JSON/SSE artifacts passed the separate official-schema and lifecycle checks. The initial focused shutdown assertion raced the test's shutdown task; an explicit test-only shutdown-start signal replaced that timing assumption, and the final focused run passed all 49 tests. These results do not establish signed installation or live provider qualification for this candidate.
 
 ### Candidate27 normal Chat automated validation
 

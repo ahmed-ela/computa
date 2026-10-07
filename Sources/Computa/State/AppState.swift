@@ -88,6 +88,8 @@ final class AppState {
     private var provisionalReasoningItemIDs: [AgentTask.ID: Set<TimelineEntry.ID>] = [:]
     private var discardedReasoningItemIDs: [AgentTask.ID: Set<TimelineEntry.ID>] = [:]
     var interruptingTaskIDs: Set<AgentTask.ID> = []
+    private(set) var websiteSessionCleanupTaskIDs: Set<AgentTask.ID> = []
+    private(set) var websiteSessionCleanupReceipts: [AgentTask.ID: WebsiteSessionCleanupReceipt] = [:]
     var queuedPrompts: [AgentTask.ID: [QueuedPrompt]] = [:]
     var pausedQueueTaskIDs: Set<AgentTask.ID> = []
     var promptReceipts: [PromptReceipt] = []
@@ -724,6 +726,96 @@ final class AppState {
             || !resolvingApprovalIDs.isEmpty
             || steeringTaskIDs.contains(taskID)
             || reviewMutationTaskIDs.contains(taskID)
+            || websiteSessionCleanupTaskIDs.contains(taskID)
+    }
+
+    /// A cleanup retry never resumes the failed turn or drains its prompt queue.
+    func canRetryWebsiteSessionCleanup(taskID: AgentTask.ID) -> Bool {
+        guard runtime != nil, !isShuttingDown,
+              case .connected = connectionState,
+              !approvalGateBlocksInteraction, pendingApprovals.isEmpty, resolvingApprovalIDs.isEmpty,
+              !isBusy(taskID: taskID), !interruptingTaskIDs.contains(taskID),
+              !dispatchingQueueTaskIDs.contains(taskID),
+              !queuedPrompts[taskID, default: []].contains(where: { $0.status == .sending }),
+              let task = tasks.first(where: { $0.id == taskID }), task.status == .waiting,
+              let lastUser = task.entries.lastIndex(where: { $0.kind == .user })
+        else { return false }
+        if let receipt = currentWebsiteSessionCleanupReceipt(taskID: taskID) {
+            guard receipt.outcome == .unconfirmed else { return false }
+            if receipt.provider != nil, receipt.route != nil,
+               receipt.modelID.map(LocalModelCatalog.isWebBrowser) == true { return true }
+        }
+        guard LocalModelCatalog.isWebBrowser(task.model) else { return false }
+        return task.entries[lastUser...].contains {
+            $0.kind == .system && ["Agent error", "Website session cleanup unconfirmed"].contains($0.title)
+        }
+    }
+
+    func currentWebsiteSessionCleanupReceipt(taskID: AgentTask.ID) -> WebsiteSessionCleanupReceipt? {
+        guard let receipt = websiteSessionCleanupReceipts[taskID],
+              let task = tasks.first(where: { $0.id == taskID }),
+              let user = task.entries.last(where: { $0.kind == .user }) else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let observedAt = formatter.date(from: receipt.timestamp), observedAt >= user.timestamp else { return nil }
+        return receipt
+    }
+
+    /// Claim synchronously at the UI boundary so duplicate clicks and queued
+    /// submissions cannot race the cleanup-only runtime call.
+    @discardableResult
+    func requestWebsiteSessionCleanup(taskID: AgentTask.ID) -> Bool {
+        guard canRetryWebsiteSessionCleanup(taskID: taskID), let runtime else { return false }
+        websiteSessionCleanupTaskIDs.insert(taskID)
+        pausedQueueTaskIDs.insert(taskID)
+        Task { @MainActor [weak self] in
+            let receipt = await runtime.retryWebsiteSessionCleanup(taskID: taskID)
+            guard let self else { return }
+            self.websiteSessionCleanupTaskIDs.remove(taskID)
+            guard !self.isShuttingDown, receipt.isValid, receipt.taskID == taskID.lowercased(),
+                  let index = self.tasks.firstIndex(where: { $0.id == taskID }) else { return }
+            self.recordWebsiteSessionCleanupReceipt(receipt, taskID: taskID)
+            // The runtime persists the finite receipt separately. This local
+            // timeline copy displays that same attempt, without replaying it.
+            let entryID = "website-session-cleanup-" + receipt.attemptID
+            guard !self.tasks[index].entries.contains(where: { $0.id == entryID }) else { return }
+            let body: String
+            switch receipt.outcome {
+            case .closed:
+                body = "Computa confirmed that this task's owned website session is closed. Your local chat is retained."
+            case .noOwnedSession:
+                body = "Computa currently has no owned website session for this task. This does not confirm whether an earlier website conversation was deleted."
+            case .unconfirmed:
+                body = "Computa could not confirm website session cleanup. The task remains paused."
+            }
+            let entry = TimelineEntry(id: entryID, kind: .system, title: "Website session cleanup",
+                body: body + " No prompt was sent and the model was not restarted."
+                    + (receipt.receiptSaved ? "" : " The cleanup receipt could not be saved locally."))
+            self.tasks[index].entries.append(entry)
+            self.tasks[index].updatedAt = max(self.tasks[index].updatedAt, entry.timestamp)
+            if self.selectedTaskID == taskID { self.selectedEntryID = entry.id }
+        }
+        return true
+    }
+
+    private func recordWebsiteSessionCleanupReceipt(_ receipt: WebsiteSessionCleanupReceipt, taskID: AgentTask.ID) {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let timestamp = formatter.date(from: receipt.timestamp) else { return }
+        if let current = websiteSessionCleanupReceipts[taskID],
+           let currentTimestamp = formatter.date(from: current.timestamp), timestamp <= currentTimestamp { return }
+        websiteSessionCleanupReceipts[taskID] = receipt
+    }
+
+    private func projectWebsiteSessionCleanupReceipt(_ receipt: WebsiteSessionCleanupReceipt) {
+        guard receipt.isValid else { return }
+        let task = tasks.first(where: { $0.id.lowercased() == receipt.taskID })
+            ?? receipt.threadID.flatMap { thread in tasks.first(where: { $0.id.lowercased() == thread }) }
+        if let task {
+            // A persisted thread match is presentation provenance, never a
+            // recreation of the receipt's old live website-session association.
+            recordWebsiteSessionCleanupReceipt(receipt, taskID: task.id)
+        }
     }
 
     func activeTurnStartedAt(for taskID: AgentTask.ID) -> TimeInterval? {
@@ -1139,6 +1231,9 @@ final class AppState {
 
     func replaceTasks(with newTasks: [AgentTask]) {
         let priorSelection = selectedTaskID
+        let cleanupReceipts = websiteSessionCleanupReceipts.values.sorted {
+            $0.timestamp == $1.timestamp ? $0.attemptID < $1.attemptID : $0.timestamp < $1.timestamp
+        }
         discardAllMessageDrafts()
         tasks = newTasks
         selectedTaskID = newTasks.contains(where: { $0.id == priorSelection })
@@ -1159,11 +1254,17 @@ final class AppState {
         }
         contextUsageByTask = contextUsageByTask.filter { liveTaskIDs.contains($0.key) }
         compactionStateByTask = compactionStateByTask.filter { liveTaskIDs.contains($0.key) }
+        websiteSessionCleanupReceipts = websiteSessionCleanupReceipts.filter { liveTaskIDs.contains($0.key) }
+        for receipt in cleanupReceipts { projectWebsiteSessionCleanupReceipt(receipt) }
         retireWebsiteModelSelections()
     }
 
     func apply(_ event: AgentRuntimeEvent) {
         switch event {
+        case .websiteSessionCleanupUpdated(let receipt):
+            guard !isShuttingDown, receipt.isValid else { return }
+            projectWebsiteSessionCleanupReceipt(receipt)
+
         case .tasksSnapshot(let snapshot):
             replaceTasks(with: snapshot)
 
@@ -1189,6 +1290,7 @@ final class AppState {
 
         case .timelineEntryAppended(let taskID, let entry):
             guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+            if entry.kind == .user { websiteSessionCleanupReceipts.removeValue(forKey: taskID) }
             var completedEntry = entry
             completedEntry.activityGroupID = activeActivityGroupID(for: taskID) ?? entry.activityGroupID
             if entry.kind == .assistant {
@@ -1534,6 +1636,7 @@ final class AppState {
             title: "You",
             body: prompt
         )
+        websiteSessionCleanupReceipts.removeValue(forKey: taskID)
         entry.activityGroupID = entry.id
         tasks[index].entries.append(entry)
         tasks[index].summary = prompt

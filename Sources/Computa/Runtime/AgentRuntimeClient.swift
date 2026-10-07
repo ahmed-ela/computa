@@ -13,6 +13,7 @@ protocol AgentRuntimeClient: Sendable {
     func steer(prompt: String, toTaskID taskID: AgentTask.ID) async throws
     func compact(taskID: AgentTask.ID) async throws
     func interrupt(taskID: AgentTask.ID) async throws
+    func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt
     func resolveApproval(requestID: String, approved: Bool) async throws
     func connectChrome(_ request: ChromeConnectionRequest) async throws
     func disconnectChrome() async
@@ -27,6 +28,10 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
+    func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt {
+        WebsiteSessionCleanupReceipt(taskID: taskID, runtimeGeneration: UUID(), outcome: .unconfirmed,
+            reason: .unsupportedRuntime, trigger: .manual)
+    }
     func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws {
         throw AgentRuntimeCapabilityError.workspaceSelectionUnsupported
     }
@@ -76,6 +81,7 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
 }
 
 enum AgentRuntimeEvent: Sendable {
+    case websiteSessionCleanupUpdated(WebsiteSessionCleanupReceipt)
     case tasksSnapshot([AgentTask])
     case taskUpserted(AgentTask)
     case timelineEntryAppended(taskID: AgentTask.ID, entry: TimelineEntry)

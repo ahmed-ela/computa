@@ -800,6 +800,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         try await core.interrupt(taskID: taskID)
     }
 
+    func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt {
+        await core.retryWebsiteSessionCleanup(taskID: taskID)
+    }
+
     func resolveApproval(requestID: String, approved: Bool) async throws {
         try await core.resolveApproval(requestID: requestID, approved: approved)
     }
@@ -817,6 +821,11 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
     }
 
     #if DEBUG
+    /// Inert race-test observation only; it grants no runtime or browser action.
+    func waitForWebsiteSessionShutdownForFixture() async {
+        await core.waitForWebsiteSessionShutdownForFixture()
+    }
+
     /// Inert integration fixture only. Not a tool, WebKit message or Release API.
     func installOwnedBrowserBindingForFixture(taskID: AgentTask.ID, binding: BrowserTabBinding) async throws {
         try await core.installOwnedBrowserBindingForFixture(taskID: taskID, binding: binding)
@@ -1152,6 +1161,13 @@ private extension CodexAppServerRuntime {
         private var embeddedWebModelConfigured = false
         private var webProviderBaseURL: URL?
         private var webCleanupTasks: [AgentTask.ID: Task<[String], Never>] = [:]
+        private var manualWebCleanupTasks: [AgentTask.ID: Task<WebsiteSessionCleanupReceipt, Never>] = [:]
+        #if DEBUG
+        private var websiteCleanupShutdownWaiters: [CheckedContinuation<Void, Never>] = []
+        #endif
+        // Website ownership survives an engine restart; app restart creates a
+        // new generation and never reconstructs a private website-session token.
+        private let websiteSessionRuntimeGeneration = UUID()
         private var selectingInferenceModel = false
         private var inferenceSelectionTask: Task<Void, Error>?
         private var inferenceSelectionTaskID: AgentTask.ID?
@@ -1199,6 +1215,7 @@ private extension CodexAppServerRuntime {
         func start() async throws {
             guard !isPreparingCommandShutdown, !isShuttingDown else { throw RuntimeError.serverStopped }
             if isReady { return }
+            guard manualWebCleanupTasks.isEmpty else { throw RuntimeError.serverError("Wait for website session cleanup to finish.") }
             guard !selectingInferenceModel else { throw HeadlessMLXServer.Failure.busy }
             guard !isStartingServer else {
                 throw RuntimeError.serverError("The App Server is still starting.")
@@ -1396,7 +1413,43 @@ private extension CodexAppServerRuntime {
             await webModelServer.configureEmbeddedTransport(transport)
             await webModelServer.configureEvidenceDirectory(URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
                 .appendingPathComponent("WebsiteModelEvidence-v1", isDirectory: true))
+            await webModelServer.configureCleanupReceipts(directory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("WebsiteSessionCleanup-v1", isDirectory: true),
+                runtimeGeneration: websiteSessionRuntimeGeneration) { [events] receipt in
+                    events.yield(.websiteSessionCleanupUpdated(receipt))
+                }
             embeddedWebModelConfigured = true
+        }
+
+        func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt {
+            let generation = websiteSessionRuntimeGeneration
+            guard !isShuttingDown, !isPreparingCommandShutdown else {
+                return await webModelServer.recordCleanupRejection(taskID: taskID, runtimeGeneration: generation, reason: .shuttingDown)
+            }
+            // This operation never starts or resumes the model engine. Claim
+            // before suspension so submit/compact cannot acquire this task.
+            guard UUID(uuidString: taskID) != nil, threadForTask[taskID] != nil,
+                  turnIdentity.activeTurnID(for: taskID) == nil,
+                  turnSubmissionClaims[taskID] == nil, !compactionReservations.contains(taskID),
+                  !compactionTracker.isRunning(taskID: taskID), managedCompactions[taskID] == nil,
+                  !dynamicToolTasks.values.contains(where: { $0.taskID == taskID }),
+                  !pendingServerApprovals.values.contains(where: { $0.request.taskID == taskID }),
+                  !computerApprovalTask.values.contains(taskID),
+                  !commandCleanupTasks.contains(taskID), webCleanupTasks[taskID] == nil,
+                  manualWebCleanupTasks.isEmpty, !isStartingServer, !selectingInferenceModel else {
+                return await webModelServer.recordCleanupRejection(taskID: taskID, runtimeGeneration: generation, reason: .busy)
+            }
+            let threadID = threadForTask[taskID]
+            let turnID = turnIdentity.latestTurnID(for: taskID)
+            let operation = Task {
+                await webModelServer.registerCleanupTurn(taskID: taskID, threadID: threadID, turnID: turnID)
+                return await webModelServer.retryWebsiteSessionCleanup(taskID: taskID, runtimeGeneration: generation)
+            }
+            manualWebCleanupTasks[taskID] = operation
+            let receipt = await operation.value
+            manualWebCleanupTasks.removeValue(forKey: taskID)
+            return receipt
         }
 
         @discardableResult
@@ -1519,6 +1572,10 @@ private extension CodexAppServerRuntime {
         func shutdown() async -> RuntimeShutdownReport {
             if let shutdownTask { return await shutdownTask.value }
             isPreparingCommandShutdown = true
+            #if DEBUG
+            for waiter in websiteCleanupShutdownWaiters { waiter.resume() }
+            websiteCleanupShutdownWaiters.removeAll()
+            #endif
             cancelledSubmissions.formUnion(turnSubmissionClaims.values)
             // Cancel pending tool work before suspension or target cleanup.
             for operation in dynamicToolTasks.values { operation.task.cancel() }
@@ -1534,7 +1591,15 @@ private extension CodexAppServerRuntime {
             return await task.value
         }
 
+        #if DEBUG
+        func waitForWebsiteSessionShutdownForFixture() async {
+            if isPreparingCommandShutdown || isShuttingDown { return }
+            await withCheckedContinuation { websiteCleanupShutdownWaiters.append($0) }
+        }
+        #endif
+
         private func prepareCommandShutdown() async {
+            for cleanup in Array(manualWebCleanupTasks.values) { _ = await cleanup.value }
             let deadline = ContinuousClock.now.advanced(by: .seconds(10))
             let taskIDs = Set(ownedCommandItems.keys).union(threadForTask.keys.filter { turnIdentity.activeTurnID(for: $0) != nil })
             for taskID in taskIDs.sorted() {
@@ -1707,6 +1772,9 @@ private extension CodexAppServerRuntime {
         }
 
         func submit(prompt: String, taskID: AgentTask.ID, modelID: String) async throws {
+            guard manualWebCleanupTasks.isEmpty else {
+                throw RuntimeError.serverError("Wait for this task's website session cleanup to finish.")
+            }
             if let cleanup = webCleanupTasks[taskID] { _ = await cleanup.value }
             guard !isPreparingCommandShutdown, !commandCleanupTasks.contains(taskID) else {
                 throw RuntimeError.serverError("Wait for this task's command cleanup to finish.")
@@ -1715,6 +1783,7 @@ private extension CodexAppServerRuntime {
             try configuration.validateSelectedModel(modelID)
             try requireHeadlessInferenceIdle(for: modelID)
             guard turnIdentity.activeTurnID(for: taskID) == nil,
+                  manualWebCleanupTasks.isEmpty,
                   turnSubmissionClaims[taskID] == nil, !compactionReservations.contains(taskID),
                   !compactionTracker.isRunning(taskID: taskID),
                   contextStoppedTurns[taskID] == nil || turnIdentity.activeTurnID(for: taskID) == nil else {
@@ -2014,9 +2083,13 @@ private extension CodexAppServerRuntime {
         private func scheduleWebCleanup(taskID: AgentTask.ID, cancelled: Bool) -> Task<[String], Never>? {
             guard LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "") else { return nil }
             if let existing = webCleanupTasks[taskID] { return existing }
+            let generation = websiteSessionRuntimeGeneration
+            let threadID = threadForTask[taskID]
+            let turnID = turnIdentity.latestTurnID(for: taskID)
             let cleanup = Task<[String], Never> {
-                let issues = cancelled ? await webModelServer.cancel(taskID: taskID)
-                    : await webModelServer.finish(taskID: taskID)
+                await webModelServer.registerCleanupTurn(taskID: taskID, threadID: threadID, turnID: turnID)
+                let issues = cancelled ? await webModelServer.cancel(taskID: taskID, runtimeGeneration: generation)
+                    : await webModelServer.finish(taskID: taskID, runtimeGeneration: generation)
                 if !issues.isEmpty {
                     childCleanupIssues.append(contentsOf: issues)
                     let message = "Your chat is saved in Computa. Closing the temporary website session could not be confirmed. " + issues.joined(separator: "; ")
@@ -2243,6 +2316,7 @@ private extension CodexAppServerRuntime {
             let modelID = modelForTask[taskID] ?? configuration.model
             try requireHeadlessInferenceIdle(for: modelID)
             guard !isShuttingDown, turnIdentity.activeTurnID(for: taskID) == nil,
+                  manualWebCleanupTasks.isEmpty,
                   turnSubmissionClaims[taskID] == nil,
                   !compactionReservations.contains(taskID),
                   let threadID = threadForTask[taskID] else {
@@ -2460,9 +2534,12 @@ private extension CodexAppServerRuntime {
             }
 
             var tasks = records.compactMap { record -> AgentTask? in
-                guard let id = record["id"] as? String else { return nil }
-                threadForTask[id] = id
-                taskForThread[id] = id
+                guard let threadID = record["id"] as? String else { return nil }
+                // Another window may reload the shared live runtime. Preserve
+                // its exact private task association; a fresh app has no map.
+                let id = taskForThread[threadID] ?? threadID
+                threadForTask[id] = threadID
+                taskForThread[threadID] = id
                 workspaceForTask[id] = record["cwd"] as? String ?? configuration.workspacePath
 
                 let preview = record["preview"] as? String ?? ""
@@ -2497,22 +2574,23 @@ private extension CodexAppServerRuntime {
                     updatedAt: Date(timeIntervalSince1970: updatedSeconds),
                     workspace: record["cwd"] as? String ?? configuration.workspacePath,
                     model: modelID,
-                    entries: nativeFailureEntries(threadID: id)
+                    entries: nativeFailureEntries(threadID: threadID)
                 )
             }
             for index in tasks.indices {
                 let taskID = tasks[index].id
+                let threadID = threadForTask[taskID] ?? taskID
                 do {
                     let history = try await request(method: "thread/read", params: [
-                        "threadId": taskID, "includeTurns": true,
+                        "threadId": threadID, "includeTurns": true,
                     ])
-                    let failures = try nativeFailureStore().load(threadID: taskID)
+                    let failures = try nativeFailureStore().load(threadID: threadID)
                     let rejectedTurns = Set(failures.map(\.turnID))
                     tasks[index].entries = try AppServerThreadHistoryContract.entries(from: history,
-                        excludingAssistantTurns: rejectedTurns) + nativeFailureEntries(threadID: taskID)
+                        excludingAssistantTurns: rejectedTurns) + nativeFailureEntries(threadID: threadID)
                     do {
                         tasks[index].turnDiffs = try AppServerThreadHistoryContract.turnDiffs(from: history,
-                            saved: turnDiffStore().load(threadID: taskID))
+                            saved: turnDiffStore().load(threadID: threadID))
                         initializedDiffTurns[taskID] = Set(tasks[index].turnDiffs.map(\.id))
                     }
                     catch {
@@ -2529,6 +2607,9 @@ private extension CodexAppServerRuntime {
                     && LocalModelCatalog.supportsResidentVisualGrounding($0.model)
             }) {
                 prepareVisualGrounderInBackground()
+            }
+            for receipt in await webModelServer.latestCleanupReceipts() {
+                events.yield(.websiteSessionCleanupUpdated(receipt))
             }
             return tasks
         }

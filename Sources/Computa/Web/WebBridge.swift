@@ -151,6 +151,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                   state.tasks.contains(where: { $0.id == taskID }) else { return }
             Task { @MainActor [weak state] in await state?.resumeQueue(taskID: taskID) }
 
+        case "retryWebsiteSessionCleanup":
+            guard Set(body.keys) == ["action", "taskID"],
+                  let taskID = body["taskID"] as? String else { return }
+            state.requestWebsiteSessionCleanup(taskID: taskID)
+
         case "interruptTask":
             guard let taskID = body["taskID"] as? String,
                   state.tasks.contains(where: { $0.id == taskID && $0.status == .running })
