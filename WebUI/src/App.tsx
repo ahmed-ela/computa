@@ -13,6 +13,8 @@ import {
   DropdownMenuTrigger,
 } from '@octanejs/shadcn/DropdownMenu';
 import { Icon } from './Icon';
+import { ReviewPanel } from './ReviewPanel';
+import { fileChangeSummary } from './reviewDiff';
 import { ResponseMarkdown } from './ResponseMarkdown';
 import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
 import { activityTimeline, type ActivityGroup } from './activityTimeline';
@@ -75,6 +77,7 @@ function modelName(model: string, snapshot: AppSnapshot) {
 
 const toolNames: Record<string, string> = {
   commandExecution: 'Command',
+  fileChange: 'File edits', apply_patch: 'Edit files',
   computer_v2_status: 'Check permissions', computer_v2_apps: 'Find applications',
   computer_v2_open: 'Open application', computer_v2_snapshot: 'Inspect interface',
   computer_v2_capture: 'Capture window', computer_v2_ground_click: 'Locate and click',
@@ -175,13 +178,19 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
     <header className="task-toolbar">
       <div className="toolbar-title-block">
         <strong>{task?.title === 'Untitled task' ? 'New task' : task?.title ?? 'Computa'}</strong>
+        {task?.workspace && task.workspace !== 'No workspace selected' ? <span className="toolbar-workspace" title={task.workspace}>{task.workspace.split('/').filter(Boolean).at(-1) ?? task.workspace}</span> : null}
       </div>
       <div className="toolbar-actions">
+        {task?.status === 'Draft' && task.entries.length === 0 && !task.isBusy ? <Button variant="ghost" size="sm" onClick={() => post({ action: 'chooseTaskWorkspace', taskID: task.id })}>Choose folder</Button> : null}
         {task && task.status !== 'Draft' && task.status !== 'Completed' ? (
           <Badge variant="secondary" className={`status-label ${toneClass(task.statusTone)}`}>
             <span className="status-dot" />{task.status}
           </Badge>
         ) : null}
+        {task ? <Button variant="ghost" size="sm" className={`review-toolbar-button ${snapshot.isReviewPresented ? 'active' : ''}`}
+          aria-label="Toggle changes" aria-pressed={Boolean(snapshot.isReviewPresented)} onClick={() => post({ action: 'toggleReview' })}>
+          <Icon name="edit" size={15} /> Changes
+        </Button> : null}
         <Button variant="ghost" size="icon"
           className={`icon-button ${snapshot.isInspectorPresented ? 'active' : ''}`}
           aria-label="Toggle inspector"
@@ -219,6 +228,17 @@ function ToolDetails({ entry, showPayload }: { entry: EntrySnapshot; showPayload
         <Icon name="chevron" size={14} />
       </summary>
       <div className="tool-expanded-summary"><span>{tool.name}</span><p>{tool.summary}</p></div>
+      {entry.fileChanges?.length ? <div className="inline-file-changes">
+        {entry.fileChanges.map((change, index) => {
+          const summary = fileChangeSummary(change);
+          return <div className="inline-file-change" key={`${change.path}:${index}`}>
+            <span className="mono" title={change.path}>{change.movePath ? `${change.path} → ${change.movePath}` : change.path}</span>
+            <span>{summary.label}</span>
+            {summary.partial ? <span>Partial diff</span> : <><span className="diff-additions">+{summary.additions}</span><span className="diff-deletions">−{summary.deletions}</span></>}
+          </div>;
+        })}
+        <Button variant="outline" size="sm" onClick={() => post({ action: 'toggleReview' })}>Review changes</Button>
+      </div> : null}
       {showPayload || tool.name === 'commandExecution' ? (
         <div className="tool-payload">
           <div><span>Input</span><pre>{tool.input}</pre></div>
@@ -706,8 +726,14 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
   };
   const rows = activityTimeline(task);
   return (
-    <div className={`conversation-column ${rows.length === 0 ? 'is-empty' : ''}`}>
+    <div className={`conversation-column ${rows.length === 0 && !snapshot.isReviewPresented ? 'is-empty' : ''} ${snapshot.isReviewPresented ? 'is-reviewing' : ''}`}>
+      <div className="review-host" hidden={!snapshot.isReviewPresented}><ReviewPanel taskID={task.id} review={snapshot.review} busy={task.isBusy} post={post} onFeedback={(text) => {
+        setDraft((drafts[task.id] ?? '').trim() ? `${drafts[task.id]}\n\n${text}` : text);
+        post({ action: 'toggleReview' });
+        requestAnimationFrame(() => document.getElementById('task-prompt')?.focus());
+      }} /></div>
       <div className="conversation-scroll" id="conversation-scroll" ref={scrollRef}
+        hidden={Boolean(snapshot.isReviewPresented)}
         onScroll={(event) => {
           const scroll = event.currentTarget as HTMLDivElement;
           followingOutput.current = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 48;
@@ -717,6 +743,7 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
             <div className="empty-conversation">
               <h1>How can I help?</h1>
               <p>Ask a question or give your Mac a task.</p>
+              {task.status === 'Draft' && task.entries.length === 0 && !task.isBusy ? <Button variant="outline" size="sm" className="choose-workspace-button" onClick={() => post({ action: 'chooseTaskWorkspace', taskID: task.id })}>Choose a project folder</Button> : null}
               <div className="suggestion-grid">
                 <Button variant="outline" size="sm" onClick={() => suggest('Check computer-use permissions and tell me what is available.')}>Check setup</Button>
                 <Button variant="outline" size="sm" onClick={() => suggest('List the running applications and summarize what is available.')}>Explore apps</Button>
@@ -999,7 +1026,7 @@ export function App() {
           </div>
         )}
       </main>
-      {task && snapshot.isInspectorPresented ? <Inspector snapshot={snapshot} task={task} /> : null}
+      {task && snapshot.isInspectorPresented && !snapshot.isReviewPresented ? <Inspector snapshot={snapshot} task={task} /> : null}
       </div>
       <SettingsModal snapshot={snapshot} />
     </div>

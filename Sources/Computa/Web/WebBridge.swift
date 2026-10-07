@@ -168,6 +168,70 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             guard !state.approvalGateBlocksInteraction else { return }
             state.isBrowserPresented.toggle()
 
+        case "toggleReview":
+            state.toggleReview()
+
+        case "setReviewScope":
+            guard let taskID = body["taskID"] as? String, let raw = body["scope"] as? String,
+                  let scope = FileReviewScope(rawValue: raw) else { return }
+            state.setReviewScope(scope, taskID: taskID)
+
+        case "setReviewReference":
+            guard let taskID = body["taskID"] as? String, let reference = body["reference"] as? String else { return }
+            state.setReviewReference(reference, taskID: taskID)
+
+        case "refreshReview":
+            guard let taskID = body["taskID"] as? String else { return }
+            state.requestReviewRefresh(taskID: taskID)
+
+        case "reviewMutation":
+            guard !state.approvalGateBlocksInteraction, let taskID = body["taskID"] as? String,
+                  let snapshotID = body["snapshotID"] as? String, let raw = body["operation"] as? String,
+                  let operation = FileReviewOperation(rawValue: raw), taskID == state.selectedTaskID,
+                  state.review?.snapshot?.id == snapshotID, !state.isBusy(taskID: taskID) else { return }
+            let fileID = body["fileID"] as? String
+            let hunkID = body["hunkID"] as? String
+            Task { @MainActor [weak state, weak self] in
+                guard let state, let self else { return }
+                if operation == .revert {
+                    let target = fileID.flatMap { id in state.review?.snapshot?.files.first { $0.id == id }?.path } ?? "all displayed changes"
+                    guard await self.confirmRevert(target: target, hunkOnly: hunkID != nil) else { return }
+                }
+                await state.mutateReview(taskID: taskID, snapshotID: snapshotID, operation: operation, fileID: fileID, hunkID: hunkID)
+            }
+
+        case "openReviewFile":
+            guard let taskID = body["taskID"] as? String, let snapshotID = body["snapshotID"] as? String,
+                  let fileID = body["fileID"] as? String else { return }
+            Task { @MainActor [weak state] in
+                guard let state else { return }
+                do {
+                    if let url = try await state.reviewFileURL(taskID: taskID, snapshotID: snapshotID, fileID: fileID) {
+                        // An explicit text editor prevents executable file associations
+                        // from turning an Open file action into program execution.
+                        NSWorkspace.shared.open([url], withApplicationAt: URL(fileURLWithPath: "/System/Applications/TextEdit.app"),
+                            configuration: NSWorkspace.OpenConfiguration()) { _, _ in }
+                    }
+                } catch { state.reportReviewError(error.localizedDescription, taskID: taskID) }
+            }
+
+        case "chooseTaskWorkspace":
+            guard let taskID = body["taskID"] as? String, taskID == state.selectedTaskID,
+                  state.canChooseTaskWorkspace, !state.approvalGateBlocksInteraction else { return }
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.allowsMultipleSelection = false
+            panel.prompt = "Choose project"
+            panel.message = "Choose the folder where this chat will read, edit and review code."
+            panel.begin { [weak state] response in
+                guard response == .OK, let url = panel.url else { return }
+                Task { @MainActor in
+                    do { try await state?.setTaskWorkspace(url, taskID: taskID) }
+                    catch { state?.reportReviewError(error.localizedDescription, taskID: taskID) }
+                }
+            }
+
         case "showSettings":
             state.refreshAutomationPermissions()
             state.presentedSheet = .settings
@@ -206,6 +270,19 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
         default:
             return
+        }
+    }
+
+    private func confirmRevert(target: String, hunkOnly: Bool) async -> Bool {
+        guard let window = webView?.window else { return false }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = hunkOnly ? "Revert this hunk?" : "Revert \(target)?"
+        alert.informativeText = "This discards the displayed unstaged edits. Existing staged work is preserved. If the files changed since this review, Computa will refuse and ask you to refresh."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Revert changes")
+        return await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { continuation.resume(returning: $0 == .alertSecondButtonReturn) }
         }
     }
 

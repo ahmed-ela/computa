@@ -16,6 +16,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let showToolPayloads: Bool
     let isInspectorPresented: Bool
     let isBrowserPresented: Bool
+    let isReviewPresented: Bool
+    let review: AppReviewState?
     let isSettingsPresented: Bool
     let promptReceipts: [PromptReceipt]
 
@@ -49,6 +51,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         showToolPayloads = state.showToolPayloads
         isInspectorPresented = state.isInspectorPresented
         isBrowserPresented = state.isBrowserPresented
+        isReviewPresented = state.isReviewPresented
+        review = state.review
         isSettingsPresented = state.presentedSheet == .settings
         promptReceipts = state.promptReceipts
     }
@@ -118,6 +122,8 @@ struct WebEntrySnapshot: Codable, Equatable, Sendable {
     let activityGroupID: String?
     let assistantPhase: String?
     let tool: WebToolSnapshot?
+    let fileChanges: [AgentFileChange]?
+    let turnID: String?
 
     init(_ entry: TimelineEntry, includeToolPayload: Bool = true) {
         id = entry.id
@@ -130,6 +136,8 @@ struct WebEntrySnapshot: Codable, Equatable, Sendable {
         activityGroupID = entry.activityGroupID
         assistantPhase = entry.kind == .assistant ? TimelineEntry.validAssistantPhase(entry.assistantPhase) : nil
         tool = entry.toolEvent.map { WebToolSnapshot($0, includePayload: includeToolPayload) }
+        fileChanges = entry.fileChanges
+        turnID = entry.turnID
     }
 }
 

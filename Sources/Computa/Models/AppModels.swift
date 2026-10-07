@@ -62,6 +62,20 @@ struct ToolEvent: Hashable, Sendable {
     var duration: TimeInterval?
 }
 
+/// Authoritative App Server patch content, separate from the model's prose.
+/// Add/delete diffs contain complete file content; update diffs are unified hunks.
+struct AgentFileChange: Codable, Hashable, Sendable {
+    let path: String
+    let kind: String
+    let movePath: String?
+    let diff: String
+}
+
+struct AgentTurnDiff: Codable, Hashable, Sendable {
+    let id: String
+    var diff: String
+}
+
 struct ActionApprovalRequest: Identifiable, Hashable, Sendable {
     enum Kind: String, Sendable {
         case command
@@ -94,6 +108,8 @@ struct TimelineEntry: Identifiable, Hashable, Sendable {
     var assistantPhase: String?
     /// Wall time for the completed user turn, attached only to its final reply.
     var workedForSeconds: TimeInterval?
+    var fileChanges: [AgentFileChange]?
+    var turnID: String?
 
     init(
         id: String = UUID().uuidString,
@@ -105,7 +121,9 @@ struct TimelineEntry: Identifiable, Hashable, Sendable {
         workedForSeconds: TimeInterval? = nil,
         isStreaming: Bool = false,
         activityGroupID: String? = nil,
-        assistantPhase: String? = nil
+        assistantPhase: String? = nil,
+        fileChanges: [AgentFileChange]? = nil,
+        turnID: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -117,6 +135,8 @@ struct TimelineEntry: Identifiable, Hashable, Sendable {
         self.isStreaming = isStreaming
         self.activityGroupID = activityGroupID
         self.assistantPhase = kind == .assistant ? Self.validAssistantPhase(assistantPhase) : nil
+        self.fileChanges = fileChanges
+        self.turnID = turnID
     }
 
     static func validAssistantPhase(_ phase: String?) -> String? {
@@ -135,6 +155,7 @@ struct AgentTask: Identifiable, Hashable, Sendable {
     var model: String
     var branch: String?
     var entries: [TimelineEntry]
+    var turnDiffs: [AgentTurnDiff]
 
     init(
         id: String = UUID().uuidString,
@@ -145,7 +166,8 @@ struct AgentTask: Identifiable, Hashable, Sendable {
         workspace: String,
         model: String,
         branch: String? = nil,
-        entries: [TimelineEntry] = []
+        entries: [TimelineEntry] = [],
+        turnDiffs: [AgentTurnDiff] = []
     ) {
         self.id = id
         self.title = title
@@ -156,6 +178,7 @@ struct AgentTask: Identifiable, Hashable, Sendable {
         self.model = model
         self.branch = branch
         self.entries = entries
+        self.turnDiffs = turnDiffs
     }
 }
 

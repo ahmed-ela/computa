@@ -407,7 +407,9 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(state.pausedQueueTaskIDs.contains(task.id))
         XCTAssertEqual(state.connectionState, .connected(provider: "Rejecting runtime"))
         XCTAssertEqual(state.selectedTask?.status, .waiting)
-        XCTAssertEqual(state.selectedTask?.entries.last?.title, "Prompt was not delivered")
+        XCTAssertEqual(state.selectedTask?.entries.last?.title, "Prompt delivery unconfirmed")
+        XCTAssertEqual(state.queuedPrompts[task.id]?.first?.deliveryUncertain, true,
+                       "A generic runtime error does not prove that delivery never occurred")
     }
 
     @MainActor

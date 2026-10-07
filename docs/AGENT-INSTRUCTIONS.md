@@ -37,6 +37,16 @@ actions. Completion of an operation requires the relevant local observations
 and outcome. A familiar or plausible answer does not establish that the
 requested operation happened. Unsupported surfaces must be reported accurately.
 
+Code tasks receive guidance to inspect existing files and changes, preserve
+unrelated work, prefer the offered native `apply_patch` tool for targeted edits,
+and check actual results and relevant tests. The website contract projects
+custom tools separately from JSON function tools: a custom patch call uses the
+exact offered name and a literal string `input`; functions retain object
+`arguments`. Neither schema permits converting an unoffered tool into a command.
+The engine executes patches and emits file-change items and aggregate turn
+diffs. Proposed, failed, or interrupted changes are not labeled applied merely
+because the model returned a patch. See [code editing](CODE-EDITING.md).
+
 Current website models receive text and Accessibility observations. Normal
 browser automation uses an authorized Chrome connection. Embedded ChatGPT,
 Gemini and Claude pages provide inference; general control of normal WebKit tabs and

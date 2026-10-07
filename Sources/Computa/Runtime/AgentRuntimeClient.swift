@@ -9,6 +9,7 @@ protocol AgentRuntimeClient: Sendable {
     func loadTasks() async throws -> [AgentTask]
     func events() -> AsyncStream<AgentRuntimeEvent>
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws
+    func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws
     func steer(prompt: String, toTaskID taskID: AgentTask.ID) async throws
     func compact(taskID: AgentTask.ID) async throws
     func interrupt(taskID: AgentTask.ID) async throws
@@ -26,6 +27,9 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
+    func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws {
+        throw AgentRuntimeCapabilityError.workspaceSelectionUnsupported
+    }
     /// Steering must be explicitly implemented by an adapter. Falling back to
     /// submit or interrupt would silently change the meaning of the user's input.
     func steer(prompt: String, toTaskID taskID: AgentTask.ID) async throws {
@@ -55,6 +59,7 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
     case steeringUnsupported
     case compactionUnsupported
     case chromeConnectionUnsupported
+    case workspaceSelectionUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -64,6 +69,8 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
             "This runtime does not support context compaction."
         case .chromeConnectionUnsupported:
             "This runtime does not support connecting to your existing Chrome session."
+        case .workspaceSelectionUnsupported:
+            "This runtime does not support choosing a project folder."
         }
     }
 }
@@ -72,6 +79,7 @@ enum AgentRuntimeEvent: Sendable {
     case tasksSnapshot([AgentTask])
     case taskUpserted(AgentTask)
     case timelineEntryAppended(taskID: AgentTask.ID, entry: TimelineEntry)
+    case turnDiffUpdated(taskID: AgentTask.ID, turnID: String, diff: String)
     case assistantMessageDelta(taskID: AgentTask.ID, itemID: String, delta: String)
     case assistantMessagePhaseUpdated(taskID: AgentTask.ID, itemID: String, phase: String)
     case assistantMessagesDiscarded(taskID: AgentTask.ID)

@@ -66,7 +66,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testLegacyInstructionsRemainAvailableForExistingToolDefinitions() {
         let legacy = ComputaAgentInstructions.developerInstructions(referenceTools: false)
-        XCTAssertEqual(legacy, ComputaAgentInstructions.legacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.commandLine)
+        XCTAssertEqual(legacy, ComputaAgentInstructions.legacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
         XCTAssertTrue(legacy.contains("computer_v2_follow_link with only"))
         XCTAssertTrue(legacy.contains(ComputerV2ToolContract.regionChangedPressArgumentShape))
         XCTAssertTrue(legacy.contains("Being inside main does not make a toolbar or composer a"))
@@ -75,7 +75,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testInstructionsAreSelfContainedAndBasePromptHasNoForeignPolicy() {
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(),
-                       ComputaAgentInstructions.scope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.commandLine)
+                       ComputaAgentInstructions.scope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
         let base = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
         XCTAssertFalse(base.localizedCaseInsensitiveContains("StudyLock"))
         XCTAssertTrue(base.contains("Respect approvals and access controls"))
@@ -174,7 +174,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(handoff.contains("If an authorized action remains necessary and an offered tool can perform"))
             XCTAssertTrue(handoff.contains("it under tool_choice, RETURN the tool_calls JSON now"))
             XCTAssertTrue(handoff.contains("response does Computa execute those calls and supply matching local"))
-            XCTAssertTrue(handoff.contains("function_call_output in a later request"))
+            XCTAssertTrue(handoff.contains("function_call_output or custom_tool_call_output in a later request"))
             XCTAssertTrue(handoff.contains("a simulated transcript, invented results or historical receipts"))
             XCTAssertTrue(handoff.contains("verify its local output and final exit"))
             XCTAssertTrue(handoff.contains("After current observations satisfy the latest user request"))

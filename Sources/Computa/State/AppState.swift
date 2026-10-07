@@ -32,6 +32,13 @@ final class AppState {
     var composerText = ""
     var isInspectorPresented = false
     var isBrowserPresented = false
+    var isReviewPresented = false
+    private(set) var review: AppReviewState?
+    @ObservationIgnored private let reviewService = WorkspaceReviewService()
+    @ObservationIgnored private var reviewGeneration: UInt64 = 0
+    @ObservationIgnored private var reviewRefresh: Task<Void, Never>?
+    private var reviewMutationTaskIDs: Set<String> = []
+    @ObservationIgnored private var reviewNeedsRefresh: Set<String> = []
     let browserSession: EmbeddedBrowserSession
     var presentedSheet: SheetDestination? {
         didSet {
@@ -347,6 +354,10 @@ final class AppState {
     func selectTask(_ id: AgentTask.ID?) {
         selectedTaskID = id
         selectedEntryID = selectedTask?.entries.last?.id
+        reviewGeneration &+= 1
+        reviewRefresh?.cancel()
+        review = nil
+        if isReviewPresented, let id { requestReviewRefresh(taskID: id) }
     }
 
     /// Remember the native user's choice across launches. Missing or invalid
@@ -398,6 +409,142 @@ final class AppState {
         selectedTaskID = task.id
         selectedEntryID = nil
         composerText = ""
+        reviewGeneration &+= 1
+        reviewRefresh?.cancel()
+        review = nil
+        if isReviewPresented { requestReviewRefresh(taskID: task.id) }
+    }
+
+    func toggleReview() {
+        guard !approvalGateBlocksInteraction else { return }
+        isReviewPresented.toggle()
+        if isReviewPresented, let selectedTaskID { requestReviewRefresh(taskID: selectedTaskID) }
+        else {
+            reviewGeneration &+= 1
+            reviewRefresh?.cancel()
+        }
+    }
+
+    func setReviewScope(_ scope: FileReviewScope, taskID: String) {
+        guard taskID == selectedTaskID else { return }
+        let reference = review?.reference ?? "HEAD"
+        review = AppReviewState(taskID: taskID, scope: scope, reference: reference)
+        requestReviewRefresh(taskID: taskID)
+    }
+
+    func setReviewReference(_ reference: String, taskID: String) {
+        guard taskID == selectedTaskID, reference.utf8.count <= 1_024 else { return }
+        if review == nil { review = AppReviewState(taskID: taskID, scope: .branch, reference: "HEAD") }
+        review?.reference = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        requestReviewRefresh(taskID: taskID)
+    }
+
+    func requestReviewRefresh(taskID: String) {
+        guard taskID == selectedTaskID, isReviewPresented else { return }
+        reviewGeneration &+= 1
+        if !reviewMutationTaskIDs.isEmpty {
+            reviewNeedsRefresh.insert(taskID)
+            return
+        }
+        let previous = reviewRefresh
+        previous?.cancel()
+        reviewRefresh = Task { @MainActor [weak self] in
+            // Coalesce event wakeups without overlapping retained Git reads.
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await self?.refreshReview(taskID: taskID)
+        }
+    }
+
+    func refreshReview(taskID: String) async {
+        guard !Task.isCancelled, !isShuttingDown, isReviewPresented, taskID == selectedTaskID,
+              let task = tasks.first(where: { $0.id == taskID }) else { return }
+        reviewGeneration &+= 1
+        let generation = reviewGeneration
+        var current = review?.taskID == taskID ? review! : AppReviewState(taskID: taskID, scope: .lastTurn, reference: "HEAD")
+        current.loading = true
+        current.error = nil
+        current.snapshot = nil
+        review = current
+        do {
+            let lastTurn = task.turnDiffs.last
+            let completedChanges = task.entries.filter {
+                lastTurn != nil && $0.turnID == lastTurn?.id && $0.toolEvent?.name == "fileChange"
+                    && $0.toolEvent?.status == .succeeded
+            }.flatMap { $0.fileChanges ?? [] }
+            let snapshot = try await reviewService.load(workspace: task.workspace, scope: current.scope,
+                reference: current.reference.isEmpty ? nil : current.reference,
+                turnDiff: lastTurn?.diff, turnChanges: completedChanges)
+            guard !Task.isCancelled, generation == reviewGeneration, selectedTaskID == taskID, isReviewPresented else { return }
+            review?.snapshot = snapshot
+            review?.loading = false
+        } catch {
+            guard !Task.isCancelled, generation == reviewGeneration, selectedTaskID == taskID else { return }
+            review?.loading = false
+            review?.error = error.localizedDescription
+        }
+    }
+
+    /// Applies only the exact patch held by the native service. Web content
+    /// supplies opaque receipt IDs, never paths, replacement text or Git flags.
+    func mutateReview(taskID: String, snapshotID: String, operation: FileReviewOperation,
+                      fileID: String?, hunkID: String?) async {
+        guard !isShuttingDown, !approvalGateBlocksInteraction, !isBusy(taskID: taskID),
+              taskID == selectedTaskID, review?.taskID == taskID, review?.snapshot?.id == snapshotID,
+              review?.loading == false else { return }
+        reviewMutationTaskIDs.insert(taskID)
+        defer {
+            reviewMutationTaskIDs.remove(taskID)
+            if reviewMutationTaskIDs.isEmpty {
+                let pending = reviewNeedsRefresh
+                reviewNeedsRefresh.removeAll()
+                if let selectedTaskID, pending.contains(selectedTaskID) {
+                    requestReviewRefresh(taskID: selectedTaskID)
+                }
+            }
+            Task { @MainActor [weak self] in await self?.drainQueue(taskID: taskID) }
+        }
+        reviewGeneration &+= 1
+        let generation = reviewGeneration
+        review?.loading = true
+        review?.error = nil
+        do {
+            let snapshot = try await reviewService.mutate(snapshotID: snapshotID, operation: operation, fileID: fileID, hunkID: hunkID)
+            guard generation == reviewGeneration, selectedTaskID == taskID else { return }
+            review?.snapshot = snapshot
+            review?.loading = false
+        } catch {
+            guard generation == reviewGeneration, selectedTaskID == taskID else { return }
+            review?.loading = false
+            review?.snapshot = nil
+            review?.error = error.localizedDescription
+        }
+    }
+
+    func reviewFileURL(taskID: String, snapshotID: String, fileID: String) async throws -> URL? {
+        guard taskID == selectedTaskID, review?.taskID == taskID, review?.snapshot?.id == snapshotID,
+              review?.loading == false else { return nil }
+        return try await reviewService.fileURL(snapshotID: snapshotID, fileID: fileID)
+    }
+
+    func reportReviewError(_ message: String, taskID: String) {
+        guard selectedTaskID == taskID else { return }
+        review?.error = message
+    }
+
+    var canChooseTaskWorkspace: Bool {
+        guard let task = selectedTask else { return false }
+        return task.status == .draft && task.entries.isEmpty && !isBusy(taskID: task.id)
+    }
+
+    func setTaskWorkspace(_ url: URL, taskID: String) async throws {
+        guard taskID == selectedTaskID, canChooseTaskWorkspace, url.isFileURL,
+              let runtime else { return }
+        try await runtime.configureWorkspace(path: url.path, forTaskID: taskID)
+        guard taskID == selectedTaskID, let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].status == .draft,
+              tasks[index].entries.isEmpty else { return }
+        tasks[index].workspace = url.path
+        if isReviewPresented { requestReviewRefresh(taskID: taskID) }
     }
 
     @discardableResult
@@ -435,6 +582,7 @@ final class AppState {
             || pendingApprovals.contains(where: { $0.taskID == nil || $0.taskID == taskID })
             || !resolvingApprovalIDs.isEmpty
             || steeringTaskIDs.contains(taskID)
+            || reviewMutationTaskIDs.contains(taskID)
     }
 
     func activeTurnStartedAt(for taskID: AgentTask.ID) -> TimeInterval? {
@@ -798,6 +946,9 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        reviewGeneration &+= 1
+        reviewRefresh?.cancel()
+        reviewNeedsRefresh.removeAll()
         discardAllMessageDrafts()
         extensionBridge?.stop()
         endChromeConnection(state: .disconnected)
@@ -875,6 +1026,16 @@ final class AppState {
                 tasks.insert(task, at: 0)
             }
 
+        case .turnDiffUpdated(let taskID, let turnID, let diff):
+            guard let index = tasks.firstIndex(where: { $0.id == taskID }), !turnID.isEmpty else { return }
+            let value = AgentTurnDiff(id: turnID, diff: diff)
+            if let existing = tasks[index].turnDiffs.firstIndex(where: { $0.id == turnID }) {
+                tasks[index].turnDiffs[existing] = value
+            } else { tasks[index].turnDiffs.append(value) }
+            if isReviewPresented, selectedTaskID == taskID, review?.scope == .lastTurn {
+                requestReviewRefresh(taskID: taskID)
+            }
+
         case .timelineEntryAppended(let taskID, let entry):
             guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
             var completedEntry = entry
@@ -930,10 +1091,14 @@ final class AppState {
                 }
             } else {
                 completedEntry.assistantPhase = nil
-                if entry.kind == .tool, entry.toolEvent?.name == "commandExecution",
+                if entry.kind == .tool, let name = entry.toolEvent?.name, ["commandExecution", "fileChange"].contains(name),
                    let existing = tasks[index].entries.firstIndex(where: {
-                       $0.id == entry.id && $0.kind == .tool && $0.toolEvent?.name == "commandExecution"
+                       $0.id == entry.id && $0.kind == .tool && $0.toolEvent?.name == name
                    }) {
+                    if name == "fileChange" {
+                        guard tasks[index].entries[existing].turnID == entry.turnID else { return }
+                        if tasks[index].entries[existing].toolEvent?.status != .running, entry.toolEvent?.status == .running { return }
+                    }
                     completedEntry.timestamp = tasks[index].entries[existing].timestamp
                     completedEntry.activityGroupID = tasks[index].entries[existing].activityGroupID
                         ?? completedEntry.activityGroupID
@@ -943,6 +1108,12 @@ final class AppState {
             tasks[index].updatedAt = max(tasks[index].updatedAt, entry.timestamp)
             if selectedTaskID == taskID {
                 selectedEntryID = entry.id
+            }
+            if completedEntry.kind == .tool, completedEntry.toolEvent?.name == "fileChange",
+               completedEntry.toolEvent?.status == .succeeded,
+               isReviewPresented, selectedTaskID == taskID, review?.scope == .lastTurn {
+                // A metadata-only move may have no aggregate-diff notification.
+                requestReviewRefresh(taskID: taskID)
             }
 
         case .assistantMessagePhaseUpdated(let taskID, let itemID, let phase):
@@ -1043,6 +1214,11 @@ final class AppState {
                     pausedQueueTaskIDs.insert(taskID)
                 }
                 if canConnectChrome { extensionBridge?.reconnectSaved() }
+                if isReviewPresented, selectedTaskID == taskID {
+                    // Shell edits have no native patch item. Refresh current Git
+                    // scopes when the turn finishes, including interrupted work.
+                    requestReviewRefresh(taskID: taskID)
+                }
             }
 
         case .contextUsageUpdated(let taskID, let usage):

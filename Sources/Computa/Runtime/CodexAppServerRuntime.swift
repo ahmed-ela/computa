@@ -212,6 +212,25 @@ enum AppServerCompletedToolItemContract {
 }
 
 enum AppServerThreadHistoryContract {
+    /// Preserve actual user-turn ordering, including a later turn that made no
+    /// patch changes. Maintenance-only turns do not replace a user-turn review.
+    static func turnDiffs(from data: Data, saved: [AgentTurnDiff]) throws -> [AgentTurnDiff] {
+        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = envelope["result"] as? [String: Any],
+              let thread = result["thread"] as? [String: Any],
+              let turns = thread["turns"] as? [[String: Any]] else {
+            throw AgentRPCError(object: ["code": -32603, "message": "Saved chat history could not be read."])
+        }
+        let byID = Dictionary(uniqueKeysWithValues: saved.map { ($0.id, $0) })
+        var seen = Set<String>()
+        return turns.compactMap { turn in
+            guard let id = turn["id"] as? String, !id.isEmpty, id.utf8.count <= 512, seen.insert(id).inserted,
+                  let items = turn["items"] as? [[String: Any]],
+                  items.contains(where: { $0["type"] as? String == "userMessage" }) else { return nil }
+            return byID[id] ?? AgentTurnDiff(id: id, diff: "")
+        }.suffix(256).map { $0 }
+    }
+
     static func entries(from data: Data, excludingAssistantTurns excluded: Set<String> = []) throws -> [TimelineEntry] {
         guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = envelope["result"] as? [String: Any],
@@ -254,6 +273,9 @@ enum AppServerThreadHistoryContract {
                     let text = raw.isEmpty ? (item["summary"] as? [String] ?? []).joined(separator: "\n\n") : raw
                     entry = text.isEmpty ? nil : TimelineEntry(id: id, kind: .reasoning, title: "Thinking",
                         body: text, timestamp: timestamp, activityGroupID: userID)
+                case "fileChange":
+                    entry = AppServerFileChangeContract.entry(item: item, turnID: turnID,
+                        timestamp: timestamp, activityGroupID: userID)
                 case "commandExecution", "mcpToolCall", "dynamicToolCall", "webSearch":
                     let name = item["name"] as? String ?? item["tool"] as? String ?? type
                     let summary = AppServerCompletedToolItemContract.summary(for: item, name: name)
@@ -761,6 +783,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         try await core.submit(prompt: prompt, taskID: taskID, modelID: modelID)
     }
 
+    func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws {
+        try await core.configureWorkspace(path: path, taskID: taskID)
+    }
+
     func steer(prompt: String, toTaskID taskID: AgentTask.ID) async throws {
         try await core.steer(prompt: prompt, taskID: taskID)
     }
@@ -1016,6 +1042,8 @@ private extension CodexAppServerRuntime {
         private let browserBroker: ChromeTabBroker
         private let visualGrounder: any VisualGroundingClient
         private let borrowedChromeConnector: @Sendable (ChromeConnectionRequest) async throws -> BorrowedChromeSessionOwner
+        private var fileChangeTranscripts = [AgentTask.ID: AppServerFileChangeTranscript]()
+        private var initializedDiffTurns = [AgentTask.ID: Set<String>]()
         private var chromeConnection: ChromeConnection?
 
         private var process: OwnedChildProcess?
@@ -1033,6 +1061,7 @@ private extension CodexAppServerRuntime {
         private var chromeRecoveryAttemptID: UUID?
         private var chromeRecoveryTask: Task<Void, Never>?
         private var threadForTask: [AgentTask.ID: String] = [:]
+        private var workspaceForTask: [AgentTask.ID: String] = [:]
         private var taskForThread: [String: AgentTask.ID] = [:]
         private var turnIdentity = AppServerTurnIdentityTracker()
         // IDs are scoped to one live turn. A completed item must never be
@@ -1188,6 +1217,8 @@ private extension CodexAppServerRuntime {
             )
             let processHome = AgentRuntimeIsolation.processHomeURL(codexHomePath: configuration.codexHomePath)
             try FileManager.default.createDirectory(at: processHome, withIntermediateDirectories: true)
+            let modelCatalogURL = try ComputaModelToolCatalog.prepare(codexHomePath: configuration.codexHomePath,
+                additionalModelID: configuration.model)
             if let protocolTracePath = configuration.protocolTracePath {
                 try startProtocolTrace(atPath: protocolTracePath)
             }
@@ -1214,7 +1245,8 @@ private extension CodexAppServerRuntime {
             do {
                 process = try OwnedChildProcess(
                     executableURL: executable.url,
-                    arguments: executable.arguments + (configuration.isBundled ? AgentRuntimeIsolation.configurationArguments : []),
+                    arguments: executable.arguments + (configuration.isBundled
+                        ? AgentRuntimeIsolation.configurationArguments + (try ComputaModelToolCatalog.launchArguments(catalogURL: modelCatalogURL)) : []),
                     environment: environment,
                     workingDirectory: URL(fileURLWithPath: configuration.workspacePath, isDirectory: true),
                     inputDescriptor: stdin.fileHandleForReading.fileDescriptor,
@@ -1751,7 +1783,7 @@ private extension CodexAppServerRuntime {
                             "threadId": threadID,
                             "modelProvider": configuration.modelProvider(for: modelID),
                             "model": modelID,
-                            "cwd": configuration.workspacePath,
+                            "cwd": workspacePath(taskID: taskID),
                             "sandbox": "workspace-write",
                             "approvalPolicy": "on-request",
                             "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
@@ -1784,7 +1816,7 @@ private extension CodexAppServerRuntime {
                     params: [
                         "modelProvider": configuration.modelProvider(for: modelID),
                         "model": modelID,
-                        "cwd": configuration.workspacePath,
+                        "cwd": workspacePath(taskID: taskID),
                         "sandbox": "workspace-write",
                         "approvalPolicy": "on-request",
                         "ephemeral": false,
@@ -1910,6 +1942,7 @@ private extension CodexAppServerRuntime {
         private func threadConfig(for modelID: String, taskID: AgentTask.ID? = nil) -> [String: Any] {
             var result = CodexAppServerRuntime.localThreadConfig(for: modelID,
                 autoCompactLimitOverride: configuration.autoCompactLimitOverride)
+            result["model_catalog_json"] = ComputaModelToolCatalog.url(codexHomePath: configuration.codexHomePath).path
             if LocalModelCatalog.isWebBrowser(modelID), let webProviderBaseURL {
                 var headers = ["Authorization": "Bearer " + webModelServer.bearerToken]
                 if let taskID { headers["X-Computa-Task-ID"] = taskID }
@@ -1925,6 +1958,35 @@ private extension CodexAppServerRuntime {
                 ] as [String: Any]
             }
             return result
+        }
+
+        func configureWorkspace(path: String, taskID: AgentTask.ID) throws {
+            guard !isShuttingDown, !isPreparingCommandShutdown,
+                  !taskID.isEmpty, taskID.utf8.count <= 512,
+                  threadForTask[taskID] == nil, turnIdentity.activeTurnID(for: taskID) == nil,
+                  turnSubmissionClaims[taskID] == nil, managedCompactions[taskID] == nil,
+                  !compactionTracker.isRunning(taskID: taskID) else {
+                throw RuntimeError.serverError("Choose a project folder before this chat starts. Existing chats keep their original folder.")
+            }
+            guard path.hasPrefix("/"), !path.contains("\0"), path.utf8.count <= 16_384 else {
+                throw RuntimeError.serverError("The project folder must be an existing absolute directory.")
+            }
+            let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue,
+                  FileManager.default.isReadableFile(atPath: url.path) else {
+                throw RuntimeError.serverError("The selected project folder is unavailable or cannot be read.")
+            }
+            workspaceForTask[taskID] = url.path
+        }
+
+        private func workspacePath(taskID: AgentTask.ID) -> String {
+            workspaceForTask[taskID] ?? configuration.workspacePath
+        }
+
+        private func turnDiffStore() -> AgentTurnDiffStore {
+            AgentTurnDiffStore(directory: URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                .appendingPathComponent("ComputaTurnDiffs", isDirectory: true))
         }
 
         private func ensureWebProvider(modelID: String) async throws {
@@ -2199,7 +2261,7 @@ private extension CodexAppServerRuntime {
                         "threadId": threadID,
                         "modelProvider": configuration.modelProvider(for: modelID),
                         "model": modelID,
-                        "cwd": configuration.workspacePath,
+                        "cwd": workspacePath(taskID: taskID),
                         "sandbox": "workspace-write",
                         "approvalPolicy": "on-request",
                         "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
@@ -2390,6 +2452,7 @@ private extension CodexAppServerRuntime {
                 guard let id = record["id"] as? String else { return nil }
                 threadForTask[id] = id
                 taskForThread[id] = id
+                workspaceForTask[id] = record["cwd"] as? String ?? configuration.workspacePath
 
                 let preview = record["preview"] as? String ?? ""
                 let name = record["name"] as? String
@@ -2426,7 +2489,7 @@ private extension CodexAppServerRuntime {
                     entries: nativeFailureEntries(threadID: id)
                 )
             }
-            for index in tasks.indices where LocalModelCatalog.isWebBrowser(tasks[index].model) {
+            for index in tasks.indices {
                 let taskID = tasks[index].id
                 do {
                     let history = try await request(method: "thread/read", params: [
@@ -2436,6 +2499,15 @@ private extension CodexAppServerRuntime {
                     let rejectedTurns = Set(failures.map(\.turnID))
                     tasks[index].entries = try AppServerThreadHistoryContract.entries(from: history,
                         excludingAssistantTurns: rejectedTurns) + nativeFailureEntries(threadID: taskID)
+                    do {
+                        tasks[index].turnDiffs = try AppServerThreadHistoryContract.turnDiffs(from: history,
+                            saved: turnDiffStore().load(threadID: taskID))
+                        initializedDiffTurns[taskID] = Set(tasks[index].turnDiffs.map(\.id))
+                    }
+                    catch {
+                        tasks[index].entries.append(TimelineEntry(kind: .system, title: "Saved changes unavailable",
+                            body: "The local diff record could not be loaded. Source files have not been changed. " + error.localizedDescription))
+                    }
                 } catch {
                     tasks[index].entries.append(TimelineEntry(kind: .system, title: "Saved chat history unavailable",
                         body: "The local transcript could not be loaded. It has not been erased. " + error.localizedDescription))
@@ -2602,6 +2674,19 @@ private extension CodexAppServerRuntime {
                     settleManagedCompaction(taskID: taskID)
                 }
                 turnIdentity.observeStart(taskID: taskID, turnID: turnID)
+                if managedCompactions[taskID] == nil,
+                   initializedDiffTurns[taskID, default: []].insert(turnID).inserted {
+                    // Every real turn owns its review scope. A later no-edit
+                    // turn must not display the previous turn's patch.
+                    let prior = try? turnDiffStore().load(threadID: threadID).first { $0.id == turnID }
+                    let diff = prior?.diff ?? ""
+                    events.yield(.turnDiffUpdated(taskID: taskID, turnID: turnID, diff: diff))
+                    do { try turnDiffStore().save(threadID: threadID, turnID: turnID, diff: diff) }
+                    catch {
+                        events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
+                            title: "Changes could not be saved", body: "The current turn's review record could not be saved. " + error.localizedDescription, turnID: turnID)))
+                    }
+                }
                 if assistantStreamTurns[taskID] != turnID {
                     events.yield(.assistantMessagesDiscarded(taskID: taskID))
                     events.yield(.reasoningMessagesDiscarded(taskID: taskID))
@@ -2636,6 +2721,11 @@ private extension CodexAppServerRuntime {
             case "turn/completed":
                 let turn = params["turn"] as? [String: Any]
                 guard turnIdentity.complete(taskID: taskID, turnID: turn?["id"] as? String) else { return }
+                if let turnID = turn?["id"] as? String {
+                    for entry in fileChangeTranscripts[taskID]?.finishUnconfirmed(turnID: turnID) ?? [] {
+                        events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
+                    }
+                }
                 finishCommandPresentation(taskID: taskID,
                     reason: "Turn ended; process completion unconfirmed. Poll the owned session if still needed.",
                     interrupted: turn?["status"] as? String != "completed", retainingPending: true)
@@ -2763,8 +2853,43 @@ private extension CodexAppServerRuntime {
                       let entry = commandTranscripts[taskID]?.append(itemID: itemID, delta: delta) else { return }
                 events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
 
+            case "item/fileChange/patchUpdated":
+                guard acceptsCommandNotification(params, taskID: taskID),
+                      let turnID = params["turnId"] as? String,
+                      let itemID = params["itemId"] as? String else { return }
+                if fileChangeTranscripts[taskID] == nil { fileChangeTranscripts[taskID] = AppServerFileChangeTranscript() }
+                guard let entry = fileChangeTranscripts[taskID]?.patchUpdated(itemID: itemID,
+                    turnID: turnID, changes: params["changes"]) else { return }
+                events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
+
+            case "turn/diff/updated":
+                guard let turnID = params["turnId"] as? String, !turnID.isEmpty, turnID.utf8.count <= 512,
+                      turnIdentity.activeTurnID(for: taskID) == turnID
+                        || fileChangeTranscripts[taskID]?.turnIDs.contains(turnID) == true,
+                      let diff = params["diff"] as? String else { return }
+                guard diff.utf8.count <= AppServerFileChangeContract.maximumDiffBytes else {
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
+                        title: "Diff exceeds display limit", body: "The engine's patch diff is larger than 2 MiB. Review the files directly.", turnID: turnID)))
+                    return
+                }
+                events.yield(.turnDiffUpdated(taskID: taskID, turnID: turnID, diff: diff))
+                do { try turnDiffStore().save(threadID: threadID, turnID: turnID, diff: diff) }
+                catch {
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
+                        title: "Changes could not be saved", body: "The current diff is visible, but its local review record could not be saved. " + error.localizedDescription, turnID: turnID)))
+                }
+
             case "item/started":
                 guard let item = params["item"] as? [String: Any] else { return }
+                if item["type"] as? String == "fileChange" {
+                    guard acceptsCommandNotification(params, taskID: taskID),
+                          let turnID = params["turnId"] as? String else { return }
+                    if fileChangeTranscripts[taskID] == nil { fileChangeTranscripts[taskID] = AppServerFileChangeTranscript() }
+                    guard let entry = fileChangeTranscripts[taskID]?.receive(item: item, turnID: turnID,
+                        isCompleted: false) else { return }
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
+                    return
+                }
                 if item["type"] as? String == "commandExecution" {
                     // An already dispatched start can race interruption. Retain only
                     // its host identity for cleanup; never publish stopped progress.
@@ -2822,6 +2947,17 @@ private extension CodexAppServerRuntime {
                 guard let item = params["item"] as? [String: Any],
                       let type = item["type"] as? String
                 else { return }
+                if type == "fileChange" {
+                    guard let turnID = params["turnId"] as? String,
+                          let itemID = item["id"] as? String,
+                          acceptsCommandNotification(params, taskID: taskID)
+                            || fileChangeTranscripts[taskID]?.entry(itemID: itemID, turnID: turnID) != nil else { return }
+                    if fileChangeTranscripts[taskID] == nil { fileChangeTranscripts[taskID] = AppServerFileChangeTranscript() }
+                    guard let entry = fileChangeTranscripts[taskID]?.receive(item: item, turnID: turnID,
+                        isCompleted: true) else { return }
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
+                    return
+                }
                 if type == "commandExecution" {
                     guard let itemID = item["id"] as? String,
                           acceptsOwnedCommandNotification(params, taskID: taskID, itemID: itemID)
@@ -3296,13 +3432,20 @@ private extension CodexAppServerRuntime {
             let details = [context, prettyJSON(params)]
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n\n")
+            let proposed = isFileChange ? (params["itemId"] as? String).flatMap {
+                fileChangeTranscripts[taskID]?.entry(itemID: $0, turnID: turnID)
+            } : nil
+            let approvalDetails = proposed.map { entry in
+                "Proposed file changes (not yet applied):\n" + entry.toolEvent!.input + "\n\n" + details
+            } ?? details
+            let approvalSummary = proposed.map { ($0.fileChanges ?? []).map(\.path).joined(separator: "\n") } ?? summary
             let approval = ActionApprovalRequest(
                 id: UUID().uuidString,
                 taskID: taskID,
                 kind: isFileChange ? .fileChange : .command,
                 title: isFileChange ? "Allow file changes?" : "Run this command?",
-                summary: summary,
-                details: details
+                summary: approvalSummary,
+                details: approvalDetails
             )
             pendingServerApprovals[approval.id] = PendingServerApproval(
                 serverRequestID: serverRequestID,
@@ -7915,6 +8058,15 @@ private extension CodexAppServerRuntime {
             ownedCommandItems.removeAll()
             commandItemTurns.removeAll()
             ownedCommandProcesses.removeAll()
+            for taskID in Array(fileChangeTranscripts.keys) {
+                for turnID in fileChangeTranscripts[taskID]?.turnIDs ?? [] {
+                    for entry in fileChangeTranscripts[taskID]?.finishUnconfirmed(turnID: turnID) ?? [] {
+                        events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
+                    }
+                }
+            }
+            fileChangeTranscripts.removeAll()
+            initializedDiffTurns.removeAll()
             turnIdentity.removeAll()
             assistantStreamTurns.removeAll()
             completedAssistantItems.removeAll()

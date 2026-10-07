@@ -30,7 +30,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(prompt.range(of: original, options: .backwards), start..<end, file: file, line: line)
         let suffix = String(decoding: prompt.suffix(from: end), as: UTF8.self)
         XCTAssertEqual(suffix, "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
-                       ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames)),
+                       ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames),
                        "The fresh response contract and current names follow every unchanged request", file: file, line: line)
         return suffix
     }
@@ -43,6 +43,52 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(lines.first, "event: \(event["type"] as? String ?? "")")
             return event
         }
+    }
+
+    func testCustomPatchRoundTripPreservesLiteralBytesAndNativeCallTypeAcrossProviders() throws {
+        let patch = "*** Begin Patch\n*** Add File: src/résumé.txt\n+quote: \"hello\"; slash: \\; 🌍\n+\tindented\n*** End Patch\n"
+        let custom: [String: Any] = ["type": "custom", "name": "apply_patch", "format": ["type": "grammar", "syntax": "lark", "definition": "native grammar"]]
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let original = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": "Create the requested file", "tools": [["type": "namespace", "name": "functions", "tools": [custom, function]]]])
+            let prepared = try WebModelResponseCodec.prepareRequest(original)
+            try assertContiguousOriginalRequest(original, in: prepared)
+            XCTAssertEqual(prepared.customToolNames, ["functions.apply_patch"])
+            XCTAssertTrue(prepared.runtimeInstructions.contains("literal patch string in input"))
+            let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "functions.apply_patch", "input": patch]]])
+            let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: prepared, requireEnvelope: true)
+            XCTAssertEqual(reply, .toolCalls([.init(name: "apply_patch", argumentsJSON: "", namespace: "functions", customInput: patch)]))
+            let stream = try events(WebModelResponseCodec.streamData(for: reply, request: prepared, responseID: "resp_patch"))
+            let done = try XCTUnwrap(stream.first { $0["type"] as? String == "response.output_item.done" }?["item"] as? [String: Any])
+            XCTAssertEqual(done["type"] as? String, "custom_tool_call")
+            XCTAssertEqual(done["input"] as? String, patch)
+            XCTAssertEqual(done["namespace"] as? String, "functions")
+            XCTAssertNil(done["arguments"])
+            XCTAssertEqual(stream.first { $0["type"] as? String == "response.custom_tool_call_input.delta" }?["delta"] as? String, patch)
+            XCTAssertEqual(stream.first { $0["type"] as? String == "response.custom_tool_call_input.done" }?["input"] as? String, patch)
+            let completed = try XCTUnwrap(stream.last?["response"] as? [String: Any])
+            XCTAssertEqual(completed["end_turn"] as? Bool, false)
+            let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
+            XCTAssertEqual(output.first?["call_id"] as? String, done["call_id"] as? String)
+        }
+    }
+
+    func testCustomAndFunctionPayloadsCannotBeConfusedOrInvented() throws {
+        let custom: [String: Any] = ["type": "custom", "name": "apply_patch"]
+        let prepared = try request(tools: [custom, function])
+        for payload: [String: Any] in [
+            ["name": "apply_patch", "arguments": ["patch": "text"]],
+            ["name": "apply_patch", "input": 4],
+            ["name": "apply_patch", "input": "text", "arguments": [:]],
+            ["name": "apply_patch", "input": "text", "path": "unoffered metadata"],
+            ["name": "computer_v2_snapshot", "input": "text"],
+            ["name": "unoffered.apply_patch", "input": "text"]
+        ] {
+            let data = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "computer_v2_snapshot", "arguments": ["view": "content"]], payload]])
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(String(decoding: data, as: UTF8.self), request: prepared, requireEnvelope: true), "The entire batch must validate before any tool output is emitted")
+        }
+        XCTAssertThrowsError(try request(tools: [custom, ["type": "function", "name": "apply_patch", "parameters": ["type": "object"]]]))
+        let namespaced = try request(tools: [["type": "namespace", "name": "functions", "tools": [custom]]])
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"apply_patch","input":"text"}]}"#, request: namespaced, requireEnvelope: true))
     }
 
     func testEntireOriginalRequestSurvivesIncludingRolesSchemasAndToolOutputs() throws {

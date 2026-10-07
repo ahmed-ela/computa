@@ -11,18 +11,21 @@ enum WebModelResponseCodec {
         let runtimeInstructions: String
         let currentUserInstructions: String
         let offeredToolNames: Set<String>
+        let customToolNames: Set<String>
         fileprivate let tools: [String: OfferedTool]
     }
 
     fileprivate struct OfferedTool: Sendable {
         let name: String
         let namespace: String?
+        let isCustom: Bool
     }
 
     struct ToolCall: Equatable, Sendable {
         let name: String
         let argumentsJSON: String
         let namespace: String?
+        var customInput: String? = nil
     }
 
     enum Reply: Equatable, Sendable {
@@ -48,6 +51,7 @@ enum WebModelResponseCodec {
         case malformedEnvelope
         case unknownTool(String)
         case argumentsMustBeObject
+        case customInputMustBeString
 
         var errorDescription: String? {
             switch self {
@@ -58,7 +62,7 @@ enum WebModelResponseCodec {
                 "Web models need the complete local conversation in input; previous_response_id is unsupported."
             case .invalidTools: "The web model request contains an invalid or ambiguous tool definition."
             case .unsupportedToolType:
-                "Web models support function tools with JSON object arguments, including namespaces. This request contains an unsupported tool type."
+                "Web models support function tools with JSON object arguments and custom tools with literal string input, including namespaces. This request contains an unsupported tool type."
             case .unsupportedModality(.image):
                 "Browser models cannot receive image attachments yet. Use a text or accessibility observation, or a model that supports images. No prompt was submitted."
             case .unsupportedModality(.audio):
@@ -69,6 +73,7 @@ enum WebModelResponseCodec {
             case .malformedEnvelope: "The website returned a malformed model response envelope. No tool calls from this reply were dispatched."
             case let .unknownTool(name): "The website requested an unoffered tool: \(name). No tool calls from this reply were dispatched."
             case .argumentsMustBeObject: "Web model tool arguments must be a JSON object. No tool calls from this reply were dispatched."
+            case .customInputMustBeString: "A custom tool needs literal string input and no function arguments. No tool calls from this reply were dispatched."
             }
         }
     }
@@ -113,7 +118,8 @@ enum WebModelResponseCodec {
                 try insertTool(schema, namespace: nil, into: &offered)
             }
         }
-        let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name))
+        let customNames = Set(offered.filter { $0.value.isCustom }.keys)
+        let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name), customToolNames: customNames)
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
             return message["type"] == nil || message["type"] as? String == "message"
@@ -130,7 +136,7 @@ enum WebModelResponseCodec {
 
         \(currentUserInstructions)
 
-        \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys)))
+        \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames))
         """
         let bytes = prompt.utf8.count
         guard bytes <= maximumPromptBytes else {
@@ -138,7 +144,7 @@ enum WebModelResponseCodec {
         }
         return Request(model: model, prompt: prompt, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
-                       offeredToolNames: Set(offered.keys), tools: offered)
+                       offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered)
     }
 
     /// Embedded inference requires its response contract. Generic callers keep
@@ -167,7 +173,13 @@ enum WebModelResponseCodec {
                     throw Failure.malformedEnvelope
                 }
                 guard let tool = request.tools[offeredName] else { throw Failure.unknownTool(offeredName) }
-                guard let arguments = call["arguments"] as? [String: Any] else {
+                if tool.isCustom {
+                    guard Set(call.keys) == ["name", "input"], let input = call["input"] as? String else {
+                        throw Failure.customInputMustBeString
+                    }
+                    return ToolCall(name: tool.name, argumentsJSON: "", namespace: tool.namespace, customInput: input)
+                }
+                guard call["input"] == nil, let arguments = call["arguments"] as? [String: Any] else {
                     throw Failure.argumentsMustBeObject
                 }
                 let encoded = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes])
@@ -210,15 +222,17 @@ enum WebModelResponseCodec {
                 events.append(common.merging(["type": "response.output_text.done", "text": text]) { _, new in new })
                 events.append(common.merging(["type": "response.content_part.done", "part": part]) { _, new in new })
             } else {
-                // Codex consumes the complete function_call in item.done;
-                // arguments events also support ordinary Responses clients.
+                // The engine consumes complete function/custom calls in item.done.
                 var pending = item
                 pending["status"] = "in_progress"
-                pending["arguments"] = ""
+                let custom = item["type"] as? String == "custom_tool_call"
+                let field = custom ? "input" : "arguments"
+                let eventName = custom ? "custom_tool_call_input" : "function_call_arguments"
+                pending[field] = ""
                 events.append(["type": "response.output_item.added", "output_index": index, "item": pending])
                 let common: [String: Any] = ["item_id": id, "output_index": index, "call_id": item["call_id"]!, "name": item["name"]!]
-                events.append(common.merging(["type": "response.function_call_arguments.delta", "delta": item["arguments"]!]) { _, new in new })
-                events.append(common.merging(["type": "response.function_call_arguments.done", "arguments": item["arguments"]!]) { _, new in new })
+                events.append(common.merging(["type": "response.\(eventName).delta", "delta": item[field]!]) { _, new in new })
+                events.append(common.merging(["type": "response.\(eventName).done", field: item[field]!]) { _, new in new })
             }
             events.append(["type": "response.output_item.done", "output_index": index, "item": item])
         }
@@ -248,12 +262,13 @@ enum WebModelResponseCodec {
     }
 
     private static func insertTool(_ schema: [String: Any], namespace: String?, into tools: inout [String: OfferedTool]) throws {
-        guard schema["type"] as? String == "function" else { throw Failure.unsupportedToolType }
-        guard let name = schema["name"] as? String, !name.isEmpty,
-              schema["parameters"] is [String: Any] else { throw Failure.invalidTools }
+        guard let type = schema["type"] as? String, type == "function" || type == "custom" else { throw Failure.unsupportedToolType }
+        guard let name = schema["name"] as? String, !name.isEmpty else { throw Failure.invalidTools }
+        if type == "function", !(schema["parameters"] is [String: Any]) { throw Failure.invalidTools }
+        if type == "custom", let format = schema["format"], !(format is [String: Any]) { throw Failure.invalidTools }
         let offeredName = namespace.map { "\($0).\(name)" } ?? name
         guard tools[offeredName] == nil else { throw Failure.invalidTools }
-        tools[offeredName] = OfferedTool(name: name, namespace: namespace)
+        tools[offeredName] = OfferedTool(name: name, namespace: namespace, isCustom: type == "custom")
     }
 
     private static func rejectUnsupportedModalities(in input: Any?) throws {
@@ -315,6 +330,12 @@ enum WebModelResponseCodec {
             return calls.enumerated().map { index, call in
                 var item: [String: Any] = ["id": "fc_\(identity)_\(index)", "type": "function_call", "status": "completed",
                                           "call_id": "call_\(identity)_\(index)", "name": call.name, "arguments": call.argumentsJSON]
+                if let input = call.customInput {
+                    item["type"] = "custom_tool_call"
+                    item["id"] = "ctc_\(identity)_\(index)"
+                    item.removeValue(forKey: "arguments")
+                    item["input"] = input
+                }
                 if let namespace = call.namespace { item["namespace"] = namespace }
                 return item
             }
