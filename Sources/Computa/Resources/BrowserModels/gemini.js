@@ -111,7 +111,8 @@ function websiteModelPickerState(provider) {
   const triggerCandidates = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node)
     && /^(?:Select ChatGPT model(?:$|[ ,])|Open mode picker(?:$|[ ,])|Model: )/.test(websiteModelNormalize(node.getAttribute('aria-label'))));
   const trigger = triggers.length === 1 ? triggers[0] : null;
-  const allMenus = nodes('[role="menu"], [role="listbox"], [role="dialog"]').filter(node => visible(node) && outside(node));
+  const physicalMenus = nodes('[role="menu"], [role="listbox"], [role="dialog"]').filter(node => physical(node) && outside(node));
+  const allMenus = physicalMenus.filter(visible);
   const associated = owner => allMenus.filter(menu => {
     const control = owner?.getAttribute('aria-controls'), ownerID = owner?.getAttribute('id');
     return !!owner && (control && control.length <= 256 && !/\s/.test(control) && menu.getAttribute('id') === control
@@ -185,7 +186,7 @@ function websiteModelPickerState(provider) {
     ? menuSelected || (!indicatorScope ? header : null) : null;
   const evidence = selected ? { selected, verification: 'website_selection', source: menuSelected
     ? checked[0].indicatorSelected ? 'selected_model_indicator' : 'checked_model_option' : 'model_picker_label' } : null;
-  return { provider, trigger, triggerCount: triggers.length, triggerCandidates, topMenu, secondary, nestedMenu, menus, allMenus, choices: duplicate ? [] : choices,
+  return { provider, trigger, triggerCount: triggers.length, triggerCandidates, topMenu, secondary, nestedMenu, menus, allMenus, physicalMenus, choices: duplicate ? [] : choices,
     controls: duplicate ? [] : controls, selected, evidence, duplicate, conflicting, indicatorInvalid, selectionAmbiguous,
     navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family };
 }
@@ -408,6 +409,16 @@ function websiteModelIgnoreOwnPickerMutation(record) {
   return changed.every(node => portal(node) || belongs(target)
     && !(node.nodeType === 1 && (node.closest?.(boundary) || node.querySelector?.(boundary))));
 }
+function websiteModelHitTestTarget(node) {
+  if (!node || typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return false;
+  try {
+    const rect = node.getBoundingClientRect(), x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+    if (![rect.left, rect.top, rect.width, rect.height, x, y].every(Number.isFinite)
+      || rect.width <= 0 || rect.height <= 0) return false;
+    const hit = document.elementFromPoint(x, y);
+    return !!hit && node.contains(hit);
+  } catch { return false; }
+}
 async function websiteModelReadEvidence(provider, expected, openingRecovery = null, context = null) {
   if (!websiteModelChoiceValid(expected)) return { error: 'model_unverified' };
   const owner = globalThis.__computaModelOwner, url = document.URL;
@@ -418,6 +429,18 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
     && (!recovery || recovery.guard(false) === true);
   const until = recovery ? recovery.until : Date.now() + 1_800;
   let primaryOpened = false, secondaryOpened = false, closeAttempted = false, trigger = null, captured = null;
+  const ownedMenus = new Set(), popupOwners = new Set(), ownedMenuIDs = new Set(), popupOwnerIDs = new Set();
+  const rememberID = (set, value) => { if (value && value.length <= 256 && !/\s/.test(value)) set.add(value); };
+  const trackOwnedMenus = current => {
+    if (provider !== 'claude' || !current.trigger || current.triggerCount !== 1
+      || trigger && current.trigger !== trigger) return;
+    for (const menu of current.menus) { ownedMenus.add(menu); rememberID(ownedMenuIDs, menu.getAttribute('id')); }
+    for (const owner of [current.trigger, current.secondary].filter(Boolean)) {
+      popupOwners.add(owner);
+      rememberID(popupOwnerIDs, owner.getAttribute('id'));
+      rememberID(ownedMenuIDs, owner.getAttribute('aria-controls'));
+    }
+  };
   let readStage = 'initial_observation';
   let state = websiteModelPickerState(provider);
   const failure = error => {
@@ -437,10 +460,37 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }),
       ...(captured ? { modelEvidence: captured } : {}) };
   };
-  const pickerClosed = current => !!trigger && current.trigger === trigger && current.enabled(trigger)
-    && current.allMenus.length === 0
-    && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
-    && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+  const claudeComposerUnobstructed = current => {
+    // Nonmodal ARIA alone cannot rule out an overlay. When another dialog
+    // remains, require the actual composer to be exposed by a fresh hit-test.
+    const composers = [...document.querySelectorAll('[data-testid="chat-input"][contenteditable="true"][role="textbox"]')].slice(0, 3)
+      .filter(node => current.enabled(node) && !node.closest('[data-testid="assistant-message"], [data-testid="user-message"], [role="dialog"], dialog'));
+    return composers.length === 1 && websiteModelHitTestTarget(composers[0]);
+  };
+  const pickerClosed = current => {
+    // Claude may mount an unrelated nonmodal dialog while closing its picker.
+    // Losing aria-controls is not closure: every exact popup observed in this
+    // read must be physically hidden or disconnected before admitting proof.
+    const popupsClosed = provider === 'claude' && ownedMenus.size > 0
+      ? [...ownedMenus].every(menu => !current.physical(menu)) && !current.topMenu && !current.nestedMenu
+        && current.physicalMenus.every(menu => {
+          const labelledBy = menu.getAttribute('aria-labelledby') || '';
+          const labels = labelledBy.trim() ? labelledBy.trim().split(/\s+/) : [];
+          if (labelledBy.length > 1_024 || labels.length > 16 || labels.some(id => id.length > 256)) return false;
+          return menu.getAttribute('role') === 'dialog' && menu.getAttribute('aria-modal') !== 'true'
+            && !(menu.tagName.toLowerCase() === 'dialog' && menu.getAttribute('open') !== null)
+            && !ownedMenuIDs.has(menu.getAttribute('id')) && !labels.some(id => popupOwnerIDs.has(id))
+            && [...popupOwners].every(owner => {
+              const controls = owner.getAttribute('aria-controls'), ownerID = owner.getAttribute('id');
+              return !(controls && controls.length <= 256 && !/\s/.test(controls) && menu.getAttribute('id') === controls
+                || ownerID && ownerID.length <= 256 && !/\s/.test(ownerID) && labels.includes(ownerID));
+            });
+        }) && (current.physicalMenus.length === 0 || claudeComposerUnobstructed(current))
+      : current.allMenus.length === 0;
+    return !!trigger && current.trigger === trigger && current.enabled(trigger) && popupsClosed
+      && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+      && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+  };
   const waitForClosedPicker = async () => {
     const acknowledged = await websiteModelWaitForChange(until,
       () => !unchanged() || pickerClosed(websiteModelPickerState(provider)));
@@ -472,6 +522,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
     while (Date.now() < until) {
       if (!unchanged()) return recovery ? failure('model_unverified') : { error: 'document_changed', detail: 'owner_token' };
       state = websiteModelPickerState(provider);
+      trackOwnedMenus(state);
       websiteModelTrackReadUI(state);
       if (state.duplicate || state.conflicting || state.indicatorInvalid || state.selectionAmbiguous || state.navigationAmbiguous)
         return failure('model_unverified');
