@@ -27,6 +27,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(failure.diagnosticCode, "website_verification_required")
         XCTAssertEqual(failure.requiredAction, "complete_website_verification")
         XCTAssertFalse(failure.localizedDescription.contains("private_canary"))
+        for gate in [failure, .signInRequired, .usageLimited(.claude)] {
+            XCTAssertTrue(gate.blocksProviderUntilRefresh)
+            XCTAssertTrue(gate.localizedDescription.contains("refresh website models"))
+        }
+        for localFailure: EmbeddedWebModelTransport.Failure in [.unexpectedPage(.gemini), .modelMismatch, .ownershipFailure(.routeAfter)] {
+            XCTAssertFalse(localFailure.blocksProviderUntilRefresh)
+        }
     }
 
     func testInitialCheckpointAndUnexpectedPageFailImmediatelyAndLatchWithoutAdapterWork() async throws {
@@ -54,7 +61,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
 
             // Returning the URL to a valid-looking fixture cannot revive this
-            // inference. Recovery requires an explicit new session.
+            // inference. Recovery requires an explicit refresh and new session.
             view.loadHTMLString(Self.modelChoicePage(.gemini).replacingOccurrences(of: "'initial'", with: "'restored'"), baseURL: URL(string: "https://gemini.google.com/app"))
             try await waitForFixture(view, generation: "restored")
             for operation in ["webProviderPoll", "webProviderSend"] {
@@ -126,6 +133,162 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testProviderGateStopsNewTasksAndDiscoveryUntilExplicitSuccessfulRefresh() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"))
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let blockedID = try XCTUnwrap(fixture.createdTabs.last)
+        try await waitForFixture(XCTUnwrap(fixture.browser.webView(for: blockedID)))
+        do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Expected checkpoint") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+
+        // A healthy-looking next URL must not cause automatic retry traffic.
+        fixture.initialURL = nil
+        for _ in 0..<3 {
+            do { _ = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"]); XCTFail("Expected provider gate") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+            do { _ = try await fixture.transport.discoverModels(provider: "gemini"); XCTFail("Expected provider gate") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        }
+        XCTAssertEqual(fixture.createdTabs.count, 1, "Blocked requests cannot even create a navigating tab")
+
+        // The gate is per provider; another provider can still finish a task.
+        fixture.page = Self.modelChoicePage(.claude)
+        let other = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
+        let otherToken = try XCTUnwrap(other["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: otherToken)
+        let otherFinished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": otherToken])
+        XCTAssertEqual(otherFinished["cleanup"] as? String, "not_created")
+
+        fixture.page = Self.modelChoicePage(.gemini)
+        let choices = try await fixture.transport.discoverModels(provider: "gemini", retryBlocked: true)
+        XCTAssertEqual(choices.map(\.label), Self.choiceLabels(.gemini))
+        XCTAssertEqual(fixture.createdTabs.count, 3)
+        // Successful recovery never resurrects the failed inference or replays it.
+        do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Old inference must stay terminal") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        let recovered = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let recoveredToken = try XCTUnwrap(recovered["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: recoveredToken)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": recoveredToken])
+        let cancelled = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+        XCTAssertEqual(cancelled["cleanup"] as? String, "failed", "Recovery cannot grant ownership of the old challenge document")
+        try await assertHumanTabIntact(fixture, retaining: blockedID)
+    }
+
+    func testFailedRecoveryKeepsGateAndCreatesOnlyOneReadOnlyProbe() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"))
+        defer { fixture.shutdown() }
+        for retry in [false, false, true, false] {
+            do { _ = try await fixture.transport.discoverModels(provider: "gemini", retryBlocked: retry); XCTFail("Expected checkpoint") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+            try await assertHumanTabIntact(fixture)
+        }
+        XCTAssertEqual(fixture.createdTabs.count, 2, "Only first discovery and one explicit recovery may navigate")
+        do { _ = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"]); XCTFail("Failed recovery must retain gate") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        XCTAssertEqual(fixture.createdTabs.count, 2)
+    }
+
+    func testProviderGateArrivingDuringPrepareStopsInsertionButAllowsOwnedCleanup() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"))
+        defer { fixture.shutdown() }
+        let blocked = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let blockedToken = try XCTUnwrap(blocked["sessionToken"] as? String)
+        let blockedID = try XCTUnwrap(fixture.createdTabs.last)
+        try await waitForFixture(XCTUnwrap(fixture.browser.webView(for: blockedID)))
+        fixture.initialURL = nil
+        let healthy = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let healthyToken = try XCTUnwrap(healthy["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: healthyToken)
+        var observedGate = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "prepare", !observedGate else { return }
+            observedGate = true
+            do { _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": blockedToken]); XCTFail("Expected checkpoint") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        }
+        do { _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": healthyToken, "prompt": "Do not insert after a profile gate"]); XCTFail("Expected provider gate") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        XCTAssertTrue(observedGate)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": healthyToken])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created", "The provider gate must not prevent exact owned cleanup")
+        try await assertHumanTabIntact(fixture, retaining: blockedID)
+    }
+
+    func testProviderGateWakesQuietPeerAndOldPeerCannotInvalidateRecovery() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"))
+        defer { fixture.shutdown() }
+        let blocked = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let blockedToken = try XCTUnwrap(blocked["sessionToken"] as? String)
+        try await waitForFixture(XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last))))
+        fixture.initialURL = nil
+        let peer = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let peerToken = try XCTUnwrap(peer["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: peerToken)
+        var waiting = false
+        let waiter = Task { @MainActor in
+            let deadline = ContinuousClock.now + .seconds(3)
+            waiting = true
+            do {
+                while ContinuousClock.now < deadline {
+                    let observedRevision = try await fixture.transport.changeRevision(sessionToken: peerToken)
+                    let revision = try XCTUnwrap(observedRevision)
+                    _ = try await fixture.transport.waitForChange(sessionToken: peerToken, after: revision, until: deadline)
+                }
+                return false
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini))
+                return true
+            }
+        }
+        for _ in 0..<1_000 where !waiting { await Task.yield() }
+        XCTAssertTrue(waiting)
+        let began = ContinuousClock.now
+        do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": blockedToken]); XCTFail("Expected checkpoint") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        let wokeForGate = await waiter.value
+        XCTAssertTrue(wokeForGate)
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(1), "Native provider changes must wake quiet peer waits immediately")
+
+        var polledPeerDuringRecovery = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "discoverModels", !polledPeerDuringRecovery else { return }
+            polledPeerDuringRecovery = true
+            do { _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": peerToken]); XCTFail("Peer must stay terminal") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        }
+        _ = try await fixture.transport.discoverModels(provider: "gemini", retryBlocked: true)
+        XCTAssertTrue(polledPeerDuringRecovery)
+        let recovered = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        XCTAssertNotNil(recovered["sessionToken"])
+    }
+
+    func testProviderGateFirstObservedDuringRecoveryIsReportedInsteadOfSuccess() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"))
+        defer { fixture.shutdown() }
+        let blocked = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let token = try XCTUnwrap(blocked["sessionToken"] as? String)
+        let blockedID = try XCTUnwrap(fixture.createdTabs.last)
+        try await waitForFixture(XCTUnwrap(fixture.browser.webView(for: blockedID)))
+        fixture.initialURL = nil
+        var observed = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "discoverModels", !observed else { return }
+            observed = true
+            do { _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Expected checkpoint") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        }
+        do { _ = try await fixture.transport.discoverModels(provider: "gemini", retryBlocked: true); XCTFail("A newer failure must be reported") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        XCTAssertTrue(observed)
+        XCTAssertEqual(fixture.createdTabs.count, 2)
+        try await assertHumanTabIntact(fixture, retaining: blockedID)
     }
 
     func testCheckpointAfterSubmissionRejectsResponseWithoutReplayOrCleanupOverclaim() async throws {
@@ -1275,7 +1438,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         // retain an unreachable private session after an authentication redirect.
         for _ in 0..<5 {
             do {
-                _ = try await fixture.transport.discoverModels(provider: "chatgpt")
+                _ = try await fixture.transport.discoverModels(provider: "chatgpt", retryBlocked: true)
                 XCTFail("An authentication document cannot prove a model menu")
             } catch {
                 XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired)
@@ -1286,18 +1449,24 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
         XCTAssertEqual(fixture.createdTabs.count, 5)
 
+        do { _ = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"]); XCTFail("Discovery auth failures must gate inference") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        XCTAssertEqual(fixture.createdTabs.count, 5)
+
         // Ordinary inference keeps its existing document/route authority; the
         // new prompt-free discovery cleanup must not weaken that contract.
-        let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let inferenceFixture = try Fixture(page: Self.modelChoicePage(.chatgpt), initialURL: authURL)
+        defer { inferenceFixture.shutdown() }
+        let started = try await call(inferenceFixture.transport, "webProviderStart", ["provider": "chatgpt"])
         let token = try XCTUnwrap(started["sessionToken"] as? String)
-        let inferenceID = try XCTUnwrap(fixture.createdTabs.last)
-        let inferenceView = try XCTUnwrap(fixture.browser.webView(for: inferenceID))
+        let inferenceID = try XCTUnwrap(inferenceFixture.createdTabs.last)
+        let inferenceView = try XCTUnwrap(inferenceFixture.browser.webView(for: inferenceID))
         try await waitForFixture(inferenceView)
-        let cancelled = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+        let cancelled = try await call(inferenceFixture.transport, "webProviderCancel", ["sessionToken": token])
         XCTAssertEqual(cancelled["cleanup"] as? String, "failed")
-        XCTAssertTrue(fixture.browser.webView(for: inferenceID) === inferenceView)
+        XCTAssertTrue(inferenceFixture.browser.webView(for: inferenceID) === inferenceView)
         XCTAssertEqual(inferenceView.url, authURL)
-        XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
+        XCTAssertTrue(inferenceFixture.browser.webView(for: inferenceFixture.humanID) === inferenceFixture.humanView)
         try await assertChoiceLedger(inferenceView, insertions: 0, sends: 0, selections: 0)
     }
 
@@ -3235,13 +3404,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             if !view.isLoading,
-               let loaded = try? await evaluate(view,
+               let loaded = try await evaluate(view,
                     "return window.fixtureReady === true ? window.fixtureGeneration : null;",
                     maximumWait: deadline - .now),
                loaded as? String == generation { return }
             try await Task.sleep(for: .milliseconds(50))
         }
-        XCTFail("The synthetic ChatGPT document did not load")
+        XCTFail("The synthetic provider document did not load (expectedGeneration=\(generation), isLoading=\(view.isLoading), urlPresent=\(view.url != nil))")
         throw FixtureFailure.timeout
     }
 
@@ -3320,9 +3489,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let humanID: UUID
         let humanView: WKWebView
         var createdTabs: [UUID] = []
+        var page: String
+        var initialURL: URL?
         private(set) var transport: EmbeddedWebModelTransport!
 
         init(page: String = EmbeddedWebModelTransportTests.page, initialURL: URL? = nil) throws {
+            self.page = page
+            self.initialURL = initialURL
             // Match the application's nonhidden model render surface. An
             // unattached WKWebView reports hidden visibility and cannot prove
             // actual render commits through requestAnimationFrame callbacks.
@@ -3342,10 +3515,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             transport = EmbeddedWebModelTransport(browser: browser, createTabForTesting: { [unowned self] url in
                 // Load only the local fixture, retaining the product's model
                 // ownership, render-host mounting, and inactive-tab behavior.
-                let id = try self.browser.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+                let id = try self.browser.createUnloadedModelTabForTesting()
                 let view = try XCTUnwrap(self.browser.webView(for: id))
                 view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
-                view.loadHTMLString(page, baseURL: initialURL ?? url)
+                view.loadHTMLString(self.page, baseURL: self.initialURL ?? url)
                 self.createdTabs.append(id)
                 return id
             })

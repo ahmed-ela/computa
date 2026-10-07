@@ -4,6 +4,99 @@ import XCTest
 
 @MainActor
 final class WebsiteModelStateTests: XCTestCase {
+    func testStartupUsesCompleteCachedCatalogWithoutDiscovery() async {
+        let preferences = isolatedTestPreferences()
+        let cached = WebsiteModelCatalog.providers.map {
+            WebsiteModelChoice(provider: $0, key: "cached", label: "Cached")
+        }
+        WebsiteModelCatalog.save(cached, to: preferences)
+        var calls: [String] = []
+        let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
+            calls.append(provider)
+            return [WebsiteModelChoice(provider: provider, key: "unexpected", label: "Unexpected")]
+        })
+
+        state.refreshWebsiteModelsIfNeeded()
+        state.refreshWebsiteModelsIfNeeded()
+        for _ in 0..<10 { await Task.yield() }
+
+        XCTAssertTrue(calls.isEmpty)
+        XCTAssertEqual(state.websiteModelChoices, cached)
+        XCTAssertFalse(state.websiteModelsRefreshing)
+        XCTAssertNil(state.websiteModelsError)
+    }
+
+    func testStartupDiscoversOnlyMissingProvidersOnce() async {
+        let preferences = isolatedTestPreferences()
+        let cached = WebsiteModelChoice(provider: "chatgpt", key: "cached", label: "Cached")
+        WebsiteModelCatalog.save([cached], to: preferences)
+        let ledger = WebsiteDiscoveryLedger()
+        let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
+            try await ledger.discover(provider)
+        })
+
+        state.refreshWebsiteModelsIfNeeded()
+        state.refreshWebsiteModelsIfNeeded()
+        await waitForDiscovery { ledger.calls.count == 2 && !state.websiteModelsRefreshing }
+        XCTAssertEqual(ledger.calls, ["gemini", "claude"])
+        XCTAssertEqual(ledger.maximumActive, 1)
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "chatgpt" }, [cached])
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+
+        state.refreshWebsiteModelsIfNeeded()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(ledger.calls, ["gemini", "claude"])
+    }
+
+    func testExplicitRefreshReplacesAllCachedProviders() async {
+        let preferences = isolatedTestPreferences()
+        let cached = WebsiteModelCatalog.providers.map {
+            WebsiteModelChoice(provider: $0, key: "cached", label: "Cached")
+        }
+        WebsiteModelCatalog.save(cached, to: preferences)
+        let ledger = WebsiteDiscoveryLedger()
+        let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
+            try await ledger.discover(provider)
+        })
+
+        await state.refreshWebsiteModels()
+
+        XCTAssertEqual(ledger.calls, WebsiteModelCatalog.providers)
+        XCTAssertEqual(state.websiteModelChoices.map(\.key), ["fixture", "fixture", "fixture"])
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+        XCTAssertNil(state.websiteModelsError)
+    }
+
+    func testExplicitRefreshExtendsPartialStartupWithoutDuplicateLoads() async {
+        let preferences = isolatedTestPreferences()
+        let cached = ["chatgpt", "claude"].map {
+            WebsiteModelChoice(provider: $0, key: "cached", label: "Cached")
+        }
+        WebsiteModelCatalog.save(cached, to: preferences)
+        let ledger = WebsiteDiscoveryLedger(delay: .milliseconds(50))
+        let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
+            try await ledger.discover(provider)
+        })
+
+        state.refreshWebsiteModelsIfNeeded()
+        await waitForDiscovery { ledger.active == 1 }
+        await state.refreshWebsiteModels()
+
+        XCTAssertEqual(ledger.calls, ["gemini", "chatgpt", "claude"])
+        XCTAssertEqual(ledger.maximumActive, 1)
+        XCTAssertEqual(state.websiteModelChoices.map(\.key), ["fixture", "fixture", "fixture"])
+        XCTAssertFalse(state.websiteModelsRefreshing)
+        XCTAssertNil(state.websiteModelsError)
+    }
+
+    private func waitForDiscovery(_ condition: @MainActor () -> Bool) async {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(condition(), "Website discovery did not reach the expected state")
+    }
+
     func testDiscoveryPublishesExactChoicesToBothSelectorsAndPersistsThem() async throws {
         let preferences = isolatedTestPreferences()
         let task = AgentTask(id: "fixture-task", title: "Fixture", summary: "", status: .draft, workspace: "/tmp", model: "browser/chatgpt")

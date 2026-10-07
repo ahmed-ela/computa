@@ -360,6 +360,12 @@ final class EmbeddedBrowserSession {
         return try channel.currentRevision()
     }
 
+    /// Native profile state can invalidate an inference without a DOM change.
+    /// This only wakes its existing notification channel; it grants no page authority.
+    func notifyModelSessionChange(tabID: UUID) {
+        entries[tabID]?.modelChanges?.signal()
+    }
+
     func waitForModelChange(tabID: UUID, after revision: UInt64,
                             until deadline: ContinuousClock.Instant) async throws -> UInt64 {
         guard let channel = try entry(tabID).modelChanges else { throw Failure.tabClosed }
@@ -381,12 +387,24 @@ final class EmbeddedBrowserSession {
 
     /// Model pages share the sign-in profile, but never reuse a human's tab.
     func createModelTab(url: URL) throws -> UUID {
+        try createModelTab(initialURL: url)
+    }
+
+    #if DEBUG
+    /// Fixtures load one local document themselves. Starting about:blank first
+    /// would leave two competing provisional navigations in the same WebView.
+    func createUnloadedModelTabForTesting() throws -> UUID {
+        try createModelTab(initialURL: nil)
+    }
+    #endif
+
+    private func createModelTab(initialURL: URL?) throws -> UUID {
         let id = try createTab(select: false, modelOwned: true)
         do {
             guard let view = webView(for: id) else { throw Failure.tabClosed }
             view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
             if let entry = entries[id] { mountModelView(entry) }
-            try navigate(tabID: id, to: url)
+            if let initialURL { try navigate(tabID: id, to: initialURL) }
             return id
         } catch {
             closeTab(id)

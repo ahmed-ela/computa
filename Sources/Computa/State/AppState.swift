@@ -26,6 +26,8 @@ final class AppState {
     @ObservationIgnored private let websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])?
     @ObservationIgnored private var websiteModelRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var websiteModelRefreshGeneration: UUID?
+    @ObservationIgnored private var websiteModelRefreshProviders: [String] = []
+    @ObservationIgnored private var websiteModelRefreshRetriesBlocked = false
     @ObservationIgnored private var didStartWebsiteModelDiscovery = false
     // Keep the persisted key across the Computa rename.
     private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
@@ -175,29 +177,58 @@ final class AppState {
     }
 
     /// Called after the privileged WebUI is ready and its background render host
-    /// is attached. Each website performs one bounded discovery, sequentially.
+    /// is attached. Saved choices are immediately usable; only providers with
+    /// no saved choices need startup discovery. An explicit refresh can replace
+    /// the saved catalog without adding provider page loads on every launch.
     func refreshWebsiteModelsIfNeeded() {
         guard !didStartWebsiteModelDiscovery, runtime != nil || websiteModelDiscovery != nil else { return }
         didStartWebsiteModelDiscovery = true
-        Task { @MainActor [weak self] in await self?.refreshWebsiteModels() }
+        let missing = WebsiteModelCatalog.providers.filter { provider in
+            !websiteModelChoices.contains { $0.provider == provider }
+        }
+        guard !missing.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            await self?.refreshWebsiteModels(providers: missing, retryBlocked: false)
+        }
     }
 
     func refreshWebsiteModels() async {
+        await refreshWebsiteModels(providers: WebsiteModelCatalog.providers, retryBlocked: true)
+    }
+
+    private func refreshWebsiteModels(providers: [String], retryBlocked: Bool) async {
         guard !isShuttingDown, !approvalGateBlocksInteraction else { return }
-        if let websiteModelRefreshTask { await websiteModelRefreshTask.value; return }
+        if let websiteModelRefreshTask {
+            // Extend an in-flight partial startup refresh rather than dropping
+            // an explicit full refresh or loading a provider twice.
+            for provider in providers where !websiteModelRefreshProviders.contains(provider) {
+                websiteModelRefreshProviders.append(provider)
+            }
+            websiteModelRefreshRetriesBlocked = websiteModelRefreshRetriesBlocked || retryBlocked
+            await websiteModelRefreshTask.value
+            return
+        }
         let generation = UUID()
         websiteModelRefreshGeneration = generation
+        websiteModelRefreshProviders = providers
+        websiteModelRefreshRetriesBlocked = retryBlocked
         websiteModelsRefreshing = true
         websiteModelsError = nil
         let refresh = Task { @MainActor [weak self] in
             guard let self else { return }
             var errors: [String] = []
-            for provider in WebsiteModelCatalog.providers {
+            var providerIndex = 0
+            while providerIndex < self.websiteModelRefreshProviders.count {
                 guard !Task.isCancelled, !self.isShuttingDown else { break }
+                let provider = self.websiteModelRefreshProviders[providerIndex]
+                providerIndex += 1
                 do {
                     let choices: [WebsiteModelChoice]
                     if let discovery = self.websiteModelDiscovery { choices = try await discovery(provider) }
-                    else { choices = try await self.websiteTransport().discoverModels(provider: provider) }
+                    else {
+                        choices = try await self.websiteTransport().discoverModels(provider: provider,
+                            retryBlocked: self.websiteModelRefreshRetriesBlocked)
+                    }
                     guard !Task.isCancelled, !self.isShuttingDown,
                           self.websiteModelRefreshGeneration == generation else { break }
                     try WebsiteModelCatalog.validate(choices, provider: provider)
@@ -216,6 +247,8 @@ final class AppState {
             self.websiteModelsRefreshing = false
             self.websiteModelRefreshTask = nil
             self.websiteModelRefreshGeneration = nil
+            self.websiteModelRefreshProviders = []
+            self.websiteModelRefreshRetriesBlocked = false
         }
         websiteModelRefreshTask = refresh
         await refresh.value
@@ -1062,6 +1095,8 @@ final class AppState {
         runtimeShutdown = task
         let report = await task.value
         websiteModelRefreshTask = nil
+        websiteModelRefreshProviders = []
+        websiteModelRefreshRetriesBlocked = false
         pendingApprovals.removeAll()
         resolvingApprovalIDs.removeAll()
         approvalAttemptTaskIDs.removeAll()
