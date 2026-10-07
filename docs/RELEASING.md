@@ -7,9 +7,9 @@ The Apple app keeps the numeric `MAJOR.MINOR.PATCH` version and a separate
 increasing build number. Use that build number as `N`.
 
 The current production build path is the Swift app through
-[`Scripts/setup.sh`](../Scripts/setup.sh). PR #3's Rust migration remains a
-draft with separate qualification gates; this workflow does not qualify or
-promote the Rust app. A Developer ID signature, a verified package, and a
+[`Scripts/setup.sh`](../Scripts/setup.sh). The Rust migration introduced in
+PR #3 remains incomplete with separate qualification gates; source integration
+does not qualify or promote the Rust app. A Developer ID signature, a verified package, and a
 successful publication are also separate from notarization and clean-Mac
 installation. Record the actual checks and known limitations in the release
 notes. See [distribution](DISTRIBUTION.md), [versioning](VERSIONING.md), and
