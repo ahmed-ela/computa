@@ -148,19 +148,23 @@ Negative live and fixture checks must include unavailable choices, changed selec
 
 The 0.4.0 (17) Release candidate was built, signed and installed. The source-to-staged resource inventories, staged-to-installed executable/runtime digests, bundle identity, version/build and strict deep code-signature checks passed. The running installed executable was observed separately by the root tester; the receipt collector did not inspect its process or browser UI.
 
-All three fresh ChatGPT tasks passed the strict receipt collector on this candidate:
+Four fresh tasks passed the strict receipt collector on this candidate. One additional task failed, and five choices remain unattempted:
 
 | Provider | Website family | Candidate17 live result |
 | --- | --- | --- |
 | ChatGPT | Latest | Verified native file read, clean final, two paired selection-only inferences. |
 | ChatGPT | GPT-5.6 Sol | Verified native file read, clean final, two paired selection-only inferences. |
 | ChatGPT | GPT-5.5 | Verified native file read, clean final, two paired selection-only inferences. |
-| Gemini | 3.5 Flash-Lite, 3.8 Flash, 3.1 Pro | Not attempted on candidate17; human Google verification and confirmed session cleanup/capacity remain required. |
-| Claude | Sonnet 5.5, Haiku 4.5, Sonnet 5, Sonnet 4.6 | Not attempted on candidate17; actual website usage-limit reset remains required. |
+| Gemini | 3.5 Flash-Lite | Verified native file read, clean final, two paired selection-only inferences. |
+| Gemini | 3.1 Pro | Failed page inspection; no native tool call, clean final or exported choice proof. |
+| Gemini | 3.8 Flash | Not attempted on candidate17; human Google verification and confirmed session cleanup/capacity remain required. |
+| Claude | Sonnet 5.5, Haiku 4.5, Sonnet 5, Sonnet 4.6 | Not attempted on candidate17; the website displays free messages returning at `12:00PM`. Its timezone was not established. |
 
-Each positive task used the ordinary file-read request with a new unknown marker and no manually supplied tool instructions. Raw closed native rollouts, exact thread/turn/time/model scope, registered task sidecars, artifact references and byte digests were archived before collection. All three tasks contained one correlated successful native terminal read, an exact clean final and two complete contiguous inference proof pairs. Their website proof remains selection-only; response-specific attribution and backend version remain unknown. The root tester reported the human Browser pane off and the private inference views hidden; those visibility observations are separate from the receipt's model and execution evidence.
+Each positive task used the ordinary file-read request with a new unknown marker and no manually supplied tool instructions. Raw closed native rollouts, exact thread/turn/time/model scope, registered task sidecars, artifact references and byte digests were archived before collection. All four positive tasks contained one correlated successful native terminal read, an exact clean final and two complete contiguous inference proof pairs. Their website proof remains selection-only; response-specific attribution and backend version remain unknown. The root tester reported the human Browser pane off and the private inference views hidden; those visibility observations are separate from the receipt's model and execution evidence.
 
-Automated validation completed 187 unique native tests in nine classes in one zero-failure run (158.555 seconds), 248 provider adapter tests, 116 Web UI tests and TypeScript checking, 79 independent receipt/diagnostic/installed-identity QA oracles, and one Rust unsupported-routing boundary test. The interrupted original candidate16 native run is not a passing suite. Current source tests, artifact identity, the three live positives and the seven unattempted choices remain distinct claims. Complete qualification of all ten choices is still pending.
+Gemini temporarily showed its normal signed-in composer, allowing the fresh Flash-Lite task to complete. The subsequent Pro task failed page inspection at 14:00:43 UTC. At 14:05 UTC the root tester's protected human Gemini tab again displayed Google's unusual-traffic verification page with no usable composer. No CAPTCHA had been completed, and human verification remained pending. This later human-tab observation does not establish the failed Pro view's destination or exact cause. The missing sidecar does not prove zero website Sends, confirmed cleanup or available browser capacity. Gemini Flash remains unattempted until verification and cleanup/capacity are confirmed. At the same observation, Claude's new-chat page displayed `Your free messages return at 12:00PM`; the four fresh Claude fixtures remain unused until actual availability is observed.
+
+Automated validation completed 187 unique native tests in nine classes in one zero-failure run (158.555 seconds), 248 provider adapter tests, 116 Web UI tests and TypeScript checking, 79 independent receipt/diagnostic/installed-identity QA oracles, and one Rust unsupported-routing boundary test. The interrupted original candidate16 native run is not a passing suite. Current source tests, artifact identity, the four live positives, one failure and five unattempted choices remain distinct claims. Product code and installed build17 are unchanged; this qualification update requires no new product test run or build. Complete qualification of all ten choices is still pending.
 
 ### Recorded candidate16 live results
 
