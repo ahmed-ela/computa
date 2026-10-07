@@ -56,6 +56,29 @@ Missing or malformed choice proof produces `modelUnverified`; an observed differ
 
 The embedded transport uses versioned page-change notifications to wake response reads. Reading a new snapshot still validates the choice; an event is not itself model evidence. Website usage limits and sign-in requirements continue to apply.
 
+## External website gates
+
+The native transport classifies known checkpoint URLs before provider JavaScript or a loading wait, after an awaited adapter result, and after a failed JavaScript callback that may have crossed navigation. Classification reads the current native `WKWebView.url`; it does not execute the model adapter on a foreign checkpoint or adopt that page as the conversation. Only HTTPS URLs without user information and with no explicit port or port 443 qualify for a known gate.
+
+For Gemini, the exact hosts `google.com` and `www.google.com` with path `/sorry` or a descendant of `/sorry/` produce human-verification failure. Lookalike hosts, plain HTTP, other ports, credential-bearing URLs, `/sorry-about`, query text containing a checkpoint URL, and another provider's Google route do not qualify. Known sign-in routes include `accounts.google.com` for Gemini/ChatGPT, and exact provider-origin path roots `/auth` or `/login` for ChatGPT, `/login` or `/signup` for Claude, and `/signin` for Gemini. Existing fixed-adapter sign-in and usage-limit signals remain supported. Other nonempty URLs outside the accepted provider pages produce unexpected-page failure, including an unknown redirect observed after a callback or across an await before generation validation. An initial unbound `about:blank` and a missing URL retain bounded loading hydration; a bound blank page cannot receive that allowance. Accepted-origin document changes and unrelated conversation routes still face the existing generation and ownership checks.
+
+Typed external failures preserve `type: browser_model_error` and the finite user message, and add the following metadata:
+
+| `code` | `retryable` | `required_action` |
+| --- | --- | --- |
+| `website_verification_required` | `false` | `complete_website_verification` |
+| `sign_in_required` | `false` | `sign_in` |
+| `website_usage_limit` | `false` | `wait_for_quota_reset` |
+| `unexpected_website_page` | `false` | `inspect_website` |
+
+Other failures do not acquire recovery metadata from a matching error string. URL/query tokens, account contents and credentials are excluded from the error and finite diagnostic message. `retryable: false` forbids automatically continuing the current attempt; it does not claim the account can never recover.
+
+A recognized external failure is latched on its owned inference session. Further Poll or Send requests return that same failure without another adapter read, insertion or Send, even if the page later returns to an apparently valid URL. Recovery requires an explicit new attempt after the required human/account action. Finish and Cancel remain available through the original ownership and cleanup checks: classifying a checkpoint cannot confirm deletion, adopt a new document or free retained ownership through a weaker rule. A gate detected after an acknowledged Send is not proof that no prompt reached the provider.
+
+The original generic readiness path allowed up to three bounded local read retries before any mode toggle or submission. The repeated Pro diagnostics were local native URL/host inspections, not repeated website messages or navigation requests. Known external gates now bypass that hydration retry. Current human-tab CAPTCHA is an observed account gate; the earlier failed private view's exact redirect destination and whether browser characteristics, network/IP reputation or request rate caused it remain unproven. A successful Flash-Lite task in the same runtime establishes useful compatibility evidence without identifying Google's blocking reason.
+
+This change does not add a guessed same-origin challenge DOM detector. An unfamiliar verification page that retains an accepted provider URL and lacks a supported adapter signal can still produce a generic readiness/composer/model error. Recognizing the trusted native route is a narrow early gate, not universal challenge detection or automated CAPTCHA completion.
+
 ## Host tool handoff
 
 Every website inference receives a fresh contract built from that request's validated tool schemas, including tool-result continuations. The contract frames the exchange as a structured-output RPC request to Computa's local host functions. The model retains its website identity and governing rules; serialized application roles do not replace them. References to a Computa or local-assistant persona inside serialized instructions label the application's task context, not the website model's identity or native capabilities. The complete original Responses request is preserved inside the application-context envelope, including the user's scope, history, current function schemas, and `tool_choice`.
@@ -144,7 +167,13 @@ Raw exports and their digests must be retained before later turns append records
 
 Negative live and fixture checks must include unavailable choices, changed selections before Send and before response admission, conflicting attribution, stale documents, invalid IDs, unsupported menus, interrupted cleanup, and uncertain acknowledgment. They must confirm failure without silent fallback, automatic replay, or unverified response admission. Synthetic negative coverage and a completed positive marker turn are separate evidence.
 
-### Current candidate17 qualification
+### Candidate18 status
+
+Candidate18 adds the external-gate classification and terminal session behavior above. The completed nine-class native feature suite passed all 194 unique tests, including five new transport tests and two server tests (16 HTTP gate/phase combinations). Initial unbound blank-page hydration, recognized and unknown redirects across awaits, blocked response admission, repeated Poll/Send rejection, exact finite error metadata and unchanged cleanup ownership are covered. Earlier failed runs remain recorded separately: one corrected retained-tab fixture assertion and intermittent fixture `InvalidTransition` failures do not count as passes. The last isolated full run completed with zero failures.
+
+The 0.4.0 (18) Release candidate was built, Developer ID signed and installed. Source/staged/installed resource inventories, staged/installed executable and runtime hashes, expected version/build, and strict deep code-signature checks passed. The running installed executable was observed separately, and the app reconnected to its local runtime. No fresh candidate18 per-model live qualification has been recorded yet. All candidate17 receipts below remain historical and cannot substitute for fresh candidate18 receipts.
+
+### Recorded candidate17 qualification
 
 The 0.4.0 (17) Release candidate was built, signed and installed. The source-to-staged resource inventories, staged-to-installed executable/runtime digests, bundle identity, version/build and strict deep code-signature checks passed. The running installed executable was observed separately by the root tester; the receipt collector did not inspect its process or browser UI.
 
@@ -164,7 +193,7 @@ Each positive task used the ordinary file-read request with a new unknown marker
 
 Gemini temporarily showed its normal signed-in composer, allowing the fresh Flash-Lite task to complete. The subsequent Pro task failed page inspection at 14:00:43 UTC. At 14:05 UTC the root tester's protected human Gemini tab again displayed Google's unusual-traffic verification page with no usable composer. No CAPTCHA had been completed, and human verification remained pending. This later human-tab observation does not establish the failed Pro view's destination or exact cause. The missing sidecar does not prove zero website Sends, confirmed cleanup or available browser capacity. Gemini Flash remains unattempted until verification and cleanup/capacity are confirmed. At the same observation, Claude's new-chat page displayed `Your free messages return at 12:00PM`; the four fresh Claude fixtures remain unused until actual availability is observed.
 
-Automated validation completed 187 unique native tests in nine classes in one zero-failure run (158.555 seconds), 248 provider adapter tests, 116 Web UI tests and TypeScript checking, 79 independent receipt/diagnostic/installed-identity QA oracles, and one Rust unsupported-routing boundary test. The interrupted original candidate16 native run is not a passing suite. Current source tests, artifact identity, the four live positives, one failure and five unattempted choices remain distinct claims. Product code and installed build17 are unchanged; this qualification update requires no new product test run or build. Complete qualification of all ten choices is still pending.
+Candidate17 automated validation completed 187 unique native tests in nine classes in one zero-failure run (158.555 seconds), 248 provider adapter tests, 116 Web UI tests and TypeScript checking, 79 independent receipt/diagnostic/installed-identity QA oracles, and one Rust unsupported-routing boundary test. The interrupted original candidate16 native run is not a passing suite. Its artifact identity, four live positives, one failure and five unattempted choices remain distinct claims. These results describe candidate17 before the subsequent external-gate product changes. Complete qualification of all ten choices is still pending.
 
 ### Recorded candidate16 live results
 

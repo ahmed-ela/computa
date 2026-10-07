@@ -6,6 +6,158 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testCheckpointURLClassificationRequiresExactTrustedOriginAndPath() throws {
+        let provider = EmbeddedWebModelTransport.Provider.gemini
+        for raw in ["https://google.com/sorry", "https://www.google.com/sorry/index?private_canary=secret", "https://google.com:443/sorry/"] {
+            XCTAssertEqual(provider.blockingFailure(for: URL(string: raw)), .humanVerificationRequired(.gemini))
+        }
+        for raw in ["http://google.com/sorry/", "https://google.com:444/sorry/", "https://user:secret@google.com/sorry/",
+                    "https://google.com.evil.test/sorry/", "https://evil.test/?next=https://google.com/sorry/",
+                    "https://www.google.com/sorry-about", "https://gemini.google.com/app/sorry", "https://google.com/search?q=captcha"] {
+            XCTAssertNil(provider.blockingFailure(for: URL(string: raw)), raw)
+        }
+        XCTAssertNil(provider.blockingFailure(for: nil))
+        XCTAssertNil(EmbeddedWebModelTransport.Provider.claude.blockingFailure(for: URL(string: "https://google.com/sorry/")))
+        for (selected, raw) in [(EmbeddedWebModelTransport.Provider.gemini, "https://accounts.google.com/v3/signin/identifier"),
+                                (.chatgpt, "https://chatgpt.com/auth/login"), (.claude, "https://claude.ai/login")] {
+            XCTAssertEqual(selected.blockingFailure(for: URL(string: raw)), .signInRequired)
+        }
+        XCTAssertNil(provider.blockingFailure(for: URL(string: "https://accounts.google.com.evil.test/signin")))
+        let failure = EmbeddedWebModelTransport.Failure.humanVerificationRequired(.gemini)
+        XCTAssertEqual(failure.diagnosticCode, "website_verification_required")
+        XCTAssertEqual(failure.requiredAction, "complete_website_verification")
+        XCTAssertFalse(failure.localizedDescription.contains("private_canary"))
+    }
+
+    func testInitialCheckpointAndUnexpectedPageFailImmediatelyAndLatchWithoutAdapterWork() async throws {
+        let cases: [(URL, EmbeddedWebModelTransport.Failure)] = [
+            (URL(string: "https://www.google.com/sorry/index?private_canary=secret")!, .humanVerificationRequired(.gemini)),
+            (URL(string: "https://accounts.google.com/v3/signin/identifier")!, .signInRequired),
+            (URL(string: "https://unexpected.example.test/checkpoint")!, .unexpectedPage(.gemini)),
+        ]
+        for (url, failure) in cases {
+            let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: url)
+            defer { fixture.shutdown() }
+            let start = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+            let token = try XCTUnwrap(start["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: id))
+            try await waitForFixture(view)
+            let began = ContinuousClock.now
+            for _ in 0..<4 {
+                do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("A checkpoint cannot enter readiness") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, failure) }
+            }
+            XCTAssertLessThan(ContinuousClock.now - began, .seconds(1), "Recognized blockers must bypass the hydration retry delay")
+            let adapterOwner = try await evaluate(view, "return globalThis.__computaModelOwner === undefined;", world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+            XCTAssertEqual(adapterOwner, true, "Provider JavaScript must never execute on a foreign checkpoint")
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+
+            // Returning the URL to a valid-looking fixture cannot revive this
+            // inference. Recovery requires an explicit new session.
+            view.loadHTMLString(Self.modelChoicePage(.gemini).replacingOccurrences(of: "'initial'", with: "'restored'"), baseURL: URL(string: "https://gemini.google.com/app"))
+            try await waitForFixture(view, generation: "restored")
+            for operation in ["webProviderPoll", "webProviderSend"] {
+                var params = ["sessionToken": token]
+                if operation == "webProviderSend" { params["prompt"] = "Must never be replayed" }
+                do { _ = try await call(fixture.transport, operation, params); XCTFail("A terminal checkpoint cannot resume implicitly") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, failure) }
+            }
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+            let cancelled = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+            XCTAssertEqual(cancelled["state"] as? String, "failed")
+            XCTAssertEqual(cancelled["cleanup"] as? String, "failed", "Classification cannot grant cleanup authority after document replacement")
+            try await assertHumanTabIntact(fixture, retaining: id)
+        }
+    }
+
+    func testCheckpointRedirectAcrossReadOrPrepareAwaitDiscardsResultBeforeInsertion() async throws {
+        let cases: [(String, String, EmbeddedWebModelTransport.Failure)] = [
+            ("inspect", "https://www.google.com/sorry/index?private_canary=secret", .humanVerificationRequired(.gemini)),
+            ("prepare", "https://www.google.com/sorry/index?private_canary=secret", .humanVerificationRequired(.gemini)),
+            ("inspect", "https://unexpected.example.test/checkpoint", .unexpectedPage(.gemini)),
+            ("prepare", "https://unexpected.example.test/checkpoint", .unexpectedPage(.gemini)),
+        ]
+        for (interruptedAction, destination, expectedFailure) in cases {
+            let fixture = try Fixture(page: Self.modelChoicePage(.gemini))
+            defer { fixture.shutdown() }
+            let start = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+            let token = try XCTUnwrap(start["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: id))
+            try await waitForFixture(view)
+            if interruptedAction == "prepare" { _ = try await waitForState("ready", fixture.transport, token: token) }
+            var redirected = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == interruptedAction, !redirected else { return }
+                redirected = true
+                view.loadHTMLString(Self.modelChoicePage(.gemini).replacingOccurrences(of: "'initial'", with: "'checkpoint'"), baseURL: URL(string: destination))
+                try? await self.waitForFixture(view, generation: "checkpoint")
+            }
+            var params = ["sessionToken": token]
+            if interruptedAction == "prepare" { params["prompt"] = "Must not cross a challenge redirect" }
+            do {
+                _ = try await call(fixture.transport, interruptedAction == "prepare" ? "webProviderSend" : "webProviderPoll", params)
+                XCTFail("An obsolete ready/editor result cannot cross a challenge redirect")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expectedFailure) }
+            XCTAssertTrue(redirected)
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+            let cancelled = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+            XCTAssertEqual(cancelled["cleanup"] as? String, "failed")
+            try await assertHumanTabIntact(fixture, retaining: id)
+        }
+    }
+
+    func testInitialBlankDocumentCanHydrateWithoutBeingLatchedAsUnexpectedPage() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "about:blank"))
+        defer { fixture.shutdown() }
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let id = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: id))
+        try await waitForFixture(view)
+        let initial = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(initial["state"] as? String, "loading")
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+        view.loadHTMLString(Self.modelChoicePage(.gemini).replacingOccurrences(of: "'initial'", with: "'hydrated'"), baseURL: URL(string: "https://gemini.google.com/app"))
+        try await waitForFixture(view, generation: "hydrated")
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testCheckpointAfterSubmissionRejectsResponseWithoutReplayOrCleanupOverclaim() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini))
+        defer { fixture.shutdown() }
+        print("Checkpoint submission fixture: phase=fixture_created")
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        print("Checkpoint submission fixture: phase=session_started")
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        print("Checkpoint submission fixture: phase=ready")
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Original single submission"])
+        print("Checkpoint submission fixture: phase=submitted")
+        let id = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: id))
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+        print("Checkpoint submission fixture: phase=ledger_verified")
+        view.loadHTMLString(Self.modelChoicePage(.gemini).replacingOccurrences(of: "'initial'", with: "'checkpoint'"), baseURL: URL(string: "https://google.com/sorry/"))
+        try await waitForFixture(view, generation: "checkpoint")
+        print("Checkpoint submission fixture: phase=checkpoint_loaded")
+        for _ in 0..<3 {
+            do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Checkpoint text is not an AI response") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        }
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["state"] as? String, "failed")
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertTrue((finished["text"] as? String ?? "").isEmpty)
+        try await assertHumanTabIntact(fixture, retaining: id)
+    }
+
     func testConcreteChoicesSelectExactlyOnceAndRetainProofAcrossTwoInferenceSends() async throws {
         for provider in Self.choiceProviders {
             let choice = Self.fixtureChoice(provider)
@@ -1126,7 +1278,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 _ = try await fixture.transport.discoverModels(provider: "chatgpt")
                 XCTFail("An authentication document cannot prove a model menu")
             } catch {
-                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .pageUnavailable)
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired)
             }
             let ownedID = try XCTUnwrap(fixture.createdTabs.last)
             XCTAssertNil(fixture.browser.webView(for: ownedID))
@@ -2718,8 +2870,16 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(ledger["selections"], selections, file: file, line: line)
     }
 
-    private func assertHumanTabIntact(_ fixture: Fixture, file: StaticString = #filePath, line: UInt = #line) async throws {
-        XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID], file: file, line: line)
+    private func assertHumanTabIntact(_ fixture: Fixture, retaining retainedID: UUID? = nil,
+                                     file: StaticString = #filePath, line: UInt = #line) async throws {
+        XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID] + (retainedID.map { [$0] } ?? []), file: file, line: line)
+        XCTAssertEqual(fixture.browser.humanTabs.map(\.id), [fixture.humanID], file: file, line: line)
+        if let retainedID {
+            XCTAssertNotNil(fixture.browser.webView(for: retainedID), file: file, line: line)
+            XCTAssertThrowsError(try fixture.browser.presentTab(retainedID, in: NSView())) { error in
+                XCTAssertEqual(error as? EmbeddedBrowserSession.Failure, .modelTabPrivate, file: file, line: line)
+            }
+        }
         XCTAssertEqual(fixture.browser.selectedTabID, fixture.humanID, file: file, line: line)
         XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView, file: file, line: line)
         let deadline = ContinuousClock.now + .seconds(10)
@@ -3018,7 +3178,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     private func call(_ transport: EmbeddedWebModelTransport, _ operation: String,
                       _ params: [String: String]) async throws -> [String: Any] {
         let data = try JSONSerialization.data(withJSONObject: params)
-        let response = try await transport.request(operation: operation, params: data)
+        let response: Data
+        do { response = try await transport.request(operation: operation, params: data) }
+        catch {
+            if !(error is EmbeddedWebModelTransport.Failure) {
+                print("Unexpected fixture transport failure: operation=\(operation) type=\(String(reflecting: type(of: error))) domain=\((error as NSError).domain) code=\((error as NSError).code)")
+            }
+            throw error
+        }
         return try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
     }
 
@@ -3081,7 +3248,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     private func evaluate(_ view: WKWebView, _ body: String, world: WKContentWorld = .page,
                           maximumWait: Duration = .seconds(10)) async throws -> Any? {
         let completion = FixtureScriptResult()
-        let data: Data = try await withTaskCancellationHandler {
+        let data: Data
+        do {
+        data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 completion.install(continuation)
                 let timeout = Task {
@@ -3108,6 +3277,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             }
         } onCancel: {
             completion.complete(.failure(CancellationError()))
+        }
+        } catch {
+            print("Unexpected fixture evaluation failure: type=\(String(reflecting: type(of: error))) domain=\((error as NSError).domain) code=\((error as NSError).code)")
+            throw error
         }
         return try JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed)
     }

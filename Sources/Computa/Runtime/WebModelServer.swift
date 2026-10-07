@@ -454,7 +454,7 @@ actor WebModelServer {
                     let stream = try await infer(request.body, taskID: taskID)
                     try await Self.send(connection, status: "200 OK", type: "text/event-stream", body: stream)
                 } catch {
-                    let body = try JSONSerialization.data(withJSONObject: ["error": ["type": "browser_model_error", "message": error.localizedDescription]])
+                    let body = try Self.errorBody(for: error)
                     try await Self.send(connection, status: "400 Bad Request", type: "application/json", body: body)
                 }
             } catch { }
@@ -463,6 +463,19 @@ actor WebModelServer {
     }
 
     private func close(_ id: UUID) { connections.removeValue(forKey: id)?.cancel() }
+
+    /// Only native finite classifications can add recovery metadata. Website
+    /// copy, URLs and response prose cannot populate these protocol fields.
+    static func errorBody(for error: any Error) throws -> Data {
+        var fields: [String: Any] = ["type": "browser_model_error", "message": error.localizedDescription]
+        if let failure = error as? EmbeddedWebModelTransport.Failure,
+           let code = failure.diagnosticCode, let action = failure.requiredAction {
+            fields["code"] = code
+            fields["retryable"] = false
+            fields["required_action"] = action
+        }
+        return try JSONSerialization.data(withJSONObject: ["error": fields])
+    }
 
     struct HTTPRequest: Sendable {
         let method: String

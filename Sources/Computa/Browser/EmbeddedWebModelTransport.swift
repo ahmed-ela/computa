@@ -86,6 +86,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return self == .gemini ? true : acceptsTemporaryToggle(url)
         }
 
+        /// Abort-only classification of known provider checkpoints. Never run
+        /// the provider adapter on these documents or treat them as ownership
+        /// evidence. Query strings can contain IPs or credentials and stay local.
+        func blockingFailure(for url: URL?) -> Failure? {
+            guard let url, url.scheme == "https", url.user == nil, url.password == nil,
+                  url.port == nil || url.port == 443 else { return nil }
+            if self == .gemini, ["google.com", "www.google.com"].contains(url.host ?? ""),
+               url.path == "/sorry" || url.path.hasPrefix("/sorry/") {
+                return .humanVerificationRequired(self)
+            }
+            if [.gemini, .chatgpt].contains(self), url.host == "accounts.google.com" {
+                return .signInRequired
+            }
+            guard url.host == host else { return nil }
+            let authRoots = self == .chatgpt ? ["/auth", "/login"] : self == .claude ? ["/login", "/signup"] : ["/signin"]
+            if authRoots.contains(where: { url.path == $0 || url.path.hasPrefix($0 + "/") }) {
+                return .signInRequired
+            }
+            return nil
+        }
+
         private func originURL(_ raw: String) -> URL? {
             guard let url = URL(string: raw), url.scheme == "https", url.host == host,
                   url.port == nil || url.port == 443, url.user == nil, url.password == nil else { return nil }
@@ -126,8 +147,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case submissionObservationPending
         case modelUnverified, modelMismatch, modelUnavailable, discoveryCleanupFailed
         case usageLimited(Provider)
+        case humanVerificationRequired(Provider), unexpectedPage(Provider)
         case editorFailure(String)
         case ownershipFailure(OwnershipReason)
+
+        var diagnosticCode: String? {
+            switch self {
+            case .humanVerificationRequired: "website_verification_required"
+            case .signInRequired: "sign_in_required"
+            case .usageLimited: "website_usage_limit"
+            case .unexpectedPage: "unexpected_website_page"
+            default: nil
+            }
+        }
+
+        var requiredAction: String? {
+            switch self {
+            case .humanVerificationRequired: "complete_website_verification"
+            case .signInRequired: "sign_in"
+            case .usageLimited: "wait_for_quota_reset"
+            case .unexpectedPage: "inspect_website"
+            default: nil
+            }
+        }
 
         var errorDescription: String? {
             switch self {
@@ -151,6 +193,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseTooLarge: "The website's response exceeded the local browser transport limit."
             case .responseInterrupted: "The website interrupted its response. No send was retried."
             case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. Try again after your account's limit resets."
+            case .humanVerificationRequired(let provider): "\(provider.displayName)'s website requires human verification. Open its website in Computa's built-in browser and complete the verification before retrying. No prompt was replayed."
+            case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
             case .preparationDeadline: "The website did not prepare a verified temporary or incognito chat before the 45-second deadline. No prompt was sent."
             case .deadline: "The website did not finish its response before the five-minute deadline."
             }
@@ -168,6 +212,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let initialDocumentGeneration: UUID
         let created = ContinuousClock.now
         var state = "loading"
+        var terminalFailure: Failure?
         var submitted = false
         var temporary = false
         var temporaryRequested = false
@@ -269,49 +314,64 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard ["webProviderPoll", "webProviderSend", "webProviderFinish", "webProviderCancel"].contains(operation),
               Set(values.keys) == (operation == "webProviderSend" ? ["sessionToken", "prompt"] : ["sessionToken"]),
               let token = values["sessionToken"], let session = sessions[token] else { throw Failure.staleSession }
-        switch operation {
-        case "webProviderFinish", "webProviderCancel":
-            return await finish(session, cancel: operation == "webProviderCancel")
-        case "webProviderSend":
-            guard !session.isDiscovery else { throw Failure.invalidRequest }
-            try Task.checkCancellation()
-            guard let prompt = values["prompt"], !prompt.isEmpty, prompt.utf8.count <= 180_000,
-                  ["ready", "complete"].contains(session.state), !session.pendingSubmission else {
-                throw Failure.invalidRequest
+        if !["webProviderFinish", "webProviderCancel"].contains(operation), let failure = session.terminalFailure {
+            throw failure
+        }
+        do {
+            switch operation {
+            case "webProviderFinish", "webProviderCancel":
+                return await finish(session, cancel: operation == "webProviderCancel")
+            case "webProviderSend":
+                guard !session.isDiscovery else { throw Failure.invalidRequest }
+                try Task.checkCancellation()
+                guard let prompt = values["prompt"], !prompt.isEmpty, prompt.utf8.count <= 180_000,
+                      ["ready", "complete"].contains(session.state), !session.pendingSubmission else {
+                    throw Failure.invalidRequest
+                }
+                let before = try await page(session, action: "prepare")
+                guard before["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
+                guard before["prepared"] as? Bool == true else { throw Failure.editorFailure("focus_unavailable") }
+                if !session.submitted {
+                    guard count(before, "responseCount") == 0, count(before, "userCount") == 0,
+                          session.provider.conversationURL(before["url"] as? String) == nil else { throw Failure.notFresh }
+                }
+                session.baseline = count(before, "responseCount")
+                // Keep the lineage marker out of the local transcript. It is an
+                // opaque transport suffix for the first website submission only.
+                let outbound = session.submitted ? prompt : "\(prompt)\n\nComputa session marker: \(session.firstUserMarker)"
+                guard outbound.utf8.count <= 180_000 else { throw Failure.invalidRequest }
+                let inserted = try await page(session, action: "insert", prompt: outbound)
+                guard inserted["inserted"] as? Bool == true else { throw Failure.editorFailure("insertion_unconfirmed") }
+                // Wait only through read-only checks. Site normalization can enable
+                // Send later; insertion and the eventual click are never repeated.
+                try await waitForSendReady(session, prompt: outbound)
+                try Task.checkCancellation()
+                session.response = ""
+                session.completionCandidate = false
+                session.candidateSince = nil
+                session.lastChanged = .now
+                session.turnStarted = .now
+                // Claim submission before clicking: even a lost reply must not replay Send.
+                session.submitted = true
+                session.sequence += 1
+                session.pendingSubmission = true
+                session.state = "running"
+                let sent = try await page(session, action: "submit", prompt: outbound)
+                guard sent["submitted"] as? Bool == true else { throw Failure.editorFailure("submission_unconfirmed") }
+                return try snapshot(session)
+            default:
+                return try await poll(session)
             }
-            let before = try await page(session, action: "prepare")
-            guard before["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
-            guard before["prepared"] as? Bool == true else { throw Failure.editorFailure("focus_unavailable") }
-            if !session.submitted {
-                guard count(before, "responseCount") == 0, count(before, "userCount") == 0,
-                      session.provider.conversationURL(before["url"] as? String) == nil else { throw Failure.notFresh }
+        } catch {
+            // Recognized website gates are terminal for this inference. Even a
+            // caller that keeps polling cannot inspect, insert, or Send again.
+            // Finish still uses the original ownership/cleanup checks.
+            if let failure = error as? Failure, failure.diagnosticCode != nil {
+                session.terminalFailure = failure
+                session.state = "failed"
+                session.initialReadRetry = nil
             }
-            session.baseline = count(before, "responseCount")
-            // Keep the lineage marker out of the local transcript. It is an
-            // opaque transport suffix for the first website submission only.
-            let outbound = session.submitted ? prompt : "\(prompt)\n\nComputa session marker: \(session.firstUserMarker)"
-            guard outbound.utf8.count <= 180_000 else { throw Failure.invalidRequest }
-            let inserted = try await page(session, action: "insert", prompt: outbound)
-            guard inserted["inserted"] as? Bool == true else { throw Failure.editorFailure("insertion_unconfirmed") }
-            // Wait only through read-only checks. Site normalization can enable
-            // Send later; insertion and the eventual click are never repeated.
-            try await waitForSendReady(session, prompt: outbound)
-            try Task.checkCancellation()
-            session.response = ""
-            session.completionCandidate = false
-            session.candidateSince = nil
-            session.lastChanged = .now
-            session.turnStarted = .now
-            // Claim submission before clicking: even a lost reply must not replay Send.
-            session.submitted = true
-            session.sequence += 1
-            session.pendingSubmission = true
-            session.state = "running"
-            let sent = try await page(session, action: "submit", prompt: outbound)
-            guard sent["submitted"] as? Bool == true else { throw Failure.editorFailure("submission_unconfirmed") }
-            return try snapshot(session)
-        default:
-            return try await poll(session)
+            throw error
         }
     }
 
@@ -419,6 +479,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
+        guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+        try rejectWebsiteBlocker(session, action: "inspect", phase: "before")
         if session.state == "loading", session.view.isLoading {
             session.initialReadRetry = nil
             guard ContinuousClock.now - session.created < preparationTimeout else { throw Failure.preparationDeadline }
@@ -430,6 +492,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let observed: [String: Any]
         do { observed = try await page(session, action: "inspect", maximumWait: min(.seconds(10), deadline - .now)) }
         catch {
+            if let failure = error as? Failure, failure.diagnosticCode != nil { throw failure }
             if !Task.isCancelled, ContinuousClock.now >= deadline { throw timeoutFailure }
             if (error as? Failure) == .submissionObservationPending {
                 try Task.checkCancellation()
@@ -860,11 +923,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return "; first difference \(index); actual/expected scalars \(actual)/\(expected)"
     }
 
+    private func rejectWebsiteBlocker(_ session: Session, action: String, phase: String) throws {
+        let url = session.view.url
+        let initialBlank = session.documentGeneration == nil && url?.absoluteString == "about:blank"
+        let unexpected = url.map { !initialBlank && !session.provider.accepts($0.absoluteString) } ?? false
+        guard let failure = session.provider.blockingFailure(for: url) ?? (unexpected ? .unexpectedPage(session.provider) : nil) else { return }
+        Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public)")
+        throw failure
+    }
+
     private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
                       refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+        try rejectWebsiteBlocker(session, action: action, phase: "before")
         guard let generation = browser.documentGeneration(for: session.tabID),
               session.documentGeneration == nil || session.documentGeneration == generation else {
             throw Failure.ownershipFailure(.documentGenerationBefore)
@@ -876,6 +949,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // Record classifications only, without publishing the page URL.
             let candidate = session.view.url
             Self.inspectionLog.error("adapterContextUnavailable provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) urlPresent=\(candidate != nil) https=\(candidate?.scheme == "https") hostMatches=\(candidate?.host == provider.host) loading=\(session.view.isLoading)")
+            if candidate != nil, candidate?.absoluteString != "about:blank" { throw Failure.unexpectedPage(provider) }
             throw Failure.pageUnavailable
         }
         let context = provider.routeContext(url.absoluteString)
@@ -910,14 +984,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         browser.captureModelNativeFocus(tabID: session.tabID)
         defer { browser.restoreModelNativeFocus(tabID: session.tabID) }
         let result = EmbeddedScriptResult()
-        let bytes: Data = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                result.install(continuation)
-                let timeout = Task {
-                    do {
-                        try await Task.sleep(for: maximumWait)
-                        Self.inspectionLog.error("adapterTimeout provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence)")
-                        result.complete(.failure(Failure.pageUnavailable))
+        let bytes: Data
+        do {
+            bytes = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    result.install(continuation)
+                    let timeout = Task {
+                        do {
+                            try await Task.sleep(for: maximumWait)
+                            Self.inspectionLog.error("adapterTimeout provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence)")
+                            result.complete(.failure(Failure.pageUnavailable))
                     } catch { }
                 }
                 result.setTimeout(timeout)
@@ -948,10 +1024,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
             }
         } onCancel: { result.complete(.failure(CancellationError())) }
+        } catch {
+            if !Task.isCancelled, browser.webView(for: session.tabID) === session.view {
+                // A challenge redirect can destroy the JavaScript context. Use
+                // only its native URL classification; never execute on it.
+                try rejectWebsiteBlocker(session, action: action, phase: "callback_failure")
+            }
+            throw error
+        }
         #if DEBUG
         await beforePageResultValidationForTesting?(action)
         #endif
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+        try rejectWebsiteBlocker(session, action: action, phase: "after")
         guard browser.documentGeneration(for: session.tabID) == generation else {
             // Readiness may redirect before any document has been bound. Discard
             // this obsolete read; subsequent reads may bind the final ready page.
@@ -1058,6 +1143,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let detail = (observed["detail"] as? String).flatMap { allowedDetails[$0] }
                 throw Failure.ownershipFailure(detail ?? (error == "document_changed" ? .javaScriptDocument : .javaScriptConversation))
             case "sign_in_required": throw Failure.signInRequired
+            case "website_verification_required": throw Failure.humanVerificationRequired(provider)
             case "website_usage_limit":
                 if action == "inspect", session.state == "loading", session.documentGeneration == nil,
                    session.sequence == 0, session.confirmedUsers == 0,

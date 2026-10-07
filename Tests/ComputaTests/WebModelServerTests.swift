@@ -606,6 +606,71 @@ final class WebModelServerTests: XCTestCase {
         _ = await server.shutdown()
     }
 
+    func testExternalWebsiteGatesAreFiniteHTTPFailuresWithoutInferenceRetriesOrToolOutput() async throws {
+        for (model, failure, code, action) in externalGateCases {
+            for point in [DiagnosticFailurePoint.start, .readinessPoll, .sendThrown, .responsePoll] {
+                let transport = ExternalGateWebModelTransport(point: point, failure: failure)
+                let server = WebModelServer()
+                await server.configureEmbeddedTransport(transport)
+                let endpoint = try await server.start().appendingPathComponent("responses")
+                var urlRequest = URLRequest(url: endpoint)
+                urlRequest.httpMethod = "POST"
+                urlRequest.httpBody = try JSONSerialization.data(withJSONObject: [
+                    "model": model, "input": [["role": "user", "content": "Synthetic external gate boundary"]],
+                    "tools": [], "stream": true,
+                ])
+                urlRequest.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
+                urlRequest.setValue("external-gate-task", forHTTPHeaderField: "X-Computa-Task-ID")
+                let (data, response) = try await URLSession.shared.data(for: urlRequest)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let error = try XCTUnwrap(body["error"] as? [String: Any])
+                XCTAssertEqual(Set(error.keys), ["type", "message", "code", "retryable", "required_action"])
+                XCTAssertEqual(error["type"] as? String, "browser_model_error")
+                XCTAssertEqual(error["message"] as? String, failure.localizedDescription)
+                XCTAssertEqual(error["code"] as? String, code)
+                XCTAssertEqual(error["retryable"] as? Bool, false)
+                XCTAssertEqual(error["required_action"] as? String, action)
+                XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("response.completed"))
+                XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("function_call"))
+                XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("https://"))
+                let operations = await transport.operations()
+                XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1, "A recognized gate cannot start another browser session")
+                let expectedSends = point == .start || point == .readinessPoll ? 0 : 1
+                XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, expectedSends,
+                    "Preparation gates prevent Send; a gate recognized after Send cannot replay it")
+                let expectedPolls = point == .readinessPoll || point == .responsePoll ? 1 : 0
+                XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count, expectedPolls,
+                    "The first recognized gate exits the inference loop without another read attempt")
+                _ = await server.shutdown()
+            }
+        }
+    }
+
+    func testOnlyTypedExternalWebsiteGatesCanPublishRequiredRecoveryMetadata() throws {
+        let otherFailures: [any Error] = [EmbeddedWebModelTransport.Failure.pageUnavailable,
+            EmbeddedWebModelTransport.Failure.ownershipFailure(.routeAfter), WebModelServer.Failure.providerFailed,
+            NSError(domain: "fixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "website_verification_required"])]
+        for failure in otherFailures {
+            let data = try WebModelServer.errorBody(for: failure)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let error = try XCTUnwrap(body["error"] as? [String: Any])
+            XCTAssertEqual(Set(error.keys), ["type", "message"])
+            XCTAssertEqual(error["type"] as? String, "browser_model_error")
+            XCTAssertEqual(error["message"] as? String, failure.localizedDescription)
+            XCTAssertNil(error["code"])
+            XCTAssertNil(error["retryable"])
+            XCTAssertNil(error["required_action"])
+        }
+    }
+
+    private var externalGateCases: [(String, EmbeddedWebModelTransport.Failure, String, String)] {
+        [("browser/gemini", .humanVerificationRequired(.gemini), "website_verification_required", "complete_website_verification"),
+         ("browser/chatgpt", .signInRequired, "sign_in_required", "sign_in"),
+         ("browser/claude", .usageLimited(.claude), "website_usage_limit", "wait_for_quota_reset"),
+         ("browser/chatgpt", .unexpectedPage(.chatgpt), "unexpected_website_page", "inspect_website")]
+    }
+
     func testCleanupPreservesSafeReasonAndRetriesOnlyTheOwnedToken() async throws {
         for failure in [DiagnosticCleanupFailure.snapshot("web_document_changed"), .bridge("web_cleanup_unverified")] {
             let transport = DiagnosticWebModelTransport(cleanupFailure: failure)
@@ -795,6 +860,40 @@ private actor NeverReadyWebModelTransport: WebModelTransport {
 
 private enum DiagnosticFailurePoint: Sendable {
     case start, readinessPoll, sendSnapshot, sendThrown, responsePoll
+}
+
+/// Injects a native external-gate classification at an exact protocol phase.
+/// It supplies no provider response or model tool calls after that boundary.
+private actor ExternalGateWebModelTransport: WebModelTransport {
+    private let token = UUID().uuidString
+    private let point: DiagnosticFailurePoint
+    private let failure: EmbeddedWebModelTransport.Failure
+    private var ledger: [String] = []
+
+    init(point: DiagnosticFailurePoint, failure: EmbeddedWebModelTransport.Failure) {
+        self.point = point; self.failure = failure
+    }
+
+    func operations() -> [String] { ledger }
+
+    func request(operation: String, params: Data) async throws -> Data {
+        ledger.append(operation)
+        let response: [String: Any]
+        switch operation {
+        case "webProviderStart":
+            if point == .start { throw failure }
+            response = ["sessionToken": token, "state": point == .readinessPoll ? "loading" : "ready"]
+        case "webProviderPoll":
+            if point == .readinessPoll || point == .responsePoll { throw failure }
+            throw WebModelServer.Failure.invalidRequest
+        case "webProviderSend":
+            if point == .sendThrown { throw failure }
+            response = ["state": "running"]
+        case "webProviderFinish", "webProviderCancel": response = ["cleanup": "not_created"]
+        default: throw WebModelServer.Failure.invalidRequest
+        }
+        return try JSONSerialization.data(withJSONObject: response)
+    }
 }
 
 private enum DiagnosticCleanupFailure: Sendable {
