@@ -237,6 +237,71 @@ defineWebsiteModelChoiceTests('chatgpt', (owned = false) => {
 }, Element);
 
 describe('normal ChatGPT product provenance', () => {
+  test('recognized disabled Chat controls wait without proof or clicks until both actually enable', async () => {
+    const f = fixture({ response: false, normalRoot: true }); f.chatMode.disabled = true; f.workMode.disabled = true;
+    const pending = await f.inspect();
+    expect(pending).toMatchObject({ composer: true, chatModeReady: false, chatModeActionAvailable: false, chatModeHydrating: true, pending: true });
+    expect(pending.productModeEvidence).toBeUndefined(); expect(f.world.__computaChatProductMode).toBeUndefined();
+    expect(f.chatMode.clicks).toBe(0); expect(f.temporary.clicks).toBe(0);
+    f.chatMode.disabled = false;
+    expect(await f.inspect()).toMatchObject({ chatModeHydrating: true, pending: true });
+    expect(f.world.__computaChatProductMode).toBeUndefined();
+    f.workMode.disabled = false;
+    const ready = await f.inspect();
+    expect(ready).toMatchObject({ chatModeReady: true, productModeEvidence: { mode: 'chat', temporaryTransition: 'not_requested' } });
+    expect(ready.chatModeHydrating).toBeUndefined(); expect(f.chatMode.clicks).toBe(0); expect(f.temporary.clicks).toBe(0);
+    expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ temporary: true,
+      productModeEvidence: { temporaryTransition: 'acknowledged' } }); expect(f.temporary.clicks).toBe(1);
+  });
+
+  test('recognized disabled Work controls wait, then authorize exactly one enabled Chat switch', async () => {
+    const f = fixture({ response: false, normalRoot: true });
+    f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true';
+    f.chatMode.values['aria-disabled'] = 'true'; f.workMode.values['aria-disabled'] = 'true';
+    expect(await f.inspect()).toMatchObject({ chatModeHydrating: true, chatModeActionAvailable: false, pending: true });
+    expect(f.world.__computaChatProductMode).toBeUndefined(); expect(f.chatMode.clicks).toBe(0);
+    expect(await f.inspect({ action: 'ensureChatMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    delete f.chatMode.values['aria-disabled']; delete f.workMode.values['aria-disabled'];
+    expect(await f.inspect()).toMatchObject({ chatModeActionAvailable: true, chatModeReady: false });
+    expect(await f.inspect({ action: 'ensureChatMode' })).toMatchObject({ pending: true });
+    expect(f.chatMode.clicks).toBe(1);
+    expect(await f.inspect()).toMatchObject({ productModeEvidence: { mode: 'chat', temporaryTransition: 'not_requested' } });
+    expect(await f.inspect({ action: 'ensureChatMode' })).toMatchObject({ chatModeReady: true });
+    expect(f.chatMode.clicks).toBe(1); expect(f.temporary.clicks).toBe(0);
+  });
+
+  test('never-enabled controls grant only pending inspection, never product reads, edits or mode clicks', async () => {
+    const f = fixture({ response: false, normalRoot: true }); f.chatMode.disabled = true; f.workMode.disabled = true;
+    for (let step = 0; step < 3; step++) {
+      expect(await f.inspect()).toMatchObject({ chatModeHydrating: true, pending: true });
+      expect(f.world.__computaChatProductMode).toBeUndefined();
+    }
+    for (const action of ['ensureChatMode', 'verifyProductMode', 'enableTemporary', 'prepare', 'insert', 'sendReady', 'submit', 'discoverModels'])
+      expect(await f.inspect({ action })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.chatMode.clicks).toBe(0); expect(f.temporary.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+  });
+
+  test('hydration cannot excuse unknown or hidden pairs, past-proof disabled controls or prior action claims', async () => {
+    for (const mutate of [
+      (f: ReturnType<typeof fixture>) => { delete f.workMode.values['aria-pressed']; },
+      (f: ReturnType<typeof fixture>) => { f.workMode.values['aria-pressed'] = 'true'; },
+      (f: ReturnType<typeof fixture>) => { f.modeGroup.values['aria-hidden'] = 'true'; },
+      (f: ReturnType<typeof fixture>) => { f.modeGroup.values.inert = ''; },
+      (f: ReturnType<typeof fixture>) => { f.world.__computaChatModeClickClaimed = true; },
+      (f: ReturnType<typeof fixture>) => { f.world.__computaModelTemporaryRequested = true; },
+    ]) {
+      const f = fixture({ response: false, normalRoot: true }); f.chatMode.disabled = true; f.workMode.disabled = true; mutate(f);
+      const result = await f.inspect(); expect(result).toMatchObject({ error: 'product_mode_unverified' });
+      expect(result.chatModeHydrating).toBeUndefined(); expect(f.world.__computaChatProductMode).toBeUndefined();
+    }
+    const proven = fixture({ response: false, normalRoot: true }); await proven.inspect();
+    proven.chatMode.disabled = true; proven.workMode.disabled = true;
+    expect(await proven.inspect()).toMatchObject({ error: 'product_mode_unverified' });
+    expect((proven.world.__computaChatProductMode as any).invalidated).toBe(true);
+    proven.chatMode.disabled = false; proven.workMode.disabled = false;
+    expect(await proven.inspect()).toMatchObject({ error: 'product_mode_unverified' });
+  });
+
   test('normal Chat and Work share family labels; Chat is proven before one explicit temporary transition', async () => {
     const f = fixture({ response: false, normalRoot: true });
     const picker = installObservedModelPicker(f, 'chatgpt', Element);

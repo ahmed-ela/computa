@@ -997,6 +997,16 @@ function chatGPTProductModeAction(request) {
     return { chatModeReady: false, chatModeActionAvailable: false, pending: true };
   if (request.action === 'inspect' && fresh && root && actionAvailable)
     return { chatModeReady: false, chatModeActionAvailable: true };
+  const disabledControl = node => node.disabled === true || node.getAttribute('aria-disabled') === 'true';
+  if (request.action === 'inspect' && fresh && root && !globalThis.__computaChatProductMode
+    && globalThis.__computaChatModeClickClaimed !== true && globalThis.__computaModelTemporaryRequested !== true
+    && state.recognized && state.visible(state.group) && state.visible(state.chat) && state.visible(state.work)
+    && (disabledControl(state.chat) || disabledControl(state.work))) {
+    // The signed-in page briefly disables its already recognized Chat/Work
+    // pair while hydrating. This is only a bounded native readiness wait;
+    // neither provenance nor any click is authorized until both enable.
+    return { chatModeReady: false, chatModeActionAvailable: false, chatModeHydrating: true, pending: true };
+  }
   if (request.action === 'inspect' && fresh && root && !state.group && !document.querySelectorAll('#prompt-textarea, [contenteditable="true"]').length)
     return { chatModeReady: false, chatModeActionAvailable: false };
   return reject();

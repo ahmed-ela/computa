@@ -65,6 +65,156 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
     }
 
+    func testChatGPTDisabledRecognizedModePairWaitsForBothControlsBeforeProofTemporaryAndSend() async throws {
+        for initiallyWork in [false, true] {
+            var page = Self.page
+            if initiallyWork {
+                page = page.replacingOccurrences(of: "id=\"fixture-chat-mode\" aria-pressed=\"true\"", with: "id=\"fixture-chat-mode\" aria-pressed=\"false\"")
+                    .replacingOccurrences(of: "id=\"fixture-work-mode\" aria-pressed=\"false\"", with: "id=\"fixture-work-mode\" aria-pressed=\"true\"")
+            }
+            page = page.replacingOccurrences(of: "id=\"fixture-chat-mode\"", with: "id=\"fixture-chat-mode\" disabled")
+                .replacingOccurrences(of: "id=\"fixture-work-mode\"", with: "id=\"fixture-work-mode\" disabled")
+            let fixture = try Fixture(page: page)
+            defer { fixture.shutdown() }
+            let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(start["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            for _ in 0..<2 {
+                let waiting = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(waiting["state"] as? String, "loading")
+                XCTAssertNil(waiting["productModeEvidence"], "Disabled selected controls cannot establish normal Chat provenance")
+            }
+            _ = try await evaluate(view, "document.getElementById('fixture-chat-mode').disabled = false; return true;")
+            let partial = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(partial["state"] as? String, "loading", "A partially enabled pair cannot authorize the Chat or temporary click")
+            XCTAssertNil(partial["productModeEvidence"])
+            let untouched = try await evaluate(view, "return {chat: window.fixtureChatModeClicks, temporary: window.fixtureTemporaryModeClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+            XCTAssertEqual(untouched, ["chat": 0, "temporary": 0, "inputs": 0, "sends": 0])
+            let observedRevision = try await fixture.transport.changeRevision(sessionToken: token)
+            let revision = try XCTUnwrap(observedRevision)
+            _ = try await evaluate(view, "document.getElementById('fixture-work-mode').disabled = false; return true;")
+            let signaledRevision = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: .now + .seconds(1))
+            let signaled = try XCTUnwrap(signaledRevision)
+            XCTAssertGreaterThan(signaled, revision, "Enabling the actual controls must wake the existing DOM observer")
+            let ready = try await waitForState("ready", fixture.transport, token: token)
+            XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(ready["productModeEvidence"], requireTemporary: true))
+            XCTAssertEqual(view.url?.absoluteString, "https://chatgpt.com/?temporary-chat=true")
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Send once after mode hydration completes"])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true))
+            let ledger = try await evaluate(view, "return {chat: window.fixtureChatModeClicks, temporary: window.fixtureTemporaryModeClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+            XCTAssertEqual(ledger, ["chat": initiallyWork ? 1 : 0, "temporary": 1, "inputs": 1, "sends": 1])
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testChatGPTNeverEnabledModePairStopsAtPreparationDeadlineWithoutActions() async throws {
+        let page = Self.page.replacingOccurrences(of: "id=\"fixture-chat-mode\"", with: "id=\"fixture-chat-mode\" disabled")
+            .replacingOccurrences(of: "id=\"fixture-work-mode\"", with: "id=\"fixture-work-mode\" disabled")
+        let fixture = try Fixture(page: page)
+        defer { fixture.shutdown() }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(1), response: .seconds(300))
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        let end = ContinuousClock.now + .seconds(3)
+        var timedOut = false
+        while ContinuousClock.now < end {
+            let observedRevision = try await fixture.transport.changeRevision(sessionToken: token)
+            let revision = try XCTUnwrap(observedRevision)
+            do {
+                let waiting = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(waiting["state"] as? String, "loading")
+                XCTAssertNil(waiting["productModeEvidence"])
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline)
+                timedOut = true; break
+            }
+            _ = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: end)
+        }
+        XCTAssertTrue(timedOut, "Disabled mode controls cannot turn the existing preparation deadline into an unbounded wait")
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never insert into an unprepared product"])
+            XCTFail("A never-enabled mode pair cannot authorize Send")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .invalidRequest) }
+        let ledger = try await evaluate(view, "return {chat: window.fixtureChatModeClicks, temporary: window.fixtureTemporaryModeClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+        XCTAssertEqual(ledger, ["chat": 0, "temporary": 0, "inputs": 0, "sends": 0])
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTDisabledModeControlsAfterRootProofCannotRestartHydrationBeforeTemporaryClaim() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        var crossed = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "verifyProductMode", !crossed else { return }
+            let proof = try? await self.evaluate(view, "return {present: !!globalThis.__computaChatProductMode, temporaryRequested: globalThis.__computaChatProductMode?.temporaryRequested === true};",
+                world: .world(name: "computa-chatgpt-model-v1")) as? [String: Bool]
+            XCTAssertEqual(proof, ["present": true, "temporaryRequested": false], "The controls must lose enabling after real root Chat proof and before the temporary action")
+            crossed = true
+            _ = try? await self.evaluate(view, """
+                document.getElementById('fixture-chat-mode').disabled = true;
+                document.getElementById('fixture-work-mode').disabled = true;
+                return true;
+                """)
+        }
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("Lost root product proof cannot become initial pending hydration")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .productModeUnverified) }
+        XCTAssertTrue(crossed)
+        _ = try await evaluate(view, "document.getElementById('fixture-chat-mode').disabled = false; document.getElementById('fixture-work-mode').disabled = false; return true;")
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("Re-enabling controls cannot revive the invalidated product proof or failed inference")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .productModeUnverified) }
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Do not reuse lost normal Chat proof"])
+            XCTFail("Invalidated root provenance cannot authorize insertion or Send")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .productModeUnverified) }
+        let ledger = try await evaluate(view, "return {chat: window.fixtureChatModeClicks, temporary: window.fixtureTemporaryModeClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+        XCTAssertEqual(ledger, ["chat": 0, "temporary": 0, "inputs": 0, "sends": 0])
+    }
+
+    func testChatGPTAcknowledgedTemporaryModeRetainsProofWithLockedComplementaryControls() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(ready["productModeEvidence"], requireTemporary: true))
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        _ = try await evaluate(view, "globalThis.__fixtureAcknowledgedProductProof = globalThis.__computaChatProductMode; return true;", world: privateWorld)
+        _ = try await evaluate(view, """
+            document.getElementById('fixture-composer-mode').hidden = false;
+            document.getElementById('fixture-chat-mode').disabled = true;
+            document.getElementById('fixture-work-mode').disabled = true;
+            return true;
+            """)
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Continue under the established normal Chat and actual temporary proof"])
+        XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(sent["productModeEvidence"], requireTemporary: true))
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true))
+        let retained = try await evaluate(view, "return {same: globalThis.__fixtureAcknowledgedProductProof === globalThis.__computaChatProductMode, invalidated: globalThis.__computaChatProductMode?.invalidated === true, requested: globalThis.__computaChatProductMode?.temporaryRequested === true, acknowledged: globalThis.__computaChatProductMode?.temporaryAcknowledged === true};", world: privateWorld) as? [String: Bool]
+        XCTAssertEqual(retained, ["same": true, "invalidated": false, "requested": true, "acknowledged": true],
+            "Complementary locked controls retain existing acknowledged proof without acquiring new hydration provenance")
+        let ledger = try await evaluate(view, "return {chat: window.fixtureChatModeClicks, temporary: window.fixtureTemporaryModeClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+        XCTAssertEqual(ledger, ["chat": 0, "temporary": 1, "inputs": 1, "sends": 1])
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testChatGPTMissingConflictingOrDirectTemporaryProductModeCannotBecomeReady() async throws {
         for variant in ["missing", "conflicting", "direct_temporary"] {
             let fixture = try Fixture(initialURL: variant == "direct_temporary" ? URL(string: "https://chatgpt.com/?temporary-chat=true") : nil)

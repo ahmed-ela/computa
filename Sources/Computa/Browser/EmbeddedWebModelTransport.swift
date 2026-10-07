@@ -594,6 +594,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if observed["signIn"] as? Bool == true { throw Failure.signInRequired }
             if session.provider == .chatgpt, observed["chatModeReady"] as? Bool != true {
                 guard !session.temporaryRequested, !session.temporary else { throw Failure.productModeUnverified }
+                // A recognized complementary pair may hydrate disabled on a
+                // fresh root. Only the adapter's fixed pre-proof signal can
+                // wait for enabling; it authorizes no action or readiness.
+                if observed["chatModeHydrating"] as? Bool == true {
+                    guard observed["pending"] as? Bool == true, observed["chatModeActionAvailable"] as? Bool == false,
+                          !session.chatModeRequested, session.productModeEvidence == nil, !session.modelSelectionRequested,
+                          !session.submitted, session.sequence == 0 else { throw Failure.productModeUnverified }
+                    return try snapshot(session)
+                }
                 if observed["chatModeActionAvailable"] as? Bool == true {
                     if !session.chatModeRequested {
                         session.chatModeRequested = true
