@@ -23,7 +23,8 @@ let package = Package(
                 .copy("Resources/WebUI"),
                 .copy("Resources/VisualGrounding"),
                 .copy("Resources/AgentRuntime"),
-                .copy("Resources/MLXServer")
+                .copy("Resources/MLXServer"),
+                .copy("Resources/BrowserModels")
             ]
         ),
         .testTarget(

@@ -1,4 +1,4 @@
-import type { AppSnapshot, EntrySnapshot, NativeAction, TaskSnapshot } from './types';
+import type { AppSnapshot, EntrySnapshot, NativeAction, ReviewScope, ReviewState, TaskSnapshot } from './types';
 import { reorderQueuedPrompts } from './promptQueue';
 
 const previewWorkspace = '/Users/preview/Projects/localcodex-demo';
@@ -6,6 +6,28 @@ const model27B = 'mlx-community/Qwen3.8-27B-4bit';
 const model35B = 'lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit';
 const model9B = 'lmstudio-community/Qwen3.5-9B-MLX-4bit';
 const model4B = 'lmstudio-community/Qwen3.5-4B-MLX-4bit';
+
+function previewReview(taskID: string, scope: ReviewScope = 'lastTurn', reference = '', revision = 1): ReviewState {
+  const header = '@@ -1,3 +1,4 @@';
+  return {
+    taskID, scope, reference, loading: false,
+    snapshot: {
+      id: `preview-review-${taskID}-${scope}-${reference}-${revision}`, revision: `preview-${revision}`,
+      workspace: previewWorkspace, scope, ...(scope === 'branch' || scope === 'commit' ? { reference } : {}),
+      canStage: scope === 'unstaged', canUnstage: scope === 'staged', canRevert: scope === 'unstaged',
+      files: [
+        { id: 'preview-source', path: 'src/greeting.ts', status: 'modified', additions: 2, deletions: 1,
+          binary: false, truncated: false, hunks: [{ id: 'preview-source-hunk', header, oldStart: 1, newStart: 1 }],
+          diff: `diff --git a/src/greeting.ts b/src/greeting.ts\n--- a/src/greeting.ts\n+++ b/src/greeting.ts\n${header}\n export function greeting(name: string) {\n-  return 'Hello';\n+  const label = name.trim() || 'friend';\n+  return \`Hello, \${label}\`;\n }\n` },
+        { id: 'preview-readme', path: 'README.md', status: 'added', additions: 2, deletions: 0,
+          binary: false, truncated: false, hunks: [{ id: 'preview-readme-hunk', header: '@@ -0,0 +1,2 @@', oldStart: 0, newStart: 1 }],
+          diff: 'diff --git a/README.md b/README.md\nnew file mode 100644\n--- /dev/null\n+++ b/README.md\n@@ -0,0 +1,2 @@\n+# Greeting fixture\n+Synthetic preview data only.\n' },
+        { id: 'preview-binary', path: 'assets/sample.png', status: 'modified', additions: 0, deletions: 0,
+          binary: true, truncated: false, hunks: [], diff: 'Binary files a/assets/sample.png and b/assets/sample.png differ\n' },
+      ],
+    },
+  };
+}
 
 function makePreviewSnapshot(): AppSnapshot {
 const now = Math.floor(Date.now() / 1000);
@@ -239,6 +261,8 @@ return {
   isInspectorPresented: false,
   isBrowserPresented: false,
   isSettingsPresented: false,
+  isReviewPresented: false,
+  review: previewReview('preview-running'),
 };
 }
 
@@ -287,6 +311,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
           ...snapshot,
           selectedTaskID: task.id,
           selectedEntryID: task.entries.at(-1)?.id,
+          review: previewReview(task.id, snapshot.review?.scope, snapshot.review?.reference, snapshot.revision + 1),
         });
         return;
       }
@@ -306,6 +331,13 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
           queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false,
         };
         publish({ ...snapshot, tasks: [task, ...snapshot.tasks], selectedTaskID: task.id, selectedEntryID: undefined });
+        return;
+      }
+
+      case 'chooseTaskWorkspace': {
+        const task = snapshot.tasks.find((candidate) => candidate.id === action.taskID);
+        if (!task || task.status !== 'Draft' || task.entries.length || task.isBusy) return;
+        updateTask(task.id, (candidate) => ({ ...candidate, workspace: previewWorkspace }));
         return;
       }
 
@@ -479,6 +511,27 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
 
       case 'toggleInspector':
         publish({ ...snapshot, isInspectorPresented: !snapshot.isInspectorPresented });
+        return;
+      case 'toggleReview': {
+        const task = selectedTask();
+        if (!task) return;
+        publish({ ...snapshot, isReviewPresented: !snapshot.isReviewPresented,
+          review: snapshot.review?.taskID === task.id ? snapshot.review : previewReview(task.id) });
+        return;
+      }
+      case 'setReviewScope':
+        publish({ ...snapshot, review: previewReview(action.taskID, action.scope, snapshot.review?.reference, snapshot.revision + 1) });
+        return;
+      case 'setReviewReference':
+        publish({ ...snapshot, review: previewReview(action.taskID, snapshot.review?.scope, action.reference, snapshot.revision + 1) });
+        return;
+      case 'refreshReview':
+        publish({ ...snapshot, review: previewReview(action.taskID, snapshot.review?.scope, snapshot.review?.reference, snapshot.revision + 1) });
+        return;
+      case 'reviewMutation':
+      case 'openReviewFile':
+        if (!snapshot.review || snapshot.review.snapshot?.id !== action.snapshotID) return;
+        publish({ ...snapshot, review: { ...snapshot.review, error: 'Preview only. No files or Git index were changed, and no external editor was opened.' } });
         return;
       case 'toggleBrowser':
         // The actual browser is a native sibling, not an iframe in this preview.

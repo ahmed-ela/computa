@@ -133,6 +133,11 @@ inspection. No shared Python installation is used.
 
 ## Produce a release
 
+New testing releases use `vMAJOR.MINOR.PATCH-alpha.N`, with the Apple build
+number as `N`. [The alpha release procedure](RELEASING.md) covers local signing
+and draft upload followed by automatic verification/publication. The historical
+preview checkpoint below remains unchanged; it is not a current published alpha.
+
 Maintainers need a built app, an installed Developer ID Application identity,
 Bun, and the standard macOS development tools. The
 [source build instructions](BUILDING.md) are separate from the recipient's
@@ -158,7 +163,7 @@ For a deliberately non-notarized preview:
 bun Scripts/package-release.ts \
   --app /absolute/path/signed/Computa.app \
   --output /absolute/path/release-output \
-  --tag v0.1.0-preview.1 --channel signed-test
+  --tag v0.1.2-alpha.3 --channel signed-test
 ```
 
 The normal default channel is `notarized`. It additionally requires a stapled
@@ -169,8 +174,9 @@ recompute its entry in the external `SHA256SUMS` before publishing because those
 operations change its bytes. Do not describe a `signed-test` asset as notarized.
 
 `--tag` is required. Optional `--version` must equal the tag without its leading
-`v`; for this preview it is `0.1.0-preview.1`. The manifest records that release
-version separately from the app's `0.1.0` bundle version. Existing output assets
+`v`; for this alpha example it is `0.1.2-alpha.3`. The manifest records that release
+version separately from the app's `0.1.2` bundle version. Use the matching app
+version and build from your actual qualified source. Existing output assets
 are never overwritten.
 
 The packager validates the app identity, architecture, minimum macOS version,

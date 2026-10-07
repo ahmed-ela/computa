@@ -11,7 +11,7 @@ The shipped `goclick-guiowl-showui-agreement-v2` worker uses this fixed cascade:
 3. Select the closest valid pair across the available points.
 4. Return the pair midpoint only when its distance is at most that same 3% threshold; otherwise return the structured `no_pair_agreement` refusal.
 
-The Swift client parses the worker's restricted response and independently recomputes the pair selection, threshold, and midpoint. A model's free-form output never becomes a click coordinate directly. Production then performs capture identity, complete-window freshness, focus/occlusion, approval, and post-approval freshness checks before posting native input.
+The Rust client parses the worker's restricted response and independently recomputes the pair selection, threshold, and midpoint. A model's free-form output never becomes a click coordinate directly. Production then performs capture identity, complete-window freshness, focus/occlusion, approval, and post-approval freshness checks before posting native input. Global input remains unresolved until explicit verification establishes a changed, originally observed property. A post-action image grants no reusable pointer authority.
 
 The tool is offered only to the Qwen3.5 4B and 9B options on this 24 GB Mac. It is a native-window fallback after Accessibility; brokered Chrome uses the semantic tab/DOM path and rejects screenshot-coordinate tools.
 
@@ -29,17 +29,17 @@ Each row includes the exact expected bounding box. An accepted point is a hit on
 
 ## Run
 
-Install and verify the sidecar first, then replay the source-tree worker against the installed pinned runtime and weights:
+Build the Rust grounding worker with `native-mlx`, stage it beside its exact generated `mlx.metallib` and `manifest.json`, and supply an explicitly reviewed installed model root. The runner never downloads or substitutes weights:
 
 ```sh
-Scripts/install-visual-grounding.sh
-
-PYTHONDONTWRITEBYTECODE=1 \
-  Benchmarks/VisualGrounding/run-production-cascade.py \
-  --output ../outputs/LocalCodex-production-grounding-cascade-2026-09-24.json
+cargo run -p xtask -- grounding-cascade \
+  --corpus /absolute/path/to/VisualGrounding/corpus.json \
+  --worker /absolute/path/to/InferenceRuntime/computa-grounding-worker \
+  --model-root /absolute/path/to/reviewed/VisualGrounding/models \
+  --output /absolute/path/to/fresh-private-audit-directory
 ```
 
-The runner creates a private request directory, copies each image to a unique request path, starts one worker process, waits for its explicit ready record, executes all 91 requests serially, requests a clean shutdown, and requires the child process to exit. Worker stderr is retained in a temporary file while it runs so pipe backpressure cannot deadlock the benchmark.
+The Rust runner retains each fixture's exact PNG bytes and hashes, starts one owned worker process, requires its exact parent/instance/three-model ready record, and warms all three production models through a closed benchmark-only request. It executes all 91 requests serially over bounded length-prefixed frames, verifies capture/target hashes and dimensions on every reply, independently checks the frozen midpoint, requests a clean shutdown, and requires the exact child to exit and be reaped. Missing reviewed artifacts stop the run with a finite failed audit; synthetic coordinates cannot qualify a live replay. `cascade.json` retains the report in the private output directory.
 
 Latency definitions:
 
@@ -50,9 +50,9 @@ Latency definitions:
 
 The p95 is a percentile over one serial, uncontended pass through this correlated task mix. It is not a repeated-process service-tail estimate. OS, filesystem, and Metal caches are not cleared. Use multiple fresh-process runs and an unseen-app corpus before making broader cold-start, reliability, or tail-latency claims.
 
-## Verified result on this Mac
+## Historical Swift/Python result on this Mac
 
-The final production-worker replay on September 24, 2026 completed all 91 requests and shut down cleanly:
+The earlier Swift/Python production-worker replay on September 24, 2026 completed all 91 requests and shut down cleanly. This historical result does not qualify the Rust tensor implementation or Rust worker:
 
 | Result | Value |
 | --- | ---: |
@@ -95,14 +95,14 @@ The retained artifacts are `LocalCodex-showui-alone-production-contract-2026-09-
 
 The corpus replay verifies deterministic routing, grounding accuracy on retained fixtures, refusal behavior, and worker lifecycle. Product acceptance additionally requires:
 
-- Python protocol and parsing tests;
-- Swift decision, cancellation, worker-restart, temp-file, and runtime-lifecycle tests;
-- an Xcode-built app whose resource bundle contains the worker/manifests and no Python bytecode caches;
+- Rust protocol, exact architecture/processor, and frozen upstream numerical fixture tests;
+- Rust decision, cancellation, worker-restart, artifact, and runtime-lifecycle tests;
+- a native app whose resource bundle contains the exact worker/manifests and Metal closure;
 - the opt-in Calculator gate, which approves only a grounded point independently proven inside Calculator's digit-1 AX frame, verifies the display transition through a fresh AX read, verifies raw App Server lifecycle evidence, and requires clean runtime shutdown.
 
 The Calculator gate is intentionally separate because a retained-image hit is not proof that capture, model tool choice, approval, coordinate conversion, click delivery, post-action verification, and cleanup work together on the live desktop.
 
-The September 24 baseline opt-in run with Qwen3.5-4B passed that gate in 25.753 seconds: exactly `open → capture → ground_click → snapshot`, an independently verified digit-1 point, Calculator display transition `0 → 1`, matching rollout/raw-wire lifecycles, and successful owned cleanup. The immediately preceding attempt safely returned an occlusion error because a stale full-display macOS Screenshot overlay was above the target; it posted no click.
+The historical September 24 Swift baseline opt-in run with Qwen3.5-4B passed that gate in 25.753 seconds: exactly `open → capture → ground_click → snapshot`, an independently verified digit-1 point, Calculator display transition `0 → 1`, matching rollout/raw-wire lifecycles, and successful owned cleanup. The immediately preceding attempt safely returned an occlusion error because a stale full-display macOS Screenshot overlay was above the target; it posted no click.
 
 After the runtime began preparing the sidecar in parallel with Qwen and `ground_click` began returning a fresh verification-only screenshot with synchronized Accessibility, a settled-app rerun passed with exactly `open → capture → ground_click` in 18.904 seconds of XCTest wall time. The raw wire turn fell from 23.885 to 17.051 seconds (28.6%), while tool time fell from 10.751 to 3.369 seconds (68.7%). The verification observation carried no reusable `capture_id`; Qwen explicitly reported reading the visible `1` from its screenshot, while the synchronized AX text did not contain the display value. Total input-plus-output tokens fell from 19,010 to 15,254 (19.8%). Non-tool/Qwen time was 13.682 seconds, 80.2% of the optimized wire turn and 4.2% above the baseline run; the six-second capture-to-ground planning interval is now the largest single stage. This is one before/after run, potentially affected by model and OS caches, not a latency distribution. One preceding run safely reported post-action uncertainty while Calculator pixels were still moving, after which Qwen requested a separate capture and verified the result without repeating the click. Other intervening runs safely refused a duplicate visible digit, a changed capture, and a still-moving cold-launch window without posting a wrong click.
 

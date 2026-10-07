@@ -141,6 +141,137 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
     }
 
+    /// Exercise the real split shell with both ownership classes present.
+    /// The private page is rendered normally, behind the opaque workspace,
+    /// while only the human page is mounted in the Browser pane.
+    @MainActor
+    func testPrivateModelStaysBehindRealWorkspaceAcrossHumanPanePresentation() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [AgentTask(title: "Background model fixture",
+            summary: "Isolated browser ownership rendering", status: .draft, workspace: "", model: "local")],
+            preferences: isolatedTestPreferences(), browserSession: session)
+        let humanID = try session.createTab()
+        let human = try XCTUnwrap(session.webView(for: humanID))
+        human.loadHTMLString("""
+            <!doctype html><title>Human browser fixture</title>
+            <style>html,body{margin:0;min-height:100%;background:#fff}</style>
+            <main id="human-page">Only the human page belongs in Browser.</main>
+            """, baseURL: nil)
+        let modelID = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let model = try XCTUnwrap(session.webView(for: modelID))
+        let privateLabel = "PRIVATE_MODEL_FIXTURE_MUST_NOT_BE_A_BROWSER_TAB"
+        model.loadHTMLString("""
+            <!doctype html><title>\(privateLabel)</title>
+            <style>html,body{margin:0;min-height:100%;background:#ff00ff}</style>
+            <input id="model-editor"><main>Private model rendering fixture</main>
+            """, baseURL: URL(string: "https://chatgpt.com/"))
+        state.isBrowserPresented = true
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state).environment(\.colorScheme, .light))
+        hosting.frame = NSRect(x: 0, y: 0, width: 1280, height: 820)
+        let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = hosting
+        defer { window.close() }
+        let keyWindow = NSApplication.shared.keyWindow
+        await settleLayout(hosting)
+        let humanReady = await waitForScriptBool(on: human, script: "Boolean(document.getElementById('human-page'))")
+        let modelReady = await waitForScriptBool(on: model, script: "document.title === '\(privateLabel)'")
+        XCTAssertTrue(humanReady)
+        XCTAssertTrue(modelReady)
+        await settleLayout(hosting)
+        let backing = try XCTUnwrap(model.superview as? EmbeddedModelRenderContainer)
+        let humanContainer = try XCTUnwrap(human.superview)
+        XCTAssertFalse(humanContainer === backing)
+        XCTAssertTrue(human.isDescendant(of: hosting), "The actual selected human view is presented by the real Browser pane")
+        XCTAssertTrue(model.isDescendant(of: hosting), "The private model remains a live rendered WebKit view in the existing window")
+        XCTAssertFalse(model.isDescendant(of: humanContainer))
+        XCTAssertTrue(model.window === window)
+        XCTAssertFalse(model.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(model.frame.size, NSSize(width: 1_024, height: 768))
+        XCTAssertEqual(session.humanTabs.map(\.id), [humanID])
+        XCTAssertFalse(session.humanTabs.contains { $0.title == privateLabel }, "The Browser tab-strip data has no inference label")
+        XCTAssertEqual(backing.accessibilityChildren()?.count ?? 0, 0,
+                       "The native render host must not expose private model content through accessibility")
+        XCTAssertNil(backing.hitTest(NSPoint(x: 20, y: 20)))
+        XCTAssertEqual(session.selectedTabID, humanID)
+        XCTAssertFalse(window.isVisible)
+        XCTAssertFalse(window.isKeyWindow)
+        XCTAssertTrue(NSApplication.shared.keyWindow === keyWindow)
+
+        // cacheDisplay cannot include WebKit compositor layers in an unordered
+        // window. Sample the native shell's backing opacity, and export actual
+        // WebKit surfaces separately when a visual receipt is requested.
+        let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+        for fraction in [0.1, 0.5, 0.9] {
+            let x = min(bitmap.pixelsWide - 1, Int(Double(bitmap.pixelsWide) * fraction))
+            let y = min(bitmap.pixelsHigh - 1, Int(Double(bitmap.pixelsHigh) * 0.5))
+            let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+            XCTAssertGreaterThanOrEqual(color.alphaComponent, 0.99, "Opaque shell coverage prevents the underlying model surface from showing through")
+        }
+        let environment = ProcessInfo.processInfo.environment
+        if let path = environment["COMPUTA_BACKGROUND_MODEL_RENDER_PATH"]
+            ?? environment["TEST_RUNNER_COMPUTA_BACKGROUND_MODEL_RENDER_PATH"] {
+            let base = URL(fileURLWithPath: path).deletingPathExtension()
+            try writeWorkspacePNG(hosting, path: path)
+            try await writeWebSnapshot(human, path: base.path + "-human.png")
+            try await writeWebSnapshot(model, path: base.path + "-private-model.png")
+        }
+
+        let addressField = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? NSTextField }
+            .first { $0.isEditable && ($0.placeholderString == "Search or enter a website address"
+                || $0.accessibilityIdentifier() == "browser-address") },
+            "Use the real Browser address control's shared field editor")
+        addressField.selectText(nil)
+        let input = try XCTUnwrap(window.firstResponder as? NSTextView)
+        XCTAssertTrue(input.isFieldEditor)
+        XCTAssertTrue(addressField.currentEditor() === input)
+        let unsentAddress = "UNSENT browser address sentinel"
+        input.insertText(unsentAddress, replacementRange: NSRange(location: 0, length: input.string.utf16.count))
+        let unsentSelection = NSRange(location: 7, length: 7)
+        input.setSelectedRange(unsentSelection)
+        XCTAssertEqual(input.string, unsentAddress)
+        await Task.yield()
+        session.captureModelNativeFocus(tabID: modelID)
+        let modelFocused = await waitForScriptBool(on: model, script: "document.getElementById('model-editor').focus(); document.activeElement === document.getElementById('model-editor')")
+        XCTAssertTrue(modelFocused)
+        session.restoreModelNativeFocus(tabID: modelID)
+        await Task.yield()
+        let activeAddressEditor = try XCTUnwrap(window.firstResponder as? NSTextView)
+        XCTAssertTrue(activeAddressEditor.isFieldEditor)
+        XCTAssertTrue(addressField.currentEditor() === activeAddressEditor)
+        XCTAssertEqual(activeAddressEditor.string, unsentAddress)
+        XCTAssertEqual(activeAddressEditor.selectedRange(), unsentSelection)
+
+        state.isBrowserPresented = false
+        await settleLayout(hosting)
+        XCTAssertEqual(session.selectedTabID, humanID)
+        XCTAssertTrue(model.superview === backing)
+        XCTAssertTrue(model.window === window)
+        XCTAssertFalse(model.isHiddenOrHasHiddenAncestor)
+        state.isBrowserPresented = true
+        await settleLayout(hosting)
+        XCTAssertTrue(human.isDescendant(of: hosting))
+        XCTAssertFalse(model.isDescendant(of: try XCTUnwrap(human.superview)))
+        XCTAssertTrue(model.superview === backing)
+        XCTAssertEqual(session.selectedTabID, humanID)
+        // Human hide/show is allowed to end editing; inference alone above is
+        // the regression boundary that must preserve unsent text and focus.
+
+        session.closeTab(humanID)
+        await settleLayout(hosting)
+        XCTAssertTrue(session.humanTabs.isEmpty)
+        XCTAssertNil(session.selectedTabID)
+        XCTAssertEqual(session.tabs.map(\.id), [modelID])
+        XCTAssertTrue(model.superview === backing, "An empty human pane cannot adopt a retained inference view")
+        XCTAssertNil(human.superview)
+        XCTAssertFalse(window.isVisible)
+        XCTAssertFalse(window.isKeyWindow)
+        XCTAssertTrue(NSApplication.shared.keyWindow === keyWindow)
+    }
+
     @MainActor
     func testOpeningAndHidingPaneDoesNotCreateOrDestroyTabs() throws {
         let session = EmbeddedBrowserSession(persistent: false)
@@ -223,6 +354,15 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             pending.append(contentsOf: view.subviews)
         }
         return result
+    }
+
+    @MainActor
+    private func settleLayout(_ hosting: NSView) async {
+        for _ in 0..<4 {
+            hosting.layoutSubtreeIfNeeded()
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        hosting.layoutSubtreeIfNeeded()
     }
 
     @MainActor

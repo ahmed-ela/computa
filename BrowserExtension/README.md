@@ -225,3 +225,116 @@ and app/browser restarts without recurring remote-debugging prompts; another
 foreground app receiving user input while background actions complete; Cancel,
 DevTools conflict, sleep/wake, helper/worker termination; and idle CPU/RSS plus
 action-latency measurements. Unit tests are not evidence of these live results.
+
+### Website model transport
+
+The native app can use `webProviderStart`, `webProviderSend`, `webProviderPoll`,
+`webProviderFinish`, and `webProviderCancel` through the existing authenticated
+bridge envelope. These commands use Chrome's existing signed-in profile. No
+additional extension permissions or separate browser process are needed.
+
+In Computa's Swift app, choose **Gemini · Chrome** or **Claude · Chrome** and
+sign into that provider in the paired Chrome profile. **ChatGPT · Built-in
+browser** instead uses the app-owned WebKit profile: sign into `chatgpt.com` in
+Computa's Browser pane. That ChatGPT route does not require Chrome or this
+extension. The bridge's `chatgpt` operation remains available to other transport
+clients. No provider API key is needed.
+
+The built-in ChatGPT adapter opens a separate owned Temporary Chat, preserves
+the human tab, and closes the owned tab after verified cleanup at the end of the
+native turn. It waits for navigation and private-world DOM-change notifications
+coalesced over approximately 100 ms, while this extension retains its existing
+polling contract. Both routes keep transcripts locally and support text,
+Accessibility and terminal tools through Computa's harness; image/screenshot and
+audio inputs remain unsupported. These transport descriptions do not establish
+live end-to-end qualification.
+
+After updating this unpacked developer extension, reload it once from Chrome's
+Extensions page to activate the changed JavaScript. Reopening Computa reconnects
+the remembered pairing but does not replace Chrome's loaded extension code.
+
+The Rust bridge reconnects its authenticated native helper with one timer and
+an attempt delay capped at 30 seconds. Opening Computa reuses the remembered
+installation and Keychain pairing, and no pending website request is replayed.
+An unsupported operation means Chrome still has an older extension worker
+loaded; that update needs one developer-extension reload, not a reload per chat.
+
+The signed Rust app can repair its native-host registration only when launched
+from the OS account's `Applications/Computa.app`. It verifies that exact app and
+its bundled `ChromeBridgeHost` have the required identities and signing Team,
+then publishes only the fixed host name and installed extension origin. A
+matching signed old registration gets a private backup. Foreign, changed or
+unverifiable registrations are rejected. Staged apps and qualification fixtures
+cannot repoint the live registration. These source checks do not constitute
+proof that an installed extension has been activated or a live website chat has
+completed.
+
+| Operation | Parameters | Result |
+| --- | --- | --- |
+| `webProviderStart` | `{provider: "chatgpt" \| "gemini" \| "claude"}` | New inactive owned tab; `state: "loading"`, `sessionToken` |
+| `webProviderPoll` | `{sessionToken}` | `loading`, `ready`, `running`, `complete`, `needs_sign_in`, or `failed`; bounded current response `text` and per-send `sequence` |
+| `webProviderSend` | `{sessionToken, prompt}` | One submission; `state: "running"`. Call only after `ready` or `complete`. |
+| `webProviderFinish` | `{sessionToken}` | Closes the owned temporary tab; `state: "finished"`, `cleanup: "not_created"` on success |
+| `webProviderCancel` | `{sessionToken}` | Stops the owned response, then performs the same cleanup |
+
+Every website session starts from an empty new conversation. Before sending,
+ChatGPT's temporary-chat control, Gemini's visible temporary-chat notice, or
+Claude's Incognito chat badge and Exit incognito control must be observed.
+Continued temporary-mode evidence is checked again at cleanup.
+Temporary sessions do not create entries in the provider's saved chat history;
+`not_created` reports that fact, and does not claim immediate erasure from the
+provider's internal retention systems. The app remains responsible for its local
+transcript and for calling finish/cancel at the end of the logical native turn.
+Multiple tool-result sends can share that same website session. Claude begins
+at its empty `/new` page and enables Incognito before any prompt is entered;
+existing saved `/chat` conversations are never adopted. Its reply body is read
+without the screen-reader heading or message toolbar, and a streaming reply
+cannot be considered complete even if a Copy control is already present.
+Because Claude keeps its incognito `/new` URL throughout a chat, the bridge also
+pins its CDP main-document loader identity at readiness and verifies the owned
+user-message count before composer actions, polling, and cleanup. Each send must
+add exactly one user message before its reply can complete. Reloads, resets, or
+extra messages permanently revoke cleanup authority and leave the tab open;
+worker recovery preserves these identity checks. A final Send whose acknowledgement
+was lost can be cleaned up only with the previous confirmed count or its one
+pending submission.
+The first outbound Claude prompt also carries a fresh opaque session marker.
+Only a rendered first user message containing that exact marker can establish
+ownership; the bridge then pins its nearest DOM ancestor ID and a SHA-256 digest
+of its normalized rendered body. Later actions, cleanup, and worker recovery
+check both, so a replacement chat with the same document and message count
+cannot acquire authority. Rendering Markdown does not need to reproduce the raw
+prompt bytes. The digest operation rechecks the same message node and body after
+its asynchronous wait, and the recovery ledger stores the marker, ID, and digest
+without storing prompt or response text.
+An interrupted reply fails before tool parsing, while cleanup can still close
+its verified owned incognito tab.
+
+Claude's [official incognito documentation](https://support.claude.com/en/articles/12260368-use-incognito-chats)
+confirms that these chats are excluded from chat history and memory, with
+provider-side retention of 30 days by default (Enterprise retention can differ).
+
+Only extension-owned fixed DOM actions run. Prompt text is inserted with Chrome's
+`Input.insertText`; arbitrary JavaScript, URLs, target IDs and model-supplied DOM
+selectors are not accepted. Response extraction is restricted to the owned tab.
+Completion requires a final-answer control, no stop-generation control, and
+stable text for 1.6 seconds. Readiness is capped at 45 seconds and each response
+at 180 seconds; polling requests never wait for the entire generation.
+During Claude's initial navigation, a fresh, unsubmitted session can retry
+read-only document inspection within that readiness deadline. It cannot send a
+prompt until its stable empty page and Incognito mode are verified. Document
+replacement after readiness still revokes ownership. A failed unsent session
+can close only its positively inspected, stable, empty starting page.
+
+A failed cleanup returns `cleanup: "failed"` with an error and leaves the owned
+tab open for inspection. It never deletes preexisting conversations or falls
+back to bulk history deletion. A Chrome session-storage ledger records only
+owned tab identities and temporary-mode state, so worker restarts can clean up
+verified owned temporary tabs without resubmitting prompts. It contains no
+prompt, response, credentials, or pairing token, and expires with the browser
+session. Unverified recovery is exposed as `webProviderCleanupFailures` in popup
+status; disconnect cleanup failures also emit `webProviderCleanupFailed`.
+
+The native transport interface can replace these website operations with a VM
+implementation later; DOM adaptation and Chrome tab ownership remain confined
+to this module.

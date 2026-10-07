@@ -12,16 +12,16 @@ role; it must not establish success by removing the policy.
 ## Inputs
 
 Run only while Computa's owned model server is idle, with the operator coordinating
-exclusive serial inference. The script checks the exact owned launch UUID before
+exclusive serial inference. The Rust runner checks the exact owned launch UUID before
 every request and stops instead of waiting/retrying if the model is busy. It never
 starts a server, changes a model, or changes settings.
 
 ```
-bun Benchmarks/InstructionIsolation/run.ts \
-  /absolute/sanitized-request-template.json \
-  /absolute/candidate-developer-scope.txt \
-  /absolute/empty-private-output-directory \
-  exact-owned-mlx-launch-uuid
+cargo run --offline -p xtask -- instruction-isolation \
+  --template /absolute/sanitized-request-template.json \
+  --candidate /absolute/candidate-developer-scope.txt \
+  --output /absolute/empty-private-output-directory \
+  --instance rust:exact-owned-mlx-launch-uuid
 ```
 
 The output directory must already exist, have mode `0700`, be empty, and be outside
@@ -30,10 +30,9 @@ the repository. Input files must be bounded regular files, not symlinks.
 The JSON template uses normal Responses request fields:
 
 - `model`: `lmstudio-community/Qwen3.5-4B-MLX-4bit`.
-- `instructions`: the frozen historical base instructions beginning
-  `You are HeyDash.` or `You are Macndash.`, exactly as accepted by this retained
-  experiment. Current Computa instructions are not accepted unchanged; renaming
-  the prose does not revise that historical input contract.
+- `instructions`: unchanged production base instructions beginning
+  `You are Computa.`, or the retained historical `You are HeyDash.` /
+  `You are Macndash.`. The Rust runner accepts each prefix without rewriting it.
 - `input`: only complete policy-bearing `# AGENTS.md instructions for ...`
   user messages, plus production system/developer messages if any. **Remove real
   user questions, assistant responses, tool output, and personal/browser data.**
@@ -48,6 +47,20 @@ The candidate text is appended unchanged as a developer message. All other
 instructions, policy bytes, model settings, tool schemas, and task fixtures are
 identical. Baseline/candidate order alternates by case to reduce simple warmup
 bias. There is only one run per arm/case and no automatic retries.
+
+The Rust worker variant requires `rust:UUID`, healthy `computa-rust-mlx` /
+`mlex-0.1.3` ownership, and the same fixed loopback port `1237`. A bare UUID retains
+the legacy `mlx-vlm` / `0.7.1` health contract. Every request explicitly sets
+`stream=true`, `store=false`, and `parallel_tool_calls=false`; public Responses
+SSE is decoded within a 4 MiB bound and its final response must match public text
+deltas. An ownership failure, a busy worker, or another selected model aborts the
+run without a retry or model switch. This is a protocol variant, not evidence
+that the legacy and Rust model outputs are identical.
+
+`instruction-contamination` accepts the same arguments with a complete candidate
+developer JSON file. It runs the three retained correction variants against four
+synthetic cases, retains the full developer policy, and stops at 30 provider
+requests. Neither command starts the worker or executes a real tool.
 
 For byte-exact source strings without a final newline, use a `.json` candidate
 file containing `{ "developerInstructions": "the exact string" }`; JSON encoding

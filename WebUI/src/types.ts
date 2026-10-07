@@ -34,6 +34,59 @@ export interface EntrySnapshot {
   activityGroupID?: string;
   assistantPhase?: 'commentary' | 'final_answer';
   tool?: ToolSnapshot;
+  turnID?: string;
+  fileChanges?: AgentFileChange[];
+}
+
+export interface AgentFileChange {
+  path: string;
+  kind: 'add' | 'delete' | 'update';
+  movePath?: string;
+  diff: string;
+}
+
+export type ReviewScope = 'lastTurn' | 'unstaged' | 'staged' | 'branch' | 'commit';
+export type ReviewOperation = 'stage' | 'unstage' | 'revert';
+
+export interface ReviewHunk {
+  id: string;
+  header: string;
+  oldStart?: number;
+  newStart?: number;
+}
+
+export interface ReviewFile {
+  id: string;
+  path: string;
+  previousPath?: string;
+  status: 'added' | 'deleted' | 'modified' | 'renamed' | 'copied' | 'untracked' | 'typeChanged' | 'unmerged';
+  diff: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  truncated: boolean;
+  hunks: ReviewHunk[];
+}
+
+export interface FileReviewSnapshot {
+  id: string;
+  workspace: string;
+  scope: ReviewScope;
+  reference?: string;
+  revision: string;
+  files: ReviewFile[];
+  canStage: boolean;
+  canUnstage: boolean;
+  canRevert: boolean;
+}
+
+export interface ReviewState {
+  taskID: string;
+  scope: ReviewScope;
+  reference: string;
+  loading: boolean;
+  error?: string;
+  snapshot?: FileReviewSnapshot;
 }
 
 export type QueuedPromptStatus = 'queued' | 'editing' | 'sending' | 'failed';
@@ -43,6 +96,7 @@ export interface QueuedPromptSnapshot {
   text: string;
   status: QueuedPromptStatus;
   error?: string;
+  deliveryUncertain?: boolean;
 }
 
 export interface PromptReceiptSnapshot {
@@ -95,6 +149,8 @@ export interface AppSnapshot {
   isInspectorPresented: boolean;
   isBrowserPresented: boolean;
   isSettingsPresented: boolean;
+  isReviewPresented?: boolean;
+  review?: ReviewState;
 }
 
 export type NativeAction =
@@ -102,6 +158,7 @@ export type NativeAction =
   | { action: 'selectTask'; id: string }
   | { action: 'selectEntry'; id: string }
   | { action: 'createTask' }
+  | { action: 'chooseTaskWorkspace'; taskID: string }
   | { action: 'submitPrompt'; requestID: string; taskID: string; prompt: string }
   | { action: 'interruptTask'; taskID: string }
   | { action: 'beginQueueEdit'; taskID: string; id: string }
@@ -113,6 +170,12 @@ export type NativeAction =
   | { action: 'resumeQueue'; taskID: string }
   | { action: 'toggleInspector' }
   | { action: 'toggleBrowser' }
+  | { action: 'toggleReview' }
+  | { action: 'setReviewScope'; taskID: string; scope: ReviewScope }
+  | { action: 'setReviewReference'; taskID: string; reference: string }
+  | { action: 'refreshReview'; taskID: string }
+  | { action: 'reviewMutation'; taskID: string; snapshotID: string; operation: ReviewOperation; fileID?: string; hunkID?: string }
+  | { action: 'openReviewFile'; taskID: string; snapshotID: string; fileID: string }
   | { action: 'showSettings' }
   | { action: 'dismissSettings' }
   | { action: 'setAppearance'; value: 'system' | 'light' | 'dark' }

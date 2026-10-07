@@ -6,6 +6,8 @@ struct ExtensionChromeAdmission: Sendable {
     let pairingToken: String
     let bridgeEpoch: String
     var supportsTemporaryTabs = false
+    /// All clients admitted on this native link share its one authorized epoch.
+    let generation = UUID()
 
     func check() throws { try link.checkPeerIdentity() }
 
@@ -27,7 +29,7 @@ struct ExtensionChromeAdmission: Sendable {
 /// Alternate transport, not a browser-level CDP impersonator. The existing
 /// session broker still owns target/document checks and every mutation permit.
 actor ExtensionChromeTransport: BorrowedChromeSessionTransport {
-    nonisolated let generation = UUID()
+    nonisolated let generation: UUID
     private let admission: ExtensionChromeAdmission
     private let consent: ChromeDebuggingConsent
     private var attached: [String: BrowserTarget] = [:]
@@ -39,7 +41,7 @@ actor ExtensionChromeTransport: BorrowedChromeSessionTransport {
     private let operations = BrowserCDPDocumentOperations()
 
     init(admission: ExtensionChromeAdmission, consent: ChromeDebuggingConsent) {
-        self.admission = admission; self.consent = consent
+        self.admission = admission; self.consent = consent; generation = admission.generation
     }
 
     func authorize() async throws {

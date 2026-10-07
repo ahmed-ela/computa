@@ -15,7 +15,7 @@ struct EmbeddedBrowserPane: View {
     @FocusState private var addressFocused: Bool
 
     private var selectedTab: EmbeddedBrowserTab? {
-        session.tabs.first { $0.id == session.selectedTabID }
+        session.humanTabs.first { $0.id == session.selectedTabID }
     }
 
     var body: some View {
@@ -40,8 +40,9 @@ struct EmbeddedBrowserPane: View {
 
             if let tab = selectedTab, let webView = session.webView(for: tab.id) {
                 ZStack {
-                    EmbeddedBrowserPageHost(webView: webView, isInteractionBlocked: isInteractionBlocked)
-                    if tab.url == nil, !tab.isLoading {
+                    EmbeddedBrowserPageHost(session: session, tabID: tab.id, webView: webView,
+                                            isInteractionBlocked: isInteractionBlocked)
+                    if tab.url == nil, !tab.isLoading, !tab.isPopup {
                         emptyPage(hasTab: true)
                     }
                 }
@@ -70,7 +71,7 @@ struct EmbeddedBrowserPane: View {
             ScrollViewReader { scroll in
                 ScrollView(.horizontal) {
                     HStack(spacing: 4) {
-                        ForEach(session.tabs) { tab in
+                        ForEach(session.humanTabs) { tab in
                             EmbeddedBrowserTabButton(
                                 tab: tab,
                                 selected: tab.id == session.selectedTabID,
@@ -141,7 +142,7 @@ struct EmbeddedBrowserPane: View {
             .help(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
             .accessibilityLabel(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
 
-            TextField("Enter a website address", text: $address)
+            TextField("Search or enter a website address", text: $address)
                 .textFieldStyle(.roundedBorder)
                 .focused($addressFocused)
                 .onSubmit(navigate)
@@ -163,7 +164,7 @@ struct EmbeddedBrowserPane: View {
                 .foregroundStyle(.secondary)
             Text(hasTab ? "New tab" : "Your browser, inside Computa")
                 .font(.headline)
-            Text("Enter a website address to get started.\nSign in here separately from Chrome.")
+            Text("Search or enter a website address to get started.\nSign in here separately from Chrome.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -257,17 +258,19 @@ private struct EmbeddedBrowserTabButton: View {
 /// privileged UI's message handlers. The session, not this view, owns teardown.
 @MainActor
 private struct EmbeddedBrowserPageHost: NSViewRepresentable {
+    let session: EmbeddedBrowserSession
+    let tabID: UUID
     let webView: WKWebView
     let isInteractionBlocked: Bool
 
     func makeNSView(context: Context) -> EmbeddedBrowserPageContainer {
         let view = EmbeddedBrowserPageContainer()
-        view.update(webView: webView, interactionBlocked: isInteractionBlocked)
+        view.update(session: session, tabID: tabID, webView: webView, interactionBlocked: isInteractionBlocked)
         return view
     }
 
     func updateNSView(_ view: EmbeddedBrowserPageContainer, context: Context) {
-        view.update(webView: webView, interactionBlocked: isInteractionBlocked)
+        view.update(session: session, tabID: tabID, webView: webView, interactionBlocked: isInteractionBlocked)
     }
 
     static func dismantleNSView(_ view: EmbeddedBrowserPageContainer, coordinator: ()) {
@@ -277,16 +280,17 @@ private struct EmbeddedBrowserPageHost: NSViewRepresentable {
 
 @MainActor
 private final class EmbeddedBrowserPageContainer: NSView {
+    private weak var session: EmbeddedBrowserSession?
+    private var mountedTabID: UUID?
     private weak var mountedWebView: WKWebView?
     private var interactionBlocked = false
 
-    func update(webView: WKWebView, interactionBlocked: Bool) {
+    func update(session: EmbeddedBrowserSession, tabID: UUID, webView: WKWebView, interactionBlocked: Bool) {
         if mountedWebView !== webView {
             detach()
-            webView.removeFromSuperview()
-            webView.frame = bounds
-            webView.autoresizingMask = [.width, .height]
-            addSubview(webView)
+            self.session = session
+            mountedTabID = tabID
+            try? session.presentTab(tabID, in: self)
             mountedWebView = webView
         }
         self.interactionBlocked = interactionBlocked
@@ -308,8 +312,10 @@ private final class EmbeddedBrowserPageContainer: NSView {
 
     func detach() {
         relinquishPageFocus()
-        mountedWebView?.removeFromSuperview()
+        if let mountedTabID { session?.detachPresentedTab(mountedTabID, from: self) }
         mountedWebView = nil
+        mountedTabID = nil
+        session = nil
     }
 
     private func relinquishPageFocus() {
@@ -319,4 +325,43 @@ private final class EmbeddedBrowserPageContainer: NSView {
         // ordinary browser rendering must not acquire it.
         window?.makeFirstResponder(nil)
     }
+}
+
+/// Nonhidden, fixed-size model pages remain in the application's existing
+/// window behind the opaque workspace. No window creation or activation occurs.
+@MainActor
+struct EmbeddedModelRenderHost: NSViewRepresentable {
+    let session: EmbeddedBrowserSession
+
+    func makeNSView(context: Context) -> EmbeddedModelRenderContainer {
+        let view = EmbeddedModelRenderContainer(session: session)
+        session.installModelRenderHost(view)
+        return view
+    }
+
+    func updateNSView(_ view: EmbeddedModelRenderContainer, context: Context) {
+        session.installModelRenderHost(view)
+    }
+
+    static func dismantleNSView(_ view: EmbeddedModelRenderContainer, coordinator: ()) {
+        view.detach()
+    }
+}
+
+@MainActor
+final class EmbeddedModelRenderContainer: NSView {
+    private weak var session: EmbeddedBrowserSession?
+
+    init(session: EmbeddedBrowserSession) {
+        self.session = session
+        super.init(frame: .zero)
+        clipsToBounds = true
+        setAccessibilityElement(false)
+        setAccessibilityChildren([])
+    }
+
+    required init?(coder: NSCoder) { return nil }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func detach() { session?.removeModelRenderHost(self) }
 }

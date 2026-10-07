@@ -45,6 +45,9 @@ targets:
       - path: Sources/Computa/Resources/MLXServer
         type: folder
         buildPhase: resources
+      - path: Sources/Computa/Resources/BrowserModels
+        type: folder
+        buildPhase: resources
       - path: BrowserExtension
         type: folder
         buildPhase: resources
@@ -63,6 +66,9 @@ targets:
         basedOnDependencyAnalysis: false
     dependencies:
       - target: AutomationCore
+    configFiles:
+      Debug: Config/Version.xcconfig
+      Release: Config/Version.xcconfig
     settings:
       base:
         # Stable identity preserves settings and macOS permission association.
@@ -73,8 +79,6 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Config/Computa-Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: 0.1.0
-        CURRENT_PROJECT_VERSION: 1
         ENABLE_HARDENED_RUNTIME: YES
       configs:
         Release:

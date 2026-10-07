@@ -57,6 +57,14 @@ struct WebWorkspaceView: View {
                 .frame(height: 34)
         }
         .ignoresSafeArea()
+        // A detached WKWebView is not a visible WebKit page. Keep owned model
+        // views attached and renderable without showing or focusing them.
+        .background(Color(nsColor: .windowBackgroundColor))
+        .background {
+            EmbeddedModelRenderHost(session: state.browserSession)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 }
 
@@ -72,6 +80,13 @@ private struct CodexWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: WebBridge.handlerName)
+        if WebBridge.diagnosticsEnabled {
+            controller.addUserScript(WKUserScript(
+                source: WebBridge.diagnosticBootstrapScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            ))
+        }
 
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = controller

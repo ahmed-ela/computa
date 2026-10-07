@@ -20,6 +20,12 @@ The default working directory is Computa's private workspace under
 `~/Library/Application Support/LocalCodex/CodexHome/Workspace`. Give an absolute
 working directory when asking about a project elsewhere.
 
+For coding tasks, choose **Choose project folder** before the first message to
+make that directory the native thread workspace. Saved chats retain their
+original directory. The native `apply_patch` tool can create, update, move, and
+delete files; **Changes** exposes recorded patches and current Git differences.
+See [code editing and review](CODE-EDITING.md).
+
 System command directories, `/opt/homebrew/bin`, and `/usr/local/bin` are on the
 runtime PATH. Computa does not install missing tools automatically. The engine
 keeps a private HOME and configuration directory; shell startup files, aliases,

@@ -15,6 +15,18 @@ Private personal repository: [ahmed-wlb/computa](https://github.com/ahmed-wlb/co
 
 Next work: [Chrome/Computa lookup comparison and generalized evidence handling](TODO.md).
 
+The complete Rust migration is being qualified on
+[`codex/browser-model-providers`](https://github.com/ahmed-ela/computa/pull/3).
+Its source lives under [`crates`](crates); the installed Swift app remains the
+baseline until the real desktop, local-model and three-provider tests pass.
+See [migration scope and qualification gates](docs/RUST-MIGRATION.md).
+With the pinned Rust toolchain, run `cargo xtask check` for native and WASM
+checks, `cargo xtask setup --check` for read-only build prerequisites, or
+`cargo run --locked --release -p xtask -- setup --build-only` to build an isolated
+app without installing it. The release installer and workers share the same
+immutable Metal-library pin.
+The Rust workers use native MLX and their exact bundled Metal library.
+
 ## Install the macOS app
 
 The draft preview uses the explicit private release tag
@@ -397,6 +409,10 @@ workaround. Pairing and browser permissions are unchanged.
 
 ## Prerequisites
 
+App releases use `major.minor.patch` with a separate increasing Apple build
+number. See [versioning and bump commands](docs/VERSIONING.md) for the shared
+Mac build metadata, release tags, and future iOS target convention.
+
 - Apple Silicon (arm64), macOS 14 or newer;
 - Xcode with a Swift 6.2-capable toolchain (the Swift Package manifest uses tools version 6.2);
 - XcodeGen when regenerating the Xcode project (`brew install xcodegen`);
@@ -485,7 +501,7 @@ Octane currently declares Node.js 22.22.2 or newer for its supported development
 The top-right **Browser** toggle opens a resizable native WKWebView pane beside
 the chat. Press **+** (or ⌘T while the pane is shown) to create a tab, enter a
 website address, and press **Return** or the Go arrow. Bare domains such as
-`example.com` use HTTPS; the address field is not a search box. Select a tab by
+`example.com` use HTTPS; ordinary text searches Google. Select a tab by
 its title, close it with ×, and drag the divider to resize the pane. Back/forward,
 reload and stop work independently for each tab.
 
@@ -498,14 +514,43 @@ not copy Chrome or Codex cookies or sessions; sign in separately. The privileged
 chat UI and untrusted websites use separate WebViews, configurations and stores.
 Native approval requests block both surfaces until resolved.
 
-This version declines popups, downloads, file pickers, camera/microphone requests,
-external-app schemes and JavaScript modal dialogs. Sites requiring these
-features, including popup-dependent sign-in, may not work yet.
+Human pages can open pop-ups as visible tabs sharing the same sign-in profile.
+Website-closed pop-ups return to their surviving opener; the normal tab limit
+and navigation rules still apply. Model inference pages cannot open pop-ups.
+Downloads, file pickers, camera/microphone requests, external-app schemes and
+JavaScript modal dialogs are declined. Providers can separately reject embedded
+browser sign-in, even when their pop-up opens correctly.
 
-The pane is **human-operated only**. Qwen is not given access to this browser
-profile or new embedded-browser tools; existing Chrome/native tools are unchanged.
+General browsing in the pane remains human-operated. Qwen has no general embedded
+browser tools. Website-model inference uses separate owned tabs in this profile through
+the fixed website-model adapter described below; existing Chrome/native tools remain available.
 [Agent control is a deferred TODO](TODO.md#embedded-browser-agent-control-deferred).
 See [implementation and validation](docs/EMBEDDED-BROWSER.md).
+
+### Website models
+
+In the Swift app, choose **ChatGPT**, **Gemini**, or **Claude** after signing into that provider in the Browser
+pane. All three use Computa's WebKit profile and require neither Chrome nor its
+extension for inference. Chrome connections remain available independently for
+ordinary browser tools.
+These website routes do not require provider API keys.
+
+Each native turn creates a new owned, inactive website chat. ChatGPT and Gemini
+must confirm Temporary Chat mode, and Claude must confirm Incognito mode before
+sending; the app preserves the human sign-in tab.
+Tool-result iterations share the owned chat until the turn completes or is
+cancelled, when the app verifies temporary mode and closes that exact tab.
+Unverified cleanup retains the owned tab and reports a warning. Conversations
+and tool results remain in Computa's local transcript store.
+
+The built-in website-model transport waits for WebKit navigation and DOM-change
+notifications, coalescing streaming changes over approximately 100 ms. Readiness,
+completion and cleanup still validate the owned document, conversation and
+message counts. Deadline and stable-response timers remain; there is no recurring
+website poll on these routes. All website models currently accept text and Accessibility observations
+and use the local terminal/computer harness; screenshots, image attachments and
+audio inputs are unsupported.
+See [installed provider qualification and limits](docs/EMBEDDED-PROVIDERS-QUALIFICATION.md).
 
 ## Generate, build, and test the app
 
@@ -659,7 +704,7 @@ After overlapping visual-sidecar preparation with Qwen and embedding a fresh ver
 
 ## Current limitations
 
-- Tasks support native `exec_command` and `write_stdin` alongside `computer_v2_*`. Other built-in coding/editing tools remain disabled. The pre-rename live CLI test returned the correct output and exit status, but the model's final answer failed stream validation; controlled OS-process Stop acceptance and final-answer reliability remain unresolved. The renamed app passed migration and startup checks, not another live CLI task. See [CLI limits](docs/COMMANDS.md) and [TODO.md](TODO.md).
+- Tasks support native `exec_command`, `write_stdin`, and `apply_patch` alongside `computer_v2_*`. Choose a project folder before sending a new chat, then use **Changes** to review recorded patches or current Git changes, stage/unstage files and hunks, or revert unstaged changes with confirmation. See [code editing and review](docs/CODE-EDITING.md), [CLI limits](docs/COMMANDS.md), and [TODO.md](TODO.md) for validation boundaries.
 - Ordinary Chrome can be bound for non-activating native AX/read-only capture, or separately connected by the native user for exact background DOM tab access. The default runtime does not permit native URL navigation or global input. The retained foreground host/test opt-in requires a positively identified native address bar for existing-mode navigation and fails closed otherwise; its explicit isolated mode uses a separate temporary profile with no imported tabs, cookies, credentials, or extensions. This is not full Codex CUA/browser parity. Owned brokered tasks within one runtime reuse that runtime's owned process/profile. Task-scoped handles restrict broker calls, not shared-profile cookies, storage, same-origin scripting, or site-triggered cross-tab effects.
 - Brokered actions use DOM click/value operations, not general trusted keyboard/pointer input. Text entry rejects read-only controls; mutations reject disabled, inert, detached, non-main-document, or unsupported controls. Browser screenshot/coordinate/keyboard support remains disabled. The visual-grounding cascade is retained only for foreground host/test opt-in native-window work and does not add browser visual control.
 - Loader/URL comparisons detect observed document changes, not every possible intervening navigation. Same-document changes that return to the previous URL between reads and arbitrary semantic changes between the final AX read and browser execution require a persistent event/DOM invalidation design for stronger guarantees. Local DevTools clients remain inside the trust boundary; loopback, origin checks, and a private profile directory are not authentication against other local processes. Terminal task cleanup revokes its lifetime before asynchronous exact-session detachment (borrowed) or exact-target closure (owned). Explicit runtime shutdown stops its owned App Server and isolated Chrome process groups, reaps their roots, and removes owned profiles after observed group exit. Shutdown has bounded waits and reports incomplete cleanup; the app termination delegate also has a ten-second reply deadline. Force quit, host failure, or descendants escaping their created process group are not covered by an unlimited cleanup guarantee. The bootstrap blank tab is retained during use rather than closing unrelated blank or loading tabs by URL.

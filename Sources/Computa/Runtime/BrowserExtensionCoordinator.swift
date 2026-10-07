@@ -201,6 +201,8 @@ final class BrowserExtensionCoordinator {
         case .detached:
             // The adapter checks exact attachment tokens; no reattach/replay.
             break
+        case .webProviderCleanupFailed:
+            status = "A temporary website session could not be closed. Check the Computa extension in Chrome."
         case .disconnected(let id):
             // A pending pairing reply cannot write a saved grant after its
             // original peer has gone away, even if the same ID reconnects.

@@ -207,6 +207,8 @@ final class AppStateQueueTests: XCTestCase {
         XCTAssertTrue(accepted, "Accepted means saved in queue, not acknowledged by transport.")
         XCTAssertEqual(queueText(state), ["Recoverable"])
         XCTAssertEqual(state.queuedPrompts[taskID]?.first?.status, .failed)
+        XCTAssertEqual(state.queuedPrompts[taskID]?.first?.deliveryUncertain, true)
+        XCTAssertFalse(state.canChangeModel(for: taskID))
         XCTAssertNotNil(state.queuedPrompts[taskID]?.first?.error)
         XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
         _ = await state.submitOrQueue(prompt: "Later", toTaskID: taskID)
@@ -235,6 +237,43 @@ final class AppStateQueueTests: XCTestCase {
         XCTAssertEqual(state.selectedTaskID, other.id)
         XCTAssertTrue(state.selectedTask?.entries.isEmpty == true)
         XCTAssertEqual(userText(state), ["For original task"])
+    }
+
+    func testKnownPreflightRejectionAllowsModelChangeButRequiresManualResume() async throws {
+        let (state, runtime) = fixture()
+        await runtime.rejectNextSubmissionBeforeDispatch()
+        _ = await state.submitOrQueue(prompt: "Keep this message", toTaskID: taskID)
+        XCTAssertEqual(state.queuedPrompts[taskID]?.first?.status, .failed)
+        XCTAssertEqual(state.queuedPrompts[taskID]?.first?.deliveryUncertain, false)
+        XCTAssertTrue(state.canChangeModel(for: taskID))
+        XCTAssertTrue(state.setTaskModel("lmstudio-community/Qwen3.5-9B-MLX-4bit", taskID: taskID))
+        await settleScheduledWork()
+        let before = await runtime.submissions
+        XCTAssertEqual(before.count, 1, "Changing the model must not replay the saved message.")
+        XCTAssertEqual(queueText(state), ["Keep this message"])
+        let resumed = await state.resumeQueue(taskID: taskID)
+        XCTAssertTrue(resumed)
+        try await waitForSubmissionCount(2, runtime: runtime)
+        let after = await runtime.submissions
+        XCTAssertEqual(after.last?.modelID, "lmstudio-community/Qwen3.5-9B-MLX-4bit")
+        XCTAssertTrue(queueText(state).isEmpty)
+    }
+
+    func testQueuedMessageAfterDefinitiveFailureStillPreventsRetargeting() async {
+        let (state, runtime) = fixture()
+        await runtime.rejectNextSubmissionBeforeDispatch()
+        _ = await state.submitOrQueue(prompt: "Rejected", toTaskID: taskID)
+        _ = await state.submitOrQueue(prompt: "Pending", toTaskID: taskID)
+        XCTAssertFalse(state.canChangeModel(for: taskID))
+        XCTAssertEqual(queueText(state), ["Rejected", "Pending"])
+    }
+
+    func testLegacyFailedQueueWithoutDeliveryClassificationRemainsFenced() {
+        let (state, _) = fixture()
+        var legacy = QueuedPrompt(id: "legacy", text: "Uncertain")
+        legacy.status = .failed
+        state.queuedPrompts[taskID] = [legacy]
+        XCTAssertFalse(state.canChangeModel(for: taskID))
     }
 
     func testQueuedMessagesPreventModelChangesEvenWhenPausedAndIdle() async throws {
@@ -544,6 +583,7 @@ private actor QueueControlledRuntime: AgentRuntimeClient {
     struct Call: Equatable, Sendable {
         let prompt: String
         let taskID: String
+        var modelID: String = ""
     }
     struct Failure: LocalizedError {
         var errorDescription: String? { "Controlled transport rejection" }
@@ -554,6 +594,7 @@ private actor QueueControlledRuntime: AgentRuntimeClient {
     private(set) var interruptions = [String]()
     private var shouldHoldSubmission = false
     private var shouldRejectSubmission = false
+    private var shouldRejectBeforeDispatch = false
     private var shouldHoldSteer = false
     private var shouldRejectSteer = false
     private var submissionContinuation: CheckedContinuation<Void, Error>?
@@ -564,11 +605,16 @@ private actor QueueControlledRuntime: AgentRuntimeClient {
 
     func holdNextSubmission() { shouldHoldSubmission = true }
     func rejectNextSubmission() { shouldRejectSubmission = true }
+    func rejectNextSubmissionBeforeDispatch() { shouldRejectBeforeDispatch = true }
     func holdNextSteer() { shouldHoldSteer = true }
     func rejectNextSteer() { shouldRejectSteer = true }
 
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {
-        submissions.append(Call(prompt: prompt, taskID: taskID))
+        submissions.append(Call(prompt: prompt, taskID: taskID, modelID: modelID))
+        if shouldRejectBeforeDispatch {
+            shouldRejectBeforeDispatch = false
+            throw WebModelServer.Failure.embeddedRequired
+        }
         if shouldRejectSubmission {
             shouldRejectSubmission = false
             throw Failure()

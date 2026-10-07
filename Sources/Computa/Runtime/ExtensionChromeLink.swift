@@ -27,6 +27,7 @@ enum ExtensionChromeLinkEvent: Sendable {
     case hello(UUID, ChromeExtensionHello)
     case detached(UUID, String)
     case disconnected(UUID)
+    case webProviderCleanupFailed(UUID)
 }
 
 /// Bounded request ledger shared by setup and the extension transport. No
@@ -152,6 +153,10 @@ actor ExtensionChromeLink {
                 guard detachedTokens.count < 4_096 else { throw ChromeBridgeIPC.Failure.invalidFrame }
                 detachedTokens.insert(token)
                 event(.detached(id, token))
+            } else if eventName == "webProviderCleanupFailed",
+                      ["chatgpt", "gemini", "claude"].contains(value["provider"] as? String ?? ""),
+                      let token = value["sessionToken"] as? String, UUID(uuidString: token) != nil {
+                event(.webProviderCleanupFailed(id))
             } else { throw ChromeBridgeIPC.Failure.invalidFrame }
             return
         }
@@ -173,13 +178,17 @@ actor ExtensionChromeLink {
     nonisolated static func operationFailure(errorCode: String?) -> ChromeBridgeIPC.Failure {
         // Only finite protocol categories reach model-visible native copy.
         // Never forward the extension's free-form error message or an unknown code.
-        switch errorCode {
+        if let websiteFailure = ChromeBridgeIPC.Failure.websiteOperationFailure(errorCode: errorCode) {
+            return websiteFailure
+        }
+        return switch errorCode {
         case "target_busy": .targetBusy
         case "target_unavailable": .targetUnavailable
         case "unsupported_command": .unsupportedCommand
         case "temporary_tabs_not_authorized": .temporaryTabsNotAuthorized
         case "stale_temporary_lease", "temporary_task_already_used": .temporaryTabUnavailable
         case "invalid_temporary_receipt": .invalidFrame
+        case "unsupported_operation": .reloadExtensionRequired
         default: .rejected
         }
     }

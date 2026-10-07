@@ -5,6 +5,22 @@ import WebKit
 @MainActor
 final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     static let handlerName = "localCodex"
+    static var diagnosticsEnabled: Bool {
+        ProcessInfo.processInfo.environment["COMPUTA_WEBUI_DIAGNOSTICS"] == "1"
+    }
+    static let diagnosticBootstrapScript = """
+    window.addEventListener('error', event => {
+      window.webkit.messageHandlers.localCodex.postMessage({
+        action: 'webClientFailure', kind: event.error?.name || 'ResourceError',
+        line: Number(event.lineno || 0)
+      });
+    }, true);
+    window.addEventListener('unhandledrejection', event => {
+      window.webkit.messageHandlers.localCodex.postMessage({
+        action: 'webClientFailure', kind: event.reason?.name || 'PromiseRejection', line: 0
+      });
+    });
+    """
 
     private weak var state: AppState?
     private weak var webView: WKWebView?
@@ -29,6 +45,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     func attach(webView: WKWebView) {
         self.webView = webView
+        Self.diagnostic("attached frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
     }
 
     func update(snapshot baseSnapshot: WebUISnapshot) {
@@ -44,6 +61,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         var versionedSnapshot = baseSnapshot
         versionedSnapshot.revision = nextRevision
         latestSnapshot = versionedSnapshot
+        Self.diagnostic("snapshot revision=\(nextRevision) tasks=\(versionedSnapshot.tasks.count) ready=\(pageIsReady)")
         pushLatestSnapshotIfReady()
     }
 
@@ -70,7 +88,18 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         switch action {
         case "ready":
             pageIsReady = true
+            if let webView {
+                Self.diagnostic("client ready frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
+            }
             pushLatestSnapshotIfReady()
+
+        case "webClientFailure":
+            guard Self.diagnosticsEnabled else { return }
+            let reported = body["kind"] as? String ?? "UnknownError"
+            let allowed = ["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", "AggregateError", "ResourceError", "PromiseRejection"]
+            let kind = allowed.contains(reported) ? reported : "UnknownError"
+            let line = body["line"] as? Int ?? 0
+            Self.diagnostic("client failure kind=\(kind) line=\(line)")
 
         case "selectTask":
             guard let id = body["id"] as? String,
@@ -139,6 +168,70 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             guard !state.approvalGateBlocksInteraction else { return }
             state.isBrowserPresented.toggle()
 
+        case "toggleReview":
+            state.toggleReview()
+
+        case "setReviewScope":
+            guard let taskID = body["taskID"] as? String, let raw = body["scope"] as? String,
+                  let scope = FileReviewScope(rawValue: raw) else { return }
+            state.setReviewScope(scope, taskID: taskID)
+
+        case "setReviewReference":
+            guard let taskID = body["taskID"] as? String, let reference = body["reference"] as? String else { return }
+            state.setReviewReference(reference, taskID: taskID)
+
+        case "refreshReview":
+            guard let taskID = body["taskID"] as? String else { return }
+            state.requestReviewRefresh(taskID: taskID)
+
+        case "reviewMutation":
+            guard !state.approvalGateBlocksInteraction, let taskID = body["taskID"] as? String,
+                  let snapshotID = body["snapshotID"] as? String, let raw = body["operation"] as? String,
+                  let operation = FileReviewOperation(rawValue: raw), taskID == state.selectedTaskID,
+                  state.review?.snapshot?.id == snapshotID, !state.isBusy(taskID: taskID) else { return }
+            let fileID = body["fileID"] as? String
+            let hunkID = body["hunkID"] as? String
+            Task { @MainActor [weak state, weak self] in
+                guard let state, let self else { return }
+                if operation == .revert {
+                    let target = fileID.flatMap { id in state.review?.snapshot?.files.first { $0.id == id }?.path } ?? "all displayed changes"
+                    guard await self.confirmRevert(target: target, hunkOnly: hunkID != nil) else { return }
+                }
+                await state.mutateReview(taskID: taskID, snapshotID: snapshotID, operation: operation, fileID: fileID, hunkID: hunkID)
+            }
+
+        case "openReviewFile":
+            guard let taskID = body["taskID"] as? String, let snapshotID = body["snapshotID"] as? String,
+                  let fileID = body["fileID"] as? String else { return }
+            Task { @MainActor [weak state] in
+                guard let state else { return }
+                do {
+                    if let url = try await state.reviewFileURL(taskID: taskID, snapshotID: snapshotID, fileID: fileID) {
+                        // An explicit text editor prevents executable file associations
+                        // from turning an Open file action into program execution.
+                        NSWorkspace.shared.open([url], withApplicationAt: URL(fileURLWithPath: "/System/Applications/TextEdit.app"),
+                            configuration: NSWorkspace.OpenConfiguration()) { _, _ in }
+                    }
+                } catch { state.reportReviewError(error.localizedDescription, taskID: taskID) }
+            }
+
+        case "chooseTaskWorkspace":
+            guard let taskID = body["taskID"] as? String, taskID == state.selectedTaskID,
+                  state.canChooseTaskWorkspace, !state.approvalGateBlocksInteraction else { return }
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.allowsMultipleSelection = false
+            panel.prompt = "Choose project"
+            panel.message = "Choose the folder where this chat will read, edit and review code."
+            panel.begin { [weak state] response in
+                guard response == .OK, let url = panel.url else { return }
+                Task { @MainActor in
+                    do { try await state?.setTaskWorkspace(url, taskID: taskID) }
+                    catch { state?.reportReviewError(error.localizedDescription, taskID: taskID) }
+                }
+            }
+
         case "showSettings":
             state.refreshAutomationPermissions()
             state.presentedSheet = .settings
@@ -180,6 +273,19 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         }
     }
 
+    private func confirmRevert(target: String, hunkOnly: Bool) async -> Bool {
+        guard let window = webView?.window else { return false }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = hunkOnly ? "Revert this hunk?" : "Revert \(target)?"
+        alert.informativeText = "This discards the displayed unstaged edits. Existing staged work is preserved. If the files changed since this review, Computa will refuse and ask you to refresh."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Revert changes")
+        return await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { continuation.resume(returning: $0 == .alertSecondButtonReturn) }
+        }
+    }
+
     /// Only the human-operated Settings action reaches this method. Opening
     /// System Settings does not change TCC authorization; the user must grant it.
     func requestScreenRecordingPermission() {
@@ -202,10 +308,54 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 arguments: ["snapshot": object],
                 in: nil,
                 in: .page
-            ) { _ in }
+            ) { [weak self] result in
+                guard Self.diagnosticsEnabled else { return }
+                switch result {
+                case .success: Self.diagnostic("snapshot applied revision=\(snapshot.revision)")
+                case .failure(let error):
+                    let value = error as NSError
+                    Self.diagnostic("snapshot failed domain=\(value.domain) code=\(value.code)")
+                }
+                self?.diagnosePage(webView)
+            }
         } catch {
             assertionFailure("Could not send the Computa web snapshot: \(error)")
         }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Self.diagnostic("navigation finished trusted=\(WebUIResourceLocator.contains(webView.url)) frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
+        diagnosePage(webView)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        let value = error as NSError
+        Self.diagnostic("navigation failed domain=\(value.domain) code=\(value.code)")
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let value = error as NSError
+        Self.diagnostic("provisional navigation failed domain=\(value.domain) code=\(value.code)")
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        Self.diagnostic("web content process terminated")
+    }
+
+    private func diagnosePage(_ webView: WKWebView) {
+        guard Self.diagnosticsEnabled else { return }
+        webView.evaluateJavaScript("JSON.stringify({ready:document.readyState,rootNodes:document.getElementById('root')?.childNodes.length || 0,rootTextLength:document.getElementById('root')?.innerText.length || 0,appShell:!!document.querySelector('.app-shell'),receiver:typeof window.__localCodexReceiveState,width:innerWidth,height:innerHeight})") { value, error in
+            if let value = value as? String { Self.diagnostic("page \(value)") }
+            else if let error {
+                let value = error as NSError
+                Self.diagnostic("page probe failed domain=\(value.domain) code=\(value.code)")
+            }
+        }
+    }
+
+    private static func diagnostic(_ message: String) {
+        guard diagnosticsEnabled else { return }
+        NSLog("ComputaWebUI %@", message)
     }
 
     func webView(

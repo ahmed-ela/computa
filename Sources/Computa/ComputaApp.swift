@@ -27,8 +27,8 @@ enum ComputaLaunchMode: Equatable {
         switch self {
         case .application:
             let preferences = preferencesFactory()
-            // The browser is owned by the UI only. Do not pass its profile or
-            // WebViews to the agent runtime until that capability is qualified.
+            // Human tabs and owned ChatGPT inference tabs share this profile;
+            // the privileged app UI remains in its separate WebView.
             let browser = EmbeddedBrowserSession(defaults: preferences)
             return AppState(tasks: [], runtime: runtimeFactory(), preferences: preferences,
                             browserSession: browser, enableChromeExtensionBridge: true)
