@@ -29,7 +29,7 @@ MALFORMED_CALL = "<tool_call>synthetic non-function payload</tool_call>"
 
 def decoded_events(raw):
     return [json.loads(line[6:]) for line in raw.decode().splitlines()
-            if line.startswith("data: ")]
+            if line.startswith("data: ") and line[6:] != "[DONE]"]
 
 
 class PinnedEndpointHarness(unittest.IsolatedAsyncioTestCase):
@@ -75,7 +75,7 @@ class PinnedEndpointHarness(unittest.IsolatedAsyncioTestCase):
         with ExitStack() as stack:
             stack.enter_context(patch.object(self.openai, "get_cached_model",
                 return_value=(None, processor, {})))
-            stack.enter_context(patch.object(self.openai, "_build_gen_args", return_value=args))
+            stack.enter_context(patch("mlx_vlm.server.app._request_normalization._build_gen_args", return_value=args))
             stack.enter_context(patch.object(self.openai, "apply_chat_template",
                 return_value="<|im_start|>assistant\n<think>\n" if thinking else "synthetic prompt"))
             stack.enter_context(patch.object(self.openai, "_infer_tool_parser_from_processor",
@@ -185,6 +185,69 @@ class PinnedProducerStreamTests(PinnedEndpointHarness):
                          if e["type"] == "response.output_text.delta"), "Public prefix ")
         self.assertEqual(events[-1]["response"]["output_text"], "Public prefix <thi")
         self.require_contract_rejection(raw, "Final text differs from public deltas")
+
+
+class PinnedOpenResponsesProfileTests(PinnedEndpointHarness):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from producer_stream import install_producer_adapter
+        install_producer_adapter(cls.openai)
+
+    async def test_both_owned_routes_preserve_real_pinned_usage_and_reasoning(self):
+        from server import LocalInferenceBoundary, MODEL_IDS
+        from producer_stream import _current
+        model = MODEL_IDS[0]
+        private = "Synthetic reasoning for route qualification"
+        request_body = {"model": model, "input": "Synthetic route test", "stream": True,
+                        "store": False, "max_output_tokens": 4096, "tools": [TOOL]}
+        snapshots = []
+        for path in ("/v1/responses", "/v1/codex/responses"):
+            forwarded, raw_terminals, effective = [], [], []
+
+            async def upstream(scope, receive, send):
+                self.assertEqual(scope["path"], "/v1/responses")
+                self.assertEqual(json.loads((await receive())["body"]), request_body)
+                await send({"type": "http.response.start", "status": 200,
+                            "headers": [(b"content-type", b"text/event-stream")]})
+
+                async def consume(chunk, final):
+                    await send({"type": "http.response.body", "body": chunk, "more_body": not final})
+
+                _, events = await self.produce([private, "</think>\n", VALID_CALL],
+                                               thinking=True, on_chunk=consume)
+                raw_terminals.append(events[-1]["response"])
+                effective.append(dict(_current.get().sampling))
+
+            boundary = LocalInferenceBoundary(upstream, [model], "fixture", lambda: {})
+
+            async def receive():
+                return {"type": "http.request", "body": json.dumps(request_body).encode()}
+
+            async def send(message):
+                forwarded.append(message)
+
+            await boundary({"type": "http", "method": "POST", "path": path, "query_string": b"",
+                            "headers": [(b"content-type", b"application/json")]}, receive, send)
+            raw = b"".join(message.get("body", b"") for message in forwarded)
+            events = decoded_events(raw)
+            self.assertEqual(events[-1]["type"], "response.completed")
+            result = events[-1]["response"]
+            measured = raw_terminals[0]["usage"]
+            self.assertEqual(result["model"], model)
+            self.assertEqual(result["metadata"]["computa_measured_usage"], measured)
+            self.assertNotIn("output_tokens_details", measured)
+            self.assertEqual(result["temperature"], effective[0]["temperature"])
+            self.assertEqual(result["top_p"], effective[0]["top_p"])
+            self.assertEqual(result["usage"], measured if path == "/v1/codex/responses" else None)
+            reasoning = [item for item in result["output"] if item["type"] == "reasoning"]
+            self.assertEqual(reasoning[0]["summary"], [{"type": "summary_text", "text": private}])
+            calls = [item for item in result["output"] if item["type"] == "function_call"]
+            self.assertEqual(json.loads(calls[0]["arguments"]), {"text": "synthetic marker"})
+            self.assertEqual(result["output_text"], "")
+            self.assertIsNone(_current.get())
+            snapshots.append({key: measured[key] for key in ("input_tokens", "output_tokens", "total_tokens")})
+        self.assertEqual(snapshots[0], snapshots[1])
 
 
 if __name__ == "__main__":

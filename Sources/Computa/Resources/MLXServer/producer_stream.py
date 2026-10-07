@@ -12,6 +12,7 @@ import re
 import uuid
 
 from sse_contract import ProtocolError, SSEContract, _json
+from open_responses import sampling_parameters
 
 
 _current = ContextVar("mactopus_response_producer", default=None)
@@ -24,6 +25,7 @@ class ProducerCapture:
         self.thinking = self.tools = None
         self.finalized = False
         self.fault = None
+        self.sampling = None
 
     def fail(self, reason):
         self.fault = ProtocolError(reason)
@@ -149,6 +151,7 @@ def producer_scope():
         if capture.thinking is not None:
             capture.thinking.delegate.buffer = ""
         capture.thinking = capture.tools = None
+        capture.sampling = None
         if capture.fault is not None:
             capture.fault.__traceback__ = None
             capture.fault = None
@@ -163,6 +166,17 @@ def install_producer_adapter(upstream):
     original_thinking = upstream.make_response_stream_state
     original_tools = upstream.ToolCallStreamState
     original_final = upstream._response_output_items_from_text
+    original_arguments = upstream._build_gen_args
+
+    def generation_arguments(*args, **kwargs):
+        arguments = original_arguments(*args, **kwargs)
+        capture = _current.get()
+        if capture is not None:
+            try:
+                capture.sampling = sampling_parameters(arguments)
+            except ValueError:
+                capture.fail("Invalid effective sampling configuration")
+        return arguments
 
     class ObservedThinking:
         def __init__(self, delegate, capture):
@@ -219,4 +233,5 @@ def install_producer_adapter(upstream):
     upstream.make_response_stream_state = thinking_factory
     upstream.ToolCallStreamState = tool_factory
     upstream._response_output_items_from_text = finalize
+    upstream._build_gen_args = generation_arguments
     upstream._mactopus_stream_adapter = True

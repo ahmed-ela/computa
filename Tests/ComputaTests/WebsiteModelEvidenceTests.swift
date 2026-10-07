@@ -114,7 +114,9 @@ final class WebsiteModelEvidenceTests: XCTestCase {
         let data = try WebModelResponseCodec.streamData(for: .message("fixture reply"), request: request, responseID: "resp_echo")
         for response in try responses(data) {
             XCTAssertEqual(response["model"] as? String, choice.modelID)
-            XCTAssertNil(response["metadata"], "Echoing a selected local ID is not website provenance")
+            let metadata = try XCTUnwrap(response["metadata"] as? [String: Any])
+            XCTAssertNil(metadata["computa_website_model"], "Echoing a selected local ID is not website provenance")
+            XCTAssertTrue(metadata.isEmpty)
             XCTAssertTrue(response["usage"] is NSNull)
         }
     }
@@ -328,7 +330,7 @@ final class WebsiteModelEvidenceTests: XCTestCase {
     }
 
     private func responses(_ data: Data) throws -> [[String: Any]] {
-        try String(decoding: data, as: UTF8.self).split(separator: "\n").filter { $0.hasPrefix("data: ") }
+        try String(decoding: data, as: UTF8.self).split(separator: "\n").filter { $0.hasPrefix("data: ") && $0 != "data: [DONE]" }
             .compactMap { try JSONSerialization.jsonObject(with: Data($0.dropFirst(6).utf8)) as? [String: Any] }
             .compactMap { $0["response"] as? [String: Any] }
     }

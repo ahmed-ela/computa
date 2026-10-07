@@ -9,7 +9,9 @@ enum LocalInferenceBackend: String, Equatable, Sendable {
     func launchEnvironment(_ inherited: [String: String]) -> [String: String] {
         guard self == .headlessMLX else { return inherited }
         var result = inherited
-        result["CODEX_OSS_BASE_URL"] = "http://127.0.0.1:1237/v1"
+        // The owned Codex profile preserves genuine partial usage counts for
+        // the engine's context budget. The standard endpoint remains /v1.
+        result["CODEX_OSS_BASE_URL"] = "http://127.0.0.1:1237/v1/codex"
         result.removeValue(forKey: "CODEX_OSS_PORT")
         return result
     }

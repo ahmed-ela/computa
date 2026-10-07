@@ -36,7 +36,10 @@ final class WebModelResponseCodecTests: XCTestCase {
     }
 
     private func events(_ data: Data) throws -> [[String: Any]] {
-        try String(decoding: data, as: UTF8.self).components(separatedBy: "\n\n").filter { !$0.isEmpty }.map { record in
+        let records = String(decoding: data, as: UTF8.self).components(separatedBy: "\n\n").filter { !$0.isEmpty }
+        XCTAssertEqual(records.last, "data: [DONE]")
+        XCTAssertEqual(records.filter { $0 == "data: [DONE]" }.count, 1)
+        return try records.dropLast().map { record in
             let lines = record.components(separatedBy: "\n")
             let payload = try XCTUnwrap(lines.first(where: { $0.hasPrefix("data: ") }))
             let event = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload.dropFirst(6).utf8)) as? [String: Any])
@@ -486,6 +489,9 @@ final class WebModelResponseCodecTests: XCTestCase {
             (#"{"type":"message"}"#, .invalidMessageText),
             (#"{"type":"message","text":null}"#, .invalidMessageText),
             (#"{"type":"message","text":{"private_key":"private_value"}}"#, .invalidMessageText),
+            (#"{"type":"message","text":"value","surprise":"private"}"#, .invalidEnvelopeFields),
+            (#"{"type":"tool_calls","calls":[],"surprise":"private"}"#, .invalidEnvelopeFields),
+            (#"{"type":"message","text":"value","phase":"private_phase"}"#, .invalidMessagePhase),
             (#"{"type":"tool_calls"}"#, .invalidCalls),
             (#"{"type":"tool_calls","calls":[]}"#, .invalidCalls),
             (#"{"type":"tool_calls","calls":{}}"#, .invalidCalls),
@@ -778,5 +784,234 @@ final class WebModelResponseCodecTests: XCTestCase {
             for: .message("done"), request: prepared, responseID: "resp_stable", createdAt: 123
         )) as? [String: Any])
         XCTAssertTrue(NSDictionary(dictionary: ordinary).isEqual(to: streamFinal))
+    }
+
+    private func controlledRequest(_ controls: [String: Any], tools: [[String: Any]]? = nil) throws -> WebModelResponseCodec.Request {
+        var body: [String: Any] = ["model": "browser/chatgpt", "input": "Perform the authorized task", "tools": tools ?? [function]]
+        body.merge(controls) { _, next in next }
+        return try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: body))
+    }
+
+    func testToolCountLimitRejectsWholeBatchBeforeAnyOutput() throws {
+        let prepared = try controlledRequest(["max_tool_calls": 1, "parallel_tool_calls": true])
+        let name = try XCTUnwrap(function["name"] as? String)
+        let call = WebModelResponseCodec.ToolCall(name: name, argumentsJSON: "{}", namespace: nil)
+        for serialize in [false, true] {
+            XCTAssertThrowsError(try serialize
+                ? WebModelResponseCodec.streamData(for: .toolCalls([call, call]), request: prepared)
+                : WebModelResponseCodec.completedResponse(for: .toolCalls([call, call]), request: prepared)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .toolCallLimitExceeded)
+            }
+        }
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: WebModelResponseCodec.completedResponse(for: .toolCalls([call]), request: prepared)) as? [String: Any])
+        XCTAssertEqual(response["max_tool_calls"] as? Int, 1)
+        for bad: Any in [0, -1, false, 1.5, Double(Int32.max) + 1] {
+            XCTAssertThrowsError(try controlledRequest(["max_tool_calls": bad])) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidParameter("max_tool_calls"))
+            }
+        }
+    }
+
+    func testStreamModeStrictlyDistinguishesJSONFromSSERequests() throws {
+        XCTAssertFalse(try controlledRequest([:]).stream)
+        XCTAssertFalse(try controlledRequest(["stream": false]).stream)
+        XCTAssertTrue(try controlledRequest(["stream": true]).stream)
+        for value: Any in [1, 0, "true", NSNull(), [], [:]] {
+            XCTAssertThrowsError(try controlledRequest(["stream": value])) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidParameter("stream"))
+            }
+        }
+    }
+
+    func testNoneAndRequiredToolChoicesAreHardLocalConstraintsForEveryReplyPath() throws {
+        let toolReply = #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{"view":"content"}}]}"#
+        let none = try controlledRequest(["tool_choice": "none"])
+        XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"Read the existing observation"}"#, request: none), .message("Read the existing observation"))
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(toolReply, request: none)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+        }
+        let required = try controlledRequest(["tool_choice": "required"])
+        XCTAssertNoThrow(try WebModelResponseCodec.parseReply(toolReply, request: required))
+        for text in [#"{"type":"message","text":"I finished"}"#, "ordinary reply", #"{"unrelated":"text"}"#] {
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: required)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+            }
+        }
+        XCTAssertThrowsError(try controlledRequest(["tool_choice": "required"], tools: [])) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidToolChoice)
+        }
+        // Neither the SSE nor JSON serializer can accidentally bypass policy
+        // by receiving an already-constructed Reply from a future adapter.
+        XCTAssertThrowsError(try WebModelResponseCodec.streamData(for: .message("done"), request: required))
+        XCTAssertThrowsError(try WebModelResponseCodec.completedResponse(for: .toolCalls([.init(name: "computer_v2_snapshot", argumentsJSON: "{}", namespace: nil)]), request: none))
+        for call in [WebModelResponseCodec.ToolCall(name: "computer_v2_snapshot", argumentsJSON: "[]", namespace: nil),
+                     .init(name: "computer_v2_snapshot", argumentsJSON: "{}", namespace: nil, customInput: "ambiguous")] {
+            XCTAssertThrowsError(try WebModelResponseCodec.completedResponse(for: .toolCalls([call]), request: required)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .argumentsMustBeObject)
+            }
+        }
+    }
+
+    func testForcedAndAllowedToolChoicesRejectAnyDisallowedCallAsAWholeBatch() throws {
+        let other: [String: Any] = ["type": "function", "name": "exec_command", "parameters": ["type": "object"]]
+        let tools = [function, other]
+        let permitted = #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{"view":"content"}}]}"#
+        let forbidden = #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}},{"name":"exec_command","arguments":{"cmd":"pwd"}}]}"#
+        for choice: Any in [
+            ["type": "function", "name": "computer_v2_snapshot"],
+            ["type": "allowed_tools", "tools": [["type": "function", "name": "computer_v2_snapshot"]]],
+            ["type": "allowed_tools", "mode": "required", "tools": [["type": "function", "name": "computer_v2_snapshot"]]],
+        ] {
+            let prepared = try controlledRequest(["tool_choice": choice], tools: tools)
+            XCTAssertNoThrow(try WebModelResponseCodec.parseReply(permitted, request: prepared))
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(forbidden, request: prepared)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+            }
+        }
+        let forced = try controlledRequest(["tool_choice": ["type": "function", "name": "computer_v2_snapshot"]], tools: tools)
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"done"}"#, request: forced))
+        let allowedAuto = try controlledRequest(["tool_choice": ["type": "allowed_tools", "tools": [["type": "function", "name": "computer_v2_snapshot"]]]], tools: tools)
+        XCTAssertNoThrow(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"done"}"#, request: allowedAuto))
+        let allowedNone = try controlledRequest(["tool_choice": ["type": "allowed_tools", "mode": "none", "tools": [["type": "function", "name": "computer_v2_snapshot"]]]], tools: tools)
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(permitted, request: allowedNone))
+    }
+
+    func testInvalidToolChoiceCannotResurrectUnlistedOrMismatchedTools() throws {
+        for choice: Any in ["sometimes", 1, [],
+            ["type": "function", "name": "unoffered"],
+            ["type": "function", "name": "apply_patch"],
+            ["type": "function", "name": "computer_v2_snapshot", "fallback": true],
+            ["type": "allowed_tools", "tools": []],
+            ["type": "allowed_tools", "mode": "sometimes", "tools": [["type": "function", "name": "computer_v2_snapshot"]]],
+            ["type": "allowed_tools", "mode": NSNull(), "tools": [["type": "function", "name": "computer_v2_snapshot"]]],
+            ["type": "allowed_tools", "tools": [["type": "function", "name": "unoffered"]]],
+            ["type": "allowed_tools", "tools": [["type": "function", "name": "computer_v2_snapshot"], ["type": "function", "name": "computer_v2_snapshot"]]],
+        ] {
+            XCTAssertThrowsError(try controlledRequest(["tool_choice": choice], tools: [function, ["type": "custom", "name": "apply_patch"]])) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidToolChoice)
+            }
+        }
+        let custom = try controlledRequest(["tool_choice": ["type": "custom", "name": "functions.apply_patch"]],
+                                           tools: [["type": "namespace", "name": "functions", "tools": [["type": "custom", "name": "apply_patch"]]]])
+        XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"functions.apply_patch","input":"literal patch"}]}"#, request: custom),
+                       .toolCalls([.init(name: "apply_patch", argumentsJSON: "", namespace: "functions", customInput: "literal patch")]))
+    }
+
+    func testParallelFalseAndStrictFunctionFieldsRejectPayloadBeforeDispatch() throws {
+        let prepared = try controlledRequest(["parallel_tool_calls": false])
+        let single = #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}}]}"#
+        XCTAssertNoThrow(try WebModelResponseCodec.parseReply(single, request: prepared))
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}},{"name":"computer_v2_snapshot","arguments":{}}]}"#, request: prepared)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .parallelToolCallsUnsupported)
+        }
+        for text in [#"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{},"input":"ambiguous"}]}"#,
+                     #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{},"unexpected":true}]}"#] {
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .argumentsMustBeObject)
+            }
+        }
+        for text in [#"{"type":"message","text":"done","calls":[]}"#,
+                     #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}}],"text":"hidden reply"}"#] {
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+            }
+        }
+    }
+
+    func testCanonicalResponseContainsEveryRequiredOpenResponsesFieldWithoutInventingUsage() throws {
+        let prepared = try controlledRequest(["instructions": "Follow current local policy", "metadata": ["test_case": "codec"], "reasoning": ["effort": "medium", "summary": "auto"], "max_output_tokens": 1024])
+        let body = try WebModelResponseCodec.completedResponse(for: .message("done"), request: prepared, responseID: "resp_schema", createdAt: 123)
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let required: Set<String> = ["id", "object", "created_at", "completed_at", "status", "incomplete_details", "model", "previous_response_id", "instructions", "output", "error", "tools", "tool_choice", "truncation", "parallel_tool_calls", "text", "top_p", "presence_penalty", "frequency_penalty", "top_logprobs", "temperature", "reasoning", "usage", "max_output_tokens", "max_tool_calls", "store", "background", "service_tier", "metadata", "safety_identifier", "prompt_cache_key"]
+        XCTAssertTrue(required.isSubset(of: Set(response.keys)))
+        XCTAssertEqual(response["instructions"] as? String, "Follow current local policy")
+        XCTAssertEqual(response["metadata"] as? [String: String], ["test_case": "codec"])
+        XCTAssertEqual(response["completed_at"] as? Int, 123)
+        XCTAssertEqual(response["store"] as? Bool, false)
+        XCTAssertEqual(response["background"] as? Bool, false)
+        for field in ["usage", "reasoning", "max_output_tokens", "max_tool_calls", "previous_response_id", "safety_identifier", "prompt_cache_key"] {
+            XCTAssertTrue(response[field] is NSNull, "No unverifiable \(field) claim may be invented")
+        }
+        let definitions = try XCTUnwrap(response["tools"] as? [[String: Any]])
+        XCTAssertTrue(definitions[0]["description"] is String)
+        XCTAssertTrue(definitions[0]["strict"] is NSNull)
+        let output = try XCTUnwrap(response["output"] as? [[String: Any]])
+        XCTAssertEqual(output[0]["phase"] as? String, "final_answer")
+        let stream = try events(WebModelResponseCodec.streamData(for: .message("done"), request: prepared, responseID: "resp_schema", createdAt: 123))
+        let initial = try XCTUnwrap(stream.first?["response"] as? [String: Any])
+        XCTAssertTrue(required.isSubset(of: Set(initial.keys)))
+        XCTAssertTrue(initial["completed_at"] is NSNull)
+    }
+
+    func testAssistantPhasesArePreservedInInputAndNormalizedInEveryOutputEvent() throws {
+        let input: [[String: Any]] = [["type": "message", "role": "assistant", "phase": "commentary", "content": "Checking now"], ["role": "user", "content": "Continue"]]
+        let original = try JSONSerialization.data(withJSONObject: ["model": "browser/claude", "input": input])
+        let prepared = try WebModelResponseCodec.prepareRequest(original)
+        try assertContiguousOriginalRequest(original, in: prepared)
+        for (raw, phase) in [("commentary", WebModelResponseCodec.AssistantPhase.commentary), ("final_answer", .finalAnswer)] {
+            let envelope = try JSONSerialization.data(withJSONObject: ["type": "message", "text": "Exact phase text", "phase": raw])
+            let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: prepared, requireEnvelope: true)
+            XCTAssertEqual(reply, .assistantMessage("Exact phase text", phase: phase))
+            let stream = try events(WebModelResponseCodec.streamData(for: reply, request: prepared))
+            for event in stream where ["response.output_item.added", "response.output_item.done"].contains(event["type"] as? String ?? "") {
+                XCTAssertEqual((event["item"] as? [String: Any])?["phase"] as? String, raw)
+            }
+            XCTAssertEqual((stream.last?["response"] as? [String: Any])?["end_turn"] as? Bool, phase == .finalAnswer)
+        }
+        for value: Any in [NSNull(), false, "analysis", "private_phase"] {
+            let envelope = try JSONSerialization.data(withJSONObject: ["type": "message", "text": "done", "phase": value])
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: prepared, requireEnvelope: true)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+            }
+        }
+    }
+
+    func testPinnedCodexEncryptedReasoningIncludeIsOptionalWithoutInventedReasoning() throws {
+        let original = try JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": "Answer with the current local context", "stream": true,
+            "store": false, "parallel_tool_calls": true, "tool_choice": "auto", "tools": [function],
+            "include": ["reasoning.encrypted_content"], "reasoning": ["effort": "medium", "summary": "auto"],
+            "client_metadata": ["codex_version": "pinned-runtime"], "access_programs": [] as [String],
+        ])
+        let prepared = try WebModelResponseCodec.prepareRequest(original)
+        try assertContiguousOriginalRequest(original, in: prepared)
+        XCTAssertTrue(prepared.stream)
+        let final = try XCTUnwrap(try events(WebModelResponseCodec.streamData(for: .message("done"), request: prepared)).last?["response"] as? [String: Any])
+        XCTAssertTrue(final["reasoning"] is NSNull)
+        XCTAssertTrue(final["usage"] is NSNull)
+        let output = try XCTUnwrap(final["output"] as? [[String: Any]])
+        XCTAssertEqual(output.count, 1)
+        XCTAssertEqual(output[0]["type"] as? String, "message")
+        XCTAssertNil(output[0]["encrypted_content"])
+    }
+
+    func testUnsupportedProviderControlsRejectBeforeCreatingAnyWebsitePrompt() throws {
+        var strictFunction = function
+        strictFunction["strict"] = true
+        XCTAssertThrowsError(try controlledRequest([:], tools: [strictFunction])) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedParameter("tools.strict"))
+        }
+        for flag: Any in [false, NSNull()] {
+            strictFunction["strict"] = flag
+            XCTAssertNoThrow(try controlledRequest([:], tools: [strictFunction]))
+        }
+        for (name, value): (String, Any) in [("store", true), ("background", true), ("temperature", 0.7), ("top_p", 0.9), ("presence_penalty", 1), ("frequency_penalty", 1), ("top_logprobs", 1), ("include", ["message.output_text.logprobs"])] {
+            XCTAssertThrowsError(try controlledRequest([name: value])) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedParameter(name))
+            }
+        }
+        XCTAssertThrowsError(try controlledRequest(["text": ["format": ["type": "json_schema", "schema": ["type": "object"]]]])) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedParameter("text.format"))
+        }
+        for (name, value): (String, Any) in [("store", 0), ("background", "false"), ("parallel_tool_calls", 1), ("max_output_tokens", 16.5), ("max_tool_calls", false), ("reasoning", "medium"), ("metadata", ["private": 1])] {
+            XCTAssertThrowsError(try controlledRequest([name: value])) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .invalidParameter(name))
+            }
+        }
+        for (type, modality) in [("input_file", WebModelResponseCodec.Modality.file), ("input_video", .video)] {
+            XCTAssertThrowsError(try controlledRequest(["input": [["role": "user", "content": [["type": type, "file_url": "https://example.com/private"]]]]])) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedModality(modality))
+            }
+        }
     }
 }

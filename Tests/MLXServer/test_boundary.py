@@ -17,6 +17,11 @@ spec.loader.exec_module(server)
 MODEL = server.MODEL_IDS[0]
 
 
+def events(raw):
+    return [json.loads(line[6:]) for line in raw.decode().splitlines()
+            if line.startswith("data: ") and line[6:] != "[DONE]"]
+
+
 class RequestTests(unittest.TestCase):
     def test_model_discovery_preserves_legacy_9b_beside_owned_4b(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -124,7 +129,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.boundary.app = upstream
         for _ in range(2):
             out = await self.invoke()
-            final = json.loads(out[-1]["body"].split(b"data: ")[1])
+            final = events(out[-1]["body"])[-1]
             self.assertEqual(final["type"], "response.failed")
             self.assertEqual(final["response"]["output"], [])
             self.assertIn("reason=malformed_generated_tool_call", final["response"]["error"]["message"])
@@ -142,7 +147,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         # Use the same class imported by the response adapter; no MLX import or listener.
         self.boundary.app = malformed
         output = await self.invoke()
-        value = json.loads(output[-1]["body"].split(b"data: ")[1])
+        value = events(output[-1]["body"])[-1]
         self.assertEqual(value["type"], "response.failed")
         self.assertEqual(value["response"]["error"]["code"], "invalid_prompt")
         self.assertIn("reason=missing_terminal_response", value["response"]["error"]["message"])
@@ -194,12 +199,13 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                              "query_string": query}, receive, send)
         return output
 
-    async def test_request_and_unrelated_upstream_error_are_not_reencoded(self):
+    async def test_request_preserved_and_upstream_error_normalized_without_exception_body(self):
         raw = b'{"store": false, "model": "' + MODEL.encode() + b'", "stream":true,"input":"hello"}'
         result = await self.invoke(raw=raw)
         self.assertEqual(self.calls[0][1]["body"], raw)
         self.assertEqual(result[0]["status"], 503)
-        self.assertEqual(result[-1]["body"], b"Unavailable")
+        self.assertEqual(json.loads(result[-1]["body"])["error"]["type"], "server_error")
+        self.assertNotIn(b"Unavailable", result[-1]["body"])
         self.assertFalse(self.boundary.busy)
 
     async def test_health_proves_owned_nonce_and_models_do_not_load(self):

@@ -46,6 +46,7 @@ actor WebModelServer {
     enum Failure: LocalizedError {
         case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
         case modelUnverified, modelMismatch
+        case modelNotFound
         case malformedReply(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         var errorDescription: String? {
             switch self {
@@ -59,6 +60,7 @@ actor WebModelServer {
             case .cleanupFailed: "The web conversation cleanup could not be verified. Its local transcript has been retained."
             case .modelUnverified: "The website's selected model could not be verified. No response was accepted and no prompt was replayed."
             case .modelMismatch: "The website selected or reported a different model. No response was accepted and no prompt was replayed."
+            case .modelNotFound: "The requested website model is not supported. Choose a model from Computa's selector."
             case let .malformedReply(diagnostic):
                 "The website returned a malformed model response envelope (\(diagnostic.reason.rawValue)). No tool calls from this reply were dispatched."
             }
@@ -85,6 +87,14 @@ actor WebModelServer {
     }
 
     nonisolated let bearerToken = UUID().uuidString + UUID().uuidString
+    /// The native HTTP client can replace a provider's JSON error with generic
+    /// status prose. Keep the exact bounded local diagnostic until Core's
+    /// correlated terminal notification consumes it, without changing HTTP.
+    private nonisolated let failureDiagnostics = WebModelFailureDiagnosticStore()
+
+    nonisolated func takeFailureDiagnostic(taskID: String) -> String? {
+        failureDiagnostics.take(taskID: taskID).map { String(decoding: $0, as: UTF8.self) }
+    }
     private var listener: NWListener?
     private var baseURL: URL?
     private var starting: Task<URL, Error>?
@@ -119,6 +129,7 @@ actor WebModelServer {
     }
 
     func registerEvidenceThread(taskID: String, threadID: String) {
+        failureDiagnostics.clear(taskID: taskID)
         guard let task = UUID(uuidString: taskID), let thread = UUID(uuidString: threadID) else { return }
         evidenceThreads[task.uuidString.lowercased()] = thread.uuidString.lowercased()
     }
@@ -193,10 +204,12 @@ actor WebModelServer {
     }
 
     func finish(taskID: String) async -> [String] {
-        await cleanup(taskID: taskID, cancel: false)
+        failureDiagnostics.clear(taskID: taskID)
+        return await cleanup(taskID: taskID, cancel: false)
     }
 
     func cancel(taskID: String) async -> [String] {
+        failureDiagnostics.clear(taskID: taskID)
         retiringTaskIDs.insert(taskID)
         defer { retiringTaskIDs.remove(taskID) }
         let request = active[taskID]
@@ -207,6 +220,7 @@ actor WebModelServer {
     }
 
     func shutdown() async -> [String] {
+        failureDiagnostics.removeAll()
         shuttingDown = true
         starting?.cancel()
         listener?.cancel(); listener = nil; baseURL = nil
@@ -249,10 +263,16 @@ actor WebModelServer {
     }
 
     func infer(_ data: Data, taskID: String) async throws -> Data {
+        try await infer(WebModelResponseCodec.prepareRequest(data), taskID: taskID)
+    }
+
+    private func infer(_ request: WebModelResponseCodec.Request, taskID: String) async throws -> Data {
         guard !shuttingDown, active[taskID] == nil, cleanupTasks[taskID] == nil,
               !retiringTaskIDs.contains(taskID) else { throw Failure.busy }
-        let request = try WebModelResponseCodec.prepareRequest(data)
-        guard let provider = Self.provider(for: request.model) else { throw Failure.invalidRequest }
+        guard let provider = Self.provider(for: request.model) else {
+            if request.model.hasPrefix("browser/") { throw Failure.invalidRequest }
+            throw Failure.modelNotFound
+        }
         // All catalog website models use the app-owned browser. The Chrome
         // connection is an independent computer-tool capability.
         let route: Route = .embedded
@@ -339,7 +359,9 @@ actor WebModelServer {
                     throw error
                 }
                 recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "complete")
-                return try WebModelResponseCodec.streamData(for: reply, request: request, websiteModelEvidence: evidence)
+                return try request.stream
+                    ? WebModelResponseCodec.streamData(for: reply, request: request, websiteModelEvidence: evidence)
+                    : WebModelResponseCodec.completedResponse(for: reply, request: request, websiteModelEvidence: evidence)
             case "running":
                 _ = try Self.modelEvidence(value, session: session)
                 try await waitForNextPoll(session, after: revision, until: end)
@@ -454,32 +476,134 @@ actor WebModelServer {
                 let request = try await Self.readRequest(connection)
                 headerDeadline.cancel()
                 // No browser CORS, Origin, preflight, or unauthenticated endpoint.
-                guard request.method == "POST", request.path == "/v1/responses",
-                      request.headers["origin"] == nil,
-                      request.headers["authorization"] == "Bearer " + bearerToken,
-                      let taskID = request.headers["x-computa-task-id"],
-                      !taskID.isEmpty, taskID.utf8.count <= 256 else {
-                    try await Self.send(connection, status: "403 Forbidden", type: "application/json", body: Data("{\"error\":{\"message\":\"Unauthorized browser model request\"}}".utf8))
+                guard request.headers["authorization"] == "Bearer " + bearerToken else {
+                    try await Self.sendError(connection, error: HTTPFailure.unauthorized)
                     close(id); return
                 }
-                do {
-                    let stream = try await infer(request.body, taskID: taskID)
-                    try await Self.send(connection, status: "200 OK", type: "text/event-stream", body: stream)
-                } catch {
-                    let body = try Self.errorBody(for: error)
-                    try await Self.send(connection, status: "400 Bad Request", type: "application/json", body: body)
+                guard request.headers["origin"] == nil,
+                      let taskID = request.headers["x-computa-task-id"],
+                      !taskID.isEmpty, taskID.utf8.count <= 256 else {
+                    try await Self.sendError(connection, error: HTTPFailure.forbidden)
+                    close(id); return
                 }
-            } catch { }
+                let diagnosticEpoch = failureDiagnostics.epoch(taskID: taskID)
+                do {
+                    guard request.method == "POST", request.path == "/v1/responses" else { throw HTTPFailure.notFound }
+                    let contentType = request.headers["content-type"]?.split(separator: ";", maxSplits: 1).first?
+                        .trimmingCharacters(in: .whitespaces).lowercased()
+                    guard contentType == "application/json" else { throw HTTPFailure.unsupportedMediaType }
+                    let prepared = try WebModelResponseCodec.prepareRequest(request.body)
+                    let body = try await infer(prepared, taskID: taskID)
+                    failureDiagnostics.clear(taskID: taskID)
+                    try await Self.send(connection, status: "200 OK",
+                        type: prepared.stream ? "text/event-stream" : "application/json", body: body)
+                } catch {
+                    if !shuttingDown, Self.hasFiniteDiagnostic(error), let diagnostic = try? Self.errorBody(for: error) {
+                        failureDiagnostics.record(diagnostic, taskID: taskID, epoch: diagnosticEpoch)
+                    }
+                    try await Self.sendError(connection, error: error)
+                }
+            } catch {
+                if !(error is CancellationError) { try? await Self.sendError(connection, error: error) }
+            }
             close(id)
         }
     }
 
     private func close(_ id: UUID) { connections.removeValue(forKey: id)?.cancel() }
 
+    private enum HTTPFailure: LocalizedError {
+        case unauthorized, forbidden, notFound, unsupportedMediaType
+        var errorDescription: String? {
+            switch self {
+            case .unauthorized: "A valid local model authorization token is required."
+            case .forbidden: "This request is not authorized for Computa's local model endpoint."
+            case .notFound: "The requested model endpoint does not exist."
+            case .unsupportedMediaType: "Model requests must use Content-Type: application/json."
+            }
+        }
+    }
+
+    struct ErrorPresentation {
+        let status: String
+        let type: String
+        let code: String
+        var param: String? = nil
+    }
+
+    static func errorPresentation(for error: any Error) -> ErrorPresentation {
+        if let failure = error as? HTTPFailure {
+            switch failure {
+            case .unauthorized: return .init(status: "401 Unauthorized", type: "invalid_request", code: "authentication_required")
+            case .forbidden: return .init(status: "403 Forbidden", type: "invalid_request", code: "access_denied")
+            case .notFound: return .init(status: "404 Not Found", type: "not_found", code: "endpoint_not_found")
+            case .unsupportedMediaType: return .init(status: "415 Unsupported Media Type", type: "invalid_request", code: "unsupported_media_type")
+            }
+        }
+        if let failure = error as? WebModelResponseCodec.Failure {
+            switch failure {
+            case .invalidParameter(let param): return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_parameter", param: param)
+            case .unsupportedParameter(let param): return .init(status: "400 Bad Request", type: "invalid_request", code: "unsupported_parameter", param: param)
+            case .invalidToolChoice: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_tool_choice", param: "tool_choice")
+            case .rejectedToolChoice: return .init(status: "500 Internal Server Error", type: "model_error", code: "tool_choice_violation", param: "tool_choice")
+            case .parallelToolCallsUnsupported: return .init(status: "500 Internal Server Error", type: "model_error", code: "parallel_tool_calls_violation", param: "parallel_tool_calls")
+            case .toolCallLimitExceeded: return .init(status: "500 Internal Server Error", type: "model_error", code: "max_tool_calls_violation", param: "max_tool_calls")
+            case .missingModel: return .init(status: "400 Bad Request", type: "invalid_request", code: "missing_model", param: "model")
+            case .missingInput: return .init(status: "400 Bad Request", type: "invalid_request", code: "missing_input", param: "input")
+            case .previousResponseUnsupported: return .init(status: "400 Bad Request", type: "invalid_request", code: "unsupported_parameter", param: "previous_response_id")
+            case .invalidTools, .unsupportedToolType: return .init(status: "400 Bad Request", type: "invalid_request", code: "unsupported_tools", param: "tools")
+            case .unsupportedModality: return .init(status: "400 Bad Request", type: "invalid_request", code: "unsupported_modality", param: "input")
+            case .promptTooLarge: return .init(status: "400 Bad Request", type: "invalid_request", code: "input_too_large", param: "input")
+            case .invalidRequest: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_request")
+            default: return .init(status: "500 Internal Server Error", type: "model_error", code: "invalid_model_output")
+            }
+        }
+        if let failure = error as? EmbeddedWebModelTransport.Failure {
+            switch failure {
+            case .humanVerificationRequired, .signInRequired:
+                return .init(status: "403 Forbidden", type: "model_error", code: failure.diagnosticCode!)
+            case .usageLimited:
+                return .init(status: "429 Too Many Requests", type: "too_many_requests", code: failure.diagnosticCode!)
+            case .capacity: return .init(status: "429 Too Many Requests", type: "too_many_requests", code: "provider_capacity")
+            case .modelUnavailable: return .init(status: "404 Not Found", type: "not_found", code: "model_unavailable", param: "model")
+            case .invalidRequest, .unsupportedProvider: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_request")
+            case .deadline, .preparationDeadline: return .init(status: "504 Gateway Timeout", type: "server_error", code: "provider_timeout")
+            default: return .init(status: "500 Internal Server Error", type: "model_error", code: failure.diagnosticCode ?? "browser_model_error")
+            }
+        }
+        if let failure = error as? Failure {
+            switch failure {
+            case .invalidRequest: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_request")
+            case .modelNotFound: return .init(status: "404 Not Found", type: "not_found", code: "model_not_found", param: "model")
+            case .busy: return .init(status: "429 Too Many Requests", type: "too_many_requests", code: "provider_busy")
+            case .deadline, .preparationDeadline: return .init(status: "504 Gateway Timeout", type: "server_error", code: "provider_timeout")
+            case .chromeRequired, .embeddedRequired: return .init(status: "503 Service Unavailable", type: "server_error", code: "provider_unavailable")
+            case .malformedReply: return .init(status: "500 Internal Server Error", type: "model_error", code: "malformed_website_reply")
+            default: return .init(status: "500 Internal Server Error", type: "model_error", code: "browser_model_error")
+            }
+        }
+        if error is ChromeBridgeIPC.Failure { return .init(status: "500 Internal Server Error", type: "model_error", code: "browser_model_error") }
+        return .init(status: "500 Internal Server Error", type: "server_error", code: "internal_error")
+    }
+
+    private static func sendError(_ connection: NWConnection, error: any Error) async throws {
+        try await send(connection, status: errorPresentation(for: error).status,
+                       type: "application/json", body: errorBody(for: error))
+    }
+
+    private static func hasFiniteDiagnostic(_ error: any Error) -> Bool {
+        // Arbitrary NSError descriptions and other transport prose cannot be
+        // promoted into an authoritative local model diagnostic.
+        error is Failure || error is WebModelResponseCodec.Failure
+            || error is EmbeddedWebModelTransport.Failure || error is ChromeBridgeIPC.Failure
+    }
+
     /// Only native finite classifications can add recovery metadata. Website
     /// copy, URLs and response prose cannot populate these protocol fields.
     static func errorBody(for error: any Error) throws -> Data {
-        var fields: [String: Any] = ["type": "browser_model_error", "message": error.localizedDescription]
+        let presentation = errorPresentation(for: error)
+        var fields: [String: Any] = ["type": presentation.type, "message": error.localizedDescription,
+            "code": presentation.code, "param": presentation.param.map { $0 as Any } ?? NSNull()]
         if let failure = error as? EmbeddedWebModelTransport.Failure,
            let code = failure.diagnosticCode, let action = failure.requiredAction {
             fields["code"] = code
@@ -555,6 +679,69 @@ actor WebModelServer {
                 else { continuation.resume() }
             })
         }
+    }
+}
+
+/// Every method holds the same lock; Data is immutable once recorded. Epochs
+/// revoke pending writers when a turn is replaced, succeeds, or is cleaned up.
+/// Recent active HTTP tasks fit well within this bound (at most eight sockets).
+final class WebModelFailureDiagnosticStore: @unchecked Sendable {
+    static let maximumEntries = 64
+    static let maximumDiagnosticBytes = 8_192
+    private struct Slot {
+        var epoch = UUID()
+        var diagnostic: Data?
+        var order: UInt64
+    }
+    private let lock = NSLock()
+    private var slots: [String: Slot] = [:]
+    private var order: UInt64 = 0
+
+    func epoch(taskID: String) -> UUID {
+        lock.lock(); defer { lock.unlock() }
+        order &+= 1
+        if var slot = slots[taskID] {
+            slot.order = order
+            slots[taskID] = slot
+            return slot.epoch
+        }
+        evictIfFull()
+        let slot = Slot(order: order)
+        slots[taskID] = slot
+        return slot.epoch
+    }
+
+    func record(_ diagnostic: Data, taskID: String, epoch: UUID) {
+        guard !diagnostic.isEmpty, diagnostic.count <= Self.maximumDiagnosticBytes else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard slots[taskID]?.epoch == epoch else { return }
+        slots[taskID]?.diagnostic = diagnostic
+    }
+
+    func take(taskID: String) -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        let value = slots[taskID]?.diagnostic
+        slots[taskID]?.diagnostic = nil
+        return value
+    }
+
+    func clear(taskID: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard var slot = slots[taskID] else { return }
+        slot.epoch = UUID()
+        slot.diagnostic = nil
+        slots[taskID] = slot
+    }
+
+    func removeAll() {
+        lock.lock(); defer { lock.unlock() }
+        slots.removeAll()
+    }
+
+    private func evictIfFull() {
+        guard slots.count >= Self.maximumEntries,
+              let oldest = slots.min(by: { $0.value.order < $1.value.order })?.key else { return }
+        slots.removeValue(forKey: oldest)
     }
 }
 

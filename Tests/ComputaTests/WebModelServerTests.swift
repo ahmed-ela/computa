@@ -463,7 +463,7 @@ final class WebModelServerTests: XCTestCase {
                 "instructions": "Preserve fixture scope", "input": firstInput, "tools": tools, "stream": true])
             let functionStream = try await server.infer(first, taskID: provider)
             let events = try String(decoding: functionStream, as: UTF8.self).split(separator: "\n")
-                .filter { $0.hasPrefix("data: ") }
+                .filter { $0.hasPrefix("data: ") && $0 != "data: [DONE]" }
                 .map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.dropFirst(6).utf8)) as? [String: Any]) }
             let completed = try XCTUnwrap(events.first { $0["type"] as? String == "response.completed" })
             let response = try XCTUnwrap(completed["response"] as? [String: Any])
@@ -598,10 +598,11 @@ final class WebModelServerTests: XCTestCase {
         let endpoint = try await server.start().appendingPathComponent("responses")
         var urlRequest = URLRequest(url: endpoint)
         urlRequest.httpMethod = "POST"; urlRequest.httpBody = request
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
         urlRequest.setValue("one", forHTTPHeaderField: "X-Computa-Task-ID")
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
-        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 500)
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let error = try XCTUnwrap(body["error"] as? [String: Any])
         XCTAssertEqual(error["message"] as? String,
@@ -623,14 +624,16 @@ final class WebModelServerTests: XCTestCase {
                     "model": model, "input": [["role": "user", "content": "Synthetic external gate boundary"]],
                     "tools": [], "stream": true,
                 ])
+                urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 urlRequest.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
                 urlRequest.setValue("external-gate-task", forHTTPHeaderField: "X-Computa-Task-ID")
                 let (data, response) = try await URLSession.shared.data(for: urlRequest)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+                let expectedStatus = code == "website_usage_limit" ? 429 : (code == "unexpected_website_page" ? 500 : 403)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, expectedStatus)
                 let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
                 let error = try XCTUnwrap(body["error"] as? [String: Any])
-                XCTAssertEqual(Set(error.keys), ["type", "message", "code", "retryable", "required_action"])
-                XCTAssertEqual(error["type"] as? String, "browser_model_error")
+                XCTAssertEqual(Set(error.keys), ["type", "message", "code", "param", "retryable", "required_action"])
+                XCTAssertEqual(error["type"] as? String, WebModelServer.errorPresentation(for: failure).type)
                 XCTAssertEqual(error["message"] as? String, failure.localizedDescription)
                 XCTAssertEqual(error["code"] as? String, code)
                 XCTAssertEqual(error["retryable"] as? Bool, false)
@@ -659,10 +662,11 @@ final class WebModelServerTests: XCTestCase {
             let data = try WebModelServer.errorBody(for: failure)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
             let error = try XCTUnwrap(body["error"] as? [String: Any])
-            XCTAssertEqual(Set(error.keys), ["type", "message"])
-            XCTAssertEqual(error["type"] as? String, "browser_model_error")
+            XCTAssertEqual(Set(error.keys), ["type", "message", "code", "param"])
+            XCTAssertEqual(error["type"] as? String, WebModelServer.errorPresentation(for: failure).type)
             XCTAssertEqual(error["message"] as? String, failure.localizedDescription)
-            XCTAssertNil(error["code"])
+            XCTAssertEqual(error["code"] as? String, WebModelServer.errorPresentation(for: failure).code)
+            XCTAssertTrue(error["param"] is NSNull)
             XCTAssertNil(error["retryable"])
             XCTAssertNil(error["required_action"])
         }
@@ -685,13 +689,14 @@ final class WebModelServerTests: XCTestCase {
             var urlRequest = URLRequest(url: endpoint)
             urlRequest.httpMethod = "POST"
             urlRequest.httpBody = request
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
             urlRequest.setValue("malformed-reply-task", forHTTPHeaderField: "X-Computa-Task-ID")
             let (data, response) = try await URLSession.shared.data(for: urlRequest)
-            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 500)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
             let error = try XCTUnwrap(body["error"] as? [String: Any])
-            XCTAssertEqual(Set(error.keys), ["type", "message", "code", "retryable", "reason", "reply_bytes", "json_fenced"])
+            XCTAssertEqual(Set(error.keys), ["type", "message", "code", "param", "retryable", "reason", "reply_bytes", "json_fenced"])
             XCTAssertEqual(error["code"] as? String, "malformed_website_reply")
             XCTAssertEqual(error["retryable"] as? Bool, false)
             XCTAssertEqual(error["reason"] as? String, reason)
@@ -754,6 +759,7 @@ final class WebModelServerTests: XCTestCase {
         let endpoint = try await server.start().appendingPathComponent("responses")
         var urlRequest = URLRequest(url: endpoint)
         urlRequest.httpMethod = "POST"; urlRequest.httpBody = request
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
         urlRequest.setValue("one", forHTTPHeaderField: "X-Computa-Task-ID")
         urlRequest.setValue("https://untrusted.example", forHTTPHeaderField: "Origin")

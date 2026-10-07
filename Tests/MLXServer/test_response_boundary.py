@@ -14,6 +14,11 @@ def body(value):
     return json.dumps(value, separators=(",", ":")).encode()
 
 
+def events(raw):
+    return [json.loads(line[6:]) for line in raw.decode().splitlines()
+            if line.startswith("data: ") and line[6:] != "[DONE]"]
+
+
 class ErrorShapeTests(unittest.TestCase):
     def test_only_consistent_exact_pinned_context_limit_is_recognized(self):
         message = "Request needs 16400 context tokens (12304 prompt + 4096 max generation), but MAX_KV_SIZE is 16384."
@@ -48,7 +53,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProtocolError) as caught:
             await self.chunk(raw)
         await self.adapter.fail(caught.exception)
-        event = json.loads(self.output[-1]["body"].split(b"data: ")[1])
+        event = events(self.output[-1]["body"])[-1]
         self.assertEqual(event["type"], "response.failed")
         self.assertEqual(event["response"]["output"], [])
         error = event["response"]["error"]
@@ -65,7 +70,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_exception_text_never_enters_failure_diagnostic(self):
         secret = "private provider body https://private.example/path"
         await self.adapter.fail(ExceptionGroup(secret, [ProtocolError(secret)]))
-        event = json.loads(self.output[-1]["body"].split(b"data: ")[1])
+        event = events(self.output[-1]["body"])[-1]
         error = event["response"]["error"]
         self.assertIn("reason=unknown_protocol_error", error["message"])
         self.assertNotIn(secret, error["message"])
@@ -75,7 +80,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProtocolError) as caught:
             await self.start(200, [(b"content-type", b"application/json")])
         await self.adapter.fail(caught.exception)
-        event = json.loads(self.output[-1]["body"].split(b"data: ")[1])
+        event = events(self.output[-1]["body"])[-1]
         self.assertEqual(event["response"]["error"]["code"], "invalid_prompt")
         self.assertIn("reason=expected_a_responses_event_stream", event["response"]["error"]["message"])
 
@@ -99,7 +104,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         await self.chunk(raw[20:])
         await self.adapter.finish()
         self.assertEqual(self.output[0]["status"], 200)
-        value = json.loads(self.output[1]["body"].split(b"data: ")[1])
+        value = events(self.output[1]["body"])[-1]
         self.assertEqual(value["type"], "response.failed")
         self.assertEqual(value["response"]["error"]["code"], "context_length_exceeded")
         self.assertEqual(value["response"]["output"], [])
@@ -112,25 +117,27 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         await self.chunk(raw)
         self.assertEqual(self.output[0]["status"], 400)
-        self.assertEqual(self.output[1]["body"], raw)
+        self.assertNotIn(raw, self.output[1]["body"])
+        self.assertEqual(json.loads(self.output[1]["body"])["error"]["type"], "invalid_request")
 
     async def test_smaller_explicit_output_allowance_is_preserved(self):
         self.adapter = ResponseBoundary(self.adapter.send, 256)
         await self.start()
         await self.chunk(body({"detail": "Request needs 16400 context tokens (16144 prompt + 256 max generation), but MAX_KV_SIZE is 16384."}))
-        value = json.loads(self.output[1]["body"].split(b"data: ")[1])
+        value = events(self.output[1]["body"])[-1]
         self.assertEqual(value["response"]["context_budget"]["max_output_tokens"], 256)
         self.assertEqual(value["response"]["context_budget"]["available_input_tokens"], 16128)
 
-    async def test_unrelated_400_is_preserved_byte_for_byte(self):
+    async def test_unrelated_400_is_typed_and_provider_exception_is_not_forwarded(self):
         raw = b'{ "detail" : "Unknown model" }'
         headers = [(b"content-type", b"application/json"), (b"content-length", str(len(raw)).encode())]
         await self.start(headers=headers)
         await self.chunk(raw[:4], True)
         await self.chunk(raw[4:])
         self.assertEqual(self.output[0]["status"], 400)
-        self.assertEqual(self.output[0]["headers"], headers)
-        self.assertEqual(self.output[1]["body"], raw)
+        self.assertNotIn((b"content-length", str(len(raw)).encode()), self.output[0]["headers"])
+        self.assertNotIn(raw, self.output[1]["body"])
+        self.assertEqual(json.loads(self.output[1]["body"])["error"]["type"], "invalid_request")
 
     async def test_oversized_400_fail_closed_without_forwarding_detail(self):
         await self.start()
@@ -139,7 +146,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         await self.adapter.fail()
         self.assertEqual(self.output[0]["status"], 200)
         self.assertIn(b'"code":"invalid_prompt"', self.output[1]["body"].replace(b" ", b""))
-        self.assertLess(len(self.output[1]["body"]), 1024)
+        self.assertLess(len(self.output[1]["body"]), 4096)
 
     async def test_success_must_have_sse_content_type_and_complete_body(self):
         with self.assertRaises(ProtocolError):

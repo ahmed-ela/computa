@@ -8,6 +8,7 @@ terminal envelope. This module neither runs tools nor interprets their arguments
 import json
 import re
 import uuid
+from open_responses import DONE, ResponseProfile, error_payload
 
 
 # Only exact host-authored conditions may leave the boundary as diagnostics.
@@ -17,6 +18,9 @@ _PROTOCOL_MESSAGES = frozenset((
     'Producer capture exceeds bound',
     'Producer state mismatch',
     'Producer ended with buffered text',
+    'Invalid effective sampling configuration',
+    'Invalid usage details',
+    'Missing effective sampling configuration',
     'Unsupported producer tool parser',
     'Unsupported producer thinking parser',
     'Incomplete generated tool call',
@@ -183,9 +187,11 @@ class SSEContract:
     MAX_ITEMS = 64
     MAX_TEXT_BYTES = 256 * 1024
 
-    def __init__(self, max_output_tokens):
+    def __init__(self, max_output_tokens, profile=None):
         _require(type(max_output_tokens) is int and max_output_tokens > 0, "Invalid output budget")
         self.max_output_tokens = max_output_tokens
+        self.profile = profile or ResponseProfile(max_output_tokens=max_output_tokens)
+        self._created_emitted = False
         self.response_id = None
         self.model = None
         self.sequence_number = 0
@@ -207,12 +213,19 @@ class SSEContract:
                 "last": self._last_event, "terminal": int(self._terminal is not None)}
 
     def _emit(self, event):
+        if "response" in event:
+            _require(self._failed or event["response"]["status"] == "failed" or self.profile.producer is None
+                     or self.profile.producer.sampling is not None,
+                     "Missing effective sampling configuration")
+            event = {**event, "response": self.profile.resource(event["response"])}
         event = {**event, "sequence_number": self.sequence_number}
         self.sequence_number += 1
         try:
             payload = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
         except (ValueError, UnicodeError):
             raise ProtocolError("Invalid stream string") from None
+        if event["type"] == "response.created":
+            self._created_emitted = True
         return b"event: " + event["type"].encode("ascii") + b"\ndata: " + payload + b"\n\n"
 
     def feed(self, data):
@@ -307,10 +320,17 @@ class SSEContract:
             return b""
         state["announced"] = True
         self._active_item_id = state["added"]["id"]
+        announced = state["added"]
+        if announced["type"] == "function_call":
+            announced = {**announced, "status": "in_progress", "arguments": ""}
         output = self._emit({"type": "response.output_item.added",
-                             "output_index": state["index"], "item": state["added"]})
+                             "output_index": state["index"], "item": announced})
         if state["part_event"] is not None:
             output += self._emit({**state["part_event"], "output_index": state["index"]})
+        elif state["added"]["type"] == "reasoning":
+            output += self._emit({"type": "response.reasoning_summary_part.added",
+                "item_id": state["added"]["id"], "output_index": state["index"], "summary_index": 0,
+                "part": {"type": "summary_text", "text": ""}})
         return output
 
     def _state(self, event, kind=None):
@@ -411,7 +431,9 @@ class SSEContract:
             if kind.endswith(".delta"):
                 _require(self._active_item_id == identity, "Interleaved reasoning is unsupported")
                 self._text(state, event.get("delta"))
-                return prefix + self._emit({**event, "output_index": state["index"]})
+                return prefix + self._emit({"type": "response.reasoning_summary_text.delta",
+                    "item_id": identity, "output_index": state["index"], "summary_index": 0,
+                    "delta": event["delta"]})
             _require(kind.endswith(".done") and not state["text_done"]
                      and event.get("text") == "".join(state["text"]), "Invalid reasoning completion")
             state["text_done"] = True
@@ -428,6 +450,8 @@ class SSEContract:
             state = self._state(event, "message")
             _require(state["part_added"], "Text before content part")
             self._text(state, event.get("delta"))
+            if not event["delta"] and not state["announced"]:
+                return b""
             prefix = self._announce(state)
             _require(self._active_item_id == state["added"]["id"], "Interleaved public text is unsupported")
             return prefix + self._emit({**event, "output_index": state["index"]})
@@ -449,6 +473,7 @@ class SSEContract:
             state = self._state(event, "function_call")
             _require(not state["args_done"], "Arguments after completion")
             call = state["added"]
+            prefix = b""
             for field in ("call_id", "name"):
                 _require(field not in event or event[field] == call[field], "Function identity mismatch")
             if kind.endswith(".delta"):
@@ -460,8 +485,16 @@ class SSEContract:
                          and (not state["args"] or "".join(state["args"]) == call["arguments"]),
                          "Function arguments mismatch")
                 _require("item" not in event or event["item"] == call, "Function item mismatch")
+                if not state["args"]:
+                    # The pinned producer publishes an already parsed call
+                    # without argument deltas. Present the exact stored string
+                    # through the standard lifecycle; item.done stays held
+                    # until the existing terminal and clean-EOF guards pass.
+                    prefix = self._emit({"type": "response.function_call_arguments.delta",
+                        "item_id": call["id"], "output_index": state["index"],
+                        "delta": call["arguments"]})
                 state["args_done"] = True
-            return self._emit({**event, "output_index": state["index"]})
+            return prefix + self._emit({**event, "output_index": state["index"]})
         if kind == "response.output_item.done":
             item = event.get("item")
             _require(isinstance(item, dict), "Invalid completed item")
@@ -500,6 +533,12 @@ class SSEContract:
         _require(isinstance(usage, dict) and all(type(usage.get(k)) is int and usage[k] >= 0
                  for k in ("input_tokens", "output_tokens", "total_tokens")), "Invalid usage")
         _require(usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"], "Inconsistent usage")
+        for name, field, maximum in (("input_tokens_details", "cached_tokens", usage["input_tokens"]),
+                                     ("output_tokens_details", "reasoning_tokens", usage["output_tokens"])):
+            if name in usage:
+                details = usage[name]
+                _require(isinstance(details, dict) and type(details.get(field)) is int
+                         and 0 <= details[field] <= maximum, "Invalid usage details")
         raw_output = response.get("output")
         _require(isinstance(raw_output, list), "Missing terminal output")
         seen = set()
@@ -561,27 +600,46 @@ class SSEContract:
             response = self._terminal["response"]
             for item in response["output"]:
                 state = self._items[item["id"]]
+                if item["type"] == "message" and not item["content"]:
+                    # An empty pending producer message has no public content.
+                    # Keep its empty item, without a part absent from item.done.
+                    state["part_event"] = None
                 output.append(self._announce(state))
                 common = {"item_id": item["id"], "output_index": state["index"], "content_index": 0}
-                if item["type"] == "message":
+                if item["type"] == "message" and item["content"]:
                     output.append(self._emit({"type": "response.output_text.done", **common, "text": self._part(state)["text"]}))
                     output.append(self._emit({"type": "response.content_part.done", **common, "part": self._part(state)}))
                 elif item["type"] == "reasoning":
-                    output.append(self._emit({"type": "response.reasoning_text.done", **common, "text": "".join(state["text"])}))
+                    reasoning = {"item_id": item["id"], "output_index": state["index"], "summary_index": 0}
+                    text = "".join(state["text"])
+                    output.append(self._emit({"type": "response.reasoning_summary_text.done", **reasoning, "text": text}))
+                    output.append(self._emit({"type": "response.reasoning_summary_part.done", **reasoning,
+                                             "part": {"type": "summary_text", "text": text}}))
                 output.append(self._emit({"type": "response.output_item.done", "output_index": state["index"], "item": item}))
             output.append(self._emit(self._terminal))
             self._finished = True
-            return b"".join(output)
+            return b"".join(output) + DONE
         except ProtocolError:
             self._failed = True
             raise
 
-    def failure(self, code="invalid_prompt", message="Local model stream could not be validated."):
+    def failure(self, code="invalid_prompt", message="Local model stream could not be validated.",
+                kind="model_error", param=None, context_budget=None):
         """Terminate safely after ProtocolError; callers must not pass provider text."""
         if self._finished:
             return b""
         self._failed = self._finished = True
-        return self._emit({"type": "response.failed", "response": {
+        prefix = b""
+        if not self._created_emitted:
+            self.response_id = self.response_id or "resp_" + uuid.uuid4().hex
+            prefix = self._emit({"type": "response.created", "response": {
+                "id": self.response_id, "model": self.model or "local",
+                "status": "in_progress", "output": []}})
+        error = error_payload(message, kind=kind, code=code, param=param)
+        response = {
             "id": self.response_id or "resp_" + uuid.uuid4().hex, "object": "response",
             "model": self.model or "local", "status": "failed", "output": [],
-            "error": {"code": code, "message": message}, "incomplete_details": None}})
+            "error": error, "incomplete_details": None}
+        if context_budget is not None:
+            response["context_budget"] = context_budget
+        return prefix + self._emit({"type": "error", "error": error}) + self._emit({"type": "response.failed", "response": response}) + DONE

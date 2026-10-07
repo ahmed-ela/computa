@@ -3060,8 +3060,10 @@ private extension CodexAppServerRuntime {
                         body: "The runtime reported a recoverable model request failure and is retrying. This turn is still active; check the local model server or stop the turn before resending."
                     )))
                 }
-                guard case .terminal(let failedTurnID, let message) = disposition,
+                guard case .terminal(let failedTurnID, let nativeMessage) = disposition,
                       turnIdentity.complete(taskID: taskID, turnID: failedTurnID) else { return }
+                let message = LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "")
+                    ? (webModelServer.takeFailureDiagnostic(taskID: taskID) ?? nativeMessage) : nativeMessage
                 finishCommandPresentation(taskID: taskID, reason: "Turn failed; final exit status unconfirmed", interrupted: true)
                 events.yield(.assistantMessagesDiscarded(taskID: taskID))
                 pendingAssistantItems.removeValue(forKey: taskID)

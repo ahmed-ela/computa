@@ -1570,6 +1570,8 @@ final class AppState {
                 let rejectedBeforeDispatch: Bool
                 if case .embeddedRequired? = error as? WebModelServer.Failure {
                     rejectedBeforeDispatch = true
+                } else if error is LocalModelServerPreflight.Failure {
+                    rejectedBeforeDispatch = true
                 } else { rejectedBeforeDispatch = false }
                 let failure = TimelineEntry(
                     kind: .system,

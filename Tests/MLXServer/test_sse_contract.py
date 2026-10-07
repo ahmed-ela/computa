@@ -5,8 +5,10 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+import sys
 
 path = Path(__file__).parents[2] / "Sources/Computa/Resources/MLXServer/sse_contract.py"
+sys.path.insert(0, str(path.parent))
 spec = importlib.util.spec_from_file_location("heydash_sse", path)
 sse = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sse)
@@ -24,11 +26,11 @@ def wire(events, crlf=False):
 
 
 def parse(data):
-    return [json.loads(line[6:]) for line in data.decode().split("\n") if line.startswith("data: ")]
+    return [json.loads(line[6:]) for line in data.decode().split("\n") if line.startswith("data: ") and line[6:] != "[DONE]"]
 
 
 def fixture(public="\n\nHello 🌍\u2028there ", reasoning="", call=None, tokens=25):
-    response = {"id": "resp_fixture", "model": "qwen-fixture", "status": "in_progress", "output": []}
+    response = {"id": "resp_fixture", "model": "qwen-fixture", "status": "in_progress", "output": [], "created_at": 20}
     message = {"id": "msg_fixture", "type": "message", "role": "assistant", "status": "in_progress", "content": []}
     common = {"item_id": message["id"], "output_index": 0, "content_index": 0}
     result = [event("response.created", response=copy.deepcopy(response)),
@@ -172,7 +174,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in prefix], ["response.created", "response.in_progress"])
         thinking = parse(contract.feed(wire(events[4:5])))
         self.assertEqual([e["type"] for e in thinking], [
-            "response.output_item.added", "response.reasoning_text.delta",
+            "response.output_item.added", "response.reasoning_summary_part.added", "response.reasoning_summary_text.delta",
         ])
         self.assertEqual(thinking[0]["item"]["id"], "rs_fixture")
         self.assertEqual(thinking[0]["output_index"], 0)

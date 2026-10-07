@@ -15,6 +15,7 @@ import uuid
 
 from response_boundary import ResponseBoundary, is_protocol_error
 from producer_stream import producer_scope, install_producer_adapter
+from open_responses import error_payload
 
 MODEL_IDS = (
     "lmstudio-community/Qwen3.5-4B-MLX-4bit",
@@ -125,6 +126,11 @@ class LocalInferenceBoundary:
         self.selected_model = None
 
     async def json(self, send, status, value):
+        if isinstance(value.get("error"), dict):
+            error = value["error"]
+            kind = "too_many_requests" if status == 429 else "not_found" if status == 404 else "server_error" if status >= 500 else "invalid_request"
+            value = {**value, "error": error_payload(error["message"], kind=kind,
+                                                     code=error.get("code"), param=error.get("param"))}
         body = json.dumps(value, separators=(",", ":")).encode()
         await send({"type": "http.response.start", "status": status,
                     "headers": [(b"content-type", b"application/json"), (b"cache-control", b"no-store")]})
@@ -143,10 +149,10 @@ class LocalInferenceBoundary:
             return await self.json(send, 200, {"status": "healthy", "heydash_instance": self.instance,
                 "backend": "mlx-vlm", "version": "0.7.1", "busy": self.busy,
                 "context_limit": 16384, "memory": self.memory(), "selected_model": self.selected_model})
-        if method == "GET" and path == "/v1/models":
+        if method == "GET" and path in ("/v1/models", "/v1/codex/models"):
             return await self.json(send, 200, {"object": "list", "data": [
                 {"id": model, "object": "model", "owned_by": "local"} for model in self.models]})
-        if method != "POST" or path != "/v1/responses":
+        if method != "POST" or path not in ("/v1/responses", "/v1/codex/responses"):
             return await self.json(send, 404, {"error": {"message": "Endpoint is not enabled."}})
         if headers.get(b"content-type", b"").split(b";", 1)[0].strip() != b"application/json":
             return await self.json(send, 415, {"error": {"message": "application/json is required."}})
@@ -182,6 +188,10 @@ class LocalInferenceBoundary:
                 return await self.json(send, 409, {"error": {"code": "owned_restart_required",
                     "message": "Switching models requires restarting the owned local model server."}})
             self.selected_model = request["model"]
+            public_request = dict(request)
+            codex_usage = path == "/v1/codex/responses"
+            if codex_usage:
+                scope = {**scope, "path": "/v1/responses", "raw_path": b"/v1/responses"}
             # The caller supplies only a public catalog ID. Resolve it using
             # host-owned startup discovery, not a request-supplied path. This
             # lets owned 4B coexist with a legacy 9B without copying either.
@@ -201,7 +211,8 @@ class LocalInferenceBoundary:
                 return await receive()
 
             with producer_scope() as producer:
-                response = ResponseBoundary(send, request.get("max_output_tokens", 4096), producer)
+                response = ResponseBoundary(send, request.get("max_output_tokens", 4096), producer,
+                                            request=public_request, codex_usage=codex_usage)
                 try:
                     await self.app(scope, replay_receive, response)
                     await response.finish()
