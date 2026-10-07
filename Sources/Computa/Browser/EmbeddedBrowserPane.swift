@@ -15,7 +15,7 @@ struct EmbeddedBrowserPane: View {
     @FocusState private var addressFocused: Bool
 
     private var selectedTab: EmbeddedBrowserTab? {
-        session.tabs.first { $0.id == session.selectedTabID }
+        session.humanTabs.first { $0.id == session.selectedTabID }
     }
 
     var body: some View {
@@ -71,7 +71,7 @@ struct EmbeddedBrowserPane: View {
             ScrollViewReader { scroll in
                 ScrollView(.horizontal) {
                     HStack(spacing: 4) {
-                        ForEach(session.tabs) { tab in
+                        ForEach(session.humanTabs) { tab in
                             EmbeddedBrowserTabButton(
                                 tab: tab,
                                 selected: tab.id == session.selectedTabID,

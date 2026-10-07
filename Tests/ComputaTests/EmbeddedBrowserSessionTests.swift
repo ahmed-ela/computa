@@ -411,7 +411,7 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === input)
     }
 
-    func testModelPresentationReturnsExactViewToBackingHostAndIgnoresStaleDetach() throws {
+    func testModelPresentationIsRejectedAndKeepsExactViewInPrivateBackingHost() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
         let backing = EmbeddedModelRenderContainer(session: session)
@@ -422,20 +422,303 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         let generation = session.documentGeneration(for: id)
         let first = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 600))
         let second = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 700))
-        try session.presentTab(id, in: first)
-        XCTAssertTrue(model.superview === first)
-        XCTAssertEqual(model.frame.size, first.bounds.size)
-        try session.presentTab(id, in: second)
+        XCTAssertThrowsError(try session.presentTab(id, in: first)) {
+            XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .modelTabPrivate)
+        }
+        XCTAssertThrowsError(try session.presentTab(id, in: second)) {
+            XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .modelTabPrivate)
+        }
         session.detachPresentedTab(id, from: first)
-        XCTAssertTrue(model.superview === second, "Late dismantling of an old host cannot remove the current presentation")
         session.detachPresentedTab(id, from: second)
         XCTAssertTrue(model.superview === backing)
+        XCTAssertTrue(first.subviews.isEmpty)
+        XCTAssertTrue(second.subviews.isEmpty)
         XCTAssertEqual(model.frame.size, NSSize(width: 1_024, height: 768))
         XCTAssertTrue(session.webView(for: id) === model)
         XCTAssertEqual(session.documentGeneration(for: id), generation)
         XCTAssertEqual(session.selectedTabID, human)
+        XCTAssertNil(session.errorMessage, "Private presentation rejection cannot become a human Browser error")
+        XCTAssertEqual(session.humanTabs.map(\.id), [human])
         session.detachPresentedTab(id, from: second)
         XCTAssertTrue(model.superview === backing)
+    }
+
+    func testModelDOMFocusAndNavigationPreserveNativeTextFieldEditorAndUnsentSelection() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { session.shutdown(); window.close() }
+        let host = EmbeddedModelRenderContainer(session: session)
+        host.frame = NSRect(x: 0, y: 0, width: 1_100, height: 800)
+        window.contentView = host
+        session.installModelRenderHost(host)
+        let field = NSTextField(string: "UNSENT human address sentinel")
+        field.frame = NSRect(x: 20, y: 20, width: 480, height: 24)
+        field.isEditable = true
+        field.isSelectable = true
+        host.addSubview(field)
+        field.selectText(nil)
+        let editor = try XCTUnwrap(window.firstResponder as? NSTextView)
+        XCTAssertTrue(editor.isFieldEditor, "Exercise the shared editor used by native text fields, not a standalone NSTextView")
+        XCTAssertTrue(field.currentEditor() === editor)
+        let selectedRange = NSRange(location: 7, length: 5)
+        editor.setSelectedRange(selectedRange)
+        let sentinel = editor.string
+        let keyWindow = NSApplication.shared.keyWindow
+        let humanID = try session.createTab()
+        let modelID = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let model = try XCTUnwrap(session.webView(for: modelID))
+
+        for document in 0..<3 {
+            session.captureModelNativeFocus(tabID: modelID)
+            model.loadHTMLString("""
+                <!doctype html><title>Field editor fixture \(document)</title>
+                <textarea id="model-editor" autofocus></textarea>
+                """, baseURL: URL(string: "https://chatgpt.com/"))
+            let deadline = ContinuousClock.now + .seconds(10)
+            var loaded = false
+            while ContinuousClock.now < deadline {
+                if !model.isLoading,
+                   (try? await script(model, "return !!document.getElementById('model-editor');")) == Data("true".utf8) {
+                    loaded = true; break
+                }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            XCTAssertTrue(loaded)
+            session.captureModelNativeFocus(tabID: modelID)
+            let domFocused = try await script(model, "document.getElementById('model-editor').focus(); return document.activeElement === document.getElementById('model-editor');")
+            XCTAssertEqual(domFocused, Data("true".utf8))
+            session.restoreModelNativeFocus(tabID: modelID)
+            try await Task.sleep(for: .milliseconds(50))
+            let activeEditor = try XCTUnwrap(window.firstResponder as? NSTextView,
+                                             "Background DOM focus must preserve the native field's editing owner")
+            XCTAssertTrue(activeEditor.isFieldEditor)
+            XCTAssertTrue(field.currentEditor() === activeEditor)
+            XCTAssertEqual(activeEditor.string, sentinel)
+            XCTAssertEqual(field.stringValue, sentinel)
+            XCTAssertEqual(activeEditor.selectedRange(), selectedRange)
+            XCTAssertEqual(session.selectedTabID, humanID)
+            XCTAssertTrue(NSApplication.shared.keyWindow === keyWindow)
+        }
+    }
+
+    func testModelFocusRestorationPreservesHumanEditsAndSelectionMadeAfterCapture() async throws {
+        let fixture = try await makeFieldEditorFocusFixture()
+        defer { fixture.session.shutdown(); fixture.window.close() }
+        let editor = try XCTUnwrap(fixture.field.currentEditor() as? NSTextView)
+        fixture.session.captureModelNativeFocus(tabID: fixture.modelID)
+        let latest = "LATEST human input after the asynchronous capture"
+        editor.insertText(latest, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+        let selection = NSRange(location: 9, length: 8)
+        editor.setSelectedRange(selection)
+        try await focusModelEditor(fixture.model, session: fixture.session, tabID: fixture.modelID)
+        let restored = try XCTUnwrap(fixture.window.firstResponder as? NSTextView)
+        XCTAssertTrue(restored.isFieldEditor)
+        XCTAssertTrue(fixture.field.currentEditor() === restored)
+        XCTAssertEqual(restored.string, latest, "A stale captured buffer cannot overwrite a newer human edit")
+        XCTAssertEqual(restored.selectedRange(), selection)
+    }
+
+    func testModelFocusRestorationRespectsHumanSwitchToAnotherEditingControl() async throws {
+        let fixture = try await makeFieldEditorFocusFixture()
+        defer { fixture.session.shutdown(); fixture.window.close() }
+        fixture.session.captureModelNativeFocus(tabID: fixture.modelID)
+        let other = NSTextField(string: "Human intentionally selected another control")
+        other.frame = NSRect(x: 20, y: 60, width: 480, height: 24)
+        fixture.host.addSubview(other)
+        other.selectText(nil)
+        let otherEditor = try XCTUnwrap(other.currentEditor() as? NSTextView)
+        let selection = NSRange(location: 6, length: 4)
+        otherEditor.setSelectedRange(selection)
+        fixture.session.restoreModelNativeFocus(tabID: fixture.modelID)
+        XCTAssertTrue(fixture.window.firstResponder === otherEditor,
+                      "A restoration request must respect an explicit newer human focus destination")
+        // Complete the same asynchronous operation without taking a new native
+        // focus receipt: the explicit human destination is the latest owner.
+        try await focusModelEditor(fixture.model, session: fixture.session, tabID: fixture.modelID)
+        let restored = try XCTUnwrap(fixture.window.firstResponder as? NSTextView)
+        XCTAssertTrue(other.currentEditor() === restored)
+        XCTAssertNil(fixture.field.currentEditor())
+        XCTAssertEqual(restored.string, other.stringValue)
+        XCTAssertEqual(restored.selectedRange(), selection)
+    }
+
+    func testDetachedCapturedFieldCannotBeRestoredOrMovedIntoAnotherWindow() async throws {
+        let fixture = try await makeFieldEditorFocusFixture()
+        let otherWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
+                                   styleMask: [], backing: .buffered, defer: false)
+        otherWindow.isReleasedWhenClosed = false
+        let otherHost = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        otherWindow.contentView = otherHost
+        defer { fixture.session.shutdown(); fixture.window.close(); otherWindow.close() }
+        let keyWindow = NSApplication.shared.keyWindow
+        fixture.session.captureModelNativeFocus(tabID: fixture.modelID)
+        XCTAssertTrue(fixture.window.makeFirstResponder(nil))
+        fixture.field.removeFromSuperview()
+        XCTAssertNil(fixture.field.window)
+        try await focusModelEditor(fixture.model, session: fixture.session, tabID: fixture.modelID)
+        XCTAssertNil(fixture.field.currentEditor(), "A detached original field is no longer an admissible focus destination")
+        otherHost.addSubview(fixture.field)
+        XCTAssertTrue(fixture.field.window === otherWindow)
+        try await focusModelEditor(fixture.model, session: fixture.session, tabID: fixture.modelID)
+        XCTAssertNil(fixture.field.currentEditor(), "An old focus receipt must not reenter a control now owned by another window")
+        XCTAssertFalse(otherWindow.isVisible)
+        XCTAssertFalse(otherWindow.isKeyWindow)
+        XCTAssertTrue(NSApplication.shared.keyWindow === keyWindow)
+    }
+
+    func testSecureNativeFieldReentryPreservesItsBufferAndSelection() async throws {
+        let fixture = try await makeFieldEditorFocusFixture(secure: true)
+        defer { fixture.session.shutdown(); fixture.window.close() }
+        XCTAssertTrue(fixture.field is NSSecureTextField)
+        let editor = try XCTUnwrap(fixture.field.currentEditor() as? NSTextView)
+        let expected = editor.string
+        let selection = NSRange(location: 2, length: 3)
+        editor.setSelectedRange(selection)
+        fixture.session.captureModelNativeFocus(tabID: fixture.modelID)
+        try await focusModelEditor(fixture.model, session: fixture.session, tabID: fixture.modelID)
+        let restored = try XCTUnwrap(fixture.window.firstResponder as? NSTextView)
+        XCTAssertTrue(fixture.field.currentEditor() === restored)
+        // Compare a synthetic fixture value without putting secure text in a
+        // failure message or requesting a production plaintext snapshot.
+        XCTAssertTrue(restored.string == expected, "The synthetic secure buffer must remain unchanged")
+        XCTAssertEqual(restored.selectedRange(), selection)
+    }
+
+    private func makeFieldEditorFocusFixture(secure: Bool = false) async throws -> (
+        session: EmbeddedBrowserSession, window: NSWindow, host: EmbeddedModelRenderContainer,
+        field: NSTextField, modelID: UUID, model: WKWebView
+    ) {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        do {
+            let host = EmbeddedModelRenderContainer(session: session)
+            host.frame = NSRect(x: 0, y: 0, width: 1_100, height: 800)
+            window.contentView = host
+            session.installModelRenderHost(host)
+            let field: NSTextField = secure ? NSSecureTextField(string: "Synthetic secure fixture buffer")
+                : NSTextField(string: "Original unsent human input")
+            field.frame = NSRect(x: 20, y: 20, width: 480, height: 24)
+            host.addSubview(field)
+            let modelID = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+            let model = try XCTUnwrap(session.webView(for: modelID))
+            model.loadHTMLString("<!doctype html><textarea id='model-editor'></textarea>",
+                                 baseURL: URL(string: "https://chatgpt.com/"))
+            let deadline = ContinuousClock.now + .seconds(10)
+            var loaded = false
+            while ContinuousClock.now < deadline {
+                if !model.isLoading,
+                   (try? await script(model, "return !!document.getElementById('model-editor');")) == Data("true".utf8) {
+                    loaded = true; break
+                }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            XCTAssertTrue(loaded)
+            field.selectText(nil)
+            let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+            XCTAssertTrue(editor.isFieldEditor)
+            XCTAssertTrue(window.firstResponder === editor)
+            return (session, window, host, field, modelID, model)
+        } catch {
+            session.shutdown()
+            window.close()
+            throw error
+        }
+    }
+
+    private func focusModelEditor(_ view: WKWebView, session: EmbeddedBrowserSession, tabID: UUID) async throws {
+        let focused = try await script(view, "document.getElementById('model-editor').focus(); return document.activeElement === document.getElementById('model-editor');")
+        XCTAssertEqual(focused, Data("true".utf8))
+        session.restoreModelNativeFocus(tabID: tabID)
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
+    func testModelCreationSelectionNavigationFailureAndClosePreserveHumanError() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let humanID = try session.createTab()
+        let humanView = try XCTUnwrap(session.webView(for: humanID))
+        let rejectedURL = try XCTUnwrap(URL(string: "file:///tmp/computa-never-loaded.html"))
+        XCTAssertThrowsError(try session.navigate(tabID: humanID, to: rejectedURL))
+        let humanError = try XCTUnwrap(session.errorMessage)
+        let humanDocument = session.documentGeneration(for: humanID)
+
+        let modelID = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let model = try XCTUnwrap(session.webView(for: modelID))
+        XCTAssertEqual(session.humanTabs.map(\.id), [humanID])
+        XCTAssertEqual(session.tabs.map(\.id), [humanID, modelID], "Private sessions remain internally owned until verified cleanup")
+        XCTAssertEqual(session.selectedTabID, humanID)
+        XCTAssertEqual(session.errorMessage, humanError)
+        session.selectTab(modelID)
+        XCTAssertEqual(session.selectedTabID, humanID)
+        XCTAssertEqual(session.errorMessage, humanError)
+        XCTAssertThrowsError(try session.presentTab(modelID, in: NSView())) {
+            XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .modelTabPrivate)
+        }
+        XCTAssertEqual(session.errorMessage, humanError)
+
+        try session.navigate(tabID: modelID, to: XCTUnwrap(URL(string: "about:blank")))
+        XCTAssertEqual(session.errorMessage, humanError, "Starting private navigation cannot clear the selected human's error")
+        XCTAssertThrowsError(try session.navigate(tabID: modelID, to: rejectedURL))
+        model.navigationDelegate?.webViewWebContentProcessDidTerminate?(model)
+        XCTAssertEqual(session.errorMessage, humanError)
+        XCTAssertEqual(session.humanTabs.first?.error, humanError)
+        XCTAssertTrue(session.tabs.first(where: { $0.id == modelID })?.error?.contains("web content process stopped") == true)
+        XCTAssertEqual(session.documentGeneration(for: humanID), humanDocument)
+        XCTAssertTrue(session.webView(for: humanID) === humanView)
+        XCTAssertNil(humanView.url)
+
+        session.closeTab(modelID)
+        XCTAssertEqual(session.selectedTabID, humanID)
+        XCTAssertEqual(session.errorMessage, humanError)
+        XCTAssertEqual(session.tabs.map(\.id), [humanID])
+    }
+
+    func testModelWorkPreservesHumanCreationErrorWithoutAttachingItToHumanTab() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let humanID = try session.createTab()
+        let rejectedURL = try XCTUnwrap(URL(string: "file:///tmp/computa-never-loaded.html"))
+        XCTAssertThrowsError(try session.createTab(url: rejectedURL))
+        let humanError = try XCTUnwrap(session.errorMessage)
+        XCTAssertNil(session.humanTabs.first?.error)
+        let modelID = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        XCTAssertEqual(session.errorMessage, humanError)
+        XCTAssertThrowsError(try session.createModelTab(url: rejectedURL))
+        XCTAssertEqual(session.errorMessage, humanError)
+        session.selectTab(modelID)
+        XCTAssertEqual(session.selectedTabID, humanID)
+        XCTAssertEqual(session.errorMessage, humanError)
+        session.closeTab(modelID)
+        XCTAssertEqual(session.errorMessage, humanError, "Cleanup of a private tab cannot dismiss a separate human action error")
+        XCTAssertEqual(session.humanTabs.map(\.id), [humanID])
+    }
+
+    func testClosingHumanTabsNeverSelectsARetainedPrivateModelSession() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let first = try session.createTab()
+        let model = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let second = try session.createTab()
+        session.selectTab(first)
+        session.closeTab(first)
+        XCTAssertEqual(session.selectedTabID, second, "Selection skips the private model tab between human tabs")
+        session.closeTab(second)
+        XCTAssertTrue(session.humanTabs.isEmpty)
+        XCTAssertEqual(session.tabs.map(\.id), [model])
+        XCTAssertNil(session.selectedTabID, "Retained inference cleanup must not expose its website in an empty Browser pane")
+        XCTAssertNil(session.errorMessage)
+        session.selectTab(model)
+        XCTAssertNil(session.selectedTabID)
+        XCTAssertNil(session.errorMessage)
+        let replacement = try session.createTab()
+        XCTAssertEqual(session.selectedTabID, replacement)
+        XCTAssertEqual(session.humanTabs.map(\.id), [replacement])
+        session.closeTab(model)
+        XCTAssertEqual(session.selectedTabID, replacement)
     }
 
     func testModelRenderHostReplacementPreservesViewsAndShutdownRemovesThem() throws {

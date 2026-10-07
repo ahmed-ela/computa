@@ -132,7 +132,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch self {
             case .invalidRequest: "The built-in browser model request could not be validated."
             case .unsupportedProvider: "That model provider is not supported in the built-in browser."
-            case .capacity: "Finish an existing browser model task before opening another session."
+            case .capacity: "Finish an existing website-model task before opening another session. If failed sessions remain retained, restart Computa to free local capacity; their website cleanup remains unconfirmed."
             case .staleSession: "The owned browser model session is no longer available."
             case .documentChanged: "The owned model page or conversation changed. No prompt was replayed."
             case .ownershipFailure(let reason): "The owned model page or conversation changed (\(reason.rawValue)). No prompt was replayed."

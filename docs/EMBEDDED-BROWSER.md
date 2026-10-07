@@ -14,7 +14,7 @@ General agent control is [explicitly deferred](../TODO.md#embedded-browser-agent
 - `EmbeddedBrowserSession` owns tabs, WebViews, independent website data,
   navigation state and teardown on the main actor. Hiding a view does not
   destroy its session. The default limit is eight tabs (configurable 1–32).
-- `EmbeddedBrowserPane` presents an injected session: tab strip, address field,
+- `EmbeddedBrowserPane` presents only human tabs from its injected session: tab strip, address field,
   history/reload/stop controls and errors. Only a human new-tab action focuses
   the address field.
 - `EmbeddedBrowserURLPolicy` accepts HTTP(S) and exact `about:blank`, rejects
@@ -41,7 +41,24 @@ General agent control is [explicitly deferred](../TODO.md#embedded-browser-agent
 - Owned model views stay attached to a permanent render host behind the workspace,
   including while the Browser pane is hidden. The host does not accept input or
   expose model pages in Accessibility. DOM editor focus preserves the native
-  responder; manually selecting a model tab presents that same view.
+  responder, including a text field's editing owner, unsent buffer and selection.
+  AppKit's shared field editor can detach during WebKit focus changes; the narrow
+  native bridge reenters editing through the still-attached original control.
+  New human field choices replace that destination, detached controls are ignored,
+  and secure-field contents are never copied into the model's focus snapshot.
+  Model pages never appear in the human tab strip and cannot be
+  selected or presented by its navigation API, including retained sessions.
+  Closing the last human tab shows the empty browser while model work continues;
+  model loading, errors and teardown do not replace the human browser's errors.
+
+Sign in through a regular human browser tab and retry the model task. Both use
+the same persistent WebKit profile; inference never takes over the sign-in tab.
+This uses ordinary rendered WKWebViews attached behind the opaque workspace,
+not a headless engine. It does not prevent providers from requesting sign-in,
+applying usage limits or rejecting embedded browsers. Existing limits still
+include background sessions. Unverified cleanup retains the owned page; if
+retained sessions exhaust capacity, restarting frees local pages without
+claiming their website conversations were deleted.
 
 Profiles initialize lazily. Session cookies can persist, but open-tab restoration
 is not implemented. No Chrome/Codex data or signed-in sessions are imported.
@@ -118,3 +135,10 @@ That run qualified browser sign-in for the tested account/session. In that
 The `0.2.0 (4)` Swift build routes ChatGPT, Gemini and Claude inference through
 the embedded browser. See [provider qualification](EMBEDDED-PROVIDERS-QUALIFICATION.md)
 for live harness results, automated checks and the remaining limits.
+
+### Private background sessions
+
+The locally installed `0.3.1 (7)` Swift build keeps inference pages private from
+the human Browser pane and preserves native typing focus. See
+[background session qualification](BACKGROUND-WEBSITE-SESSIONS.md) for the final
+three-provider terminal/UI results and 91-test regression run.

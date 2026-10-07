@@ -29,14 +29,16 @@ final class EmbeddedBrowserSession {
         case tabLimit(Int)
         case tabClosed
         case sessionClosed
+        case modelTabPrivate
         case modelPopupUnsupported
         case popupProfileMismatch
 
         var errorDescription: String? {
             switch self {
-            case .tabLimit(let limit): "This browser allows up to \(limit) tabs. Close a tab before opening another."
+            case .tabLimit(let limit): "This browser allows up to \(limit) tabs, including background model sessions. Close a browser tab before opening another; restart Computa if only retained model sessions remain."
             case .tabClosed: "That browser tab is no longer open."
             case .sessionClosed: "This browser session has ended."
+            case .modelTabPrivate: "Model sessions run privately in the background. Open a regular browser tab to visit the website."
             case .modelPopupUnsupported: "Pop-up windows are not enabled for model inference pages."
             case .popupProfileMismatch: "The requested pop-up did not preserve this browser's sign-in profile."
             }
@@ -44,6 +46,9 @@ final class EmbeddedBrowserSession {
     }
 
     private(set) var tabs: [EmbeddedBrowserTab] = []
+    /// The human browser never exposes an inference page, including a retained
+    /// session whose website cleanup could not be confirmed.
+    var humanTabs: [EmbeddedBrowserTab] { tabs.filter { entries[$0.id]?.isModelOwned == false } }
     private(set) var selectedTabID: UUID?
     private(set) var errorMessage: String?
     let maximumTabs: Int
@@ -141,7 +146,7 @@ final class EmbeddedBrowserSession {
             if let url { try navigate(tabID: entry.tab.id, to: url) }
             return entry.tab.id
         } catch {
-            errorMessage = error.localizedDescription
+            if !modelOwned { errorMessage = error.localizedDescription }
             throw error
         }
     }
@@ -164,7 +169,7 @@ final class EmbeddedBrowserSession {
         // Inactive creation stays inactive, including the first inference tab.
         if select { selectedTabID = tab.id }
         observe(entry)
-        errorMessage = nil
+        if !modelOwned { errorMessage = nil }
         return entry
     }
 
@@ -196,13 +201,15 @@ final class EmbeddedBrowserSession {
     }
 
     func selectTab(_ id: UUID) {
-        guard entries[id] != nil else { errorMessage = Failure.tabClosed.localizedDescription; return }
+        guard let entry = entries[id] else { errorMessage = Failure.tabClosed.localizedDescription; return }
+        guard !entry.isModelOwned else { return }
         selectedTabID = id
-        errorMessage = entries[id]?.tab.error
+        errorMessage = entry.tab.error
     }
 
     func closeTab(_ id: UUID) {
         guard let entry = entries.removeValue(forKey: id), let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let humanIndex = tabs.prefix(index).filter { entries[$0.id]?.isModelOwned == false }.count
         entry.tab.documentID = UUID()
         entry.tab.documentGeneration = UUID()
         entry.modelChanges?.close()
@@ -219,10 +226,13 @@ final class EmbeddedBrowserSession {
         entry.view.removeFromSuperview()
         tabs.remove(at: index)
         if selectedTabID == id {
-            if let opener = entry.popupOpenerTabID, entries[opener] != nil { selectedTabID = opener }
-            else { selectedTabID = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].id }
+            if let opener = entry.popupOpenerTabID, entries[opener]?.isModelOwned == false { selectedTabID = opener }
+            else {
+                let remaining = humanTabs
+                selectedTabID = remaining.isEmpty ? nil : remaining[min(humanIndex, remaining.count - 1)].id
+            }
         }
-        errorMessage = selectedTabID.flatMap { entries[$0]?.tab.error }
+        if !entry.isModelOwned { errorMessage = selectedTabID.flatMap { entries[$0]?.tab.error } }
     }
 
     func navigate(tabID: UUID, to url: URL) throws {
@@ -303,6 +313,7 @@ final class EmbeddedBrowserSession {
 
     func presentTab(_ id: UUID, in host: NSView) throws {
         let entry = try entry(id)
+        guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
         entry.presentationHost = host
         entry.view.removeFromSuperview()
         entry.view.frame = host.bounds
@@ -405,7 +416,7 @@ final class EmbeddedBrowserSession {
         entry.tab.error = nil
         entry.tab.isLoading = true
         signalModelChange(entry)
-        errorMessage = nil
+        if selectedTabID == entry.tab.id { errorMessage = nil }
     }
 
     private func observe(_ entry: Entry) {
@@ -487,6 +498,10 @@ final class EmbeddedBrowserSession {
 private final class EmbeddedModelWebView: WKWebView {
     private weak var focusWindow: NSWindow?
     private weak var focusResponder: NSResponder?
+    private weak var focusField: NSTextField?
+    private weak var focusFieldEditor: NSTextView?
+    private var focusFieldText: String?
+    private var focusFieldSelection: NSRange?
     private var restoringFocus = false
 
     override var acceptsFirstResponder: Bool { false }
@@ -496,12 +511,53 @@ private final class EmbeddedModelWebView: WKWebView {
               !ownsResponder(responder) else { return }
         focusWindow = target
         focusResponder = responder
+        NotificationCenter.default.removeObserver(self, name: NSText.didChangeNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSTextView.didChangeSelectionNotification, object: nil)
+        focusField = nil
+        focusFieldEditor = nil
+        focusFieldText = nil
+        focusFieldSelection = nil
+        guard let editor = responder as? NSTextView, editor.isFieldEditor,
+              let field = editingField(for: editor, in: target) else { return }
+        // The window's shared editor detaches when WebKit takes native focus.
+        // Keep its stable control and current editing buffer instead of trying
+        // to make that detached editor a responder again.
+        focusField = field
+        focusFieldEditor = editor
+        rememberFieldEditing()
+        for name in [NSText.didChangeNotification, NSTextView.didChangeSelectionNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(fieldEditingChanged(_:)),
+                                                   name: name, object: editor)
+        }
     }
 
     func restoreNativeFocus() {
         guard !restoringFocus, let target = window, target === focusWindow,
-              let responder = focusResponder, let current = target.firstResponder,
-              ownsResponder(current), !ownsResponder(responder) else { return }
+              let current = target.firstResponder, ownsResponder(current) else { return }
+        if let field = focusField {
+            guard field.window === target, !field.isHiddenOrHasHiddenAncestor,
+                  field.isEnabled, field.isEditable,
+                  let selection = focusFieldSelection else { return }
+            restoringFocus = true
+            defer { restoringFocus = false }
+            field.selectText(nil)
+            guard let editor = field.currentEditor() as? NSTextView,
+                  target.firstResponder === editor else { return }
+            if let text = focusFieldText, editor.string != text {
+                // Reenter the normal editing path so SwiftUI's binding receives
+                // the unsent buffer too. Restoring focus is not an undoable edit.
+                let undo = editor.undoManager
+                let undoWasEnabled = undo?.isUndoRegistrationEnabled == true
+                if undoWasEnabled { undo?.disableUndoRegistration() }
+                editor.insertText(text, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+                if undoWasEnabled { undo?.enableUndoRegistration() }
+            }
+            let length = editor.textStorage?.length ?? 0
+            let location = min(selection.location, length)
+            editor.setSelectedRange(NSRange(location: location, length: min(selection.length, length - location)))
+            return
+        }
+        guard let responder = focusResponder, !ownsResponder(responder) else { return }
         // An old control detached during an await is no longer an admissible
         // focus destination; never redirect into another window.
         if let view = responder as? NSView, view.window !== target { return }
@@ -509,6 +565,44 @@ private final class EmbeddedModelWebView: WKWebView {
         restoringFocus = true
         defer { restoringFocus = false }
         _ = target.makeFirstResponder(responder)
+    }
+
+    @objc private func fieldEditingChanged(_ notification: Notification) {
+        guard !restoringFocus, let editor = notification.object as? NSTextView,
+              editor === focusFieldEditor, let target = focusWindow,
+              target === window, target.firstResponder === editor else { return }
+        if focusField?.currentEditor() !== editor {
+            // The human reused this window's shared editor for another field
+            // during an awaited website action. Follow its exact current owner,
+            // rather than restoring the earlier control over that newer choice.
+            captureNativeFocus(in: target)
+            return
+        }
+        rememberFieldEditing()
+    }
+
+    private func rememberFieldEditing() {
+        guard let field = focusField, let editor = focusFieldEditor,
+              field.window === focusWindow, field.currentEditor() === editor else { return }
+        // A secure control retains its own contents. Never copy its plaintext
+        // into a model view's focus snapshot or synthesize a password insertion.
+        focusFieldText = field is NSSecureTextField ? nil : editor.string
+        focusFieldSelection = editor.selectedRange()
+    }
+
+    private func editingField(for editor: NSTextView, in target: NSWindow) -> NSTextField? {
+        if let field = editor.delegate as? NSTextField, field.window === target,
+           field.currentEditor() === editor { return field }
+        // SwiftUI may use a delegate proxy. Match the actual current editor in
+        // this window, rather than guessing a control from its class or label.
+        var pending = target.contentView.map { [$0] } ?? []
+        var inspected = 0
+        while let view = pending.popLast(), inspected < 2_048 {
+            inspected += 1
+            if let field = view as? NSTextField, field.currentEditor() === editor { return field }
+            pending.append(contentsOf: view.subviews)
+        }
+        return nil
     }
 
     override func becomeFirstResponder() -> Bool {
