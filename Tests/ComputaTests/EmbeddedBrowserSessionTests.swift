@@ -531,6 +531,45 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertGreaterThan(after, before)
     }
 
+    func testModelNotificationsPinClaudeAndGeminiOriginsRatherThanTrustingAnotherProvider() async throws {
+        for host in ["claude.ai", "gemini.google.com"] {
+            let session = EmbeddedBrowserSession(persistent: false)
+            defer { session.shutdown() }
+            let id = try session.createTab(select: false)
+            let view = try XCTUnwrap(session.webView(for: id))
+            let token = UUID().uuidString
+            let world = WKContentWorld.world(name: "computa-origin-test-\(host)")
+            try session.installModelChangeSignal(tabID: id, ownerToken: token, world: world, originHost: host)
+            let receipt = "window.webkit.messageHandlers.computaChatGPTSignal.postMessage({ownerToken: '\(token)', kind: 'dom_changed'}); return true;"
+            for origin in [host, "chatgpt.com"] {
+                view.loadHTMLString("<p id='ready'>Ready</p>", baseURL: URL(string: "https://\(origin)/"))
+                let deadline = ContinuousClock.now + .seconds(10)
+                var loaded = false
+                while ContinuousClock.now < deadline {
+                    if !view.isLoading, (try? await script(view, "return document.getElementById('ready')?.textContent;")) == Data("\"Ready\"".utf8) {
+                        loaded = true; break
+                    }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                XCTAssertTrue(loaded)
+                // Let native navigation/KVO signals settle; only the fixed
+                // private-world DOM receipt is under test below.
+                try await Task.sleep(for: .milliseconds(150))
+                let before = try session.modelChangeRevision(for: id)
+                _ = try await script(view, receipt, world: world)
+                let after = try await session.waitForModelChange(tabID: id, after: before, until: .now + .milliseconds(150))
+                if origin == host { XCTAssertGreaterThan(after, before) }
+                else { XCTAssertEqual(after, before, "Another supported provider cannot wake this provider's session") }
+            }
+        }
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false)
+        XCTAssertThrowsError(try session.installModelChangeSignal(tabID: id, ownerToken: UUID().uuidString,
+                                                                 world: .world(name: "invalid-origin"), originHost: "example.com"))
+        XCTAssertThrowsError(try session.modelChangeRevision(for: id), "An unsupported origin must not install a channel")
+    }
+
     private func script(_ view: WKWebView, _ body: String, world: WKContentWorld = .page) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             view.callAsyncJavaScript(body, arguments: [:], in: nil, in: world) { result in

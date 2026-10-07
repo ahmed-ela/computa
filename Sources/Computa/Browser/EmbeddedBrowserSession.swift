@@ -75,6 +75,7 @@ final class EmbeddedBrowserSession {
         var preparedDocumentNavigation = false
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
+        var modelSignalOriginHost: String?
 
         init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate, isModelOwned: Bool,
              popupOpenerTabID: UUID? = nil) {
@@ -331,11 +332,14 @@ final class EmbeddedBrowserSession {
     static let modelSignalName = "computaChatGPTSignal"
 
     /// Only inference-owned views receive this notification-only private-world handler.
-    func installModelChangeSignal(tabID: UUID, ownerToken: String, world: WKContentWorld) throws {
+    func installModelChangeSignal(tabID: UUID, ownerToken: String, world: WKContentWorld,
+                                  originHost: String = "chatgpt.com") throws {
         let entry = try entry(tabID)
-        guard UUID(uuidString: ownerToken) != nil, entry.modelChanges == nil else { throw Failure.tabClosed }
+        guard UUID(uuidString: ownerToken) != nil, entry.modelChanges == nil,
+              ["chatgpt.com", "claude.ai", "gemini.google.com"].contains(originHost) else { throw Failure.tabClosed }
         entry.modelChanges = EmbeddedModelChangeChannel(ownerToken: ownerToken)
         entry.modelSignalWorld = world
+        entry.modelSignalOriginHost = originHost
         entry.view.configuration.userContentController.add(EmbeddedModelSignalHandler(session: self, tabID: tabID),
                                                            contentWorld: world, name: Self.modelSignalName)
     }
@@ -357,7 +361,8 @@ final class EmbeddedBrowserSession {
               let body = message.body as? [String: String], body.count == 2, Set(body.keys) == ["ownerToken", "kind"],
               body["ownerToken"] == channel.ownerToken, body["kind"] == "dom_changed" else { return }
         let origin = message.frameInfo.securityOrigin
-        guard origin.`protocol` == "https", origin.host == "chatgpt.com", origin.port == 0 || origin.port == 443 else { return }
+        guard origin.`protocol` == "https", origin.host == entry.modelSignalOriginHost,
+              origin.port == 0 || origin.port == 443 else { return }
         channel.signal()
     }
 

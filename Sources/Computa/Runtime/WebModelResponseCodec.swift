@@ -9,6 +9,7 @@ enum WebModelResponseCodec {
         let model: String
         let prompt: String
         let runtimeInstructions: String
+        let currentUserInstructions: String
         let offeredToolNames: Set<String>
         fileprivate let tools: [String: OfferedTool]
     }
@@ -65,9 +66,9 @@ enum WebModelResponseCodec {
             case let .promptTooLarge(actual, maximum):
                 "The complete web model prompt is \(actual) bytes, exceeding the \(maximum)-byte limit. No context was truncated or submitted."
             case .emptyReply: "The website returned an empty model reply."
-            case .malformedEnvelope: "The website returned a malformed model response envelope. No tool was dispatched."
-            case let .unknownTool(name): "The website requested an unoffered tool: \(name). No tool was dispatched."
-            case .argumentsMustBeObject: "Web model tool arguments must be a JSON object. No tool was dispatched."
+            case .malformedEnvelope: "The website returned a malformed model response envelope. No tool calls from this reply were dispatched."
+            case let .unknownTool(name): "The website requested an unoffered tool: \(name). No tool calls from this reply were dispatched."
+            case .argumentsMustBeObject: "Web model tool arguments must be a JSON object. No tool calls from this reply were dispatched."
             }
         }
     }
@@ -113,6 +114,12 @@ enum WebModelResponseCodec {
             }
         }
         let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name))
+        let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
+            guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
+            return message["type"] == nil || message["type"] as? String == "message"
+        }
+        let currentUserInstructions = ComputaAgentInstructions.webCurrentUserContract(
+            latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
         let prompt = """
         \(runtimeInstructions)
 
@@ -121,6 +128,8 @@ enum WebModelResponseCodec {
         \(originalJSON)
         END_COMPLETE_RESPONSES_REQUEST_JSON.
 
+        \(currentUserInstructions)
+
         \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys)))
         """
         let bytes = prompt.utf8.count
@@ -128,10 +137,13 @@ enum WebModelResponseCodec {
             throw Failure.promptTooLarge(actualBytes: bytes, maximumBytes: maximumPromptBytes)
         }
         return Request(model: model, prompt: prompt, runtimeInstructions: runtimeInstructions,
+                       currentUserInstructions: currentUserInstructions,
                        offeredToolNames: Set(offered.keys), tools: offered)
     }
 
-    static func parseReply(_ text: String, request: Request) throws -> Reply {
+    /// Embedded inference requires its response contract. Generic callers keep
+    /// ordinary-text compatibility; strict callers never repair or extract JSON.
+    static func parseReply(_ text: String, request: Request, requireEnvelope: Bool = false) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }
         let candidate = removingJSONFence(trimmed)
@@ -139,7 +151,7 @@ enum WebModelResponseCodec {
               let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             // A damaged tool envelope must never be presented as a successful
             // final answer. Ordinary prose/code/JSON still remains ordinary text.
-            if looksLikeToolEnvelope(candidate) { throw Failure.malformedEnvelope }
+            if requireEnvelope || looksLikeToolEnvelope(candidate) { throw Failure.malformedEnvelope }
             return .message(text)
         }
         switch envelope["type"] as? String {
@@ -163,6 +175,7 @@ enum WebModelResponseCodec {
             }
             return .toolCalls(validated)
         default:
+            if requireEnvelope { throw Failure.malformedEnvelope }
             return .message(text)
         }
     }

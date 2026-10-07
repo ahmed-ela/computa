@@ -26,14 +26,14 @@ enum LocalModelCatalog {
         ),
         LocalModelOption(
             id: geminiBrowserModelID,
-            label: "Gemini · Chrome",
-            detail: "Uses signed-in Gemini in Chrome with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
+            label: "Gemini · Built-in browser",
+            detail: "Uses signed-in Gemini in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(
             id: claudeBrowserModelID,
-            label: "Claude · Chrome",
-            detail: "Uses signed-in Claude Incognito in Chrome with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the Incognito website session closes after each turn.",
+            label: "Claude · Built-in browser",
+            detail: "Uses signed-in Claude Incognito in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the Incognito website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(

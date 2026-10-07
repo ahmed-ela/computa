@@ -4,8 +4,9 @@
 
 Computa owns a native WKWebView tab pane beside the chat. General browsing remains
 human-operated; Qwen has no general embedded-browser tools. The Swift app's
-ChatGPT model uses fixed inference actions in separate owned Temporary Chat tabs
-sharing this profile. Gemini and Claude continue to use the Chrome extension.
+ChatGPT, Gemini, and Claude models use fixed inference actions in separate owned
+Temporary Chat or Incognito tabs sharing this profile. They do not require Chrome
+for inference; ordinary browser tools still use the separately approved Chrome connection.
 General agent control is [explicitly deferred](../TODO.md#embedded-browser-agent-control-deferred).
 
 ## Composition
@@ -75,6 +76,8 @@ Computa -destination 'platform=macOS,arch=arm64' -only-testing:ComputaTests/Embe
 and in-memory documents; no fixture server is needed. No production model or
 signed-in-account qualification is implied by these checks.
 
+### Earlier ChatGPT and sign-in qualification
+
 On October 6, 2026, the Developer ID signed Swift app installed at
 `~/Applications/Computa.app` completed two live ChatGPT harness tasks with Chrome
 disconnected and the Browser pane hidden. A local `/usr/bin/uname -m` execution
@@ -107,5 +110,11 @@ With the existing Google profile already signed in, the installed app's Claude
 identity consent, closed its pop-up and returned to the authenticated
 `https://claude.ai/new` composer. The previous build rejected this same action
 as a disabled pop-up. No user-agent change or Chrome connection was needed.
-This qualifies browser sign-in for the tested account/session, not an embedded
-Claude model transport; Claude inference still uses the Chrome transport.
+That run qualified browser sign-in for the tested account/session. In that
+`0.1.2 (3)` build, Claude inference still used the Chrome transport.
+
+### Three-provider inference
+
+The `0.2.0 (4)` Swift build routes ChatGPT, Gemini and Claude inference through
+the embedded browser. See [provider qualification](EMBEDDED-PROVIDERS-QUALIFICATION.md)
+for live harness results, automated checks and the remaining limits.

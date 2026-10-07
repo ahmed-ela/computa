@@ -225,7 +225,7 @@ enum ComputaAgentInstructions {
         does not assert the current approval mode or a connected browser.
 
         This web model accepts text and Accessibility observations only; image
-        and audio inputs are unsupported. The built-in ChatGPT page is an owned
+        and audio inputs are unsupported. The built-in model page is an owned
         inference session, not a computer-tool target. Ordinary browser tools,
         when offered, use an authorized Chrome connection. No dedicated driver
         currently navigates or reads normal built-in WebKit tabs. For a request
@@ -263,6 +263,39 @@ enum ComputaAgentInstructions {
         return parts.joined(separator: "\n\n")
     }
 
+    /// Locates original input without duplicating user text. Only actual
+    /// top-level message roles determine the locator, never quoted tool data.
+    static func webCurrentUserContract(latestUserItemIndex: Int?, inputIsString: Bool) -> String {
+        let locator: String
+        if inputIsString {
+            locator = "The current user input is COMPLETE_RESPONSES_REQUEST_JSON.input (the string input)."
+        } else if let latestUserItemIndex {
+            locator = "The latest user request is the last top-level role=user message at COMPLETE_RESPONSES_REQUEST_JSON.input[\(latestUserItemIndex)]."
+        } else {
+            locator = """
+            No top-level user message is present in this input. Follow the supplied
+            instruction roles and input, including maintenance or compaction. An
+            output-only continuation may still finish authorized work supported by
+            its matching call/result context; absence of a user item does not
+            authorize replaying historical commands or inventing a new task.
+            """
+        }
+        return """
+        COMPUTA_CURRENT_USER_LOCATOR:
+        \(locator)
+        This locator does not replace system/developer instructions or duplicate
+        the user's content. Interpret the latest request in context: a follow-up
+        or status request can retain earlier unfinished authorized work, while
+        corrections and current constraints still apply. Completed historical
+        requests and tool calls are reference history, not a pending checklist.
+        Later matching tool results continue the current request; once those
+        results suffice, answer it and stop. Do not restart completed work unless
+        the current user requests repetition, or start an unrequested interactive
+        or background process to continue work that already finished.
+        END_COMPUTA_CURRENT_USER_LOCATOR.
+        """
+    }
+
     /// Kept after the complete request so long histories cannot bury the local
     /// response handoff. Names come only from the current validated schemas.
     static func webResponseContract(offeredToolNames: [String]) -> String {
@@ -277,6 +310,12 @@ enum ComputaAgentInstructions {
         output, a simulated transcript, invented results or historical receipts.
         A running local session is not completion: request the offered session
         tool for needed input/polling and verify its local output and final exit.
+        After current observations satisfy the latest user request, return its
+        message. Do not replay completed historical tasks or calls unless the
+        current user asks to repeat them. Never start an unrequested interactive
+        or background process to continue already finished work.
+        Before a final message, finish or stop newly started sessions and verify
+        their exits, unless the current user requested ongoing background behavior.
 
         Use a message for a general or self-contained question answered without
         action, a requested plan/summary, verified completion, necessary user
@@ -286,7 +325,10 @@ enum ComputaAgentInstructions {
         Use only current offered schemas, exact qualified names and JSON object
         arguments. For namespace tools use namespace.tool, not the bare name.
 
-        Return exactly one JSON object, without Markdown fences or extra text:
+        Return exactly one fenced JSON code block, opening with ```json and
+        closing with ```. Put one JSON object inside and no text outside it.
+        Preserve valid JSON escaping for quotes, backslashes and newlines in
+        every string. Choose exactly one envelope:
         {"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}
         OR
         {"type":"message","text":"Your answer or truthful remaining limitation"}

@@ -45,7 +45,8 @@ final class WebModelServerTests: XCTestCase {
                 _ = try await server.infer(request, taskID: "late")
                 XCTFail("A Poll reply after the deadline must not be accepted")
             } catch {
-                XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.deadline.localizedDescription)
+                let failure: WebModelServer.Failure = readiness ? .preparationDeadline : .deadline
+                XCTAssertEqual(error.localizedDescription, failure.localizedDescription)
             }
             let beforeCleanup = await transport.operations()
             XCTAssertEqual(beforeCleanup.contains("webProviderSend"), !readiness)
@@ -54,10 +55,39 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testNeverReadyWebsiteReportsPreparationDeadlineWithoutSendingAndStillCleansUp() async throws {
+        let transport = NeverReadyWebModelTransport()
+        let server = WebModelServer()
+        await server.configureEmbeddedTransport(transport)
+        await server.setTimeoutsForTesting(readiness: .milliseconds(100), response: .seconds(2))
+        let input = Data("{\"model\":\"browser/gemini\",\"input\":\"Never submit this fixture\",\"tools\":[],\"stream\":true}".utf8)
+        do {
+            _ = try await server.infer(input, taskID: "never-ready")
+            XCTFail("A website that remains loading must time out before Send")
+        } catch {
+            guard case .preparationDeadline? = error as? WebModelServer.Failure else {
+                return XCTFail("Expected a preparation deadline, received \(error.localizedDescription)")
+            }
+            XCTAssertTrue(error.localizedDescription.contains("45-second preparation deadline"))
+            XCTAssertTrue(error.localizedDescription.contains("No prompt was sent"))
+            XCTAssertFalse(error.localizedDescription.contains("five-minute"))
+        }
+        let beforeCleanup = await transport.operations()
+        XCTAssertEqual(beforeCleanup.first, "webProviderStart")
+        XCTAssertTrue(beforeCleanup.contains("webProviderPoll"))
+        XCTAssertTrue(beforeCleanup.contains("waitForChange"), "Readiness should wait for events until its deadline")
+        XCTAssertFalse(beforeCleanup.contains("webProviderSend"))
+        let issues = await server.shutdown()
+        XCTAssertTrue(issues.isEmpty)
+        let finalOperations = await transport.operations()
+        XCTAssertEqual(finalOperations.last, "webProviderCancel")
+        XCTAssertFalse(finalOperations.contains("webProviderSend"))
+    }
+
     func testClaudeRoutesToClaudeReusesItsSessionAndStartsFreshAfterCleanup() async throws {
         let transport = FixtureWebModelTransport()
         let server = WebModelServer()
-        await server.setTransportForTesting(transport)
+        await server.configureEmbeddedTransport(transport)
         let claudeRequest = Data("{\"model\":\"browser/claude\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
         _ = try await server.infer(claudeRequest, taskID: "claude-task")
         _ = try await server.infer(claudeRequest, taskID: "claude-task")
@@ -76,80 +106,160 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertEqual(finalOperations.filter { $0 == "webProviderCancel" }.count, 1)
     }
 
-    func testChatGPTRequiresEmbeddedTransportEvenWhenChromeIsAvailable() async throws {
+    func testEveryWebsiteRequiresEmbeddedTransportEvenWhenChromeIsAvailable() async throws {
         let chrome = FixtureWebModelTransport()
         let server = WebModelServer()
         await server.setTransportForTesting(chrome)
-        do {
-            _ = try await server.infer(request, taskID: "chatgpt")
-            XCTFail("ChatGPT must not fall back to Chrome")
-        } catch {
-            XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.embeddedRequired.localizedDescription)
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let input = Data("{\"model\":\"browser/\(provider)\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
+            do {
+                _ = try await server.infer(input, taskID: provider)
+                XCTFail("Website models must not fall back to Chrome")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.embeddedRequired.localizedDescription)
+            }
         }
         let operations = await chrome.operations()
         XCTAssertTrue(operations.isEmpty)
         _ = await server.shutdown()
     }
 
-    func testEmbeddedChatGPTWorksWithoutChromeAndOtherProvidersStillRequireChrome() async throws {
+    func testEveryWebsiteUsesEmbeddedTransportWithoutChromeAndShutsDownItsOwnedSession() async throws {
         let embedded = FixtureWebModelTransport()
         let server = WebModelServer()
         await server.configureEmbeddedTransport(embedded)
-        _ = try await server.infer(request, taskID: "chatgpt")
-        for provider in ["gemini", "claude"] {
-            let other = Data("{\"model\":\"browser/\(provider)\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
-            do {
-                _ = try await server.infer(other, taskID: provider)
-                XCTFail("Other providers still require Chrome")
-            } catch {
-                XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.chromeRequired.localizedDescription)
-            }
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let input = Data("{\"model\":\"browser/\(provider)\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
+            let result = try await server.infer(input, taskID: provider)
+            XCTAssertTrue(String(decoding: result, as: UTF8.self).contains("response.completed"))
         }
         let providers = await embedded.startedProviders()
-        XCTAssertEqual(providers, ["chatgpt"])
+        XCTAssertEqual(providers, ["chatgpt", "gemini", "claude"])
         let issues = await server.shutdown()
         XCTAssertTrue(issues.isEmpty)
         let operations = await embedded.operations()
-        XCTAssertEqual(operations.filter { $0 == "webProviderCancel" }.count, 1)
+        XCTAssertEqual(operations.filter { $0 == "webProviderCancel" }.count, 3)
+    }
+
+    func testEveryEmbeddedProviderRejectsMalformedOrHeaderPrefixedRepliesInsteadOfFinalSuccess() async throws {
+        let tool = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf fixture"}}]}"#
+        for provider in ["chatgpt", "gemini", "claude"] {
+            for response in ["\u{E056}\njson\n" + tool,
+                             #"{"type":"message","text":"Observed "Fixture marker value""}"#,
+                             "The command completed."] {
+                let transport = FixtureWebModelTransport(replyTexts: [response])
+                let server = WebModelServer()
+                await server.configureEmbeddedTransport(transport)
+                let input = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": "Run the fixture",
+                    "tools": [["type": "function", "name": "exec_command", "parameters": ["type": "object"]]], "stream": true])
+                do {
+                    let stream = try await server.infer(input, taskID: provider)
+                    XCTFail("A malformed embedded reply must not return final success or tool events: \(stream.count) bytes")
+                } catch {
+                    XCTAssertEqual(error as? WebModelResponseCodec.Failure, .malformedEnvelope)
+                }
+                let operations = await transport.operations()
+                XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1,
+                               "Rejected output must never trigger an automatic retry")
+                let issues = await server.shutdown()
+                XCTAssertTrue(issues.isEmpty)
+                let finalOperations = await transport.operations()
+                XCTAssertEqual(finalOperations.filter { $0 == "webProviderCancel" }.count, 1)
+            }
+        }
+    }
+
+    func testEveryEmbeddedProviderPreservesTheSharedToolHandoffAndMatchingContinuation() async throws {
+        let tools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [
+            ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]],
+            ["type": "function", "name": "write_stdin", "parameters": ["type": "object", "properties": ["session_id": ["type": "integer"]]]],
+        ]]]
+        let developer = ComputaAgentInstructions.developerInstructions()
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let transport = FixtureWebModelTransport(replyTexts: [
+                #"{"type":"tool_calls","calls":[{"name":"functions.exec_command","arguments":{"cmd":"printf fixture"}}]}"#,
+                #"{"type":"message","text":"Observed fixture output"}"#,
+            ])
+            let server = WebModelServer()
+            await server.configureEmbeddedTransport(transport)
+            let firstInput: [[String: Any]] = [
+                ["role": "developer", "content": [["type": "input_text", "text": developer]]],
+                ["role": "user", "content": "Run the harmless fixture"],
+            ]
+            let first = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)",
+                "instructions": "Preserve fixture scope", "input": firstInput, "tools": tools, "stream": true])
+            let functionStream = try await server.infer(first, taskID: provider)
+            let events = try String(decoding: functionStream, as: UTF8.self).split(separator: "\n")
+                .filter { $0.hasPrefix("data: ") }
+                .map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.dropFirst(6).utf8)) as? [String: Any]) }
+            let completed = try XCTUnwrap(events.first { $0["type"] as? String == "response.completed" })
+            let response = try XCTUnwrap(completed["response"] as? [String: Any])
+            let output = try XCTUnwrap(response["output"] as? [[String: Any]])
+            let call = try XCTUnwrap(output.first)
+            XCTAssertEqual(call["type"] as? String, "function_call")
+            XCTAssertEqual(call["name"] as? String, "exec_command")
+            XCTAssertEqual(call["namespace"] as? String, "functions")
+            let callID = try XCTUnwrap(call["call_id"] as? String)
+            let nextInput = firstInput + [
+                ["type": "function_call", "name": "exec_command", "namespace": "functions", "call_id": callID,
+                 "arguments": #"{"cmd":"printf fixture"}"#],
+                ["type": "function_call_output", "call_id": callID, "output": "fixture output; exit 0"],
+            ]
+            let next = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)",
+                "instructions": "Preserve fixture scope", "input": nextInput, "tools": tools, "stream": true])
+            let final = try await server.infer(next, taskID: provider)
+            XCTAssertTrue(String(decoding: final, as: UTF8.self).contains("Observed fixture output"))
+            let prompts = await transport.sentPrompts()
+            XCTAssertEqual(prompts.count, 2)
+            for (prompt, raw) in zip(prompts, [first, next]) {
+                XCTAssertTrue(prompt.contains(String(decoding: raw, as: UTF8.self)))
+                XCTAssertTrue(prompt.contains("Local command execution is offered as: functions.exec_command."))
+                XCTAssertTrue(prompt.hasSuffix("Exact currently offered local function names: functions.exec_command, functions.write_stdin\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+            }
+            let providers = await transport.startedProviders()
+            XCTAssertEqual(providers, [provider])
+            let issues = await server.finish(taskID: provider)
+            XCTAssertTrue(issues.isEmpty)
+            _ = await server.shutdown()
+        }
     }
 
     func testChromeReplacementAndDisconnectLeavePendingEmbeddedStartAndItsSessionAlive() async throws {
-        let gate = WebListenerStartupGate()
-        let embedded = FixtureWebModelTransport(startGate: gate)
-        let chrome = FixtureWebModelTransport()
-        let server = WebModelServer()
-        await server.configureEmbeddedTransport(embedded)
-        await server.setTransportForTesting(chrome)
-        let gemini = Data("{\"model\":\"browser/gemini\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
-        _ = try await server.infer(gemini, taskID: "gemini")
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let gate = WebListenerStartupGate()
+            let embedded = FixtureWebModelTransport(startGate: gate)
+            let chrome = FixtureWebModelTransport()
+            let server = WebModelServer()
+            await server.configureEmbeddedTransport(embedded)
+            await server.setTransportForTesting(chrome)
+            let input = Data("{\"model\":\"browser/\(provider)\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
+            let inference = Task { try await server.infer(input, taskID: provider) }
+            await gate.waitUntilEntered()
+            let connection = ChromeConnectionRequest(
+                application: .init(processIdentifier: 123, bundleIdentifier: "com.google.Chrome",
+                    executableURL: URL(fileURLWithPath: "/fixture/Chrome")),
+                userDataDirectory: URL(fileURLWithPath: "/fixture/profile"),
+                consent: ChromeDebuggingConsent(approvedByUser: true))
+            await server.connect(connection)
+            let disconnected = await server.disconnect()
+            XCTAssertTrue(disconnected.isEmpty)
+            let chromeOperations = await chrome.operations()
+            XCTAssertTrue(chromeOperations.isEmpty)
+            let pendingOperations = await embedded.operations()
+            XCTAssertEqual(pendingOperations, ["webProviderStart"])
 
-        let input = request
-        let inference = Task { try await server.infer(input, taskID: "chatgpt") }
-        await gate.waitUntilEntered()
-        let connection = ChromeConnectionRequest(
-            application: .init(processIdentifier: 123, bundleIdentifier: "com.google.Chrome",
-                executableURL: URL(fileURLWithPath: "/fixture/Chrome")),
-            userDataDirectory: URL(fileURLWithPath: "/fixture/profile"),
-            consent: ChromeDebuggingConsent(approvedByUser: true))
-        await server.connect(connection)
-        let disconnected = await server.disconnect()
-        XCTAssertTrue(disconnected.isEmpty)
-        let chromeOperations = await chrome.operations()
-        XCTAssertEqual(chromeOperations.filter { $0 == "webProviderCancel" }.count, 1)
-        let pendingOperations = await embedded.operations()
-        XCTAssertEqual(pendingOperations, ["webProviderStart"])
-
-        await gate.resume()
-        let first = try await inference.value
-        XCTAssertTrue(String(decoding: first, as: UTF8.self).contains("response.completed"))
-        _ = try await server.infer(request, taskID: "chatgpt")
-        let resumedOperations = await embedded.operations()
-        XCTAssertEqual(resumedOperations.filter { $0 == "webProviderStart" }.count, 1)
-        XCTAssertFalse(resumedOperations.contains("webProviderCancel"))
-        let issues = await server.shutdown()
-        XCTAssertTrue(issues.isEmpty)
-        let finalOperations = await embedded.operations()
-        XCTAssertEqual(finalOperations.filter { $0 == "webProviderCancel" }.count, 1)
+            await gate.resume()
+            let first = try await inference.value
+            XCTAssertTrue(String(decoding: first, as: UTF8.self).contains("response.completed"))
+            _ = try await server.infer(input, taskID: provider)
+            let resumedOperations = await embedded.operations()
+            XCTAssertEqual(resumedOperations.filter { $0 == "webProviderStart" }.count, 1)
+            XCTAssertFalse(resumedOperations.contains("webProviderCancel"))
+            let issues = await server.shutdown()
+            XCTAssertTrue(issues.isEmpty)
+            let finalOperations = await embedded.operations()
+            XCTAssertEqual(finalOperations.filter { $0 == "webProviderCancel" }.count, 1)
+        }
     }
 
     func testUnverifiedCleanupIsReportedAndRetried() async throws {
@@ -379,6 +489,41 @@ private actor LateWebModelTransport: WebModelTransport {
     }
 }
 
+private actor NeverReadyWebModelTransport: WebModelTransport {
+    private let token = UUID().uuidString
+    private var ledger: [String] = []
+    func operations() -> [String] { ledger }
+    func changeRevision(sessionToken: String) throws -> UInt64? {
+        guard sessionToken == token else { throw WebModelServer.Failure.invalidRequest }
+        return 0
+    }
+    func waitForChange(sessionToken: String, after revision: UInt64,
+                       until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+        guard sessionToken == token, revision == 0 else { throw WebModelServer.Failure.invalidRequest }
+        ledger.append("waitForChange")
+        let remaining = deadline - .now
+        if remaining > .zero { try await Task.sleep(for: remaining) }
+        return revision
+    }
+    func request(operation: String, params: Data) throws -> Data {
+        ledger.append(operation)
+        let response: [String: String]
+        if operation == "webProviderStart" {
+            response = ["sessionToken": token, "state": "loading"]
+        } else {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            guard object["sessionToken"] == token else { throw WebModelServer.Failure.invalidRequest }
+            switch operation {
+            case "webProviderPoll": response = ["state": "loading"]
+            case "webProviderSend": response = ["state": "running"]
+            case "webProviderFinish", "webProviderCancel": response = ["cleanup": "not_created"]
+            default: throw WebModelServer.Failure.invalidRequest
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: response)
+    }
+}
+
 private enum DiagnosticFailurePoint: Sendable {
     case start, readinessPoll, sendSnapshot, sendThrown, responsePoll
 }
@@ -477,12 +622,17 @@ private actor FixtureWebModelTransport: WebModelTransport {
     private let cleanupDelay: Bool
     private let startGate: WebListenerStartupGate?
     private var tokens = Set<String>()
-    init(cleanupFailsOnce: Bool = false, cleanupDelay: Bool = false, startGate: WebListenerStartupGate? = nil) {
+    private var prompts: [String] = []
+    private var replyTexts: [String]
+    init(cleanupFailsOnce: Bool = false, cleanupDelay: Bool = false, startGate: WebListenerStartupGate? = nil,
+         replyTexts: [String] = []) {
         self.cleanupFailsOnce = cleanupFailsOnce; self.cleanupDelay = cleanupDelay
         self.startGate = startGate
+        self.replyTexts = replyTexts
     }
     func operations() -> [String] { ledger }
     func startedProviders() -> [String] { providers }
+    func sentPrompts() -> [String] { prompts }
     func request(operation: String, params: Data) async throws -> Data {
         ledger.append(operation)
         var response: [String: String]
@@ -497,8 +647,11 @@ private actor FixtureWebModelTransport: WebModelTransport {
             let object = try JSONSerialization.jsonObject(with: params) as! [String: String]
             guard let token = object["sessionToken"], tokens.contains(token) else { throw WebModelServer.Failure.invalidRequest }
             switch operation {
-            case "webProviderSend": response = ["state": "running"]
-            case "webProviderPoll": response = ["state": "complete", "text": "{\"type\":\"message\",\"text\":\"OK\"}"]
+            case "webProviderSend":
+                prompts.append(try XCTUnwrap(object["prompt"]))
+                response = ["state": "running"]
+            case "webProviderPoll":
+                response = ["state": "complete", "text": replyTexts.isEmpty ? "{\"type\":\"message\",\"text\":\"OK\"}" : replyTexts.removeFirst()]
             case "webProviderFinish", "webProviderCancel":
                 if cleanupDelay { try await Task.sleep(for: .milliseconds(30)) }
                 if cleanupFailsOnce { cleanupFailsOnce = false; response = ["cleanup": "failed"] }

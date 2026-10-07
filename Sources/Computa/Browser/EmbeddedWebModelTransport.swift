@@ -1,4 +1,5 @@
 import AppKit
+import CoreFoundation
 import Foundation
 import OSLog
 @preconcurrency import WebKit
@@ -7,6 +8,99 @@ import OSLog
 /// Prompts are data passed to a fixed DOM program in an isolated content world.
 @MainActor
 final class EmbeddedWebModelTransport: WebModelTransport {
+    /// Every session pins one provider. A valid route on another provider can
+    /// never satisfy its ownership checks, including before its first submit.
+    enum Provider: String, CaseIterable {
+        case chatgpt, claude, gemini
+
+        var host: String {
+            switch self {
+            case .chatgpt: "chatgpt.com"
+            case .claude: "claude.ai"
+            case .gemini: "gemini.google.com"
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .chatgpt: "ChatGPT"
+            case .claude: "Claude"
+            case .gemini: "Gemini"
+            }
+        }
+
+        var startURL: URL {
+            switch self {
+            case .chatgpt: URL(string: "https://chatgpt.com/?temporary-chat=true")!
+            case .claude: URL(string: "https://claude.ai/new?incognito")!
+            case .gemini: URL(string: "https://gemini.google.com/app")!
+            }
+        }
+
+        func accepts(_ raw: String) -> Bool {
+            guard let url = originURL(raw) else { return false }
+            return isFreshPath(url.path) || conversationURL(raw) != nil
+        }
+
+        func conversationURL(_ raw: String?) -> String? {
+            guard let raw, let url = originURL(raw) else { return nil }
+            let pattern: String
+            switch self {
+            case .chatgpt: pattern = #"^/c/(?:[A-Za-z0-9-]+|local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+)/?$"#
+            case .claude: pattern = #"^/chat/[A-Za-z0-9-]+/?$"#
+            case .gemini: pattern = #"^/(?:u/[0-9]{1,3}/)?app/[A-Za-z0-9_-]+/?$"#
+            }
+            guard url.path.range(of: pattern, options: .regularExpression) != nil else { return nil }
+            return "https://\(host)" + (url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path)
+        }
+
+        func isLocalConversation(_ route: String?) -> Bool {
+            self == .chatgpt && route?.contains("/c/local-chatgpt") == true
+        }
+
+        /// Gemini may select an account before readiness. Once observed, its
+        /// account prefix is immutable, including the first conversation route.
+        func routeContext(_ raw: String) -> String? {
+            guard accepts(raw), let url = originURL(raw) else { return nil }
+            switch self {
+            case .chatgpt: return "https://\(host)/"
+            case .claude: return "https://\(host)/new"
+            case .gemini:
+                guard let range = url.path.range(of: #"^/(?:u/[0-9]{1,3}/)?app(?=/|$)"#, options: .regularExpression) else { return nil }
+                return "https://\(host)" + String(url.path[range])
+            }
+        }
+
+        func acceptsTemporaryToggle(_ url: URL) -> Bool {
+            guard accepts(url.absoluteString), conversationURL(url.absoluteString) == nil else { return false }
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            switch self {
+            case .chatgpt: return query.contains(URLQueryItem(name: "temporary-chat", value: "true"))
+            case .claude: return query.contains { $0.name == "incognito" }
+            case .gemini: return false // Gemini changes its mode without changing the route.
+            }
+        }
+
+        func acceptsUnboundStart(_ url: URL) -> Bool {
+            guard accepts(url.absoluteString), conversationURL(url.absoluteString) == nil else { return false }
+            return self == .gemini ? true : acceptsTemporaryToggle(url)
+        }
+
+        private func originURL(_ raw: String) -> URL? {
+            guard let url = URL(string: raw), url.scheme == "https", url.host == host,
+                  url.port == nil || url.port == 443, url.user == nil, url.password == nil else { return nil }
+            return url
+        }
+
+        private func isFreshPath(_ path: String) -> Bool {
+            switch self {
+            case .chatgpt: path == "/"
+            case .claude: path == "/new" || path == "/new/"
+            case .gemini: path.range(of: #"^/(?:u/[0-9]{1,3}/)?app/?$"#, options: .regularExpression) != nil
+            }
+        }
+    }
+
     enum OwnershipReason: String {
         case documentGenerationBefore = "document_generation_before"
         case documentGenerationAfter = "document_generation_after"
@@ -28,26 +122,32 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     enum Failure: Error, LocalizedError, Equatable {
         case invalidRequest, unsupportedProvider, capacity, staleSession, documentChanged
         case signInRequired, temporaryUnverified, notFresh, composerUnavailable
-        case pageUnavailable, responseTooLarge, deadline
+        case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
+        case submissionObservationPending
+        case usageLimited(Provider)
         case editorFailure(String)
         case ownershipFailure(OwnershipReason)
 
         var errorDescription: String? {
             switch self {
             case .invalidRequest: "The built-in browser model request could not be validated."
-            case .unsupportedProvider: "Only ChatGPT is supported in the built-in browser right now."
-            case .capacity: "Finish an existing ChatGPT task before opening another browser session."
-            case .staleSession: "The owned ChatGPT browser session is no longer available."
-            case .documentChanged: "The owned ChatGPT page or conversation changed. No prompt was replayed."
-            case .ownershipFailure(let reason): "The owned ChatGPT page or conversation changed (\(reason.rawValue)). No prompt was replayed."
-            case .signInRequired: "Sign in to ChatGPT in Computa's built-in browser, then retry."
-            case .temporaryUnverified: "ChatGPT did not confirm Temporary Chat mode. No further prompt was sent."
-            case .notFresh: "The new ChatGPT page was not empty. It was not modified."
-            case .composerUnavailable: "ChatGPT's message editor could not accept the exact prompt. No send was retried."
-            case .editorFailure(let reason): "ChatGPT's message editor could not accept the exact prompt (\(reason)). No send was retried."
-            case .pageUnavailable: "The ChatGPT page could not be inspected in the built-in browser."
-            case .responseTooLarge: "ChatGPT's response exceeded the local browser transport limit."
-            case .deadline: "ChatGPT did not become ready or complete its response before the deadline."
+            case .unsupportedProvider: "That model provider is not supported in the built-in browser."
+            case .capacity: "Finish an existing browser model task before opening another session."
+            case .staleSession: "The owned browser model session is no longer available."
+            case .documentChanged: "The owned model page or conversation changed. No prompt was replayed."
+            case .ownershipFailure(let reason): "The owned model page or conversation changed (\(reason.rawValue)). No prompt was replayed."
+            case .signInRequired: "Sign in to the selected AI website in Computa's built-in browser, then retry."
+            case .temporaryUnverified: "The AI website did not confirm temporary or incognito chat mode. No further prompt was sent."
+            case .notFresh: "The new model page was not empty. It was not modified."
+            case .composerUnavailable: "The website's message editor could not accept the exact prompt. No send was retried."
+            case .editorFailure(let reason): "The website's message editor could not accept the exact prompt (\(reason)). No send was retried."
+            case .pageUnavailable: "The model page could not be inspected in the built-in browser."
+            case .submissionObservationPending: "The submitted message is still appearing on the model page."
+            case .responseTooLarge: "The website's response exceeded the local browser transport limit."
+            case .responseInterrupted: "The website interrupted its response. No send was retried."
+            case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. Try again after your account's limit resets."
+            case .preparationDeadline: "The website did not prepare a verified temporary or incognito chat before the 45-second deadline. No prompt was sent."
+            case .deadline: "The website did not finish its response before the five-minute deadline."
             }
         }
     }
@@ -56,6 +156,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let token = UUID().uuidString
         let firstUserMarker = UUID().uuidString
         let tabID: UUID
+        let provider: Provider
         let view: WKWebView
         let initialDocumentGeneration: UUID
         let created = ContinuousClock.now
@@ -71,6 +172,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var lastChanged = ContinuousClock.now
         var turnStarted = ContinuousClock.now
         var conversation: String?
+        var routeContext: String?
         var conversationIdentity: String?
         var firstUserFingerprint: String?
         var promoted = false
@@ -81,8 +183,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var initialReadFailures = 0
         var lastInspection: InspectionSignature?
         var loggedStructure = false
+        var loggedReadinessStages: Set<Bool> = []
+        var loggedCodeSequence: Int?
+        var loggedCodeResponseCount: Int?
+        var loggedFirstUserStructure = false
+        var lastQuotaDiagnostic: [String]?
 
-        init(tabID: UUID, view: WKWebView, documentGeneration: UUID) {
+        init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID) {
+            self.provider = provider
             self.tabID = tabID
             self.view = view
             initialDocumentGeneration = documentGeneration
@@ -93,11 +201,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private let createTab: @MainActor (URL) throws -> UUID
     private let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
     private var sessions: [String: Session] = [:]
-    private lazy var script: String? = Self.loadScript()
-    private static let inspectionLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedChatGPT")
+    private var scripts: [Provider: String] = [:]
+    private var preparationTimeout: Duration = .seconds(45)
+    private var responseTimeout: Duration = .seconds(300)
+    private static let inspectionLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
     private struct InspectionSignature: Equatable {
         let responses: Int, users: Int, sequence: Int, textBytes: Int
-        let pending: Bool, busy: Bool, answerComplete: Bool, ownershipPending: Bool
+        let pending: Bool, busy: Bool, answerComplete: Bool, ownershipPending: Bool, composer: Bool, temporary: Bool, temporaryActionAvailable: Bool
         let modernMarkers: Int, logicalAnswers: Int, scopedCopies: Int, enabledCopies: Int, depth: Int
     }
     #if DEBUG
@@ -118,6 +228,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     func setBeforePageResultValidationForTesting(_ hook: (@MainActor (String) async -> Void)?) {
         beforePageResultValidationForTesting = hook
     }
+
+    func setTimeoutsForTesting(preparation: Duration, response: Duration) {
+        preparationTimeout = max(.milliseconds(1), min(.seconds(45), preparation))
+        responseTimeout = max(.milliseconds(1), min(.seconds(300), response))
+    }
     #endif
 
     func request(operation: String, params: Data) async throws -> Data {
@@ -127,15 +242,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if operation == "webProviderStart" {
             try Task.checkCancellation()
             guard Set(values.keys) == ["provider"] else { throw Failure.invalidRequest }
-            guard values["provider"] == "chatgpt" else { throw Failure.unsupportedProvider }
+            guard let raw = values["provider"], let provider = Provider(rawValue: raw) else { throw Failure.unsupportedProvider }
             guard sessions.count < 4 else { throw Failure.capacity }
-            guard script != nil else { throw Failure.pageUnavailable }
-            let id = try createTab(URL(string: "https://chatgpt.com/?temporary-chat=true")!)
+            guard script(for: provider) != nil else { throw Failure.pageUnavailable }
+            let id = try createTab(provider.startURL)
             guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else {
                 throw Failure.staleSession
             }
-            let session = Session(tabID: id, view: view, documentGeneration: generation)
-            try browser.installModelChangeSignal(tabID: id, ownerToken: session.token, world: world)
+            let session = Session(provider: provider, tabID: id, view: view, documentGeneration: generation)
+            try browser.installModelChangeSignal(tabID: id, ownerToken: session.token, world: world, originHost: provider.host)
             sessions[session.token] = session
             return try snapshot(session)
         }
@@ -156,7 +271,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard before["prepared"] as? Bool == true else { throw Failure.editorFailure("focus_unavailable") }
             if !session.submitted {
                 guard count(before, "responseCount") == 0, count(before, "userCount") == 0,
-                      conversationURL(before["url"] as? String) == nil else { throw Failure.notFresh }
+                      session.provider.conversationURL(before["url"] as? String) == nil else { throw Failure.notFresh }
             }
             session.baseline = count(before, "responseCount")
             // Keep the lineage marker out of the local transcript. It is an
@@ -196,6 +311,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                        until deadline: ContinuousClock.Instant) async throws -> UInt64? {
         guard let session = sessions[sessionToken] else { throw Failure.staleSession }
         var wake = deadline
+        if session.state == "loading" { wake = min(wake, session.created + preparationTimeout) }
+        else if session.state == "running" { wake = min(wake, session.turnStarted + responseTimeout) }
         if session.completionCandidate, let since = session.candidateSince {
             wake = min(wake, max(since, session.lastChanged) + .milliseconds(1_600))
         }
@@ -232,17 +349,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
         if session.state == "loading", session.view.isLoading {
             session.initialReadRetry = nil
-            guard ContinuousClock.now - session.created < .seconds(45) else { throw Failure.deadline }
+            guard ContinuousClock.now - session.created < preparationTimeout else { throw Failure.preparationDeadline }
             return try snapshot(session)
         }
-        let deadline = session.state == "loading" ? session.created + .seconds(45) : session.turnStarted + .seconds(300)
-        guard ContinuousClock.now < deadline else { throw Failure.deadline }
+        let timeoutFailure: Failure = session.state == "loading" ? .preparationDeadline : .deadline
+        let deadline = session.state == "loading" ? session.created + preparationTimeout : session.turnStarted + responseTimeout
+        guard ContinuousClock.now < deadline else { throw timeoutFailure }
         let observed: [String: Any]
         do { observed = try await page(session, action: "inspect", maximumWait: min(.seconds(10), deadline - .now)) }
         catch {
+            if !Task.isCancelled, ContinuousClock.now >= deadline { throw timeoutFailure }
+            if (error as? Failure) == .submissionObservationPending {
+                try Task.checkCancellation()
+                // The fixed adapter discarded a read crossed only by the
+                // already-claimed submission's asynchronous user append. No
+                // observation is admitted; the versioned DOM signal wakes a
+                // fresh read which recomputes every ownership proof.
+                return try snapshot(session)
+            }
             // Retry only the initial read, before any mode toggle or submission.
             if session.state == "loading", !session.temporaryRequested,
-               !session.submitted, ContinuousClock.now - session.created < .seconds(45),
+               !session.submitted, ContinuousClock.now - session.created < preparationTimeout,
                (error as? Failure) == .pageUnavailable, session.initialReadFailures < 3 {
                 // Before the first observer exists, an inspection failure may
                 // have no subsequent event. Only that failure gets a bounded retry.
@@ -252,29 +379,30 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             throw error
         }
-        guard ContinuousClock.now < deadline else { throw Failure.deadline }
+        guard ContinuousClock.now < deadline else { throw timeoutFailure }
         session.initialReadRetry = nil
         logInspection(observed, session: session)
         if session.state == "loading" {
             guard count(observed, "responseCount") == 0, count(observed, "userCount") == 0,
-                  conversationURL(observed["url"] as? String) == nil else { throw Failure.notFresh }
+                  session.provider.conversationURL(observed["url"] as? String) == nil else { throw Failure.notFresh }
             if observed["signIn"] as? Bool == true { throw Failure.signInRequired }
             if observed["composer"] as? Bool == true {
                 if observed["temporary"] as? Bool == true {
                     session.temporary = true
                     session.state = "ready"
-                } else if !session.temporaryRequested {
+                } else if !session.temporaryRequested, observed["temporaryActionAvailable"] as? Bool == true {
                     session.temporaryRequested = true
                     _ = try await page(session, action: "enableTemporary")
                 }
             }
-            guard session.state == "ready" || ContinuousClock.now - session.created < .seconds(45) else {
-                throw Failure.temporaryUnverified
+            guard session.state == "ready" || ContinuousClock.now - session.created < preparationTimeout else {
+                throw Failure.preparationDeadline
             }
         } else {
             let previouslyCandidate = session.completionCandidate
             session.completionCandidate = false
             guard observed["temporary"] as? Bool == true else { throw Failure.temporaryUnverified }
+            guard observed["interrupted"] as? Bool != true else { throw Failure.responseInterrupted }
             let response = observed["text"] as? String ?? ""
             guard response.utf8.count <= 220_000 else { throw Failure.responseTooLarge }
             if count(observed, "responseCount") > session.baseline,
@@ -290,7 +418,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
             }
             if !session.completionCandidate { session.candidateSince = nil }
-            guard session.state == "complete" || ContinuousClock.now - session.turnStarted < .seconds(300) else {
+            guard session.state == "complete" || ContinuousClock.now - session.turnStarted < responseTimeout else {
                 throw Failure.deadline
             }
         }
@@ -298,7 +426,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func logInspection(_ observed: [String: Any], session: Session) {
+        if let raw = observed["quotaDiagnostic"] as? String {
+            logQuotaDiagnostic(raw, session: session, action: "inspect")
+        }
         let evidence = observed["completionEvidence"] as? [String: Any] ?? [:]
+        let responseCount = count(observed, "responseCount")
+        if observed["answerComplete"] as? Bool == true,
+           session.loggedCodeSequence != session.sequence || session.loggedCodeResponseCount != responseCount,
+           let structure = evidence["codeStructure"] as? [String: Any],
+           let safe = Self.sanitizedCodeStructure(structure) {
+            session.loggedCodeSequence = session.sequence
+            session.loggedCodeResponseCount = responseCount
+            Self.inspectionLog.info("codeStructure sequence=\(session.sequence) responses=\(responseCount) \(safe, privacy: .public)")
+        }
+        if let raw = observed["debugStructure"] as? String, raw.utf8.count <= 8_192,
+           !session.loggedReadinessStages.contains(session.temporaryRequested),
+           let safe = Self.sanitizedReadinessStructure(raw, provider: session.provider) {
+            session.loggedReadinessStages.insert(session.temporaryRequested)
+            Self.inspectionLog.info("readiness \(safe, privacy: .public)")
+        }
         if !session.loggedStructure, count(observed, "responseCount") == 0 || count(observed, "userCount") == 0,
            let structure = observed["debugStructure"] as? String, !structure.isEmpty, structure.utf8.count <= 8_192,
            let metadata = try? JSONSerialization.jsonObject(with: Data(structure.utf8)) as? [String: Any],
@@ -310,11 +456,307 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             sequence: session.sequence, textBytes: (observed["text"] as? String ?? "").utf8.count,
             pending: session.pendingSubmission, busy: observed["busy"] as? Bool ?? false,
             answerComplete: observed["answerComplete"] as? Bool ?? false, ownershipPending: observed["ownershipPending"] as? Bool ?? false,
+            composer: observed["composer"] as? Bool ?? false, temporary: observed["temporary"] as? Bool ?? false,
+            temporaryActionAvailable: observed["temporaryActionAvailable"] as? Bool ?? false,
             modernMarkers: count(evidence, "modernMarkers"), logicalAnswers: count(evidence, "logicalAnswers"),
             scopedCopies: count(evidence, "scopedCopies"), enabledCopies: count(evidence, "enabledCopies"), depth: count(evidence, "depth"))
         guard signature != session.lastInspection else { return }
         session.lastInspection = signature
-        Self.inspectionLog.info("inspection responses=\(signature.responses) users=\(signature.users) sequence=\(signature.sequence) pending=\(signature.pending) busy=\(signature.busy) answerComplete=\(signature.answerComplete) textBytes=\(signature.textBytes) ownershipPending=\(signature.ownershipPending) modernMarkers=\(signature.modernMarkers) logicalAnswers=\(signature.logicalAnswers) scopedCopies=\(signature.scopedCopies) enabledCopies=\(signature.enabledCopies) depth=\(signature.depth)")
+        Self.inspectionLog.info("inspection responses=\(signature.responses) users=\(signature.users) sequence=\(signature.sequence) pending=\(signature.pending) busy=\(signature.busy) answerComplete=\(signature.answerComplete) textBytes=\(signature.textBytes) ownershipPending=\(signature.ownershipPending) composer=\(signature.composer) temporary=\(signature.temporary) temporaryActionAvailable=\(signature.temporaryActionAvailable) modernMarkers=\(signature.modernMarkers) logicalAnswers=\(signature.logicalAnswers) scopedCopies=\(signature.scopedCopies) enabledCopies=\(signature.enabledCopies) depth=\(signature.depth)")
+    }
+
+    /// The fixed adapter's fresh quota receipt can pin an empty initial
+    /// document for cleanup, without accepting readiness or message lineage.
+    static func validFreshQuotaAbort(_ value: [String: Any], provider: Provider, expectedURL: URL, currentURL: URL) -> Bool {
+        guard provider == .claude,
+              Set(value.keys) == ["error", "freshQuotaAbort", "url", "userCount", "responseCount"],
+              value["error"] as? String == "website_usage_limit",
+              let receipt = value["freshQuotaAbort"] as? NSNumber,
+              CFGetTypeID(receipt) == CFBooleanGetTypeID(), receipt.boolValue,
+              let rawURL = value["url"] as? String, rawURL == expectedURL.absoluteString, rawURL == currentURL.absoluteString,
+              provider.acceptsUnboundStart(currentURL) else { return false }
+        for key in ["userCount", "responseCount"] {
+            guard let number = value[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue == 0 else { return false }
+        }
+        return true
+    }
+
+    /// Diagnostic metadata has no authority. Project only bounded counts,
+    /// booleans and selector names; never log arbitrary text, IDs or URLs.
+    static func sanitizedQuotaStructure(_ raw: String, provider: Provider) -> String? {
+        guard provider == .claude, raw.utf8.count <= 8_192,
+              let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+              value["kind"] as? String == "quota_structure", value["provider"] as? String == "claude" else { return nil }
+        func boundedCount(_ source: [String: Any], _ key: String, limit: Int = 1_000) -> Int? {
+            guard let number = source[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue >= 0, number.doubleValue <= Double(limit),
+                  number.doubleValue.rounded() == number.doubleValue else { return nil }
+            return number.intValue
+        }
+        func flag(_ source: [String: Any], _ key: String) -> Bool? {
+            guard let number = source[key] as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+            return number.boolValue
+        }
+        func shape(_ source: [String: Any]) -> [String: Any]? {
+            let tags = ["a", "button", "div", "span", "h1", "h2", "h3", "h4", "h5", "h6", "p", "section", "main", "body", "html", "dialog", "other"]
+            guard let tag = source["tag"] as? String,
+                  let rectCount = boundedCount(source, "rectCount"),
+                  let display = source["display"] as? String, ["none", "contents", "other"].contains(display),
+                  let visibility = source["visibility"] as? String, ["visible", "hidden", "collapse", "other"].contains(visibility) else { return nil }
+            var result: [String: Any] = ["tag": tags.contains(tag) ? tag : "other", "rectCount": rectCount,
+                                         "display": display, "visibility": visibility]
+            for key in ["strictVisible", "physicalVisible", "inertAncestor", "ariaHiddenAncestor"] {
+                guard let boolean = flag(source, key) else { return nil }
+                result[key] = boolean
+            }
+            return result
+        }
+        var safe: [String: Any] = ["kind": "quota_structure", "provider": "claude"]
+        let sections: [(String, Int, [String], [String])] = [
+            ("headings", 4, ["spacedClock", "joinedClock"], []),
+            ("controls", 8, ["roleButton", "ariaLabelPresent", "ariaUpgradeExact", "ariaDismissExact",
+                              "textUpgradeExact", "textDismissExact", "upgradeEdgePrivateUse", "dismissEdgePrivateUse", "hasUnknownLabelText"], ["privateUseCount"]),
+            ("popupAncestors", 8, ["containsMessages"], ["depth", "buttonCount", "roleButtonCount", "anchorCount", "upgradeExactCount", "dismissExactCount"]),
+            ("support", 4, ["labelExact", "labelKnownSuffix"], []),
+            ("bannerParents", 4, ["spacedClock", "joinedClock", "supportDirect"], []),
+        ]
+        for (key, limit, flags, counts) in sections {
+            guard let nodes = value[key] as? [[String: Any]], nodes.count <= limit else { return nil }
+            var projected: [[String: Any]] = []
+            for node in nodes {
+                guard var result = shape(node) else { return nil }
+                for name in flags {
+                    guard let boolean = flag(node, name) else { return nil }
+                    result[name] = boolean
+                }
+                for name in counts {
+                    guard let count = boundedCount(node, name, limit: name == "depth" ? 7 : 1_000) else { return nil }
+                    result[name] = count
+                }
+                if key == "bannerParents" {
+                    guard let children = node["children"] as? [String], children.count <= 8,
+                          children.allSatisfy({ ["text", "support", "element", "other"].contains($0) }) else { return nil }
+                    result["children"] = children
+                }
+                projected.append(result)
+            }
+            safe[key] = projected
+        }
+        guard let mode = value["mode"] as? [String: Any] else { return nil }
+        var counts: [String: Int] = [:]
+        for key in ["headerTotal", "headerVisible", "headerPhysical", "exitTotal", "exitVisible", "exitPhysical"] {
+            guard let count = boundedCount(mode, key) else { return nil }
+            counts[key] = count
+        }
+        safe["mode"] = counts
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 8_192 else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    static func quotaStructureDiagnosticRecords(_ raw: String, provider: Provider) -> [String]? {
+        guard let safe = sanitizedQuotaStructure(raw, provider: provider),
+              var summary = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] else { return nil }
+        var records: [[String: Any]] = []
+        for section in ["headings", "controls", "popupAncestors", "support", "bannerParents"] {
+            let nodes = summary.removeValue(forKey: section) as? [[String: Any]] ?? []
+            records += nodes.enumerated().map { ["section": section, "index": $0.offset, "node": $0.element] }
+        }
+        var result: [String] = []
+        for record in [summary] + records {
+            guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys), bytes.count <= 960 else { return nil }
+            result.append(String(decoding: bytes, as: UTF8.self))
+        }
+        return result
+    }
+
+    private func logQuotaDiagnostic(_ raw: String, session: Session, action: String, force: Bool = false) {
+        guard let records = Self.quotaStructureDiagnosticRecords(raw, provider: session.provider),
+              force || session.lastQuotaDiagnostic != records else { return }
+        session.lastQuotaDiagnostic = records
+        for (index, record) in records.enumerated() {
+            Self.inspectionLog.error("quotaStructure action=\(action) sequence=\(session.sequence) index=\(index) \(record, privacy: .public)")
+        }
+    }
+
+    static func sanitizedReadinessStructure(_ raw: String, provider: Provider) -> String? {
+        guard raw.utf8.count <= 8_192,
+              let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+              value["kind"] as? String == "provider_readiness", value["provider"] as? String == provider.rawValue else { return nil }
+        func node(_ source: [String: Any], descendants: Bool) -> [String: Any]? {
+            guard let tag = source["tag"] as? String,
+                  tag.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) != nil,
+                  let classes = source["classes"] as? [String], classes.count <= 6,
+                  classes.allSatisfy({ $0.range(of: #"^[A-Za-z0-9_-]{1,48}$"#, options: .regularExpression) != nil }),
+                  let length = source["textLength"] as? Int, (0...220_001).contains(length) else { return nil }
+            var safe: [String: Any] = ["tag": tag, "classes": classes, "textLength": length]
+            for key in ["visible", "excluded", "initialExact", "activeExact", "initialTitle", "initialContained", "activeContained", "supportLink", "noHistory"] {
+                if let flag = source[key] as? Bool { safe[key] = flag }
+            }
+            if descendants, let leaves = source["exactDescendants"] as? [[String: Any]] {
+                guard leaves.count <= 4 else { return nil }
+                let projected = leaves.compactMap { node($0, descendants: false) }
+                guard projected.count == leaves.count else { return nil }
+                safe["exactDescendants"] = projected
+            }
+            return safe
+        }
+        guard let nodes = value["nodes"] as? [[String: Any]], nodes.count <= 12 else { return nil }
+        let projected = nodes.compactMap { node($0, descendants: true) }
+        guard projected.count == nodes.count else { return nil }
+        var safe: [String: Any] = ["kind": "provider_readiness", "provider": provider.rawValue, "nodes": projected]
+        for key in ["composer", "toggle", "exit"] {
+            guard let counts = value[key] as? [String: Any] else { return nil }
+            var bounded: [String: Int] = [:]
+            for name in ["total", "visible", "enabled"] {
+                guard let count = counts[name] as? Int, (0...1_000).contains(count) else { return nil }
+                bounded[name] = count
+            }
+            safe[key] = bounded
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 8_192 else { return nil }
+        return String(data: bytes, encoding: .utf8)
+    }
+
+    static func sanitizedCodeStructure(_ source: [String: Any]) -> String? {
+        var safe: [String: Any] = [:]
+        for key in ["preCount", "codeCount", "codeTextLength", "outsideTextLength"] {
+            let limit = key.hasSuffix("Length") ? 220_001 : 1_000
+            guard let count = source[key] as? Int, (0...limit).contains(count) else { return nil }
+            safe[key] = count
+        }
+        guard let truncated = source["outsideTruncated"] as? Bool,
+              let tags = source["preParentTags"] as? [String], tags.count <= 3,
+              tags.allSatisfy({ $0.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) != nil }) else { return nil }
+        safe["outsideTruncated"] = truncated
+        safe["preParentTags"] = tags
+        if let nodes = source["outsideNodes"] as? [[String: Any]] {
+            guard nodes.count <= 4 else { return nil }
+            var projected: [[String: Any]] = []
+            for node in nodes {
+                guard let kind = node["kind"] as? String, ["json", "private_use", "other"].contains(kind),
+                      let length = node["textLength"] as? Int, (0...220_001).contains(length),
+                      let ancestors = node["ancestors"] as? [[String: Any]], ancestors.count <= 4 else { return nil }
+                var parents: [[String: Any]] = []
+                for parent in ancestors {
+                    guard let tag = parent["tag"] as? String,
+                          tag.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) != nil,
+                          let classes = parent["classes"] as? [String], classes.count <= 6,
+                          classes.allSatisfy({ $0.range(of: #"^[A-Za-z0-9_-]{1,48}$"#, options: .regularExpression) != nil }),
+                          let pres = parent["preDescendants"] as? Int, (0...1_000).contains(pres),
+                          let copies = parent["copyControls"] as? Int, (0...1_000).contains(copies) else { return nil }
+                    parents.append(["tag": tag, "classes": classes, "preDescendants": pres, "copyControls": copies])
+                }
+                projected.append(["kind": kind, "textLength": length, "ancestors": parents])
+            }
+            safe["outsideNodes"] = projected
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 8_192 else { return nil }
+        return String(data: bytes, encoding: .utf8)
+    }
+
+    static func sanitizedFirstUserStructure(_ raw: String, provider: Provider) -> String? {
+        guard raw.utf8.count <= 8_192,
+              let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+              value["kind"] as? String == "first_user_structure", value["provider"] as? String == provider.rawValue else { return nil }
+        let tags: Set<String> = ["none", "div", "span", "p", "pre", "code", "button", "section", "article", "user-query", "a", "strong", "em", "ol", "ul", "li", "br", "input", "textarea", "mat-icon"]
+        let utilityClasses: Set<String> = ["ng-star-inserted", "cdk-visually-hidden", "hidden", "invisible", "truncate", "overflow-hidden", "whitespace-pre-wrap"]
+        let sitePrefixes = ["query-", "user-query-", "gds-", "mat-", "cdk-", "ng-"]
+        func shape(_ source: [String: Any], discovery: Bool = false) -> [String: Any]? {
+            guard let tag = source["tag"] as? String,
+                  tag.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) != nil,
+                  let classes = source["classes"] as? [String], classes.count <= 6,
+                  classes.allSatisfy({ $0.range(of: #"^[A-Za-z0-9_-]{1,48}$"#, options: .regularExpression) != nil }) else { return nil }
+            let safeClasses = classes.filter { token in
+                utilityClasses.contains(token) || discovery && sitePrefixes.contains { token.hasPrefix($0) }
+            }
+            return ["tag": tags.contains(tag) ? tag : "other", "classes": safeClasses]
+        }
+        guard let root = value["root"] as? [String: Any], let safeRoot = shape(root),
+              let body = value["body"] as? [String: Any], let safeBody = shape(body) else { return nil }
+        var safe: [String: Any] = ["kind": "first_user_structure", "provider": provider.rawValue, "root": safeRoot, "body": safeBody]
+        for key in ["userCount", "textLength", "lineCount", "markerOccurrences", "controlDescendants"] {
+            let limit = key == "textLength" || key == "lineCount" ? 220_001 : 1_000
+            guard let count = value[key] as? Int, (0...limit).contains(count) else { return nil }
+            safe[key] = count
+        }
+        for key in ["markerFinalLine", "submitted", "markerMatches"] {
+            guard let flag = value[key] as? Bool else { return nil }
+            safe[key] = flag
+        }
+        if let rawReason = value["reason"] {
+            let reasons: Set<String> = ["first_bound", "marker_invalid", "submission_unclaimed", "marker_mismatch", "body_limit", "marker_not_final", "marker_duplicate", "body_empty", "snapshot_before_action", "pinned_fingerprint", "native_fingerprint", "binding_not_authorized", "first_missing", "snapshot_after_action", "first_insert", "first_submit"]
+            guard let reason = rawReason as? String, reasons.contains(reason) else { return nil }
+            safe["reason"] = reason
+        }
+        for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch"] {
+            if let rawFlag = value[key] {
+                guard let flag = rawFlag as? Bool else { return nil }
+                safe[key] = flag
+            }
+        }
+        if let rawSnapshot = value["snapshot"] {
+            guard let snapshot = rawSnapshot as? [String: Any] else { return nil }
+            var projected: [String: Bool] = [:]
+            for key in ["rootSame", "bodySame", "bodyConnected", "textSame", "countSame", "urlSame", "originSame", "ownerSame"] {
+                guard let flag = snapshot[key] as? Bool else { return nil }
+                projected[key] = flag
+            }
+            safe["snapshot"] = projected
+        }
+        if let rawDescendants = value["descendants"] {
+            guard let descendants = rawDescendants as? [[String: Any]], descendants.count <= 16 else { return nil }
+            var projected: [[String: Any]] = []
+            for node in descendants {
+                guard var child = shape(node, discovery: true), let path = node["path"] as? [Int],
+                      path.count <= 16, path.allSatisfy({ (0...1_000).contains($0) }) else { return nil }
+                child["path"] = path
+                for key in ["childElements", "controls", "textLength"] {
+                    guard let count = node[key] as? Int, (0...(key == "textLength" ? 220_001 : 1_000)).contains(count) else { return nil }
+                    child[key] = count
+                }
+                for key in ["markerExact", "markerContained", "visible", "editable"] {
+                    guard let flag = node[key] as? Bool else { return nil }
+                    child[key] = flag
+                }
+                projected.append(child)
+            }
+            safe["descendants"] = projected
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 8_192 else { return nil }
+        return String(data: bytes, encoding: .utf8)
+    }
+
+    /// Keep each already-sanitized record below unified logging's message cap.
+    static func firstUserStructureDiagnosticRecords(_ raw: String, provider: Provider, expectedReason: String? = nil) -> [String]? {
+        guard let safe = sanitizedFirstUserStructure(raw, provider: provider),
+              var summary = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] else { return nil }
+        if let expectedReason, summary["reason"] as? String != expectedReason { return nil }
+        let children = summary.removeValue(forKey: "descendants") as? [[String: Any]] ?? []
+        var records: [String] = []
+        for value in [summary] + children {
+            guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: .sortedKeys), bytes.count <= 960 else { return nil }
+            records.append(String(decoding: bytes, as: UTF8.self))
+        }
+        return records
+    }
+
+    private func logFirstUserStructure(_ records: [String], sequence: Int) {
+        for (index, safe) in records.enumerated() {
+            if index == 0 { Self.inspectionLog.info("firstUserStructure sequence=\(sequence) \(safe, privacy: .public)") }
+            else { Self.inspectionLog.info("firstUserChild sequence=\(sequence) index=\(index - 1) \(safe, privacy: .public)") }
+        }
+    }
+
+    static func insertionDifferenceDiagnostic(_ observed: [String: Any]) -> String? {
+        guard let index = observed["firstDifference"] as? Int, (0...360_000).contains(index) else { return nil }
+        func scalar(_ key: String) -> String? {
+            if observed[key] is NSNull { return "end" }
+            guard let value = observed[key] as? Int, (0...0x10FFFF).contains(value), !(0xD800...0xDFFF).contains(value) else { return nil }
+            return String(value)
+        }
+        guard let actual = scalar("actualScalar"), let expected = scalar("expectedScalar") else { return nil }
+        return "; first difference \(index); actual/expected scalars \(actual)/\(expected)"
     }
 
     private func page(_ session: Session, action: String, prompt: String? = nil,
@@ -324,16 +766,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               session.documentGeneration == nil || session.documentGeneration == generation else {
             throw Failure.ownershipFailure(.documentGenerationBefore)
         }
-        guard let script, let url = session.view.url, isChatGPTURL(url.absoluteString) else { throw Failure.pageUnavailable }
-        let current = conversationURL(url.absoluteString)
-        let promotion = session.conversation?.contains("/c/local-chatgpt") == true && current != nil
-            && current != session.conversation && current?.contains("/c/local-chatgpt") == false && !session.promoted
+        let provider = session.provider
+        guard let script = script(for: provider), let url = session.view.url, provider.accepts(url.absoluteString) else { throw Failure.pageUnavailable }
+        let context = provider.routeContext(url.absoluteString)
+        if let pinned = session.routeContext, context != pinned { throw Failure.ownershipFailure(.routeBefore) }
+        let current = provider.conversationURL(url.absoluteString)
+        let promotion = provider.isLocalConversation(session.conversation) && current != nil
+            && current != session.conversation && !provider.isLocalConversation(current) && !session.promoted
         if let owned = session.conversation, current != owned, !promotion { throw Failure.ownershipFailure(.routeBefore) }
         if current != nil, !session.submitted { throw Failure.notFresh }
         let expectedCounts: [Int] = action == "submit" ? [session.confirmedUsers]
             : session.pendingSubmission ? [session.confirmedUsers, session.sequence] : [session.confirmedUsers]
         var input: [String: Any] = [
-            "provider": "chatgpt", "action": action, "expectedURL": url.absoluteString,
+            "provider": provider.rawValue, "action": action, "expectedURL": url.absoluteString,
             "ownerToken": session.token, "bindOwner": session.state == "loading" && !session.submitted,
             "expectedUserCounts": expectedCounts,
             "expectedFirstUserMarker": session.firstUserMarker,
@@ -342,7 +787,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         ]
         if let fingerprint = session.firstUserFingerprint { input["expectedFirstUserFingerprint"] = fingerprint }
         if let conversation = session.conversation, !promotion { input["expectedConversation"] = conversation }
-        // ChatGPT's selection IDs can change during ordinary re-rendering.
+        // Website selection IDs can change during ordinary re-rendering.
         // Authority comes from generation, private owner, pinned route, counts
         // and pinned first-message lineage; an auxiliary ID cannot veto it.
         if let prompt { input["prompt"] = prompt }
@@ -381,17 +826,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                !session.temporaryRequested, !session.submitted { throw Failure.pageUnavailable }
             throw Failure.ownershipFailure(.documentGenerationAfter)
         }
-        guard let currentURL = session.view.url, isChatGPTURL(currentURL.absoluteString) else {
+        guard let currentURL = session.view.url, provider.accepts(currentURL.absoluteString) else {
+            throw Failure.ownershipFailure(.routeAfter)
+        }
+        let currentContext = provider.routeContext(currentURL.absoluteString)
+        if currentContext != context || session.routeContext != nil && session.routeContext != currentContext {
+            if session.documentGeneration == nil, session.state == "loading", action == "inspect",
+               !session.temporaryRequested, !session.submitted { throw Failure.pageUnavailable }
             throw Failure.ownershipFailure(.routeAfter)
         }
         if currentURL != url {
-            let nextConversation = conversationURL(currentURL.absoluteString)
+            let nextConversation = provider.conversationURL(currentURL.absoluteString)
             let firstConversation = session.submitted && session.sequence == 1 && session.conversation == nil
-                && nextConversation != nil && (current == nil || current?.contains("/c/local-chatgpt") == true
-                    && nextConversation?.contains("/c/local-chatgpt") == false)
-            let promotedConversation = session.conversation?.contains("/c/local-chatgpt") == true
+                && nextConversation != nil && (current == nil || provider.isLocalConversation(current)
+                    && !provider.isLocalConversation(nextConversation))
+            let promotedConversation = provider.isLocalConversation(session.conversation)
                 && nextConversation != nil && nextConversation != session.conversation
-                && nextConversation?.contains("/c/local-chatgpt") == false && !session.promoted
+                && !provider.isLocalConversation(nextConversation) && !session.promoted
             if action == "inspect", refreshChangedRoute, firstConversation || promotedConversation {
                 // A read may race the site's normal SPA route promotion. Read
                 // the current route once; never accept the old result or replay a mutation.
@@ -399,23 +850,32 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             let temporaryToggle = action == "enableTemporary" && session.state == "loading"
                 && !session.submitted && current == nil && nextConversation == nil
-                && URLComponents(url: currentURL, resolvingAgainstBaseURL: false)?.queryItems?
-                    .contains(URLQueryItem(name: "temporary-chat", value: "true")) == true
+                && provider.acceptsTemporaryToggle(currentURL)
             // Send can synchronously create the first SPA route before its
             // acknowledgment returns. The next poll verifies its conversation.
             guard action == "submit" && firstConversation || temporaryToggle else { throw Failure.ownershipFailure(.routeAfter) }
         }
         guard let observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
         if let error = observed["error"] as? String {
+            if ["temporary_mode_unavailable", "temporary_mode_unverified"].contains(error),
+               let raw = observed["quotaDiagnostic"] as? String {
+                logQuotaDiagnostic(raw, session: session, action: action, force: true)
+            }
             if error == "prompt_not_inserted", let detail = observed["detail"] as? String,
                ["editor_empty", "line_break_expansion", "nonbreaking_spaces", "text_difference"].contains(detail),
                let actual = observed["actualLength"] as? Int, let expected = observed["expectedLength"] as? Int,
                let actualLines = observed["actualLines"] as? Int, let expectedLines = observed["expectedLines"] as? Int,
                [actual, expected, actualLines, expectedLines].allSatisfy({ (0...360_000).contains($0) }) {
-                throw Failure.editorFailure("\(detail); \(actual)/\(expected) characters; \(actualLines)/\(expectedLines) lines")
+                let difference = Self.insertionDifferenceDiagnostic(observed) ?? ""
+                throw Failure.editorFailure("\(detail); \(actual)/\(expected) characters; \(actualLines)/\(expectedLines) lines\(difference)")
             }
             switch error {
             case "document_changed", "conversation_changed":
+                if observed["detail"] as? String == "first_user_message",
+                   let raw = observed["debugStructure"] as? String,
+                   let records = Self.firstUserStructureDiagnosticRecords(raw, provider: provider) {
+                    logFirstUserStructure(records, sequence: session.sequence)
+                }
                 let allowedDetails: [String: OwnershipReason] = [
                     "owner_token": .javaScriptOwner, "user_count": .javaScriptUserCount,
                     "conversation_identity": .javaScriptConversationIdentity, "document_url": .javaScriptURL,
@@ -424,6 +884,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let detail = (observed["detail"] as? String).flatMap { allowedDetails[$0] }
                 throw Failure.ownershipFailure(detail ?? (error == "document_changed" ? .javaScriptDocument : .javaScriptConversation))
             case "sign_in_required": throw Failure.signInRequired
+            case "website_usage_limit":
+                if action == "inspect", session.state == "loading", session.documentGeneration == nil,
+                   session.sequence == 0, session.confirmedUsers == 0,
+                   !session.submitted, !session.pendingSubmission, !session.temporaryRequested, !session.temporary,
+                   session.firstUserFingerprint == nil,
+                   Self.validFreshQuotaAbort(observed, provider: provider, expectedURL: url, currentURL: currentURL) {
+                    // The fixed adapter proved an untouched, empty fresh page
+                    // after its initial commit. Pin only that document for
+                    // cleanup; quota cannot establish readiness or lineage.
+                    session.documentGeneration = generation
+                    session.routeContext = currentContext
+                }
+                throw Failure.usageLimited(provider)
+            case "submission_observation_pending":
+                guard provider == .gemini, action == "inspect", session.state == "running",
+                      session.submitted, session.pendingSubmission, session.firstUserFingerprint != nil,
+                      session.confirmedUsers + 1 == session.sequence else {
+                    throw Failure.ownershipFailure(.javaScriptUserCount)
+                }
+                throw Failure.submissionObservationPending
             case "not_fresh": throw Failure.notFresh
             case "temporary_mode_unavailable", "temporary_mode_unverified": throw Failure.temporaryUnverified
             case "composer_unavailable", "composer_not_empty", "prompt_not_inserted", "send_unavailable", "caret_unavailable", "insert_command_rejected": throw Failure.editorFailure(error)
@@ -432,8 +912,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         // Submit returns only its acknowledgment; observations carry ownership state.
         if let observedURL = observed["url"] as? String {
-            guard isChatGPTURL(observedURL) else { throw Failure.documentChanged }
+            guard provider.accepts(observedURL), provider.routeContext(observedURL) == currentContext else { throw Failure.documentChanged }
             if session.documentGeneration == nil { session.documentGeneration = generation }
+            if session.routeContext == nil { session.routeContext = currentContext }
             if count(observed, "userCount") > 0 {
                 guard observed["firstUserVerified"] as? Bool == true,
                       observed["firstUserMarkerVerified"] as? Bool == true,
@@ -450,10 +931,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         throw Failure.ownershipFailure(.javaScriptFirstUser)
                     }
                     session.firstUserFingerprint = fingerprint
+                    if !session.loggedFirstUserStructure,
+                       let raw = observed["debugStructure"] as? String,
+                       let records = Self.firstUserStructureDiagnosticRecords(raw, provider: provider, expectedReason: "first_bound") {
+                        session.loggedFirstUserStructure = true
+                        logFirstUserStructure(records, sequence: session.sequence)
+                    }
                 }
             }
             if action == "inspect", session.pendingSubmission, count(observed, "userCount") == 0 {
-                if !promotion, session.conversation == nil, let conversation = conversationURL(observedURL) {
+                if !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
                     // a later promotion still requires the first-message proof.
                     session.conversation = conversation
@@ -472,7 +959,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard observed["firstUserVerified"] as? Bool == true else {
                     throw Failure.ownershipFailure(.promotionFirstUser)
                 }
-                session.conversation = conversationURL(observedURL)
+                session.conversation = provider.conversationURL(observedURL)
                 // Selection IDs are auxiliary rendering metadata. The private
                 // world, pinned first-message lineage, generation and one-time route
                 // promotion carry authority even while these IDs are absent.
@@ -483,7 +970,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.conversationIdentity = nil
                 }
                 session.promoted = true
-            } else if session.conversation == nil, let conversation = conversationURL(observedURL) {
+            } else if session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                 guard session.submitted else { throw Failure.notFresh }
                 session.conversation = conversation
             }
@@ -501,7 +988,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func finish(_ session: Session, cancel: Bool) async -> Data {
         do {
             if session.submitted || session.temporaryRequested || session.temporary {
-                let observed = try await page(session, action: "inspect")
+                let observed: [String: Any]
+                do { observed = try await page(session, action: "inspect") }
+                catch {
+                    guard let failure = error as? Failure, case .usageLimited(let provider) = failure,
+                          provider == session.provider, session.submitted, session.firstUserFingerprint != nil else { throw error }
+                    // Only the fixed adapter's exact quota modal can expose
+                    // physical temporary indicators for cleanup. The ordinary
+                    // first-message and session proofs remain mandatory.
+                    observed = try await page(session, action: "stop")
+                    guard observed["usageLimited"] as? Bool == true, observed["busy"] as? Bool == false else {
+                        throw Failure.temporaryUnverified
+                    }
+                }
                 guard observed["ownershipPending"] as? Bool != true else {
                     throw Failure.ownershipFailure(.promotionFirstUser)
                 }
@@ -518,9 +1017,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     throw Failure.ownershipFailure(.unboundCleanup)
                 }
                 if let url = session.view.url {
-                    guard isChatGPTURL(url.absoluteString), conversationURL(url.absoluteString) == nil,
-                          URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
-                            .contains(URLQueryItem(name: "temporary-chat", value: "true")) == true else {
+                    guard session.provider.acceptsUnboundStart(url) else {
                         throw Failure.ownershipFailure(.unboundCleanup)
                     }
                 }
@@ -536,7 +1033,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func snapshot(_ session: Session, cleanup: String? = nil) throws -> Data {
-        var value: [String: Any] = ["sessionToken": session.token, "provider": "chatgpt",
+        var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
                                   "state": session.state, "text": session.response, "sequence": session.sequence]
         if let cleanup { value["cleanup"] = cleanup }
         return try JSONSerialization.data(withJSONObject: value)
@@ -544,26 +1041,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func count(_ observation: [String: Any], _ key: String) -> Int { observation[key] as? Int ?? 0 }
 
-    private func isChatGPTURL(_ raw: String) -> Bool {
-        guard let url = URL(string: raw), url.scheme == "https", url.host == "chatgpt.com",
-              url.port == nil || url.port == 443, url.user == nil, url.password == nil else { return false }
-        return url.path == "/" || conversationURL(raw) != nil
+    private func script(for provider: Provider) -> String? {
+        if let script = scripts[provider] { return script }
+        guard let script = Self.loadScript(provider: provider) else { return nil }
+        scripts[provider] = script
+        return script
     }
 
-    private func conversationURL(_ raw: String?) -> String? {
-        guard let raw, let url = URL(string: raw), url.scheme == "https", url.host == "chatgpt.com",
-              url.path.range(of: #"^/c/(?:[A-Za-z0-9-]+|local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+)/?$"#, options: .regularExpression) != nil else { return nil }
-        return "https://chatgpt.com" + (url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path)
-    }
-
-    private static func loadScript() -> String? {
+    private static func loadScript(provider: Provider) -> String? {
         #if SWIFT_PACKAGE
         let bundles = [Bundle.module, Bundle.main]
         #else
         let bundles = [Bundle.main]
         #endif
         for bundle in bundles {
-            if let url = bundle.url(forResource: "chatgpt", withExtension: "js", subdirectory: "BrowserModels"),
+            if let url = bundle.url(forResource: provider.rawValue, withExtension: "js", subdirectory: "BrowserModels"),
                let source = try? String(contentsOf: url, encoding: .utf8) { return source }
         }
         return nil

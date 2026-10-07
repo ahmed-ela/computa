@@ -2,14 +2,16 @@ import XCTest
 @testable import Computa
 
 final class BrowserModelCatalogTests: XCTestCase {
-    func testChatGPTDescribesTheBuiltInBrowserWhileOtherProvidersKeepChrome() throws {
-        let chatgpt = try XCTUnwrap(LocalModelCatalog.option(for: LocalModelCatalog.chatGPTBrowserModelID))
-        XCTAssertEqual(chatgpt.label, "ChatGPT · Built-in browser")
-        XCTAssertTrue(chatgpt.detail.contains("Computa's built-in browser"))
-        XCTAssertTrue(chatgpt.detail.contains("screenshots are unavailable"))
-        XCTAssertFalse(chatgpt.detail.contains("Chrome"))
-        for model in [LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID] {
-            XCTAssertTrue(try XCTUnwrap(LocalModelCatalog.option(for: model)).label.contains("Chrome"))
+    func testEveryWebsiteDescribesTheBuiltInBrowserAndTextOnlyHarness() throws {
+        for (model, provider) in [(LocalModelCatalog.chatGPTBrowserModelID, "ChatGPT"),
+                                  (LocalModelCatalog.geminiBrowserModelID, "Gemini"),
+                                  (LocalModelCatalog.claudeBrowserModelID, "Claude")] {
+            let option = try XCTUnwrap(LocalModelCatalog.option(for: model))
+            XCTAssertEqual(option.label, "\(provider) · Built-in browser")
+            XCTAssertTrue(option.detail.contains("Computa's built-in browser"))
+            XCTAssertTrue(option.detail.contains("screenshots are unavailable"))
+            XCTAssertTrue(option.detail.contains("history is saved locally"))
+            XCTAssertFalse(option.detail.contains("Chrome"))
         }
     }
 

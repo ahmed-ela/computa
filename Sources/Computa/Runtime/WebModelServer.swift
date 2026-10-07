@@ -44,14 +44,15 @@ private struct ChromeWebModelTransport: WebModelTransport {
 /// rollout persistence; only model inference goes through the website.
 actor WebModelServer {
     enum Failure: LocalizedError {
-        case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, deadline, cleanupFailed
+        case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
         var errorDescription: String? {
             switch self {
             case .chromeRequired: "Connect the Computa Chrome extension, then sign in to the selected website in Chrome."
-            case .embeddedRequired: "Open ChatGPT in Computa's built-in browser and sign in before using this model."
+            case .embeddedRequired: "Open the selected website in Computa's built-in browser and sign in before using this model."
             case .invalidRequest: "The browser model request could not be validated."
             case .busy: "This browser model already has a request running."
             case .providerFailed: "The website could not produce a response. Check its sign-in, usage limit, or error message in the browser."
+            case .preparationDeadline: "The website did not become ready before the 45-second preparation deadline. No prompt was sent."
             case .deadline: "The website did not finish its response before the five-minute deadline."
             case .cleanupFailed: "The web conversation cleanup could not be verified. Its local transcript has been retained."
             }
@@ -233,10 +234,10 @@ actor WebModelServer {
               !retiringTaskIDs.contains(taskID) else { throw Failure.busy }
         let request = try WebModelResponseCodec.prepareRequest(data)
         guard let provider = Self.provider(for: request.model) else { throw Failure.invalidRequest }
-        let route: Route = provider == "chatgpt" ? .embedded : .chrome
-        guard let transport = route == .embedded ? embeddedTransport : transport else {
-            throw route == .embedded ? Failure.embeddedRequired : Failure.chromeRequired
-        }
+        // All catalog website models use the app-owned browser. The Chrome
+        // connection is an independent computer-tool capability.
+        let route: Route = .embedded
+        guard let transport = embeddedTransport else { throw Failure.embeddedRequired }
         let operation = Task { try await self.perform(request, provider: provider, route: route,
                                                      taskID: taskID, transport: transport) }
         let id = UUID()
@@ -262,14 +263,14 @@ actor WebModelServer {
             while !ready, ContinuousClock.now < readinessDeadline {
                 try Task.checkCancellation()
                 let revision = try await transport.changeRevision(sessionToken: token)
-                guard ContinuousClock.now < readinessDeadline else { throw Failure.deadline }
+                guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
                 let state = try await call(transport, operation: "webProviderPoll", params: ["sessionToken": token])
-                guard ContinuousClock.now < readinessDeadline else { throw Failure.deadline }
+                guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
                 if state["state"] as? String == "ready" { ready = true }
                 else if !["loading", "running"].contains(state["state"] as? String ?? "") { throw Self.snapshotFailure(state) }
                 if !ready { try await waitForNextPoll(session, after: revision, until: readinessDeadline) }
             }
-            guard ready else { throw Failure.deadline }
+            guard ready else { throw Failure.preparationDeadline }
         }
         try Task.checkCancellation()
         let sent = try await call(session.transport, operation: "webProviderSend",
@@ -285,7 +286,7 @@ actor WebModelServer {
             switch value["state"] as? String {
             case "complete":
                 guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
-                let reply = try WebModelResponseCodec.parseReply(text, request: request)
+                let reply = try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: session.route == .embedded)
                 return try WebModelResponseCodec.streamData(for: reply, request: request)
             case "running": try await waitForNextPoll(session, after: revision, until: end)
             default: throw Self.snapshotFailure(value)

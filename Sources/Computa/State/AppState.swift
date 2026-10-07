@@ -423,7 +423,9 @@ final class AppState {
     func canChangeModel(for taskID: AgentTask.ID) -> Bool {
         tasks.contains(where: { $0.id == taskID })
             && !isBusy(taskID: taskID)
-            && queuedPrompts[taskID, default: []].isEmpty
+            && queuedPrompts[taskID, default: []].allSatisfy {
+                $0.status == .failed && $0.deliveryUncertain == false
+            }
     }
 
     func isBusy(taskID: AgentTask.ID) -> Bool {
@@ -1175,18 +1177,27 @@ final class AppState {
     /// This prevents selection or composer changes from retargeting a queued turn.
     @discardableResult
     func submit(prompt rawPrompt: String, toTaskID taskID: AgentTask.ID) async -> Bool {
+        await submitDelivery(prompt: rawPrompt, toTaskID: taskID).wasDelivered
+    }
+
+    private enum PromptDelivery {
+        case delivered, notDelivered(String), uncertain(String)
+        var wasDelivered: Bool { if case .delivered = self { true } else { false } }
+    }
+
+    private func submitDelivery(prompt rawPrompt: String, toTaskID taskID: AgentTask.ID) async -> PromptDelivery {
         // Do not begin a turn while a remembered connection is being restored:
         // Core correctly rejects that race, which otherwise loses first-send UX.
         if let pendingConnection = chromeConnectionTask { await pendingConnection.value }
         if let cleanup = chromeCleanupTask { await cleanup.value }
-        guard !Task.isCancelled else { return false }
+        guard !Task.isCancelled else { return .notDelivered("Submission was cancelled before delivery.") }
         let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty,
               !isShuttingDown,
               let index = tasks.firstIndex(where: { $0.id == taskID }),
               !isBusy(taskID: taskID)
         else {
-            return false
+            return .notDelivered("Submission was rejected before delivery.")
         }
 
         var entry = TimelineEntry(
@@ -1224,12 +1235,16 @@ final class AppState {
                     apply(.connectionChanged(.failed(message: error.localizedDescription)))
                 }
                 guard let currentIndex = tasks.firstIndex(where: { $0.id == taskID }) else {
-                    return false
+                    return .uncertain(error.localizedDescription)
                 }
                 tasks[currentIndex].status = .waiting
+                let rejectedBeforeDispatch: Bool
+                if case .embeddedRequired? = error as? WebModelServer.Failure {
+                    rejectedBeforeDispatch = true
+                } else { rejectedBeforeDispatch = false }
                 let failure = TimelineEntry(
                     kind: .system,
-                    title: "Prompt was not delivered",
+                    title: rejectedBeforeDispatch ? "Prompt was not delivered" : "Prompt delivery unconfirmed",
                     body: error.localizedDescription,
                     activityGroupID: entry.id
                 )
@@ -1237,11 +1252,11 @@ final class AppState {
                 if selectedTaskID == taskID {
                     selectedEntryID = failure.id
                 }
-                return false
+                return rejectedBeforeDispatch ? .notDelivered(error.localizedDescription) : .uncertain(error.localizedDescription)
             }
         }
 
-        return true
+        return .delivered
     }
 
     @discardableResult
@@ -1449,6 +1464,7 @@ final class AppState {
             where queuedPrompts[taskID]?[index].status == .failed {
             queuedPrompts[taskID]?[index].status = .queued
             queuedPrompts[taskID]?[index].error = nil
+            queuedPrompts[taskID]?[index].deliveryUncertain = nil
         }
         await drainQueue(taskID: taskID)
         return true
@@ -1540,11 +1556,19 @@ final class AppState {
               let item = queuedPrompts[taskID]?.first, item.status == .queued else { return }
         dispatchingQueueTaskIDs.insert(taskID)
         queuedPrompts[taskID]?[0].status = .sending
-        let delivered = await submit(prompt: item.text, toTaskID: taskID)
+        let delivery = await submitDelivery(prompt: item.text, toTaskID: taskID)
+        let delivered = delivery.wasDelivered
         if delivered {
             queuedPrompts[taskID]?.removeAll { $0.id == item.id }
         } else {
-            failQueuedPrompt(taskID: taskID, id: item.id, message: "Delivery was not confirmed. Review the conversation before resending.")
+            switch delivery {
+            case .notDelivered(let reason):
+                failQueuedPrompt(taskID: taskID, id: item.id,
+                    message: "The prompt was not delivered. \(reason)", deliveryUncertain: false)
+            case .uncertain:
+                failQueuedPrompt(taskID: taskID, id: item.id, message: "Delivery was not confirmed. Review the conversation before resending.")
+            case .delivered: break
+            }
         }
         dispatchingQueueTaskIDs.remove(taskID)
         if delivered, tasks.first(where: { $0.id == taskID })?.status == .completed {
@@ -1552,10 +1576,11 @@ final class AppState {
         }
     }
 
-    private func failQueuedPrompt(taskID: String, id: String, message: String) {
+    private func failQueuedPrompt(taskID: String, id: String, message: String, deliveryUncertain: Bool = true) {
         if let index = queuedPrompts[taskID]?.firstIndex(where: { $0.id == id }) {
             queuedPrompts[taskID]?[index].status = .failed
             queuedPrompts[taskID]?[index].error = message
+            queuedPrompts[taskID]?[index].deliveryUncertain = deliveryUncertain
         }
         pausedQueueTaskIDs.insert(taskID)
     }

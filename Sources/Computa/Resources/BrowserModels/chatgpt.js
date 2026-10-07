@@ -1,3 +1,117 @@
+// A fenced envelope keeps JSON escapes out of the website's Markdown parser.
+// Admit only one literal code body with no author prose elsewhere in this answer.
+function modelResponseText(answer) {
+  if (!answer) return '';
+  const rendered = (answer.innerText || answer.textContent || '').trim();
+  const blocks = [...answer.querySelectorAll('pre')];
+  const codes = [...answer.querySelectorAll('code')];
+  if (blocks.length > 1) return rendered;
+  if (codes.length !== 1) return rendered;
+  const code = codes[0], raw = code.textContent || '';
+  if (blocks.length === 1 && !blocks[0].contains(code)) return rendered;
+  const noPre = blocks.length === 0;
+  // Current ChatGPT also renders short code bodies in this exact DIV/CODE
+  // structure. A generic CODE element without PRE is never admitted.
+  const divCode = noPre && code.closest('code.block.text-size-code') === code
+    && code.parentElement?.closest('div.text-size-chat.overflow-auto.outline-none.px-4.pt-0.pb-3') === code.parentElement;
+  if (noPre && !divCode) return rendered;
+  if (raw.length > 220_000) return rendered;
+  let envelope;
+  try { envelope = JSON.parse(raw); } catch { return rendered; }
+  if (!envelope || Array.isArray(envelope) || !['message', 'tool_calls'].includes(envelope.type)) return rendered;
+  // Observed ChatGPT code widget. Utility classes bound the actual header;
+  // the generated outer CodeBlock class does not carry stable identity.
+  const wrapper = (noPre ? code : blocks[0]).closest('div.relative.w-full.min-w-0.overflow-clip.contain-inline-size.border');
+  const chrome = new Set();
+  const visible = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
+  if (wrapper && wrapper !== answer && answer.contains(wrapper)
+    && wrapper.querySelectorAll('pre').length === blocks.length && wrapper.querySelectorAll('code').length === 1) {
+    const headers = [...wrapper.querySelectorAll('div.flex.items-center.font-sans.text-sm.select-none.min-h-12')]
+      .filter(node => visible(node) && !node.closest('pre'));
+    if (headers.length === 1) {
+      const labels = [...headers[0].querySelectorAll('div.min-w-0.flex-1.truncate')].filter(node =>
+        visible(node) && node.childElementCount === 0 && (node.textContent || '').trim() === 'JSON');
+      const copies = [...headers[0].querySelectorAll('button[aria-label="Copy"]')].filter(node => visible(node)
+        && !node.disabled && node.getAttribute('aria-disabled') !== 'true' && !(node.textContent || '').trim());
+      if (labels.length === 1 && copies.length === 1) { chrome.add(labels[0]); chrome.add(copies[0]); }
+    }
+  }
+  if (noPre && chrome.size !== 2) return rendered;
+  let visited = 0;
+  const onlyCodeAndWhitespace = node => {
+    if (++visited > 10_000) return false;
+    if (node === code || chrome.has(node)) return true;
+    if (node.nodeType === 3) return /^\s*$/.test(node.textContent || '');
+    if (node.nodeType !== 1) return true;
+    // Actual controls inside this pre are code-block chrome, never surrounding prose.
+    if (node.tagName.toLowerCase() === 'button' && blocks.length === 1 && blocks[0].contains(node)) return true;
+    return [...node.childNodes].every(onlyCodeAndWhitespace);
+  };
+  return onlyCodeAndWhitespace(answer) ? raw : rendered;
+}
+
+// Diagnostic counts describe only this scoped answer; no response bytes leave this function.
+function modelResponseStructure(answer) {
+  const blocks = answer ? [...answer.querySelectorAll('pre')] : [];
+  const allCodes = answer ? [...answer.querySelectorAll('code')] : [];
+  const code = allCodes.length === 1 ? allCodes[0] : null;
+  let visited = 0, outsideTextLength = 0, outsideTruncated = false;
+  const outsideNodes = [];
+  const nodeShape = node => ({ tag: /^[a-zA-Z][a-zA-Z0-9-]{0,31}$/.test(node.tagName) ? node.tagName.toLowerCase() : 'other',
+    classes: [...node.classList].filter(name => /^[a-zA-Z0-9_-]{1,48}$/.test(name)).slice(0, 6),
+    preDescendants: Math.min(node.querySelectorAll('pre').length, 1_000),
+    copyControls: Math.min(node.querySelectorAll('button[aria-label="Copy"], button[aria-label="Copy code"]').length, 1_000) });
+  const countOutside = node => {
+    if (++visited > 10_000) { outsideTruncated = true; return; }
+    if (node === code) return;
+    if (node.nodeType === 3) {
+      const text = (node.textContent || '').trim();
+      outsideTextLength = Math.min(220_001, outsideTextLength + text.length);
+      if (text && outsideNodes.length < 4) {
+        const ancestors = [];
+        for (let parent = node.parentElement; parent && ancestors.length < 4; parent = parent.parentElement) {
+          ancestors.push(nodeShape(parent)); if (parent === answer) break;
+        }
+        outsideNodes.push({ kind: text === 'json' ? 'json' : /^[\uE000-\uF8FF]+$/u.test(text) ? 'private_use' : 'other',
+          textLength: Math.min(text.length, 220_001), ancestors });
+      }
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    if (blocks.length === 1 && node.tagName.toLowerCase() === 'button' && blocks[0].contains(node)) return;
+    for (const child of node.childNodes) { countOutside(child); if (outsideTruncated) break; }
+  };
+  if (answer) countOutside(answer);
+  const preParentTags = [];
+  if (blocks.length === 1) for (let node = blocks[0].parentElement; node && preParentTags.length < 3; node = node.parentElement) {
+    preParentTags.push(/^[a-zA-Z][a-zA-Z0-9-]{0,31}$/.test(node.tagName) ? node.tagName.toLowerCase() : 'other');
+    if (node === answer) break;
+  }
+  const result = { preCount: Math.min(blocks.length, 1_000), codeCount: Math.min(allCodes.length, 1_000),
+    codeTextLength: Math.min((code?.textContent || '').length, 220_001), outsideTextLength, outsideTruncated, preParentTags, outsideNodes };
+  while (JSON.stringify(result).length > 8_192 && result.outsideNodes.length) result.outsideNodes.pop();
+  return result;
+}
+
+// Report only the first mismatch's offset and Unicode scalar values, never prompt text.
+function modelEditorDifference(actual, expected) {
+  let firstDifference = 0;
+  while (firstDifference < Math.min(actual.length, expected.length)
+    && actual.charCodeAt(firstDifference) === expected.charCodeAt(firstDifference)) firstDifference++;
+  // A differing low surrogate still belongs to the scalar beginning one unit earlier.
+  if (firstDifference > 0 && actual.charCodeAt(firstDifference - 1) >= 0xD800
+    && actual.charCodeAt(firstDifference - 1) <= 0xDBFF
+    && (actual.charCodeAt(firstDifference) >= 0xDC00 && actual.charCodeAt(firstDifference) <= 0xDFFF
+      || expected.charCodeAt(firstDifference) >= 0xDC00 && expected.charCodeAt(firstDifference) <= 0xDFFF)) firstDifference--;
+  const scalarAt = text => {
+    if (firstDifference >= text.length) return null;
+    const scalar = text.codePointAt(firstDifference);
+    return scalar >= 0xD800 && scalar <= 0xDFFF ? undefined : scalar;
+  };
+  return { firstDifference: Math.min(firstDifference, 360_000), actualScalar: scalarAt(actual), expectedScalar: scalarAt(expected) };
+}
+
 // Fixed ChatGPT DOM adapter derived from BrowserExtension/web-providers.js.
 // Runs in a private WebKit content world; input arrives as structured arguments.
 function chatGPTMessageRoots(role) {
@@ -149,9 +263,9 @@ async function providerPageAction(input) {
   const interrupted = !!claudeStatus && (claudeStatus.textContent || "").trim().replace(/’/g, "'") === "Claude's response was interrupted.";
   const claudeStreaming = provider === "claude" && [...document.querySelectorAll('[data-testid="assistant-message"][data-is-streaming="true"]')].some(visible);
   const answer = answers.at(-1);
-  const answerText = answer ? (answer.innerText || answer.textContent || "").trim() : "";
+  const answerText = modelResponseText(answer);
   let answerComplete = false;
-  const completionEvidence = { modernMarkers: modernChatGPTAnswers.length, logicalAnswers: answers.length,
+  const completionEvidence = { codeStructure: modelResponseStructure(answer), modernMarkers: modernChatGPTAnswers.length, logicalAnswers: answers.length,
     scopedCopies: 0, enabledCopies: 0, depth: -1 };
   if (provider === "chatgpt" && answer) {
     // The current Copy footer is a sibling of the selection wrapper. Keep the
@@ -184,7 +298,9 @@ async function providerPageAction(input) {
       || [...document.querySelectorAll('h1, h2, span.info-text')].some(node => visible(node)
         && !node.closest('button, [role="menu"], [role="tooltip"], model-response, user-query')
         && ["Just stopping by?", "Temporary Chat"].includes((node.textContent || "").trim()));
-  const state = { url: document.URL, temporary, conversationIdentity, composer: !!composer, responseCount: answers.length, userCount,
+  const temporaryActionAvailable = enabled(provider === "claude" ? find(['button[aria-label="Use incognito"]'])
+    : find(['button[aria-label="Temporary chat"]']));
+  const state = { url: document.URL, temporary, temporaryActionAvailable, conversationIdentity, composer: !!composer, responseCount: answers.length, userCount,
     firstUserIdentity, firstUserFingerprint, firstUserMarkerVerified,
     busy: !!stop || claudeStreaming, interrupted, text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
   if (action === "inspect") {
@@ -194,9 +310,11 @@ async function providerPageAction(input) {
   if (action === "enableTemporary") {
     if (temporary) return { ...state, enabled: true };
     if (userCount || answers.length) return { error: "not_fresh" };
+    if (globalThis.__computaModelTemporaryRequested) return { error: "temporary_mode_unverified" };
     const toggle = provider === "claude" ? find(['button[aria-label="Use incognito"]'])
       : find(['button[aria-label="Temporary chat"]']);
     if (!enabled(toggle)) return { error: "temporary_mode_unavailable" };
+    globalThis.__computaModelTemporaryRequested = true;
     toggle.click(); return { ...state, enabled: false };
   }
   if (["prepare", "insert", "sendReady", "submit", "stop"].includes(action) && !temporary)
@@ -267,7 +385,7 @@ async function providerPageAction(input) {
       const detail = !actual ? "editor_empty"
         : actual.replace(/\n+/g, "\n") === expected.replace(/\n+/g, "\n") ? "line_break_expansion"
         : actual.replace(/\u00a0/g, " ") === expected ? "nonbreaking_spaces" : "text_difference";
-      return { error: "prompt_not_inserted", detail, actualLength: actual.length,
+      return { error: "prompt_not_inserted", detail, ...modelEditorDifference(actual, expected), actualLength: actual.length,
         expectedLength: expected.length, actualLines: actual.split("\n").length, expectedLines: expected.split("\n").length };
     }
     const send = provider === "chatgpt" ? find(['button[data-testid="send-button"]', 'button[aria-label="Send prompt"]', 'button[aria-label="Send message"]', 'button[aria-label="Send"]'])

@@ -1928,25 +1928,13 @@ private extension CodexAppServerRuntime {
         }
 
         private func ensureWebProvider(modelID: String) async throws {
-            if modelID == LocalModelCatalog.chatGPTBrowserModelID {
-                guard embeddedWebModelConfigured else { throw WebModelServer.Failure.embeddedRequired }
-                if webProviderBaseURL == nil {
-                    webProviderBaseURL = try await webModelServer.start()
-                }
-                try Task.checkCancellation()
-                guard !isShuttingDown, !isPreparingCommandShutdown else { throw CancellationError() }
-                return
-            }
-            guard let connection = chromeConnection, connection.owner != nil,
-                  connection.request.extensionAdmission != nil else {
-                throw RuntimeError.serverError("Connect the Computa extension in signed-in Chrome before using Gemini or Claude.")
-            }
-            try connection.request.consent.check()
+            guard LocalModelCatalog.isWebBrowser(modelID) else { throw WebModelServer.Failure.invalidRequest }
+            guard embeddedWebModelConfigured else { throw WebModelServer.Failure.embeddedRequired }
             if webProviderBaseURL == nil {
                 webProviderBaseURL = try await webModelServer.start()
             }
-            try connection.request.consent.check()
-            guard chromeConnection?.attemptID == connection.attemptID else { throw CancellationError() }
+            try Task.checkCancellation()
+            guard !isShuttingDown, !isPreparingCommandShutdown else { throw CancellationError() }
         }
 
         @discardableResult

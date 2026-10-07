@@ -370,6 +370,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
 
   if (task.queuedPrompts.length === 0) return null;
   const hasFailure = task.queuedPrompts.some((item) => item.status === 'failed');
+  const hasUncertainFailure = task.queuedPrompts.some((item) => item.status === 'failed' && item.deliveryUncertain !== false);
 
   return (
     <section
@@ -389,9 +390,11 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
       {task.queuePaused || hasFailure ? (
         <div className="queue-warning" role="status">
           <Icon name="info" size={14} />
-          <span>{hasFailure
+          <span>{hasUncertainFailure
             ? 'Delivery is uncertain and may already have happened. Review this message before resuming or resending.'
-            : 'The queue is paused after this task stopped. Review it, then resume manually.'}</span>
+            : hasFailure
+              ? 'The message was not sent. Choose a model or fix the connection, then resume manually.'
+              : 'The queue is paused after this task stopped. Review it, then resume manually.'}</span>
         </div>
       ) : null}
       <div className="queue-list">

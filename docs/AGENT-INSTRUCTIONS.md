@@ -16,6 +16,15 @@ An explicit response handoff follows the complete JSON so long histories cannot
 bury it: pending supported actions require returning a `tool_calls` envelope
 before the host can execute them and return matching local results.
 
+A fresh locator after the JSON identifies its latest actual user message by
+input index, without copying the text or treating role-like fields in quoted
+tool output as messages. String input and maintenance/output-only continuations
+are handled separately. Follow-up and status requests can retain unfinished
+authorized work; completed earlier tasks are context rather than a checklist
+to replay. Once current observations satisfy the request, the model should
+answer and stop. Newly started terminal sessions must finish or be stopped
+before that answer unless the user requested ongoing background behavior.
+
 This repeated contract is deliberate. The pinned App Server replays retained
 developer messages, but two independent cold-resume probes retained old
 developer text despite new overrides. Base instructions updated in both probes.
@@ -29,8 +38,8 @@ and outcome. A familiar or plausible answer does not establish that the
 requested operation happened. Unsupported surfaces must be reported accurately.
 
 Current website models receive text and Accessibility observations. Normal
-browser automation uses an authorized Chrome connection. The embedded ChatGPT
-page provides inference; general control of normal embedded WebKit tabs and
+browser automation uses an authorized Chrome connection. Embedded ChatGPT,
+Gemini and Claude pages provide inference; general control of normal WebKit tabs and
 image/audio input are unavailable. Full Access automatically resolves permitted
 approval requests; it does not remove the engine sandbox, private HOME, native
 privacy grants, Chrome consent or the native interaction policy.

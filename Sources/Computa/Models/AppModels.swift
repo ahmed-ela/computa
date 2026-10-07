@@ -170,6 +170,8 @@ struct QueuedPrompt: Identifiable, Equatable, Codable, Sendable {
     var text: String
     var status: Status = .queued
     var error: String?
+    /// Nil remains conservative for older snapshots and uncertain acknowledgements.
+    var deliveryUncertain: Bool?
 
     init(id: String = UUID().uuidString, text: String) {
         self.id = id

@@ -43,6 +43,7 @@ export interface QueuedPromptSnapshot {
   text: string;
   status: QueuedPromptStatus;
   error?: string;
+  deliveryUncertain?: boolean;
 }
 
 export interface PromptReceiptSnapshot {
