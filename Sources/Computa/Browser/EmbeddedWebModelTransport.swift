@@ -400,10 +400,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // caller that keeps polling cannot inspect, insert, or Send again.
             // Finish still uses the original ownership/cleanup checks.
             if let failure = error as? Failure, failure.diagnosticCode != nil {
+                _ = recordedWebsiteBlocker(failure, session: session)
                 session.terminalFailure = failure
                 session.state = "failed"
                 session.initialReadRetry = nil
-                recordProviderGate(failure, provider: session.provider)
             }
             throw error
         }
@@ -419,6 +419,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Propagation of the same gate is not a new website observation and
         // must not invalidate a successful recovery already in progress.
         guard providerGates[provider]?.failure != failure else { return }
+        if case .humanVerificationRequired = failure {
+            browser.recordHumanVerificationRequired(provider: provider.rawValue)
+        }
         providerGates[provider] = ProviderGate(failure: failure)
         for session in sessions.values where session.provider == provider && !session.isRecoveryProbe {
             if session.terminalFailure == nil { session.terminalFailure = failure }
@@ -428,13 +431,28 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    private func synchronizeProviderGate(_ provider: Provider) {
+        if browser.savedHumanVerificationProviders.contains(provider.rawValue) {
+            recordProviderGate(Failure.humanVerificationRequired(provider), provider: provider)
+        }
+    }
+
+    private func recordedWebsiteBlocker(_ failure: Failure, session: Session) -> Failure {
+        // Cleanup may inspect an old failed page after an explicit recovery.
+        // Its already-latched failure cannot invalidate that newer recovery.
+        if session.terminalFailure != failure { recordProviderGate(failure, provider: session.provider) }
+        return failure
+    }
+
     private func checkProviderGate(_ session: Session) throws {
+        synchronizeProviderGate(session.provider)
         if let failure = session.terminalFailure { throw failure }
         if !session.isRecoveryProbe, let gate = providerGates[session.provider] { throw gate.failure }
     }
 
     private func createSession(provider: Provider, choice: WebsiteModelChoice?, isDiscovery: Bool,
                                isRecoveryProbe: Bool = false) throws -> Session {
+        synchronizeProviderGate(provider)
         if !isRecoveryProbe, let gate = providerGates[provider] { throw gate.failure }
         let admitted = sessions.values.filter { $0.isDiscovery == isDiscovery }.count
         guard admitted < (isDiscovery ? 1 : 4) else { throw Failure.capacity }
@@ -455,7 +473,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard let provider = Provider(rawValue: rawProvider) else { throw Failure.unsupportedProvider }
         // Only an explicit refresh may probe a blocked provider. Keep its gate
         // in place for other tasks until this prompt-free check succeeds.
+        synchronizeProviderGate(provider)
         let previousGateID = providerGates[provider]?.id
+        let previousVerificationID = browser.savedHumanVerificationCheckpointIDs[provider.rawValue]
         let session = try createSession(provider: provider, choice: nil, isDiscovery: true, isRecoveryProbe: retryBlocked)
         let token = session.token
         var closed = false
@@ -491,7 +511,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         // do not report recovery while new tasks remain blocked.
                         throw gate.failure
                     }
-                    providerGates.removeValue(forKey: provider)
+                    if browser.savedHumanVerificationCheckpointIDs[provider.rawValue] != previousVerificationID {
+                        // A human tab can observe a new checkpoint while this
+                        // read-only recovery awaits. Never erase that observation.
+                        throw Failure.humanVerificationRequired(provider)
+                    }
+                    if retryBlocked {
+                        browser.clearHumanVerificationRequired(provider: provider.rawValue)
+                        providerGates.removeValue(forKey: provider)
+                    }
                     return parsed
                 }
                 _ = try await waitForChange(sessionToken: token, after: revision, until: deadline)
@@ -1047,7 +1075,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let unexpected = url.map { !initialBlank && !session.provider.accepts($0.absoluteString) } ?? false
         guard let failure = session.provider.blockingFailure(for: url) ?? (unexpected ? .unexpectedPage(session.provider) : nil) else { return }
         Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public)")
-        throw failure
+        throw recordedWebsiteBlocker(failure, session: session)
     }
 
     private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
@@ -1273,8 +1301,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 ]
                 let detail = (observed["detail"] as? String).flatMap { allowedDetails[$0] }
                 throw Failure.ownershipFailure(detail ?? (error == "document_changed" ? .javaScriptDocument : .javaScriptConversation))
-            case "sign_in_required": throw Failure.signInRequired
-            case "website_verification_required": throw Failure.humanVerificationRequired(provider)
+            case "sign_in_required": throw recordedWebsiteBlocker(.signInRequired, session: session)
+            case "website_verification_required": throw recordedWebsiteBlocker(.humanVerificationRequired(provider), session: session)
             case "website_usage_limit":
                 if action == "inspect", session.state == "loading", session.documentGeneration == nil,
                    session.sequence == 0, session.confirmedUsers == 0,
@@ -1287,7 +1315,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.documentGeneration = generation
                     session.routeContext = currentContext
                 }
-                throw Failure.usageLimited(provider)
+                throw recordedWebsiteBlocker(.usageLimited(provider), session: session)
             case "submission_observation_pending":
                 guard provider == .gemini, action == "inspect", session.state == "running",
                       session.submitted, session.pendingSubmission, session.firstUserFingerprint != nil,
@@ -1534,6 +1562,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func finish(_ session: Session, cancel: Bool) async -> Data {
         do {
+            guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+            if !session.isDiscovery {
+                // A checkpoint may first arrive after the last poll or before
+                // mode setup. Record it even when cleanup cannot own the page.
+                try rejectWebsiteBlocker(session, action: "cleanup", phase: "before")
+            }
             if session.isDiscovery {
                 // Discovery cannot Send and its private view cannot be adopted
                 // by a human tab. Close exactly this read-only view even after
