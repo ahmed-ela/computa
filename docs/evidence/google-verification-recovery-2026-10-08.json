@@ -1,0 +1,44 @@
+{
+  "recordedAtUTC": "2026-10-08T15:55:54.646660+00:00",
+  "status": "current_browser_and_local_admission_recovery_verified",
+  "stoppedAfterFirstVerifiedRecovery": true,
+  "verifiedSolution": "Once Google has recovered, open Gemini normally and use one guarded prompt-free website-model Refresh to clear the stale saved verification checkpoint. Automatic repeated attempts stay disabled during a recognized block.",
+  "observations": [
+    "Actual Google search results appeared in installed Computa34 without CAPTCHA",
+    "Signed-in human Gemini composer appeared in same browser profile without CAPTCHA",
+    "Saved Gemini checkpoint remained after healthy human navigation",
+    "One explicit guarded refresh completed and removed the Gemini checkpoint"
+  ],
+  "changedByExperiment": [
+    "One guarded website-model Refresh cleared an unchanged stale local checkpoint"
+  ],
+  "notChanged": [
+    "Network/VPN/proxies",
+    "Browser engine/version/user agent",
+    "Cookie/profile data",
+    "Application source or installed binary"
+  ],
+  "captchaCompleted": false,
+  "modelInferenceOrHarnessSuccessClaimed": false,
+  "limitations": [
+    "Google challenge had already recovered before the refresh; this does not prove pause/cooldown caused recovery",
+    "Original Google anti-abuse trigger is unproven",
+    "No permanent guarantee against future provider challenges",
+    "No post-recovery model prompt submitted because the requested stop condition was reached"
+  ],
+  "evidenceSHA256": {
+    "initial-state.json": "ffeee676bff490ceb383e2bba427417d8d0818d61eef7a01b25ca252e9cccc70",
+    "experiment3-refresh-result.json": "0c083b45845921e993f5761c4d26ef306f88d4c0ecc3f377b83266d44dbf52c5",
+    "experiment3-refresh-start.json": "8c812ecfd1f1db823e6f34826b4c0dec8d2c036c52f0ebcc6152ec0f920319bd",
+    "experiment1-google-human.json": "046a5694a7a607593fdb5021236bb6a50a6064913618bd06816278dcee1f1357",
+    "experiment2-gemini-human-and-saved-gate.json": "e0759f30793c2942a0abfe5d670d1e10f8a5fafeb35c345af963f825e1ad6aa0"
+  },
+  "receiptKind": "curated_finite_experiment_summary",
+  "installedCandidate": {
+    "installedVersion": "0.5.0",
+    "installedBuild": "34",
+    "compiledSource": "b6e60b77162e73a1f6ebd038b40650b820dec6a3",
+    "mainSHA256": "f86c69c1f9394841172693da894ba5a6c03256aa21119785108cf53898b74f03"
+  },
+  "originalEvidenceDirectory": "work/google-captcha-experiments-20261008"
+}
