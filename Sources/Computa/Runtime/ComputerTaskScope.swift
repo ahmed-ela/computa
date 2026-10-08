@@ -46,6 +46,9 @@ struct ComputerTaskScope: Equatable, Sendable {
     ]
 
     let backgroundChromeOnly: Bool
+    /// Generic background-browser requests can use Computa's own browser.
+    /// Only an explicitly named Chrome restriction excludes that backend.
+    let explicitChromeBrowserOnly: Bool
     let targetConfidence: TargetConfidence
     private let site: Site?
     private let exactTitle: String?
@@ -53,6 +56,7 @@ struct ComputerTaskScope: Equatable, Sendable {
     init(userPrompt: String) {
         let normalized = userPrompt.replacingOccurrences(of: "\u{2011}", with: "-")
         backgroundChromeOnly = Self.explicitBackgroundOnly(normalized)
+        explicitChromeBrowserOnly = Self.explicitBackgroundChromeOnly(normalized)
         let titles = Set(Self.matches(#"\b(?:tabs?|pages?)\s+(?:titled|named|called)\s+[\"“]([^\"”]+)[\"”]"#,
                                      in: normalized, group: 1).map(Self.normalizedTitle))
         let rawURLs = Self.matches(#"https?://[^\s<>\"“”]+"#, in: normalized)
@@ -105,14 +109,22 @@ struct ComputerTaskScope: Equatable, Sendable {
     /// No affirmative-word list or model-authored history is used as authority.
     func preservingContinuationRestrictions(from previous: Self?, hasRetainedTarget: Bool) -> Self {
         guard hasRetainedTarget, targetConfidence == .unknown, let previous else { return self }
-        return Self(continuing: previous, backgroundChromeOnly: backgroundChromeOnly || previous.backgroundChromeOnly)
+        return Self(continuing: previous, backgroundChromeOnly: backgroundChromeOnly || previous.backgroundChromeOnly,
+                    explicitChromeBrowserOnly: explicitChromeBrowserOnly || previous.explicitChromeBrowserOnly)
     }
 
-    private init(continuing previous: Self, backgroundChromeOnly: Bool) {
+    private init(continuing previous: Self, backgroundChromeOnly: Bool, explicitChromeBrowserOnly: Bool) {
         self.backgroundChromeOnly = backgroundChromeOnly
+        self.explicitChromeBrowserOnly = explicitChromeBrowserOnly
         targetConfidence = previous.targetConfidence
         site = previous.site
         exactTitle = previous.exactTitle
+    }
+
+    func embeddedBrowserToolViolation() -> String? {
+        explicitChromeBrowserOnly
+            ? "This request explicitly permits Chrome only. Computa's built-in browser is a separate surface; no built-in browser action was dispatched."
+            : nil
     }
 
     /// Called before tool dispatch, with host-owned binding state. A model may
@@ -169,6 +181,16 @@ struct ComputerTaskScope: Equatable, Sendable {
             #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?background\s+(?:chrome|browser)(?:\s+tab)?(?:\s+tools?)?\s+only\b"#,
             #"(?:^|[.!?\n])\s*(?:please\s+)?use\s+(?:the\s+)?background-only\s+(?:chrome|browser)\b"#,
             #"\b(?:chrome|browser)\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
+        ]
+        return patterns.contains { hasMatch($0, in: prompt) }
+    }
+
+    private static func explicitBackgroundChromeOnly(_ prompt: String) -> Bool {
+        let patterns = [
+            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?background\s+chrome(?:\s+tab)?(?:\s+tools?)?\s+only\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?use\s+(?:the\s+)?background-only\s+chrome\b"#,
+            #"\bchrome\s+(?:tab\s+)?tools?\s+only\s+in\s+the\s+background\b"#,
+            #"(?:^|[.!?\n])\s*(?:please\s+)?(?:use\s+)?(?:the\s+)?chrome(?:\s+browser)?(?:\s+tab)?(?:\s+tools?)?\s+only\b"#
         ]
         return patterns.contains { hasMatch($0, in: prompt) }
     }

@@ -90,6 +90,7 @@ struct BrowserDocumentObservation: Equatable, Sendable {
     let url: URL
     let nodes: [BrowserDocumentNode]
     let sourceTruncated: Bool
+    var sourceName = "chrome_devtools"
     /// Host-only immutable plan carried to the final CDP mutation preflight.
     /// Never accepted from a browser document or model response.
     var verificationPlan: BrowserActionVerification.Plan? = nil
@@ -229,7 +230,7 @@ enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .browserUnavailable(let detail):
-            "The project-owned Chrome tab broker is unavailable: \(detail)"
+            "The browser tab broker is unavailable: \(detail)"
         case .malformedDevToolsResponse(let detail):
             "Chrome DevTools returned an invalid response: \(detail)"
         case .handleMissing:
@@ -237,7 +238,7 @@ enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
         case .crossTaskHandle:
             "The browser tab handle belongs to a different task."
         case .browserGenerationChanged:
-            "The brokered Chrome process changed. Open the browser tab again."
+            "The brokered browser instance changed. Open the browser tab again."
         case .targetClosed:
             "The bound browser tab was closed. Open it again before interacting."
         case .targetReplaced:
@@ -255,7 +256,7 @@ enum BrowserTabBrokerError: Error, Equatable, LocalizedError, Sendable {
         case .unsupportedAction(let action):
             "The browser tab broker does not support \(action) for this element."
         case .mutationRejected(let detail):
-            "Chrome rejected the approved browser action: \(detail)"
+            "The browser rejected the approved browser action: \(detail)"
         case .ownershipMismatch:
             "The browser tab operation does not match this broker's ownership policy."
         case .invalidRead(let detail):
@@ -1491,7 +1492,7 @@ actor BrowserTabSessionBroker {
         var lines = [
             "AXSNAPSHOT id=\(snapshotID.uuidString) pid=\(binding.processIdentifier) "
                 + "bundle=\(quote(bundleIdentifier)) tab_handle=\(binding.handle.uuidString) "
-                + "document_epoch=\(binding.documentEpoch.uuidString) source=chrome_devtools "
+                + "document_epoch=\(binding.documentEpoch.uuidString) source=\(document.sourceName) "
                 + "\(formattedURL) "
                 + "title=\(quote(title.text))",
             "READ view=\(readViewName(read.view)) scope=\(scopeNodeID == nil ? "document" : "subtree") "

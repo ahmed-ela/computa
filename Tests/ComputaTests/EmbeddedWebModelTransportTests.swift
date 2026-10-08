@@ -1252,6 +1252,124 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testCollapsedOwnedFirstMessageExpandsDuringInspectWithoutRepeatingSendOrCreatingTab() async throws {
+        let fixture = try Fixture(page: Self.collapsedFirstUserPage())
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: ownedID)
+        var expansionObservedIn: String?
+        var expansionDiagnostics: [String] = []
+        fixture.transport.setFirstUserDiagnosticsObserverForTesting { expansionDiagnostics += $0 }
+        fixture.transport.setBeforePageResultValidationDetailedForTesting { action, enforceModel in
+            let clicks = try? await self.evaluate(view, "return window.fixtureExpansionClicks || 0;") as? Int
+            if clicks == 1, expansionObservedIn == nil {
+                expansionObservedIn = action
+                XCTAssertEqual(action, "inspect")
+                XCTAssertFalse(enforceModel, "The first post-Send product read needs its separate expected-family input")
+            }
+        }
+        defer {
+            fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil)
+        }
+        let prompt = String(repeating: "Owned fixture payload line.\n", count: 600)
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(expansionObservedIn, "inspect")
+        XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+        let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+        let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+        XCTAssertEqual(clicks, 1)
+        let diagnosticValues = expansionDiagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        XCTAssertTrue(diagnosticValues.contains { $0["expansionOutcome"] as? String == "expanded" })
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testCleanupCannotExpandAnUnboundCollapsedFirstMessage() async throws {
+        for operation in ["webProviderFinish", "webProviderCancel"] {
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(deferred: true))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": String(repeating: "Owned cleanup fixture line.\n", count: 600)])
+            let proof = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(proof["firstUserFingerprint"] as? String, "")
+            _ = try await evaluate(view, """
+                document.getElementById('messages').appendChild(window.fixturePendingUser);
+                document.getElementById('messages').appendChild(window.fixturePendingTurn);
+                window.fixturePendingUser = null; window.fixturePendingTurn = null; return true;
+                """)
+            var diagnostics: [String] = []
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting { diagnostics += $0 }
+            let finished = try await call(fixture.transport, operation, ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            let clicks = try await evaluate(view, "return window.fixtureExpansionClicks || 0;") as? Int
+            XCTAssertEqual(clicks, 0, "Cleanup inspection may verify lineage but cannot expand it")
+            let values = diagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            XCTAssertTrue(values.contains { $0["allowFirstUserExpansion"] as? Bool == false })
+            XCTAssertTrue(fixture.browser.webView(for: ownedID) === view)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
+    }
+
+    func testIgnoredFirstMessageExpansionNeverClicksOrSendsAgain() async throws {
+        let fixture = try Fixture(page: Self.collapsedFirstUserPage(deferred: true, ignored: true))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": String(repeating: "Owned ignored expansion line.\n", count: 600)])
+        _ = try await evaluate(view, """
+            document.getElementById('messages').appendChild(window.fixturePendingUser);
+            document.getElementById('messages').appendChild(window.fixturePendingTurn);
+            window.fixturePendingUser = null; window.fixturePendingTurn = null; return true;
+            """)
+        var expansionDiagnostics: [String] = []
+        fixture.transport.setFirstUserDiagnosticsObserverForTesting { expansionDiagnostics += $0 }
+        for _ in 0..<2 {
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("An ignored local expansion cannot admit a first message")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
+        }
+        let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+        XCTAssertEqual(clicks, 1)
+        let diagnosticValues = expansionDiagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        XCTAssertTrue(diagnosticValues.contains { $0["expansionOutcome"] as? String == "timeout" })
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        let clicksAfterCleanup = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+        XCTAssertEqual(clicksAfterCleanup, 1)
+        try await assertHumanTabIntact(fixture, retaining: ownedID)
+    }
+
     func testDelayedFirstBubbleBindsThroughInspectBeforeAnyModelOnlyRead() async throws {
         for boundary in ["submit_result", "product_result", "after_send"] {
             let choice = Self.fixtureChoice(.chatgpt)
@@ -3036,7 +3154,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             "userCount": 1, "textLength": 220_001, "lineCount": 220_001, "markerOccurrences": 1, "controlDescendants": 1_000,
             "markerFinalLine": true, "submitted": true, "markerMatches": true,
             "reason": "binding_not_authorized", "scope": "action_final_guard", "action": "verifyProductMode",
-            "allowFirstUserBinding": false, "privatePinPresent": true, "expectedFingerprintPresent": false,
+            "allowFirstUserBinding": false, "allowFirstUserExpansion": false, "privatePinPresent": true, "expectedFingerprintPresent": false,
             "markerValid": true, "firstPromptPresent": true, "firstPromptMatches": true,
             "pinnedFingerprintMatch": true, "nativeFingerprintMatch": false,
             "snapshot": ["rootSame": true, "bodySame": true, "bodyConnected": true, "textSame": true,
@@ -3051,7 +3169,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(values[1]["kind"] as? String, "first_user_context")
         XCTAssertEqual(values[1]["action"] as? String, "verifyProductMode")
         XCTAssertEqual(values[1]["expectedFingerprintPresent"] as? Bool, false)
-        for key in ["allowFirstUserBinding", "privatePinPresent", "expectedFingerprintPresent", "markerValid",
+        for key in ["allowFirstUserBinding", "allowFirstUserExpansion", "privatePinPresent", "expectedFingerprintPresent", "markerValid",
                     "firstPromptPresent", "firstPromptMatches", "pinnedFingerprintMatch", "markerFinalLine", "submitted"] {
             for invalid in [1, 0, "private_canary", NSNull()] as [Any] {
                 var forged = source; forged[key] = invalid
@@ -3064,6 +3182,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
         var withBody = source
         withBody["bodySelection"] = "markdown_user_message"
+        withBody["expansionOutcome"] = "model_unverified"
         for key in ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"] {
             withBody[key] = 220_001
         }
@@ -3083,6 +3202,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(bodyValues[1]["kind"] as? String, "first_user_context")
         XCTAssertEqual(bodyValues[2]["kind"] as? String, "first_user_body")
         XCTAssertEqual(bodyValues[2]["bodyTextContentLength"] as? Int, 220_001)
+        XCTAssertEqual(bodyValues[2]["expansionOutcome"] as? String, "model_unverified")
         XCTAssertNil(bodyValues[0]["bodyTextContentLength"])
     }
 
@@ -3115,6 +3235,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[1].utf8)) as? [String: Any])
             XCTAssertEqual(body["bodySelection"] as? String, selection)
             XCTAssertEqual(body["bodyTextContentMarkerFinalLine"] as? Bool, true)
+        }
+        for outcome in ["not_requested", "ineligible", "unavailable", "ambiguous", "disabled", "obstructed", "claimed",
+                        "model_unverified", "timeout", "context_changed", "node_changed", "text_mismatch", "expanded", "failed"] {
+            var candidate = source; candidate["expansionOutcome"] = outcome
+            let records = try projected(candidate)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[1].utf8)) as? [String: Any])
+            XCTAssertEqual(body["expansionOutcome"] as? String, outcome)
+            XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+        }
+        for invalid in ["private_canary", 1, true, NSNull()] as [Any] {
+            var forged = source; forged["expansionOutcome"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
         }
         for key in lengths + counts {
             for invalid in [-1, lengths.contains(key) ? 220_002 : 1_001, 1.5, true, NSNull(), "private_canary"] as [Any] {
@@ -4040,6 +4172,30 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 """)
             .replacingOccurrences(of: "answerBody.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';",
                 with: "answerBody.textContent = window.fixturePrompts.length === 1 ? '\(fixtureToolReply)' : '{\"type\":\"message\",\"text\":\"Fixture reply\"}';")
+    }
+
+    private static func collapsedFirstUserPage(deferred: Bool = false, ignored: Bool = false) -> String {
+        var page = acknowledgedAppendRacePage().replacingOccurrences(of: "user.appendChild(userBody);", with: """
+            user.appendChild(userBody);
+            if (window.fixturePrompts.length === 1) {
+              userBody.textContent = prompt.slice(0, 10240);
+              const expand = document.createElement('button');
+              expand.type = 'button'; expand.textContent = 'Show more';
+              expand.setAttribute('aria-label', 'Show more');
+              window.fixtureExpansionClicks = 0;
+              expand.addEventListener('click', () => {
+                window.fixtureExpansionClicks++;
+                if (\(ignored ? "true" : "false")) return;
+                setTimeout(() => { userBody.textContent = prompt; expand.remove(); }, 25);
+              });
+              user.appendChild(expand);
+            }
+            """)
+        if !deferred {
+            page = page.replacingOccurrences(of: "window.fixturePendingUser = user;", with: "document.getElementById('messages').appendChild(user);")
+                .replacingOccurrences(of: "window.fixturePendingTurn = turn;", with: "document.getElementById('messages').appendChild(turn);")
+        }
+        return page
     }
 
     private static func firstSendRoutePromotionPage() -> String {

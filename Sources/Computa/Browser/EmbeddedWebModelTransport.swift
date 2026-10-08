@@ -1025,7 +1025,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let reason = rawReason as? String, reasons.contains(reason) else { return nil }
             safe["reason"] = reason
         }
-        for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "privatePinPresent", "expectedFingerprintPresent",
+        for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "allowFirstUserExpansion", "privatePinPresent", "expectedFingerprintPresent",
                     "markerValid", "firstPromptPresent", "firstPromptMatches"] {
             if let rawFlag = value[key] {
                 guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
@@ -1036,6 +1036,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let selections: Set<String> = ["markdown_user_message", "whitespace_pre_wrap", "author_user", "root_fallback", "none", "unmatched"]
             guard let selection = rawSelection as? String, selections.contains(selection) else { return nil }
             safe["bodySelection"] = selection
+        }
+        if let rawOutcome = value["expansionOutcome"] {
+            let outcomes: Set<String> = ["not_requested", "ineligible", "unavailable", "ambiguous", "disabled", "obstructed", "claimed",
+                "model_unverified", "timeout", "context_changed", "node_changed", "text_mismatch", "expanded", "failed"]
+            guard let outcome = rawOutcome as? String, outcomes.contains(outcome) else { return nil }
+            safe["expansionOutcome"] = outcome
         }
         for key in firstUserBodyLengths + firstUserBodyCounts {
             if let rawCount = value[key] {
@@ -1097,7 +1103,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let expectedReason, summary["reason"] as? String != expectedReason { return nil }
         let children = summary.removeValue(forKey: "descendants") as? [[String: Any]] ?? []
         var bodyObservation: [String: Any] = [:]
-        for key in ["bodySelection"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
+        for key in ["bodySelection", "expansionOutcome"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
             if let value = summary.removeValue(forKey: key) { bodyObservation[key] = value }
         }
         if !bodyObservation.isEmpty {
@@ -1109,7 +1115,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var context: [String: Any] = [:]
         if let bytes = try? JSONSerialization.data(withJSONObject: summary), bytes.count > 960 {
             context = ["kind": "first_user_context", "provider": provider.rawValue]
-            for key in ["scope", "action", "allowFirstUserBinding", "privatePinPresent", "expectedFingerprintPresent",
+            for key in ["scope", "action", "allowFirstUserBinding", "allowFirstUserExpansion", "privatePinPresent", "expectedFingerprintPresent",
                         "markerValid", "firstPromptPresent", "firstPromptMatches", "snapshot"] {
                 if let value = summary.removeValue(forKey: key) { context[key] = value }
             }
@@ -1252,6 +1258,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if current != nil, !session.submitted { throw Failure.notFresh }
         let expectedCounts: [Int] = action == "submit" ? [session.confirmedUsers]
             : session.pendingSubmission ? [session.confirmedUsers, session.sequence] : [session.confirmedUsers]
+        // Cleanup also inspects pending lineage. It may verify an already
+        // rendered message, but must never acquire expansion-click authority.
+        let allowFirstUserExpansion = provider == .chatgpt && action == "inspect" && !allowBlockedProvider
+            && !session.isDiscovery && session.state == "running" && session.submitted
+            && session.sequence == 1 && session.confirmedUsers == 0 && session.pendingSubmission
+            && session.temporary && session.firstUserFingerprint == nil
+            && session.modelSelectionVerified && session.modelChoice != nil
         var input: [String: Any] = [
             "provider": provider.rawValue, "action": action, "expectedURL": url.absoluteString,
             "ownerToken": session.token, "bindOwner": session.state == "loading" && !session.submitted,
@@ -1259,8 +1272,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "expectedFirstUserMarker": session.firstUserMarker,
             "allowFirstUserBinding": action == "inspect" && session.sequence == 1
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
+            "allowFirstUserExpansion": allowFirstUserExpansion,
         ]
         if let choice = session.modelChoice {
+            if allowFirstUserExpansion {
+                input["firstUserExpansionModelChoice"] = ["key": choice.key, "label": choice.label]
+            }
             if action == "selectModel" { input["modelChoice"] = ["key": choice.key, "label": choice.label] }
             if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
                 input["expectedModelChoice"] = ["key": choice.key, "label": choice.label]

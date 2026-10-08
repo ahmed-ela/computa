@@ -877,6 +877,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         await core.configureEmbeddedWebModelTransport(transport)
     }
 
+    func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async {
+        await core.configureEmbeddedBrowserTools(controller)
+    }
+
     #if DEBUG
     /// Inert race-test observation only; it grants no runtime or browser action.
     func waitForWebsiteSessionShutdownForFixture() async {
@@ -1107,6 +1111,8 @@ private extension CodexAppServerRuntime {
         private let configuration: Configuration
         private let events: AsyncStream<AgentRuntimeEvent>.Continuation
         private let browserBroker: ChromeTabBroker
+        private var embeddedBrowserTools: EmbeddedBrowserToolController?
+        private var embeddedBrowserTurnKeys = [AgentTask.ID: String]()
         private let visualGrounder: any VisualGroundingClient
         private let borrowedChromeConnector: @Sendable (ChromeConnectionRequest) async throws -> BorrowedChromeSessionOwner
         private var fileChangeTranscripts = [AgentTask.ID: AppServerFileChangeTranscript]()
@@ -1465,6 +1471,11 @@ private extension CodexAppServerRuntime {
             await invalidateChromeConnection()?.value
         }
 
+        func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) {
+            guard !isShuttingDown, !isPreparingCommandShutdown, embeddedBrowserTools == nil else { return }
+            embeddedBrowserTools = controller
+        }
+
         func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
             guard !isShuttingDown, !isPreparingCommandShutdown else { return }
             await webModelServer.configureEmbeddedTransport(transport)
@@ -1702,11 +1713,12 @@ private extension CodexAppServerRuntime {
             let grounder = await groundingIssues
             for cleanup in Array(browserCleanupTasks.values) { await cleanup.value }
             browserCleanupTasks.removeAll()
+            let embeddedBrowserIssues = await embeddedBrowserTools?.shutdown() ?? []
             let webIssues = await webModelServer.shutdown()
             for cleanup in Array(webCleanupTasks.values) { _ = await cleanup.value }
             webCleanupTasks.removeAll()
             let issues = Array(Set(
-                processIssues + inferenceIssues + webIssues + childCleanupIssues + browser.issues + grounder
+                processIssues + inferenceIssues + webIssues + childCleanupIssues + browser.issues + embeddedBrowserIssues + grounder
             )).sorted()
             events.yield(.connectionChanged(.disconnected))
             events.finish()
@@ -1743,6 +1755,17 @@ private extension CodexAppServerRuntime {
 
         @discardableResult
         private func discardComputerV2Session(taskID: AgentTask.ID) -> Task<Void, Never>? {
+            let embeddedCleanup: Task<Void, Never>?
+            if let key = embeddedBrowserTurnKeys.removeValue(forKey: taskID), let controller = embeddedBrowserTools {
+                let id = UUID()
+                let cleanup = Task<Void, Never> {
+                    let issues = await controller.release(taskKey: key)
+                    childCleanupIssues.append(contentsOf: issues)
+                    browserCleanupTasks.removeValue(forKey: id)
+                }
+                browserCleanupTasks[id] = cleanup
+                embeddedCleanup = cleanup
+            } else { embeddedCleanup = nil }
             let session = computerV2Sessions.removeValue(forKey: taskID)
             session?.backgroundLifetime?.revoke()
             session?.browserLifetime?.revoke()
@@ -1760,8 +1783,9 @@ private extension CodexAppServerRuntime {
                 try? sendResponse(id: approval.serverRequestID, result: ["decision": "decline"])
                 events.yield(.approvalResolved(requestID: requestID))
             }
-            guard session?.browserTab != nil || session?.borrowedChrome != nil else { return nil }
-            return scheduleBrowserCleanup(taskID: taskID, binding: session?.browserTab, borrowed: session?.borrowedChrome)
+            guard session?.browserTab != nil || session?.borrowedChrome != nil else { return embeddedCleanup }
+            let chromeCleanup = scheduleBrowserCleanup(taskID: taskID, binding: session?.browserTab, borrowed: session?.borrowedChrome)
+            return Task { await chromeCleanup.value; await embeddedCleanup?.value }
         }
 
         private func headlessWorkState(excludingSubmissionFor taskID: AgentTask.ID? = nil) -> HeadlessMLXWorkState {
@@ -1921,7 +1945,7 @@ private extension CodexAppServerRuntime {
                             "sandbox": "workspace-write",
                             "approvalPolicy": "on-request",
                             "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
-                            "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID)),
+                            "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID), embeddedBrowserTools: embeddedBrowserTools != nil),
                             "config": threadConfig(for: modelID, taskID: taskID),
                             "excludeTurns": true,
                             "initialTurnsPage": ["limit": 3, "sortDirection": "desc", "itemsView": "full"],
@@ -1956,7 +1980,7 @@ private extension CodexAppServerRuntime {
                         "ephemeral": false,
                         "threadSource": "local_codex",
                         "baseInstructions": baseInstructions(for: modelID),
-                        "developerInstructions": ComputaAgentInstructions.developerInstructions(),
+                        "developerInstructions": ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: embeddedBrowserTools != nil),
                         "config": threadConfig(for: modelID, taskID: taskID),
                         "dynamicTools": dynamicToolSpecs(for: modelID),
                     ]
@@ -2435,7 +2459,7 @@ private extension CodexAppServerRuntime {
                         "sandbox": "workspace-write",
                         "approvalPolicy": "on-request",
                         "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
-                        "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID)),
+                        "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID), embeddedBrowserTools: embeddedBrowserTools != nil),
                         "config": threadConfig(for: modelID, taskID: taskID),
                         "excludeTurns": true,
                         "initialTurnsPage": ["limit": 3, "sortDirection": "desc", "itemsView": "full"],
@@ -3684,6 +3708,7 @@ private extension CodexAppServerRuntime {
                         || chromeConnection?.request.consent.allowsTemporaryTabs == true
                 }
                 + [ComputerOutcomeToolContract.spec]
+                + (embeddedBrowserTools == nil ? [] : EmbeddedBrowserTools.definitions())
         }
 
         private func computerEvidenceTarget(taskID: AgentTask.ID, tool: String) -> String {
@@ -4129,7 +4154,7 @@ private extension CodexAppServerRuntime {
 
         private func baseInstructions(for modelID: String, referenceTools: Bool = true) -> String {
             let observationInstructions = LocalModelCatalog.isWebBrowser(modelID)
-                ? "\nThis browser model transport supports text only. Use the offered Accessibility and Chrome page-text observations. Screenshot and image attachment transfer is unavailable; do not request captures or infer visual content from encoded image data. If the requested information requires viewing an image or an opaque UI, report that limitation."
+                ? "\nThis browser model transport supports text only. Use the offered native, Chrome or built-in browser text observations for the requested surface. Screenshot and image attachment transfer is unavailable; do not request captures or infer visual content from encoded image data. If the requested information requires viewing an image or an opaque UI, report that limitation."
                 : ""
             if referenceTools {
                 let background = configuration.computerInteractionPolicy == .backgroundOnly
@@ -4137,7 +4162,7 @@ private extension CodexAppServerRuntime {
                     : "Use only tools offered for this model and respect each observation's input scope."
                 return configuration.baseInstructions + observationInstructions + "\n" + background + "\n" + """
                 Use computer_v2_read_page for a fresh page, computer_v2_read_region with an observed region_ref for a subtree, and computer_v2_continue with next_cursor. Never add snapshot_id or element_index to these calls. Copy the current typed reference: computer_v2_follow(link_ref), computer_v2_fill(field_ref,text), or computer_v2_press(action_ref,postcondition). A region_ref alone is readable context, not a press target. Fresh reads and action results replace all earlier references.
-                Browser presses require a postcondition declared BEFORE input unless their link destination is automatic through follow. If intending to open a same-page dialog, use {kind:dialog_opened}, with no expected text or result reference. For unknown future result text, use {kind:region_changed,region_ref:<observed candidate>}; it proves only displayed text changed. value/region_text require an observed result region_ref and exact expected value. Native detail_view needs an observed detail_ref for a separate pane; selection proves selection only. Runtime approval, exact-target checks, bounded verification and at-most-once dispatch always apply.
+                computer_v2_press on a Chrome page requires a postcondition declared BEFORE input unless its link destination is automatic through computer_v2_follow. If intending to open a same-page dialog, use {kind:dialog_opened}, with no expected text or result reference. For unknown future result text, use {kind:region_changed,region_ref:<observed candidate>}; it proves only displayed text changed. value/region_text require an observed result region_ref and exact expected value. Native detail_view needs an observed detail_ref for a separate pane; selection proves selection only. Built-in browser_click instead takes its published snapshot_id and element_index, returns dispatch evidence, and requires a subsequent read to verify the result. Runtime approval, exact-target checks, bounded verification and at-most-once dispatch always apply.
                 VERIFIED_PROPERTY and ALREADY_SATISFIED need no repeated input or verification. VERIFICATION_PENDING permits read-only recovery, never a changed postcondition or replay. A host recovery read does not perform or prove the rejected action. Read new content to establish meaning and answer once supported. Filling a search field is not submission; search conclusions need observed query and actual results or a verified empty state. Captured no_matches and an overview do not prove document/account completeness. Never infer message sender, incoming direction or latest ordering from selection alone.
                 """
             }
@@ -4353,7 +4378,7 @@ private extension CodexAppServerRuntime {
                     clearRecoveredComputerFinalDiagnostic(taskID: taskID)
                 }
                 let referencePublication: ComputerModelReferences.Prepared?
-                if let taskID, referenceInterfaceTasks.contains(taskID) {
+                if isComputer, let taskID, referenceInterfaceTasks.contains(taskID) {
                     guard let session = computerV2Sessions[taskID] else {
                         throw ComputerExecutionFailure(message: "The computer-use context ended before publication. No new references were issued.")
                     }
@@ -4372,6 +4397,9 @@ private extension CodexAppServerRuntime {
                 )
                 if let taskID, let publishedRead { computerReadEvidence[taskID] = publishedRead.evidence }
                 if let taskID, let referencePublication { computerV2Sessions[taskID]?.modelReferences = referencePublication.references }
+                if EmbeddedBrowserTools.names.contains(tool), let taskID {
+                    computerAttempts[taskID]?.succeeded(key: intentKey)
+                }
             } catch {
                 guard !Task.isCancelled,
                       !isShuttingDown,
@@ -4417,6 +4445,9 @@ private extension CodexAppServerRuntime {
                     if tracked || computerEvidence[taskID]?.unresolvedOperations.isEmpty == false,
                        let checkpoint = try? computerEvidence[taskID]?.checkpointText() { message += "\n" + checkpoint }
                 }
+                if EmbeddedBrowserTools.names.contains(tool), let taskID {
+                    exhausted = computerAttempts[taskID, default: ComputerUnchangedAttemptGuard()].failed(key: intentKey)
+                }
                 let terminal = ComputerToolFailureEvidence.terminalMessage(for: error)
                     ?? ((error as? NativeBackgroundAccessibility.Failure) == .focusChangedDuringAction ? error.localizedDescription : nil)
                     ?? ((error as? ComputerRecoveryState.Rejection)?.shouldStop == true ? error.localizedDescription : nil)
@@ -4452,7 +4483,7 @@ private extension CodexAppServerRuntime {
                 if let taskID, let requestedTurn = params["turnId"] as? String,
                    turnIdentity.activeTurnID(for: taskID) != requestedTurn { return }
                 let referencePublication: ComputerModelReferences.Prepared?
-                if let taskID, referenceInterfaceTasks.contains(taskID), let session = computerV2Sessions[taskID],
+                if isComputer, let taskID, referenceInterfaceTasks.contains(taskID), let session = computerV2Sessions[taskID],
                    let scope = try? computerReferenceScope(taskID: taskID) {
                     referencePublication = try? session.modelReferences.prepare(items: failureItems, scope: scope)
                     if let referencePublication { failureItems = referencePublication.contentItems }
@@ -4463,7 +4494,7 @@ private extension CodexAppServerRuntime {
                     }
                 } else {
                     referencePublication = nil
-                    if let taskID, referenceInterfaceTasks.contains(taskID) {
+                    if isComputer, let taskID, referenceInterfaceTasks.contains(taskID) {
                         failureItems = [textContent(message + "\nThe computer-use context ended before recovery publication. No new references or read coverage were issued.")]
                     }
                 }
@@ -4634,11 +4665,58 @@ private extension CodexAppServerRuntime {
             }
         }
 
+        /// Browser mechanics live behind a separate controller; this boundary
+        /// supplies only current-turn authority and the existing native approval.
+        private func executeEmbeddedBrowserTool(_ tool: String, arguments: [String: Any],
+                                                taskID: AgentTask.ID?) async throws -> [[String: Any]] {
+            guard let controller = embeddedBrowserTools, EmbeddedBrowserTools.names.contains(tool),
+                  let taskID, let turnID = turnIdentity.activeTurnID(for: taskID),
+                  let epoch = computerV2Sessions[taskID]?.epoch,
+                  commandStoppedTurns[taskID] != turnID,
+                  nativeStoppedTurns[taskID] != turnID, contextStoppedTurns[taskID] != turnID,
+                  !isShuttingDown, !isPreparingCommandShutdown else {
+                throw RuntimeError.serverError("Built-in browser tools require a configured browser and an active user turn.")
+            }
+            try EmbeddedBrowserTools.validate(tool: tool, arguments: arguments)
+            let scope = computerTaskScopes[taskID]
+            if let violation = scope?.embeddedBrowserToolViolation() {
+                throw RuntimeError.serverError(violation)
+            }
+            if let rawURL = arguments["url"] as? String, let url = URL(string: rawURL),
+               let violation = scope?.siteViolation(url: url) {
+                throw RuntimeError.serverError(violation)
+            }
+            let generation = serverGeneration
+            let key = embeddedBrowserTurnKeys[taskID] ?? "\(generation):\(taskID):\(turnID)"
+            embeddedBrowserTurnKeys[taskID] = key
+            if EmbeddedBrowserTools.requiresApproval(tool: tool) {
+                guard await requestComputerUseApproval(taskID: taskID,
+                    title: "Allow built-in browser action?", summary: tool,
+                    details: prettyJSON(arguments)) else {
+                    throw RuntimeError.serverError("The user declined the built-in browser action. No input was dispatched.")
+                }
+            }
+            guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
+                  generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
+                  computerV2Sessions[taskID]?.epoch == epoch,
+                  embeddedBrowserTurnKeys[taskID] == key else { throw CancellationError() }
+            let input = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
+            let result = try await controller.execute(taskKey: key, tool: tool, arguments: input, scope: scope)
+            guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
+                  generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
+                  computerV2Sessions[taskID]?.epoch == epoch,
+                  embeddedBrowserTurnKeys[taskID] == key else { throw CancellationError() }
+            return [textContent(result)]
+        }
+
         private func executeDynamicTool(
             _ tool: String,
             arguments: [String: Any],
             taskID: AgentTask.ID?
         ) async throws -> [[String: Any]] {
+            if tool.hasPrefix("browser_") {
+                return try await executeEmbeddedBrowserTool(tool, arguments: arguments, taskID: taskID)
+            }
             if tool.hasPrefix("computer_v2_"), tool != ComputerOutcomeToolContract.name {
                 return try await executeComputerV2(tool, arguments: arguments, taskID: taskID)
             }

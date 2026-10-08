@@ -31,6 +31,7 @@ final class EmbeddedBrowserSession {
         case sessionClosed
         case modelTabPrivate
         case modelPopupUnsupported
+        case toolPopupUnsupported
         case popupProfileMismatch
 
         var errorDescription: String? {
@@ -40,6 +41,7 @@ final class EmbeddedBrowserSession {
             case .sessionClosed: "This browser session has ended."
             case .modelTabPrivate: "Model sessions run privately in the background. Open a regular browser tab to visit the website."
             case .modelPopupUnsupported: "Pop-up windows are not enabled for model inference pages."
+            case .toolPopupUnsupported: "This task tab cannot open an unowned pop-up. Open the observed destination with the browser tools."
             case .popupProfileMismatch: "The requested pop-up did not preserve this browser's sign-in profile."
             }
         }
@@ -70,11 +72,13 @@ final class EmbeddedBrowserSession {
         init(_ view: NSView) { self.view = view }
     }
 
-    private final class Entry {
+    @MainActor private final class Entry {
         let tab: EmbeddedBrowserTab
         let view: WKWebView
         let delegate: EmbeddedBrowserDelegate
         let isModelOwned: Bool
+        let isToolOwned: Bool
+        let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
         weak var presentationHost: NSView?
         var observations: [NSKeyValueObservation] = []
@@ -91,12 +95,13 @@ final class EmbeddedBrowserSession {
         var humanCheckpointDocumentID: UUID?
         var humanCheckpointURL: URL?
 
-        init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate, isModelOwned: Bool,
+        init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate, isModelOwned: Bool, isToolOwned: Bool = false,
              popupOpenerTabID: UUID? = nil) {
             self.tab = tab
             self.view = view
             self.delegate = delegate
             self.isModelOwned = isModelOwned
+            self.isToolOwned = isToolOwned
             self.popupOpenerTabID = popupOpenerTabID
         }
     }
@@ -181,7 +186,7 @@ final class EmbeddedBrowserSession {
         try createTab(url: url, select: select, modelOwned: false)
     }
 
-    private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool) throws -> UUID {
+    private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool, toolOwned: Bool = false) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
             guard tabs.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
@@ -193,9 +198,10 @@ final class EmbeddedBrowserSession {
             // OAuth can open a window after an asynchronous response, beyond
             // the original click's gesture. Human popups still use the tab cap
             // and navigation policy; inference-owned pages cannot open them.
-            configuration.preferences.javaScriptCanOpenWindowsAutomatically = !modelOwned
+            configuration.preferences.javaScriptCanOpenWindowsAutomatically = !modelOwned && !toolOwned
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-            let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned)
+            let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned)
+            if toolOwned { mountModelView(entry) }
             // Empty tabs intentionally do not load a homepage or trigger any network request.
             if let url { try navigate(tabID: entry.tab.id, to: url) }
             return entry.tab.id
@@ -205,18 +211,18 @@ final class EmbeddedBrowserSession {
         }
     }
 
-    private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool,
+    private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
                              popupOpenerTabID: UUID? = nil) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard tabs.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil)
-        let view = modelOwned ? EmbeddedModelWebView(frame: .zero, configuration: configuration)
+        let view = modelOwned || toolOwned ? EmbeddedModelWebView(frame: NSRect(x: 0, y: 0, width: 1_024, height: 768), configuration: configuration)
             : WKWebView(frame: .zero, configuration: configuration)
         let delegate = EmbeddedBrowserDelegate(session: self, tabID: tab.id)
         view.navigationDelegate = delegate
         view.uiDelegate = delegate
         view.allowsBackForwardNavigationGestures = true
-        let entry = Entry(tab: tab, view: view, delegate: delegate, isModelOwned: modelOwned,
+        let entry = Entry(tab: tab, view: view, delegate: delegate, isModelOwned: modelOwned, isToolOwned: toolOwned,
                           popupOpenerTabID: popupOpenerTabID)
         entries[tab.id] = entry
         tabs.append(tab)
@@ -232,6 +238,7 @@ final class EmbeddedBrowserSession {
         guard let opener = entries[tabID], opener.view === source else { return nil }
         do {
             guard !opener.isModelOwned else { throw Failure.modelPopupUnsupported }
+            guard !opener.isToolOwned else { throw Failure.toolPopupUnsupported }
             // window.open('', name) supplies an empty relative URL rather than
             // nil/about:blank. WebKit owns that initial blank document.
             if let url, !url.absoluteString.isEmpty { try EmbeddedBrowserURLPolicy.validate(url) }
@@ -267,6 +274,7 @@ final class EmbeddedBrowserSession {
         entry.tab.documentID = UUID()
         entry.tab.documentGeneration = UUID()
         entry.modelChanges?.close()
+        entry.navigationChanges.close()
         if let world = entry.modelSignalWorld {
             entry.view.configuration.userContentController.removeScriptMessageHandler(forName: Self.modelSignalName, contentWorld: world)
         }
@@ -349,7 +357,7 @@ final class EmbeddedBrowserSession {
         // WindowGroup shares this session. Updating another window must not
         // move live pages away from a surviving designated render host.
         if modelRenderHost == nil { modelRenderHost = modelRenderHosts.first?.view }
-        for entry in entries.values where entry.isModelOwned && entry.presentationHost == nil {
+        for entry in entries.values where (entry.isModelOwned || entry.isToolOwned) && entry.presentationHost == nil {
             mountModelView(entry)
         }
     }
@@ -358,7 +366,7 @@ final class EmbeddedBrowserSession {
         modelRenderHosts.removeAll { $0.view == nil || $0.view === host }
         if modelRenderHost === host {
             modelRenderHost = modelRenderHosts.first?.view
-            for entry in entries.values where entry.isModelOwned && entry.presentationHost == nil {
+            for entry in entries.values where (entry.isModelOwned || entry.isToolOwned) && entry.presentationHost == nil {
                 if modelRenderHost != nil { mountModelView(entry) }
                 else if entry.view.superview === host { entry.view.removeFromSuperview() }
             }
@@ -380,7 +388,7 @@ final class EmbeddedBrowserSession {
         guard let entry = entries[id], entry.presentationHost === host else { return }
         entry.presentationHost = nil
         if entry.view.superview === host { entry.view.removeFromSuperview() }
-        if entry.isModelOwned { mountModelView(entry) }
+        if entry.isModelOwned || entry.isToolOwned { mountModelView(entry) }
     }
 
     private func mountModelView(_ entry: Entry) {
@@ -437,7 +445,37 @@ final class EmbeddedBrowserSession {
         channel.signal()
     }
 
-    private func signalModelChange(_ entry: Entry) { entry.modelChanges?.signal() }
+    private func signalModelChange(_ entry: Entry) {
+        entry.modelChanges?.signal()
+        entry.navigationChanges.signal()
+    }
+
+    /// Tool tabs share the human profile and can be inspected by the user, but
+    /// keep a render surface and never select or acquire native keyboard focus.
+    func createToolTab(url: URL) throws -> UUID {
+        try createTab(url: url, select: false, modelOwned: false, toolOwned: true)
+    }
+
+    /// No model page or privileged app WebView can enter the general browser driver.
+    func humanTab(id: UUID) -> EmbeddedBrowserTab? {
+        guard let entry = entries[id], !entry.isModelOwned else { return nil }
+        return entry.tab
+    }
+
+    func waitForHumanTabReady(id: UUID, until deadline: ContinuousClock.Instant) async throws {
+        while true {
+            try Task.checkCancellation()
+            let entry = try entry(id)
+            guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
+            let revision = try entry.navigationChanges.currentRevision()
+            if let error = entry.tab.error { throw BrowserTabBrokerError.browserUnavailable(error) }
+            if !entry.tab.isLoading, !entry.view.isLoading, entry.view.url != nil { return }
+            guard ContinuousClock.now < deadline else {
+                throw BrowserTabBrokerError.browserUnavailable("The built-in tab did not finish navigation before its deadline; no action was replayed.")
+            }
+            _ = try await entry.navigationChanges.wait(after: revision, until: deadline)
+        }
+    }
 
     /// Model pages share the sign-in profile, but never reuse a human's tab.
     func createModelTab(url: URL) throws -> UUID {

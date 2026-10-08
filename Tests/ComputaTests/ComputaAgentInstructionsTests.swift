@@ -37,7 +37,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testPaginationRequiresAnObservedResultPlanWithoutFutureTextGuessing() {
         let instructions = ComputaAgentInstructions.developerInstructions()
-        XCTAssertTrue(instructions.contains("non-link press"))
+        XCTAssertTrue(instructions.contains("A Chrome computer_v2_press"))
         XCTAssertTrue(instructions.contains("postcondition before input"))
         XCTAssertTrue(instructions.contains("region_changed"))
         XCTAssertTrue(instructions.contains("Both omit expected text"))
@@ -132,6 +132,24 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertLessThan(ComputaAgentInstructions.ordinaryRequests.utf8.count, 800)
     }
 
+    func testBuiltInBrowserGuidanceRequiresCurrentOfferedToolsAndSurvivesQualifiedNames() {
+        let absent = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [:])
+        XCTAssertFalse(absent.contains(ComputaAgentInstructions.builtInBrowser))
+        let browser = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [
+            "functions.browser_open": "browser_open", "functions.browser_read": "browser_read",
+            "functions.browser_click": "browser_click", "functions.browser_fill": "browser_fill",
+        ])
+        XCTAssertTrue(browser.contains(ComputaAgentInstructions.builtInBrowser))
+        XCTAssertTrue(browser.contains("functions.browser_open"))
+        XCTAssertFalse(browser.contains("No dedicated driver"))
+        XCTAssertTrue(browser.contains("Never\nrepeat uncertain input"))
+        XCTAssertTrue(browser.contains("snapshot_id/element_index"))
+        XCTAssertTrue(browser.contains("Model inference pages are separate"))
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 1_100)
+        XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
+            ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
+    }
+
     func testWebContractsDescribeExternalRelayWithoutReassigningWebsiteIdentityOrPermissions() {
         // Source-contract checks; actual provider cooperation needs live runs.
         for manifest in [[:], ["functions.exec_command": "exec_command"]] {
@@ -180,11 +198,11 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(contract.contains("general or self-contained questions directly"))
             XCTAssertTrue(contract.contains("Requested actions or inspections require relevant current observations"))
             XCTAssertTrue(contract.contains("guesses cannot substitute for the requested operation"))
-            XCTAssertTrue(contract.contains("No dedicated driver\ncurrently navigates or reads normal built-in WebKit tabs"))
-            XCTAssertTrue(contract.contains("to operate such a tab, report that limitation; do not silently substitute"))
-            XCTAssertTrue(contract.contains("a remembered heading, website tools, CLI HTTP fetching, Chrome or another"))
-            XCTAssertTrue(contract.contains("Offer a compatible alternative truthfully"))
-            XCTAssertTrue(contract.contains("limitation does not restrict offered local terminal or native-app tools"))
+            XCTAssertTrue(contract.contains("Without the relevant\noffered operations, report the limitation"))
+            XCTAssertTrue(contract.contains("Never substitute CLI HTTP"))
+            XCTAssertTrue(contract.contains("a remembered heading or a different browser"))
+            XCTAssertTrue(contract.contains("Local terminal and native-app tools have separate access"))
+            XCTAssertFalse(contract.contains(ComputaAgentInstructions.builtInBrowser))
             XCTAssertTrue(contract.contains("request the relevant offered relay\noperation"))
             XCTAssertTrue(contract.contains("Tools being offered does not require a call: respect tool_choice"))
             XCTAssertTrue(contract.contains("If no tools are offered, use no historical or\ninvented tool"))

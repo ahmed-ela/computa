@@ -26,7 +26,7 @@ lines.on("line", line => {
       break;
     case "thread/list":
       result(request.id, { data: mode === "resume" ? [{
-        id: threadId, model, name: "Existing isolated task", cwd: "/unrelated/prior/workspace",
+        id: threadId, model, name: "Existing isolated task", cwd: join(root, "PersistedProject"),
         preview: "Prior fixture history", status: { type: "idle" }, updatedAt: 1_790_000_000,
       }] : [], nextCursor: null });
       break;

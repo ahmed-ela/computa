@@ -47,10 +47,12 @@ The engine executes patches and emits file-change items and aggregate turn
 diffs. Proposed, failed, or interrupted changes are not labeled applied merely
 because the model returned a patch. See [code editing](CODE-EDITING.md).
 
-Current website models receive text and Accessibility observations. Normal
-browser automation uses an authorized Chrome connection. Embedded ChatGPT,
-Gemini and Claude pages provide inference; general control of normal WebKit tabs and
-image/audio input are unavailable. Full Access automatically resolves permitted
+Current website models receive text observations. The `browser_*` tools control
+Computa's normal built-in WebKit tabs through a separate owned controller;
+the `computer_v2_*` browser interface retains its authorized Chrome connection.
+Embedded ChatGPT, Gemini and Claude model pages remain private inference surfaces
+and cannot be selected as browser-tool targets. See [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md).
+Image/audio input remains unavailable. Full Access automatically resolves permitted
 approval requests; it does not remove the engine sandbox, private HOME, native
 privacy grants, Chrome consent or the native interaction policy.
 

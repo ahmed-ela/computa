@@ -18,6 +18,7 @@ protocol AgentRuntimeClient: Sendable {
     func connectChrome(_ request: ChromeConnectionRequest) async throws
     func disconnectChrome() async
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async
+    func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async
     func shutdown() async -> RuntimeShutdownReport
 }
 
@@ -52,6 +53,7 @@ extension AgentRuntimeClient {
     func disconnectChrome() async {}
 
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {}
+    func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async {}
 
     /// Resource-free adapters can keep the default; the production runtime
     /// explicitly implements shutdown for its owned processes and capabilities.

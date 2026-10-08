@@ -582,6 +582,197 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
     });
 
+    if (provider === 'chatgpt') describe('owned collapsed first message expansion', () => {
+      const expansionInput = { allowFirstUserExpansion: true, firstUserExpansionModelChoice: choice(initial) };
+      const collapsed = async (behavior: { genericHeader?: boolean } = {}) => {
+        const { f, picker } = setup(true, behavior);
+        // Establish real Chat/temporary provenance without binding the staged
+        // first message; the native first-submission permission stays explicit.
+        expect((await f.run('inspect', { allowFirstUserBinding: false })).error).toBe('conversation_changed');
+        const prompt = 'PRIVATE LONG OUTBOUND\n' + 'x'.repeat(40_000) + '\n\n' + markerLine;
+        f.world.__computaModelFirstPrompt = prompt; f.world.__computaModelLastSubmissionCount = 0;
+        f.userBody.text = prompt.slice(0, 10_240);
+        const root = firstRoot(f), expand = new Node('BUTTON', { 'aria-label': 'Show more' });
+        const send = new Node('BUTTON', { 'aria-label': 'Send' }); root.append(expand); f.body.append(send);
+        return { f, picker, root, expand, send, prompt };
+      };
+      const notify = (f: any) => f.observers.forEach((observer: any) => observer.callback([
+        { type: 'characterData', target: f.userBody },
+      ]));
+      const noSend = (f: any, picker: any, send: any) => {
+        expect(send.clicks).toBe(0); expect(f.composer.textContent).toBe(''); expect(f.composer.events).toHaveLength(0);
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      };
+      const rejected = (result: any) => {
+        expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+        expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
+      };
+
+      test('one delayed expansion waits for an event and binds only the complete exact first body', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        let dispatched!: () => void; const click = new Promise<void>(resolve => { dispatched = resolve; });
+        expand.onClick = () => { expect(f.world.__computaModelFirstExpansion.clicked).toBe(true); dispatched(); };
+        let settled = false;
+        const pending = f.run('inspect', expansionInput).then((result: any) => { settled = true; return result; });
+        await click; await Promise.resolve();
+        expect(settled).toBe(false); expect(f.world.__computaModelFirstProof).toBeUndefined();
+        expect(f.scheduledDelays.filter((delay: number) => delay > 1_000)).toHaveLength(1);
+        rejected(await f.run('inspect', expansionInput)); expect(expand.clicks).toBe(1);
+        f.userBody.text = prompt.slice(0, 20_000); notify(f); await Promise.resolve();
+        expect(settled).toBe(false); expect(f.world.__computaModelFirstProof).toBeUndefined();
+        f.userBody.text = prompt; notify(f);
+        const result = await pending;
+        expect(result.firstUserVerified).toBe(true); expect(result.firstUserMarkerVerified).toBe(true);
+        expect(result.firstUserFingerprint).toMatch(/^[a-f0-9]{64}$/);
+        expect(expand.clicks).toBe(1); expect(result.firstUserDebugStructure).not.toContain('PRIVATE');
+        expect(JSON.parse(result.firstUserDebugStructure).expansionOutcome).toBe('expanded');
+        expect(result.firstUserDebugStructure).not.toContain(firstMarker); noSend(f, picker, send);
+        expect((await f.run('inspect', expansionInput)).firstUserVerified).toBe(true); expect(expand.clicks).toBe(1);
+      });
+
+      test('synchronous expansion binds without recurring polling or an extra Send', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        expand.onClick = () => { f.userBody.text = prompt; };
+        expect((await f.run('inspect', expansionInput)).firstUserVerified).toBe(true);
+        expect(expand.clicks).toBe(1); expect(f.scheduledDelays).toHaveLength(0); noSend(f, picker, send);
+      });
+
+      test('an offscreen control scrolls once and must become exposed before its single click', async () => {
+        for (const expose of [true, false]) {
+          const { f, picker, expand, send, prompt } = await collapsed(); let scrolled = 0;
+          expand.getBoundingClientRect = () => ({ left: 0, top: scrolled ? 50 : -100, width: 100, height: 30 });
+          expand.scrollIntoView = () => { scrolled++; if (expose) f.setHit(expand); };
+          f.setHit(null); expand.onClick = () => { f.userBody.text = prompt; };
+          const result = await f.run('inspect', expansionInput);
+          expect(scrolled).toBe(1); expect(expand.clicks).toBe(expose ? 1 : 0);
+          if (expose) expect(result.firstUserVerified).toBe(true); else rejected(result);
+          noSend(f, picker, send);
+        }
+      });
+
+      test('missing permission, first binding state, marker, prompt or verified model never authorize expansion', async () => {
+        for (const [mutate, overrides] of [
+          [() => {}, { allowFirstUserExpansion: false }], [() => {}, { allowFirstUserBinding: false }],
+          [() => {}, { expectedFirstUserFingerprint: 'a'.repeat(64) }],
+          [() => {}, { firstUserExpansionModelChoice: undefined }],
+          [(f: any) => { f.world.__computaModelFirstProof = { marker: firstMarker, fingerprint: 'a'.repeat(64) }; }, {}],
+          [(f: any) => { f.world.__computaModelFirstSubmitted = false; }, {}],
+          [(f: any) => { f.world.__computaModelLastSubmissionCount = 1; }, {}],
+          [(f: any) => { f.world.__computaModelFirstMarker = 'foreign'; }, {}],
+          [(f: any) => { f.world.__computaModelFirstPrompt = 'PRIVATE DIFFERENT PROMPT\n\n' + markerLine; }, {}],
+          [(f: any) => { f.world.__computaModelFirstPrompt = 'x'.repeat(180_001) + '\n\n' + markerLine; }, {}],
+          [(f: any) => { f.userBody.text = 'PRIVATE WRONG BODY'; }, {}],
+        ] as [(f: any) => void, Record<string, unknown>][]) {
+          const { f, picker, expand, send, prompt } = await collapsed(); mutate(f);
+          expand.onClick = () => { f.userBody.text = prompt; };
+          rejected(await f.run('inspect', { ...expansionInput, ...overrides }));
+          expect(expand.clicks).toBe(0); expect(f.world.__computaModelFirstExpansion).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
+      test('insert, submit, preparation, model reads, stop and cleanup never expand a first body', async () => {
+        for (const action of ['prepare', 'insert', 'sendReady', 'submit', 'verifyModel', 'verifyProductMode', 'stop', 'cleanup']) {
+          const { f, picker, expand, send } = await collapsed();
+          rejected(await f.run(action, expansionInput));
+          expect(expand.clicks).toBe(0); expect(f.world.__computaModelFirstExpansion).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
+      test('foreign product, temporary, route, identity and model contexts cannot expand', async () => {
+        for (const [mutate, overrides] of [
+          [(f: any) => { f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true'; }, {}],
+          [(f: any) => { f.temporary.connected = false; }, {}],
+          [() => {}, { expectedConversation: 'https://chatgpt.com/c/foreign' }],
+          [() => {}, { expectedConversationIdentity: 'PRIVATE FOREIGN IDENTITY' }],
+          [() => {}, { firstUserExpansionModelChoice: choice(target) }],
+        ] as [(f: any) => void, Record<string, unknown>][]) {
+          const { f, picker, expand, send } = await collapsed(); mutate(f);
+          rejected(await f.run('inspect', { ...expansionInput, ...overrides }));
+          expect(expand.clicks).toBe(0); expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
+      test('ambiguous, disabled, hidden, disconnected, obstructed or nonlocal controls are never clicked', async () => {
+        for (const mutate of [
+          ({ root }: any) => root.append(new Node('BUTTON', { 'aria-label': 'Read more' })),
+          ({ expand }: any) => { expand.disabled = true; },
+          ({ expand }: any) => { expand.values['aria-disabled'] = 'true'; },
+          ({ expand }: any) => { expand.values.hidden = ''; },
+          ({ expand }: any) => { expand.values['aria-hidden'] = 'true'; },
+          ({ expand }: any) => { expand.connected = false; },
+          ({ expand }: any) => { expand.values['aria-label'] = 'PRIVATE OTHER CONTROL'; },
+          ({ f }: any) => f.setHit(null),
+          ({ expand }: any) => { expand.tagName = 'SUMMARY'; },
+          ({ f, root, expand }: any) => { root.children = root.children.filter((node: any) => node !== expand); f.body.append(expand); },
+        ]) {
+          const stage = await collapsed(); mutate(stage);
+          rejected(await stage.f.run('inspect', expansionInput)); expect(stage.expand.clicks).toBe(0);
+          expect(stage.f.world.__computaModelFirstProof).toBeUndefined(); noSend(stage.f, stage.picker, stage.send);
+        }
+      });
+
+      test('ignored expansion times out once and cannot be replayed by a second inspection', async () => {
+        const { f, picker, expand, send } = await collapsed();
+        let dispatched!: () => void; const click = new Promise<void>(resolve => { dispatched = resolve; });
+        expand.onClick = () => dispatched();
+        const pending = f.run('inspect', expansionInput); await click; f.flush();
+        const timedOut = await pending; rejected(timedOut);
+        expect(JSON.parse(timedOut.debugStructure).expansionOutcome).toBe('timeout');
+        const repeated = await f.run('inspect', expansionInput); rejected(repeated);
+        expect(JSON.parse(repeated.debugStructure).expansionOutcome).toBe('timeout');
+        expect(expand.clicks).toBe(1); expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+      });
+
+      test('document, owner, count, body, prompt and mode drift during expansion retain the original rejection', async () => {
+        for (const [outcome, mutate] of [
+          ['context_changed', ({ f }: any) => { f.document.URL = 'https://chatgpt.com/c/foreign'; }],
+          ['context_changed', ({ f }: any) => { f.world.__computaModelOwner = 'foreign'; }],
+          ['context_changed', ({ f }: any) => f.appendUser('PRIVATE SECOND MESSAGE')],
+          ['node_changed', ({ f, root }: any) => replaceFirstRoot(f, root, f.userBody)],
+          ['context_changed', ({ f }: any) => { f.world.__computaModelFirstPrompt += 'PRIVATE DRIFT'; }],
+          ['context_changed', ({ f }: any) => { f.temporary.connected = false; }],
+          ['context_changed', ({ f }: any) => { f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true'; }],
+          ['text_mismatch', ({ f }: any) => { f.userBody.text = 'PRIVATE DIFFERENT COMPLETE BODY\n\n' + markerLine; }],
+        ] as [string, (stage: any) => void][]) {
+          const stage = await collapsed();
+          let dispatched!: () => void; const click = new Promise<void>(resolve => { dispatched = resolve; });
+          stage.expand.onClick = () => dispatched();
+          const pending = stage.f.run('inspect', expansionInput); await click;
+          stage.f.userBody.text = stage.prompt; mutate(stage); notify(stage.f);
+          const result = await pending; rejected(result); expect(stage.expand.clicks).toBe(1);
+          expect(JSON.parse(result.debugStructure).expansionOutcome).toBe(outcome);
+          expect(stage.f.world.__computaModelFirstProof).toBeUndefined(); noSend(stage.f, stage.picker, stage.send);
+        }
+      });
+
+      test('context drift during the pre-expansion model await prevents even the display click', async () => {
+        const { f, picker, expand, send } = await collapsed({ genericHeader: true });
+        const click = picker.trigger.onClick; let changed = false;
+        picker.trigger.onClick = () => { click(); if (!changed) { changed = true; f.userBody.text += 'PRIVATE DRIFT'; } };
+        rejected(await f.run('inspect', expansionInput));
+        expect(expand.clicks).toBe(0); expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+      });
+
+      test('a recognized control in an adjacent foreign card is diagnostic-only and cannot receive expansion authority', async () => {
+        const { f, picker, root, expand, send } = await collapsed();
+        const parent = root.parentElement, wrapper = new Node('DIV'), foreign = new Node('DIV');
+        parent.children = parent.children.filter((node: any) => node !== root);
+        root.children = root.children.filter((node: any) => node !== expand); foreign.append(expand);
+        wrapper.append(root, foreign); parent.append(wrapper);
+        const result = await f.run('inspect', expansionInput); rejected(result);
+        expect(JSON.parse(result.debugStructure)).toMatchObject({ scopedExpandControlCount: 1, expansionOutcome: 'unavailable' });
+        expect(expand.clicks).toBe(0); noSend(f, picker, send);
+      });
+
+      test('a failed dispatch consumes its claim and a later inspection cannot click again', async () => {
+        const { f, picker, expand, send } = await collapsed();
+        expand.onClick = () => { throw new Error('PRIVATE CONTROL FAILURE'); };
+        const first = await f.run('inspect', expansionInput); rejected(first);
+        expect(JSON.parse(first.debugStructure).expansionOutcome).toBe('failed');
+        rejected(await f.run('inspect', expansionInput)); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+    });
+
     if (provider === 'chatgpt') describe('finite first-user ownership diagnostics', () => {
       const failure = (result: any, reason: string, scope: string, action = 'inspect') => {
         expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
@@ -859,12 +1050,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
         const allowed = new Set(['kind', 'provider', 'reason', 'scope', 'action', 'userCount', 'root', 'body', 'textLength',
           'lineCount', 'markerFinalLine', 'markerOccurrences', 'controlDescendants', 'submitted', 'markerMatches',
-          'markerValid', 'allowFirstUserBinding', 'privatePinPresent', 'expectedFingerprintPresent', 'bodySelection',
+          'markerValid', 'allowFirstUserBinding', 'allowFirstUserExpansion', 'privatePinPresent', 'expectedFingerprintPresent', 'bodySelection',
           'bodyInnerTextLength', 'bodyTextContentLength', 'rootRenderedTextLength', 'rootTextContentLength', 'firstPromptLength',
           'bodyTextContentAnalyzed', 'rootRenderedAnalyzed', 'rootTextContentAnalyzed', 'firstPromptAnalyzed',
           'bodyTextContentMarkerOccurrences', 'rootRenderedMarkerOccurrences', 'rootTextContentMarkerOccurrences',
           'bodyTextContentMarkerFinalLine', 'rootRenderedMarkerFinalLine', 'rootTextContentMarkerFinalLine',
-          'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount']);
+          'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount', 'expansionOutcome']);
         expect(Object.keys(JSON.parse(result.debugStructure)).every(key => allowed.has(key))).toBe(true);
       });
 

@@ -47,6 +47,8 @@ final class AppState {
     private var reviewMutationTaskIDs: Set<String> = []
     @ObservationIgnored private var reviewNeedsRefresh: Set<String> = []
     let browserSession: EmbeddedBrowserSession
+    @ObservationIgnored private lazy var embeddedBrowserTools = EmbeddedBrowserToolController(
+        transport: EmbeddedBrowserTabTransport(session: browserSession))
     var presentedSheet: SheetDestination? {
         didSet {
             if presentedSheet != nil, approvalGateBlocksInteraction {
@@ -1155,6 +1157,7 @@ final class AppState {
 
         do {
             await runtime.configureEmbeddedWebModelTransport(websiteTransport())
+            await runtime.configureEmbeddedBrowserTools(embeddedBrowserTools)
             guard !Task.isCancelled, !isShuttingDown else { return }
             let snapshot = try await runtime.loadTasks()
             guard !isShuttingDown else { return }

@@ -1,0 +1,49 @@
+# Built-in browser tools
+
+Computa's `browser_*` tools operate its own WebKit human tabs without a Chrome connection. They share the existing signed-in browser profile. Model inference pages and the privileged app UI are excluded from inventory and binding. The website assistant requests operations; the local controller supplies current page observations and executes approved actions.
+
+## Boundaries and composition
+
+`EmbeddedBrowserTools` owns the strict public schemas. `EmbeddedBrowserToolController` owns turn contexts, explicit tab leases, bounded inventory continuations, published snapshots and cleanup. It delegates observation and one-use action capabilities to the existing `BrowserTabSessionBroker`. `EmbeddedBrowserControlBackend` is the narrow backend interface; `EmbeddedBrowserTabTransport` implements it for `EmbeddedBrowserSession`. A fixed script in a named isolated JavaScript world supplies main-frame DOM semantics and guarded semantic activation. Model callers cannot submit arbitrary JavaScript.
+
+`CodexAppServerRuntime` advertises these schemas only after the app configures the controller. The runtime requires the exact active thread/turn, uses a unique runtime-generation/task/turn key, obtains existing native computer-use approval for mutations, and checks authority again after approval. The browser response does not pass through native/Chrome action-reference rewriting. `AppState` configures the same browser session before loading the runtime.
+
+Browser mechanics are independent of the model provider, native window binding and command executor. A localhost development server started through terminal tools can be inspected through these browser tools. Fresh capability guidance is rebuilt from the current offered schemas on every website inference; a user need not name tools or explain the harness.
+
+The pinned runtime fixes dynamic tool schemas at thread creation and persists them in the local rollout metadata. Start a new Computa chat to obtain `browser_*` tools if an existing chat predates this feature. A newly created chat retains those schemas across app restarts; older chats retain their original toolset. Cold resume can update conditional instructions, but its protocol does not accept replacement dynamic tool schemas. Current offered schemas remain authoritative for each inference.
+
+## Operations
+
+| Tool | Main arguments | Result and scope |
+| --- | --- | --- |
+| `browser_tabs` | optional observed `cursor` | Bounded metadata page for human tabs; follow its opaque `next_cursor`. Metadata alone is not page-content evidence. |
+| `browser_open` | explicit HTTP(S) `url` | Creates and binds a background task-owned tab using the shared profile. |
+| `browser_bind` | currently issued `tab_id` | Leases an available observed human tab without activation or navigation. |
+| `browser_navigate` | HTTP(S) `url` | Navigates the bound target once and retires the old action snapshot. |
+| `browser_read` | optional `view`, literal `query`, observed `cursor` | Bounded semantic text with current snapshot ID and exposed element indices. Read continuations retain their exact selection. |
+| `browser_click` | current `snapshot_id`, exposed `element_index` | One guarded semantic press; returns dispatch evidence. Read the changed page to verify the outcome. |
+| `browser_fill` | current snapshot/index and `text` | Replaces one observed editable value and sends input/change events. Fill is separate from submission; read again before pressing. |
+| `browser_wait` | optional nonempty `text`, `timeout_ms` | Read-only event-driven readiness/text wait, bounded to 10 seconds. Does not refresh or repeat input. |
+| `browser_close` | none | Releases the bound page; closes only the page created by this task. |
+
+Inventory pages are at most 8 KiB, with explicit omitted/truncated metadata. Displayed titles are limited to 256 UTF-8 bytes at a scalar boundary; a single oversized combining-character grapheme cannot stall pagination, and JSON control-character escapes still fit the row budget. URLs longer than 2,048 UTF-8 bytes are omitted, never shortened into a different address. Inventory continuations retain metadata captured for that inventory; they are not fresh page-content observations. Cursors are opaque, one-use and confined to their originating turn. Only returned rows issue bind IDs, and binding rechecks the current exact target. Semantic reads reuse the broker's bounded views and pagination. Fresh reads, navigation and actions retire older action capabilities; neither transcript text nor a guessed index can restore one.
+
+## Ownership, actions and cleanup
+
+One task writes a leased tab at a time. Action admission checks current target identity, document generation/URL, snapshot exposure, connected physical node, unchanged role/label/value/link metadata, enabled state and obstruction. A permit can be consumed once. An uncertain or timed-out mutation is not replayed; callers may inspect read-only state and report what remains unverified.
+
+Turn completion, Stop and runtime shutdown revoke the turn lifetime before awaiting cleanup. A late opening closes its returned task-owned tab instead of publishing a binding. Existing user tabs survive release; cleanup never substitutes a same-title or same-URL tab. A task-created tab already closed by the user is recognized by its never-reused ID. Tool tabs keep a background rendering surface and can still be selected in the human UI. Task-owned pop-ups and new-window link activation are rejected so cleanup cannot orphan a page.
+
+Full Access uses Computa's existing approval behavior; it does not remove host scope, stale-state or permit checks. Declined actions dispatch no input. Page content is untrusted data, not permission or new instructions. Model inference and app-control webviews never become tool targets, even when a title or URL resembles a human page.
+
+The host derives conservative target restrictions from the submitted user request, never from model arguments or page text. An unambiguous explicit URL restricts the host and port; a recognized service restricts its allowed hosts, and an exact tab title is checked when choosing a tab. The controller applies those restrictions to inventory, binding, creation, navigation, exposed link destinations and current document publication. Unknown or ambiguous requests do not invent a target restriction. An explicit Chrome-only request excludes the built-in backend; a generic background-browser request can use it. A script-driven redirect can occur after an admitted press, but unrelated redirected content cannot be published as evidence for the restricted task.
+
+Built-in browser failures participate in the runtime's unchanged-attempt budget. Three failures for the same normalized tool intent stop that turn before a fourth request can dispatch input. Replacing opaque snapshot IDs or cursors does not reset that budget; a successful matching operation clears its own counter. A fresh user turn remains usable. This is a limit on unchanged failures, not a claim that every different failure is classified as the same condition or that arbitrary sites are compatible.
+
+## Supported surface and validation
+
+The initial backend reads main-frame light-DOM semantics and uses JavaScript semantic activation, rather than trusted OS pointer/keyboard events. Password values are excluded even when page-provided ARIA assigns a different role. Fill authority requires an actual editable input, textarea, select or contenteditable surface; an ARIA textbox role alone does not make an arbitrary element writable. Oversized labels/values disable action authority instead of comparing clipped text. Custom role attributes and their normalized lowercase token are limited to 100 UTF-8 bytes, with a character bound checked before encoding. Oversized roles become nonactionable generic metadata and mark semantic coverage incomplete, preserving useful observations of the remaining controls. Visible frame and shadow subtrees that this backend cannot inspect also mark source coverage incomplete; negative conclusions must not ignore that unread material. Sites requiring trusted input, unsupported frames, authentication, verification or other unavailable controls remain explicit compatibility boundaries.
+
+Offline controller tests cover schema rejection, inventory pagination including oversized grapheme/control titles, issued binding IDs, leases, fresh snapshot consumption, navigation, event waits, cancellation races, requested-target restrictions and ownership-safe cleanup. Real isolated WebKit fixtures cover flight forms/results, private-world isolation, stale metadata, password protection, forged editable roles, readonly/inert controls, oversized/multibyte/lowercase-expanding roles, inference exclusion and background rendering. Production runtime fixtures separately exercise schema advertisement, active-turn checks, native approval/decline, late approval after Stop, mixed native/browser routing, repeated unchanged failures and shutdown. These describe the test coverage; final pass counts belong to the source-bound validation receipts.
+
+The [workflow benchmark](HARNESS-WORKFLOW-BENCHMARK.md) qualifies native editing/terminal/Git/localhost composition with scripted inference. Signed installed website-model tasks and public-site checks require their own receipts; offline tests or a synthetic United-style flight board do not establish access to a real booking or universal website compatibility. Installed qualification for 0.6.0 (35) remains pending until its recorded live tests complete.

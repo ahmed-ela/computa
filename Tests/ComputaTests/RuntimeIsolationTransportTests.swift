@@ -43,6 +43,9 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         try FileManager.default.createDirectory(at: location, withIntermediateDirectories: true,
                                               attributes: [.posixPermissions: 0o700])
         let root = location.resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("PersistedProject"),
+                                                withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
         let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Fixtures/IsolationAppServer.ts")
         let executable = root.appendingPathComponent("fixture.ts")
@@ -111,7 +114,11 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         let threadRequests = requests.filter { ["thread/start", "thread/resume"].contains($0["method"] as? String ?? "") }
         XCTAssertEqual(threadRequests.map { $0["method"] as? String }, [threadMethod])
         let params = try XCTUnwrap(threadRequests.first?["params"] as? [String: Any])
-        XCTAssertEqual(params["cwd"] as? String, configuration.workspacePath)
+        // The child keeps its private default working directory, while a
+        // resumed chat retains its app-recorded project selection.
+        let expectedWorkspace = threadMethod == "thread/resume"
+            ? root.appendingPathComponent("PersistedProject").path : configuration.workspacePath
+        XCTAssertEqual(params["cwd"] as? String, expectedWorkspace)
         // New chats receive reference tools; the cold legacy fixture has no
         // persisted reference-tool marker and must retain its legacy contract.
         XCTAssertEqual(params["developerInstructions"] as? String,
@@ -127,6 +134,9 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         let turnRequests = requests.filter { $0["method"] as? String == "turn/start" }
         XCTAssertEqual(turnRequests.count, 1)
         let turn = try XCTUnwrap(turnRequests.first?["params"] as? [String: Any])
+        // Each turn inherits the selected thread workspace without replacing
+        // it with the child's private default directory.
+        XCTAssertNil(turn["cwd"])
         let inputs = try XCTUnwrap(turn["input"] as? [[String: String]])
         XCTAssertEqual(inputs.first, ["type": "text", "text": prompt], "The original user prompt is not rewritten.")
         XCTAssertEqual(inputs.count, 2)

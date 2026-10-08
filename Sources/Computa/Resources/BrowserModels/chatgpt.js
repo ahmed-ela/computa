@@ -1397,6 +1397,123 @@ let firstSnapshot = null;
 let firstUserRejectionDiagnostic;
 const normalizedFirstBody = node => (node.innerText || node.textContent || "")
   .replace(/\r\n?/g, "\n").normalize("NFC").trim();
+function chatGPTFirstUserExpandControls(root, roots, maxDepth = 3) {
+  const controls = new Set(), assistants = chatGPTMessageRoots('assistant');
+  const physical = node => node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
+  for (let scope = root, depth = 0; scope && depth <= maxDepth; scope = scope.parentElement, depth++) {
+    if (depth > 0 && !['DIV', 'SECTION', 'ARTICLE'].includes(scope.tagName)) break;
+    if (depth > 0 && (['main', 'navigation', 'complementary'].includes(scope.getAttribute('role'))
+      || scope.querySelector('form, textarea, [contenteditable="true"], nav, aside, [role="navigation"], [role="complementary"]'))) break;
+    if (roots.filter(node => scope === node || scope.contains(node)).length !== 1
+      || assistants.some(node => scope === node || scope.contains(node))) break;
+    for (const control of [...scope.querySelectorAll('button, [role="button"], summary')].slice(0, 1_001)) {
+      if (!physical(control)) continue;
+      const label = control.getAttribute('aria-label') || control.innerText || control.textContent;
+      if (typeof label !== 'string' || label.length > 64) continue;
+      if (/^(?:show more|view more|read more|expand)$/i.test(label.trim().replace(/\s+/g, ' '))) controls.add(control);
+    }
+  }
+  return [...controls];
+}
+function chatGPTFirstUserExpansionCandidate(root, body, rendered) {
+  const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
+  if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
+    || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
+    || globalThis.__computaModelFirstExpansion != null || ownedUserCount !== 1
+    || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0
+    || typeof marker !== 'string' || !/^[a-f0-9-]{36}$/i.test(marker) || globalThis.__computaModelFirstMarker !== marker
+    || typeof prompt !== 'string' || prompt.length > 180_000 || !prompt.endsWith(`\n\nComputa session marker: ${marker}`)
+    || !websiteModelChoiceValid(input.firstUserExpansionModelChoice)) return null;
+  const canonical = prompt.replace(/\r\n?/g, '\n').normalize('NFC').trim();
+  if (!rendered || rendered.length >= canonical.length || !canonical.startsWith(rendered)
+    || rendered.includes(`Computa session marker: ${marker}`)) return null;
+  const candidate = { root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed' };
+  return chatGPTFirstUserExpansionContext(candidate) ? candidate : null;
+}
+function chatGPTFirstUserExpansionContextFailure(candidate) {
+  const roots = chatGPTMessageRoots('user');
+  if (window !== window.top || input.provider !== 'chatgpt' || location.origin !== 'https://chatgpt.com'
+    || document.URL !== input.expectedURL || globalThis.__computaModelOwner !== input.ownerToken
+    || roots.length !== 1 || globalThis.__computaModelFirstSubmitted !== true
+    || globalThis.__computaModelLastSubmissionCount !== 0 || globalThis.__computaModelFirstMarker !== candidate.marker
+    || globalThis.__computaModelFirstPrompt !== candidate.prompt || globalThis.__computaModelFirstProof != null
+    || !chatGPTProductModeProof() || !chatGPTTemporaryVerified()) return 'context_changed';
+  if (roots[0] !== candidate.root || !candidate.root.isConnected || !candidate.body.isConnected
+    || chatGPTUserBody(candidate.root) !== candidate.body) return 'node_changed';
+  const cleanURL = location.origin + decodeURIComponent(location.pathname).replace(/\/$/, '');
+  if (input.expectedConversation && cleanURL !== input.expectedConversation) return 'context_changed';
+  if (input.expectedConversationIdentity) {
+    const identities = [...new Set([...document.querySelectorAll('[data-chatgpt-selection-conversation-id]')]
+      .filter(node => node.isConnected && node.getClientRects().length > 0
+        && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]'))
+      .map(node => node.getAttribute('data-chatgpt-selection-conversation-id')).filter(Boolean))];
+    if (identities.length !== 1 || identities[0] !== input.expectedConversationIdentity) return 'context_changed';
+  }
+  return null;
+}
+function chatGPTFirstUserExpansionContext(candidate) { return chatGPTFirstUserExpansionContextFailure(candidate) === null; }
+async function chatGPTExpandFirstUser(candidate) {
+  // One private claim survives timeout/reinspection. It grants only this local
+  // display expansion, never Send, lineage, cleanup, or another attempt.
+  globalThis.__computaModelFirstExpansion = candidate;
+  const reject = outcome => { candidate.outcome = outcome; return false; };
+  try {
+    const intact = () => chatGPTFirstUserExpansionContext(candidate)
+      && normalizedFirstBody(candidate.body) === candidate.rendered;
+    // Only descendants of the captured physical message can receive a click.
+    // The wider diagnostic ancestry never grants mutation authority.
+    const localControls = () => chatGPTFirstUserExpandControls(candidate.root, [candidate.root], 0);
+    const controls = localControls();
+    const control = controls.length === 1 ? controls[0] : null;
+    const available = () => !!control && (control.tagName === 'BUTTON' || control.getAttribute('role') === 'button')
+      && !control.disabled && control.getAttribute('aria-disabled') !== 'true'
+      && getComputedStyle(control).pointerEvents !== 'none'
+      && localControls().length === 1 && localControls()[0] === control;
+    if (!intact()) return reject(chatGPTFirstUserExpansionContextFailure(candidate) || 'text_mismatch');
+    if (!control) return reject(controls.length ? 'ambiguous' : 'unavailable');
+    if (!available()) return reject('disabled');
+    const model = await websiteModelReadEvidence('chatgpt', input.firstUserExpansionModelChoice, null,
+      { scope: 'action_precheck', action: input.action });
+    if (model.error) return reject('model_unverified');
+    if (!intact()) return reject(chatGPTFirstUserExpansionContextFailure(candidate) || 'text_mismatch');
+    if (!available()) return reject('unavailable');
+    if (!chatGPTControlExposed(control)) {
+      const rect = control.getBoundingClientRect();
+      const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+      const offscreen = [x, y, rect.width, rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0
+        && (x < 0 || y < 0 || Number.isFinite(window.innerWidth) && x >= window.innerWidth
+          || Number.isFinite(window.innerHeight) && y >= window.innerHeight);
+      if (!offscreen || typeof control.scrollIntoView !== 'function') return reject('obstructed');
+      control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+      if (!intact()) return reject(chatGPTFirstUserExpansionContextFailure(candidate) || 'text_mismatch');
+      if (!available()) return reject('unavailable');
+    }
+    if (!intact()) return reject(chatGPTFirstUserExpansionContextFailure(candidate) || 'text_mismatch');
+    if (!chatGPTControlExposed(control)) return reject('obstructed');
+    candidate.clicked = true;
+    control.click();
+    const currentText = () => {
+      const value = candidate.body.innerText || candidate.body.textContent || '';
+      return typeof value === 'string' && value.length <= 180_200
+        ? value.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
+    };
+    const changed = await websiteModelWaitForChange(Date.now() + 1_800, () => {
+      if (!chatGPTFirstUserExpansionContext(candidate)) return true;
+      const text = currentText();
+      // A single expansion can render incrementally. Proper longer prefixes
+      // may wait on later mutations, but unrelated text must stop immediately.
+      return text === candidate.canonical || text === null || text.length < candidate.rendered.length
+        || !candidate.canonical.startsWith(text);
+    });
+    const contextFailure = chatGPTFirstUserExpansionContextFailure(candidate);
+    if (contextFailure) return reject(contextFailure);
+    if (!changed) return reject('timeout');
+    if (currentText() !== candidate.canonical) return reject('text_mismatch');
+    candidate.outcome = 'expanded';
+    return true;
+  } catch { return reject('failed'); }
+}
 function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots) {
   try {
     const limit = 220_000, result = {};
@@ -1411,6 +1528,10 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
       if (selected !== body) selection = 'unmatched';
     }
     result.bodySelection = selection;
+    const outcome = globalThis.__computaModelFirstExpansion?.outcome;
+    result.expansionOutcome = ['unavailable', 'ambiguous', 'disabled', 'obstructed', 'claimed', 'model_unverified',
+      'timeout', 'context_changed', 'node_changed', 'text_mismatch', 'expanded', 'failed'].includes(outcome)
+      ? outcome : input.allowFirstUserExpansion === true ? 'ineligible' : 'not_requested';
     const length = (key, value) => { if (typeof value === 'string') result[key] = Math.min(value.length, limit + 1); };
     const normalized = value => value.replace(/\r\n?/g, '\n').normalize('NFC').trim();
     const alternate = (prefix, value, lengthKey = prefix + 'Length') => {
@@ -1439,23 +1560,7 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
 
     // Look only inside the first physical message and at most three local
     // wrappers containing that message alone. Never search main/body/sidebar.
-    const controls = new Set(), assistants = chatGPTMessageRoots('assistant');
-    const physical = node => node.isConnected && node.getClientRects().length > 0
-      && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
-    for (let scope = root, depth = 0; scope && depth <= 3; scope = scope.parentElement, depth++) {
-      if (depth > 0 && !['DIV', 'SECTION', 'ARTICLE'].includes(scope.tagName)) break;
-      if (depth > 0 && (['main', 'navigation', 'complementary'].includes(scope.getAttribute('role'))
-        || scope.querySelector('form, textarea, [contenteditable="true"], nav, aside, [role="navigation"], [role="complementary"]'))) break;
-      if (roots.filter(node => scope === node || scope.contains(node)).length !== 1
-        || assistants.some(node => scope === node || scope.contains(node))) break;
-      for (const control of [...scope.querySelectorAll('button, [role="button"], summary')].slice(0, 1_001)) {
-        if (!physical(control)) continue;
-        const label = control.getAttribute('aria-label') || control.innerText || control.textContent;
-        if (typeof label !== 'string' || label.length > 64) continue;
-        if (/^(?:show more|view more|read more|expand)$/i.test(label.trim().replace(/\s+/g, ' '))) controls.add(control);
-      }
-    }
-    result.scopedExpandControlCount = Math.min(controls.size, 1_000);
+    result.scopedExpandControlCount = Math.min(chatGPTFirstUserExpandControls(root, roots).length, 1_000);
     return result;
   } catch { return {}; }
 }
@@ -1487,7 +1592,7 @@ function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedU
       markerOccurrences: Math.min(markerLine === null ? 0 : lines.filter(line => line === markerLine).length, 1_000),
       controlDescendants: Math.min(body ? body.querySelectorAll('button, [role="button"]').length : 0, 1_000),
       submitted: globalThis.__computaModelFirstSubmitted === true, markerMatches: globalThis.__computaModelFirstMarker === marker,
-      markerValid, allowFirstUserBinding: input.allowFirstUserBinding === true,
+      markerValid, allowFirstUserBinding: input.allowFirstUserBinding === true, allowFirstUserExpansion: input.allowFirstUserExpansion === true,
       privatePinPresent: pinned != null, expectedFingerprintPresent: input.expectedFirstUserFingerprint != null };
     Object.assign(diagnostic, chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots));
     if (scope === 'first_insert' || scope === 'first_submit') {
@@ -1552,7 +1657,9 @@ const finalReadContextFailure = observed => {
 if (ownedUserCount > 0) {
   const marker = input.expectedFirstUserMarker;
   const first = chatGPTUserBody(ownedMessages[0]);
-  const rendered = normalizedFirstBody(first);
+  let rendered = normalizedFirstBody(first);
+  const expansion = chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered);
+  if (expansion && await chatGPTExpandFirstUser(expansion)) rendered = normalizedFirstBody(first);
   const markerLine = `Computa session marker: ${marker}`;
   const renderedLines = rendered.split("\n");
   if (typeof marker !== "string" || !/^[a-f0-9-]{36}$/i.test(marker)
