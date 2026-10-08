@@ -58,6 +58,11 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
         var failure: Error?
         var receiptSummary: String?
         do {
+            // Match AppState's production composition before thread/start.
+            // The real pinned parser must accept native and built-in tools in
+            // one payload even when this workflow only dispatches file/terminal tools.
+            await runtime.configureEmbeddedBrowserTools(
+                EmbeddedBrowserToolController(transport: InertRuntimeBrowser()))
             await runtime.configureEmbeddedWebModelTransport(transport)
             try await runtime.configureWorkspace(path: fixture.project.path, forTaskID: taskID)
             try await runtime.submit(prompt: "Complete this disposable coding workflow and verify every result.",
@@ -129,6 +134,21 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
             XCTAssertEqual(trace.parseFailures, [])
             XCTAssertEqual(trace.messages.filter { $0.method == "turn/start" && $0.direction == .clientToServer }.count, 1)
             XCTAssertEqual(trace.messages.filter { $0.method == "thread/start" && $0.direction == .clientToServer }.count, 1)
+            let threadStart = try XCTUnwrap(trace.messages.first {
+                $0.method == "thread/start" && $0.direction == .clientToServer
+            })
+            let threadParameters = try XCTUnwrap(threadStart.object["params"] as? [String: Any])
+            let dynamicSpecs = try XCTUnwrap(threadParameters["dynamicTools"] as? [[String: Any]])
+            try CanonicalDynamicToolTestContract.validate(dynamicSpecs)
+            let offeredNames = Set(dynamicSpecs.compactMap { $0["name"] as? String })
+            XCTAssertEqual(offeredNames.intersection(EmbeddedBrowserTools.names), EmbeddedBrowserTools.names)
+            XCTAssertTrue(offeredNames.contains(ComputerOutcomeToolContract.name))
+            XCTAssertTrue(offeredNames.contains("computer_v2_apps"))
+            let acceptedThread = try XCTUnwrap(trace.messages.first {
+                $0.direction == .serverToClient && $0.method == nil && $0.identifier == threadStart.identifier
+            })
+            XCTAssertNil(acceptedThread.object["error"], "The real pinned App Server rejected combined dynamic tools")
+            XCTAssertNotNil((acceptedThread.object["result"] as? [String: Any])?["thread"])
             if scenario == .interruptedServer {
                 try verifyInterruptedServer(trace: trace, receipt: receipt, audit: audit, fixture: fixture)
             } else {

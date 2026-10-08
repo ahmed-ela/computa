@@ -20,7 +20,7 @@ enum EmbeddedBrowserTools {
             _ required: [String] = []
         ) -> [String: Any] {
             [
-                "name": name, "description": description,
+                "type": "function", "name": name, "description": description,
                 "inputSchema": [
                     "type": "object", "properties": properties, "required": required,
                     "additionalProperties": false,

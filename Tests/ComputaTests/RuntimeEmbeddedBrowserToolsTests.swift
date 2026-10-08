@@ -296,6 +296,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
         func offeredNames() throws -> Set<String> {
             let specs = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("specs.json"))) as? [[String: Any]])
+            try CanonicalDynamicToolTestContract.validate(specs)
             return Set(specs.compactMap { $0["name"] as? String })
         }
     }
@@ -338,6 +339,29 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     const result = (id, value = {}) => send({id, result:value});
     const notify = (method, params) => send({method, params:{threadId, ...params}});
     const save = (name, value) => writeFileSync(join(root, name), JSON.stringify(value));
+    const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    function canonicalToolError(specs) {
+      if (!Array.isArray(specs) || specs.length === 0) return 'Invalid request: missing dynamic tools';
+      const legacy = specs.some(spec => !plainObject(spec) || !Object.hasOwn(spec, 'type') || Object.hasOwn(spec, 'namespace') || Object.hasOwn(spec, 'exposeToContext'));
+      const canonical = specs.some(spec => plainObject(spec) && Object.hasOwn(spec, 'type'));
+      if (legacy && canonical) return 'Invalid request: dynamic tools must use either canonical or legacy format consistently';
+      if (legacy) return 'Invalid request: this fixture requires canonical dynamic function tools';
+      const names = new Set();
+      const allowed = new Set(['type', 'name', 'description', 'inputSchema', 'deferLoading']);
+      for (const spec of specs) {
+        const schema = spec.inputSchema;
+        if (spec.type !== 'function' || typeof spec.name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(spec.name) || names.has(spec.name)
+            || typeof spec.description !== 'string' || !spec.description.trim() || Object.keys(spec).some(key => !allowed.has(key))
+            || (Object.hasOwn(spec, 'deferLoading') && typeof spec.deferLoading !== 'boolean')
+            || !plainObject(schema) || schema.type !== 'object' || !plainObject(schema.properties) || schema.additionalProperties !== false
+            || !Array.isArray(schema.required) || new Set(schema.required).size !== schema.required.length
+            || schema.required.some(key => typeof key !== 'string' || !Object.hasOwn(schema.properties, key))) {
+          return 'Invalid request: invalid canonical dynamic function tool definition';
+        }
+        names.add(spec.name);
+      }
+      return null;
+    }
     const rows = [], refs = {}, requests = [];
     let turnCount = 0, turnId = '', step = 0, plan = {}, finished = true, interruptRequest;
     function complete(status = 'completed') {
@@ -394,7 +418,13 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
       switch (message.method) {
         case 'initialize': result(message.id, {userAgent:'embedded-browser-runtime-fixture'}); break;
         case 'thread/list': result(message.id, {data:[], nextCursor:null}); break;
-        case 'thread/start': save('specs.json', message.params.dynamicTools); result(message.id, {thread:{id:threadId, turns:[]}}); break;
+        case 'thread/start': {
+          save('specs.json', message.params.dynamicTools);
+          const error = canonicalToolError(message.params.dynamicTools);
+          if (error) send({id:message.id, error:{code:-32600, message:error}});
+          else result(message.id, {thread:{id:threadId, turns:[]}});
+          break;
+        }
         case 'thread/resume': result(message.id, {thread:{id:threadId, turns:[], status:{type:'idle'}}, initialTurnsPage:{data:[], nextCursor:null, hasMore:false}, model:'lmstudio-community/Qwen3.5-4B-MLX-4bit'}); break;
         case 'thread/name/set': case 'thread/inject_items': result(message.id); break;
         case 'turn/start':
@@ -417,7 +447,41 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     """#
 }
 
-private actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
+/// Inspects the complete thread/start payload, including native and browser
+/// tools together. Real-engine tests also require the pinned parser to accept it.
+enum CanonicalDynamicToolTestContract {
+    static func validate(_ specs: [[String: Any]]) throws {
+        guard !specs.isEmpty else { throw invalid("No dynamic tools were offered") }
+        let allowed: Set<String> = ["type", "name", "description", "inputSchema", "deferLoading"]
+        var names = Set<String>()
+        for (index, spec) in specs.enumerated() {
+            guard spec["type"] as? String == "function",
+                  Set(spec.keys).isSubset(of: allowed),
+                  let name = spec["name"] as? String,
+                  name.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil,
+                  names.insert(name).inserted,
+                  let description = spec["description"] as? String,
+                  !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let schema = spec["inputSchema"] as? [String: Any],
+                  schema["type"] as? String == "object",
+                  schema["additionalProperties"] as? Bool == false,
+                  let properties = schema["properties"] as? [String: Any],
+                  let required = schema["required"] as? [String],
+                  Set(required).count == required.count,
+                  Set(required).isSubset(of: Set(properties.keys)),
+                  spec["deferLoading"] == nil || spec["deferLoading"] is Bool
+            else { throw invalid("Offered tool \(index) is not a canonical dynamic function definition") }
+        }
+    }
+
+    private static func invalid(_ message: String) -> NSError {
+        NSError(domain: "CanonicalDynamicToolTestContract", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+/// Shared only with native-engine contract tests; never a production backend.
+actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     static let humanID = "11111111-1111-4111-8111-111111111111"
     struct Counts: Sendable {
         var inventories = 0, created = 0, ownedClosed = 0, humanCloseAttempts = 0, activations = 0
