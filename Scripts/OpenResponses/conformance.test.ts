@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseFrames, responseErrors, schemaErrors, streamErrors, verifyUpstream } from "./conformance";
+import { officialRequestHeaders, parseOfficialFixtureHeaders, parseFrames, responseErrors, schemaErrors, streamErrors, verifyUpstream } from "./conformance";
 import { testTemplates, type TestConfig } from "./vendor/src/lib/compliance-tests";
 
 const config: TestConfig = { baseUrl: "http://127.0.0.1/v1", apiKey: "fixture-only", model: "fixture", authHeaderName: "Authorization", useBearerPrefix: true };
@@ -58,6 +58,38 @@ function encode(events: Record<string, any>[]) {
 }
 
 describe("pinned Open Responses conformance infrastructure", () => {
+  test("default official headers preserve authorization and invent no native turn context", () => {
+    const original = new Headers({ Authorization: "Bearer fixture-only", "Content-Type": "application/json" });
+    const first = officialRequestHeaders(original), second = officialRequestHeaders(original);
+    expect(first.get("Authorization")).toBe("Bearer fixture-only");
+    expect(first.get("Content-Type")).toBe("application/json");
+    expect(first.get("x-computa-task-id")).toMatch(/^[a-f0-9-]{36}$/);
+    expect(first.get("x-computa-task-id")).not.toBe(second.get("x-computa-task-id"));
+    expect(first.has("x-codex-turn-metadata")).toBe(false);
+    expect(original.has("x-computa-task-id")).toBe(false);
+  });
+  test("explicit fixture headers retain the prepared native context without rewriting other request headers", () => {
+    const value = { "x-computa-task-id": "7851b5cc-fc3f-4336-95a0-d02e217da9f2",
+      "x-codex-turn-metadata": '{"thread_id":"d4d641ae-3716-4d7d-a4d8-4079885d791e","turn_id":"41a57bdf-24b2-4763-b1c2-ec277b33eb82"}' };
+    const parsed = parseOfficialFixtureHeaders(value);
+    const headers = officialRequestHeaders({ Authorization: "Bearer fixture-only", "Content-Type": "application/json", "X-Upstream-Case": "unmodified" }, parsed);
+    expect(headers.get("x-computa-task-id")).toBe(value["x-computa-task-id"]);
+    expect(headers.get("x-codex-turn-metadata")).toBe(value["x-codex-turn-metadata"]);
+    expect(headers.get("Authorization")).toBe("Bearer fixture-only");
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("X-Upstream-Case")).toBe("unmodified");
+    expect(value).toEqual(parsed);
+  });
+  test("fixture headers reject missing identities, arbitrary header overrides and malformed metadata", () => {
+    const value = { "x-computa-task-id": "7851b5cc-fc3f-4336-95a0-d02e217da9f2",
+      "x-codex-turn-metadata": '{"thread_id":"d4d641ae-3716-4d7d-a4d8-4079885d791e","turn_id":"41a57bdf-24b2-4763-b1c2-ec277b33eb82"}' };
+    for (const invalid of [null, [], {}, { ...value, Authorization: "replacement" }, { ...value, "x-computa-task-id": "not-a-uuid" },
+      { ...value, "x-codex-turn-metadata": "invalid" }, { ...value, "x-codex-turn-metadata": "null" },
+      { ...value, "x-codex-turn-metadata": "{}" }, { ...value, "x-codex-turn-metadata": JSON.stringify({ thread_id: value["x-computa-task-id"], turn_id: "invalid" }) },
+      { ...value, "x-codex-turn-metadata": JSON.stringify({ thread_id: value["x-computa-task-id"], turn_id: value["x-computa-task-id"], extra: "foreign" }) },
+      { ...value, "x-codex-turn-metadata": value["x-codex-turn-metadata"] + "\n" },
+      { ...value, "x-codex-turn-metadata": "x".repeat(4097) }]) expect(() => parseOfficialFixtureHeaders(invalid)).toThrow();
+  });
   test("vendored schemas and official tests match upstream hashes", async () => { await verifyUpstream(); });
   test("official assistant-phase fixture validates without data repair", () => {
     expect(responseErrors(phaseFixture.getMockResponse!(config) as Record<string, any>)).toEqual([]);

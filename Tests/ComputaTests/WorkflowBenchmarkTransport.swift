@@ -1,4 +1,5 @@
 import Foundation
+import XCTest
 @testable import Computa
 
 /// Replaces only model inference. Every reply names an actually offered tool;
@@ -18,6 +19,8 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
         var interruptedServerCall: ObservedToolResult?
         var interruptedServerSession: Int?
         var failure: String?
+        var createdTokens = [String]()
+        var closedTokens = [String]()
     }
     private enum Step: String, CaseIterable {
         case failingTests, patch, passingTests, diff, commitPush, serverStart,
@@ -25,7 +28,9 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
     }
     private let fixture: WorkflowBenchmarkFixture
     private let scenario: Scenario
-    private let token = UUID().uuidString
+    private var token: String?
+    private var documentGeneration: String?
+    private var submitted = false
     private var reply = ""
     private var receiptValue = Receipt()
     private var pending: ExpectedCall?
@@ -40,11 +45,24 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
     func request(operation: String, params: Data) throws -> Data {
         var result: [String: Any]
         do {
+            let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            if operation != "webProviderStart" {
+                try WorkflowBenchmarkFailure.require(token != nil && input["sessionToken"] == token,
+                    "An operation did not retain the exact active website lease")
+            }
             switch operation {
             case "webProviderStart":
+                try WorkflowBenchmarkFailure.require(token == nil, "A new website page started before the prior lease closed")
+                let created = UUID().uuidString.lowercased()
+                token = created
+                documentGeneration = UUID().uuidString.lowercased()
+                submitted = false
+                receiptValue.createdTokens.append(created)
                 receiptValue.starts += 1
-                result = ["sessionToken": token, "state": "ready"]
+                result = ["sessionToken": created, "state": "ready"]
             case "webProviderSend":
+                try WorkflowBenchmarkFailure.require(!submitted, "A website lease submitted more than once")
+                submitted = true
                 let request = try InferenceRequest(params: params)
                 receiptValue.requestModels.append(request.prepared.model)
                 reply = try nextReply(request)
@@ -60,6 +78,19 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
                 receiptValue.cancels += 1
                 result = ["cleanup": "not_created"]
             default: throw WorkflowBenchmarkFailure("Unexpected website operation: \(operation)")
+            }
+            if let token, let documentGeneration {
+                result["sessionToken"] = token
+                result["sequence"] = submitted ? 1 : 0
+                result["modelProofContext"] = ["documentGeneration": documentGeneration,
+                    "sequence": submitted ? 1 : 0, "baselineResponseCount": 0,
+                    "responseCount": result["state"] as? String == "complete" ? 1 : 0,
+                    "firstUserFingerprint": submitted ? String(repeating: "a", count: 64) : ""]
+                if ["webProviderFinish", "webProviderCancel"].contains(operation) {
+                    receiptValue.closedTokens.append(token)
+                    self.token = nil
+                    self.documentGeneration = nil
+                }
             }
         } catch {
             receiptValue.failure = error.localizedDescription

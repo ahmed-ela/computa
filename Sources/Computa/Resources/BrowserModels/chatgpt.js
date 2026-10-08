@@ -1498,18 +1498,32 @@ async function chatGPTExpandFirstUser(candidate) {
       return typeof value === 'string' && value.length <= 180_200
         ? value.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
     };
+    const markerLine = `Computa session marker: ${candidate.marker}`;
+    // Preserve all non-whitespace bytes and every whitespace boundary. The
+    // provider may collapse ASCII whitespace runs; no Markdown delimiters,
+    // punctuation or message content are removed to make a display match.
+    const whitespaceRuns = text => text.replace(/[ \t\n]+/g, ' ');
+    const canonicalWhitespaceRuns = whitespaceRuns(candidate.canonical);
+    const complete = text => typeof text === 'string' && text.length > candidate.rendered.length
+      && text.startsWith(candidate.rendered) && text.split('\n').at(-1) === markerLine
+      && text.split(markerLine).length === 2
+      && whitespaceRuns(text) === canonicalWhitespaceRuns;
     const changed = await websiteModelWaitForChange(Date.now() + 1_800, () => {
       if (!chatGPTFirstUserExpansionContext(candidate)) return true;
       const text = currentText();
       // A single expansion can render incrementally. Proper longer prefixes
-      // may wait on later mutations, but unrelated text must stop immediately.
-      return text === candidate.canonical || text === null || text.length < candidate.rendered.length
-        || !candidate.canonical.startsWith(text);
+      // may wait on later mutations. Completed provider rendering may differ
+      // only in ASCII whitespace runs, preserve the exact captured prefix,
+      // and expose its one final marker on this same physical body.
+      return complete(text) || text === null || !text.startsWith(candidate.rendered)
+        || text.includes(markerLine) || !canonicalWhitespaceRuns.startsWith(whitespaceRuns(text));
     });
     const contextFailure = chatGPTFirstUserExpansionContextFailure(candidate);
     if (contextFailure) return reject(contextFailure);
     if (!changed) return reject('timeout');
-    if (currentText() !== candidate.canonical) return reject('text_mismatch');
+    const expandedText = currentText();
+    if (!complete(expandedText)) return reject('text_mismatch');
+    candidate.expandedText = expandedText;
     candidate.outcome = 'expanded';
     return true;
   } catch { return reject('failed'); }
@@ -1658,8 +1672,22 @@ if (ownedUserCount > 0) {
   const marker = input.expectedFirstUserMarker;
   const first = chatGPTUserBody(ownedMessages[0]);
   let rendered = normalizedFirstBody(first);
+  const consumedExpansion = globalThis.__computaModelFirstExpansion;
+  if (globalThis.__computaModelFirstProof == null && consumedExpansion != null
+    && (consumedExpansion.outcome !== 'expanded' || !chatGPTFirstUserExpansionContext(consumedExpansion)
+      || consumedExpansion.root !== ownedMessages[0] || consumedExpansion.body !== first
+      || consumedExpansion.marker !== marker || rendered !== consumedExpansion.expandedText))
+    // A consumed local claim cannot acquire first-message or cleanup authority
+    // on a later read after failure, replacement, or a different full body.
+    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
   const expansion = chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered);
-  if (expansion && await chatGPTExpandFirstUser(expansion)) rendered = normalizedFirstBody(first);
+  let expansionRejected = false;
+  if (expansion) {
+    expansionRejected = !await chatGPTExpandFirstUser(expansion);
+    // A display click can mutate the body before a later guard rejects it.
+    // Keep diagnostics current; a failed attempt never falls through to bind.
+    rendered = normalizedFirstBody(first);
+  }
   const markerLine = `Computa session marker: ${marker}`;
   const renderedLines = rendered.split("\n");
   if (typeof marker !== "string" || !/^[a-f0-9-]{36}$/i.test(marker)
@@ -1673,6 +1701,8 @@ if (ownedUserCount > 0) {
           : rendered.length > 180_200 ? 'body_limit' : renderedLines.at(-1) !== markerLine ? 'marker_not_final'
             : renderedLines.filter(line => line === markerLine).length !== 1 ? 'marker_duplicate' : 'body_empty',
       'marker_validation', { roots: ownedMessages, body: first, rendered });
+  if (expansionRejected)
+    return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
   firstSnapshot = { root: ownedMessages[0], body: first, text: rendered };
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");

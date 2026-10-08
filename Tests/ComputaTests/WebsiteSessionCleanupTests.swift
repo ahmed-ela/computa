@@ -11,31 +11,32 @@ final class WebsiteSessionCleanupTests: XCTestCase {
         return root
     }
 
-    func testAutomaticFailureAndExactManualRetryPersistFiniteOriginalBindingWithoutInferenceReplay() async throws {
+    func testInferenceRetirementFailureAndExactManualRetryPersistOriginalBindingWithoutInferenceReplay() async throws {
         let root = try directory(), task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString
         let generation = UUID(), original = CleanupReceiptTransport(failFirstCleanup: true)
         let replacement = CleanupReceiptTransport()
         let server = WebModelServer(), audit = CleanupReceiptAudit()
-        await server.configureEmbeddedTransport(original)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(original))
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
         await server.configureCleanupReceipts(directory: root, runtimeGeneration: generation) { await audit.append($0) }
-        await server.registerCleanupTurn(taskID: task, threadID: thread, turnID: turn)
-        _ = try await server.infer(Data("{\"model\":\"browser/claude\",\"input\":\"Synthetic\",\"tools\":[]}".utf8), taskID: task)
-        let initialIssues = await server.finish(taskID: task)
-        XCTAssertFalse(initialIssues.isEmpty)
+        do {
+            _ = try await server.fixtureInfer(Data("{\"model\":\"browser/claude\",\"input\":\"Synthetic\",\"tools\":[]}".utf8),
+                taskID: task, threadID: thread, turnID: turn, runtimeGeneration: generation)
+            XCTFail("A response cannot escape a failed inference retirement")
+        } catch { XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.cleanupFailed.localizedDescription) }
         let lastAutomatic = await audit.last()
         let automatic = try XCTUnwrap(lastAutomatic)
-        XCTAssertEqual(automatic.outcome, .unconfirmed); XCTAssertEqual(automatic.trigger, .automatic)
+        XCTAssertEqual(automatic.outcome, .unconfirmed); XCTAssertEqual(automatic.trigger, .inference)
         XCTAssertEqual(automatic.taskID, task.lowercased()); XCTAssertEqual(automatic.threadID, thread.lowercased())
         XCTAssertEqual(automatic.turnID, turn.lowercased()); XCTAssertEqual(automatic.provider, .claude)
         XCTAssertEqual(automatic.route, .embedded); XCTAssertEqual(automatic.modelID, "browser/claude")
         XCTAssertEqual(automatic.runtimeGeneration, generation.uuidString.lowercased()); XCTAssertTrue(automatic.receiptSaved)
-        await server.configureEmbeddedTransport(replacement)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(replacement))
         let closed = await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
         XCTAssertEqual(closed.outcome, .closed); XCTAssertEqual(closed.reason, .deleted)
         XCTAssertEqual(closed.trigger, .manual); XCTAssertTrue(closed.receiptSaved)
-        let absent = await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
-        XCTAssertEqual(absent.outcome, .noOwnedSession); XCTAssertEqual(absent.reason, .noOwnedSession)
-        XCTAssertNil(absent.provider); XCTAssertNil(absent.route); XCTAssertNil(absent.modelID)
+        let repeated = await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
+        XCTAssertEqual(repeated, closed, "Turn-end current absence cannot overwrite the exact durable closure")
         let originalCalls = await original.calls(), replacementCalls = await replacement.calls()
         XCTAssertEqual(originalCalls.map(\.0), ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish", "webProviderCancel"])
         XCTAssertTrue(replacementCalls.isEmpty, "Selector/transport changes cannot retarget old cleanup")
@@ -43,10 +44,11 @@ final class WebsiteSessionCleanupTests: XCTestCase {
         XCTAssertEqual(originalCalls.suffix(2).map(\.1), Array(repeating: originalToken, count: 2))
         let file = root.appendingPathComponent(task.lowercased() + ".jsonl")
         let raw = try String(contentsOf: file, encoding: .utf8)
-        XCTAssertFalse(raw.contains(originalToken)); XCTAssertFalse(raw.contains("PRIVATE_REPLY_CANARY"))
+        XCTAssertTrue(raw.contains(originalToken.lowercased())); XCTAssertFalse(raw.contains("PRIVATE_REPLY_CANARY"))
         let records = try raw.split(separator: "\n").map { try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: Data($0.utf8)) }
-        XCTAssertEqual(records.map(\.outcome), [.unconfirmed, .closed, .noOwnedSession])
-        XCTAssertEqual(WebsiteSessionCleanupStore(directory: root).latest(), [absent])
+        XCTAssertEqual(records.map(\.outcome), [.unconfirmed, .closed])
+        XCTAssertTrue(records.allSatisfy { $0.inferenceID == automatic.inferenceID && $0.sessionToken == automatic.sessionToken })
+        XCTAssertEqual(WebsiteSessionCleanupStore(directory: root).latest(), [closed])
         _ = await server.shutdown()
     }
 
@@ -54,20 +56,29 @@ final class WebsiteSessionCleanupTests: XCTestCase {
         let root = try directory(), task = UUID().uuidString, generation = UUID()
         let gate = CleanupReceiptGate(), transport = CleanupReceiptTransport(cleanupGate: gate)
         let server = WebModelServer()
-        await server.configureEmbeddedTransport(transport)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
         await server.configureCleanupReceipts(directory: root, runtimeGeneration: generation) { _ in }
-        _ = try await server.infer(Data("{\"model\":\"browser/claude\",\"input\":\"Synthetic\",\"tools\":[]}".utf8), taskID: task)
-        let first = Task { await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation) }
+        let first = Task {
+            try await server.fixtureInfer(Data("{\"model\":\"browser/claude\",\"input\":\"Synthetic\",\"tools\":[]}".utf8),
+                taskID: task, runtimeGeneration: generation)
+        }
         await gate.waitUntilEntered()
         let duplicate = await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
         XCTAssertEqual(duplicate.outcome, .unconfirmed); XCTAssertEqual(duplicate.reason, .busy)
-        do { _ = try await server.infer(Data("{\"model\":\"browser/gemini\",\"input\":\"Forbidden\",\"tools\":[]}".utf8), taskID: task); XCTFail("Cleanup must fence inference") }
+        do {
+            _ = try await server.fixtureInfer(Data("{\"model\":\"browser/gemini\",\"input\":\"Forbidden\",\"tools\":[]}".utf8),
+                taskID: task, runtimeGeneration: generation)
+            XCTFail("Cleanup must fence an otherwise valid inference for the same native turn")
+        }
         catch { XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.busy.localizedDescription) }
         await gate.release()
-        let firstResult = await first.value
-        XCTAssertEqual(firstResult.outcome, .closed)
+        _ = try await first.value
+        let saved = try XCTUnwrap(WebsiteSessionCleanupStore(directory: root).latest().last)
+        XCTAssertEqual(saved.outcome, .closed); XCTAssertEqual(saved.trigger, .inference)
         let calls = await transport.calls()
-        XCTAssertEqual(calls.filter { $0.0 == "webProviderCancel" }.count, 1)
+        XCTAssertEqual(calls.filter { $0.0 == "webProviderFinish" }.count, 1)
+        XCTAssertTrue(calls.filter { $0.0 == "webProviderCancel" }.isEmpty)
         XCTAssertEqual(calls.filter { $0.0 == "webProviderSend" }.count, 1)
         _ = await server.shutdown()
     }
@@ -90,7 +101,7 @@ final class WebsiteSessionCleanupTests: XCTestCase {
         let receipt = WebsiteSessionCleanupReceipt(taskID: task, runtimeGeneration: UUID(), outcome: .closed,
             provider: .claude, route: .embedded, modelID: "browser/claude", reason: .notCreated, trigger: .automatic, receiptSaved: true)
         let store = WebsiteSessionCleanupStore(directory: root)
-        XCTAssertTrue(store.save(receipt)); XCTAssertFalse(store.save(receipt))
+        XCTAssertTrue(store.save(receipt)); XCTAssertTrue(store.save(receipt), "An exact persistence retry must not append or repeat cleanup")
         let file = root.appendingPathComponent(task.lowercased() + ".jsonl")
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
@@ -117,6 +128,314 @@ final class WebsiteSessionCleanupTests: XCTestCase {
             let forged = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: JSONSerialization.data(withJSONObject: raw))
             XCTAssertFalse(forged.isValid)
         }
+    }
+}
+
+@MainActor
+final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
+    private struct Scope {
+        let task = UUID().uuidString.lowercased()
+        let thread = UUID().uuidString.lowercased()
+        let turn = UUID().uuidString.lowercased()
+        let generation = UUID()
+        let inference = UUID().uuidString.lowercased()
+        let token = UUID().uuidString.lowercased()
+    }
+
+    private func directory() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaCleanupJournal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root
+    }
+
+    private func receipt(_ scope: Scope, turn: String? = nil, inference: String? = nil, token: String? = nil,
+                         outcome: WebsiteSessionCleanupReceipt.Outcome = .closed) -> WebsiteSessionCleanupReceipt {
+        WebsiteSessionCleanupReceipt(taskID: scope.task, threadID: scope.thread, turnID: turn ?? scope.turn,
+            runtimeGeneration: scope.generation, outcome: outcome, provider: .claude, route: .embedded,
+            modelID: "browser/claude", reason: outcome == .closed ? .notCreated : .cleanupUnverified,
+            trigger: .inference, receiptSaved: true, inferenceID: inference ?? scope.inference, sessionToken: token ?? scope.token)
+    }
+
+    private func legacy(_ task: String) -> WebsiteSessionCleanupReceipt {
+        WebsiteSessionCleanupReceipt(taskID: task, runtimeGeneration: UUID(), outcome: .noOwnedSession,
+            reason: .noOwnedSession, trigger: .automatic, receiptSaved: true)
+    }
+
+    private func changed(_ receipt: WebsiteSessionCleanupReceipt, _ fields: [String: Any], removing: [String] = []) throws -> WebsiteSessionCleanupReceipt {
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(receipt)) as? [String: Any])
+        fields.forEach { raw[$0.key] = $0.value }; removing.forEach { raw.removeValue(forKey: $0) }
+        return try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: JSONSerialization.data(withJSONObject: raw))
+    }
+
+    private func rowBytes(_ receipt: WebsiteSessionCleanupReceipt) throws -> Int {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(receipt).count
+    }
+
+    private func journalFile(_ root: URL, _ scope: Scope, turn: String? = nil) -> URL {
+        root.appendingPathComponent("transactions").appendingPathComponent(scope.task).appendingPathComponent((turn ?? scope.turn) + ".jsonl")
+    }
+
+    func testLegacyDecodeAndIdenticalRetryRemainCompatibleWithoutInventedTransactionProof() throws {
+        let root = try directory(), scope = Scope(), old = legacy(scope.task), store = WebsiteSessionCleanupStore(directory: root)
+        let raw = try JSONEncoder().encode(old)
+        XCTAssertFalse(String(decoding: raw, as: UTF8.self).contains("inferenceID"))
+        let decoded = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: raw)
+        XCTAssertEqual(decoded.schemaVersion, 1); XCTAssertTrue(decoded.isValid); XCTAssertFalse(decoded.isTransactionLinked)
+        XCTAssertTrue(store.save(decoded)); XCTAssertTrue(store.save(decoded))
+        XCTAssertFalse(store.saveTransaction(decoded)); XCTAssertEqual(store.latest(), [decoded])
+        XCTAssertTrue(try store.transactionRecords(for: scope.task, turnID: scope.turn).isEmpty)
+        let rows = try String(contentsOf: root.appendingPathComponent(scope.task + ".jsonl"), encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(rows.count, 1)
+    }
+
+    func testTransactionSchemaRequiresCompleteCanonicalCausalBinding() throws {
+        let scope = Scope(), valid = receipt(scope)
+        XCTAssertEqual(valid.schemaVersion, 2); XCTAssertTrue(valid.isValid); XCTAssertTrue(valid.isTransactionLinked)
+        for field in ["inferenceID", "sessionToken", "threadID", "turnID"] {
+            XCTAssertFalse(try changed(valid, [:], removing: [field]).isValid, field)
+        }
+        for field in ["attemptID", "taskID", "threadID", "turnID", "runtimeGeneration", "inferenceID", "sessionToken"] {
+            XCTAssertFalse(try changed(valid, [field: "invalid"]).isValid, field)
+            XCTAssertFalse(try changed(valid, [field: UUID().uuidString.uppercased()]).isValid, field)
+        }
+        XCTAssertFalse(try changed(valid, ["schemaVersion": 1]).isValid)
+        XCTAssertFalse(try changed(valid, ["outcome": "no_owned_session", "reason": "no_owned_session"]).isValid)
+        XCTAssertFalse(try changed(legacy(scope.task), ["trigger": "inference"]).isValid)
+        let halfLinked = WebsiteSessionCleanupReceipt(taskID: scope.task, threadID: scope.thread, turnID: scope.turn,
+            runtimeGeneration: scope.generation, outcome: .closed, provider: .claude, route: .embedded,
+            modelID: "browser/claude", reason: .notCreated, trigger: .inference, inferenceID: scope.inference)
+        XCTAssertFalse(halfLinked.isValid)
+    }
+
+    func testJournalIsIdempotentAndRejectsChangedRecordWithSameAttemptID() throws {
+        let root = try directory(), scope = Scope(), first = receipt(scope), store = WebsiteSessionCleanupStore(directory: root)
+        XCTAssertTrue(store.save(first)); let bytes = try Data(contentsOf: journalFile(root, scope))
+        XCTAssertTrue(store.save(first)); XCTAssertTrue(store.saveTransaction(first))
+        XCTAssertEqual(try Data(contentsOf: journalFile(root, scope)), bytes)
+        let conflicting = try changed(first, ["trigger": "manual"])
+        XCTAssertTrue(conflicting.isValid); XCTAssertFalse(store.saveTransaction(conflicting)); XCTAssertFalse(store.save(conflicting))
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [first])
+        let retry = receipt(scope)
+        XCTAssertTrue(store.saveTransaction(retry))
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [first, retry])
+        let foreign = try changed(receipt(Scope()), ["attemptID": first.attemptID])
+        XCTAssertTrue(foreign.isValid); XCTAssertFalse(store.saveTransaction(foreign), "A conflicting attempt cannot move to a different task journal")
+    }
+
+    func testInferenceAndSessionCannotBeReboundAcrossNativeScope() throws {
+        let root = try directory(), scope = Scope(), original = receipt(scope), store = WebsiteSessionCleanupStore(directory: root)
+        XCTAssertTrue(store.saveTransaction(original))
+        let mutations: [[String: Any]] = [
+            ["sessionToken": UUID().uuidString.lowercased()], ["inferenceID": UUID().uuidString.lowercased()],
+            ["turnID": UUID().uuidString.lowercased()], ["threadID": UUID().uuidString.lowercased()],
+            ["runtimeGeneration": UUID().uuidString.lowercased()], ["provider": "gemini", "modelID": "browser/gemini"]
+        ]
+        for mutation in mutations {
+            var new = mutation; new["attemptID"] = UUID().uuidString.lowercased()
+            let row = try changed(original, new)
+            XCTAssertTrue(row.isValid); XCTAssertFalse(store.saveTransaction(row), String(describing: mutation))
+        }
+        let otherThread = try changed(receipt(scope, inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased()),
+            ["threadID": UUID().uuidString.lowercased()])
+        XCTAssertFalse(store.saveTransaction(otherThread), "One native turn cannot change its owning thread")
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [original])
+    }
+
+    func testRecordAndJournalByteBudgetsHaveExactInclusiveBoundary() throws {
+        let root = try directory(), scope = Scope(), row = receipt(scope), bytes = try rowBytes(row)
+        var limits = WebsiteSessionCleanupStore.Limits(); limits.recordBytes = bytes; limits.transactionBytes = bytes + 1
+        let store = WebsiteSessionCleanupStore(directory: root, limits: limits)
+        XCTAssertTrue(store.saveTransaction(row)); XCTAssertTrue(store.saveTransaction(row))
+        XCTAssertFalse(store.saveTransaction(receipt(scope)), "A second row exceeds the byte budget")
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [row])
+        let other = try directory(); limits.recordBytes = bytes - 1
+        XCTAssertFalse(WebsiteSessionCleanupStore(directory: other, limits: limits).saveTransaction(row))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journalFile(other, scope).path))
+    }
+
+    func testCountAndGlobalByteBudgetsRetainExistingProofOnFailure() throws {
+        let root = try directory(), scope = Scope()
+        var limits = WebsiteSessionCleanupStore.Limits(); limits.transactionRecords = 2
+        let store = WebsiteSessionCleanupStore(directory: root, limits: limits)
+        let first = receipt(scope), second = receipt(scope)
+        XCTAssertTrue(store.saveTransaction(first)); XCTAssertTrue(store.saveTransaction(second)); XCTAssertFalse(store.saveTransaction(receipt(scope)))
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [first, second])
+        let exactBytes = try Data(contentsOf: journalFile(root, scope)).count
+        limits.transactionDirectoryBytes = exactBytes
+        let exactStore = WebsiteSessionCleanupStore(directory: root, limits: limits)
+        XCTAssertTrue(exactStore.saveTransaction(first))
+        XCTAssertFalse(exactStore.saveTransaction(receipt(scope, turn: UUID().uuidString.lowercased(), inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased())))
+        XCTAssertEqual(try exactStore.transactionRecords(for: scope.task, turnID: scope.turn), [first, second])
+    }
+
+    func testJournalTaskTurnAndFileCountsAreFinite() throws {
+        for constrained in ["task", "turn", "file"] {
+            let root = try directory(), scope = Scope()
+            var limits = WebsiteSessionCleanupStore.Limits()
+            if constrained == "task" { limits.transactionTasks = 1 }
+            if constrained == "turn" { limits.transactionTurnsPerTask = 1 }
+            if constrained == "file" { limits.transactionFiles = 1 }
+            let store = WebsiteSessionCleanupStore(directory: root, limits: limits), first = receipt(scope)
+            XCTAssertTrue(store.saveTransaction(first))
+            let next = constrained == "task" ? receipt(Scope())
+                : receipt(scope, turn: UUID().uuidString.lowercased(), inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased())
+            XCTAssertFalse(store.saveTransaction(next), constrained)
+            XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [first])
+        }
+    }
+
+    func testNinetyNativeTurnsRetainEveryJournalAndArchiveEvictedLegacyRows() throws {
+        let root = try directory(), scope = Scope(), store = WebsiteSessionCleanupStore(directory: root)
+        let old = (0..<64).map { _ in legacy(scope.task) }
+        for row in old { XCTAssertTrue(store.save(row)) }
+        var fresh: [WebsiteSessionCleanupReceipt] = []
+        for _ in 0..<90 {
+            let row = receipt(scope, turn: UUID().uuidString.lowercased(), inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased())
+            XCTAssertTrue(store.save(row)); fresh.append(row)
+        }
+        XCTAssertEqual(try store.archivedLegacyRecords(for: scope.task), old)
+        for row in fresh { XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: row.turnID!), [row]) }
+        let summary = try String(contentsOf: root.appendingPathComponent(scope.task + ".jsonl"), encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(summary.count, 64)
+        let permissions = try FileManager.default.attributesOfItem(atPath: journalFile(root, scope, turn: fresh[0].turnID!).path)
+        XCTAssertEqual((permissions[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let directoryPermissions = try FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("transactions").path)
+        XCTAssertEqual((directoryPermissions[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+    }
+
+    func testNinetySixInferencesWithinOneNativeTurnSurviveSummaryCompaction() throws {
+        let root = try directory(), scope = Scope(), store = WebsiteSessionCleanupStore(directory: root)
+        var expected: [WebsiteSessionCleanupReceipt] = []
+        for _ in 0..<96 {
+            let row = receipt(scope, inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased())
+            XCTAssertTrue(store.save(row)); expected.append(row)
+        }
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), expected)
+        let summary = try String(contentsOf: root.appendingPathComponent(scope.task + ".jsonl"), encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(summary.count, 64); XCTAssertEqual(store.latest(), [expected.last!])
+    }
+
+    func testArchiveFailurePreservesSummaryAndExactRetryCompletesWithoutDuplicateJournal() throws {
+        let root = try directory(), scope = Scope()
+        var limits = WebsiteSessionCleanupStore.Limits(); limits.summaryRecords = 2
+        let store = WebsiteSessionCleanupStore(directory: root, limits: limits), old = [legacy(scope.task), legacy(scope.task)]
+        old.forEach { XCTAssertTrue(store.save($0)) }
+        let summary = root.appendingPathComponent(scope.task + ".jsonl"), original = try Data(contentsOf: summary)
+        let blocked = root.appendingPathComponent("legacy-archive")
+        try Data("blocked".utf8).write(to: blocked)
+        let closed = receipt(scope)
+        XCTAssertFalse(store.save(closed)); XCTAssertEqual(try Data(contentsOf: summary), original)
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [closed])
+        try FileManager.default.removeItem(at: blocked)
+        XCTAssertTrue(store.save(closed)); XCTAssertTrue(store.save(closed))
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [closed])
+        XCTAssertEqual(try store.archivedLegacyRecords(for: scope.task), [old[0]])
+    }
+
+    func testSummaryFailureAfterJournalWriteCanRecoverSameSavedReceipt() throws {
+        let root = try directory(), scope = Scope(), store = WebsiteSessionCleanupStore(directory: root), closed = receipt(scope)
+        let summary = root.appendingPathComponent(scope.task + ".jsonl")
+        try FileManager.default.createDirectory(at: summary, withIntermediateDirectories: true)
+        XCTAssertFalse(store.save(closed)); XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [closed])
+        try FileManager.default.removeItem(at: summary)
+        XCTAssertTrue(store.save(closed)); XCTAssertEqual(store.latest(), [closed])
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [closed])
+    }
+
+    func testArchiveCountBudgetFailsBeforeEvictingHistoricalProof() throws {
+        let root = try directory(), scope = Scope()
+        var limits = WebsiteSessionCleanupStore.Limits(); limits.summaryRecords = 2; limits.archiveRecords = 1
+        let store = WebsiteSessionCleanupStore(directory: root, limits: limits), old = [legacy(scope.task), legacy(scope.task)]
+        old.forEach { XCTAssertTrue(store.save($0)) }
+        let first = receipt(scope)
+        XCTAssertTrue(store.save(first))
+        let file = root.appendingPathComponent(scope.task + ".jsonl"), before = try Data(contentsOf: file)
+        let second = receipt(scope, inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased())
+        XCTAssertFalse(store.save(second)); XCTAssertEqual(try Data(contentsOf: file), before)
+        XCTAssertEqual(try store.archivedLegacyRecords(for: scope.task), [old[0]])
+        limits.archiveRecords = 2
+        let expandedStore = WebsiteSessionCleanupStore(directory: root, limits: limits)
+        XCTAssertTrue(expandedStore.save(second))
+        XCTAssertThrowsError(try store.archivedLegacyRecords(for: scope.task),
+            "The original reader must continue to enforce its one-record archive budget")
+        XCTAssertEqual(try expandedStore.archivedLegacyRecords(for: scope.task), old)
+        XCTAssertTrue(expandedStore.save(second), "A persistence retry must not append either durable proof again")
+        XCTAssertEqual(try expandedStore.archivedLegacyRecords(for: scope.task), old)
+        XCTAssertEqual(try expandedStore.transactionRecords(for: scope.task, turnID: scope.turn), [first, second])
+    }
+
+    func testUnresolvedTransactionCannotBeMaskedByOtherClosureOrNoOwnedSession() throws {
+        let root = try directory(), scope = Scope(), store = WebsiteSessionCleanupStore(directory: root)
+        let unresolved = receipt(scope, outcome: .unconfirmed)
+        XCTAssertTrue(store.save(unresolved))
+        let other = receipt(scope, inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased())
+        XCTAssertTrue(store.save(other)); let absent = legacy(scope.task); XCTAssertTrue(store.save(absent))
+        XCTAssertEqual(store.latest(), [unresolved])
+        let resolved = receipt(scope)
+        XCTAssertTrue(store.save(resolved)); let laterAbsent = legacy(scope.task); XCTAssertTrue(store.save(laterAbsent))
+        XCTAssertEqual(store.latest(), [laterAbsent])
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [unresolved, other, resolved])
+    }
+
+    func testArchiveByteBudgetsFailBeforeSummaryCompaction() throws {
+        for globalBudget in [false, true] {
+            let root = try directory(), scope = Scope(), old = legacy(scope.task)
+            var limits = WebsiteSessionCleanupStore.Limits(); limits.summaryRecords = 1
+            let bytes = try rowBytes(old) + 1
+            if globalBudget { limits.archiveDirectoryBytes = bytes - 1 } else { limits.archiveBytes = bytes - 1 }
+            let store = WebsiteSessionCleanupStore(directory: root, limits: limits)
+            XCTAssertTrue(store.save(old))
+            let summary = root.appendingPathComponent(scope.task + ".jsonl"), before = try Data(contentsOf: summary), closed = receipt(scope)
+            XCTAssertFalse(store.save(closed)); XCTAssertEqual(try Data(contentsOf: summary), before)
+            XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [closed])
+            limits.archiveDirectoryBytes = bytes; limits.archiveBytes = bytes
+            let repaired = WebsiteSessionCleanupStore(directory: root, limits: limits)
+            XCTAssertTrue(repaired.save(closed)); XCTAssertEqual(try repaired.archivedLegacyRecords(for: scope.task), [old])
+        }
+    }
+
+    func testEvictedUnconfirmedTransactionRemainsVisibleUntilThatSameLeaseCloses() throws {
+        let root = try directory(), scope = Scope(), store = WebsiteSessionCleanupStore(directory: root)
+        let unresolved = receipt(scope, outcome: .unconfirmed)
+        XCTAssertTrue(store.save(unresolved))
+        for _ in 0..<70 {
+            XCTAssertTrue(store.save(receipt(scope, turn: UUID().uuidString.lowercased(),
+                inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased())))
+        }
+        XCTAssertEqual(store.latest(), [unresolved])
+        let closed = receipt(scope)
+        XCTAssertTrue(store.save(closed)); XCTAssertEqual(store.latest(), [closed])
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [unresolved, closed])
+    }
+
+    func testJournalRejectsUnknownFieldsPartialRowsAndSymlinkedScope() throws {
+        let root = try directory(), scope = Scope(), store = WebsiteSessionCleanupStore(directory: root), row = receipt(scope)
+        XCTAssertTrue(store.saveTransaction(row)); let file = journalFile(root, scope), original = try Data(contentsOf: file)
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(row)) as? [String: Any])
+        raw["pageText"] = "PRIVATE_REPLY_CANARY"
+        var corrupt = try JSONSerialization.data(withJSONObject: raw); corrupt.append(0x0A)
+        try corrupt.write(to: file)
+        XCTAssertThrowsError(try store.transactionRecords(for: scope.task, turnID: scope.turn)); XCTAssertFalse(store.saveTransaction(row))
+        try original.dropLast().write(to: file)
+        XCTAssertThrowsError(try store.transactionRecords(for: scope.task, turnID: scope.turn))
+        try FileManager.default.removeItem(at: file)
+        let outside = root.appendingPathComponent("outside"); try original.write(to: outside)
+        try FileManager.default.createSymbolicLink(at: file, withDestinationURL: outside)
+        XCTAssertThrowsError(try store.transactionRecords(for: scope.task, turnID: scope.turn)); XCTAssertFalse(store.saveTransaction(row))
+        XCTAssertEqual(try Data(contentsOf: outside), original)
+    }
+
+    func testJournalReaderRejectsContradictoryInferenceLinkageEvenWithValidIndividualRows() throws {
+        let root = try directory(), scope = Scope(), store = WebsiteSessionCleanupStore(directory: root), first = receipt(scope)
+        XCTAssertTrue(store.saveTransaction(first))
+        let different = receipt(scope, token: UUID().uuidString.lowercased())
+        XCTAssertTrue(different.isValid)
+        var bytes = try Data(contentsOf: journalFile(root, scope)); bytes.append(try JSONEncoder().encode(different)); bytes.append(0x0A)
+        try bytes.write(to: journalFile(root, scope))
+        XCTAssertThrowsError(try store.transactionRecords(for: scope.task, turnID: scope.turn))
+        XCTAssertFalse(store.saveTransaction(receipt(scope, inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased())))
     }
 }
 
@@ -325,6 +644,7 @@ private actor CleanupReceiptGate {
 
 private actor CleanupReceiptTransport: WebModelTransport {
     private let ownedToken = UUID().uuidString
+    private let documentGeneration = UUID().uuidString.lowercased()
     private var operations: [(String, String)] = []
     private var failFirstCleanup: Bool
     private let cleanupGate: CleanupReceiptGate?
@@ -350,6 +670,13 @@ private actor CleanupReceiptTransport: WebModelTransport {
             default: throw WebModelServer.Failure.invalidRequest
             }
         }
-        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result))
+        var snapshot = syntheticPreparedWebsiteSnapshot(result)
+        if ["running", "complete"].contains(snapshot["state"] as? String ?? "") {
+            snapshot["sessionToken"] = ownedToken; snapshot["sequence"] = 1
+            snapshot["modelProofContext"] = ["documentGeneration": documentGeneration, "sequence": 1,
+                "baselineResponseCount": 0, "responseCount": snapshot["state"] as? String == "complete" ? 1 : 0,
+                "firstUserFingerprint": String(repeating: "a", count: 64)]
+        }
+        return try JSONSerialization.data(withJSONObject: snapshot)
     }
 }

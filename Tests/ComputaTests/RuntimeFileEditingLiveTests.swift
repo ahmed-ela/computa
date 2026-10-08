@@ -38,14 +38,17 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
         let runtime = CodexAppServerRuntime(configuration: config)
         let transport = NativePatchInferenceFixture(projectPath: project.path, failureProbes: failureProbes)
         let audit = PatchAudit()
+        let taskID = UUID().uuidString.lowercased()
         let observer = Task { [audit] in
             for await event in runtime.events() { audit.receive(event) }
         }
         do {
-            await runtime.configureEmbeddedWebModelTransport(transport)
-            try await runtime.configureWorkspace(path: project.path, forTaskID: "qualification")
+            // The deterministic provider supplies lease proof; the real
+            // native runtime supplies its actual inference and turn context.
+            await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(transport))
+            try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
             try await runtime.submit(prompt: "Apply the requested isolated fixture edits and run its assertion.",
-                toTaskID: "qualification", modelID: modelID)
+                toTaskID: taskID, modelID: modelID)
             let deadline = ContinuousClock.now + .seconds(45)
             while !audit.terminal, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
             XCTAssertTrue(audit.terminal, "The native executor did not finish within its bounded deadline")
@@ -81,6 +84,9 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             let receipt = await transport.receipt()
             let expectedInferences = failureProbes ? 5 : 3
             XCTAssertEqual(receipt.sendCount, expectedInferences)
+            XCTAssertEqual(receipt.startCount, expectedInferences)
+            XCTAssertEqual(receipt.finishCount, expectedInferences)
+            XCTAssertEqual(Set(receipt.sessionTokens).count, expectedInferences)
             XCTAssertTrue(receipt.customPatchOffered)
             XCTAssertTrue(receipt.patchOutputMatched)
             XCTAssertTrue(receipt.commandOutputMatched)
@@ -91,12 +97,12 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
                 XCTAssertTrue(receipt.rejectedPatchesDidNotWrite)
             }
             do {
-                try await runtime.configureWorkspace(path: root.path, forTaskID: "qualification")
+                try await runtime.configureWorkspace(path: root.path, forTaskID: taskID)
                 XCTFail("A started chat must keep its original project folder")
             } catch { XCTAssertTrue(error.localizedDescription.contains("original folder")) }
             audit.terminal = false
             try await runtime.submit(prompt: "Give a brief confirmation without editing files.",
-                toTaskID: "qualification", modelID: modelID)
+                toTaskID: taskID, modelID: modelID)
             let noEditDeadline = ContinuousClock.now + .seconds(30)
             while !audit.terminal, ContinuousClock.now < noEditDeadline { try await Task.sleep(for: .milliseconds(20)) }
             XCTAssertTrue(audit.terminal)
@@ -106,6 +112,9 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             XCTAssertEqual(audit.fileEntries.filter { $0.toolEvent?.status == .succeeded }.count, 1)
             let noEditReceipt = await transport.receipt()
             XCTAssertEqual(noEditReceipt.sendCount, expectedInferences + 1)
+            XCTAssertEqual(noEditReceipt.startCount, expectedInferences + 1)
+            XCTAssertEqual(noEditReceipt.finishCount, expectedInferences + 1)
+            XCTAssertEqual(Set(noEditReceipt.sessionTokens).count, expectedInferences + 1)
             let report = await runtime.shutdown()
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
             observer.cancel()
@@ -168,6 +177,9 @@ private final class PatchAudit {
 
 private actor NativePatchInferenceFixture: WebModelTransport {
     struct Receipt: Sendable {
+        var startCount = 0
+        var finishCount = 0
+        var sessionTokens = [String]()
         var sendCount = 0
         var customPatchOffered = false
         var patchOutputMatched = false
@@ -177,7 +189,7 @@ private actor NativePatchInferenceFixture: WebModelTransport {
         var rejectedPatchesDidNotWrite = false
         var requestModels = [String]()
     }
-    private let token = UUID().uuidString
+    private var token = UUID().uuidString
     private let projectPath: String
     private let failureProbes: Bool
     private var response = ""
@@ -187,7 +199,11 @@ private actor NativePatchInferenceFixture: WebModelTransport {
     func request(operation: String, params: Data) throws -> Data {
         var result: [String: Any]
         switch operation {
-        case "webProviderStart": result = ["sessionToken": token, "state": "ready"]
+        case "webProviderStart":
+            token = UUID().uuidString
+            observations.startCount += 1
+            observations.sessionTokens.append(token)
+            result = ["sessionToken": token, "state": "ready"]
         case "webProviderSend":
             let parameters = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: Any])
             let prompt = try XCTUnwrap(parameters["prompt"] as? String)
@@ -251,7 +267,9 @@ private actor NativePatchInferenceFixture: WebModelTransport {
             observations.sendCount += 1
             result = ["state": "running"]
         case "webProviderPoll": result = ["state": "complete", "text": response]
-        case "webProviderFinish", "webProviderCancel": result = ["cleanup": "not_created"]
+        case "webProviderFinish", "webProviderCancel":
+            observations.finishCount += 1
+            result = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
         return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result))

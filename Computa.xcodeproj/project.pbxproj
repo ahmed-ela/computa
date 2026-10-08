@@ -31,6 +31,7 @@
 		0D4B1CD78302046F53CAF5F7 /* OpenResponsesAppServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1556E64A45FDDC15AABEBB9A /* OpenResponsesAppServerTests.swift */; };
 		0FDC7959BF70E71BAFAA8C5B /* FocusedWindowIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5F12E18D54EBB7EBAAA8378 /* FocusedWindowIdentityTests.swift */; };
 		10F81455C5E968181D47CC9D /* WebModelServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01C9A1A3371E98358999B992 /* WebModelServer.swift */; };
+		1104FB028BDC3CBD46F43BED /* WebsiteInferenceFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1837784A0BDDD6BF213907A9 /* WebsiteInferenceFixture.swift */; };
 		11390AB1F5009B5A418CE198 /* BrowserModels in Resources */ = {isa = PBXBuildFile; fileRef = ABF5C281ACC343DCDEE1E730 /* BrowserModels */; };
 		12547676C29A32213848EA03 /* ChromeTabBrokerRetirementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA8321C2639D5357131F2CDD /* ChromeTabBrokerRetirementTests.swift */; };
 		125875D63DE84D7B3B84BEE2 /* ComputerReadPublicationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE00286D4F49C4ACBDB2DDEC /* ComputerReadPublicationTests.swift */; };
@@ -343,6 +344,7 @@
 		16C4A65BD8AA64845289E816 /* RuntimeShutdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeShutdownTests.swift; sourceTree = "<group>"; };
 		1768E07D26CACF575B9DDD7C /* ComputerRecoveryState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerRecoveryState.swift; sourceTree = "<group>"; };
 		180DED41FB7570A657C2CDCB /* AgentRPCError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRPCError.swift; sourceTree = "<group>"; };
+		1837784A0BDDD6BF213907A9 /* WebsiteInferenceFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteInferenceFixture.swift; sourceTree = "<group>"; };
 		19815F76334C907C5D52006D /* ExistingChromeTabInventoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExistingChromeTabInventoryTests.swift; sourceTree = "<group>"; };
 		1BA21630EAFE54E766939408 /* ChromeTabBrokerFreshLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChromeTabBrokerFreshLaunchTests.swift; sourceTree = "<group>"; };
 		1C9DE151DE49EFE8CC0AD48C /* ChromeBridgeIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChromeBridgeIdentity.swift; sourceTree = "<group>"; };
@@ -841,6 +843,7 @@
 				A37D1BAA92581DA4F19AEDDA /* WebModelRuntimeRoutingTests.swift */,
 				1544C8B2C1C2F25040B8EEFA /* WebModelServerTests.swift */,
 				D2D07D907D389C1A2E52C055 /* WebsiteFailureHistoryTests.swift */,
+				1837784A0BDDD6BF213907A9 /* WebsiteInferenceFixture.swift */,
 				6DA00A10FE419AC6AF7DDEBF /* WebsiteModelCatalogTests.swift */,
 				FDEBA7EA90C4A23E2B8E618B /* WebsiteModelEvidenceTests.swift */,
 				7280653A92318C7E0F2197F2 /* WebsiteModelStateTests.swift */,
@@ -1510,6 +1513,7 @@
 				60ED317F8B31B2A9103F50D2 /* WebModelServerTests.swift in Sources */,
 				F6B7EBEDB7411C99E7C83F59 /* WebSnapshotTests.swift in Sources */,
 				3CDF20ECC6F8C32F66FBB765 /* WebsiteFailureHistoryTests.swift in Sources */,
+				1104FB028BDC3CBD46F43BED /* WebsiteInferenceFixture.swift in Sources */,
 				C292D8DDB8CC28D916E3C4F1 /* WebsiteModelCatalogTests.swift in Sources */,
 				0D3CF4F7D159D4E01EA8191C /* WebsiteModelEvidenceTests.swift in Sources */,
 				F6D21ADAD5D0346BD12A8B6F /* WebsiteModelStateTests.swift in Sources */,

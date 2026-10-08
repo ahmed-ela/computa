@@ -3,6 +3,7 @@ import ApplicationServices
 import AutomationCore
 import CryptoKit
 @preconcurrency import Foundation
+import OSLog
 
 /// Native snapshots retain more AX handles than fit in the model observation. A retained
 /// handle is not permission to guess its index: only fully emitted element lines are targets.
@@ -112,6 +113,7 @@ struct AppServerTurnIdentityTracker: Sendable {
     private var activeTurnIDs: [AgentTask.ID: String] = [:]
     private var latestTurnIDs: [AgentTask.ID: String] = [:]
     private var startTokens: [AgentTask.ID: UUID] = [:]
+    private var retiredTurnIDs: [AgentTask.ID: Set<String>] = [:]
 
     func activeTurnID(for taskID: AgentTask.ID) -> String? { activeTurnIDs[taskID] }
     func latestTurnID(for taskID: AgentTask.ID) -> String? { latestTurnIDs[taskID] }
@@ -119,6 +121,7 @@ struct AppServerTurnIdentityTracker: Sendable {
     mutating func restoreLatestTurnID(taskID: AgentTask.ID, turnID: String) {
         guard latestTurnIDs[taskID] == nil, !turnID.isEmpty, turnID.utf8.count <= 512 else { return }
         latestTurnIDs[taskID] = turnID
+        retiredTurnIDs[taskID, default: []].insert(turnID)
     }
     var hasActiveOrStartingTurns: Bool { !activeTurnIDs.isEmpty || !startTokens.isEmpty }
 
@@ -134,17 +137,20 @@ struct AppServerTurnIdentityTracker: Sendable {
 
     @discardableResult
     mutating func acknowledgeStart(taskID: AgentTask.ID, turnID: String, token: UUID) -> Bool {
-        guard !turnID.isEmpty, startTokens[taskID] == token,
+        guard !turnID.isEmpty, !retiredTurnIDs[taskID, default: []].contains(turnID), startTokens[taskID] == token,
               activeTurnIDs[taskID] == nil || activeTurnIDs[taskID] == turnID else { return false }
         activeTurnIDs[taskID] = turnID
         latestTurnIDs[taskID] = turnID
         return true
     }
 
-    mutating func observeStart(taskID: AgentTask.ID, turnID: String) {
-        guard !turnID.isEmpty else { return }
+    @discardableResult
+    mutating func observeStart(taskID: AgentTask.ID, turnID: String) -> Bool {
+        guard !turnID.isEmpty, !retiredTurnIDs[taskID, default: []].contains(turnID),
+              activeTurnIDs[taskID] == nil || activeTurnIDs[taskID] == turnID else { return false }
         activeTurnIDs[taskID] = turnID
         latestTurnIDs[taskID] = turnID
+        return true
     }
 
     @discardableResult
@@ -152,6 +158,7 @@ struct AppServerTurnIdentityTracker: Sendable {
         guard let turnID, !turnID.isEmpty, activeTurnIDs[taskID] == turnID else { return false }
         activeTurnIDs.removeValue(forKey: taskID)
         startTokens.removeValue(forKey: taskID)
+        retiredTurnIDs[taskID, default: []].insert(turnID)
         return true
     }
 
@@ -159,6 +166,7 @@ struct AppServerTurnIdentityTracker: Sendable {
         activeTurnIDs.removeAll()
         latestTurnIDs.removeAll()
         startTokens.removeAll()
+        retiredTurnIDs.removeAll()
     }
 }
 
@@ -1137,6 +1145,9 @@ private extension CodexAppServerRuntime {
         private var workspaceForTask: [AgentTask.ID: String] = [:]
         private var taskForThread: [String: AgentTask.ID] = [:]
         private var turnIdentity = AppServerTurnIdentityTracker()
+        // A prepared website scope precedes the native RPC. Its nonce keeps a
+        // delayed acknowledgement from registering under a newer local turn.
+        private var websiteInferencePreparations: [AgentTask.ID: UUID] = [:]
         // IDs are scoped to one live turn. A completed item must never be
         // reopened by a delayed delta or rendered twice after a retry.
         private var assistantStreamTurns: [AgentTask.ID: String] = [:]
@@ -1222,6 +1233,7 @@ private extension CodexAppServerRuntime {
         private var inferenceServer: HeadlessMLXServer?
         private let webModelServer: WebModelServer
         private var embeddedWebModelConfigured = false
+        private var websiteEvidenceConfiguration: Task<Void, Never>?
         private var webProviderBaseURL: URL?
         private var webCleanupTasks: [AgentTask.ID: Task<[String], Never>] = [:]
         private var manualWebCleanupTasks: [AgentTask.ID: Task<WebsiteSessionCleanupReceipt, Never>] = [:]
@@ -1285,6 +1297,8 @@ private extension CodexAppServerRuntime {
             }
             isStartingServer = true
             defer { isStartingServer = false }
+            await configureWebsiteEvidence()
+            guard !isPreparingCommandShutdown, !isShuttingDown else { throw RuntimeError.serverStopped }
             let executable = try configuration.executable.resolve()
             guard FileManager.default.isExecutableFile(atPath: executable.url.path) else {
                 throw RuntimeError.executableMissing(executable.url.path)
@@ -1479,15 +1493,27 @@ private extension CodexAppServerRuntime {
         func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
             guard !isShuttingDown, !isPreparingCommandShutdown else { return }
             await webModelServer.configureEmbeddedTransport(transport)
-            await webModelServer.configureEvidenceDirectory(URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
-                .appendingPathComponent("WebsiteModelEvidence-v1", isDirectory: true))
-            await webModelServer.configureCleanupReceipts(directory:
-                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
-                    .appendingPathComponent("WebsiteSessionCleanup-v1", isDirectory: true),
-                runtimeGeneration: websiteSessionRuntimeGeneration) { [events] receipt in
-                    events.yield(.websiteSessionCleanupUpdated(receipt))
-                }
+            await configureWebsiteEvidence()
             embeddedWebModelConfigured = true
+        }
+
+        /// History-only runtimes also persist cleanup observations. Installing
+        /// their evidence store does not configure or start a website transport.
+        private func configureWebsiteEvidence() async {
+            if let operation = websiteEvidenceConfiguration { await operation.value; return }
+            let operation = Task {
+                let home = URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                await webModelServer.configureEvidenceDirectory(home.appendingPathComponent("WebsiteModelEvidence-v1", isDirectory: true))
+                await webModelServer.configureCleanupReceipts(directory:
+                    home.appendingPathComponent("WebsiteSessionCleanup-v1", isDirectory: true),
+                    runtimeGeneration: websiteSessionRuntimeGeneration) { [events] receipt in
+                        events.yield(.websiteSessionCleanupUpdated(receipt))
+                    }
+                Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "WebsiteInference").notice(
+                    "websiteInferenceRuntimeConfigured runtimeGeneration=\(self.websiteSessionRuntimeGeneration.uuidString.lowercased(), privacy: .public)")
+            }
+            websiteEvidenceConfiguration = operation
+            await operation.value
         }
 
         func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt {
@@ -2007,7 +2033,7 @@ private extension CodexAppServerRuntime {
             if previousModel != nil, previousModel != modelID { measuredContext.removeValue(forKey: taskID) }
             let compactLimit = (threadConfig(for: modelID)["model_auto_compact_token_limit"] as? Int) ?? 3_072
             if resumedWithoutUsage || (measuredContext[taskID]?.usedTokens ?? 0) >= compactLimit {
-                try await runManagedCompaction(taskID: taskID, threadID: threadID)
+                try await runManagedCompaction(taskID: taskID, threadID: threadID, modelID: maintenanceModelID)
             }
             guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                   !cancelledSubmissions.contains(claim) else { throw CancellationError() }
@@ -2037,11 +2063,16 @@ private extension CodexAppServerRuntime {
 
             let turnResponse: Data
             let startToken = turnIdentity.beginStart(taskID: taskID)
+            var websitePreparation: UUID?
             do {
                 if !LocalModelCatalog.isWebBrowser(modelID), !supportsVisualGrounding {
                     try await suspendVisualGrounderForHighMemoryModel()
                 }
                 try Task.checkCancellation()
+                guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
+                      !cancelledSubmissions.contains(claim) else { throw CancellationError() }
+                websitePreparation = try await prepareWebsiteInferenceTurn(
+                    taskID: taskID, threadID: threadID, modelID: modelID)
                 guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
                 turnResponse = try await request(
@@ -2072,7 +2103,11 @@ private extension CodexAppServerRuntime {
                let result = object["result"] as? [String: Any],
                let turn = result["turn"] as? [String: Any],
                let turnID = turn["id"] as? String {
-                turnIdentity.acknowledgeStart(taskID: taskID, turnID: turnID, token: startToken)
+                let accepted = turnIdentity.acknowledgeStart(taskID: taskID, turnID: turnID, token: startToken)
+                if accepted, let websitePreparation {
+                    try await registerWebsiteInferenceTurn(taskID: taskID, threadID: threadID,
+                        turnID: turnID, preparationID: websitePreparation, generation: generation)
+                }
             }
             if cancelledSubmissions.contains(claim), turnIdentity.activeTurnID(for: taskID) != nil {
                 try await interrupt(taskID: taskID)
@@ -2188,13 +2223,48 @@ private extension CodexAppServerRuntime {
                 kind: .system, title: "Agent error", body: message, turnID: turnID)))
         }
 
+        private func prepareWebsiteInferenceTurn(taskID: AgentTask.ID, threadID: String,
+                                                 modelID: String) async throws -> UUID? {
+            guard LocalModelCatalog.isWebBrowser(modelID) else {
+                websiteInferencePreparations.removeValue(forKey: taskID)
+                return nil
+            }
+            let preparationID = UUID()
+            websiteInferencePreparations[taskID] = preparationID
+            do {
+                try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
+                    runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID)
+                return preparationID
+            } catch {
+                if websiteInferencePreparations[taskID] == preparationID {
+                    websiteInferencePreparations.removeValue(forKey: taskID)
+                }
+                throw error
+            }
+        }
+
+        private func registerWebsiteInferenceTurn(taskID: AgentTask.ID, threadID: String, turnID: String,
+                                                  preparationID: UUID, generation: UUID) async throws {
+            guard !isShuttingDown, serverGeneration == generation,
+                  websiteInferencePreparations[taskID] == preparationID,
+                  threadForTask[taskID] == threadID,
+                  turnIdentity.activeTurnID(for: taskID) == turnID,
+                  nativeStoppedTurns[taskID] != turnID,
+                  contextStoppedTurns[taskID] != turnID else { return }
+            try await webModelServer.registerInferenceTurn(taskID: taskID, threadID: threadID,
+                turnID: turnID, runtimeGeneration: websiteSessionRuntimeGeneration,
+                preparationID: preparationID)
+        }
+
         @discardableResult
         private func scheduleWebCleanup(taskID: AgentTask.ID, cancelled: Bool) -> Task<[String], Never>? {
-            guard LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "") else { return nil }
+            guard LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "")
+                    || websiteInferencePreparations[taskID] != nil else { return nil }
             if let existing = webCleanupTasks[taskID] { return existing }
             let generation = websiteSessionRuntimeGeneration
             let threadID = threadForTask[taskID]
             let turnID = turnIdentity.latestTurnID(for: taskID)
+            let preparationID = websiteInferencePreparations[taskID]
             let cleanup = Task<[String], Never> {
                 await webModelServer.registerCleanupTurn(taskID: taskID, threadID: threadID, turnID: turnID)
                 let issues = cancelled ? await webModelServer.cancel(taskID: taskID, runtimeGeneration: generation)
@@ -2205,6 +2275,9 @@ private extension CodexAppServerRuntime {
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(
                         kind: .system, title: "Website session cleanup unconfirmed",
                         body: message)))
+                }
+                if websiteInferencePreparations[taskID] == preparationID {
+                    websiteInferencePreparations.removeValue(forKey: taskID)
                 }
                 webCleanupTasks.removeValue(forKey: taskID)
                 return issues
@@ -2321,7 +2394,7 @@ private extension CodexAppServerRuntime {
         /// Compaction is maintenance, not completion of the user's pending turn.
         /// Keep the submission claim and logical running state across the native
         /// terminal notification and the durable assistant-history append.
-        private func runManagedCompaction(taskID: AgentTask.ID, threadID: String) async throws {
+        private func runManagedCompaction(taskID: AgentTask.ID, threadID: String, modelID: String) async throws {
             let barrier = CompactionBarrier(generation: serverGeneration)
             let operationID = barrier.id
             let generation = barrier.generation
@@ -2346,6 +2419,8 @@ private extension CodexAppServerRuntime {
                 }
             }
             do {
+                _ = try await prepareWebsiteInferenceTurn(taskID: taskID, threadID: threadID, modelID: modelID)
+                try requireManagedCompaction(taskID: taskID, operationID: operationID, generation: generation)
                 let response = try await request(method: "thread/compact/start", params: ["threadId": threadID])
                 try requireResultObject(response)
                 managedCompactions[taskID]?.barrier.acknowledged(operationID: operationID, generation: generation)
@@ -2368,6 +2443,12 @@ private extension CodexAppServerRuntime {
                         "threadId": threadID, "items": restoredItems,
                     ])
                     try requireResultObject(injected)
+                    try requireManagedCompaction(taskID: taskID, operationID: operationID, generation: generation)
+                }
+                if LocalModelCatalog.isWebBrowser(modelID),
+                   let cleanup = scheduleWebCleanup(taskID: taskID, cancelled: false) {
+                    let issues = await cleanup.value
+                    guard issues.isEmpty else { throw WebModelServer.Failure.cleanupFailed }
                     try requireManagedCompaction(taskID: taskID, operationID: operationID, generation: generation)
                 }
                 events.yield(.contextUsageUpdated(taskID: taskID, usage: nil))
@@ -2471,13 +2552,8 @@ private extension CodexAppServerRuntime {
                     try await suspendVisualGrounderForHighMemoryModel()
                 }
                 guard serverGeneration == generation, !cancelledSubmissions.contains(claim) else { throw CancellationError() }
-                try await runManagedCompaction(taskID: taskID, threadID: threadID)
-                if let cleanup = scheduleWebCleanup(taskID: taskID, cancelled: false) {
-                    let issues = await cleanup.value
-                    events.yield(.taskStatusChanged(taskID: taskID, status: issues.isEmpty ? .completed : .waiting))
-                } else {
-                    events.yield(.taskStatusChanged(taskID: taskID, status: .completed))
-                }
+                try await runManagedCompaction(taskID: taskID, threadID: threadID, modelID: modelID)
+                events.yield(.taskStatusChanged(taskID: taskID, status: .completed))
             } catch {
                 if turnSubmissionClaims[taskID] == claim {
                     _ = compactionTracker.fail(taskID: taskID, message: error.localizedDescription)
@@ -2884,6 +2960,7 @@ private extension CodexAppServerRuntime {
                 guard let turn = params["turn"] as? [String: Any],
                       let turnID = turn["id"] as? String, !turnID.isEmpty else { return }
                 guard nativeStoppedTurns[taskID] != turnID else { return }
+                guard turnIdentity.observeStart(taskID: taskID, turnID: turnID) else { return }
                 if let operation = managedCompactions[taskID] {
                     if let expected = operation.barrier.turnID, expected != turnID {
                         serverFailed(RuntimeError.malformedResponse("Context maintenance changed turn identity."))
@@ -2893,7 +2970,22 @@ private extension CodexAppServerRuntime {
                         operationID: operation.barrier.id, generation: serverGeneration)
                     settleManagedCompaction(taskID: taskID)
                 }
-                turnIdentity.observeStart(taskID: taskID, turnID: turnID)
+                if let preparationID = websiteInferencePreparations[taskID] {
+                    let generation = serverGeneration
+                    Task {
+                        do {
+                            try await registerWebsiteInferenceTurn(taskID: taskID, threadID: threadID,
+                                turnID: turnID, preparationID: preparationID, generation: generation)
+                        } catch {
+                            guard serverGeneration == generation,
+                                  websiteInferencePreparations[taskID] == preparationID,
+                                  turnIdentity.activeTurnID(for: taskID) == turnID,
+                                  nativeStoppedTurns[taskID] != turnID,
+                                  contextStoppedTurns[taskID] != turnID else { return }
+                            serverFailed(error)
+                        }
+                    }
+                }
                 if managedCompactions[taskID] == nil,
                    initializedDiffTurns[taskID, default: []].insert(turnID).inserted {
                     // Every real turn owns its review scope. A later no-edit
@@ -8344,6 +8436,7 @@ private extension CodexAppServerRuntime {
             fileChangeTranscripts.removeAll()
             initializedDiffTurns.removeAll()
             turnIdentity.removeAll()
+            websiteInferencePreparations.removeAll()
             assistantStreamTurns.removeAll()
             completedAssistantItems.removeAll()
             pendingAssistantItems.removeAll()

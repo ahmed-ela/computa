@@ -28,6 +28,19 @@ qualification of the installed app and selected provider/model pair.
   deadlines, protocol identity checks, timing and cleanup. It observes actual
   patch and command receipts before checking final files and remote Git state.
 
+The workflow also configures the built-in browser controller before creating
+its thread, matching the app's startup composition. The full native/browser
+dynamic-tool list must use canonical `type: "function"` definitions, contain
+all nine browser tools and the native app/outcome tools, and be accepted by the
+real pinned App Server's `thread/start` parser. The browser backend is inert in
+this workflow; acceptance does not establish browser action execution.
+
+An installed build 35 check exposed a startup gap: browser tools were emitted
+in legacy form alongside canonical native definitions, so `thread/start` was
+rejected before inference. Build 36 makes that manifest consistent. The
+workflow now checks the complete combined payload and its actual native
+acceptance, closing the earlier fixture gap.
+
 Production threads retain their normal `workspace-write` sandbox and
 `on-request` approval policy. The benchmark explicitly approves only its own
 disposable actions. A separate rejection scenario declines an elevated command
@@ -74,7 +87,12 @@ The interrupted command's presentation must retire as failed with its final
 exit status unconfirmed. An interrupted server need not emit an
 `item/completed` command notification or a known exit code; neither is invented
 to make the test pass. The fixture independently requires that the owned PID
-and localhost socket are gone **before runtime shutdown**. This proves that
+and localhost socket are gone **before runtime shutdown**, within a five-second
+observation-only deadline. The pinned engine acknowledges logical termination
+after sending the signal while its OS waiter continues asynchronously; an
+empty native session inventory cannot substitute for `ESRCH` and a refused
+socket. The benchmark records this physical retirement latency and emits
+bounded structural diagnostics on failure before emergency cleanup. This proves that
 Stop terminates the owned process; it does not prove a successful command exit.
 Shutdown must then report confirmed cleanup, and the PID and port are checked
 again.
@@ -103,23 +121,43 @@ Existing native editing qualification remains available with
 
 ## Results
 
-The final native validation on 2026-10-08 passed 160 selected tests with zero
-failures in 58.730 seconds. `native-final.log` is bound to the 307 input hashes
-in `native-source-freeze-final.json` for Computa 0.6.0 (35); all frozen inputs
-were checked against the current source before recording these results.
+The final native validation on 2026-10-08 passed **404 selected tests with zero
+failures in 154.862 seconds**. `native-build37-final.log` and
+`native-build37-final-validation.json` are bound to the 310 unchanged input
+hashes in `native-source-freeze-build37-final.json` for Computa **0.6.0 (37)**.
+The native suite includes actual combined thread startup, editing/diffs,
+protocol/streaming, isolated WebKit, approval/Stop, and durable cleanup tests.
 
 | Scripted provider ID | Scenario | Seconds | Inference requests | Matched tool outputs | Approvals | Outcome |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| `browser/chatgpt` | Editing, tests, Git push, localhost, TTY | 5.491 | 13 | 12 | 3 | Passed |
-| `browser/gemini` | Editing, tests, Git push, localhost, TTY | 5.552 | 13 | 12 | 3 | Passed |
-| `browser/claude` | Editing, tests, Git push, localhost, TTY | 5.666 | 13 | 12 | 3 | Passed |
-| `browser/chatgpt` | Declined command has no side effect | 1.582 | 2 | 1 | 1 | Passed |
-| `browser/chatgpt` | Stop cancels inference and reaps server | 2.765 | 2 | 1 | 1 | Passed |
+| `browser/chatgpt` | Editing, tests, Git push, localhost, TTY | 6.586 | 13 | 12 | 3 | Passed |
+| `browser/gemini` | Editing, tests, Git push, localhost, TTY | 7.017 | 13 | 12 | 3 | Passed |
+| `browser/claude` | Editing, tests, Git push, localhost, TTY | 5.987 | 13 | 12 | 3 | Passed |
+| `browser/chatgpt` | Declined command has no side effect | 1.684 | 2 | 1 | 1 | Passed |
+| `browser/chatgpt` | Stop cancels inference and reaps server | 2.830 | 2 | 1 | 1 | Passed |
 
-Every scenario receipt confirmed removal of its owned fixture. The interrupted
-server's exit remained unconfirmed in the command presentation, while its PID
-and port were independently verified closed before shutdown.
+Every scenario confirmed removal of its owned fixture. The interrupted server's
+exit remained unconfirmed in presentation, while its PID and port were
+independently verified closed before shutdown. Five additional consecutive Stop
+runs passed; the maximum observed physical retirement latency after logical
+acknowledgement was **98.275 ms**, with no extra signal or shutdown used to pass.
+The original immediate-PID check exposed the pinned engine's asynchronous reap
+boundary; finite structural diagnostics now survive failure cleanup.
 
-Installed-app tests with live website models and built-in browser tasks remain
-pending. These native results prove actual tool execution with scripted
-inference; they do not qualify a live provider/model pair.
+Every scripted workflow uses fresh owned website leases while retaining the
+same real native user turn. Long-history regressions verify more than 80 native
+turns, 90-turn receipt retention, summary eviction, conflicting identities,
+partial persistence failure, exact retry and storage bounds. Separate native
+patch qualification passed for all three provider IDs; malformed/stale patches
+were rejected before writes and were not replayed.
+
+Build 36 installed coding attempts exposed ChatGPT's rendered whitespace change
+and Claude's virtualized old website message roots. Their failures remain
+separate records. Build 37 narrowly handles ASCII whitespace during guarded
+first-message promotion and uses [fresh website inference
+transactions](WEBSITE-INFERENCE-TRANSACTIONS.md).
+
+Installed-app qualification for 0.6.0 (37), with live website models and
+built-in browser tasks, is recorded separately from these scripted-inference
+results. Native execution does not establish website sign-in or qualify a
+concrete provider/model pair.

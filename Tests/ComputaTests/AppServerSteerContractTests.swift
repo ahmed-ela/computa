@@ -133,6 +133,36 @@ final class AppServerSteerContractTests: XCTestCase {
         XCTAssertNil(tracker.activeTurnID(for: "task"))
     }
 
+    func testRetiredStartNotificationCannotBindTheNextPreparedTurn() {
+        var tracker = AppServerTurnIdentityTracker()
+        for old in ["first", "second"] {
+            let token = tracker.beginStart(taskID: "task")
+            XCTAssertTrue(tracker.observeStart(taskID: "task", turnID: old))
+            XCTAssertTrue(tracker.acknowledgeStart(taskID: "task", turnID: old, token: token))
+            XCTAssertTrue(tracker.complete(taskID: "task", turnID: old))
+        }
+        let current = tracker.beginStart(taskID: "task")
+        for retired in ["first", "second"] {
+            XCTAssertFalse(tracker.observeStart(taskID: "task", turnID: retired))
+            XCTAssertNil(tracker.activeTurnID(for: "task"))
+            XCTAssertFalse(tracker.acknowledgeStart(taskID: "task", turnID: retired, token: current))
+        }
+        XCTAssertTrue(tracker.acknowledgeStart(taskID: "task", turnID: "current", token: current))
+        XCTAssertFalse(tracker.observeStart(taskID: "task", turnID: "foreign"))
+        XCTAssertEqual(tracker.activeTurnID(for: "task"), "current")
+        XCTAssertEqual(tracker.latestTurnID(for: "task"), "current")
+    }
+
+    func testRestoredHistoryCannotStartAgainWithinTheOwnedRuntime() {
+        var tracker = AppServerTurnIdentityTracker()
+        tracker.restoreLatestTurnID(taskID: "task", turnID: "saved")
+        let token = tracker.beginStart(taskID: "task")
+        XCTAssertFalse(tracker.observeStart(taskID: "task", turnID: "saved"))
+        XCTAssertFalse(tracker.acknowledgeStart(taskID: "task", turnID: "saved", token: token))
+        XCTAssertTrue(tracker.observeStart(taskID: "task", turnID: "fresh"))
+        XCTAssertTrue(tracker.acknowledgeStart(taskID: "task", turnID: "fresh", token: token))
+    }
+
     func testStaleCompletionCannotRetireTheNextTurn() {
         var tracker = AppServerTurnIdentityTracker()
         _ = tracker.beginStart(taskID: "task")

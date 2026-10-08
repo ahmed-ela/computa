@@ -637,6 +637,185 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(expand.clicks).toBe(1); expect(f.scheduledDelays).toHaveLength(0); noSend(f, picker, send);
       });
 
+      test('completed provider rendering binds its actual digest when one whitespace run loses twelve source characters', async () => {
+        const { f, picker, expand, send } = await collapsed();
+        // The live first-message body was twelve characters shorter than the
+        // outbound source after a successful display expansion. Preserve its
+        // observed exact 10,240-character prefix and model/product context.
+        const prefix = f.userBody.text;
+        const suffix = '\nUse schema_0 and schema_1' + '\n'.repeat(13) + markerLine;
+        const outbound = prefix + 'x'.repeat(46_593 - prefix.length - suffix.length) + suffix;
+        const rendered = outbound.replace(/\n{2,}/g, '\n');
+        expect(outbound.length).toBe(46_593); expect(rendered.length).toBe(46_581);
+        expect(rendered.startsWith(prefix)).toBe(true); expect(rendered).not.toBe(outbound);
+        f.world.__computaModelFirstPrompt = outbound;
+        expand.onClick = () => { f.userBody.text = rendered; };
+        const result = await f.run('inspect', { ...expansionInput, expectedModelChoice: choice(initial) });
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rendered));
+        const expectedFingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+        expect(result).toMatchObject({ firstUserVerified: true, firstUserMarkerVerified: true,
+          firstUserFingerprint: expectedFingerprint });
+        expect(JSON.parse(result.firstUserDebugStructure)).toMatchObject({ textLength: 46_581,
+          expansionOutcome: 'expanded', markerFinalLine: true, markerOccurrences: 1,
+          snapshot: { rootSame: true, bodySame: true, textSame: true } });
+        expect((await f.run('inspect', { ...expansionInput, expectedModelChoice: choice(initial) })).firstUserFingerprint).toBe(expectedFingerprint);
+        f.userBody.text = rendered.replace('schema_0', 'foreign_schema');
+        rejected(await f.run('inspect', expansionInput));
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('normalized completion waits for its one actual mutation and retains the same bounded event budget', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        const suffix = '\nUse schema\n\n' + markerLine;
+        const body = prompt.slice(0, -('\n\n' + markerLine).length);
+        const outbound = body.slice(0, 12_000) + '\n\n\n' + body.slice(12_000) + suffix;
+        f.world.__computaModelFirstPrompt = outbound;
+        let clicked!: () => void; const click = new Promise<void>(resolve => { clicked = resolve; });
+        expand.onClick = () => clicked();
+        let settled = false;
+        const pending = f.run('inspect', expansionInput).then((result: any) => { settled = true; return result; });
+        await click; await Promise.resolve();
+        expect(settled).toBe(false); expect(f.world.__computaModelFirstProof).toBeUndefined();
+        f.userBody.text = outbound.slice(0, 20_000).replace(/\n{2,}/g, '\n'); notify(f); await Promise.resolve();
+        expect(settled).toBe(false); expect(f.world.__computaModelFirstProof).toBeUndefined();
+        f.userBody.text = outbound.replace(/\n{2,}/g, '\n'); notify(f);
+        expect((await pending).firstUserVerified).toBe(true);
+        expect(f.scheduledDelays.filter((delay: number) => delay > 1_000)).toHaveLength(1);
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('completed bodies reject changed exact prefixes, duplicate or nonfinal markers and oversized text', async () => {
+        for (const mutate of [
+          (text: string) => 'foreign-prefix' + text.slice('foreign-prefix'.length),
+          (text: string) => text.replace(/\n\nComputa session marker:/, '\ninline ' + markerLine + '\n\nComputa session marker:'),
+          (text: string) => text + '\nPRIVATE TRAILING BODY',
+          (text: string) => text.replace(markerLine, markerLine + '-changed'),
+          (text: string) => text.slice(0, 10_240) + 'x'.repeat(180_201) + '\n\n' + markerLine,
+        ]) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expand.onClick = () => { f.userBody.text = mutate(prompt); };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure).expansionOutcome).toBe('text_mismatch');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
+      test('an intact prefix and final marker cannot excuse changed middle, suffix, whitespace boundaries or Markdown delimiters', async () => {
+        for (const mutate of [
+          (text: string) => text.slice(0, 15_000) + 'foreign' + text.slice(15_007),
+          (text: string) => text.replace('schema_0 and schema_1', 'schema_0 or schema_1'),
+          (text: string) => text.replace('schema_0 and schema_1', 'schema_0and schema_1'),
+          (text: string) => text.replace('`literal_code`', 'literal_code'),
+          (text: string) => text.replace('schema_0 and schema_1', 'schema_0\u00a0and schema_1'),
+        ]) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          const outbound = prompt.replace('\n\n' + markerLine, '\nUse schema_0 and schema_1 and `literal_code`\n\n' + markerLine);
+          f.world.__computaModelFirstPrompt = outbound;
+          expand.onClick = () => { f.userBody.text = mutate(outbound); };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure)).toMatchObject({ markerFinalLine: true, expansionOutcome: 'text_mismatch' });
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
+      test('provider-normalized full-body rejection diagnostics use the mutated body and never bind after context or physical node drift', async () => {
+        for (const [outcome, mutate] of [
+          ['context_changed', ({ f }: any) => { f.document.URL = 'https://chatgpt.com/c/foreign'; }],
+          ['context_changed', ({ f }: any) => { f.world.__computaModelOwner = 'foreign'; }],
+          ['context_changed', ({ f }: any) => { f.world.__computaModelFirstPrompt += 'PRIVATE DRIFT'; }],
+          ['context_changed', ({ f }: any) => { f.temporary.connected = false; }],
+          ['context_changed', ({ f }: any) => { f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true'; }],
+          ['node_changed', ({ f, root }: any) => replaceFirstRoot(f, root, f.userBody)],
+        ] as [string, (stage: any) => void][]) {
+          const stage = await collapsed();
+          const outbound = stage.prompt.replace('\n\n' + markerLine, '\nUse schema\n\n' + markerLine);
+          stage.f.world.__computaModelFirstPrompt = outbound;
+          const rendered = outbound.replace('\n\n' + markerLine, '\n' + markerLine);
+          stage.expand.onClick = () => { stage.f.userBody.text = rendered; mutate(stage); };
+          const result = await stage.f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure)).toMatchObject({ textLength: rendered.length,
+            markerFinalLine: true, expansionOutcome: outcome });
+          expect(stage.f.world.__computaModelFirstProof).toBeUndefined(); expect(stage.expand.clicks).toBe(1);
+          noSend(stage.f, stage.picker, stage.send);
+        }
+      });
+
+      test('normalized display completion cannot bind a different selected model', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        const outbound = prompt.replace('\n\n' + markerLine, '\nUse schema\n\n' + markerLine);
+        f.world.__computaModelFirstPrompt = outbound;
+        expand.onClick = () => { f.userBody.text = outbound.replace('\n\n' + markerLine, '\n' + markerLine); picker.selected(target); };
+        const result = await f.run('inspect', { ...expansionInput, expectedModelChoice: choice(initial) });
+        expect(result.error).toBe('model_mismatch'); expect(f.world.__computaModelFirstProof).toBeUndefined();
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('a rejected consumed claim cannot bind a later full body or grant cleanup authority', async () => {
+        for (const fail of [
+          ({ f, prompt }: any) => { f.userBody.text = 'foreign-prefix' + prompt.slice('foreign-prefix'.length); },
+          () => { throw new Error('PRIVATE FAILED EXPANSION'); },
+        ]) {
+          const stage = await collapsed(); stage.expand.onClick = () => fail(stage);
+          rejected(await stage.f.run('inspect', expansionInput));
+          // A late site render must not turn a terminally rejected local claim
+          // into ownership on either ordinary inspection or cleanup.
+          stage.f.userBody.text = stage.prompt;
+          for (const action of ['inspect', 'cleanup']) {
+            const result = await stage.f.run(action, { ...expansionInput, allowFirstUserExpansion: false });
+            rejected(result); expect(stage.f.world.__computaModelFirstProof).toBeUndefined();
+          }
+          expect(stage.expand.clicks).toBe(1); noSend(stage.f, stage.picker, stage.send);
+        }
+      });
+
+      test('a timed-out consumed claim cannot bind a late completed body during inspection or cleanup', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        let clicked!: () => void; const click = new Promise<void>(resolve => { clicked = resolve; });
+        expand.onClick = () => clicked();
+        const pending = f.run('inspect', expansionInput); await click; f.flush();
+        rejected(await pending); f.userBody.text = prompt;
+        for (const action of ['inspect', 'cleanup']) {
+          const result = await f.run(action, expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure).expansionOutcome).toBe('timeout');
+        }
+        expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('normalized display cannot bypass disabled controls, including changes during the model precheck', async () => {
+        for (const duringAwait of [false, true]) {
+          const { f, picker, expand, send, prompt } = await collapsed({ genericHeader: duringAwait });
+          const outbound = prompt.replace('\n\n' + markerLine, '\nUse schema\n\n' + markerLine);
+          f.world.__computaModelFirstPrompt = outbound;
+          expand.onClick = () => { f.userBody.text = outbound.replace('\n\n' + markerLine, '\n' + markerLine); };
+          if (duringAwait) {
+            const click = picker.trigger.onClick; picker.trigger.onClick = () => { click(); expand.disabled = true; };
+          } else expand.disabled = true;
+          rejected(await f.run('inspect', expansionInput));
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(0); noSend(f, picker, send);
+        }
+      });
+
+      test('a successful expansion awaiting first binding retains its exact full body and physical lineage on later reads', async () => {
+        for (const drift of ['none', 'whitespace', 'root']) {
+          const { f, picker, root, expand, send, prompt } = await collapsed();
+          const outbound = prompt.replace('\n\n' + markerLine, '\nUse schema\n\n' + markerLine);
+          const rendered = outbound.replace('\n\n' + markerLine, '\n' + markerLine);
+          f.world.__computaModelFirstPrompt = outbound;
+          expand.onClick = () => { f.userBody.text = rendered; };
+          // Expansion succeeds, but a disallowed final model read prevents
+          // first binding; a future read still owes the original full snapshot.
+          expect((await f.run('inspect', { ...expansionInput, expectedModelChoice: choice(target) })).error).toBe('model_mismatch');
+          expect(f.world.__computaModelFirstProof).toBeUndefined();
+          expect(f.world.__computaModelFirstExpansion.outcome).toBe('expanded');
+          if (drift === 'whitespace') f.userBody.text = rendered.replace('Use schema', 'Use  schema');
+          if (drift === 'root') replaceFirstRoot(f, root, f.userBody);
+          const later = await f.run('inspect', { ...expansionInput, expectedModelChoice: choice(initial) });
+          if (drift === 'none') expect(later.firstUserVerified).toBe(true);
+          else { rejected(later); expect(f.world.__computaModelFirstProof).toBeUndefined(); }
+          expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
       test('an offscreen control scrolls once and must become exposed before its single click', async () => {
         for (const expose of [true, false]) {
           const { f, picker, expand, send, prompt } = await collapsed(); let scrolled = 0;

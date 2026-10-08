@@ -4,50 +4,52 @@ import XCTest
 
 final class WebModelFailureDiagnosticTests: XCTestCase {
     func testAuthenticatedHTTPFailureRetainsTheExactFiniteGateDiagnosticForItsOwnTaskOnce() async throws {
-        let server = WebModelServer()
-        await server.configureEmbeddedTransport(FailureReceiptTransport(mode: .quota))
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .quota)))
         do {
             let base = try await server.start()
             let (body, status) = try await Self.post(base, server: server, taskID: "receipt-task")
             XCTAssertEqual(status, 429)
-            let diagnostic = try XCTUnwrap(server.takeFailureDiagnostic(taskID: "receipt-task"))
+            let diagnostic = try XCTUnwrap(server.takeFailureDiagnostic(taskID: websiteInferenceFixtureTaskID("receipt-task")))
             XCTAssertEqual(Data(diagnostic.utf8), body, "The local receipt must preserve the actual standardized HTTP error body")
             let fields = try XCTUnwrap((JSONSerialization.jsonObject(with: Data(diagnostic.utf8)) as? [String: Any])?["error"] as? [String: Any])
             XCTAssertEqual(fields["code"] as? String, "website_usage_limit")
             XCTAssertEqual(fields["required_action"] as? String, "wait_for_quota_reset")
             XCTAssertEqual(fields["retryable"] as? Bool, false)
-            XCTAssertNil(server.takeFailureDiagnostic(taskID: "other-task"))
-            XCTAssertNil(server.takeFailureDiagnostic(taskID: "receipt-task"))
+            XCTAssertNil(server.takeFailureDiagnostic(taskID: websiteInferenceFixtureTaskID("other-task")))
+            XCTAssertNil(server.takeFailureDiagnostic(taskID: websiteInferenceFixtureTaskID("receipt-task")))
             _ = await server.shutdown()
         } catch { _ = await server.shutdown(); throw error }
     }
 
     func testNewTurnSuccessCleanupAndShutdownEachClearPendingDiagnostics() async throws {
         for boundary in ["turn", "success", "cleanup", "shutdown"] {
-            let server = WebModelServer()
-            await server.configureEmbeddedTransport(FailureReceiptTransport(mode: .failureThenSuccess))
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .failureThenSuccess)))
             do {
                 let base = try await server.start()
                 let (_, failureStatus) = try await Self.post(base, server: server, taskID: boundary)
                 XCTAssertEqual(failureStatus, 429)
                 switch boundary {
-                case "turn": await server.registerEvidenceThread(taskID: boundary, threadID: UUID().uuidString)
+                case "turn": await server.registerEvidenceThread(taskID: websiteInferenceFixtureTaskID(boundary), threadID: UUID().uuidString)
                 case "success":
+                    let issues = await server.fixtureFinish(taskID: boundary)
+                    XCTAssertEqual(issues, [], "A failed lease must close before the following successful inference")
                     let (_, successStatus) = try await Self.post(base, server: server, taskID: boundary)
                     XCTAssertEqual(successStatus, 200)
-                case "cleanup": _ = await server.finish(taskID: boundary)
+                case "cleanup": _ = await server.fixtureFinish(taskID: boundary)
                 default: _ = await server.shutdown()
                 }
-                XCTAssertNil(server.takeFailureDiagnostic(taskID: boundary), "The \(boundary) boundary must not leak a prior turn's error")
+                XCTAssertNil(server.takeFailureDiagnostic(taskID: websiteInferenceFixtureTaskID(boundary)), "The \(boundary) boundary must not leak a prior turn's error")
                 _ = await server.shutdown()
             } catch { _ = await server.shutdown(); throw error }
         }
     }
 
     func testLateHTTPFailureCannotRestoreADiagnosticAfterTheNextTurnHasRegistered() async throws {
-        let server = WebModelServer()
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
         let transport = FailureReceiptTransport(mode: .pausedQuota)
-        await server.configureEmbeddedTransport(transport)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
         do {
             let base = try await server.start()
             let request = Task.detached {
@@ -62,23 +64,23 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
                 throw NSError(domain: "FailureReceiptFixture", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "The HTTP fixture did not enter its bounded send"])
             }
-            await server.registerEvidenceThread(taskID: "racing-task", threadID: UUID().uuidString)
+            await server.registerEvidenceThread(taskID: websiteInferenceFixtureTaskID("racing-task"), threadID: UUID().uuidString)
             await transport.release()
             let (_, status) = try await request.value
             XCTAssertEqual(status, 429)
-            XCTAssertNil(server.takeFailureDiagnostic(taskID: "racing-task"), "A revoked writer epoch cannot populate the new turn")
+            XCTAssertNil(server.takeFailureDiagnostic(taskID: websiteInferenceFixtureTaskID("racing-task")), "A revoked writer epoch cannot populate the new turn")
             _ = await server.shutdown()
         } catch { await transport.release(); _ = await server.shutdown(); throw error }
     }
 
     func testArbitraryTransportProseIsNotPromotedIntoALocalFailureReceipt() async throws {
-        let server = WebModelServer()
-        await server.configureEmbeddedTransport(FailureReceiptTransport(mode: .arbitraryError))
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .arbitraryError)))
         do {
             let base = try await server.start()
             let (_, status) = try await Self.post(base, server: server, taskID: "untrusted-task")
             XCTAssertEqual(status, 500)
-            XCTAssertNil(server.takeFailureDiagnostic(taskID: "untrusted-task"))
+            XCTAssertNil(server.takeFailureDiagnostic(taskID: websiteInferenceFixtureTaskID("untrusted-task")))
             _ = await server.shutdown()
         } catch { _ = await server.shutdown(); throw error }
     }
@@ -114,11 +116,13 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
     }
 
     private static func post(_ base: URL, server: WebModelServer, taskID: String) async throws -> (Data, Int) {
+        let nativeTaskID = try await bindWebsiteInferenceFixtureTurn(server, taskID: taskID)
         var request = URLRequest(url: base.appendingPathComponent("responses"))
         request.httpMethod = "POST"
         request.timeoutInterval = 15
         request.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
-        request.setValue(taskID, forHTTPHeaderField: "X-Computa-Task-ID")
+        request.setValue(nativeTaskID, forHTTPHeaderField: "X-Computa-Task-ID")
+        request.setValue(try websiteInferenceFixtureMetadata(taskID: taskID), forHTTPHeaderField: "x-codex-turn-metadata")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": LocalModelCatalog.chatGPTBrowserModelID, "input": "Synthetic failure receipt check", "stream": true,
@@ -131,7 +135,7 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
 private actor FailureReceiptTransport: WebModelTransport {
     enum Mode: Sendable { case quota, failureThenSuccess, pausedQuota, arbitraryError }
     let mode: Mode
-    let token = UUID().uuidString
+    var token = UUID().uuidString
     var sends = 0
     var entered = false
     var continuation: CheckedContinuation<Void, Never>?
@@ -141,7 +145,7 @@ private actor FailureReceiptTransport: WebModelTransport {
     func request(operation: String, params: Data) async throws -> Data {
         let result: [String: Any]
         switch operation {
-        case "webProviderStart": result = ["sessionToken": token, "state": "ready"]
+        case "webProviderStart": token = UUID().uuidString; result = ["sessionToken": token, "state": "ready"]
         case "webProviderSend":
             sends += 1
             if mode == .pausedQuota {

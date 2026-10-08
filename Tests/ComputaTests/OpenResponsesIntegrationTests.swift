@@ -7,8 +7,8 @@ import XCTest
 final class OpenResponsesIntegrationTests: XCTestCase {
     func testJSONAndSSEModesThroughHTTPAndOfficialSchema() async throws {
         let transport = OpenResponsesFixtureTransport()
-        let server = WebModelServer()
-        await server.configureEmbeddedTransport(transport)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
         let base = try await server.start()
         do {
             var artifacts: [[String: Any]] = []
@@ -56,11 +56,21 @@ final class OpenResponsesIntegrationTests: XCTestCase {
 
     func testUpstreamAcceptanceTemplatesAgainstRealHTTPListener() async throws {
         let transport = OpenResponsesFixtureTransport()
-        let server = WebModelServer()
-        await server.configureEmbeddedTransport(transport)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
         let base = try await server.start()
         do {
-            let result = try await runConformance(["--official", "--base-url", base.absoluteString, "--model", "browser/chatgpt"], token: server.bearerToken)
+            let taskID = UUID().uuidString.lowercased()
+            _ = try await bindWebsiteInferenceFixtureTurn(server, taskID: taskID)
+            let contextRoot = try artifactRoot()
+            let contextURL = contextRoot.appendingPathComponent("official-fixture-headers.json")
+            try JSONSerialization.data(withJSONObject: ["x-computa-task-id": taskID,
+                "x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: taskID)], options: [.sortedKeys])
+                .write(to: contextURL, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: contextURL.path)
+            defer { try? FileManager.default.removeItem(at: contextURL) }
+            let result = try await runConformance(["--official", "--base-url", base.absoluteString, "--model", "browser/chatgpt",
+                "--fixture-headers", contextURL.path], token: server.bearerToken)
             XCTAssertEqual(result.status, 0, result.output)
             print(result.output)
             let sends = await transport.sendCount()
@@ -72,8 +82,8 @@ final class OpenResponsesIntegrationTests: XCTestCase {
 
     func testUnsupportedRequestsAndSecurityFailBeforeTransport() async throws {
         let transport = OpenResponsesFixtureTransport()
-        let server = WebModelServer()
-        await server.configureEmbeddedTransport(transport)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
         let base = try await server.start()
         do {
             let invalid: [([String: Any], Int, String?)] = [
@@ -107,8 +117,8 @@ final class OpenResponsesIntegrationTests: XCTestCase {
         for policy in ["none", "required"] {
             let reply = policy == "none" ? #"{"type":"tool_calls","calls":[{"name":"get_weather","arguments":{}}]}"# : #"{"type":"message","text":"Synthetic"}"#
             let transport = OpenResponsesFixtureTransport(forcedReply: reply)
-            let server = WebModelServer()
-            await server.configureEmbeddedTransport(transport)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
             let base = try await server.start()
             do {
                 let (data, response) = try await send(["model": "browser/chatgpt", "input": "fixture", "stream": true, "tool_choice": policy,
@@ -125,12 +135,15 @@ final class OpenResponsesIntegrationTests: XCTestCase {
     }
 
     private func send(_ body: [String: Any], to base: URL, server: WebModelServer, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+        let taskID = UUID().uuidString.lowercased()
+        _ = try await bindWebsiteInferenceFixtureTurn(server, taskID: taskID)
         var request = URLRequest(url: base.appendingPathComponent("responses"))
         request.httpMethod = "POST"; request.timeoutInterval = 20
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
-        request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Computa-Task-ID")
+        request.setValue(taskID, forHTTPHeaderField: "X-Computa-Task-ID")
+        request.setValue(try websiteInferenceFixtureMetadata(taskID: taskID), forHTTPHeaderField: "x-codex-turn-metadata")
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         let (data, response) = try await URLSession.shared.data(for: request)
         return (data, try XCTUnwrap(response as? HTTPURLResponse))

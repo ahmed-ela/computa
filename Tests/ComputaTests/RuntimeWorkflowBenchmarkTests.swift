@@ -57,6 +57,7 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
         let began = ContinuousClock.now
         var failure: Error?
         var receiptSummary: String?
+        var stopReapLatency: Duration?
         do {
             // Match AppState's production composition before thread/start.
             // The real pinned parser must accept native and built-in tools in
@@ -83,7 +84,10 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
             try WorkflowBenchmarkFailure.require(receipt.failure == nil,
                 "Scripted inference oracle rejected the real result: \(receipt.failure ?? "unknown")")
             try WorkflowBenchmarkFailure.require(audit.errors.isEmpty, "Native runtime errors: \(audit.errors.joined(separator: "; "))")
-            XCTAssertEqual(receipt.starts, 1)
+            XCTAssertEqual(receipt.starts, receipt.sends)
+            XCTAssertEqual(Set(receipt.createdTokens).count, receipt.starts)
+            XCTAssertEqual(receipt.closedTokens, receipt.createdTokens,
+                "Every inference must close its exact website lease before the next tool continuation")
             XCTAssertEqual(receipt.requestModels, Array(repeating: model, count: receipt.sends))
             switch scenario {
             case .workflow:
@@ -91,7 +95,7 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
                 XCTAssertEqual(audit.finalTexts.last, "WORKFLOW_BENCHMARK_OK")
                 XCTAssertEqual(receipt.sends, 13)
                 XCTAssertEqual(receipt.matchedOutputs, 12)
-                XCTAssertEqual(receipt.finishes, 1)
+                XCTAssertEqual(receipt.finishes, 13)
                 XCTAssertEqual(receipt.cancels, 0)
                 _ = try fixture.verifyCommittedOutcome()
                 try fixture.verifyServerClosed()
@@ -111,6 +115,8 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
                 XCTAssertEqual(audit.approvals, 1)
                 XCTAssertEqual(receipt.sends, 2)
                 XCTAssertEqual(receipt.matchedOutputs, 1)
+                XCTAssertEqual(receipt.finishes, 2)
+                XCTAssertEqual(receipt.cancels, 0)
                 XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.project.appendingPathComponent("denied-side-effect.txt").path))
             case .interruptedServer:
                 XCTAssertEqual(audit.status, .waiting)
@@ -118,12 +124,12 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
                 XCTAssertEqual(receipt.sends, 2)
                 XCTAssertEqual(receipt.matchedOutputs, 1)
                 XCTAssertEqual(receipt.cancels, 1)
-                XCTAssertEqual(receipt.finishes, 0)
+                XCTAssertEqual(receipt.finishes, 1)
                 XCTAssertEqual(audit.approvals, 1)
-                // Stop itself must reap the process and release its socket;
-                // later runtime shutdown or emergency fixture cleanup is not
-                // evidence that interruption worked.
-                try fixture.verifyServerClosed()
+                // Session termination precedes the engine's asynchronous PTY
+                // reap. Only observed ESRCH plus ECONNREFUSED within this
+                // finite window passes, before shutdown or fixture cleanup.
+                stopReapLatency = try await fixture.waitForServerClosed()
             }
             let shutdown = await runtime.shutdown()
             try WorkflowBenchmarkFailure.require(shutdown.succeeded,
@@ -157,7 +163,23 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
             }
             let duration = began.duration(to: .now)
             receiptSummary = "workflowBenchmark model=\(model) scenario=\(scenario) duration=\(duration) actualInferences=\(receipt.sends) matchedToolOutputs=\(receipt.matchedOutputs) approvals=\(audit.approvals)"
-        } catch { failure = error }
+            if let stopReapLatency {
+                receiptSummary? += " stopReapLatency=\(stopReapLatency) processAbsent=true portRefused=true observedBeforeShutdown=true"
+            }
+        } catch {
+            failure = error
+            if scenario == .interruptedServer {
+                // Retain only structural ownership/cancellation evidence before
+                // the always-required emergency cleanup removes its fixture.
+                if let diagnostic = try? fixture.serverDiagnostic() {
+                    print("workflowStopFailureObservation " + diagnostic)
+                }
+                let receipt = await transport.receipt()
+                if let diagnostic = try? interruptedServerDiagnostic(traceURL: traceURL, receipt: receipt, taskID: taskID) {
+                    print("workflowStopFailureProtocol " + diagnostic)
+                }
+            }
+        }
         // Never leave fixture servers or user-visible benchmark repositories
         // behind, even when an assertion, engine startup or cancellation fails.
         let finalShutdown = await runtime.shutdown()
@@ -170,6 +192,57 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
         try WorkflowBenchmarkFailure.require((testRun?.failureCount ?? 0) == failuresBefore,
             "One or more native workflow assertions failed")
         if let receiptSummary { print(receiptSummary + " fixtureRemoved=true outcome=verified") }
+    }
+
+    private func interruptedServerDiagnostic(traceURL: URL,
+        receipt: WorkflowBenchmarkTransport.Receipt, taskID: String) throws -> String {
+        let trace = try AppServerWireTrace.load(traceURL)
+        let starts = trace.messages.filter { $0.direction == .serverToClient && $0.method == "turn/started" }
+        let startParams = starts.first?.object["params"] as? [String: Any]
+        let threadID = startParams?["threadId"] as? String
+        let turnID = (startParams?["turn"] as? [String: Any])?["id"] as? String
+        let methods: Set<String> = ["turn/interrupt", "thread/backgroundTerminals/list", "thread/backgroundTerminals/terminate"]
+        let requests = trace.messages.filter {
+            $0.direction == .clientToServer && methods.contains($0.method ?? "")
+                && threadID != nil && ($0.object["params"] as? [String: Any])?["threadId"] as? String == threadID
+        }
+        let operations: [[String: Any]] = requests.prefix(16).map { request in
+            let params = request.object["params"] as? [String: Any] ?? [:]
+            let responses = trace.messages.filter { $0.direction == .serverToClient && $0.method == nil && $0.identifier == request.identifier }
+            var value: [String: Any] = ["method": request.method ?? "", "sequence": request.sequence,
+                "requestID": request.identifier ?? "", "responseCount": responses.count]
+            if let turnID = params["turnId"] as? String { value["turnID"] = turnID }
+            if let processID = params["processId"] as? String { value["engineSession"] = processID }
+            if let response = responses.first {
+                value["responseSequence"] = response.sequence
+                value["responseError"] = response.object["error"] != nil
+                let result = response.object["result"] as? [String: Any] ?? [:]
+                if let terminated = result["terminated"] as? Bool { value["terminated"] = terminated }
+                if let sessions = result["data"] as? [[String: Any]] {
+                    value["sessions"] = sessions.prefix(32).map { row in
+                        ["engineSession": row["processId"] as? String ?? "", "itemID": row["itemId"] as? String ?? ""]
+                    }
+                }
+            }
+            return value
+        }
+        let completions = trace.messages.filter {
+            guard $0.direction == .serverToClient, $0.method == "turn/completed",
+                  let params = $0.object["params"] as? [String: Any], threadID != nil,
+                  params["threadId"] as? String == threadID,
+                  let turn = params["turn"] as? [String: Any], turnID != nil else { return false }
+            return turn["id"] as? String == turnID
+        }
+        let value: [String: Any] = ["schemaVersion": 1, "taskID": taskID,
+            "threadID": threadID ?? "", "turnID": turnID ?? "",
+            "callID": receipt.interruptedServerCall?.callID ?? "",
+            "engineSession": receipt.interruptedServerSession.map(String.init) ?? "",
+            "parseFailureCount": trace.parseFailures.count, "nativeStartCount": starts.count,
+            "nativeCompletionCount": completions.count,
+            "nativeCompletionStatuses": completions.compactMap {
+                (($0.object["params"] as? [String: Any])?["turn"] as? [String: Any])?["status"] as? String
+            }, "operations": operations]
+        return String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
     }
 
     private func verifyInterruptedServer(trace: AppServerWireTrace,

@@ -9,8 +9,10 @@ selected or presented through the human browser API. This also applies to pages
 retained after unconfirmed cleanup.
 
 Sign in through a normal human tab. Model pages share its persistent WebKit
-profile, while each local turn retains its own temporary website session and
-ownership checks. Navigation and DOM events wake the existing transport. This
+profile, while each API inference retains its own temporary website session and
+ownership checks. Native thread history stays local across those
+[inference transactions](WEBSITE-INFERENCE-TRANSACTIONS.md).
+Navigation and DOM events wake the existing transport. This
 change does not introduce headless browsing, a separate window, a Chrome
 dependency or a different website identity. Providers can still require sign-in,
 apply limits or reject embedded browsers.

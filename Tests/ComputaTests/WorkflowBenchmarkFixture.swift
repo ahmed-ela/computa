@@ -140,9 +140,22 @@ struct WorkflowBenchmarkFixture: Sendable {
         return (pid, port)
     }
 
-    func verifyServerClosed() throws {
+    struct ServerObservation: Sendable {
+        let pid: Int32
+        let port: Int
+        let processResult: Int32
+        let processErrno: Int32
+        let connectResult: Int32
+        let connectErrno: Int32
+        var processAbsent: Bool { processResult == -1 && processErrno == ESRCH }
+        var portRefused: Bool { connectResult == -1 && connectErrno == ECONNREFUSED }
+        var closed: Bool { processAbsent && portRefused }
+    }
+
+    func observeServer() throws -> ServerObservation {
         let server = try serverRecord()
-        try WorkflowBenchmarkFailure.require(kill(server.pid, 0) == -1 && errno == ESRCH, "The owned localhost server process is still running")
+        let processResult = kill(server.pid, 0)
+        let processErrno = processResult == -1 ? errno : 0
         let descriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw WorkflowBenchmarkFailure("Could not inspect the closed localhost port") }
         defer { close(descriptor) }
@@ -156,7 +169,49 @@ struct WorkflowBenchmarkFixture: Sendable {
                 connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        try WorkflowBenchmarkFailure.require(result == -1 && errno == ECONNREFUSED, "The localhost port still accepts connections")
+        return ServerObservation(pid: server.pid, port: server.port, processResult: processResult,
+            processErrno: processErrno, connectResult: result, connectErrno: result == -1 ? errno : 0)
+    }
+
+    func verifyServerClosed() throws {
+        try requireServerClosed(observeServer())
+    }
+
+    private func requireServerClosed(_ observation: ServerObservation) throws {
+        try WorkflowBenchmarkFailure.require(observation.processAbsent, "The owned localhost server process is still running")
+        try WorkflowBenchmarkFailure.require(observation.portRefused, "The localhost port still accepts connections")
+    }
+
+    /// The pinned engine acknowledges session removal before its PTY waiter
+    /// finishes reaping. Observe that asynchronous boundary without sending
+    /// signals or shutting down the runtime; only exact PID/socket absence passes.
+    func waitForServerClosed() async throws -> Duration {
+        let began = ContinuousClock.now
+        let deadline = began + .seconds(5)
+        var observation = try observeServer()
+        if !observation.closed {
+            print("workflowStopInitialObservation " + (try serverDiagnostic(observation)))
+        }
+        while !observation.closed, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+            observation = try observeServer()
+        }
+        try requireServerClosed(observation)
+        return began.duration(to: .now)
+    }
+
+    /// Fixed structural columns from the recorded PID only. Commands, page
+    /// text, prompts and model responses never enter the retained test log.
+    func serverDiagnostic(_ supplied: ServerObservation? = nil) throws -> String {
+        let observation = try supplied ?? observeServer()
+        let columns = (try? command("/bin/ps", ["-p", String(observation.pid), "-o", "pid=,ppid=,pgid=,stat="])) ?? "unavailable"
+        let value: [String: Any] = ["schemaVersion": 1, "fixtureID": root.lastPathComponent,
+            "pid": observation.pid, "port": observation.port,
+            "processResult": observation.processResult, "processErrno": observation.processErrno,
+            "connectResult": observation.connectResult, "connectErrno": observation.connectErrno,
+            "processAbsent": observation.processAbsent, "portRefused": observation.portRefused,
+            "psColumns": String(columns.prefix(256))]
+        return String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
     }
 
     /// Always called after runtime shutdown, including failures. Emergency

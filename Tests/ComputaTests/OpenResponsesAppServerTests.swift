@@ -64,7 +64,9 @@ final class OpenResponsesAppServerTests: XCTestCase {
         }
         defer { observer.cancel() }
         do {
-            await runtime.configureEmbeddedWebModelTransport(inference)
+            // Only the provider proof is synthetic. The actual bundled HTTP
+            // client and native turn notifications supply inference context.
+            await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(inference))
             let initial = try await runtime.loadTasks()
             XCTAssertTrue(initial.isEmpty, "Only this isolated Codex home may supply thread history")
             try await runtime.configureWorkspace(path: workspace.path, forTaskID: taskID)
@@ -86,7 +88,10 @@ final class OpenResponsesAppServerTests: XCTestCase {
             XCTAssertTrue(receipt.nativeEncryptedReasoningIncludePresent,
                           "Exercise the unconditional include sent by the actual pinned Codex HTTP client")
             XCTAssertEqual(receipt.requestModels, Array(repeating: model, count: scenario == .statusTool ? 2 : 1))
-            XCTAssertEqual(receipt.startCount, 1)
+            let expectedInferences = scenario == .statusTool ? 2 : 1
+            XCTAssertEqual(receipt.startCount, expectedInferences)
+            XCTAssertEqual(Set(receipt.sessionTokens).count, expectedInferences,
+                           "Every inference must acquire a distinct website lease")
             XCTAssertEqual(receipt.sendCount, scenario == .statusTool ? 2 : 1,
                            "Failures must not cause native-client or app-level inference replay")
             if scenario.isFailure {
@@ -95,13 +100,13 @@ final class OpenResponsesAppServerTests: XCTestCase {
                 XCTAssertTrue(audit.errors.joined().contains(scenario == .usageLimit ? "website_usage_limit" : "malformed_website_reply"),
                               "The actual HTTP client's terminal error must preserve the structured failure code")
                 XCTAssertTrue(audit.assistant.isEmpty, "A failed HTTP inference must not become an assistant answer")
-                XCTAssertEqual(receipt.finishCount, 1)
+                XCTAssertEqual(receipt.finishCount, expectedInferences)
             } else {
                 XCTAssertEqual(audit.status, .completed)
                 XCTAssertEqual(audit.errors, [])
                 XCTAssertEqual(audit.assistant.last?.body, marker)
                 XCTAssertEqual(audit.assistant.last?.assistantPhase, "final_answer")
-                XCTAssertEqual(receipt.finishCount, 1)
+                XCTAssertEqual(receipt.finishCount, expectedInferences)
             }
             let report = await runtime.shutdown()
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
@@ -179,6 +184,7 @@ private actor EngineInferenceTransport: WebModelTransport {
         var startCount = 0
         var sendCount = 0
         var finishCount = 0
+        var sessionTokens = [String]()
         var requestModels = [String]()
         var requestsWereStreaming = true
         var nativeEncryptedReasoningIncludePresent = true
@@ -188,7 +194,7 @@ private actor EngineInferenceTransport: WebModelTransport {
     }
     let scenario: EngineInferenceScenario
     let marker: String
-    let token = UUID().uuidString
+    var token = UUID().uuidString
     var reply = ""
     var observations = Receipt()
     init(scenario: EngineInferenceScenario, marker: String) { self.scenario = scenario; self.marker = marker }
@@ -198,6 +204,8 @@ private actor EngineInferenceTransport: WebModelTransport {
         switch operation {
         case "webProviderStart":
             observations.startCount += 1
+            token = UUID().uuidString
+            observations.sessionTokens.append(token)
             result = ["sessionToken": token, "state": "ready"]
         case "webProviderSend":
             observations.sendCount += 1

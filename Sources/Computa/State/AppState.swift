@@ -743,7 +743,8 @@ final class AppState {
               let lastUser = task.entries.lastIndex(where: { $0.kind == .user })
         else { return false }
         if let receipt = currentWebsiteSessionCleanupReceipt(taskID: taskID) {
-            guard receipt.outcome == .unconfirmed else { return false }
+            guard receipt.outcome == .unconfirmed
+                    || (receipt.outcome == .closed && receipt.isTransactionLinked && !receipt.receiptSaved) else { return false }
             if receipt.provider != nil, receipt.route != nil,
                receipt.modelID.map(LocalModelCatalog.isWebBrowser) == true { return true }
         }
@@ -804,8 +805,13 @@ final class AppState {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         guard let timestamp = formatter.date(from: receipt.timestamp) else { return }
-        if let current = websiteSessionCleanupReceipts[taskID],
-           let currentTimestamp = formatter.date(from: current.timestamp), timestamp <= currentTimestamp { return }
+        if let current = websiteSessionCleanupReceipts[taskID] {
+            if current.attemptID == receipt.attemptID {
+                var saved = current
+                saved.receiptSaved = true
+                guard !current.receiptSaved, receipt.receiptSaved, receipt == saved else { return }
+            } else if let currentTimestamp = formatter.date(from: current.timestamp), timestamp <= currentTimestamp { return }
+        }
         websiteSessionCleanupReceipts[taskID] = receipt
     }
 

@@ -9,10 +9,9 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         let task = UUID(), thread = UUID(), reply = "Rejected prose with JSON-looking text { and escaped \\\n🙂"
         try fixture.arm(task)
         let transport = RejectedReplyTransport(reply: reply)
-        let server = WebModelServer(rejectedReplyDirectory: fixture.directory)
-        await server.registerEvidenceThread(taskID: task.uuidString, threadID: thread.uuidString)
-        await server.configureEmbeddedTransport(transport)
-        await assertMalformed(server, task: task)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, rejectedReplyDirectory: fixture.directory)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await assertMalformed(server, task: task, thread: thread)
         let value = try fixture.record()
         XCTAssertEqual(value["replyText"] as? String, reply)
         XCTAssertEqual(value["taskID"] as? String, task.uuidString.lowercased())
@@ -39,7 +38,9 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         let firstOperations = await transport.operations()
         XCTAssertEqual(firstOperations.filter { $0 == "webProviderSend" }.count, 1)
         try FileManager.default.removeItem(at: fixture.output)
-        await assertMalformed(server, task: task)
+        let cleanupIssues = await server.fixtureFinish(taskID: task.uuidString)
+        XCTAssertEqual(cleanupIssues, [], "The failed lease must close before a new explicit inference")
+        await assertMalformed(server, task: task, thread: thread)
         XCTAssertFalse(fixture.exists(fixture.output), "An already-consumed arm cannot capture a later explicit inference")
         let secondOperations = await transport.operations()
         XCTAssertEqual(secondOperations.filter { $0 == "webProviderSend" }.count, 2)
@@ -51,9 +52,10 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
             let fixture = try Fixture(); defer { fixture.remove() }
             let task = UUID(); try fixture.arm(task)
             let transport = RejectedReplyTransport(reply: configured ? #"{"type":"message","text":"OK"}"# : "invalid")
-            let server = WebModelServer(rejectedReplyDirectory: configured ? fixture.directory : nil)
-            await server.configureEmbeddedTransport(transport)
-            if configured { _ = try await server.infer(request, taskID: task.uuidString) }
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: configured ? fixture.directory : nil)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            if configured { _ = try await server.fixtureInfer(request, taskID: task.uuidString) }
             else { await assertMalformed(server, task: task) }
             XCTAssertTrue(fixture.exists(fixture.armFile))
             XCTAssertFalse(fixture.exists(fixture.output))
@@ -179,8 +181,8 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         let task = UUID(); try fixture.arm(task)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.armFile.path)
         let transport = RejectedReplyTransport(reply: "original invalid reply")
-        let server = WebModelServer(rejectedReplyDirectory: fixture.directory)
-        await server.configureEmbeddedTransport(transport)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, rejectedReplyDirectory: fixture.directory)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
         await assertMalformed(server, task: task)
         XCTAssertFalse(fixture.exists(fixture.output))
         let operations = await transport.operations()
@@ -228,8 +230,8 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         Data(#"{"model":"browser/claude","input":"request-only-secret","tools":[],"stream":false}"#.utf8)
     }
 
-    private func assertMalformed(_ server: WebModelServer, task: UUID) async {
-        do { _ = try await server.infer(request, taskID: task.uuidString); XCTFail("A malformed reply must remain rejected") }
+    private func assertMalformed(_ server: WebModelServer, task: UUID, thread: UUID? = nil) async {
+        do { _ = try await server.fixtureInfer(request, taskID: task.uuidString, threadID: thread?.uuidString); XCTFail("A malformed reply must remain rejected") }
         catch {
             guard case let .malformedReply(diagnostic) = error as? WebModelServer.Failure else { XCTFail("Original malformed failure must survive capture: \(error)"); return }
             XCTAssertEqual(diagnostic.reason, .invalidJSON)
@@ -268,7 +270,7 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
 
 private actor RejectedReplyTransport: WebModelTransport {
     let reply: String
-    private let token = UUID().uuidString
+    private var token = UUID().uuidString
     private var calls: [String] = []
     init(reply: String) { self.reply = reply }
     func operations() -> [String] { calls }
@@ -276,7 +278,7 @@ private actor RejectedReplyTransport: WebModelTransport {
         calls.append(operation)
         var value: [String: Any] = ["sessionToken": token]
         switch operation {
-        case "webProviderStart": value["state"] = "ready"
+        case "webProviderStart": token = UUID().uuidString; value["sessionToken"] = token; value["state"] = "ready"
         case "webProviderSend": value["state"] = "running"
         case "webProviderPoll":
             value["state"] = "complete"; value["text"] = reply; value["sequence"] = 1
