@@ -1397,6 +1397,68 @@ let firstSnapshot = null;
 let firstUserRejectionDiagnostic;
 const normalizedFirstBody = node => (node.innerText || node.textContent || "")
   .replace(/\r\n?/g, "\n").normalize("NFC").trim();
+function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots) {
+  try {
+    const limit = 220_000, result = {};
+    let selected = null, selection = root ? 'root_fallback' : 'none';
+    if (root) {
+      for (const [selector, kind] of [['[data-markdown-text-style="user-message"]', 'markdown_user_message'],
+        ['.whitespace-pre-wrap', 'whitespace_pre_wrap'], ['[data-message-author-role="user"]', 'author_user']]) {
+        selected = root.querySelector(selector);
+        if (selected) { selection = kind; break; }
+      }
+      selected ||= root;
+      if (selected !== body) selection = 'unmatched';
+    }
+    result.bodySelection = selection;
+    const length = (key, value) => { if (typeof value === 'string') result[key] = Math.min(value.length, limit + 1); };
+    const normalized = value => value.replace(/\r\n?/g, '\n').normalize('NFC').trim();
+    const alternate = (prefix, value, lengthKey = prefix + 'Length') => {
+      length(lengthKey, value);
+      const available = typeof value === 'string' && value.length <= limit;
+      result[prefix + 'Analyzed'] = available;
+      if (!available) return;
+      const text = normalized(value);
+      // Count literal occurrences too: an adjacent control can remove the
+      // marker's line boundary without removing the marker from this DOM text.
+      result[prefix + 'MarkerOccurrences'] = markerLine === null ? 0 : Math.min(text.split(markerLine).length - 1, 1_000);
+      result[prefix + 'MarkerFinalLine'] = markerLine !== null && text.split('\n').at(-1) === markerLine;
+    };
+    const innerText = body?.innerText, textContent = body?.textContent;
+    const rootInnerText = root?.innerText, rootTextContent = root?.textContent;
+    length('bodyInnerTextLength', innerText);
+    alternate('bodyTextContent', textContent);
+    const rootRendered = typeof rootInnerText === 'string' && rootInnerText ? rootInnerText : rootTextContent;
+    alternate('rootRendered', rootRendered, 'rootRenderedTextLength');
+    alternate('rootTextContent', rootTextContent);
+    const firstPrompt = globalThis.__computaModelFirstPrompt;
+    length('firstPromptLength', firstPrompt);
+    result.firstPromptAnalyzed = typeof firstPrompt === 'string' && firstPrompt.length <= limit;
+    if (result.firstPromptAnalyzed && typeof rendered === 'string' && rendered.length <= limit)
+      result.renderedPrefixOfFirstPrompt = normalized(firstPrompt).startsWith(rendered);
+
+    // Look only inside the first physical message and at most three local
+    // wrappers containing that message alone. Never search main/body/sidebar.
+    const controls = new Set(), assistants = chatGPTMessageRoots('assistant');
+    const physical = node => node.isConnected && node.getClientRects().length > 0
+      && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
+    for (let scope = root, depth = 0; scope && depth <= 3; scope = scope.parentElement, depth++) {
+      if (depth > 0 && !['DIV', 'SECTION', 'ARTICLE'].includes(scope.tagName)) break;
+      if (depth > 0 && (['main', 'navigation', 'complementary'].includes(scope.getAttribute('role'))
+        || scope.querySelector('form, textarea, [contenteditable="true"], nav, aside, [role="navigation"], [role="complementary"]'))) break;
+      if (roots.filter(node => scope === node || scope.contains(node)).length !== 1
+        || assistants.some(node => scope === node || scope.contains(node))) break;
+      for (const control of [...scope.querySelectorAll('button, [role="button"], summary')].slice(0, 1_001)) {
+        if (!physical(control)) continue;
+        const label = control.getAttribute('aria-label') || control.innerText || control.textContent;
+        if (typeof label !== 'string' || label.length > 64) continue;
+        if (/^(?:show more|view more|read more|expand)$/i.test(label.trim().replace(/\s+/g, ' '))) controls.add(control);
+      }
+    }
+    result.scopedExpandControlCount = Math.min(controls.size, 1_000);
+    return result;
+  } catch { return {}; }
+}
 // Diagnostics are a finite, best-effort projection. They never authorize an
 // action, await, or publish page text, private pins, attributes, or addresses.
 function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedUser = false, fingerprint = firstUserFingerprint) {
@@ -1427,6 +1489,7 @@ function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedU
       submitted: globalThis.__computaModelFirstSubmitted === true, markerMatches: globalThis.__computaModelFirstMarker === marker,
       markerValid, allowFirstUserBinding: input.allowFirstUserBinding === true,
       privatePinPresent: pinned != null, expectedFingerprintPresent: input.expectedFirstUserFingerprint != null };
+    Object.assign(diagnostic, chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots));
     if (scope === 'first_insert' || scope === 'first_submit') {
       diagnostic.firstPromptPresent = typeof globalThis.__computaModelFirstPrompt === 'string';
       diagnostic.firstPromptMatches = globalThis.__computaModelFirstPrompt === input.prompt;

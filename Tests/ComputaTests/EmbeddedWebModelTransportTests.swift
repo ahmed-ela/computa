@@ -3062,6 +3062,93 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             var forged = source; forged[key] = "private_canary"
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
         }
+        var withBody = source
+        withBody["bodySelection"] = "markdown_user_message"
+        for key in ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"] {
+            withBody[key] = 220_001
+        }
+        for prefix in ["bodyTextContent", "rootRendered", "rootTextContent"] {
+            withBody[prefix + "Analyzed"] = true
+            withBody[prefix + "MarkerOccurrences"] = 1_000
+            withBody[prefix + "MarkerFinalLine"] = false
+        }
+        withBody["firstPromptAnalyzed"] = true
+        withBody["renderedPrefixOfFirstPrompt"] = true
+        withBody["scopedExpandControlCount"] = 1_000
+        let bodyRecords = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(withBody), provider: .chatgpt))
+        XCTAssertEqual(bodyRecords.count, 3, "Alternate body observations must not crowd out existing summary/context")
+        XCTAssertTrue(bodyRecords.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+        let bodyValues = try bodyRecords.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        XCTAssertEqual(bodyValues[0]["reason"] as? String, "binding_not_authorized")
+        XCTAssertEqual(bodyValues[1]["kind"] as? String, "first_user_context")
+        XCTAssertEqual(bodyValues[2]["kind"] as? String, "first_user_body")
+        XCTAssertEqual(bodyValues[2]["bodyTextContentLength"] as? Int, 220_001)
+        XCTAssertNil(bodyValues[0]["bodyTextContentLength"])
+    }
+
+    func testChatGPTAlternateBodyDiagnosticsRejectPrivateValuesAndDistinguishUnavailableAnalysis() throws {
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        let lengths = ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"]
+        let counts = ["bodyTextContentMarkerOccurrences", "rootRenderedMarkerOccurrences", "rootTextContentMarkerOccurrences", "scopedExpandControlCount"]
+        let flags = ["bodyTextContentAnalyzed", "rootRenderedAnalyzed", "rootTextContentAnalyzed", "firstPromptAnalyzed",
+                     "bodyTextContentMarkerFinalLine", "rootRenderedMarkerFinalLine", "rootTextContentMarkerFinalLine", "renderedPrefixOfFirstPrompt"]
+        var source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt", "reason": "marker_not_final",
+            "scope": "marker_validation", "action": "inspect", "root": ["tag": "div", "classes": []],
+            "body": ["tag": "div", "classes": []], "userCount": 1, "textLength": 10_240, "lineCount": 98,
+            "markerOccurrences": 0, "controlDescendants": 0, "markerFinalLine": false, "submitted": true, "markerMatches": true,
+            "bodySelection": "markdown_user_message", "bodyTextContent": "private_canary", "rootTextContent": "private_canary",
+            "firstPrompt": "private_canary", "selector": "private_canary", "expandControlLabel": "private_canary",
+            "ownerToken": "private_canary", "marker": "private_canary", "url": "https://private_canary"]
+        for key in lengths { source[key] = 100 }
+        for key in counts { source[key] = 1 }
+        for key in flags { source[key] = true }
+        func projected(_ value: [String: Any]) throws -> [String] {
+            try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(value), provider: .chatgpt))
+        }
+        for selection in ["markdown_user_message", "whitespace_pre_wrap", "author_user", "root_fallback", "none", "unmatched"] {
+            var candidate = source; candidate["bodySelection"] = selection
+            let records = try projected(candidate)
+            XCTAssertEqual(records.count, 2)
+            XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[1].utf8)) as? [String: Any])
+            XCTAssertEqual(body["bodySelection"] as? String, selection)
+            XCTAssertEqual(body["bodyTextContentMarkerFinalLine"] as? Bool, true)
+        }
+        for key in lengths + counts {
+            for invalid in [-1, lengths.contains(key) ? 220_002 : 1_001, 1.5, true, NSNull(), "private_canary"] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        for key in flags {
+            for invalid in [1, 0, NSNull(), "private_canary"] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        var forged = source; forged["bodySelection"] = "private_canary"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        var unavailable = source
+        for key in lengths { unavailable[key] = 220_001 }
+        for prefix in ["bodyTextContent", "rootRendered", "rootTextContent"] {
+            unavailable[prefix + "Analyzed"] = false
+            unavailable.removeValue(forKey: prefix + "MarkerOccurrences")
+            unavailable.removeValue(forKey: prefix + "MarkerFinalLine")
+        }
+        unavailable["firstPromptAnalyzed"] = false
+        unavailable.removeValue(forKey: "renderedPrefixOfFirstPrompt")
+        let unavailableRecords = try projected(unavailable)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(unavailableRecords[1].utf8)) as? [String: Any])
+        XCTAssertEqual(body["bodyTextContentAnalyzed"] as? Bool, false)
+        XCTAssertEqual(body["bodyTextContentLength"] as? Int, 220_001)
+        XCTAssertNil(body["bodyTextContentMarkerFinalLine"], "Unavailable analysis is not a verified absence")
+        XCTAssertNil(body["renderedPrefixOfFirstPrompt"])
+        for key in ["bodyTextContentMarkerFinalLine", "rootRenderedMarkerOccurrences", "rootTextContentMarkerFinalLine", "renderedPrefixOfFirstPrompt"] {
+            var contradictory = unavailable; contradictory[key] = source[key]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(contradictory), provider: .chatgpt))
+        }
     }
 
     func testNativeFirstUserFailureContextProjectsPresenceWithoutPrivateValues() throws {

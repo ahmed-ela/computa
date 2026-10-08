@@ -733,6 +733,112 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(f.world.__computaModelFirstProof).toBeUndefined(); noMutation(f, picker);
       });
 
+      for (const kind of ['hidden_tail', 'wrong_body', 'clipped_body']) {
+        test(`bounded alternate-body evidence distinguishes ${kind} without admitting or expanding it`, async () => {
+          const { f, picker } = setup(true), root = firstRoot(f);
+          const prompt = 'PRIVATE FULL PROMPT\n' + 'x'.repeat(14_000) + '\n\n' + markerLine;
+          const rendered = kind === 'wrong_body' ? 'PRIVATE WRONG BODY\n' + 'z'.repeat(10_221) : prompt.slice(0, 10_240);
+          f.world.__computaModelFirstPrompt = prompt;
+          f.userBody.text = kind === 'hidden_tail' ? prompt : rendered;
+          Object.defineProperty(f.userBody, 'innerText', { configurable: true, get: () => rendered });
+          if (kind === 'wrong_body') root.append(new Node('DIV', { 'data-user-message-bubble': '' }, prompt));
+          const expand = new Node('BUTTON', { 'aria-label': 'Show more' }, 'PRIVATE CONTROL CONTENT'); root.append(expand);
+          const result = await f.run('inspect'), diagnostic = failure(result, 'marker_not_final', 'marker_validation');
+          expect(diagnostic).toMatchObject({ bodySelection: 'whitespace_pre_wrap', textLength: rendered.length,
+            bodyInnerTextLength: rendered.length, firstPromptLength: prompt.length, firstPromptAnalyzed: true,
+            bodyTextContentAnalyzed: true, rootRenderedAnalyzed: true, rootTextContentAnalyzed: true,
+            markerOccurrences: 0, bodyTextContentMarkerOccurrences: kind === 'hidden_tail' ? 1 : 0,
+            bodyTextContentMarkerFinalLine: kind === 'hidden_tail',
+            rootTextContentMarkerOccurrences: kind === 'clipped_body' ? 0 : 1,
+            rootRenderedMarkerOccurrences: kind === 'clipped_body' ? 0 : 1,
+            renderedPrefixOfFirstPrompt: kind !== 'wrong_body', scopedExpandControlCount: 1 });
+          expect(diagnostic.bodyTextContentLength).toBe(kind === 'hidden_tail' ? prompt.length : rendered.length);
+          expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
+          expect(expand.clicks).toBe(0); expect(f.world.__computaModelFirstProof).toBeUndefined(); noMutation(f, picker);
+        });
+      }
+
+      test('body selection diagnostics report existing selector precedence without changing it', async () => {
+        for (const [selection, attributes] of [
+          ['markdown_user_message', { 'data-markdown-text-style': 'user-message', class: 'whitespace-pre-wrap', 'data-message-author-role': 'user' }],
+          ['whitespace_pre_wrap', { class: 'whitespace-pre-wrap', 'data-message-author-role': 'user' }],
+          ['author_user', { 'data-message-author-role': 'user' }],
+          ['root_fallback', { 'data-user-message-bubble': '' }],
+        ] as [string, Record<string, string>][]) {
+          const { f, picker } = setup(true); f.userBody.values = attributes;
+          const result = await f.run('inspect', { expectedFirstUserMarker: 'invalid' });
+          expect(failure(result, 'marker_invalid', 'marker_validation').bodySelection).toBe(selection);
+          noMutation(f, picker);
+        }
+      });
+
+      test('expand-control counts remain exact, physical, uniquely scoped and notification-only', async () => {
+        for (const shared of [false, true]) {
+          const { f, picker } = setup(true), root = firstRoot(f), parent = root.parentElement;
+          const local = new Node('DIV'), known = ['Show more', 'View more', 'Read more', 'Expand']
+            .map(label => new Node('BUTTON', { 'aria-label': label }, 'PRIVATE CONTROL CONTENT'));
+          parent.children = parent.children.filter((node: any) => node !== root);
+          local.append(root, ...known); parent.append(local);
+          if (shared) local.append(new Node('ARTICLE', { 'data-turn': 'user' }, 'PRIVATE SIBLING MESSAGE'));
+          const hidden = new Node('BUTTON', { 'aria-label': 'Show more', hidden: '' });
+          const disconnected = new Node('BUTTON', { 'aria-label': 'View more' }); disconnected.connected = false;
+          const arbitrary = new Node('BUTTON', { 'aria-label': 'PRIVATE LABEL Show more' });
+          const outside = new Node('BUTTON', { 'aria-label': 'Read more' });
+          root.append(hidden, disconnected, arbitrary); f.body.append(outside);
+          const result = await f.run('inspect', { expectedFirstUserMarker: 'invalid', expectedUserCounts: [shared ? 2 : 1] });
+          expect(failure(result, 'marker_invalid', 'marker_validation').scopedExpandControlCount).toBe(shared ? 0 : 4);
+          expect([...known, hidden, disconnected, arbitrary, outside].every(control => control.clicks === 0)).toBe(true);
+          expect(result.debugStructure).not.toContain('PRIVATE'); noMutation(f, picker);
+        }
+      });
+
+      test('expand-control observation does not extend into composer or navigation wrappers', async () => {
+        for (const [tag, attributes, wrapperRole] of [
+          ['FORM', {}, ''], ['TEXTAREA', {}, ''], ['DIV', { contenteditable: 'true' }, ''],
+          ['NAV', {}, ''], ['ASIDE', {}, ''], ['DIV', { role: 'navigation' }, ''],
+          ['DIV', { role: 'complementary' }, ''], ['DIV', {}, 'main'],
+          ['DIV', {}, 'navigation'], ['DIV', {}, 'complementary'],
+        ] as [string, Record<string, string>, string][]) {
+          const { f, picker } = setup(true), root = firstRoot(f), parent = root.parentElement;
+          const wider = new Node('DIV', wrapperRole ? { role: wrapperRole } : {});
+          const inside = new Node('BUTTON', { 'aria-label': 'Show more' });
+          const outside = new Node('BUTTON', { 'aria-label': 'Read more' });
+          root.append(inside); parent.children = parent.children.filter((node: any) => node !== root);
+          wider.append(root, new Node(tag, attributes), outside); parent.append(wider);
+          const result = await f.run('inspect', { expectedFirstUserMarker: 'invalid' });
+          expect(failure(result, 'marker_invalid', 'marker_validation').scopedExpandControlCount).toBe(1);
+          expect(inside.clicks + outside.clicks).toBe(0); noMutation(f, picker);
+        }
+      });
+
+      test('oversized alternate text is counted with a sentinel but never analyzed as absent marker evidence', async () => {
+        const { f, picker } = setup(true), root = firstRoot(f);
+        const oversized = 'PRIVATE OVERSIZED TEXT ' + 'x'.repeat(220_001) + '\n' + markerLine;
+        Object.defineProperty(f.userBody, 'innerText', { get: () => 'PRIVATE CLIPPED BODY' });
+        Object.defineProperty(f.userBody, 'textContent', { get: () => oversized });
+        Object.defineProperty(root, 'innerText', { get: () => oversized });
+        Object.defineProperty(root, 'textContent', { get: () => oversized });
+        f.world.__computaModelFirstPrompt = oversized;
+        const result = await f.run('inspect'), diagnostic = failure(result, 'marker_not_final', 'marker_validation');
+        expect(diagnostic).toMatchObject({ bodyTextContentLength: 220_001, rootRenderedTextLength: 220_001,
+          rootTextContentLength: 220_001, firstPromptLength: 220_001, bodyTextContentAnalyzed: false,
+          rootRenderedAnalyzed: false, rootTextContentAnalyzed: false, firstPromptAnalyzed: false });
+        for (const prefix of ['bodyTextContent', 'rootRendered', 'rootTextContent']) {
+          expect(diagnostic[prefix + 'MarkerOccurrences']).toBeUndefined(); expect(diagnostic[prefix + 'MarkerFinalLine']).toBeUndefined();
+        }
+        expect(diagnostic.renderedPrefixOfFirstPrompt).toBeUndefined();
+        expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker); noMutation(f, picker);
+      });
+
+      test('alternate diagnostic property failures cannot obscure the original first-user rejection', async () => {
+        const { f, picker } = setup(true);
+        Object.defineProperty(f.userBody, 'innerText', { get: () => 'PRIVATE CLIPPED BODY' });
+        Object.defineProperty(f.userBody, 'textContent', { get: () => { throw new Error('PRIVATE ALTERNATE FAILURE'); } });
+        const result = await f.run('inspect'), diagnostic = failure(result, 'marker_not_final', 'marker_validation');
+        expect(diagnostic.bodySelection).toBeUndefined();
+        expect(result.debugStructure).not.toContain('PRIVATE'); noMutation(f, picker);
+      });
+
       test('poisoned content and metadata never escape the finite diagnostic projection', async () => {
         const { f } = setup(true), root = firstRoot(f);
         // Bootstrap the normal product owner before poisoning the diagnostic
@@ -753,7 +859,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
         const allowed = new Set(['kind', 'provider', 'reason', 'scope', 'action', 'userCount', 'root', 'body', 'textLength',
           'lineCount', 'markerFinalLine', 'markerOccurrences', 'controlDescendants', 'submitted', 'markerMatches',
-          'markerValid', 'allowFirstUserBinding', 'privatePinPresent', 'expectedFingerprintPresent']);
+          'markerValid', 'allowFirstUserBinding', 'privatePinPresent', 'expectedFingerprintPresent', 'bodySelection',
+          'bodyInnerTextLength', 'bodyTextContentLength', 'rootRenderedTextLength', 'rootTextContentLength', 'firstPromptLength',
+          'bodyTextContentAnalyzed', 'rootRenderedAnalyzed', 'rootTextContentAnalyzed', 'firstPromptAnalyzed',
+          'bodyTextContentMarkerOccurrences', 'rootRenderedMarkerOccurrences', 'rootTextContentMarkerOccurrences',
+          'bodyTextContentMarkerFinalLine', 'rootRenderedMarkerFinalLine', 'rootTextContentMarkerFinalLine',
+          'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount']);
         expect(Object.keys(JSON.parse(result.debugStructure)).every(key => allowed.has(key))).toBe(true);
       });
 

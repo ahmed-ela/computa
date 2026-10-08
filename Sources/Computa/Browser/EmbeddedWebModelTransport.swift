@@ -972,6 +972,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private static let firstUserDiagnosticActions: Set<String> = ["inspect", "prepare", "insert", "sendReady", "submit",
         "verifyModel", "verifyProductMode", "ensureChatMode", "enableTemporary", "selectModel", "discoverModels", "modelDiagnostic", "stop", "cleanup"]
+    private static let firstUserBodyLengths = ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"]
+    private static let firstUserBodyCounts = ["bodyTextContentMarkerOccurrences", "rootRenderedMarkerOccurrences", "rootTextContentMarkerOccurrences", "scopedExpandControlCount"]
+    private static let firstUserBodyFlags = ["bodyTextContentAnalyzed", "rootRenderedAnalyzed", "rootTextContentAnalyzed", "firstPromptAnalyzed",
+        "bodyTextContentMarkerFinalLine", "rootRenderedMarkerFinalLine", "rootTextContentMarkerFinalLine", "renderedPrefixOfFirstPrompt"]
 
     private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
@@ -1028,6 +1032,32 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 safe[key] = flag
             }
         }
+        if let rawSelection = value["bodySelection"] {
+            let selections: Set<String> = ["markdown_user_message", "whitespace_pre_wrap", "author_user", "root_fallback", "none", "unmatched"]
+            guard let selection = rawSelection as? String, selections.contains(selection) else { return nil }
+            safe["bodySelection"] = selection
+        }
+        for key in firstUserBodyLengths + firstUserBodyCounts {
+            if let rawCount = value[key] {
+                let limit: Int64 = firstUserBodyLengths.contains(key) ? 220_001 : 1_000
+                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...limit).contains(count) else { return nil }
+                safe[key] = count
+            }
+        }
+        for key in firstUserBodyFlags {
+            if let rawFlag = value[key] {
+                guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
+                safe[key] = flag
+            }
+        }
+        // An unavailable alternate observation must not look like a verified
+        // absence of the marker. The adapter omits these fields over its limit.
+        for prefix in ["bodyTextContent", "rootRendered", "rootTextContent"] {
+            if safe[prefix + "MarkerOccurrences"] != nil || safe[prefix + "MarkerFinalLine"] != nil {
+                guard safe[prefix + "Analyzed"] as? Bool == true else { return nil }
+            }
+        }
+        if safe["renderedPrefixOfFirstPrompt"] != nil, safe["firstPromptAnalyzed"] as? Bool != true { return nil }
         if let rawSnapshot = value["snapshot"] {
             guard let snapshot = rawSnapshot as? [String: Any] else { return nil }
             var projected: [String: Bool] = [:]
@@ -1066,6 +1096,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               var summary = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] else { return nil }
         if let expectedReason, summary["reason"] as? String != expectedReason { return nil }
         let children = summary.removeValue(forKey: "descendants") as? [[String: Any]] ?? []
+        var bodyObservation: [String: Any] = [:]
+        for key in ["bodySelection"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
+            if let value = summary.removeValue(forKey: key) { bodyObservation[key] = value }
+        }
+        if !bodyObservation.isEmpty {
+            bodyObservation["kind"] = "first_user_body"; bodyObservation["provider"] = provider.rawValue
+            for key in ["action", "scope"] { bodyObservation[key] = summary[key] }
+        }
         // Keep optional context separate if the full summary exceeds the same
         // existing log cap. Adding diagnostics must not discard the branch.
         var context: [String: Any] = [:]
@@ -1077,7 +1115,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
         }
         var records: [String] = []
-        for value in [summary] + (context.isEmpty ? [] : [context]) + children {
+        for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation]) + children {
             guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: .sortedKeys), bytes.count <= 960 else { return nil }
             records.append(String(decoding: bytes, as: UTF8.self))
         }
@@ -1085,12 +1123,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func logFirstUserStructure(_ records: [String], sequence: Int) {
+        var childIndex = 0
         for (index, safe) in records.enumerated() {
             if index == 0 { Self.inspectionLog.info("firstUserStructure sequence=\(sequence) \(safe, privacy: .public)") }
             else if safe.contains("\"kind\":\"first_user_context\"") {
                 Self.inspectionLog.info("firstUserContext sequence=\(sequence) \(safe, privacy: .public)")
             }
-            else { Self.inspectionLog.info("firstUserChild sequence=\(sequence) index=\(index - 1) \(safe, privacy: .public)") }
+            else if safe.contains("\"kind\":\"first_user_body\"") {
+                Self.inspectionLog.info("firstUserBody sequence=\(sequence) \(safe, privacy: .public)")
+            }
+            else {
+                Self.inspectionLog.info("firstUserChild sequence=\(sequence) index=\(childIndex) \(safe, privacy: .public)")
+                childIndex += 1
+            }
         }
         #if DEBUG
         firstUserDiagnosticsObserverForTesting?(records)
