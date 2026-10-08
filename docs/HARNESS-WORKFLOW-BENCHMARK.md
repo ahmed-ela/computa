@@ -121,27 +121,36 @@ Existing native editing qualification remains available with
 
 ## Results
 
-The final native validation on 2026-10-08 passed **512 selected tests with zero
-failures in 335.490 seconds**. `native-build38-final.log` and
-`native-build38-final-validation.json` are bound to the 310 unchanged input
-hashes in `native-source-freeze-build38-final.json` for Computa **0.6.0 (38)**.
-Earlier build 37 validation separately passed 404 selected tests in 154.862
-seconds; the current run adds the entire 108-test WebKit transport group.
+The final native validation on 2026-10-08 passed **535 selected tests with zero
+failures in 361.278 seconds**. `native-build39-corrected.log` and
+`native-build39-corrected-validation.json` are bound to the 311 unchanged input
+hashes in `native-source-freeze-build39-corrected.json` for Computa **0.6.0 (39)**.
 The native suite includes actual combined thread startup, editing/diffs,
-protocol/streaming, isolated WebKit, approval/Stop, and durable cleanup tests.
+protocol/streaming, isolated WebKit, approval/Stop, owned child-process and
+signal-probe tests, and durable cleanup. All 26 selected streaming/child fixture
+cleanup records verified removal. The three-provider adapter suite separately
+passed **361 tests and 6,194 assertions**, and the strict live-evidence collector
+passed **90 synthetic oracle tests**. Version checks passed nine tests.
+
+Build 38 separately passed 512 native tests against 310 inputs. The extra C
+signal-probe fixture is included in build 39's freeze because the selected child
+process tests actually compile and execute it. An earlier build 39 run's one
+failed assertion incorrectly expected a rejected private website lease to have
+been closed; its log is retained. The corrected test requires the lease to remain
+private while preserving the human tab, matching the production cleanup policy.
 
 | Scripted provider ID | Scenario | Seconds | Inference requests | Matched tool outputs | Approvals | Outcome |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| `browser/chatgpt` | Editing, tests, Git push, localhost, TTY | 6.325 | 13 | 12 | 3 | Passed |
-| `browser/gemini` | Editing, tests, Git push, localhost, TTY | 6.012 | 13 | 12 | 3 | Passed |
-| `browser/claude` | Editing, tests, Git push, localhost, TTY | 6.133 | 13 | 12 | 3 | Passed |
-| `browser/chatgpt` | Declined command has no side effect | 1.681 | 2 | 1 | 1 | Passed |
-| `browser/chatgpt` | Stop cancels inference and reaps server | 2.859 | 2 | 1 | 1 | Passed |
+| `browser/chatgpt` | Editing, tests, Git push, localhost, TTY | 6.300 | 13 | 12 | 3 | Passed |
+| `browser/gemini` | Editing, tests, Git push, localhost, TTY | 6.158 | 13 | 12 | 3 | Passed |
+| `browser/claude` | Editing, tests, Git push, localhost, TTY | 5.881 | 13 | 12 | 3 | Passed |
+| `browser/chatgpt` | Declined command has no side effect | 1.666 | 2 | 1 | 1 | Passed |
+| `browser/chatgpt` | Stop cancels inference and reaps server | 2.806 | 2 | 1 | 1 | Passed |
 
 Every scenario confirmed removal of its owned fixture. The interrupted server's
 exit remained unconfirmed in presentation, while its PID and port were
 independently verified closed before shutdown. Five additional consecutive Stop
-runs passed; the maximum observed physical retirement latency after logical
+runs on build 37 passed; the maximum observed physical retirement latency after logical
 acknowledgement was **98.275 ms**, with no extra signal or shutdown used to pass.
 The original immediate-PID check exposed the pinned engine's asynchronous reap
 boundary; finite structural diagnostics now survive failure cleanup.
@@ -206,6 +215,28 @@ usage limit before any tool ran. Its exact cleanup receipt confirmed an
 untouched session was closed; no preview server or run directory was created.
 A separate build 37 ChatGPT flight attempt stopped before tools on first-message
 verification after a permitted initial chat route change, without replaying
-the prompt. Its cleanup remained unconfirmed. Both are retained failure records,
-not successful qualification. The reproduced route/expansion regression is
-being repaired and the combined localhost preview remains pending.
+the prompt. Its cleanup remained unconfirmed. A fixture reproduced a consumed
+expansion claim that could not continue across an accepted route change; build
+38 corrects that specific regression with native-certified route continuations.
+The build 37 coarse diagnostic cannot establish which predicate failed live.
+
+A fresh build 38 ChatGPT attempt also stopped before tools. Its finite
+diagnostic identifies `expansionContextFailure=product`, with the full first
+message and final marker present. A read-only fixture reproduced a false
+product revocation at 513 message-only mutations: the observer was counting
+conversation rendering against its product-control limit. The live batch count
+was not recorded, so this is a likely cause rather than proven causation.
+Build 39 excludes verified message-only records from that budget while retaining
+tracked product-control mutations, including controls moved into a message and
+transient Work selection. The first revocation reason and bounded counts are
+latched and logged without message content. Historical failed attempts retain
+their exact evidence and cannot become successful qualification through a later
+fix. The combined localhost preview remains pending.
+
+Final cleanup also archived and removed 275 historical, exactly owned streaming
+fixture roots. The immutable cleanup receipt verifies 1,914 archived regular
+files, every byte hash and mode, no live processes or open files, and final
+absence of each root. Roots without sufficient ownership evidence were preserved.
+Successful streaming and child-process tests now remove only their unchanged
+owned directory after confirmed process shutdown and successful assertions;
+failure evidence remains available.

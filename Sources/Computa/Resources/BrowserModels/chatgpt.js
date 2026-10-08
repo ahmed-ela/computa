@@ -884,7 +884,8 @@ function chatGPTProductModeState() {
     contradictory: groups.length > 1 || !!group && (!recognized || workSelected === true), physical, visible, enabled,
     outside: node => !!node && node.nodeType === 1 && !node.closest(boundary),
     namedGroup: node => !!node && node.nodeType === 1 && !node.closest(boundary) && labelledGroup(node),
-    modeControl: node => !!node && node.nodeType === 1 && !node.closest(boundary) && label(node) === 'Work'
+    labelledGroup,
+    modeControl: (node, trackedGroup = false) => !!node && node.nodeType === 1 && (trackedGroup || !node.closest(boundary)) && label(node) === 'Work'
       && (node.tagName.toLowerCase() === 'button' || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role'))) };
 }
 function chatGPTProductModeDiagnostic(state) {
@@ -898,7 +899,29 @@ function chatGPTProductModeDiagnostic(state) {
     groupVisible: state.visible(state.group), recognized: state.recognized, contradictory: state.contradictory,
     chat: control(state.chat), work: control(state.work),
     proofPresent: !!globalThis.__computaChatProductMode, proofInvalidated: globalThis.__computaChatProductMode?.invalidated === true,
-    chatClickClaimed: globalThis.__computaChatModeClickClaimed === true };
+    chatClickClaimed: globalThis.__computaChatModeClickClaimed === true,
+    ...chatGPTProductProofFailureDiagnostic() };
+}
+function chatGPTProductProofFailureDiagnostic() {
+  const proof = globalThis.__computaChatProductMode;
+  const reasons = ['work_selected', 'mutation_overflow', 'group_overflow', 'work_overflow', 'contradictory_controls',
+    'owner', 'document', 'frame', 'origin', 'route', 'not_ready', 'temporary_unclaimed'];
+  if (!proof?.invalidated || !reasons.includes(proof.invalidationReason)) return {};
+  const diagnostic = { productProofFailure: proof.invalidationReason };
+  for (const key of ['productMutationRelevantCount', 'productMutationIgnoredCount'])
+    if (Number.isInteger(proof[key]) && proof[key] >= 0) diagnostic[key] = Math.min(proof[key], 1_000);
+  return diagnostic;
+}
+function chatGPTInvalidateProductProof(proof, reason, counts = null) {
+  if (!proof.invalidated) {
+    proof.invalidationReason = reason;
+    if (counts) {
+      proof.productMutationRelevantCount = Math.min(counts.relevant, 1_000);
+      proof.productMutationIgnoredCount = Math.min(counts.ignored, 1_000);
+    }
+  }
+  proof.invalidated = true;
+  return null;
 }
 function chatGPTControlExposed(node) {
   if (!node || typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return false;
@@ -911,16 +934,54 @@ function chatGPTControlExposed(node) {
   return hit === node || !!hit && node.contains(hit);
 }
 function chatGPTObserveProductMutations(proof, state, records) {
+  if (proof.invalidated) return;
   const groups = proof.groups, works = proof.works;
-  const trackWork = node => {
-    if (!state.modeControl(node)) return;
-    works.add(node);
-    if (node.getAttribute('aria-pressed') === 'true' || node.getAttribute('aria-checked') === 'true') proof.invalidated = true;
+  // Rendering a conversation is not a product-mode event. Tracked product
+  // nodes take precedence even after moving into a message or detaching.
+  const messageBoundary = '[data-message-author-role="user"], [data-message-author-role="assistant"], '
+    + '[data-markdown-text-style="user-message"], [data-markdown-text-style="assistant-message"], '
+    + 'article[data-turn="user"], article[data-turn="assistant"], [data-user-message-bubble]';
+  const tracked = [...groups, ...works];
+  const touchesTracked = node => !!node && tracked.some(control => control === node
+    || control.contains(node) || node.contains?.(control));
+  const containsGroup = node => {
+    if (node?.nodeType !== 1) return false;
+    const candidates = [node, ...node.querySelectorAll('[aria-label], [aria-labelledby]')];
+    return candidates.length > 128 || candidates.some(candidate => state.labelledGroup(candidate));
   };
-  const register = node => {
+  const messageOnly = record => {
+    // State transitions stay relevant until structural records establish which
+    // controls belonged to a tracked group earlier in this mutation batch.
+    if (record.type === 'attributes' && ['aria-pressed', 'aria-checked'].includes(record.attributeName)) return false;
+    const element = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
+    if (!element?.closest(messageBoundary) || touchesTracked(record.target)) return false;
+    // A new/moved product group in a message is still relevant to provenance.
+    for (let node = element; node; node = node.parentElement) if (state.labelledGroup(node)) return false;
+    if (record.type === 'attributes' && record.attributeName === 'aria-label' && record.oldValue === 'Composer mode') return false;
+    return [...(record.addedNodes || []), ...(record.removedNodes || [])]
+      .every(node => !touchesTracked(node) && !containsGroup(node));
+  };
+  const relevant = [];
+  let ignored = 0;
+  // Counts describe the examined prefix, stopping at the first over-budget
+  // relevant record. Unrelated message rendering does not consume that budget.
+  for (const record of records) {
+    if (messageOnly(record)) ignored++;
+    else relevant.push(record);
+    if (relevant.length > 512) break;
+  }
+  const counts = { relevant: relevant.length, ignored };
+  const invalidate = reason => chatGPTInvalidateProductProof(proof, reason, counts);
+  const trackWork = (node, observedInTrackedGroup = false) => {
+    const trackedGroup = observedInTrackedGroup || works.has(node) || [...groups].some(group => group.contains(node));
+    if (!state.modeControl(node, trackedGroup)) return;
+    works.add(node);
+    if (node.getAttribute('aria-pressed') === 'true' || node.getAttribute('aria-checked') === 'true') invalidate('work_selected');
+  };
+  const register = (node, allowNewGroups) => {
     if (!node || node.nodeType !== 1) return;
     const candidates = [node, ...node.querySelectorAll('[aria-label], [aria-labelledby]')].slice(0, 128);
-    for (const candidate of candidates) if (state.namedGroup(candidate)) groups.add(candidate);
+    for (const candidate of candidates) if (allowNewGroups && state.namedGroup(candidate)) groups.add(candidate);
     const owned = groups.has(node) || [...groups].some(group => group.contains(node));
     if (owned) for (const candidate of [node, ...node.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 128))
       trackWork(candidate);
@@ -929,34 +990,40 @@ function chatGPTObserveProductMutations(proof, state, records) {
   if (state.work) trackWork(state.work);
   // Process structural provenance before attribute records. A control can be
   // mounted, switched to Work, switched back and detached within one batch.
-  for (const record of records.slice(0, 512)) if (record.type === 'childList' && state.outside(record.target)) {
-    register(record.target);
+  for (const record of relevant.slice(0, 512)) if (record.type === 'childList') {
+    // A detached group authored in a message cannot become trusted just
+    // because its final ancestry no longer contains that message boundary.
+    const allowNewGroups = state.outside(record.target);
+    register(record.target, allowNewGroups);
     const ownedTarget = groups.has(record.target) || [...groups].some(group => group.contains(record.target));
     for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])].slice(0, 128)) {
-      register(node);
+      register(node, allowNewGroups);
       if (ownedTarget && node?.nodeType === 1) for (const candidate of [node,
         ...node.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 128))
-        trackWork(candidate);
+        trackWork(candidate, true);
     }
   }
-  if (groups.size > 64 || works.size > 128 || records.length > 512) { proof.invalidated = true; return; }
-  if (state.contradictory || records.some(record => record.type === 'attributes'
+  if (groups.size > 64) { invalidate('group_overflow'); return; }
+  if (works.size > 128) { invalidate('work_overflow'); return; }
+  if (relevant.length > 512) { invalidate('mutation_overflow'); return; }
+  if (state.contradictory) invalidate('contradictory_controls');
+  if (relevant.some(record => record.type === 'attributes'
     && ['aria-pressed', 'aria-checked'].includes(record.attributeName) && record.oldValue === 'true'
-    && works.has(record.target))) proof.invalidated = true;
+    && works.has(record.target))) invalidate('work_selected');
 }
 function chatGPTProductModeProof() {
   const proof = globalThis.__computaChatProductMode;
   const state = chatGPTProductModeState();
-  if (!proof || proof.invalidated || proof.owner !== globalThis.__computaModelOwner || proof.document !== document
-    || window !== window.top || location.origin !== 'https://chatgpt.com'
-    || !/^\/(?:c\/(?:[A-Za-z0-9-]+|local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+)\/?)?$/.test(new URL(document.URL).pathname)
-    || state.contradictory) {
-    if (proof) proof.invalidated = true;
-    return null;
-  }
+  if (!proof || proof.invalidated) return null;
+  if (proof.owner !== globalThis.__computaModelOwner) return chatGPTInvalidateProductProof(proof, 'owner');
+  if (proof.document !== document) return chatGPTInvalidateProductProof(proof, 'document');
+  if (window !== window.top) return chatGPTInvalidateProductProof(proof, 'frame');
+  if (location.origin !== 'https://chatgpt.com') return chatGPTInvalidateProductProof(proof, 'origin');
+  if (!/^\/(?:c\/(?:[A-Za-z0-9-]+|local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+)\/?)?$/.test(new URL(document.URL).pathname))
+    return chatGPTInvalidateProductProof(proof, 'route');
+  if (state.contradictory) return chatGPTInvalidateProductProof(proof, 'contradictory_controls');
   if (!proof.temporaryRequested && (!state.ready || state.chatSelected !== true)) {
-    proof.invalidated = true;
-    return null;
+    return chatGPTInvalidateProductProof(proof, 'not_ready');
   }
   if (proof.temporaryRequested && chatGPTRenderedTemporary()) proof.temporaryAcknowledged = true;
   if (chatGPTRenderedTemporary() && !proof.temporaryAcknowledged) return null;
@@ -1512,19 +1579,26 @@ async function chatGPTObserveFirstUserExpansion(candidate) {
   return true;
 }
 async function chatGPTContinueFirstUserExpansion(candidate) {
-  const edge = input.firstUserExpansionRouteContinuation;
+  const edges = input.firstUserExpansionRouteContinuation;
+  const validChain = Array.isArray(edges) && edges.length >= 1 && edges.length <= 2
+    && Object.keys(edges).join(',') === (edges.length === 1 ? '0' : '0,1')
+    && edges.every((edge, index) => edge && !Array.isArray(edge) && typeof edge === 'object'
+      && Object.keys(edge).sort().join(',') === 'fromURL,toURL'
+      && typeof edge.fromURL === 'string' && typeof edge.toURL === 'string' && edge.fromURL !== edge.toURL
+      && (index === 0 || edges[index - 1].toURL === edge.fromURL))
+    && new Set([edges[0].fromURL, ...edges.map(edge => edge.toURL)]).size === edges.length + 1;
+  const starts = validChain ? edges.flatMap((edge, index) => edge.fromURL === candidate.routeURL ? [index] : []) : [];
   if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
     || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
-    || !edge || Array.isArray(edge) || typeof edge !== 'object' || Object.keys(edge).sort().join(',') !== 'fromURL,toURL'
-    || typeof edge.fromURL !== 'string' || typeof edge.toURL !== 'string' || edge.fromURL === edge.toURL
-    || edge.fromURL !== candidate.routeURL || edge.toURL !== input.expectedURL || edge.toURL !== document.URL
+    || !validChain || starts.length !== 1 || edges.at(-1).toURL !== input.expectedURL || edges.at(-1).toURL !== document.URL
     || candidate.clicked !== true || candidate.outcome !== 'context_changed' || candidate.contextFailure !== 'url'
     || !websiteModelChoiceEqual(candidate.modelChoice, input.firstUserExpansionModelChoice))
     return chatGPTRejectFirstUserExpansion(candidate, 'context_changed', 'continuation');
   if (!chatGPTFirstUserExpansionContext(candidate)) return chatGPTRejectFirstUserExpansionContext(candidate);
-  // Consume this native-certified edge. A second permitted promotion must
-  // name this new source URL; neither the deadline nor click claim is reset.
-  candidate.routeURL = edge.toURL;
+  // Consume only the unconsumed suffix of the exact native-certified chain.
+  // A route may have promoted before this read or before the previous script
+  // consumed its receipt. Neither the deadline nor click claim is reset.
+  for (const edge of edges.slice(starts[0])) candidate.routeURL = edge.toURL;
   candidate.contextFailure = null;
   candidate.outcome = 'claimed';
   try { return await chatGPTObserveFirstUserExpansion(candidate); }
@@ -1588,6 +1662,7 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
       if (selected !== body) selection = 'unmatched';
     }
     result.bodySelection = selection;
+    Object.assign(result, chatGPTProductProofFailureDiagnostic());
     const outcome = globalThis.__computaModelFirstExpansion?.outcome;
     result.expansionOutcome = ['unavailable', 'ambiguous', 'disabled', 'obstructed', 'claimed', 'model_unverified',
       'timeout', 'context_changed', 'node_changed', 'text_mismatch', 'expanded', 'failed'].includes(outcome)

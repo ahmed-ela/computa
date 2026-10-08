@@ -71,12 +71,25 @@ unique final marker. Crossed reads are discarded. Continuation issues no extra
 click or Send and grants no lineage until normal full-body proof succeeds.
 Cleanup never receives expansion or route-continuation authority.
 
-A distinct timing boundary remains: if the public route arrives before the
-next native inspect captures its entry URL, the preceding edge's destination no
-longer matches. The consumed candidate fails closed instead of adopting that
-uncertified edge. Tests for two sequentially consumed edges do not establish
-success for this pre-entry timing; installed provider qualification remains
-separate.
+Build 39 retains an ephemeral native-certified chain of at most two contiguous
+edges through that first-route inspection. This covers public promotion before
+recursive entry and before the next script starts, without losing the already
+approved local edge. Only the existing one-time local-to-public rule may append
+an edge, consuming the remaining route refresh allowance. The private candidate
+consumes only the unique suffix beginning at its exact current route. Malformed
+chains, additional routes and destructive changes still fail closed; no URL
+similarity can manufacture a missing receipt. The original click claim and
+deadline remain fixed. Deterministic tests target both timing boundaries;
+installed provider qualification remains separate.
+
+Product-mode observation has a separate budget from message rendering. Build
+39 ignores only verified message-only mutations; tracked Composer mode groups
+and Work controls retain authority after hiding, moving or detaching. All
+pressed/checked state transitions remain relevant so structural provenance can
+identify newly mounted controls before a transient Work selection is consumed.
+Conversation-authored controls cannot establish product provenance. More than
+512 relevant mutations still revokes the proof. The first finite revocation
+reason and examined-prefix counts remain latched, with no message text in logs.
 
 ## Durable evidence
 
@@ -93,6 +106,10 @@ Writes synchronize and verify exact bytes before publication. Per-turn,
 per-task and global bounds produce finite failures instead of unbounded writes.
 Website evidence contains identity, structural counts, finite phases and
 fingerprints, not prompt text, tool payloads, responses, cookies or credentials.
+Start phases carry sequence zero and baseline zero; verified response phases
+carry sequence one and baseline zero. Failed/cancelled phases omit progress
+counts when no verified snapshot exists. Validators must preserve that absence
+and reject an abort as successful qualification rather than invent progress.
 
 Qualification must correlate each inference's native context and release with
 its exact durable cleanup attempt. A later `no_owned_session` observation does

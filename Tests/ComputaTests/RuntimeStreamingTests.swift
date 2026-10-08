@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import Computa
@@ -480,14 +481,23 @@ final class RuntimeStreamingTests: XCTestCase {
         let taskID = "streaming-task"
         let modelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
         let root: URL
+        let rootDevice: dev_t
+        let rootInode: ino_t
         let runtime: CodexAppServerRuntime
         let audit = Audit()
         var eventTask: Task<Void, Never>?
 
         init(scenario: String) throws {
-            root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaStreaming-\(UUID().uuidString)")
+            root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                .appendingPathComponent("ComputaStreaming-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
                                                   attributes: [.posixPermissions: 0o700])
+            var identity = stat()
+            guard root.path.withCString({ Darwin.lstat($0, &identity) }) == 0,
+                  (identity.st_mode & S_IFMT) == S_IFDIR else { throw POSIXError(.EINVAL) }
+            rootDevice = identity.st_dev
+            rootInode = identity.st_ino
+            print("fixtureOwned kind=runtime_streaming path=\(root.path) device=\(rootDevice) inode=\(rootInode)")
             let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                 .appendingPathComponent("Fixtures/StreamingAppServer.ts")
             let fixture = root.appendingPathComponent("fixture.ts")
@@ -523,6 +533,16 @@ final class RuntimeStreamingTests: XCTestCase {
             XCTAssertTrue(trace.parseFailures.isEmpty)
             return trace
         }
+
+        func removeFixtureAfterVerifiedShutdown() -> String? {
+            var identity = stat()
+            guard root.path.withCString({ Darwin.lstat($0, &identity) }) == 0,
+                  (identity.st_mode & S_IFMT) == S_IFDIR,
+                  identity.st_dev == rootDevice, identity.st_ino == rootInode else {
+                return "Fixture identity changed; refusing removal of \(root.path)."
+            }
+            return OwnedProfileCleanup.removeAndVerify(root, operations: .live)
+        }
     }
 
     private struct NoModelVisualGrounder: VisualGroundingClient {
@@ -534,16 +554,29 @@ final class RuntimeStreamingTests: XCTestCase {
     }
 
     private func withHarness(scenario: String, _ body: (Harness) async throws -> Void) async throws {
+        let failuresBefore = testRun?.failureCount ?? 0
         let harness = try Harness(scenario: scenario)
         do {
             _ = try await harness.runtime.loadTasks()
             try await body(harness)
             let report = await harness.runtime.shutdown()
             harness.eventTask?.cancel()
+            await harness.eventTask?.value
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            guard report.succeeded, (testRun?.failureCount ?? 0) == failuresBefore else {
+                print("fixtureCleanupPreserved kind=runtime_streaming path=\(harness.root.path) reason=test_or_shutdown_failed")
+                return
+            }
+            if let issue = harness.removeFixtureAfterVerifiedShutdown() {
+                XCTFail("Fixture cleanup failed: \(String(issue.prefix(1_024)))")
+            } else {
+                print("fixtureCleanupVerified kind=runtime_streaming path=\(harness.root.path) device=\(harness.rootDevice) inode=\(harness.rootInode)")
+            }
         } catch {
-            _ = await harness.runtime.shutdown()
+            let report = await harness.runtime.shutdown()
             harness.eventTask?.cancel()
+            await harness.eventTask?.value
+            print("fixtureCleanupPreserved kind=runtime_streaming path=\(harness.root.path) shutdownVerified=\(report.succeeded) reason=\(String(error.localizedDescription.prefix(512)))")
             throw error
         }
     }

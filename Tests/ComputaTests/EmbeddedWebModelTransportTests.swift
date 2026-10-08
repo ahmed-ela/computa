@@ -28,6 +28,23 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(additional))
         additional = raw; var item = control; item["text"] = "PRIVATE_RAW_PAGE_CANARY"; additional["chat"] = item
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(additional))
+        var failed = raw
+        failed["productProofFailure"] = "mutation_overflow"
+        failed["productMutationRelevantCount"] = 513
+        failed["productMutationIgnoredCount"] = 1_000
+        let failure = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(failed))
+        XCTAssertTrue(failure.contains("mutation_overflow"))
+        XCTAssertLessThan(failure.utf8.count, 2_048)
+        for field in ["productMutationRelevantCount", "productMutationIgnoredCount"] {
+            for bad in [-1, 1_001, 0.5, true, NSNull(), "PRIVATE_RAW_PAGE_CANARY"] as [Any] {
+                var invalid = failed; invalid[field] = bad
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(invalid))
+            }
+        }
+        for bad in ["PRIVATE_RAW_PAGE_CANARY", true, NSNull()] as [Any] {
+            var invalid = failed; invalid["productProofFailure"] = bad
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(invalid))
+        }
     }
 
     func testChatGPTStartsOnNormalRootAndProvesChatBeforeOwnedTemporaryTransition() async throws {
@@ -1299,6 +1316,62 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testFirstMessageExpansionIgnoresRenderingChurnButRetainsTransientWorkRevocation() async throws {
+        for transientWork in [false, true] {
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: """
+                const text = userBody.firstChild;
+                for (let i = 0; i < 600; i++) text.data = prompt;
+                if (\(transientWork)) {
+                  const work = document.getElementById('fixture-work-mode');
+                  work.setAttribute('aria-pressed', 'true');
+                  work.setAttribute('aria-pressed', 'false');
+                }
+                window.fixtureRenderingMutations = 600;
+                """))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            var diagnostics: [String] = []
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting { diagnostics += $0 }
+            let prompt = String(repeating: "Rendering churn must preserve the owned prompt.\n", count: 600)
+            if transientWork {
+                do {
+                    // Native may detect the product change during Send's
+                    // first read or the subsequent completion observation.
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                    _ = try await waitForState("complete", fixture.transport, token: token)
+                    XCTFail("A transient Work selection cannot be hidden among message rendering")
+                } catch {
+                    let failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure)
+                    XCTAssertTrue([.productModeUnverified, .ownershipFailure(.javaScriptFirstUser),
+                                   .ownershipFailure(.promotionFirstUser)].contains(failure))
+                }
+                let values = diagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+                XCTAssertTrue(values.contains { $0["productProofFailure"] as? String == "work_selected" })
+                XCTAssertTrue(values.contains { ($0["productMutationIgnoredCount"] as? Int ?? 0) >= 600 })
+            } else {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true))
+            }
+            let mutations = try await evaluate(view, "return window.fixtureRenderingMutations;") as? Int
+            let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+            XCTAssertEqual(mutations, 600)
+            XCTAssertEqual(clicks, 1)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            if !transientWork {
+                let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            }
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil)
+            try await assertHumanTabIntact(fixture, retaining: transientWork ? fixture.createdTabs.last : nil)
+        }
+    }
+
     func testFirstMessageExpansionContinuesThroughNativeCertifiedFirstLocalRouteWithoutReclick() async throws {
         let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: """
             history.pushState({}, '', '/c/local-chatgpt%3Aexpanded-first-user?temporary-chat=true');
@@ -1397,6 +1470,134 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testExactExpansionRouteChainSurvivesPreEntryAndPreScriptPublicPromotion() async throws {
+        for checkpoint in [EmbeddedWebModelTransport.FirstUserExpansionRouteCheckpoint.routeAccepted, .continuationInput] {
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionDelayMilliseconds: 2_300,
+                earlyExpansionScript: "history.pushState({}, '', '/c/local-chatgpt%3Apre-entry-expansion?temporary-chat=true');"))
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let generation = fixture.browser.documentGeneration(for: ownedID)
+            let initialURL = try XCTUnwrap(view.url?.absoluteString)
+            var promoted = false
+            var originalDeadline: Double?
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { observed in
+                guard observed == checkpoint, !promoted else { return }
+                promoted = true
+                // At routeAccepted native has captured the local edge but has
+                // not entered the next inspect. At continuationInput it has
+                // captured that inspect's local URL, before executing JS.
+                let before = try? await self.evaluate(view, """
+                    const candidate = globalThis.__computaModelFirstExpansion;
+                    return { route: candidate?.routeURL, deadline: candidate?.deadline,
+                      clicked: candidate?.clicked, outcome: candidate?.outcome };
+                    """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+                XCTAssertEqual(before?["route"] as? String, initialURL)
+                XCTAssertEqual(before?["clicked"] as? Bool, true)
+                XCTAssertEqual(before?["outcome"] as? String, "context_changed")
+                originalDeadline = before?["deadline"] as? Double
+                let changed = try? await self.evaluate(view, """
+                    const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
+                    if (!body || window.fixturePrompts.length !== 1 || window.fixtureExpansionClicks !== 1) return false;
+                    history.pushState({}, '', '/c/public-pre-entry-expansion?temporary-chat=true');
+                    body.textContent = window.fixturePrompts[0];
+                    body.parentElement.querySelector('button[aria-label="Show more"]')?.remove(); return true;
+                    """) as? Bool
+                XCTAssertEqual(changed, true)
+            }
+            defer { fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil) }
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": String(repeating: "Owned native pre-entry route-chain fixture line.\n", count: 600)])
+            XCTAssertEqual(sent["state"] as? String, "running")
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertTrue(promoted)
+            XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+            try assertChoiceEvidence(complete, choice: choice)
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+            let final = try await evaluate(view, """
+                const candidate = globalThis.__computaModelFirstExpansion;
+                return { route: candidate.routeURL, deadline: candidate.deadline, outcome: candidate.outcome };
+                """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+            XCTAssertNotNil(originalDeadline)
+            XCTAssertEqual(final?["deadline"] as? Double, originalDeadline)
+            XCTAssertEqual(final?["route"] as? String, view.url?.absoluteString)
+            XCTAssertEqual(final?["outcome"] as? String, "expanded")
+            XCTAssertEqual(view.url?.path, "/c/public-pre-entry-expansion")
+            XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+            let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+            XCTAssertEqual(clicks, 1)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testPreEntryExpansionRouteChainRejectsExtraRoutesAndDestructiveChangesWithoutReplay() async throws {
+        for condition in ["second_local", "third_public", "body", "owner", "work"] {
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionDelayMilliseconds: 2_300,
+                earlyExpansionScript: "history.pushState({}, '', '/c/local-chatgpt%3Arejected-pre-entry?temporary-chat=true');"))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            var changed = false
+            var extraPublic = false
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { checkpoint in
+                if checkpoint == .continuationInput, condition == "third_public", changed, !extraPublic {
+                    extraPublic = true
+                    _ = try? await self.evaluate(view, "history.pushState({}, '', '/c/foreign-second-public?temporary-chat=true'); return true;")
+                    return
+                }
+                guard checkpoint == .routeAccepted, !changed else { return }
+                changed = true
+                let target = condition == "second_local" ? "/c/local-chatgpt%3Aforeign-second-local" : "/c/public-rejected-pre-entry"
+                _ = try? await self.evaluate(view, """
+                    const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
+                    history.pushState({}, '', '\(target)?temporary-chat=true');
+                    body.textContent = window.fixturePrompts[0];
+                    if ('\(condition)' === 'body') body.replaceWith(body.cloneNode(true));
+                    if ('\(condition)' === 'work') {
+                      const work = document.getElementById('fixture-work-mode');
+                      work.setAttribute('aria-pressed', 'true'); work.setAttribute('aria-pressed', 'false');
+                    }
+                    return true;
+                    """)
+                if condition == "owner" {
+                    _ = try? await self.evaluate(view, "globalThis.__computaModelOwner = 'changed-private-fixture-owner'; return true;",
+                                                world: .world(name: "computa-chatgpt-model-v1"))
+                }
+            }
+            defer { fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil) }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": String(repeating: "Owned rejected pre-entry fixture line.\n", count: 600)])
+                XCTFail("The bounded route chain must reject \(condition)")
+            } catch { XCTAssertTrue(error is EmbeddedWebModelTransport.Failure) }
+            XCTAssertTrue(changed)
+            if condition == "third_public" { XCTAssertTrue(extraPublic) }
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+            let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+            XCTAssertEqual(clicks, 1)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            let clicksAfterCleanup = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+            XCTAssertEqual(clicksAfterCleanup, 1)
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
     }
 
     func testExpansionRouteContinuationRejectsChangedLineageOwnerAndProductWithoutAnotherClick() async throws {
@@ -3387,6 +3588,44 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(bodyValues[2]["expansionOutcome"] as? String, "model_unverified")
         XCTAssertEqual(bodyValues[2]["expansionContextFailure"] as? String, "owner")
         XCTAssertNil(bodyValues[0]["bodyTextContentLength"])
+    }
+
+    func testProductProofFailureDiagnosticsAreFiniteBoundedAndSeparateFromBody() throws {
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        let source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt", "reason": "marker_not_final",
+            "scope": "marker_validation", "action": "inspect", "root": ["tag": "div", "classes": []],
+            "body": ["tag": "div", "classes": []], "userCount": 1, "textLength": 10_240, "lineCount": 98,
+            "markerOccurrences": 0, "controlDescendants": 0, "markerFinalLine": false, "submitted": true, "markerMatches": true,
+            "expansionOutcome": "context_changed", "expansionContextFailure": "product",
+            "productMutationRelevantCount": 513, "productMutationIgnoredCount": 1_000,
+            "productProof": "private_canary", "productControls": "private_canary", "prompt": "private_canary"]
+        for failure in ["work_selected", "mutation_overflow", "group_overflow", "work_overflow", "contradictory_controls",
+                        "owner", "document", "frame", "origin", "route", "not_ready", "temporary_unclaimed"] {
+            var candidate = source; candidate["productProofFailure"] = failure
+            let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(candidate), provider: .chatgpt))
+            XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+            let values = try records.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+            let product = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_product_proof" })
+            XCTAssertEqual(product["productProofFailure"] as? String, failure)
+            XCTAssertEqual(product["productMutationRelevantCount"] as? Int, 513)
+            XCTAssertEqual(product["productMutationIgnoredCount"] as? Int, 1_000)
+            XCTAssertEqual(product["scope"] as? String, "marker_validation")
+            let body = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_body" })
+            XCTAssertEqual(body["expansionContextFailure"] as? String, "product")
+            XCTAssertNil(body["productProofFailure"])
+        }
+        for key in ["productMutationRelevantCount", "productMutationIgnoredCount"] {
+            for invalid in [-1, 1_001, 1.5, true, NSNull(), "private_canary"] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        for invalid in ["private_canary", "none", 1, true, NSNull()] as [Any] {
+            var forged = source; forged["productProofFailure"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
     }
 
     func testChatGPTAlternateBodyDiagnosticsRejectPrivateValuesAndDistinguishUnavailableAnalysis() throws {

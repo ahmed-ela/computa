@@ -630,9 +630,158 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect((await f.run('inspect', expansionInput)).firstUserVerified).toBe(true); expect(expand.clicks).toBe(1);
       });
 
+      const productRecords = (f: any, records: any[]) => {
+        for (const observer of [...f.observers]) observer.callback(records);
+      };
+      const messageChurn = (f: any, count: number) => Array.from({ length: count }, (_, index) => index % 3 === 0
+        ? { type: 'characterData', target: { nodeType: 3, parentElement: f.userBody } }
+        : index % 3 === 1 ? { type: 'attributes', target: f.userBody, attributeName: 'class', oldValue: 'PRIVATE OLD CLASS' }
+          : { type: 'childList', target: f.userBody, addedNodes: [new Node('SPAN', {}, 'PRIVATE RENDER FRAGMENT')], removedNodes: [] });
+
+      test('product provenance ignores more than 512 message-only rendering mutations during first expansion', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        expand.onClick = () => { f.userBody.text = prompt; productRecords(f, messageChurn(f, 768)); };
+        const result = await f.run('inspect', expansionInput);
+        expect(result.firstUserVerified).toBe(true); expect(f.world.__computaChatProductMode.invalidated).toBe(false);
+        expect(JSON.parse(result.firstUserDebugStructure).productProofFailure).toBeUndefined();
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('a transient Work selection hidden among message churn still revokes pressed and checked controls', async () => {
+        for (const attribute of ['aria-pressed', 'aria-checked']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          if (attribute === 'aria-checked') {
+            delete f.chatMode.values['aria-pressed']; delete f.workMode.values['aria-pressed'];
+            f.chatMode.values.role = 'radio'; f.workMode.values.role = 'radio';
+            f.chatMode.values['aria-checked'] = 'true'; f.workMode.values['aria-checked'] = 'false';
+          }
+          f.modeGroup.values['aria-hidden'] = 'true';
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            productRecords(f, [...messageChurn(f, 800), { type: 'attributes', target: f.workMode,
+              attributeName: attribute, oldValue: 'true' }]);
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure)).toMatchObject({ expansionContextFailure: 'product',
+            productProofFailure: 'work_selected', productMutationRelevantCount: 1, productMutationIgnoredCount: 800 });
+          expect(result.debugStructure).not.toContain('PRIVATE'); expect(f.world.__computaModelFirstProof).toBeUndefined();
+          expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
+      test('tracked product groups remain authoritative after moving into a message or detaching', async () => {
+        for (const disposition of ['moved', 'detached', 'message_marked']) {
+          const { f, picker, root, expand, send, prompt } = await collapsed();
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            const records = messageChurn(f, 700);
+            if (disposition === 'message_marked') {
+              f.modeGroup.values['data-user-message-bubble'] = '';
+              records.push({ type: 'attributes', target: f.modeGroup, attributeName: 'data-user-message-bubble', oldValue: null });
+            } else {
+              f.body.children = f.body.children.filter((node: any) => node !== f.modeGroup);
+              records.push({ type: 'childList', target: f.body, removedNodes: [f.modeGroup], addedNodes: [] });
+              if (disposition === 'moved') {
+                root.append(f.modeGroup);
+                records.push({ type: 'childList', target: root, removedNodes: [], addedNodes: [f.modeGroup] });
+              } else { f.modeGroup.parentElement = null; f.modeGroup.connected = false; }
+            }
+            records.push({ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' });
+            productRecords(f, records);
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(f.world.__computaChatProductMode.invalidated).toBe(true);
+          expect(JSON.parse(result.debugStructure).productProofFailure).toBe('work_selected');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
+      test('new Work descendants of a tracked group moved into a message cannot escape provenance', async () => {
+        const { f, picker, root, expand, send, prompt } = await collapsed();
+        expand.onClick = () => {
+          f.userBody.text = prompt;
+          f.body.children = f.body.children.filter((node: any) => node !== f.modeGroup); root.append(f.modeGroup);
+          const oldWork = f.workMode, replacement = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work');
+          f.modeGroup.children = f.modeGroup.children.filter((node: any) => node !== oldWork); f.modeGroup.append(replacement);
+          productRecords(f, [...messageChurn(f, 600),
+            { type: 'childList', target: root, addedNodes: [f.modeGroup], removedNodes: [] },
+            { type: 'childList', target: f.modeGroup, addedNodes: [replacement], removedNodes: [oldWork] },
+            { type: 'attributes', target: replacement, attributeName: 'aria-pressed', oldValue: 'true' }]);
+        };
+        const result = await f.run('inspect', expansionInput); rejected(result);
+        expect(JSON.parse(result.debugStructure).productProofFailure).toBe('work_selected');
+        expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+      });
+
+      test('a Work control mounted in a tracked group then moved into a message retains its observed provenance', async () => {
+        const { f, picker, root, expand, send, prompt } = await collapsed();
+        expand.onClick = () => {
+          f.userBody.text = prompt;
+          const replacement = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work'); root.append(replacement);
+          productRecords(f, [...messageChurn(f, 600),
+            { type: 'childList', target: f.modeGroup, addedNodes: [replacement], removedNodes: [] },
+            { type: 'attributes', target: replacement, attributeName: 'aria-pressed', oldValue: 'true' },
+            { type: 'childList', target: f.modeGroup, addedNodes: [], removedNodes: [replacement] },
+            { type: 'childList', target: root, addedNodes: [replacement], removedNodes: [] }]);
+        };
+        const result = await f.run('inspect', expansionInput); rejected(result);
+        expect(JSON.parse(result.debugStructure).productProofFailure).toBe('work_selected');
+        expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('a detached conversation-authored product group cannot become trusted while rendering expands', async () => {
+        const { f, picker, root, expand, send, prompt } = await collapsed();
+        expand.onClick = () => {
+          f.userBody.text = prompt;
+          const authored = new Node('DIV', { 'aria-label': 'Composer mode' });
+          const work = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work'); authored.append(work); authored.connected = false;
+          productRecords(f, [...messageChurn(f, 600),
+            { type: 'childList', target: root, addedNodes: [authored], removedNodes: [] },
+            { type: 'attributes', target: work, attributeName: 'aria-pressed', oldValue: 'true' },
+            { type: 'childList', target: root, addedNodes: [], removedNodes: [authored] }]);
+          expect(f.world.__computaChatProductMode.groups.has(authored)).toBe(false);
+          expect(f.world.__computaChatProductMode.works.has(work)).toBe(false);
+        };
+        const result = await f.run('inspect', expansionInput);
+        expect(result.firstUserVerified).toBe(true); expect(f.world.__computaChatProductMode.invalidated).toBe(false);
+        expect(JSON.parse(result.firstUserDebugStructure).productProofFailure).toBeUndefined();
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('more than 512 relevant product records still fail and preserve first-cause bounded counts', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        expand.onClick = () => {
+          f.userBody.text = prompt;
+          productRecords(f, [...messageChurn(f, 1_100), ...Array.from({ length: 513 }, () => ({
+            type: 'attributes', target: f.composer, attributeName: 'class', oldValue: 'PRIVATE OLD CLASS' }))]);
+          productRecords(f, [{ type: 'attributes', target: f.workMode, attributeName: 'aria-pressed', oldValue: 'true' }]);
+        };
+        const result = await f.run('inspect', expansionInput); rejected(result);
+        expect(JSON.parse(result.debugStructure)).toMatchObject({ productProofFailure: 'mutation_overflow',
+          productMutationRelevantCount: 513, productMutationIgnoredCount: 1_000 });
+        expect(result.debugStructure).not.toContain('PRIVATE'); expect(f.world.__computaModelFirstProof).toBeUndefined();
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('message records adding recognized product groups remain relevant to the mutation budget', async () => {
+        const { f, picker, root, expand, send, prompt } = await collapsed();
+        expand.onClick = () => {
+          f.userBody.text = prompt;
+          const group = new Node('DIV', { 'aria-label': 'Composer mode' });
+          root.append(group);
+          productRecords(f, Array.from({ length: 513 }, () => ({ type: 'childList', target: root, addedNodes: [group], removedNodes: [] })));
+        };
+        const result = await f.run('inspect', expansionInput); rejected(result);
+        expect(JSON.parse(result.debugStructure)).toMatchObject({ productProofFailure: 'mutation_overflow',
+          productMutationRelevantCount: 513, productMutationIgnoredCount: 0 });
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
       const moveRoute = (f: any, url: string) => { f.document.URL = url; f.location.pathname = new URL(url).pathname; };
       const continuation = (fromURL: string, toURL: string) => ({ ...expansionInput,
-        firstUserExpansionRouteContinuation: { fromURL, toURL } });
+        firstUserExpansionRouteContinuation: [{ fromURL, toURL }] });
+      const routeChain = (root: string, local: string, final: string) => ({ ...expansionInput,
+        firstUserExpansionRouteContinuation: [{ fromURL: root, toURL: local }, { fromURL: local, toURL: final }] });
       const crossedExpansion = async () => {
         const stage = await collapsed(), fromURL = stage.f.document.URL;
         const toURL = 'https://chatgpt.com/c/local-chatgpt:owned-expansion?temporary-chat=true';
@@ -667,17 +816,68 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const crossed = await pending; rejected(crossed);
         expect(JSON.parse(crossed.debugStructure).expansionContextFailure).toBe('url');
         expect(f.world.__computaModelFirstExpansion.routeURL).toBe(local);
-        expect((await f.run('inspect', continuation(local, final))).firstUserVerified).toBe(true);
+        expect((await f.run('inspect', routeChain(fromURL, local, final))).firstUserVerified).toBe(true);
         expect(f.world.__computaModelFirstExpansion.deadline).toBe(deadline);
         expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('an unconsumed first route receipt survives a native-certified public promotion before the next inspect', async () => {
+        const { f, picker, expand, send, fromURL, toURL } = await crossedExpansion();
+        const final = 'https://chatgpt.com/c/owned-pre-entry-public?temporary-chat=true';
+        const candidate = f.world.__computaModelFirstExpansion, deadline = candidate.deadline;
+        expect(candidate.routeURL).toBe(fromURL); moveRoute(f, final); f.advanceTime(200);
+        const result = await f.run('inspect', routeChain(fromURL, toURL, final));
+        expect(result.firstUserVerified).toBe(true); expect(candidate.routeURL).toBe(final);
+        expect(candidate.deadline).toBe(deadline); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        expect(result.firstUserDebugStructure).not.toContain(fromURL);
+        expect(result.firstUserDebugStructure).not.toContain(toURL);
+        expect(result.firstUserDebugStructure).not.toContain(final);
+      });
+
+      test('an exact two-edge chain cannot extend the deadline or rescue changed private lineage', async () => {
+        for (const condition of ['deadline', 'owner', 'prompt', 'body', 'product', 'temporary']) {
+          const stage = await crossedExpansion(), { f, fromURL, toURL } = stage;
+          const final = 'https://chatgpt.com/c/owned-pre-entry-rejected?temporary-chat=true';
+          moveRoute(f, final);
+          if (condition === 'deadline') f.advanceTime(1_801);
+          if (condition === 'owner') f.world.__computaModelOwner = 'PRIVATE WRONG OWNER';
+          if (condition === 'prompt') f.world.__computaModelFirstPrompt += 'PRIVATE WRONG PROMPT';
+          if (condition === 'body') f.userBody.text = stage.prompt.replace('PRIVATE LONG', 'PRIVATE WRONG');
+          if (condition === 'product') { f.workMode.values['aria-pressed'] = 'true'; f.chatMode.values['aria-pressed'] = 'false'; }
+          if (condition === 'temporary') f.temporary.connected = false;
+          const result = await f.run('inspect', routeChain(fromURL, toURL, final));
+          if (condition === 'owner') expect(result).toMatchObject({ error: 'document_changed', detail: 'owner_token' });
+          else rejected(result);
+          expect(JSON.stringify(result)).not.toContain('PRIVATE WRONG');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(stage.expand.clicks).toBe(1);
+          noSend(f, stage.picker, stage.send);
+        }
+      });
+
+      test('empty, discontinuous, repeated and over-budget native receipt chains fail without a new display click', async () => {
+        for (const alter of [
+          (edges: any[]) => [],
+          (edges: any[]) => [edges[0], { ...edges[1], fromURL: 'https://chatgpt.com/c/unrelated-local' }],
+          (edges: any[]) => [edges[0], { fromURL: edges[0].toURL, toURL: edges[0].fromURL }],
+          (edges: any[]) => [edges[0], edges[0], edges[1]],
+          (edges: any[]) => [{ ...edges[0], privateValue: 'PRIVATE EXTRA' }, edges[1]],
+          (edges: any[]) => [{ fromURL: edges[0].fromURL, toURL: edges[0].fromURL }, edges[1]],
+        ]) {
+          const stage = await crossedExpansion(), final = 'https://chatgpt.com/c/owned-chain-invalid?temporary-chat=true';
+          moveRoute(stage.f, final);
+          const request = routeChain(stage.fromURL, stage.toURL, final);
+          request.firstUserExpansionRouteContinuation = alter(request.firstUserExpansionRouteContinuation);
+          rejected(await stage.f.run('inspect', request)); expect(stage.f.world.__computaModelFirstProof).toBeUndefined();
+          expect(stage.expand.clicks).toBe(1); noSend(stage.f, stage.picker, stage.send);
+        }
       });
 
       test('missing, mismatched or malformed continuation authority cannot rescue a consumed route failure', async () => {
         for (const alter of [
           (request: any) => { delete request.firstUserExpansionRouteContinuation; },
-          (request: any) => { request.firstUserExpansionRouteContinuation.fromURL = 'https://chatgpt.com/c/foreign'; },
-          (request: any) => { request.firstUserExpansionRouteContinuation.toURL = 'https://chatgpt.com/c/foreign'; },
-          (request: any) => { request.firstUserExpansionRouteContinuation.extra = true; },
+          (request: any) => { request.firstUserExpansionRouteContinuation[0].fromURL = 'https://chatgpt.com/c/foreign'; },
+          (request: any) => { request.firstUserExpansionRouteContinuation[0].toURL = 'https://chatgpt.com/c/foreign'; },
+          (request: any) => { request.firstUserExpansionRouteContinuation[0].extra = true; },
           (request: any) => { request.firstUserExpansionRouteContinuation = true; },
           (request: any) => { request.allowFirstUserExpansion = false; },
           (request: any) => { request.allowFirstUserBinding = false; },
@@ -1343,7 +1543,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           'bodyTextContentAnalyzed', 'rootRenderedAnalyzed', 'rootTextContentAnalyzed', 'firstPromptAnalyzed',
           'bodyTextContentMarkerOccurrences', 'rootRenderedMarkerOccurrences', 'rootTextContentMarkerOccurrences',
           'bodyTextContentMarkerFinalLine', 'rootRenderedMarkerFinalLine', 'rootTextContentMarkerFinalLine',
-          'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount', 'expansionOutcome', 'expansionContextFailure']);
+          'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount', 'expansionOutcome', 'expansionContextFailure',
+          'productProofFailure', 'productMutationRelevantCount', 'productMutationIgnoredCount']);
         expect(Object.keys(JSON.parse(result.debugStructure)).every(key => allowed.has(key))).toBe(true);
       });
 

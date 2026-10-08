@@ -8,23 +8,27 @@ final class OwnedChildProcessTests: XCTestCase {
     private let pid: Int32 = 89757
 
     func testChildWorkingDirectoryDoesNotChangeParentWorkingDirectory() async throws {
+        let failuresBefore = testRun?.failureCount ?? 0
         let before = FileManager.default.currentDirectoryPath
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaChildCWD-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let fixture = try OwnedFixtureDirectory(prefix: "ComputaChildCWD-")
+        let root = fixture.root
         let output = Pipe()
         let child = try OwnedChildProcess(executableURL: URL(fileURLWithPath: "/bin/pwd"),
             arguments: [], environment: [:], workingDirectory: root,
             outputDescriptor: output.fileHandleForWriting.fileDescriptor)
         try output.fileHandleForWriting.close()
-        let bytes = try output.fileHandleForReading.readToEnd() ?? Data()
+        let read = Result { try output.fileHandleForReading.readToEnd() ?? Data() }
         let result = await child.stop()
         XCTAssertTrue(result.succeeded)
+        let bytes = try read.get()
         let observed = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(URL(fileURLWithPath: observed).resolvingSymlinksInPath(), root.resolvingSymlinksInPath())
         XCTAssertEqual(FileManager.default.currentDirectoryPath, before)
+        removeSuccessfulFixture(fixture, terminationVerified: result.succeeded, failuresBefore: failuresBefore)
     }
 
     func testSpawnClearsChildSignalMaskWithoutChangingTheSpawningThread() async throws {
+        let failuresBefore = testRun?.failureCount ?? 0
         let probe = try await compileSignalProbe()
         let output = Pipe()
         let (child, unchanged) = try await Task.detached {
@@ -34,51 +38,113 @@ final class OwnedChildProcessTests: XCTestCase {
             guard pthread_sigmask(SIG_BLOCK, &blocked, &original) == 0 else { throw POSIXError(.EINVAL) }
             defer { pthread_sigmask(SIG_SETMASK, &original, nil) }
             pthread_sigmask(SIG_BLOCK, nil, &before)
-            let child = try OwnedChildProcess(executableURL: probe, arguments: ["mask"], environment: [:],
+            let child = try OwnedChildProcess(executableURL: probe.binary, arguments: ["mask"], environment: [:],
                 outputDescriptor: output.fileHandleForWriting.fileDescriptor)
             pthread_sigmask(SIG_BLOCK, nil, &after)
             return (child, before == after)
         }.value
         try output.fileHandleForWriting.close()
-        try await waitForExit(child)
+        let stopped = try await waitForExit(child)
         let text = String(decoding: try output.fileHandleForReading.readToEnd() ?? Data(), as: UTF8.self)
         XCTAssertTrue(unchanged)
         XCTAssertEqual(text, "blocked=0 nondefault=0\n")
+        removeSuccessfulFixture(probe.fixture, terminationVerified: stopped, failuresBefore: failuresBefore)
     }
 
     func testSpawnedRuntimeCanReceiveSIGCHLDAndReapItsOwnChild() async throws {
+        let failuresBefore = testRun?.failureCount ?? 0
         let probe = try await compileSignalProbe()
         let output = Pipe()
         let child = try await Task.detached {
-            try OwnedChildProcess(executableURL: probe, arguments: ["wait"], environment: [:],
+            try OwnedChildProcess(executableURL: probe.binary, arguments: ["wait"], environment: [:],
                 outputDescriptor: output.fileHandleForWriting.fileDescriptor)
         }.value
         try output.fileHandleForWriting.close()
-        try await waitForExit(child)
+        let stopped = try await waitForExit(child)
         let text = String(decoding: try output.fileHandleForReading.readToEnd() ?? Data(), as: UTF8.self)
         XCTAssertEqual(text, "blocked=0 nondefault=0\nobserved_sigchld=1 child_exit=23\n")
+        removeSuccessfulFixture(probe.fixture, terminationVerified: stopped, failuresBefore: failuresBefore)
     }
 
-    private func compileSignalProbe() async throws -> URL {
+    private struct CompiledProbe: Sendable {
+        let binary: URL
+        let fixture: OwnedFixtureDirectory
+    }
+
+    private struct OwnedFixtureDirectory: Sendable {
+        let root: URL
+        let device: dev_t
+        let inode: ino_t
+
+        init(prefix: String) throws {
+            root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                .appendingPathComponent(prefix + UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700])
+            var identity = stat()
+            guard root.path.withCString({ Darwin.lstat($0, &identity) }) == 0,
+                  (identity.st_mode & S_IFMT) == S_IFDIR else { throw POSIXError(.EINVAL) }
+            device = identity.st_dev
+            inode = identity.st_ino
+            print("fixtureOwned kind=owned_child path=\(root.path) device=\(device) inode=\(inode)")
+        }
+
+        func removeAfterVerifiedTermination() -> String? {
+            var identity = stat()
+            guard root.path.withCString({ Darwin.lstat($0, &identity) }) == 0,
+                  (identity.st_mode & S_IFMT) == S_IFDIR,
+                  identity.st_dev == device, identity.st_ino == inode else {
+                return "Fixture identity changed; refusing removal of \(root.path)."
+            }
+            return OwnedProfileCleanup.removeAndVerify(root, operations: .live)
+        }
+    }
+
+    private func removeSuccessfulFixture(_ fixture: OwnedFixtureDirectory,
+        terminationVerified: Bool, failuresBefore: Int) {
+        guard terminationVerified, (testRun?.failureCount ?? 0) == failuresBefore else {
+            print("fixtureCleanupPreserved kind=owned_child path=\(fixture.root.path) reason=test_or_termination_failed")
+            return
+        }
+        if let issue = fixture.removeAfterVerifiedTermination() {
+            XCTFail("Fixture cleanup failed: \(String(issue.prefix(1_024)))")
+        } else {
+            print("fixtureCleanupVerified kind=owned_child path=\(fixture.root.path) device=\(fixture.device) inode=\(fixture.inode)")
+        }
+    }
+
+    private func compileSignalProbe() async throws -> CompiledProbe {
         let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Fixtures/OwnedChildSignalProbe.c")
-        let binary = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaSignalProbe-\(UUID().uuidString)")
+        let fixture = try OwnedFixtureDirectory(prefix: "ComputaSignalProbe-")
+        let binary = fixture.root.appendingPathComponent("probe")
         let compiler = try OwnedChildProcess(executableURL: URL(fileURLWithPath: "/usr/bin/clang"),
             arguments: [source.path, "-o", binary.path])
-        try await waitForExit(compiler)
+        let stopped = try await waitForExit(compiler)
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: binary.path))
-        return binary
+        guard stopped, FileManager.default.isExecutableFile(atPath: binary.path) else {
+            print("fixtureCleanupPreserved kind=signal_probe path=\(fixture.root.path) reason=compiler_termination_or_output_failed")
+            throw POSIXError(.ECHILD)
+        }
+        return CompiledProbe(binary: binary, fixture: fixture)
     }
 
-    private func waitForExit(_ child: OwnedChildProcess) async throws {
-        for _ in 0..<400 {
-            if !child.isRunning { break }
-            try await Task.sleep(for: .milliseconds(20))
+    private func waitForExit(_ child: OwnedChildProcess) async throws -> Bool {
+        do {
+            for _ in 0..<400 {
+                if !child.isRunning { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        } catch {
+            let cleanup = await child.stop()
+            print("fixtureTerminationAfterCancellation pid=\(child.processIdentifier) stopped=\(cleanup.succeeded) issues=\(String(cleanup.issues.joined(separator: "; ").prefix(1_024)))")
+            throw error
         }
         let exited = !child.isRunning
         let cleanup = await child.stop()
         XCTAssertTrue(exited, "The owned signal fixture did not exit within its bound.")
         XCTAssertTrue(cleanup.succeeded, cleanup.issues.joined(separator: "; "))
+        return exited && cleanup.succeeded
     }
 
     func testObservedSIGKILLEPERMResolvesOnlyAfterReapAndFreshESRCH() async {

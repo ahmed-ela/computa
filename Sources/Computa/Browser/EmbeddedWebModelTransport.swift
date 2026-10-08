@@ -297,9 +297,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let modernMarkers: Int, logicalAnswers: Int, scopedCopies: Int, enabledCopies: Int, depth: Int
     }
     #if DEBUG
+    enum FirstUserExpansionRouteCheckpoint { case routeAccepted, continuationInput }
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
     #endif
 
     init(browser: EmbeddedBrowserSession) {
@@ -324,6 +326,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFirstUserDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
         firstUserDiagnosticsObserverForTesting = observer
+    }
+
+    func setFirstUserExpansionRouteCheckpointForTesting(_ hook: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?) {
+        firstUserExpansionRouteCheckpointForTesting = hook
     }
 
     func setTimeoutsForTesting(preparation: Duration, response: Duration) {
@@ -972,6 +978,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private static let firstUserDiagnosticActions: Set<String> = ["inspect", "prepare", "insert", "sendReady", "submit",
         "verifyModel", "verifyProductMode", "ensureChatMode", "enableTemporary", "selectModel", "discoverModels", "modelDiagnostic", "stop", "cleanup"]
+    private static let productProofFailures: Set<String> = ["work_selected", "mutation_overflow", "group_overflow", "work_overflow",
+        "contradictory_controls", "owner", "document", "frame", "origin", "route", "not_ready", "temporary_unclaimed"]
+    private static let productMutationCounts = ["productMutationRelevantCount", "productMutationIgnoredCount"]
     private static let firstUserBodyLengths = ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"]
     private static let firstUserBodyCounts = ["bodyTextContentMarkerOccurrences", "rootRenderedMarkerOccurrences", "rootTextContentMarkerOccurrences", "scopedExpandControlCount"]
     private static let firstUserBodyFlags = ["bodyTextContentAnalyzed", "rootRenderedAnalyzed", "rootTextContentAnalyzed", "firstPromptAnalyzed",
@@ -1050,6 +1059,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let failure = rawFailure as? String, failures.contains(failure) else { return nil }
             safe["expansionContextFailure"] = failure
         }
+        if let rawFailure = value["productProofFailure"] {
+            guard let failure = rawFailure as? String, productProofFailures.contains(failure) else { return nil }
+            safe["productProofFailure"] = failure
+        }
+        for key in productMutationCounts {
+            if let rawCount = value[key] {
+                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...1_000).contains(count) else { return nil }
+                safe[key] = count
+            }
+        }
         for key in firstUserBodyLengths + firstUserBodyCounts {
             if let rawCount = value[key] {
                 let limit: Int64 = firstUserBodyLengths.contains(key) ? 220_001 : 1_000
@@ -1109,6 +1128,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               var summary = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] else { return nil }
         if let expectedReason, summary["reason"] as? String != expectedReason { return nil }
         let children = summary.removeValue(forKey: "descendants") as? [[String: Any]] ?? []
+        // Product-control provenance has its own bounded record so diagnosing
+        // message rendering cannot push the body observation past the log cap.
+        var productObservation: [String: Any] = [:]
+        for key in ["productProofFailure", "productMutationRelevantCount", "productMutationIgnoredCount"] {
+            if let value = summary.removeValue(forKey: key) { productObservation[key] = value }
+        }
+        if !productObservation.isEmpty {
+            productObservation["kind"] = "first_user_product_proof"; productObservation["provider"] = provider.rawValue
+            for key in ["action", "scope"] { productObservation[key] = summary[key] }
+        }
         var bodyObservation: [String: Any] = [:]
         for key in ["bodySelection", "expansionOutcome", "expansionContextFailure"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
             if let value = summary.removeValue(forKey: key) { bodyObservation[key] = value }
@@ -1128,7 +1157,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
         }
         var records: [String] = []
-        for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation]) + children {
+        for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
+            + (productObservation.isEmpty ? [] : [productObservation]) + children {
             guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: .sortedKeys), bytes.count <= 960 else { return nil }
             records.append(String(decoding: bytes, as: UTF8.self))
         }
@@ -1234,11 +1264,39 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         throw recordedWebsiteBlocker(failure, session: session)
     }
 
+    private struct FirstUserExpansionRouteEdge {
+        let fromURL: URL
+        let toURL: URL
+    }
+
+    /// Ephemeral receipts for the existing first-route allowance, never a new
+    /// navigation or a session-wide permission. Only root/local/public order
+    /// is possible, even when JavaScript has not consumed the first receipt.
+    private static func appendingFirstUserExpansionRoute(_ edges: [FirstUserExpansionRouteEdge],
+                                                        from: URL, to: URL) throws -> [FirstUserExpansionRouteEdge] {
+        let provider = Provider.chatgpt
+        let source = provider.conversationURL(from.absoluteString)
+        let destination = provider.conversationURL(to.absoluteString)
+        guard edges.count < 2, from != to, provider.accepts(from.absoluteString), provider.accepts(to.absoluteString),
+              provider.routeContext(from.absoluteString) == provider.routeContext(to.absoluteString),
+              destination != nil else { throw Failure.ownershipFailure(.routeAfter) }
+        let rootToFirst = source == nil && edges.isEmpty
+        let localToPublic = provider.isLocalConversation(source) && !provider.isLocalConversation(destination)
+        guard rootToFirst || localToPublic else { throw Failure.ownershipFailure(.routeAfter) }
+        if let preceding = edges.last {
+            guard edges.count == 1, preceding.toURL == from,
+                  provider.conversationURL(preceding.fromURL.absoluteString) == nil,
+                  provider.isLocalConversation(provider.conversationURL(preceding.toURL.absoluteString)),
+                  localToPublic else { throw Failure.ownershipFailure(.routeAfter) }
+        }
+        return edges + [FirstUserExpansionRouteEdge(fromURL: from, toURL: to)]
+    }
+
     private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
                       refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true, recheckProductAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
-                      firstUserExpansionRouteContinuation: (fromURL: URL, toURL: URL)? = nil,
+                      firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         if !allowBlockedProvider { try checkProviderGate(session) }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
@@ -1273,6 +1331,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.sequence == 1 && session.confirmedUsers == 0 && session.pendingSubmission
             && session.temporary && session.firstUserFingerprint == nil
             && session.modelSelectionVerified && session.modelChoice != nil
+        var routeContinuation = firstUserExpansionRouteContinuation
+        var routeRefreshAvailable = refreshChangedRoute
+        if let preceding = routeContinuation.last {
+            guard allowFirstUserExpansion else { throw Failure.ownershipFailure(.routeBefore) }
+            if preceding.toURL != url {
+                // The allowed public promotion can arrive after native accepts
+                // the local edge but before this recursive inspect starts.
+                guard routeRefreshAvailable, !session.promoted,
+                      session.conversation == nil || session.conversation == provider.conversationURL(preceding.toURL.absoluteString),
+                      provider.isLocalConversation(provider.conversationURL(preceding.toURL.absoluteString)),
+                      current != nil, !provider.isLocalConversation(current) else {
+                    throw Failure.ownershipFailure(.routeBefore)
+                }
+                routeContinuation = try Self.appendingFirstUserExpansionRoute(routeContinuation, from: preceding.toURL, to: url)
+                routeRefreshAvailable = false
+            }
+        }
         var input: [String: Any] = [
             "provider": provider.rawValue, "action": action, "expectedURL": url.absoluteString,
             "ownerToken": session.token, "bindOwner": session.state == "loading" && !session.submitted,
@@ -1282,14 +1357,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
             "allowFirstUserExpansion": allowFirstUserExpansion,
         ]
-        if allowFirstUserExpansion, let continuation = firstUserExpansionRouteContinuation,
-           continuation.toURL == url {
-            // Only the immediately preceding native-certified SPA route edge
-            // may continue an already-clicked display expansion. This receipt
-            // is not forwarded to cleanup or any unrelated read refresh.
-            input["firstUserExpansionRouteContinuation"] = [
-                "fromURL": continuation.fromURL.absoluteString, "toURL": continuation.toURL.absoluteString,
-            ]
+        if allowFirstUserExpansion, !routeContinuation.isEmpty {
+            // A bounded contiguous chain survives an unconsumed intermediate
+            // read. Cleanup and unrelated read refreshes receive no receipts.
+            input["firstUserExpansionRouteContinuation"] = routeContinuation.map {
+                ["fromURL": $0.fromURL.absoluteString, "toURL": $0.toURL.absoluteString]
+            }
         }
         if let choice = session.modelChoice {
             if allowFirstUserExpansion {
@@ -1316,6 +1389,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             firstUserDiagnosticsObserverForTesting?(records)
             #endif
         }
+        #if DEBUG
+        if !routeContinuation.isEmpty { await firstUserExpansionRouteCheckpointForTesting?(.continuationInput) }
+        #endif
         browser.captureModelNativeFocus(tabID: session.tabID)
         defer { browser.restoreModelNativeFocus(tabID: session.tabID) }
         let result = EmbeddedScriptResult()
@@ -1398,8 +1474,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let promotedConversation = provider.isLocalConversation(session.conversation)
                 && nextConversation != nil && nextConversation != session.conversation
                 && !provider.isLocalConversation(nextConversation) && !session.promoted
-            Self.inspectionLog.info("routeTransition provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) submitted=\(session.submitted) oldConversation=\(current != nil) newConversation=\(nextConversation != nil) oldLocal=\(provider.isLocalConversation(current)) newLocal=\(provider.isLocalConversation(nextConversation)) refresh=\(refreshChangedRoute) first=\(firstConversation) promotion=\(promotedConversation)")
-            if ["inspect", "verifyModel", "verifyProductMode"].contains(action), refreshChangedRoute, firstConversation || promotedConversation {
+            Self.inspectionLog.info("routeTransition provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) submitted=\(session.submitted) oldConversation=\(current != nil) newConversation=\(nextConversation != nil) oldLocal=\(provider.isLocalConversation(current)) newLocal=\(provider.isLocalConversation(nextConversation)) refresh=\(routeRefreshAvailable) first=\(firstConversation) promotion=\(promotedConversation)")
+            if ["inspect", "verifyModel", "verifyProductMode"].contains(action), routeRefreshAvailable, firstConversation || promotedConversation {
                 // Discard every crossed read. ChatGPT can create a local route
                 // and promote it during the next read before either result can
                 // bind the conversation. Only that first empty-to-local edge
@@ -1407,11 +1483,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // predicates above reject another local or public conversation.
                 let awaitingLocalPromotion = firstConversation && current == nil
                     && provider.isLocalConversation(nextConversation)
+                let nextContinuation = allowFirstUserExpansion
+                    ? try Self.appendingFirstUserExpansionRoute(routeContinuation, from: url, to: currentURL) : []
+                #if DEBUG
+                if !nextContinuation.isEmpty { await firstUserExpansionRouteCheckpointForTesting?(.routeAccepted) }
+                #endif
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
                                       allowBlockedProvider: allowBlockedProvider,
-                                      firstUserExpansionRouteContinuation: allowFirstUserExpansion ? (url, currentURL) : nil,
+                                      firstUserExpansionRouteContinuation: nextContinuation,
                                       maximumWait: maximumWait)
             }
             let temporaryToggle = action == "enableTemporary" && session.state == "loading"
@@ -1523,7 +1604,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try await verifyProductModeAfterAwait(observed, session: session, action: action,
                                              recheck: recheckProductAfterAwait,
-                                             refreshChangedRoute: refreshChangedRoute,
+                                             refreshChangedRoute: routeRefreshAvailable,
                                              refreshReadOnlyObservation: refreshReadOnlyObservation,
                                              maximumWait: maximumWait,
                                              allowBlockedProvider: allowBlockedProvider,
@@ -1567,7 +1648,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if action == "inspect", session.pendingSubmission, count(observed, "userCount") == 0 {
                 try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
                                                        enforceModel: enforceModel, recheck: recheckModelAfterAwait,
-                                                       refreshChangedRoute: refreshChangedRoute,
+                                                       refreshChangedRoute: routeRefreshAvailable,
                                                        refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                        maximumWait: maximumWait)
                 if !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
@@ -1617,7 +1698,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
                                                enforceModel: enforceModel, recheck: recheckModelAfterAwait,
-                                               refreshChangedRoute: refreshChangedRoute,
+                                               refreshChangedRoute: routeRefreshAvailable,
                                                refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                maximumWait: maximumWait)
         return observed
@@ -1707,9 +1788,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     static func sanitizedProductModeDiagnostic(_ raw: Any?) -> String? {
+        let required: Set<String> = ["kind", "groupCount", "groupVisible", "recognized", "contradictory", "chat", "work",
+                                     "proofPresent", "proofInvalidated", "chatClickClaimed"]
+        let optional: Set<String> = ["productProofFailure", "productMutationRelevantCount", "productMutationIgnoredCount"]
         guard let value = raw as? [String: Any],
-              Set(value.keys) == ["kind", "groupCount", "groupVisible", "recognized", "contradictory", "chat", "work",
-                                  "proofPresent", "proofInvalidated", "chatClickClaimed"],
+              required.isSubset(of: Set(value.keys)), Set(value.keys).isSubset(of: required.union(optional)),
               value["kind"] as? String == "chatgpt_product_mode_structure",
               let count = value["groupCount"] as? NSNumber,
               CFGetTypeID(count) != CFBooleanGetTypeID(), (0...16).contains(count.intValue),
@@ -1721,6 +1804,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var safe: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": count.intValue]
         for key in ["groupVisible", "recognized", "contradictory", "proofPresent", "proofInvalidated", "chatClickClaimed"] {
             guard let flag = boolean(value[key]) else { return nil }; safe[key] = flag
+        }
+        if let rawFailure = value["productProofFailure"] {
+            guard let failure = rawFailure as? String, productProofFailures.contains(failure) else { return nil }
+            safe["productProofFailure"] = failure
+        }
+        for key in productMutationCounts {
+            if let rawCount = value[key] {
+                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...1_000).contains(count) else { return nil }
+                safe[key] = count
+            }
         }
         for key in ["chat", "work"] {
             if value[key] is NSNull { safe[key] = NSNull(); continue }
