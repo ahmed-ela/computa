@@ -31,10 +31,10 @@ final class HeadlessMLXServerTests: XCTestCase {
     func testHeadlessLaunchEndpointCannotInheritAnUnrelatedProviderDestination() throws {
         let inherited = ["CODEX_OSS_BASE_URL": "https://unrelated.example/v1", "CODEX_OSS_PORT": "1234", "OTHER": "preserved"]
         let headless = LocalInferenceBackend.headlessMLX.launchEnvironment(inherited)
-        XCTAssertEqual(headless, ["CODEX_OSS_BASE_URL": "http://127.0.0.1:1237/v1", "OTHER": "preserved"])
+        XCTAssertEqual(headless, ["CODEX_OSS_BASE_URL": "http://127.0.0.1:1237/v1/codex", "OTHER": "preserved"])
         XCTAssertEqual(LocalInferenceBackend.external.launchEnvironment(inherited), inherited)
         XCTAssertEqual(try LocalModelServerPreflight.endpoint(launchEnvironment: headless).absoluteString,
-                       "http://127.0.0.1:1237/v1/models")
+                       "http://127.0.0.1:1237/v1/codex/models")
     }
 
     func testLaunchUsesOnlyOwnedResourcePathsAndNoPrivateEnvironment() {
@@ -55,7 +55,7 @@ final class HeadlessMLXServerTests: XCTestCase {
         let resources = try FileManager.default.contentsOfDirectory(
             at: configuration.script.deletingLastPathComponent(), includingPropertiesForKeys: nil)
         XCTAssertEqual(Set(resources.map(\.lastPathComponent)),
-                       ["server.py", "response_boundary.py", "sse_contract.py", "producer_stream.py"])
+                       ["server.py", "response_boundary.py", "sse_contract.py", "producer_stream.py", "open_responses.py"])
     }
 
     func testOwnedMLXInstallationIsPreferredWithoutRequiringLegacyEnvironment() {

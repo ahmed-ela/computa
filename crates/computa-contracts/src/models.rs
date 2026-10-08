@@ -107,6 +107,11 @@ impl ModelId {
                 return Ok(Self::Local(local));
             }
         }
+        // The Rust website transport has not qualified concrete model selection.
+        // Never reinterpret a persisted Swift website choice as local inference.
+        if value.starts_with("browser/") {
+            return Err(ContractError::UnsupportedWebsiteModelChoice);
+        }
         Ok(Self::External(Identifier::new(value)?))
     }
 
@@ -152,5 +157,14 @@ mod tests {
         let model = ModelId::parse("custom-local-model").unwrap();
         assert!(matches!(model, ModelId::External(_)));
         assert_eq!(model.as_str(), "custom-local-model");
+    }
+
+    #[test]
+    fn unqualified_website_choices_never_enter_external_local_inference() {
+        for id in ["browser/chatgpt/choice/example", "browser/gemini/choice/example",
+            "browser/claude/choice/example", "browser/unknown"] {
+            assert_eq!(ModelId::parse(id), Err(ContractError::UnsupportedWebsiteModelChoice));
+            assert!(serde_json::from_value::<ModelId>(serde_json::json!(id)).is_err());
+        }
     }
 }

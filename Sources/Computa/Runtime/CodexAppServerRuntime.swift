@@ -115,6 +115,11 @@ struct AppServerTurnIdentityTracker: Sendable {
 
     func activeTurnID(for taskID: AgentTask.ID) -> String? { activeTurnIDs[taskID] }
     func latestTurnID(for taskID: AgentTask.ID) -> String? { latestTurnIDs[taskID] }
+
+    mutating func restoreLatestTurnID(taskID: AgentTask.ID, turnID: String) {
+        guard latestTurnIDs[taskID] == nil, !turnID.isEmpty, turnID.utf8.count <= 512 else { return }
+        latestTurnIDs[taskID] = turnID
+    }
     var hasActiveOrStartingTurns: Bool { !activeTurnIDs.isEmpty || !startTokens.isEmpty }
 
     mutating func beginStart(taskID: AgentTask.ID) -> UUID {
@@ -212,6 +217,53 @@ enum AppServerCompletedToolItemContract {
 }
 
 enum AppServerThreadHistoryContract {
+    /// A thread's unloaded/list status is not its last user turn's outcome.
+    /// Unknown/missing turn outcomes provide no evidence of failure.
+    static func latestUserTurnStatus(from data: Data, rejectedTurns: Set<String> = []) throws -> TaskStatus? {
+        let turns = try savedTurns(data)
+        guard let turn = turns.last(where: { ($0["items"] as? [[String: Any]] ?? []).contains { $0["type"] as? String == "userMessage" } }),
+              let id = turn["id"] as? String, !id.isEmpty, id.utf8.count <= 512 else { return nil }
+        if turn["status"] as? String == "inProgress", !rejectedTurns.contains(id) { return .running }
+        if rejectedTurns.contains(id) || hasSavedError(turn) { return .waiting }
+        switch turn["status"] as? String {
+        case "failed", "interrupted": return .waiting
+        case "completed": return .completed
+        default: return nil
+        }
+    }
+
+    static func turnIDs(from data: Data) throws -> Set<String> {
+        Set(try savedTurns(data).compactMap { turn in
+            guard let id = turn["id"] as? String, !id.isEmpty, id.utf8.count <= 512 else { return nil }
+            return id
+        })
+    }
+
+    static func latestUserTurnID(from data: Data) throws -> String? {
+        guard let turn = try savedTurns(data).last(where: { ($0["items"] as? [[String: Any]] ?? []).contains { $0["type"] as? String == "userMessage" } }),
+              let id = turn["id"] as? String, !id.isEmpty, id.utf8.count <= 512 else { return nil }
+        return id
+    }
+
+    private static func savedTurns(_ data: Data) throws -> [[String: Any]] {
+        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = envelope["result"] as? [String: Any],
+              let thread = result["thread"] as? [String: Any],
+              let turns = thread["turns"] as? [[String: Any]] else {
+            throw AgentRPCError(object: ["code": -32603, "message": "Saved chat history could not be read."])
+        }
+        return turns
+    }
+
+    private static func savedErrorMessage(_ turn: [String: Any]) -> String? {
+        guard let error = turn["error"] as? [String: Any], let message = error["message"] as? String,
+              !message.isEmpty, message.utf8.count <= 8_192 else { return nil }
+        return message
+    }
+
+    private static func hasSavedError(_ turn: [String: Any]) -> Bool {
+        turn["error"] != nil && !(turn["error"] is NSNull)
+    }
     /// Preserve actual user-turn ordering, including a later turn that made no
     /// patch changes. Maintenance-only turns do not replace a user-turn review.
     static func turnDiffs(from data: Data, saved: [AgentTurnDiff]) throws -> [AgentTurnDiff] {
@@ -232,12 +284,7 @@ enum AppServerThreadHistoryContract {
     }
 
     static func entries(from data: Data, excludingAssistantTurns excluded: Set<String> = []) throws -> [TimelineEntry] {
-        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let result = envelope["result"] as? [String: Any],
-              let thread = result["thread"] as? [String: Any],
-              let turns = thread["turns"] as? [[String: Any]] else {
-            throw AgentRPCError(object: ["code": -32603, "message": "Saved chat history could not be read."])
-        }
+        let turns = try savedTurns(data)
         var seen = Set<String>()
         var entries: [TimelineEntry] = []
         for turn in turns {
@@ -265,7 +312,9 @@ enum AppServerThreadHistoryContract {
                     entry = TimelineEntry(id: id, kind: .user, title: "You", body: text,
                         timestamp: timestamp, activityGroupID: userID)
                 case "agentMessage":
-                    guard !excluded.contains(turnID), let text = item["text"] as? String else { continue }
+                    guard !excluded.contains(turnID), turn["status"] as? String == "inProgress" || !hasSavedError(turn),
+                          !["failed", "interrupted"].contains(turn["status"] as? String ?? ""),
+                          let text = item["text"] as? String else { continue }
                     entry = TimelineEntry(id: id, kind: .assistant, title: "Computa", body: text,
                         timestamp: timestamp, activityGroupID: userID, assistantPhase: item["phase"] as? String)
                 case "reasoning":
@@ -290,7 +339,15 @@ enum AppServerThreadHistoryContract {
                         activityGroupID: userID)
                 default: entry = nil
                 }
-                if let entry { entries.append(entry) }
+                if var entry {
+                    if !turnID.isEmpty, turnID.utf8.count <= 512 { entry.turnID = turnID }
+                    entries.append(entry)
+                }
+            }
+            if turn["status"] as? String != "inProgress", let message = savedErrorMessage(turn), !turnID.isEmpty, turnID.utf8.count <= 512 {
+                let completed = (turn["completedAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? timestamp
+                entries.append(TimelineEntry(id: "agent-error:" + turnID, kind: .system, title: "Agent error",
+                    body: message, timestamp: completed, activityGroupID: userID, turnID: turnID))
             }
         }
         return entries
@@ -694,6 +751,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         }
         func validateSelectedModel(_ modelID: String) throws {
             if LocalModelCatalog.isWebBrowser(modelID) { return }
+            if modelID.hasPrefix("browser/") { throw WebsiteModelCatalog.Failure.invalidModelID }
             guard effectiveBackend == .headlessMLX,
                   !LocalModelCatalog.supportsHeadlessMLX(modelID) else { return }
             throw HeadlessMLXServer.Failure.unsupportedModel
@@ -799,6 +857,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         try await core.interrupt(taskID: taskID)
     }
 
+    func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt {
+        await core.retryWebsiteSessionCleanup(taskID: taskID)
+    }
+
     func resolveApproval(requestID: String, approved: Bool) async throws {
         try await core.resolveApproval(requestID: requestID, approved: approved)
     }
@@ -816,6 +878,11 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
     }
 
     #if DEBUG
+    /// Inert race-test observation only; it grants no runtime or browser action.
+    func waitForWebsiteSessionShutdownForFixture() async {
+        await core.waitForWebsiteSessionShutdownForFixture()
+    }
+
     /// Inert integration fixture only. Not a tool, WebKit message or Release API.
     func installOwnedBrowserBindingForFixture(taskID: AgentTask.ID, binding: BrowserTabBinding) async throws {
         try await core.installOwnedBrowserBindingForFixture(taskID: taskID, binding: binding)
@@ -1147,10 +1214,17 @@ private extension CodexAppServerRuntime {
         private var retryReportedForTurn: [AgentTask.ID: String] = [:]
         private var localProviderLaunchEnvironment: [String: String] = [:]
         private var inferenceServer: HeadlessMLXServer?
-        private let webModelServer = WebModelServer()
+        private let webModelServer: WebModelServer
         private var embeddedWebModelConfigured = false
         private var webProviderBaseURL: URL?
         private var webCleanupTasks: [AgentTask.ID: Task<[String], Never>] = [:]
+        private var manualWebCleanupTasks: [AgentTask.ID: Task<WebsiteSessionCleanupReceipt, Never>] = [:]
+        #if DEBUG
+        private var websiteCleanupShutdownWaiters: [CheckedContinuation<Void, Never>] = []
+        #endif
+        // Website ownership survives an engine restart; app restart creates a
+        // new generation and never reconstructs a private website-session token.
+        private let websiteSessionRuntimeGeneration = UUID()
         private var selectingInferenceModel = false
         private var inferenceSelectionTask: Task<Void, Error>?
         private var inferenceSelectionTaskID: AgentTask.ID?
@@ -1188,11 +1262,17 @@ private extension CodexAppServerRuntime {
             self.browserBroker = browserBroker
             self.visualGrounder = visualGrounder
             self.borrowedChromeConnector = borrowedChromeConnector
+            // Captures stay disabled unless a private, exact-task one-shot arm
+            // is explicitly created in this local diagnostic directory.
+            self.webModelServer = WebModelServer(rejectedReplyDirectory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("WebsiteReplyDiagnostics-v1", isDirectory: true))
         }
 
         func start() async throws {
             guard !isPreparingCommandShutdown, !isShuttingDown else { throw RuntimeError.serverStopped }
             if isReady { return }
+            guard manualWebCleanupTasks.isEmpty else { throw RuntimeError.serverError("Wait for website session cleanup to finish.") }
             guard !selectingInferenceModel else { throw HeadlessMLXServer.Failure.busy }
             guard !isStartingServer else {
                 throw RuntimeError.serverError("The App Server is still starting.")
@@ -1388,7 +1468,45 @@ private extension CodexAppServerRuntime {
         func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
             guard !isShuttingDown, !isPreparingCommandShutdown else { return }
             await webModelServer.configureEmbeddedTransport(transport)
+            await webModelServer.configureEvidenceDirectory(URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                .appendingPathComponent("WebsiteModelEvidence-v1", isDirectory: true))
+            await webModelServer.configureCleanupReceipts(directory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("WebsiteSessionCleanup-v1", isDirectory: true),
+                runtimeGeneration: websiteSessionRuntimeGeneration) { [events] receipt in
+                    events.yield(.websiteSessionCleanupUpdated(receipt))
+                }
             embeddedWebModelConfigured = true
+        }
+
+        func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt {
+            let generation = websiteSessionRuntimeGeneration
+            guard !isShuttingDown, !isPreparingCommandShutdown else {
+                return await webModelServer.recordCleanupRejection(taskID: taskID, runtimeGeneration: generation, reason: .shuttingDown)
+            }
+            // This operation never starts or resumes the model engine. Claim
+            // before suspension so submit/compact cannot acquire this task.
+            guard UUID(uuidString: taskID) != nil, threadForTask[taskID] != nil,
+                  turnIdentity.activeTurnID(for: taskID) == nil,
+                  turnSubmissionClaims[taskID] == nil, !compactionReservations.contains(taskID),
+                  !compactionTracker.isRunning(taskID: taskID), managedCompactions[taskID] == nil,
+                  !dynamicToolTasks.values.contains(where: { $0.taskID == taskID }),
+                  !pendingServerApprovals.values.contains(where: { $0.request.taskID == taskID }),
+                  !computerApprovalTask.values.contains(taskID),
+                  !commandCleanupTasks.contains(taskID), webCleanupTasks[taskID] == nil,
+                  manualWebCleanupTasks.isEmpty, !isStartingServer, !selectingInferenceModel else {
+                return await webModelServer.recordCleanupRejection(taskID: taskID, runtimeGeneration: generation, reason: .busy)
+            }
+            let threadID = threadForTask[taskID]
+            let turnID = turnIdentity.latestTurnID(for: taskID)
+            let operation = Task {
+                await webModelServer.registerCleanupTurn(taskID: taskID, threadID: threadID, turnID: turnID)
+                return await webModelServer.retryWebsiteSessionCleanup(taskID: taskID, runtimeGeneration: generation)
+            }
+            manualWebCleanupTasks[taskID] = operation
+            let receipt = await operation.value
+            manualWebCleanupTasks.removeValue(forKey: taskID)
+            return receipt
         }
 
         @discardableResult
@@ -1511,6 +1629,10 @@ private extension CodexAppServerRuntime {
         func shutdown() async -> RuntimeShutdownReport {
             if let shutdownTask { return await shutdownTask.value }
             isPreparingCommandShutdown = true
+            #if DEBUG
+            for waiter in websiteCleanupShutdownWaiters { waiter.resume() }
+            websiteCleanupShutdownWaiters.removeAll()
+            #endif
             cancelledSubmissions.formUnion(turnSubmissionClaims.values)
             // Cancel pending tool work before suspension or target cleanup.
             for operation in dynamicToolTasks.values { operation.task.cancel() }
@@ -1526,7 +1648,15 @@ private extension CodexAppServerRuntime {
             return await task.value
         }
 
+        #if DEBUG
+        func waitForWebsiteSessionShutdownForFixture() async {
+            if isPreparingCommandShutdown || isShuttingDown { return }
+            await withCheckedContinuation { websiteCleanupShutdownWaiters.append($0) }
+        }
+        #endif
+
         private func prepareCommandShutdown() async {
+            for cleanup in Array(manualWebCleanupTasks.values) { _ = await cleanup.value }
             let deadline = ContinuousClock.now.advanced(by: .seconds(10))
             let taskIDs = Set(ownedCommandItems.keys).union(threadForTask.keys.filter { turnIdentity.activeTurnID(for: $0) != nil })
             for taskID in taskIDs.sorted() {
@@ -1699,6 +1829,9 @@ private extension CodexAppServerRuntime {
         }
 
         func submit(prompt: String, taskID: AgentTask.ID, modelID: String) async throws {
+            guard manualWebCleanupTasks.isEmpty else {
+                throw RuntimeError.serverError("Wait for this task's website session cleanup to finish.")
+            }
             if let cleanup = webCleanupTasks[taskID] { _ = await cleanup.value }
             guard !isPreparingCommandShutdown, !commandCleanupTasks.contains(taskID) else {
                 throw RuntimeError.serverError("Wait for this task's command cleanup to finish.")
@@ -1707,6 +1840,7 @@ private extension CodexAppServerRuntime {
             try configuration.validateSelectedModel(modelID)
             try requireHeadlessInferenceIdle(for: modelID)
             guard turnIdentity.activeTurnID(for: taskID) == nil,
+                  manualWebCleanupTasks.isEmpty,
                   turnSubmissionClaims[taskID] == nil, !compactionReservations.contains(taskID),
                   !compactionTracker.isRunning(taskID: taskID),
                   contextStoppedTurns[taskID] == nil || turnIdentity.activeTurnID(for: taskID) == nil else {
@@ -1843,6 +1977,9 @@ private extension CodexAppServerRuntime {
             guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                   !cancelledSubmissions.contains(claim) else { throw CancellationError() }
             let previousModel = modelForTask.updateValue(modelID, forKey: taskID)
+            if LocalModelCatalog.isWebBrowser(modelID) {
+                await webModelServer.registerEvidenceThread(taskID: taskID, threadID: threadID)
+            }
             if previousModel != nil, previousModel != modelID { measuredContext.removeValue(forKey: taskID) }
             let compactLimit = (threadConfig(for: modelID)["model_auto_compact_token_limit"] as? Int) ?? 3_072
             if resumedWithoutUsage || (measuredContext[taskID]?.usedTokens ?? 0) >= compactLimit {
@@ -1999,13 +2136,45 @@ private extension CodexAppServerRuntime {
             guard !isShuttingDown, !isPreparingCommandShutdown else { throw CancellationError() }
         }
 
+        private func websiteTurnFailureStore() -> WebsiteTurnFailureStore {
+            WebsiteTurnFailureStore(directory: URL(fileURLWithPath: configuration.codexHomePath)
+                .appendingPathComponent("WebsiteTurnFailureStore-v1", isDirectory: true))
+        }
+
+        private func persistWebsiteTurnFailure(taskID: AgentTask.ID, threadID: String, turnID: String, diagnostic: String) {
+            guard let modelID = modelForTask[taskID], let record = WebsiteTurnFailureStore.Record.make(taskID: taskID,
+                threadID: threadID, turnID: turnID, modelID: modelID, diagnosticText: diagnostic) else { return }
+            if !websiteTurnFailureStore().append(record) {
+                events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
+                    title: "Website error record unavailable", body: "The failed turn remains stopped, but its native website diagnostic could not be saved locally.", turnID: turnID)))
+            }
+        }
+
+        private func terminalFailureMessage(taskID: AgentTask.ID, threadID: String, turnID: String, nativeMessage: String?) -> String? {
+            let diagnostic = LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "")
+                ? webModelServer.takeFailureDiagnostic(taskID: taskID) : nil
+            if let diagnostic { persistWebsiteTurnFailure(taskID: taskID, threadID: threadID, turnID: turnID, diagnostic: diagnostic) }
+            return diagnostic ?? nativeMessage
+        }
+
+        private func publishAgentError(taskID: AgentTask.ID, turnID: String, message: String) {
+            guard lastErrorMessageForTask[taskID] != message else { return }
+            lastErrorMessageForTask[taskID] = message
+            events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(id: "agent-error:" + turnID,
+                kind: .system, title: "Agent error", body: message, turnID: turnID)))
+        }
+
         @discardableResult
         private func scheduleWebCleanup(taskID: AgentTask.ID, cancelled: Bool) -> Task<[String], Never>? {
             guard LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "") else { return nil }
             if let existing = webCleanupTasks[taskID] { return existing }
+            let generation = websiteSessionRuntimeGeneration
+            let threadID = threadForTask[taskID]
+            let turnID = turnIdentity.latestTurnID(for: taskID)
             let cleanup = Task<[String], Never> {
-                let issues = cancelled ? await webModelServer.cancel(taskID: taskID)
-                    : await webModelServer.finish(taskID: taskID)
+                await webModelServer.registerCleanupTurn(taskID: taskID, threadID: threadID, turnID: turnID)
+                let issues = cancelled ? await webModelServer.cancel(taskID: taskID, runtimeGeneration: generation)
+                    : await webModelServer.finish(taskID: taskID, runtimeGeneration: generation)
                 if !issues.isEmpty {
                     childCleanupIssues.append(contentsOf: issues)
                     let message = "Your chat is saved in Computa. Closing the temporary website session could not be confirmed. " + issues.joined(separator: "; ")
@@ -2232,6 +2401,7 @@ private extension CodexAppServerRuntime {
             let modelID = modelForTask[taskID] ?? configuration.model
             try requireHeadlessInferenceIdle(for: modelID)
             guard !isShuttingDown, turnIdentity.activeTurnID(for: taskID) == nil,
+                  manualWebCleanupTasks.isEmpty,
                   turnSubmissionClaims[taskID] == nil,
                   !compactionReservations.contains(taskID),
                   let threadID = threadForTask[taskID] else {
@@ -2449,9 +2619,12 @@ private extension CodexAppServerRuntime {
             }
 
             var tasks = records.compactMap { record -> AgentTask? in
-                guard let id = record["id"] as? String else { return nil }
-                threadForTask[id] = id
-                taskForThread[id] = id
+                guard let threadID = record["id"] as? String else { return nil }
+                // Another window may reload the shared live runtime. Preserve
+                // its exact private task association; a fresh app has no map.
+                let id = taskForThread[threadID] ?? threadID
+                threadForTask[id] = threadID
+                taskForThread[threadID] = id
                 workspaceForTask[id] = record["cwd"] as? String ?? configuration.workspacePath
 
                 let preview = record["preview"] as? String ?? ""
@@ -2486,22 +2659,42 @@ private extension CodexAppServerRuntime {
                     updatedAt: Date(timeIntervalSince1970: updatedSeconds),
                     workspace: record["cwd"] as? String ?? configuration.workspacePath,
                     model: modelID,
-                    entries: nativeFailureEntries(threadID: id)
+                    entries: nativeFailureEntries(threadID: threadID)
                 )
             }
             for index in tasks.indices {
                 let taskID = tasks[index].id
+                let threadID = threadForTask[taskID] ?? taskID
                 do {
                     let history = try await request(method: "thread/read", params: [
-                        "threadId": taskID, "includeTurns": true,
+                        "threadId": threadID, "includeTurns": true,
                     ])
-                    let failures = try nativeFailureStore().load(threadID: taskID)
-                    let rejectedTurns = Set(failures.map(\.turnID))
+                    let failures = try nativeFailureStore().load(threadID: threadID)
+                    let historyTurnIDs = try AppServerThreadHistoryContract.turnIDs(from: history)
+                    let websiteFailures = ((try? websiteTurnFailureStore().load(threadID: threadID)) ?? [])
+                        .filter { historyTurnIDs.contains($0.turnID) }
+                    let rejectedTurns = Set(failures.map(\.turnID) + websiteFailures.map(\.turnID))
                     tasks[index].entries = try AppServerThreadHistoryContract.entries(from: history,
-                        excludingAssistantTurns: rejectedTurns) + nativeFailureEntries(threadID: taskID)
+                        excludingAssistantTurns: rejectedTurns) + nativeFailureEntries(threadID: threadID)
+                    for record in websiteFailures {
+                        guard let user = tasks[index].entries.first(where: { $0.kind == .user && $0.turnID == record.turnID }) else { continue }
+                        var restored = record.entry
+                        restored.activityGroupID = user.activityGroupID
+                        if let errorIndex = tasks[index].entries.firstIndex(where: { $0.id == record.entry.id }) {
+                            tasks[index].entries[errorIndex] = restored
+                        } else if let lastIndex = tasks[index].entries.lastIndex(where: { $0.turnID == record.turnID }) {
+                            tasks[index].entries.insert(restored, at: lastIndex + 1)
+                        }
+                    }
+                    let latestTurnID = try AppServerThreadHistoryContract.latestUserTurnID(from: history)
+                    if let latestTurnID { turnIdentity.restoreLatestTurnID(taskID: taskID, turnID: latestTurnID) }
+                    if (tasks[index].status != .running || latestTurnID.map(rejectedTurns.contains) == true),
+                       let restoredStatus = try AppServerThreadHistoryContract.latestUserTurnStatus(from: history, rejectedTurns: rejectedTurns) {
+                        tasks[index].status = restoredStatus
+                    }
                     do {
                         tasks[index].turnDiffs = try AppServerThreadHistoryContract.turnDiffs(from: history,
-                            saved: turnDiffStore().load(threadID: taskID))
+                            saved: turnDiffStore().load(threadID: threadID))
                         initializedDiffTurns[taskID] = Set(tasks[index].turnDiffs.map(\.id))
                     }
                     catch {
@@ -2518,6 +2711,9 @@ private extension CodexAppServerRuntime {
                     && LocalModelCatalog.supportsResidentVisualGrounding($0.model)
             }) {
                 prepareVisualGrounderInBackground()
+            }
+            for receipt in await webModelServer.latestCleanupReceipts() {
+                events.yield(.websiteSessionCleanupUpdated(receipt))
             }
             return tasks
         }
@@ -2734,6 +2930,13 @@ private extension CodexAppServerRuntime {
                 let wasContextStopped = contextStoppedTurns[taskID] == turn?["id"] as? String
                 let wasNativeStopped = nativeStoppedTurns[taskID] == turn?["id"] as? String
                 var completionStatus: TaskStatus = wasContextStopped || wasNativeStopped ? .waiting : AppServerTurnCompletionContract.status(for: turn)
+                if completionStatus == .waiting, let turnID = turn?["id"] as? String {
+                    let rawMessage = (turn?["error"] as? [String: Any])?["message"] as? String
+                    let savedMessage = rawMessage.flatMap { !$0.isEmpty && $0.utf8.count <= 8_192 ? $0 : nil }
+                    if let message = terminalFailureMessage(taskID: taskID, threadID: threadID, turnID: turnID, nativeMessage: savedMessage) {
+                        publishAgentError(taskID: taskID, turnID: turnID, message: message)
+                    }
+                }
                 if managedCompactions[taskID] == nil, !wasNativeStopped, !wasContextStopped,
                    let diagnostic = computerCompletionDiagnostic(taskID: taskID) {
                     emitComputerOutcomeDiagnostic(taskID: taskID, turnID: turn?["id"] as? String ?? "unknown", message: diagnostic)
@@ -3054,8 +3257,9 @@ private extension CodexAppServerRuntime {
                         body: "The runtime reported a recoverable model request failure and is retrying. This turn is still active; check the local model server or stop the turn before resending."
                     )))
                 }
-                guard case .terminal(let failedTurnID, let message) = disposition,
+                guard case .terminal(let failedTurnID, let nativeMessage) = disposition,
                       turnIdentity.complete(taskID: taskID, turnID: failedTurnID) else { return }
+                let message = terminalFailureMessage(taskID: taskID, threadID: threadID, turnID: failedTurnID, nativeMessage: nativeMessage) ?? nativeMessage
                 finishCommandPresentation(taskID: taskID, reason: "Turn failed; final exit status unconfirmed", interrupted: true)
                 events.yield(.assistantMessagesDiscarded(taskID: taskID))
                 pendingAssistantItems.removeValue(forKey: taskID)
@@ -3080,13 +3284,7 @@ private extension CodexAppServerRuntime {
                 } else {
                     compactionReservations.remove(taskID)
                 }
-                if lastErrorMessageForTask[taskID] != message {
-                    lastErrorMessageForTask[taskID] = message
-                    events.yield(.timelineEntryAppended(
-                        taskID: taskID,
-                        entry: TimelineEntry(kind: .system, title: "Agent error", body: message)
-                    ))
-                }
+                publishAgentError(taskID: taskID, turnID: failedTurnID, message: message)
                 publishTerminalStatus(taskID: taskID, status: .waiting, cancelled: true)
 
             default:

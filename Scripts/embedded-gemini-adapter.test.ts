@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { Element, fixture, firstMarker, markerLine } from "./embedded-provider-adapter-fixture";
+import { defineWebsiteModelChoiceTests } from "./embedded-model-choice-tests";
 const provider = "gemini";
 const prompt = 'Use `tool_calls` with C++ "quoted" text\n\n  two spaces and\u00a0NBSP';
 const outbound = prompt + "\n\n" + markerLine;
+
+defineWebsiteModelChoiceTests(provider, (owned = false) => fixture(provider, owned ? { userPrompt: 'Synthetic owned prompt' } : {}), Element);
 
 function observedGeminiCodeBlock(f: ReturnType<typeof fixture>, raw: string) {
   f.answer.text = ""; f.answer.children = [];

@@ -4,6 +4,7 @@ import re
 import uuid
 
 from sse_contract import ProtocolError, SSEContract, protocol_error_diagnostic
+from open_responses import ResponseProfile, error_payload
 
 MAX_ERROR_BODY = 64 * 1024
 CONTEXT_LIMIT = 16384
@@ -63,9 +64,11 @@ def stream_start():
 
 
 class ResponseBoundary:
-    def __init__(self, send, max_output_tokens, producer=None):
+    def __init__(self, send, max_output_tokens, producer=None, request=None, *, codex_usage=False):
         self.send = send
-        self.contract = SSEContract(max_output_tokens=max_output_tokens)
+        self.contract = SSEContract(max_output_tokens=max_output_tokens,
+                                    profile=ResponseProfile(request, producer, max_output_tokens,
+                                                            codex_usage=codex_usage))
         self.start = None
         self.error_body = bytearray()
         self.sent_start = False
@@ -87,9 +90,6 @@ class ResponseBoundary:
                     raise ProtocolError("Expected a Responses event stream.")
                 await self.send(stream_start())
                 self.sent_start = True
-            elif status != 400:
-                await self.send(message)
-                self.sent_start = True
             return
         if message["type"] != "http.response.body" or self.start is None:
             raise ProtocolError("Missing response start.")
@@ -107,31 +107,29 @@ class ResponseBoundary:
                 output += self.contract.finish()
             if output or final:
                 await self.send({"type": "http.response.body", "body": output, "more_body": not final})
-        elif status == 400:
+        else:
             if len(self.error_body) + len(body) > MAX_ERROR_BODY:
                 raise ProtocolError("Upstream error body limit exceeded.")
             self.error_body.extend(body)
             if final:
                 budget = context_overflow_budget(self.error_body,
                                                  max_output_tokens=self.contract.max_output_tokens)
-                if budget is not None:
+                if status == 400 and budget is not None:
                     await self.send(stream_start())
                     self.sent_start = True
-                    event = {"type": "response.failed", "sequence_number": 0, "response": {
-                        "id": "resp_" + uuid.uuid4().hex, "object": "response", "status": "failed",
-                        "output": [], "error": {"code": "context_length_exceeded",
-                            "message": "Local input and output allowance exceed the 16384-token context window."},
-                        # Numeric-only evidence; never retain prompt text, tool
-                        # results, image payloads or upstream exception bodies.
-                        "context_budget": budget}}
-                    payload = ("event: response.failed\ndata: " + json.dumps(event, separators=(",", ":")) + "\n\n").encode()
+                    payload = self.contract.failure(code="context_length_exceeded",
+                        message="Local input and output allowance exceed the 16384-token context window.",
+                        kind="invalid_request", param="input", context_budget=budget)
                     await self.send({"type": "http.response.body", "body": payload})
                 else:
-                    await self.send(self.start)
+                    # No upstream exception body enters the public protocol.
+                    kind = "too_many_requests" if status == 429 else "not_found" if status == 404 else "server_error" if status >= 500 else "invalid_request"
+                    payload = json.dumps({"error": error_payload("The local model could not process this request.",
+                        kind=kind, code="local_provider_error")}, separators=(",", ":")).encode()
+                    await self.send({"type": "http.response.start", "status": status, "headers": [
+                        (b"content-type", b"application/json"), (b"cache-control", b"no-store")]})
                     self.sent_start = True
-                    await self.send({"type": "http.response.body", "body": bytes(self.error_body)})
-        else:
-            await self.send(message)
+                    await self.send({"type": "http.response.body", "body": payload})
         self.closed = final
 
     async def fail(self, error=None):

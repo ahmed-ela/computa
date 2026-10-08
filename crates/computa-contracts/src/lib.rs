@@ -44,6 +44,8 @@ pub enum ContractError {
     InvalidIdentifier,
     #[error("The prompt is empty or exceeds its byte limit")]
     InvalidPrompt,
+    #[error("Specific website model choices require the qualified Swift desktop runtime")]
+    UnsupportedWebsiteModelChoice,
 }
 
 pub fn validate_prompt(prompt: &str) -> Result<(), ContractError> {

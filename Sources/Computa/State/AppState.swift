@@ -22,6 +22,13 @@ final class AppState {
     @ObservationIgnored private var chromePreferenceGeneration: UInt64 = 0
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
     @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored private var embeddedModelTransport: EmbeddedWebModelTransport?
+    @ObservationIgnored private let websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])?
+    @ObservationIgnored private var websiteModelRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var websiteModelRefreshGeneration: UUID?
+    @ObservationIgnored private var websiteModelRefreshProviders: [String] = []
+    @ObservationIgnored private var websiteModelRefreshRetriesBlocked = false
+    @ObservationIgnored private var didStartWebsiteModelDiscovery = false
     // Keep the persisted key across the Computa rename.
     private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
     private static let accessModePreferenceKey = "HeyDash.accessMode"
@@ -50,6 +57,9 @@ final class AppState {
 
     var appearance: AppAppearance = .system
     var defaultModel: String
+    private(set) var websiteModelChoices: [WebsiteModelChoice]
+    private(set) var websiteModelsRefreshing = false
+    private(set) var websiteModelsError: String?
     var showToolPayloads = false
     var connectionState: RuntimeConnectionState = .disconnected
     private(set) var chromeConnectionState: ChromeConnectionState = .disconnected
@@ -78,6 +88,8 @@ final class AppState {
     private var provisionalReasoningItemIDs: [AgentTask.ID: Set<TimelineEntry.ID>] = [:]
     private var discardedReasoningItemIDs: [AgentTask.ID: Set<TimelineEntry.ID>] = [:]
     var interruptingTaskIDs: Set<AgentTask.ID> = []
+    private(set) var websiteSessionCleanupTaskIDs: Set<AgentTask.ID> = []
+    private(set) var websiteSessionCleanupReceipts: [AgentTask.ID: WebsiteSessionCleanupReceipt] = [:]
     var queuedPrompts: [AgentTask.ID: [QueuedPrompt]] = [:]
     var pausedQueueTaskIDs: Set<AgentTask.ID> = []
     var promptReceipts: [PromptReceipt] = []
@@ -100,6 +112,7 @@ final class AppState {
         preferences: UserDefaults = .standard,
         browserSession: EmbeddedBrowserSession? = nil,
         enableChromeExtensionBridge: Bool = false,
+        websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])? = nil,
         chromeTargetProvider: @escaping @MainActor () throws -> NativeChromeConnectionTarget = {
             try NativeChromeConnectionTarget.prepare()
         }
@@ -107,18 +120,24 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        self.websiteModelDiscovery = websiteModelDiscovery
         self.browserSession = browserSession ?? EmbeddedBrowserSession(defaults: preferences)
         self.chromeTargetProvider = chromeTargetProvider
         remembersChromeConnection = RememberedChromeConnection.load(from: preferences) != nil
         let storedAccessMode = preferences.object(forKey: Self.accessModePreferenceKey) as? String
         accessMode = storedAccessMode.flatMap(AccessMode.init(rawValue:)) ?? .askEveryTime
         let storedModel = preferences.string(forKey: Self.defaultModelPreferenceKey)
-        defaultModel = storedModel.flatMap(LocalModelCatalog.option(for:))?.id
-            ?? LocalModelCatalog.defaultModelID
+        defaultModel = storedModel.flatMap { id in
+            // Saved website choices remain selected if an account/menu changes.
+            // Invalid ones are visible and rejected, never replaced with Qwen.
+            id.hasPrefix("browser/") ? id : LocalModelCatalog.option(for: id)?.id
+        } ?? LocalModelCatalog.defaultModelID
+        websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()
         self.tasks = tasks
         selectedTaskID = tasks.first?.id
         selectedEntryID = tasks.first?.entries.last?.id
+        retireWebsiteModelSelections()
         if enableChromeExtensionBridge {
             extensionBridge = BrowserExtensionCoordinator(preferences: preferences, onAdmission: { [weak self] request in
                 guard let self, self.canConnectChrome else { request.consent.revoke(); return false }
@@ -133,6 +152,130 @@ final class AppState {
     var selectedTask: AgentTask? {
         guard let selectedTaskID else { return nil }
         return tasks.first { $0.id == selectedTaskID }
+    }
+
+    var modelOptions: [LocalModelOption] {
+        var options = LocalModelCatalog.options.flatMap { option -> [LocalModelOption] in
+            guard let provider = LocalModelCatalog.webProvider(for: option.id) else { return [option] }
+            return [option] + websiteModelChoices.filter { $0.provider == provider && $0.isSelectable }.map { WebsiteModelCatalog.option(for: $0) }
+        }
+        for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
+            where id.hasPrefix("browser/") && !options.contains(where: { $0.id == id }) {
+            if let choice = WebsiteModelCatalog.choice(for: id) {
+                guard !choice.isRetired else { continue }
+                options.append(WebsiteModelCatalog.option(for: choice, available: false))
+            } else {
+                options.append(LocalModelOption(id: id, label: "Unavailable website choice",
+                    detail: WebsiteModelCatalog.Failure.invalidModelID.localizedDescription,
+                    highMemory: false, available: false))
+            }
+        }
+        return options
+    }
+
+    /// Explicitly removed choices migrate only the next inference's selection.
+    /// Recorded messages and active/queued turns retain their original identity.
+    private func retireWebsiteModelSelections() {
+        let choices = websiteModelChoices.filter { $0.provider == "chatgpt" && $0.isSelectable }
+        let replacement = choices.first { $0.key == "GPT-5.6 Sol" }?.modelID
+            ?? choices.first?.modelID ?? "browser/chatgpt"
+        if WebsiteModelCatalog.choice(for: defaultModel)?.isRetired == true {
+            defaultModel = replacement
+            preferences.set(replacement, forKey: Self.defaultModelPreferenceKey)
+        }
+        for index in tasks.indices where WebsiteModelCatalog.choice(for: tasks[index].model)?.isRetired == true {
+            let taskID = tasks[index].id
+            guard canChangeModel(for: taskID) else { continue }
+            tasks[index].model = replacement
+            contextUsageByTask.removeValue(forKey: taskID)
+            compactionStateByTask.removeValue(forKey: taskID)
+        }
+    }
+
+    private func websiteTransport() -> EmbeddedWebModelTransport {
+        if let embeddedModelTransport { return embeddedModelTransport }
+        let transport = EmbeddedWebModelTransport(browser: browserSession)
+        embeddedModelTransport = transport
+        return transport
+    }
+
+    /// Called after the privileged WebUI is ready and its background render host
+    /// is attached. Saved choices are immediately usable; only providers with
+    /// no saved choices need startup discovery. An explicit refresh can replace
+    /// the saved catalog without adding provider page loads on every launch.
+    func refreshWebsiteModelsIfNeeded() {
+        guard !didStartWebsiteModelDiscovery, runtime != nil || websiteModelDiscovery != nil else { return }
+        didStartWebsiteModelDiscovery = true
+        let missing = WebsiteModelCatalog.providers.filter { provider in
+            !websiteModelChoices.contains { $0.provider == provider }
+        }
+        guard !missing.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            await self?.refreshWebsiteModels(providers: missing, retryBlocked: false)
+        }
+    }
+
+    func refreshWebsiteModels() async {
+        await refreshWebsiteModels(providers: WebsiteModelCatalog.providers, retryBlocked: true)
+    }
+
+    private func refreshWebsiteModels(providers: [String], retryBlocked: Bool) async {
+        guard !isShuttingDown, !approvalGateBlocksInteraction else { return }
+        if let websiteModelRefreshTask {
+            // Extend an in-flight partial startup refresh rather than dropping
+            // an explicit full refresh or loading a provider twice.
+            for provider in providers where !websiteModelRefreshProviders.contains(provider) {
+                websiteModelRefreshProviders.append(provider)
+            }
+            websiteModelRefreshRetriesBlocked = websiteModelRefreshRetriesBlocked || retryBlocked
+            await websiteModelRefreshTask.value
+            return
+        }
+        let generation = UUID()
+        websiteModelRefreshGeneration = generation
+        websiteModelRefreshProviders = providers
+        websiteModelRefreshRetriesBlocked = retryBlocked
+        websiteModelsRefreshing = true
+        websiteModelsError = nil
+        let refresh = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var errors: [String] = []
+            var providerIndex = 0
+            while providerIndex < self.websiteModelRefreshProviders.count {
+                guard !Task.isCancelled, !self.isShuttingDown else { break }
+                let provider = self.websiteModelRefreshProviders[providerIndex]
+                providerIndex += 1
+                do {
+                    let choices: [WebsiteModelChoice]
+                    if let discovery = self.websiteModelDiscovery { choices = try await discovery(provider) }
+                    else {
+                        choices = try await self.websiteTransport().discoverModels(provider: provider,
+                            retryBlocked: self.websiteModelRefreshRetriesBlocked)
+                    }
+                    guard !Task.isCancelled, !self.isShuttingDown,
+                          self.websiteModelRefreshGeneration == generation else { break }
+                    try WebsiteModelCatalog.validate(choices, provider: provider)
+                    self.websiteModelChoices.removeAll { $0.provider == provider }
+                    self.websiteModelChoices.append(contentsOf: choices.filter(\.isSelectable))
+                    WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
+                    self.retireWebsiteModelSelections()
+                } catch is CancellationError {
+                    break
+                } catch {
+                    guard !self.isShuttingDown, self.websiteModelRefreshGeneration == generation else { break }
+                    errors.append("\(WebsiteModelCatalog.providerLabel(provider)): \(error.localizedDescription)")
+                }
+            }
+            guard self.websiteModelRefreshGeneration == generation else { return }
+            self.websiteModelsError = errors.isEmpty ? nil : errors.joined(separator: "\n")
+            self.websiteModelsRefreshing = false
+            self.websiteModelRefreshTask = nil
+            self.websiteModelRefreshGeneration = nil
+            self.websiteModelRefreshProviders = []
+            self.websiteModelRefreshRetriesBlocked = false
+        }
+        websiteModelRefreshTask = refresh
+        await refresh.value
     }
 
     /// Settings is rendered inside the privileged UI document. Temporarily
@@ -549,7 +692,7 @@ final class AppState {
 
     @discardableResult
     func setDefaultModel(_ modelID: String) -> Bool {
-        guard LocalModelCatalog.option(for: modelID) != nil else { return false }
+        guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false else { return false }
         defaultModel = modelID
         preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
         return true
@@ -557,7 +700,7 @@ final class AppState {
 
     @discardableResult
     func setTaskModel(_ modelID: String, taskID: AgentTask.ID) -> Bool {
-        guard LocalModelCatalog.option(for: modelID) != nil,
+        guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false,
               let index = tasks.firstIndex(where: { $0.id == taskID }),
               canChangeModel(for: taskID)
         else { return false }
@@ -583,6 +726,96 @@ final class AppState {
             || !resolvingApprovalIDs.isEmpty
             || steeringTaskIDs.contains(taskID)
             || reviewMutationTaskIDs.contains(taskID)
+            || websiteSessionCleanupTaskIDs.contains(taskID)
+    }
+
+    /// A cleanup retry never resumes the failed turn or drains its prompt queue.
+    func canRetryWebsiteSessionCleanup(taskID: AgentTask.ID) -> Bool {
+        guard runtime != nil, !isShuttingDown,
+              case .connected = connectionState,
+              !approvalGateBlocksInteraction, pendingApprovals.isEmpty, resolvingApprovalIDs.isEmpty,
+              !isBusy(taskID: taskID), !interruptingTaskIDs.contains(taskID),
+              !dispatchingQueueTaskIDs.contains(taskID),
+              !queuedPrompts[taskID, default: []].contains(where: { $0.status == .sending }),
+              let task = tasks.first(where: { $0.id == taskID }), task.status == .waiting,
+              let lastUser = task.entries.lastIndex(where: { $0.kind == .user })
+        else { return false }
+        if let receipt = currentWebsiteSessionCleanupReceipt(taskID: taskID) {
+            guard receipt.outcome == .unconfirmed else { return false }
+            if receipt.provider != nil, receipt.route != nil,
+               receipt.modelID.map(LocalModelCatalog.isWebBrowser) == true { return true }
+        }
+        guard LocalModelCatalog.isWebBrowser(task.model) else { return false }
+        return task.entries[lastUser...].contains {
+            $0.kind == .system && ["Agent error", "Website session cleanup unconfirmed"].contains($0.title)
+        }
+    }
+
+    func currentWebsiteSessionCleanupReceipt(taskID: AgentTask.ID) -> WebsiteSessionCleanupReceipt? {
+        guard let receipt = websiteSessionCleanupReceipts[taskID],
+              let task = tasks.first(where: { $0.id == taskID }),
+              let user = task.entries.last(where: { $0.kind == .user }) else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let observedAt = formatter.date(from: receipt.timestamp), observedAt >= user.timestamp else { return nil }
+        return receipt
+    }
+
+    /// Claim synchronously at the UI boundary so duplicate clicks and queued
+    /// submissions cannot race the cleanup-only runtime call.
+    @discardableResult
+    func requestWebsiteSessionCleanup(taskID: AgentTask.ID) -> Bool {
+        guard canRetryWebsiteSessionCleanup(taskID: taskID), let runtime else { return false }
+        websiteSessionCleanupTaskIDs.insert(taskID)
+        pausedQueueTaskIDs.insert(taskID)
+        Task { @MainActor [weak self] in
+            let receipt = await runtime.retryWebsiteSessionCleanup(taskID: taskID)
+            guard let self else { return }
+            self.websiteSessionCleanupTaskIDs.remove(taskID)
+            guard !self.isShuttingDown, receipt.isValid, receipt.taskID == taskID.lowercased(),
+                  let index = self.tasks.firstIndex(where: { $0.id == taskID }) else { return }
+            self.recordWebsiteSessionCleanupReceipt(receipt, taskID: taskID)
+            // The runtime persists the finite receipt separately. This local
+            // timeline copy displays that same attempt, without replaying it.
+            let entryID = "website-session-cleanup-" + receipt.attemptID
+            guard !self.tasks[index].entries.contains(where: { $0.id == entryID }) else { return }
+            let body: String
+            switch receipt.outcome {
+            case .closed:
+                body = "Computa confirmed that this task's owned website session is closed. Your local chat is retained."
+            case .noOwnedSession:
+                body = "Computa currently has no owned website session for this task. This does not confirm whether an earlier website conversation was deleted."
+            case .unconfirmed:
+                body = "Computa could not confirm website session cleanup. The task remains paused."
+            }
+            let entry = TimelineEntry(id: entryID, kind: .system, title: "Website session cleanup",
+                body: body + " No prompt was sent and the model was not restarted."
+                    + (receipt.receiptSaved ? "" : " The cleanup receipt could not be saved locally."))
+            self.tasks[index].entries.append(entry)
+            self.tasks[index].updatedAt = max(self.tasks[index].updatedAt, entry.timestamp)
+            if self.selectedTaskID == taskID { self.selectedEntryID = entry.id }
+        }
+        return true
+    }
+
+    private func recordWebsiteSessionCleanupReceipt(_ receipt: WebsiteSessionCleanupReceipt, taskID: AgentTask.ID) {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let timestamp = formatter.date(from: receipt.timestamp) else { return }
+        if let current = websiteSessionCleanupReceipts[taskID],
+           let currentTimestamp = formatter.date(from: current.timestamp), timestamp <= currentTimestamp { return }
+        websiteSessionCleanupReceipts[taskID] = receipt
+    }
+
+    private func projectWebsiteSessionCleanupReceipt(_ receipt: WebsiteSessionCleanupReceipt) {
+        guard receipt.isValid else { return }
+        let task = tasks.first(where: { $0.id.lowercased() == receipt.taskID })
+            ?? receipt.threadID.flatMap { thread in tasks.first(where: { $0.id.lowercased() == thread }) }
+        if let task {
+            // A persisted thread match is presentation provenance, never a
+            // recreation of the receipt's old live website-session association.
+            recordWebsiteSessionCleanupReceipt(receipt, taskID: task.id)
+        }
     }
 
     func activeTurnStartedAt(for taskID: AgentTask.ID) -> TimeInterval? {
@@ -921,7 +1154,7 @@ final class AppState {
         connectionState = .connecting
 
         do {
-            await runtime.configureEmbeddedWebModelTransport(EmbeddedWebModelTransport(browser: browserSession))
+            await runtime.configureEmbeddedWebModelTransport(websiteTransport())
             guard !Task.isCancelled, !isShuttingDown else { return }
             let snapshot = try await runtime.loadTasks()
             guard !isShuttingDown else { return }
@@ -946,6 +1179,10 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        websiteModelRefreshTask?.cancel()
+        let websiteRefresh = websiteModelRefreshTask
+        websiteModelRefreshGeneration = nil
+        websiteModelsRefreshing = false
         reviewGeneration &+= 1
         reviewRefresh?.cancel()
         reviewNeedsRefresh.removeAll()
@@ -963,6 +1200,7 @@ final class AppState {
         let browserSession = self.browserSession
         let chromeCleanup = chromeCleanupTask
         let task = Task {
+            await websiteRefresh?.value
             await chromeCleanup?.value
             let report = await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
             browserSession.shutdown()
@@ -970,6 +1208,9 @@ final class AppState {
         }
         runtimeShutdown = task
         let report = await task.value
+        websiteModelRefreshTask = nil
+        websiteModelRefreshProviders = []
+        websiteModelRefreshRetriesBlocked = false
         pendingApprovals.removeAll()
         resolvingApprovalIDs.removeAll()
         approvalAttemptTaskIDs.removeAll()
@@ -990,6 +1231,9 @@ final class AppState {
 
     func replaceTasks(with newTasks: [AgentTask]) {
         let priorSelection = selectedTaskID
+        let cleanupReceipts = websiteSessionCleanupReceipts.values.sorted {
+            $0.timestamp == $1.timestamp ? $0.attemptID < $1.attemptID : $0.timestamp < $1.timestamp
+        }
         discardAllMessageDrafts()
         tasks = newTasks
         selectedTaskID = newTasks.contains(where: { $0.id == priorSelection })
@@ -1010,10 +1254,17 @@ final class AppState {
         }
         contextUsageByTask = contextUsageByTask.filter { liveTaskIDs.contains($0.key) }
         compactionStateByTask = compactionStateByTask.filter { liveTaskIDs.contains($0.key) }
+        websiteSessionCleanupReceipts = websiteSessionCleanupReceipts.filter { liveTaskIDs.contains($0.key) }
+        for receipt in cleanupReceipts { projectWebsiteSessionCleanupReceipt(receipt) }
+        retireWebsiteModelSelections()
     }
 
     func apply(_ event: AgentRuntimeEvent) {
         switch event {
+        case .websiteSessionCleanupUpdated(let receipt):
+            guard !isShuttingDown, receipt.isValid else { return }
+            projectWebsiteSessionCleanupReceipt(receipt)
+
         case .tasksSnapshot(let snapshot):
             replaceTasks(with: snapshot)
 
@@ -1025,6 +1276,7 @@ final class AppState {
             } else {
                 tasks.insert(task, at: 0)
             }
+            retireWebsiteModelSelections()
 
         case .turnDiffUpdated(let taskID, let turnID, let diff):
             guard let index = tasks.firstIndex(where: { $0.id == taskID }), !turnID.isEmpty else { return }
@@ -1038,6 +1290,7 @@ final class AppState {
 
         case .timelineEntryAppended(let taskID, let entry):
             guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+            if entry.kind == .user { websiteSessionCleanupReceipts.removeValue(forKey: taskID) }
             var completedEntry = entry
             completedEntry.activityGroupID = activeActivityGroupID(for: taskID) ?? entry.activityGroupID
             if entry.kind == .assistant {
@@ -1205,6 +1458,7 @@ final class AppState {
                 activeTurnTaskIDs.remove(taskID)
                 interruptingTaskIDs.remove(taskID)
                 pendingApprovals.removeAll { $0.taskID == taskID }
+                retireWebsiteModelSelections()
                 automaticApprovalAttemptedRequests = automaticApprovalAttemptedRequests.filter {
                     $0.taskID != taskID
                 }
@@ -1367,6 +1621,7 @@ final class AppState {
         if let pendingConnection = chromeConnectionTask { await pendingConnection.value }
         if let cleanup = chromeCleanupTask { await cleanup.value }
         guard !Task.isCancelled else { return .notDelivered("Submission was cancelled before delivery.") }
+        retireWebsiteModelSelections()
         let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty,
               !isShuttingDown,
@@ -1381,6 +1636,7 @@ final class AppState {
             title: "You",
             body: prompt
         )
+        websiteSessionCleanupReceipts.removeValue(forKey: taskID)
         entry.activityGroupID = entry.id
         tasks[index].entries.append(entry)
         tasks[index].summary = prompt
@@ -1416,6 +1672,8 @@ final class AppState {
                 tasks[currentIndex].status = .waiting
                 let rejectedBeforeDispatch: Bool
                 if case .embeddedRequired? = error as? WebModelServer.Failure {
+                    rejectedBeforeDispatch = true
+                } else if error is LocalModelServerPreflight.Failure {
                     rejectedBeforeDispatch = true
                 } else { rejectedBeforeDispatch = false }
                 let failure = TimelineEntry(
@@ -1545,6 +1803,7 @@ final class AppState {
     private func enqueuePrompt(prompt rawPrompt: String, taskID: String) -> Bool {
         guard let prompt = validatedPrompt(rawPrompt), !isShuttingDown,
               tasks.contains(where: { $0.id == taskID }) else { return false }
+        retireWebsiteModelSelections()
         if queuedPrompts[taskID, default: []].isEmpty && !isBusy(taskID: taskID) {
             pausedQueueTaskIDs.remove(taskID)
         }
@@ -1611,6 +1870,7 @@ final class AppState {
     func deleteQueuedPrompt(taskID: String, id: String) -> Bool {
         guard let index = editableQueueIndex(taskID: taskID, id: id) else { return false }
         queuedPrompts[taskID]?.remove(at: index)
+        retireWebsiteModelSelections()
         scheduleQueueDrain(taskID: taskID)
         return true
     }
@@ -1684,7 +1944,10 @@ final class AppState {
         let taskID = submission.taskID
         let item = submission.item
         let id = item.id
-        defer { steeringTaskIDs.remove(taskID) }
+        defer {
+            steeringTaskIDs.remove(taskID)
+            retireWebsiteModelSelections()
+        }
         guard let runtime, !isShuttingDown else {
             failQueuedPrompt(taskID: taskID, id: id, message: "Steering was cancelled before delivery.")
             return false
@@ -1747,6 +2010,7 @@ final class AppState {
             }
         }
         dispatchingQueueTaskIDs.remove(taskID)
+        retireWebsiteModelSelections()
         if delivered, tasks.first(where: { $0.id == taskID })?.status == .completed {
             scheduleQueueDrain(taskID: taskID)
         }

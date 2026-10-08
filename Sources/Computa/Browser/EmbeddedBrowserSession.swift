@@ -57,6 +57,8 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private let persistent: Bool
     @ObservationIgnored private let profileID: UUID?
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private var resolvedProfileID: UUID?
+    @ObservationIgnored private var transientHumanVerificationCheckpoints: [String: UUID] = [:]
     @ObservationIgnored private var entries: [UUID: Entry] = [:]
     @ObservationIgnored private weak var modelRenderHost: NSView?
     @ObservationIgnored private var modelRenderHosts: [ModelRenderHostReference] = []
@@ -81,6 +83,13 @@ final class EmbeddedBrowserSession {
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
+        // Model generations also invalidate on provisional loads. Human
+        // checkpoint observations advance only for a committed document.
+        var humanCommittedDocumentID = UUID()
+        var humanCommittedNavigation: WKNavigation?
+        // Ephemeral deduplication only; neither URL nor document identity is persisted.
+        var humanCheckpointDocumentID: UUID?
+        var humanCheckpointURL: URL?
 
         init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate, isModelOwned: Bool,
              popupOpenerTabID: UUID? = nil) {
@@ -101,20 +110,65 @@ final class EmbeddedBrowserSession {
         self.defaults = defaults
     }
 
+    /// Resolve once for both WebKit and saved checkpoints, even if preferences
+    /// change while this browser instance is alive. Private sessions never call this.
+    private func persistentProfileIdentifier() -> UUID {
+        precondition(persistent)
+        if let resolvedProfileID { return resolvedProfileID }
+        let identifier: UUID
+        if let profileID {
+            identifier = profileID
+        } else if let existing = defaults.string(forKey: Self.profileDefaultsKey).flatMap(UUID.init(uuidString:)) {
+            identifier = existing
+        } else {
+            identifier = UUID()
+            defaults.set(identifier.uuidString, forKey: Self.profileDefaultsKey)
+        }
+        resolvedProfileID = identifier
+        return identifier
+    }
+
+    var savedHumanVerificationCheckpointIDs: [String: UUID] {
+        guard persistent else { return transientHumanVerificationCheckpoints }
+        return EmbeddedHumanVerificationStore(defaults: defaults, profileID: persistentProfileIdentifier()).load()
+    }
+
+    var savedHumanVerificationProviders: Set<String> { Set(savedHumanVerificationCheckpointIDs.keys) }
+
+    /// Re-observing a saved gate in the model transport does not make it newer.
+    func recordHumanVerificationRequired(provider: String) {
+        recordHumanVerificationRequired(provider: provider, renewObservation: false)
+    }
+
+    private func recordHumanVerificationRequired(provider: String, renewObservation: Bool) {
+        guard EmbeddedHumanVerificationStore.providers.contains(provider) else { return }
+        var checkpoints = savedHumanVerificationCheckpointIDs
+        guard renewObservation || checkpoints[provider] == nil else { return }
+        checkpoints[provider] = UUID()
+        saveHumanVerificationCheckpoints(checkpoints)
+    }
+
+    func clearHumanVerificationRequired(provider: String) {
+        guard EmbeddedHumanVerificationStore.providers.contains(provider) else { return }
+        var checkpoints = savedHumanVerificationCheckpointIDs
+        guard checkpoints.removeValue(forKey: provider) != nil else { return }
+        saveHumanVerificationCheckpoints(checkpoints)
+    }
+
+    private func saveHumanVerificationCheckpoints(_ checkpoints: [String: UUID]) {
+        if persistent {
+            EmbeddedHumanVerificationStore(defaults: defaults, profileID: persistentProfileIdentifier()).save(checkpoints)
+        } else {
+            transientHumanVerificationCheckpoints = checkpoints
+        }
+        for entry in entries.values where entry.isModelOwned { signalModelChange(entry) }
+    }
+
     private func dataStore() -> WKWebsiteDataStore {
         if let websiteDataStore { return websiteDataStore }
         let store: WKWebsiteDataStore
         if persistent {
-            let identifier: UUID
-            if let profileID {
-                identifier = profileID
-            } else if let existing = defaults.string(forKey: Self.profileDefaultsKey).flatMap(UUID.init(uuidString:)) {
-                identifier = existing
-            } else {
-                identifier = UUID()
-                defaults.set(identifier.uuidString, forKey: Self.profileDefaultsKey)
-            }
-            store = WKWebsiteDataStore(forIdentifier: identifier)
+            store = WKWebsiteDataStore(forIdentifier: persistentProfileIdentifier())
         } else {
             store = .nonPersistent()
         }
@@ -360,6 +414,12 @@ final class EmbeddedBrowserSession {
         return try channel.currentRevision()
     }
 
+    /// Native profile state can invalidate an inference without a DOM change.
+    /// This only wakes its existing notification channel; it grants no page authority.
+    func notifyModelSessionChange(tabID: UUID) {
+        entries[tabID]?.modelChanges?.signal()
+    }
+
     func waitForModelChange(tabID: UUID, after revision: UInt64,
                             until deadline: ContinuousClock.Instant) async throws -> UInt64 {
         guard let channel = try entry(tabID).modelChanges else { throw Failure.tabClosed }
@@ -381,12 +441,24 @@ final class EmbeddedBrowserSession {
 
     /// Model pages share the sign-in profile, but never reuse a human's tab.
     func createModelTab(url: URL) throws -> UUID {
+        try createModelTab(initialURL: url)
+    }
+
+    #if DEBUG
+    /// Fixtures load one local document themselves. Starting about:blank first
+    /// would leave two competing provisional navigations in the same WebView.
+    func createUnloadedModelTabForTesting() throws -> UUID {
+        try createModelTab(initialURL: nil)
+    }
+    #endif
+
+    private func createModelTab(initialURL: URL?) throws -> UUID {
         let id = try createTab(select: false, modelOwned: true)
         do {
             guard let view = webView(for: id) else { throw Failure.tabClosed }
             view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
             if let entry = entries[id] { mountModelView(entry) }
-            try navigate(tabID: id, to: url)
+            if let initialURL { try navigate(tabID: id, to: initialURL) }
             return id
         } catch {
             closeTab(id)
@@ -436,7 +508,7 @@ final class EmbeddedBrowserSession {
         ]
     }
 
-    private func refresh(_ id: UUID, view: WKWebView) {
+    private func refresh(_ id: UUID, view: WKWebView, committedNavigation: Bool = false) {
         guard let entry = entries[id], entry.view === view else { return }
         let title = view.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         entry.tab.title = title.isEmpty ? (view.url?.host ?? "New tab") : String(title.prefix(512))
@@ -447,7 +519,25 @@ final class EmbeddedBrowserSession {
         entry.tab.isLoading = view.isLoading
         entry.tab.canGoBack = view.canGoBack
         entry.tab.canGoForward = view.canGoForward
+        // A provisional load can still expose the old page URL. Observe the
+        // committed document or settled native URL without inspecting its DOM.
+        if !entry.isModelOwned, committedNavigation || !view.isLoading {
+            observeHumanVerificationCheckpoint(entry)
+        }
         signalModelChange(entry)
+    }
+
+    private func observeHumanVerificationCheckpoint(_ entry: Entry) {
+        guard let provider = EmbeddedHumanVerificationStore.provider(forTrustedHumanURL: entry.view.url) else {
+            entry.humanCheckpointDocumentID = nil
+            entry.humanCheckpointURL = nil
+            return
+        }
+        guard entry.humanCheckpointDocumentID != entry.humanCommittedDocumentID
+                || entry.humanCheckpointURL != entry.view.url else { return }
+        entry.humanCheckpointDocumentID = entry.humanCommittedDocumentID
+        entry.humanCheckpointURL = entry.view.url
+        recordHumanVerificationRequired(provider: provider, renewObservation: true)
     }
 
     fileprivate func owns(_ view: WKWebView, tabID: UUID) -> Bool { entries[tabID]?.view === view }
@@ -478,6 +568,15 @@ final class EmbeddedBrowserSession {
         if let error, (error as NSError).code != NSURLErrorCancelled {
             report("The page could not load. \(error.localizedDescription)", tabID: tabID)
         }
+    }
+
+    fileprivate func committed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
+        guard let entry = entries[tabID], entry.view === view, entry.navigation === navigation else { return }
+        if !entry.isModelOwned, let navigation, entry.humanCommittedNavigation !== navigation {
+            entry.humanCommittedNavigation = navigation
+            entry.humanCommittedDocumentID = UUID()
+        }
+        refresh(tabID, view: view, committedNavigation: true)
     }
 
     fileprivate func terminated(_ view: WKWebView, tabID: UUID) {
@@ -749,6 +848,9 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         session?.started(webView, navigation: navigation, tabID: tabID)
+    }
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        session?.committed(webView, navigation: navigation, tabID: tabID)
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         session?.completed(webView, navigation: navigation, tabID: tabID)

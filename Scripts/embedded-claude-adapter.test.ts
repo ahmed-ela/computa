@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { Element, fixture, firstMarker, markerLine } from "./embedded-provider-adapter-fixture";
+import { Element, fixture, firstMarker, markerLine, installObservedModelPicker } from "./embedded-provider-adapter-fixture";
+import { defineWebsiteModelChoiceTests } from "./embedded-model-choice-tests";
 const provider = "claude";
 const prompt = 'Use `tool_calls` with C++ "quoted" text\n\n  two spaces and\u00a0NBSP';
 const outbound = prompt + "\n\n" + markerLine;
+
+defineWebsiteModelChoiceTests(provider, (owned = false) => fixture(provider, owned ? { userPrompt: 'Synthetic owned prompt' } : {}), Element);
 
 function observedClaudeCodeBlock(f: ReturnType<typeof fixture>, raw: string) {
   f.answer.text = ""; f.answer.children = [];
@@ -41,7 +44,186 @@ function observedClaudeBanner(f: ReturnType<typeof fixture>, clock = "11:40 PM")
 const freshQuotaReceipt = (f: ReturnType<typeof fixture>) => ({ error: "website_usage_limit", freshQuotaAbort: true,
   url: f.document.URL, userCount: 0, responseCount: 0 });
 
+function claudeCloseFixture(onClosed: (f: ReturnType<typeof fixture>, picker: ReturnType<typeof installObservedModelPicker>, count: number) => void) {
+  const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element, { genericHeader: true, unmountMenus: true });
+  picker.selected("Sonnet 5");
+  const click = picker.trigger.onClick!;
+  let closes = 0;
+  picker.trigger.onClick = () => {
+    const wasOpen = picker.menu.values.hidden === undefined || picker.nested?.values.hidden === undefined;
+    click();
+    if (wasOpen) onClosed(f, picker, ++closes);
+  };
+  return { f, picker };
+}
+
+function unrelatedClaudeDialog(f: ReturnType<typeof fixture>, attributes: Record<string, string> = {}, tag = "DIV") {
+  const dialog = new Element(tag, { role: "dialog", id: "unrelated-dialog", "aria-labelledby": "unrelated-title", ...attributes });
+  const dismiss = new Element("BUTTON", { "aria-label": "Dismiss notice" });
+  dialog.append(dismiss); f.body.append(dialog);
+  Object.defineProperty(f.composer, "getBoundingClientRect", { configurable: true,
+    value: () => ({ left: 10, top: 20, width: 100, height: 40 }) });
+  f.document.elementFromPoint = () => f.composer;
+  return { dialog, dismiss };
+}
+
+async function completeClaudeRead(f: ReturnType<typeof fixture>, action: string, overrides: Record<string, unknown>) {
+  const result = f.run(action, overrides);
+  // Flush only fixture-owned waits after asynchronous proof and digest steps.
+  for (let phase = 0; phase < 4; phase++) {
+    for (let tick = 0; tick < 40; tick++) await Promise.resolve();
+    f.flush();
+  }
+  return await result;
+}
+
 describe("embedded Claude fixed adapter", () => {
+  test("a final model guard confirms its exact closed popups without dismissing an unrelated nonmodal dialog", async () => {
+    let popup: ReturnType<typeof unrelatedClaudeDialog> | undefined;
+    const { f, picker } = claudeCloseFixture((f, picker, count) => {
+      if (count === 2) { delete picker.trigger.values["aria-controls"]; popup = unrelatedClaudeDialog(f); }
+    });
+    const expectedModelChoice = { key: "Sonnet 5", label: "Sonnet 5" };
+    const result = await completeClaudeRead(f, "insert", { expectedModelChoice, prompt: outbound });
+    expect(result).toMatchObject({ inserted: true, modelEvidence: { selected: expectedModelChoice, source: "checked_model_option" } });
+    expect(picker.trigger.values["aria-label"]).toBe("Model: Sonnet 5 Medium");
+    expect(picker.trigger.clicks).toBe(4); expect(picker.menu.isConnected).toBe(false); expect(picker.nested!.isConnected).toBe(false);
+    expect(popup!.dialog.isConnected).toBe(true); expect(popup!.dismiss.clicks).toBe(0);
+    expect(f.composer.textContent).toBe(outbound); expect(f.send.clicks).toBe(0);
+    expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+    const before = picker.trigger.clicks;
+    expect((await completeClaudeRead(f, "sendReady", { expectedModelChoice, prompt: outbound })).error).toBe("model_unverified");
+    expect(picker.trigger.clicks).toBe(before); expect(popup!.dismiss.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+  });
+
+  test("losing association never confirms a still-physical owned Claude popup", async () => {
+    for (const concealment of ["unassociated", "aria-hidden", "inert", "replaced-id", "replaced-id-hidden", "replaced-owner-id",
+      "replaced-owner-tokens", "replaced-current-owner-tokens"]) {
+      const { f, picker } = claudeCloseFixture((f, picker) => {
+        if (concealment.startsWith("replaced-")) {
+          const replacement = picker.menu.cloneNode(true);
+          replacement.values.role = "dialog"; delete replacement.values.hidden;
+          delete replacement.values["aria-labelledby"]; delete picker.trigger.values["aria-controls"];
+          if (concealment === "replaced-id-hidden") replacement.values["aria-hidden"] = "true";
+          if (concealment.startsWith("replaced-owner-") || concealment === "replaced-current-owner-tokens") {
+            replacement.values.id = "new-dialog-id";
+            replacement.values["aria-labelledby"] = picker.trigger.values.id;
+            picker.trigger.values.id = "changed-trigger-id";
+            if (concealment === "replaced-owner-tokens") replacement.values["aria-labelledby"] += " extra-label";
+            if (concealment === "replaced-current-owner-tokens") replacement.values["aria-labelledby"] = "extra-label " + picker.trigger.values.id;
+          }
+          f.body.append(replacement);
+          Object.defineProperty(f.composer, "getBoundingClientRect", { value: () => ({ left: 10, top: 20, width: 100, height: 40 }) });
+          f.document.elementFromPoint = () => f.composer;
+          return;
+        }
+        const oldPopup = picker.nested!;
+        oldPopup.connected = true; delete oldPopup.values.hidden;
+        oldPopup.values.role = "dialog"; delete oldPopup.values.id; delete oldPopup.values["aria-labelledby"];
+        if (concealment !== "unassociated") oldPopup.values[concealment] = concealment === "inert" ? "" : "true";
+      });
+      const result = await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound });
+      expect(result).toMatchObject({ error: "model_unverified", modelDiagnostic: { readStage: "close_unconfirmed",
+        readAttempt: { closeAttempted: true, observedProof: true, sameTrigger: true, popupStillAssociated: false } } });
+      expect(picker.trigger.clicks).toBe(2); expect(f.composer.textContent).toBe(""); expect(f.send.clicks).toBe(0);
+      expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+    }
+  });
+
+  test("unknown modal dialogs and blocked composer controls cannot be acted through after owned popup closure", async () => {
+    for (const kind of ["aria-modal", "native-dialog", "occluding-dialog", "inert-composer", "hidden-composer",
+      "geometry-unavailable", "point-unavailable"]) {
+      let dismiss: Element | undefined;
+      const { f, picker } = claudeCloseFixture((f, _picker, count) => {
+        if (count !== 1) return;
+        const popup = unrelatedClaudeDialog(f, kind === "aria-modal" ? { "aria-modal": "true" }
+          : kind === "native-dialog" ? { open: "" } : {}, kind === "native-dialog" ? "DIALOG" : "DIV");
+        dismiss = popup.dismiss;
+        if (kind === "inert-composer") f.composer.values.inert = "";
+        if (kind === "hidden-composer") f.composer.values["aria-hidden"] = "true";
+        if (kind === "occluding-dialog") f.document.elementFromPoint = () => popup.dialog;
+        if (kind === "geometry-unavailable") Reflect.deleteProperty(f.composer, "getBoundingClientRect");
+        if (kind === "point-unavailable") f.document.elementFromPoint = undefined;
+      });
+      const result = await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound });
+      expect(result.error).toBe("model_unverified");
+      expect(picker.trigger.clicks).toBe(2); expect(dismiss!.clicks).toBe(0);
+      expect(f.composer.textContent).toBe(""); expect(f.composer.events.length).toBe(0); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("Claude popup closure still requires the same restored enabled trigger", async () => {
+    for (const kind of ["replacement", "disabled", "inert", "expanded", "open-state"]) {
+      const { f, picker } = claudeCloseFixture((f, picker) => {
+        unrelatedClaudeDialog(f);
+        if (kind === "replacement") {
+          const replacement = picker.trigger.cloneNode(true);
+          picker.trigger.connected = false; f.body.append(replacement);
+        } else if (kind === "disabled") picker.trigger.disabled = true;
+        else if (kind === "inert") picker.trigger.values.inert = "";
+        else if (kind === "expanded") picker.trigger.values["aria-expanded"] = "true";
+        else picker.trigger.values["data-state"] = "open";
+      });
+      expect((await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound })).error).toBe("model_unverified");
+      expect(picker.trigger.clicks).toBe(2); expect(f.composer.textContent).toBe(""); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("unassociated dialogs cannot grant model proof or authorize a fresh opening", async () => {
+    for (const initialDialog of [false, true]) {
+      const { f, picker } = claudeCloseFixture(f => { unrelatedClaudeDialog(f); });
+      if (initialDialog) unrelatedClaudeDialog(f);
+      else for (const option of picker.options) option.values["aria-checked"] = "false";
+      const result = await completeClaudeRead(f, "insert", { expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" }, prompt: outbound });
+      expect(result.error).toBe("model_unverified");
+      expect(result.modelDiagnostic.readAttempt.observedProof).toBe(false);
+      expect(picker.trigger.clicks).toBe(initialDialog ? 0 : 2);
+      expect(f.composer.textContent).toBe(""); expect(f.send.clicks).toBe(0);
+      expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+    }
+  });
+
+  test("an unrelated dialog cannot occlude the actual Send target even when the composer is exposed", async () => {
+    for (const geometry of ["occluded", "unavailable"]) {
+      const f = fixture(provider);
+      expect((await f.run("insert", { prompt: outbound })).inserted).toBe(true);
+      const popup = unrelatedClaudeDialog(f);
+      if (geometry === "occluded") Object.defineProperty(f.send, "getBoundingClientRect", {
+        value: () => ({ left: 10, top: 80, width: 40, height: 20 }) });
+      f.document.elementFromPoint = (_x: number, y: number) => y === 40 ? f.composer : popup.dialog;
+      expect((await f.run("sendReady", { prompt: outbound })).sendReady).toBe(false);
+      expect((await f.run("submit", { prompt: outbound })).error).toBe("send_unavailable");
+      expect(f.send.clicks).toBe(0); expect(popup.dismiss.clicks).toBe(0);
+      expect(f.world.__computaModelFirstSubmitted).toBeUndefined(); expect(f.composer.textContent).toBe(outbound);
+    }
+  });
+
+  test("an exposed composer and Send target allow one normal submission beside an unrelated dialog", async () => {
+    const f = fixture(provider);
+    expect((await f.run("insert", { prompt: outbound })).inserted).toBe(true);
+    const popup = unrelatedClaudeDialog(f), icon = new Element("SPAN"); f.send.append(icon);
+    Object.defineProperty(f.send, "getBoundingClientRect", { value: () => ({ left: 10, top: 80, width: 40, height: 20 }) });
+    f.document.elementFromPoint = (_x: number, y: number) => y === 40 ? f.composer : icon;
+    expect((await f.run("sendReady", { prompt: outbound })).sendReady).toBe(true);
+    expect((await f.run("submit", { prompt: outbound })).submitted).toBe(true);
+    expect(f.send.clicks).toBe(1); expect(popup.dismiss.clicks).toBe(0); expect(f.userBody!.textContent).toBe(outbound);
+  });
+
+  test("an occluding dialog blocks unselected-model editor actions before their mutations", async () => {
+    for (const [action, concealment] of [["prepare", ""], ["insert", ""], ["insert", "aria-hidden"], ["insert", "inert"],
+      ["insert", "declared-modal"], ["insert", "native-modal"]]) {
+      const f = fixture(provider), popup = unrelatedClaudeDialog(f,
+        concealment === "declared-modal" ? { "aria-modal": "true" } : concealment === "native-modal" ? { open: "" } : {},
+        concealment === "native-modal" ? "DIALOG" : "DIV");
+      if (concealment) popup.dialog.values[concealment] = concealment === "inert" ? "" : "true";
+      f.document.elementFromPoint = () => concealment.endsWith("modal") ? f.composer : popup.dialog;
+      expect((await f.run(action, { prompt: outbound })).error).toBe("composer_unavailable");
+      expect(f.composer.textContent).toBe(""); expect(f.composer.events.length).toBe(0);
+      expect(f.send.clicks).toBe(0); expect(popup.dismiss.clicks).toBe(0);
+      expect(f.world.__computaModelFirstPrepared).toBeUndefined(); expect(f.world.__computaModelFirstPrompt).toBeUndefined();
+    }
+  });
+
   test("a sole fenced envelope preserves literal JSON escapes and code-block controls", async () => {
     for (const envelope of [
       { type: "message", text: 'Literal "quoted" text, C:\\tmp\\file\nnext line\\n stays literal' },
@@ -60,7 +242,9 @@ describe("embedded Claude fixed adapter", () => {
       expect(JSON.parse(result.text)).toEqual(envelope);
       expect(result.text).not.toContain("Copy code");
       expect(result.completionEvidence.codeStructure).toMatchObject({ preCount: 1, codeCount: 1,
-        codeTextLength: raw.length, outsideTextLength: 0, outsideTruncated: false });
+        codeTextLength: raw.length, outsideTextLength: 0, outsideTruncated: false,
+        literalCodeValidJSON: true, literalCodeKnownEnvelopeType: envelope.type,
+        selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
       expect(JSON.stringify(result.completionEvidence.codeStructure)).not.toContain('quoted');
     }
   });
@@ -75,6 +259,8 @@ describe("embedded Claude fixed adapter", () => {
       const result = await f.run();
       expect(result.text).toBe(raw); expect(JSON.parse(result.text)).toEqual(envelope);
       expect(result.text).not.toContain("\uE056"); expect(result.text).not.toContain("json\n");
+      expect(result.completionEvidence.codeStructure).toMatchObject({ literalCodeValidJSON: true,
+        literalCodeKnownEnvelopeType: envelope.type, selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
     }
   });
 
@@ -141,6 +327,60 @@ describe("embedded Claude fixed adapter", () => {
       expect(result.completionEvidence.codeStructure.preCount).toBeGreaterThanOrEqual(1);
       expect(JSON.stringify(result.completionEvidence.codeStructure)).not.toContain('Author prose');
     }
+  });
+
+  test("finite extraction evidence distinguishes rejected structure without exposing response content", async () => {
+    const privateText = "PRIVATE_RESPONSE_PROMPT_HEADER_ACCOUNT_938475";
+    const cases: { reason: string; validJSON: boolean | null; type: string | null;
+      configure: (f: ReturnType<typeof fixture>, pre: Element, code: Element) => void }[] = [
+      { reason: "missing_pre", validJSON: null, type: null,
+        configure: f => { f.answer.children = []; f.answer.text = privateText; } },
+      { reason: "multiple_pre", validJSON: null, type: null,
+        configure: f => { const extra = new Element("PRE"); extra.append(new Element("CODE", {}, privateText)); f.answer.append(extra); } },
+      { reason: "missing_code", validJSON: null, type: null,
+        configure: (_f, pre) => { pre.children = []; pre.text = privateText; } },
+      { reason: "multiple_code", validJSON: null, type: null,
+        configure: (_f, pre) => { pre.append(new Element("CODE", {}, privateText)); } },
+      { reason: "oversized_code", validJSON: null, type: null,
+        configure: (_f, _pre, code) => { code.text = JSON.stringify({ type: "message", text: privateText + "x".repeat(220_000) }); } },
+      { reason: "invalid_json", validJSON: false, type: null,
+        configure: (_f, _pre, code) => { code.text = '{"type":"message","text":"' + privateText + '"unescaped""}'; } },
+      { reason: "unknown_envelope_type", validJSON: true, type: "unknown",
+        configure: (_f, _pre, code) => { code.text = JSON.stringify({ type: privateText, text: privateText }); } },
+      { reason: "unknown_envelope_type", validJSON: true, type: "unknown",
+        configure: (_f, _pre, code) => { code.text = JSON.stringify([{ type: "message", text: privateText }]); } },
+      { reason: "unknown_envelope_type", validJSON: true, type: "unknown",
+        configure: (_f, _pre, code) => { code.text = "null"; } },
+      { reason: "outside_content", validJSON: true, type: "message",
+        configure: f => { f.answer.append(new Element("P", { id: privateText, "data-private-header": privateText }, privateText)); } },
+      { reason: "outside_scan_limit", validJSON: true, type: "message",
+        configure: f => { for (let index = 0; index < 10_001; index++) f.answer.append(new Element("#text", {}, " ")); } },
+    ];
+    for (const { reason, validJSON, type, configure } of cases) {
+      const f = fixture(provider, { userPrompt: privateText });
+      f.answer.text = ""; f.answer.children = [];
+      const pre = new Element("PRE"), code = new Element("CODE", {}, JSON.stringify({ type: "message", text: privateText }));
+      pre.append(code); f.answer.append(pre); configure(f, pre, code);
+      const rendered = "Rendered whole answer " + privateText;
+      Object.defineProperty(f.answer, "innerText", { get: () => rendered });
+      const result = await f.run(), evidence = result.completionEvidence.codeStructure;
+      expect(result.text).toBe(rendered);
+      expect(evidence).toMatchObject({ literalCodeValidJSON: validJSON, literalCodeKnownEnvelopeType: type,
+        selectedExtraction: "rendered_fallback", extractionReason: reason });
+      const encoded = JSON.stringify(evidence);
+      expect(encoded).not.toContain(privateText); expect(encoded).not.toContain(firstMarker);
+      expect(encoded).not.toContain("data-private-header"); expect(encoded).not.toContain("unescaped");
+      expect(encoded.length).toBeLessThanOrEqual(8192); expect(f.send.clicks).toBe(0);
+    }
+  });
+
+  test("absent answers leave literal JSON facts unobserved and keep empty extraction", async () => {
+    const f = fixture(provider, { userPrompt: prompt, response: false });
+    const result = await f.run();
+    expect(result.text).toBe("");
+    expect(result.completionEvidence.codeStructure).toMatchObject({ preCount: 0, codeCount: 0,
+      literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null,
+      selectedExtraction: "rendered_fallback", extractionReason: "absent_answer" });
   });
 
   test("an owned fresh page enables temporary mode once and verifies real UI evidence", async () => {

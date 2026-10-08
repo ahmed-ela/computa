@@ -1,0 +1,13 @@
+{
+  "name": "computa-open-responses-conformance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test conformance.test.ts",
+    "check": "bun run conformance.ts"
+  },
+  "dependencies": {
+    "ajv": "8.17.1",
+    "zod": "3.25.76"
+  }
+}

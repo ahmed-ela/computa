@@ -13,6 +13,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let accessMode: String
     let defaultModel: String
     let modelOptions: [LocalModelOption]
+    let websiteModelsRefreshing: Bool
+    let websiteModelsError: String?
     let showToolPayloads: Bool
     let isInspectorPresented: Bool
     let isBrowserPresented: Bool
@@ -35,6 +37,10 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
                 queuePaused: state.pausedQueueTaskIDs.contains(task.id),
                 canSteer: state.canSteer(taskID: task.id),
                 isBusy: state.isBusy(taskID: task.id),
+                websiteSessionCleanupAvailable: state.canRetryWebsiteSessionCleanup(taskID: task.id),
+                websiteSessionCleanupInProgress: state.websiteSessionCleanupTaskIDs.contains(task.id),
+                websiteSessionCleanupOutcome: state.currentWebsiteSessionCleanupReceipt(taskID: task.id)?.outcome.rawValue,
+                websiteSessionCleanupReceiptSaved: state.currentWebsiteSessionCleanupReceipt(taskID: task.id)?.receiptSaved,
                 activeTurnStartedAt: state.activeTurnStartedAt(for: task.id),
                 activeActivityGroupID: state.activeActivityGroupID(for: task.id)
             )
@@ -47,7 +53,9 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         appearance = state.appearance.rawValue
         accessMode = state.accessMode.rawValue
         defaultModel = state.defaultModel
-        modelOptions = LocalModelCatalog.options
+        modelOptions = state.modelOptions
+        websiteModelsRefreshing = state.websiteModelsRefreshing
+        websiteModelsError = state.websiteModelsError
         showToolPayloads = state.showToolPayloads
         isInspectorPresented = state.isInspectorPresented
         isBrowserPresented = state.isBrowserPresented
@@ -72,6 +80,10 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
     let queuePaused: Bool
     let canSteer: Bool
     let isBusy: Bool
+    let websiteSessionCleanupAvailable: Bool
+    let websiteSessionCleanupInProgress: Bool
+    let websiteSessionCleanupOutcome: String?
+    let websiteSessionCleanupReceiptSaved: Bool?
     let activeTurnStartedAt: TimeInterval?
     let activeActivityGroupID: String?
     let branch: String?
@@ -86,6 +98,10 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         queuePaused: Bool = false,
         canSteer: Bool = false,
         isBusy: Bool = false,
+        websiteSessionCleanupAvailable: Bool = false,
+        websiteSessionCleanupInProgress: Bool = false,
+        websiteSessionCleanupOutcome: String? = nil,
+        websiteSessionCleanupReceiptSaved: Bool? = nil,
         activeTurnStartedAt: TimeInterval? = nil,
         activeActivityGroupID: String? = nil
     ) {
@@ -102,6 +118,10 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         self.queuePaused = queuePaused
         self.canSteer = canSteer
         self.isBusy = isBusy
+        self.websiteSessionCleanupAvailable = websiteSessionCleanupAvailable
+        self.websiteSessionCleanupInProgress = websiteSessionCleanupInProgress
+        self.websiteSessionCleanupOutcome = websiteSessionCleanupOutcome
+        self.websiteSessionCleanupReceiptSaved = websiteSessionCleanupReceiptSaved
         self.activeTurnStartedAt = activeTurnStartedAt
         self.activeActivityGroupID = activeActivityGroupID
         branch = task.branch

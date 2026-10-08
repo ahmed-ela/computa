@@ -92,6 +92,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 Self.diagnostic("client ready frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
             }
             pushLatestSnapshotIfReady()
+            state.refreshWebsiteModelsIfNeeded()
 
         case "webClientFailure":
             guard Self.diagnosticsEnabled else { return }
@@ -149,6 +150,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             guard let taskID = body["taskID"] as? String,
                   state.tasks.contains(where: { $0.id == taskID }) else { return }
             Task { @MainActor [weak state] in await state?.resumeQueue(taskID: taskID) }
+
+        case "retryWebsiteSessionCleanup":
+            guard Set(body.keys) == ["action", "taskID"],
+                  let taskID = body["taskID"] as? String else { return }
+            state.requestWebsiteSessionCleanup(taskID: taskID)
 
         case "interruptTask":
             guard let taskID = body["taskID"] as? String,
@@ -248,6 +254,9 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "setDefaultModel":
             guard let modelID = body["modelID"] as? String else { return }
             state.setDefaultModel(modelID)
+
+        case "refreshWebsiteModels":
+            Task { @MainActor [weak state] in await state?.refreshWebsiteModels() }
 
         case "setTaskModel":
             guard let modelID = body["modelID"] as? String,

@@ -51,8 +51,22 @@ General agent control is [explicitly deferred](../TODO.md#embedded-browser-agent
   Closing the last human tab shows the empty browser while model work continues;
   model loading, errors and teardown do not replace the human browser's errors.
 
-Sign in through a regular human browser tab and retry the model task. Both use
-the same persistent WebKit profile; inference never takes over the sign-in tab.
+Sign in through a regular human browser tab. Both use the same persistent WebKit
+profile; inference never takes over the sign-in tab. Saved model catalogs are
+reused on startup; only missing catalogs are discovered once. **Refresh website
+models** explicitly reads all provider menus sequentially without sending a
+prompt.
+
+When a provider reports a CAPTCHA, sign-in requirement or usage limit, Computa
+stops new sessions for that provider and wakes its active waits with the same
+failure. Resolve the issue in the built-in Browser, or wait for quota recovery,
+then choose **Refresh website models**. Successful menu discovery and cleanup
+clear the provider gate; failed refreshes leave it in place. Then start a new
+task attempt: recovery does not resume failed tasks or replay their messages.
+Cached startup and provider gates reduce unnecessary page loads, but cannot
+guarantee the absence of CAPTCHAs or establish that a WebKit version caused one.
+See [website model behavior](WEBSITE-MODEL-CHOICES.md#external-website-gates).
+
 This uses ordinary rendered WKWebViews attached behind the opaque workspace,
 not a headless engine. It does not prevent providers from requesting sign-in,
 applying usage limits or rejecting embedded browsers. Existing limits still

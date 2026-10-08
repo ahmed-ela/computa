@@ -5,6 +5,7 @@ struct LocalModelOption: Codable, Equatable, Sendable {
     let label: String
     let detail: String
     let highMemory: Bool
+    var available: Bool? = nil
 }
 
 enum LocalModelCatalog {
@@ -20,20 +21,20 @@ enum LocalModelCatalog {
     static let options: [LocalModelOption] = [
         LocalModelOption(
             id: chatGPTBrowserModelID,
-            label: "ChatGPT · Built-in browser",
-            detail: "Uses signed-in ChatGPT in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
+            label: "ChatGPT / Website default · Built-in browser",
+            detail: "Uses signed-in ChatGPT's website default in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(
             id: geminiBrowserModelID,
-            label: "Gemini · Built-in browser",
-            detail: "Uses signed-in Gemini in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
+            label: "Gemini / Website default · Built-in browser",
+            detail: "Uses signed-in Gemini's website default in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(
             id: claudeBrowserModelID,
-            label: "Claude · Built-in browser",
-            detail: "Uses signed-in Claude Incognito in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the Incognito website session closes after each turn.",
+            label: "Claude / Website default · Built-in browser",
+            detail: "Uses signed-in Claude's website default in Incognito in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the Incognito website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(
@@ -63,16 +64,11 @@ enum LocalModelCatalog {
     ]
 
     static func option(for id: String) -> LocalModelOption? {
-        options.first { $0.id == id }
+        options.first { $0.id == id } ?? WebsiteModelCatalog.choice(for: id).map { WebsiteModelCatalog.option(for: $0) }
     }
 
     static func webProvider(for id: String) -> String? {
-        switch id {
-        case chatGPTBrowserModelID: "chatgpt"
-        case geminiBrowserModelID: "gemini"
-        case claudeBrowserModelID: "claude"
-        default: nil
-        }
+        WebsiteModelCatalog.selection(for: id)?.provider
     }
 
     static func isWebBrowser(_ id: String) -> Bool {
