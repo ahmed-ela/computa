@@ -1299,6 +1299,186 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testFirstMessageExpansionContinuesThroughNativeCertifiedFirstLocalRouteWithoutReclick() async throws {
+        let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: """
+            history.pushState({}, '', '/c/local-chatgpt%3Aexpanded-first-user?temporary-chat=true');
+            """))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: ownedID)
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": String(repeating: "Owned first-route expansion fixture line.\n", count: 600)])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+        let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+        XCTAssertEqual(view.url?.path, "/c/local-chatgpt:expanded-first-user")
+        let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+        XCTAssertEqual(clicks, 1)
+        XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testOneExpansionContinuesAcrossFirstLocalRouteAndItsPublicPromotionBeforeLineageBinding() async throws {
+        let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionDelayMilliseconds: 2_300,
+            earlyExpansionScript: """
+                history.pushState({}, '', '/c/local-chatgpt%3Aexpansion-route-chain?temporary-chat=true');
+                """))
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: ownedID)
+        let initialURL = try XCTUnwrap(view.url?.absoluteString)
+        // This fixture oracle observes the private candidate route pin, which
+        // advances only after JS validates and consumes the exact native edge.
+        // The next route is committed by that receipt, never by a timer that
+        // could let native validation skip the local document altogether.
+        _ = try await evaluate(view, """
+            globalThis.__computaFixtureExpansionEdges = [];
+            let expansion;
+            Object.defineProperty(globalThis, '__computaModelFirstExpansion', {
+              configurable: true,
+              get() { return expansion; },
+              set(candidate) {
+                expansion = candidate;
+                if (!candidate) return;
+                let route = candidate.routeURL;
+                Object.defineProperty(candidate, 'routeURL', {
+                  configurable: true, enumerable: true,
+                  get() { return route; },
+                  set(next) {
+                    globalThis.__computaFixtureExpansionEdges.push([route, next]);
+                    route = next;
+                    if (globalThis.__computaFixtureExpansionEdges.length === 1) {
+                      history.pushState({}, '', '/c/public-expansion-route-chain?temporary-chat=true');
+                    } else if (globalThis.__computaFixtureExpansionEdges.length === 2) {
+                      candidate.body.textContent = candidate.prompt;
+                      candidate.root.querySelector('button[aria-label="Show more"]')?.remove();
+                    }
+                  }
+                });
+              }
+            }); return true;
+            """, world: .world(name: "computa-chatgpt-model-v1"))
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": String(repeating: "Owned two-edge expansion fixture line.\n", count: 600)])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+        try assertChoiceEvidence(complete, choice: choice)
+        XCTAssertEqual(view.url?.path, "/c/public-expansion-route-chain")
+        let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+        let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+        XCTAssertEqual(clicks, 1)
+        let edges = try await evaluate(view, "return globalThis.__computaFixtureExpansionEdges;",
+                                       world: .world(name: "computa-chatgpt-model-v1")) as? [[String]]
+        let localURL = "https://chatgpt.com/c/local-chatgpt%3Aexpansion-route-chain?temporary-chat=true"
+        let publicURL = "https://chatgpt.com/c/public-expansion-route-chain?temporary-chat=true"
+        XCTAssertEqual(edges, [[initialURL, localURL], [localURL, publicURL]],
+                       "Both native-certified receipts must be consumed before first-message lineage can bind")
+        XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testExpansionRouteContinuationRejectsChangedLineageOwnerAndProductWithoutAnotherClick() async throws {
+        let changes = [
+            "body": "const replacement = userBody.cloneNode(true); userBody.replaceWith(replacement);",
+            "prompt": "userBody.textContent = 'Changed first body.\\n' + prompt;",
+            "owner": "document.dispatchEvent(new Event('fixture-change-private-owner'));",
+            "private_prompt": "document.dispatchEvent(new Event('fixture-change-private-prompt'));",
+            "temporary": "document.getElementById('fixture-temporary-mode').setAttribute('aria-label', 'Start temporary chat'); document.getElementById('fixture-temporary-mode').textContent = 'Start temporary chat';",
+            "foreign_route": "history.pushState({}, '', '/settings');",
+        ]
+        for condition in ["body", "prompt", "owner", "private_prompt", "temporary", "foreign_route"] {
+            let effect = try XCTUnwrap(changes[condition])
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: """
+                history.pushState({}, '', '/c/local-chatgpt%3Arejected-expansion-\(condition)?temporary-chat=true');
+                \(effect)
+                """))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            if ["owner", "private_prompt"].contains(condition) {
+                // Deliberate fixture corruption in the adapter's isolated
+                // world. Ordinary website page code cannot access these pins.
+                _ = try await evaluate(view, """
+                    document.addEventListener('fixture-change-private-owner', () => {
+                      globalThis.__computaModelOwner = 'invalid-fixture-owner';
+                    });
+                    document.addEventListener('fixture-change-private-prompt', () => {
+                      globalThis.__computaModelFirstPrompt += '\\nChanged private fixture prompt.';
+                    }); return true;
+                    """, world: .world(name: "computa-chatgpt-model-v1"))
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": String(repeating: "Owned rejected expansion fixture line.\n", count: 600)])
+                XCTFail("A native route edge cannot repair \(condition) drift")
+            } catch { XCTAssertTrue(error is EmbeddedWebModelTransport.Failure) }
+            let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+            XCTAssertEqual(clicks, 1)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            let clicksAfterCleanup = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+            XCTAssertEqual(clicksAfterCleanup, 1)
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
+    }
+
+    func testNativeCertifiedRouteContinuationCannotRestartExpiredExpansionDeadline() async throws {
+        let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionDelayMilliseconds: 2_300,
+            earlyExpansionScript: """
+                history.pushState({}, '', '/c/local-chatgpt%3Aexpired-expansion?temporary-chat=true');
+                """))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": String(repeating: "Owned delayed expansion fixture line.\n", count: 600)])
+            XCTFail("A certified route transition cannot grant another expansion deadline")
+        } catch { XCTAssertTrue(error is EmbeddedWebModelTransport.Failure) }
+        try await Task.sleep(for: .milliseconds(650))
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("Later full rendering cannot revive an expired expansion claim")
+        } catch { XCTAssertTrue(error is EmbeddedWebModelTransport.Failure) }
+        let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+        XCTAssertEqual(clicks, 1)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        try await assertHumanTabIntact(fixture, retaining: ownedID)
+    }
+
     func testCleanupCannotExpandAnUnboundCollapsedFirstMessage() async throws {
         for operation in ["webProviderFinish", "webProviderCancel"] {
             let fixture = try Fixture(page: Self.collapsedFirstUserPage(deferred: true))
@@ -1316,7 +1496,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await evaluate(view, """
                 document.getElementById('messages').appendChild(window.fixturePendingUser);
                 document.getElementById('messages').appendChild(window.fixturePendingTurn);
-                window.fixturePendingUser = null; window.fixturePendingTurn = null; return true;
+                window.fixturePendingUser = null; window.fixturePendingTurn = null;
+                history.pushState({}, '', '/c/local-chatgpt%3Acleanup-cannot-expand?temporary-chat=true'); return true;
                 """)
             var diagnostics: [String] = []
             fixture.transport.setFirstUserDiagnosticsObserverForTesting { diagnostics += $0 }
@@ -3183,6 +3364,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         var withBody = source
         withBody["bodySelection"] = "markdown_user_message"
         withBody["expansionOutcome"] = "model_unverified"
+        withBody["expansionContextFailure"] = "owner"
         for key in ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"] {
             withBody[key] = 220_001
         }
@@ -3203,6 +3385,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(bodyValues[2]["kind"] as? String, "first_user_body")
         XCTAssertEqual(bodyValues[2]["bodyTextContentLength"] as? Int, 220_001)
         XCTAssertEqual(bodyValues[2]["expansionOutcome"] as? String, "model_unverified")
+        XCTAssertEqual(bodyValues[2]["expansionContextFailure"] as? String, "owner")
         XCTAssertNil(bodyValues[0]["bodyTextContentLength"])
     }
 
@@ -3246,6 +3429,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
         for invalid in ["private_canary", 1, true, NSNull()] as [Any] {
             var forged = source; forged["expansionOutcome"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
+        for failure in ["frame", "provider", "origin", "owner", "user_count", "submission", "submission_count",
+                        "marker", "prompt", "private_pin", "product", "temporary", "root", "body",
+                        "conversation_route", "conversation_identity", "url", "continuation", "deadline"] {
+            var candidate = source; candidate["expansionContextFailure"] = failure
+            let records = try projected(candidate)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[1].utf8)) as? [String: Any])
+            XCTAssertEqual(body["expansionContextFailure"] as? String, failure)
+            XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+        }
+        for invalid in ["private_canary", "none", 1, true, NSNull()] as [Any] {
+            var forged = source; forged["expansionContextFailure"] = invalid
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
         }
         for key in lengths + counts {
@@ -4174,7 +4370,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 with: "answerBody.textContent = window.fixturePrompts.length === 1 ? '\(fixtureToolReply)' : '{\"type\":\"message\",\"text\":\"Fixture reply\"}';")
     }
 
-    private static func collapsedFirstUserPage(deferred: Bool = false, ignored: Bool = false) -> String {
+    private static func collapsedFirstUserPage(deferred: Bool = false, ignored: Bool = false,
+                                               expansionScript: String = "", expansionDelayMilliseconds: Int = 25,
+                                               earlyExpansionScript: String = "") -> String {
         var page = acknowledgedAppendRacePage().replacingOccurrences(of: "user.appendChild(userBody);", with: """
             user.appendChild(userBody);
             if (window.fixturePrompts.length === 1) {
@@ -4186,7 +4384,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
               expand.addEventListener('click', () => {
                 window.fixtureExpansionClicks++;
                 if (\(ignored ? "true" : "false")) return;
-                setTimeout(() => { userBody.textContent = prompt; expand.remove(); }, 25);
+                \(earlyExpansionScript)
+                setTimeout(() => { userBody.textContent = prompt; expand.remove(); \(expansionScript) }, \(expansionDelayMilliseconds));
               });
               user.appendChild(expand);
             }

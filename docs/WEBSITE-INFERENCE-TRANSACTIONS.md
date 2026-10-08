@@ -60,6 +60,24 @@ token or borrowing an earlier closure. Public finish/cancel revokes prepared
 context before cleanup; private inference cleanup preserves native context for
 the next tool continuation.
 
+Build 38 lets a native-approved same-document first route, followed by its
+local-to-public promotion, continue one already-clicked ChatGPT display
+expansion. Each edge must match the candidate's previous URL and the current
+native URL. The exact physical document, message root and body, private owner,
+prompt, marker, user count, model choice, product and temporary mode must remain
+valid. The original 1.8-second deadline and captured prefix stay fixed; the full
+canonical content may differ only by collapsed ASCII whitespace runs, with one
+unique final marker. Crossed reads are discarded. Continuation issues no extra
+click or Send and grants no lineage until normal full-body proof succeeds.
+Cleanup never receives expansion or route-continuation authority.
+
+A distinct timing boundary remains: if the public route arrives before the
+next native inspect captures its entry URL, the preceding edge's destination no
+longer matches. The consumed candidate fails closed instead of adopting that
+uncertified edge. Tests for two sequentially consumed edges do not establish
+success for this pre-entry timing; installed provider qualification remains
+separate.
+
 ## Durable evidence
 
 New schema-2 journals are scoped to one native turn:

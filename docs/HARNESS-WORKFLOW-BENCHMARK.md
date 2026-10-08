@@ -121,20 +121,22 @@ Existing native editing qualification remains available with
 
 ## Results
 
-The final native validation on 2026-10-08 passed **404 selected tests with zero
-failures in 154.862 seconds**. `native-build37-final.log` and
-`native-build37-final-validation.json` are bound to the 310 unchanged input
-hashes in `native-source-freeze-build37-final.json` for Computa **0.6.0 (37)**.
+The final native validation on 2026-10-08 passed **512 selected tests with zero
+failures in 335.490 seconds**. `native-build38-final.log` and
+`native-build38-final-validation.json` are bound to the 310 unchanged input
+hashes in `native-source-freeze-build38-final.json` for Computa **0.6.0 (38)**.
+Earlier build 37 validation separately passed 404 selected tests in 154.862
+seconds; the current run adds the entire 108-test WebKit transport group.
 The native suite includes actual combined thread startup, editing/diffs,
 protocol/streaming, isolated WebKit, approval/Stop, and durable cleanup tests.
 
 | Scripted provider ID | Scenario | Seconds | Inference requests | Matched tool outputs | Approvals | Outcome |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| `browser/chatgpt` | Editing, tests, Git push, localhost, TTY | 6.586 | 13 | 12 | 3 | Passed |
-| `browser/gemini` | Editing, tests, Git push, localhost, TTY | 7.017 | 13 | 12 | 3 | Passed |
-| `browser/claude` | Editing, tests, Git push, localhost, TTY | 5.987 | 13 | 12 | 3 | Passed |
-| `browser/chatgpt` | Declined command has no side effect | 1.684 | 2 | 1 | 1 | Passed |
-| `browser/chatgpt` | Stop cancels inference and reaps server | 2.830 | 2 | 1 | 1 | Passed |
+| `browser/chatgpt` | Editing, tests, Git push, localhost, TTY | 6.325 | 13 | 12 | 3 | Passed |
+| `browser/gemini` | Editing, tests, Git push, localhost, TTY | 6.012 | 13 | 12 | 3 | Passed |
+| `browser/claude` | Editing, tests, Git push, localhost, TTY | 6.133 | 13 | 12 | 3 | Passed |
+| `browser/chatgpt` | Declined command has no side effect | 1.681 | 2 | 1 | 1 | Passed |
+| `browser/chatgpt` | Stop cancels inference and reaps server | 2.859 | 2 | 1 | 1 | Passed |
 
 Every scenario confirmed removal of its owned fixture. The interrupted server's
 exit remained unconfirmed in presentation, while its PID and port were
@@ -157,7 +159,53 @@ separate records. Build 37 narrowly handles ASCII whitespace during guarded
 first-message promotion and uses [fresh website inference
 transactions](WEBSITE-INFERENCE-TRANSACTIONS.md).
 
-Installed-app qualification for 0.6.0 (37), with live website models and
-built-in browser tasks, is recorded separately from these scripted-inference
-results. Native execution does not establish website sign-in or qualify a
-concrete provider/model pair.
+Installed **0.6.0 (37)**, source
+`cbf199d8bebc69b146b2a58af9bd4039ff1ec7db`, completed one fresh **Claude Sonnet
+5.5** coding turn in **91.468 seconds**. The live collector verified **43/43
+checks**, including nine distinct website leases, nine durable closures and
+release before native tools, the next inference and the final response. Nine
+matched tool calls produced nine outputs: eight `exec_command` calls and one
+native `apply_patch`. The archived evidence matches the 310 frozen inputs with
+zero mismatches; `live-claude-coding-build37-receipt.json` binds the exact turn,
+process, model selection and transaction journals.
+
+The model fixed addition, added test instructions, deleted the obsolete fixture
+and renamed the helper without changing its content. Both Python tests passed
+twice through native commands and again in the independent **15/15** filesystem
+oracle. Commit `367667eb070c96378efc8ac8d36210a414d1444f` matched the disposable
+bare remote; only the original user note remained dirty. The model recovered
+from a shell glob error and sandbox Git denials before using explicit elevated
+Git requests. The live run did not execute the broken baseline tests first.
+
+Operator AX observations in `live-coding-build37-diff-ui-observations.json`
+confirmed that Last Turn showed the three files changed by the native patch,
+with 18 additions and two removals; the terminal rename was outside that
+aggregate. Commit showed
+four changes, including the 100% helper rename with zero line changes. Split
+showed `return a - b` beside `return a + b`; Unstaged showed only `notes.txt`
+with its one preserved addition. No stage or revert action was tested.
+
+This live result is separate from scripted provider coverage. It proves an
+observed Claude website selection, not an immutable backend revision; guarded
+cleanup acknowledgements do not independently prove provider-side deletion.
+The push used a local remote, so external Git hosting authentication remains
+unqualified.
+
+The same build completed a separate **Claude Sonnet 5.5** flight-browser turn
+in **102.777 seconds**. The collector passed **37/37** checks: thirteen matched
+browser calls (one open, seven reads, four clicks and one fill), fourteen fresh
+website transactions and fourteen durable closures. The synthetic board
+recorded one matching flight search and one gate reveal. Fresh DOM observations
+supported the final **18:37 EDT, gate B49** answer. Expected facts were absent
+from the natural-language prompt. This exercises navigation, forms and dynamic
+page results in Computa's own WebKit browser; it does not access a real United
+account or establish personal booking data.
+
+A subsequent Claude combined preview attempt stopped on its actual website
+usage limit before any tool ran. Its exact cleanup receipt confirmed an
+untouched session was closed; no preview server or run directory was created.
+A separate build 37 ChatGPT flight attempt stopped before tools on first-message
+verification after a permitted initial chat route change, without replaying
+the prompt. Its cleanup remained unconfirmed. Both are retained failure records,
+not successful qualification. The reproduced route/expansion regression is
+being repaired and the combined localhost preview remains pending.

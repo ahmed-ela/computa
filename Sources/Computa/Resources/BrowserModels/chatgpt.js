@@ -1428,36 +1428,113 @@ function chatGPTFirstUserExpansionCandidate(root, body, rendered) {
   const canonical = prompt.replace(/\r\n?/g, '\n').normalize('NFC').trim();
   if (!rendered || rendered.length >= canonical.length || !canonical.startsWith(rendered)
     || rendered.includes(`Computa session marker: ${marker}`)) return null;
-  const candidate = { root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed' };
+  const candidate = { root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed',
+    document, owner: input.ownerToken, routeURL: input.expectedURL, modelChoice: input.firstUserExpansionModelChoice };
   return chatGPTFirstUserExpansionContext(candidate) ? candidate : null;
 }
 function chatGPTFirstUserExpansionContextFailure(candidate) {
   const roots = chatGPTMessageRoots('user');
-  if (window !== window.top || input.provider !== 'chatgpt' || location.origin !== 'https://chatgpt.com'
-    || document.URL !== input.expectedURL || globalThis.__computaModelOwner !== input.ownerToken
-    || roots.length !== 1 || globalThis.__computaModelFirstSubmitted !== true
-    || globalThis.__computaModelLastSubmissionCount !== 0 || globalThis.__computaModelFirstMarker !== candidate.marker
-    || globalThis.__computaModelFirstPrompt !== candidate.prompt || globalThis.__computaModelFirstProof != null
-    || !chatGPTProductModeProof() || !chatGPTTemporaryVerified()) return 'context_changed';
-  if (roots[0] !== candidate.root || !candidate.root.isConnected || !candidate.body.isConnected
-    || chatGPTUserBody(candidate.root) !== candidate.body) return 'node_changed';
+  if (window !== window.top || candidate.document !== document) return 'frame';
+  if (input.provider !== 'chatgpt') return 'provider';
+  if (location.origin !== 'https://chatgpt.com') return 'origin';
+  if (globalThis.__computaModelOwner !== candidate.owner || input.ownerToken !== candidate.owner) return 'owner';
+  if (roots.length !== 1) return 'user_count';
+  if (globalThis.__computaModelFirstSubmitted !== true) return 'submission';
+  if (globalThis.__computaModelLastSubmissionCount !== 0) return 'submission_count';
+  if (globalThis.__computaModelFirstMarker !== candidate.marker) return 'marker';
+  if (globalThis.__computaModelFirstPrompt !== candidate.prompt) return 'prompt';
+  if (globalThis.__computaModelFirstProof != null) return 'private_pin';
+  if (!chatGPTProductModeProof()) return 'product';
+  if (!chatGPTTemporaryVerified()) return 'temporary';
+  if (roots[0] !== candidate.root || !candidate.root.isConnected) return 'root';
+  if (!candidate.body.isConnected || chatGPTUserBody(candidate.root) !== candidate.body) return 'body';
   const cleanURL = location.origin + decodeURIComponent(location.pathname).replace(/\/$/, '');
-  if (input.expectedConversation && cleanURL !== input.expectedConversation) return 'context_changed';
+  if (input.expectedConversation && cleanURL !== input.expectedConversation) return 'conversation_route';
   if (input.expectedConversationIdentity) {
     const identities = [...new Set([...document.querySelectorAll('[data-chatgpt-selection-conversation-id]')]
       .filter(node => node.isConnected && node.getClientRects().length > 0
         && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]'))
       .map(node => node.getAttribute('data-chatgpt-selection-conversation-id')).filter(Boolean))];
-    if (identities.length !== 1 || identities[0] !== input.expectedConversationIdentity) return 'context_changed';
+    if (identities.length !== 1 || identities[0] !== input.expectedConversationIdentity) return 'conversation_identity';
   }
+  // URL-only failure is continuable only after every other predicate passes.
+  // The native route classifier, never this page, certifies the specific edge.
+  if (document.URL !== input.expectedURL) return 'url';
   return null;
 }
 function chatGPTFirstUserExpansionContext(candidate) { return chatGPTFirstUserExpansionContextFailure(candidate) === null; }
+function chatGPTRejectFirstUserExpansion(candidate, outcome, contextFailure = null) {
+  if (contextFailure) candidate.contextFailure = contextFailure;
+  candidate.outcome = outcome;
+  return false;
+}
+function chatGPTRejectFirstUserExpansionContext(candidate) {
+  const failure = chatGPTFirstUserExpansionContextFailure(candidate);
+  return chatGPTRejectFirstUserExpansion(candidate,
+    failure ? ['root', 'body'].includes(failure) ? 'node_changed' : 'context_changed' : 'text_mismatch', failure);
+}
+async function chatGPTObserveFirstUserExpansion(candidate) {
+  const reject = outcome => chatGPTRejectFirstUserExpansion(candidate, outcome);
+  if (!Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline)
+    return chatGPTRejectFirstUserExpansion(candidate, 'timeout', 'deadline');
+  const currentText = () => {
+    const value = candidate.body.innerText || candidate.body.textContent || '';
+    return typeof value === 'string' && value.length <= 180_200
+      ? value.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
+  };
+  const markerLine = `Computa session marker: ${candidate.marker}`;
+  // Preserve all non-whitespace bytes and every whitespace boundary. The
+  // provider may collapse ASCII whitespace runs; no Markdown delimiters,
+  // punctuation or message content are removed to make a display match.
+  const whitespaceRuns = text => text.replace(/[ \t\n]+/g, ' ');
+  const canonicalWhitespaceRuns = whitespaceRuns(candidate.canonical);
+  const complete = text => typeof text === 'string' && text.length > candidate.rendered.length
+    && text.startsWith(candidate.rendered) && text.split('\n').at(-1) === markerLine
+    && text.split(markerLine).length === 2 && whitespaceRuns(text) === canonicalWhitespaceRuns;
+  const compatible = text => complete(text) || typeof text === 'string' && text.startsWith(candidate.rendered)
+    && !text.includes(markerLine) && canonicalWhitespaceRuns.startsWith(whitespaceRuns(text));
+  const changed = await websiteModelWaitForChange(candidate.deadline, () => {
+    if (!chatGPTFirstUserExpansionContext(candidate)) return true;
+    const text = currentText();
+    return complete(text) || text === null || !text.startsWith(candidate.rendered)
+      || text.includes(markerLine) || !canonicalWhitespaceRuns.startsWith(whitespaceRuns(text));
+  });
+  const contextFailure = chatGPTFirstUserExpansionContextFailure(candidate);
+  // A crossed route cannot hide a changed message and later revive it. Only
+  // the same complete body or a still-compatible prefix is a URL-only failure.
+  if (contextFailure === 'url' && !compatible(currentText())) return reject('text_mismatch');
+  if (contextFailure) return chatGPTRejectFirstUserExpansionContext(candidate);
+  if (!changed || Date.now() > candidate.deadline) return chatGPTRejectFirstUserExpansion(candidate, 'timeout', 'deadline');
+  const expandedText = currentText();
+  if (!complete(expandedText)) return reject('text_mismatch');
+  candidate.expandedText = expandedText;
+  candidate.outcome = 'expanded';
+  return true;
+}
+async function chatGPTContinueFirstUserExpansion(candidate) {
+  const edge = input.firstUserExpansionRouteContinuation;
+  if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
+    || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
+    || !edge || Array.isArray(edge) || typeof edge !== 'object' || Object.keys(edge).sort().join(',') !== 'fromURL,toURL'
+    || typeof edge.fromURL !== 'string' || typeof edge.toURL !== 'string' || edge.fromURL === edge.toURL
+    || edge.fromURL !== candidate.routeURL || edge.toURL !== input.expectedURL || edge.toURL !== document.URL
+    || candidate.clicked !== true || candidate.outcome !== 'context_changed' || candidate.contextFailure !== 'url'
+    || !websiteModelChoiceEqual(candidate.modelChoice, input.firstUserExpansionModelChoice))
+    return chatGPTRejectFirstUserExpansion(candidate, 'context_changed', 'continuation');
+  if (!chatGPTFirstUserExpansionContext(candidate)) return chatGPTRejectFirstUserExpansionContext(candidate);
+  // Consume this native-certified edge. A second permitted promotion must
+  // name this new source URL; neither the deadline nor click claim is reset.
+  candidate.routeURL = edge.toURL;
+  candidate.contextFailure = null;
+  candidate.outcome = 'claimed';
+  try { return await chatGPTObserveFirstUserExpansion(candidate); }
+  catch { return chatGPTRejectFirstUserExpansion(candidate, 'failed'); }
+}
 async function chatGPTExpandFirstUser(candidate) {
   // One private claim survives timeout/reinspection. It grants only this local
   // display expansion, never Send, lineage, cleanup, or another attempt.
   globalThis.__computaModelFirstExpansion = candidate;
-  const reject = outcome => { candidate.outcome = outcome; return false; };
+  const reject = outcome => chatGPTRejectFirstUserExpansion(candidate, outcome);
   try {
     const intact = () => chatGPTFirstUserExpansionContext(candidate)
       && normalizedFirstBody(candidate.body) === candidate.rendered;
@@ -1470,13 +1547,13 @@ async function chatGPTExpandFirstUser(candidate) {
       && !control.disabled && control.getAttribute('aria-disabled') !== 'true'
       && getComputedStyle(control).pointerEvents !== 'none'
       && localControls().length === 1 && localControls()[0] === control;
-    if (!intact()) return reject(chatGPTFirstUserExpansionContextFailure(candidate) || 'text_mismatch');
+    if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!control) return reject(controls.length ? 'ambiguous' : 'unavailable');
     if (!available()) return reject('disabled');
     const model = await websiteModelReadEvidence('chatgpt', input.firstUserExpansionModelChoice, null,
       { scope: 'action_precheck', action: input.action });
     if (model.error) return reject('model_unverified');
-    if (!intact()) return reject(chatGPTFirstUserExpansionContextFailure(candidate) || 'text_mismatch');
+    if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!available()) return reject('unavailable');
     if (!chatGPTControlExposed(control)) {
       const rect = control.getBoundingClientRect();
@@ -1486,46 +1563,15 @@ async function chatGPTExpandFirstUser(candidate) {
           || Number.isFinite(window.innerHeight) && y >= window.innerHeight);
       if (!offscreen || typeof control.scrollIntoView !== 'function') return reject('obstructed');
       control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
-      if (!intact()) return reject(chatGPTFirstUserExpansionContextFailure(candidate) || 'text_mismatch');
+      if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
       if (!available()) return reject('unavailable');
     }
-    if (!intact()) return reject(chatGPTFirstUserExpansionContextFailure(candidate) || 'text_mismatch');
+    if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!chatGPTControlExposed(control)) return reject('obstructed');
     candidate.clicked = true;
+    candidate.deadline = Date.now() + 1_800;
     control.click();
-    const currentText = () => {
-      const value = candidate.body.innerText || candidate.body.textContent || '';
-      return typeof value === 'string' && value.length <= 180_200
-        ? value.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
-    };
-    const markerLine = `Computa session marker: ${candidate.marker}`;
-    // Preserve all non-whitespace bytes and every whitespace boundary. The
-    // provider may collapse ASCII whitespace runs; no Markdown delimiters,
-    // punctuation or message content are removed to make a display match.
-    const whitespaceRuns = text => text.replace(/[ \t\n]+/g, ' ');
-    const canonicalWhitespaceRuns = whitespaceRuns(candidate.canonical);
-    const complete = text => typeof text === 'string' && text.length > candidate.rendered.length
-      && text.startsWith(candidate.rendered) && text.split('\n').at(-1) === markerLine
-      && text.split(markerLine).length === 2
-      && whitespaceRuns(text) === canonicalWhitespaceRuns;
-    const changed = await websiteModelWaitForChange(Date.now() + 1_800, () => {
-      if (!chatGPTFirstUserExpansionContext(candidate)) return true;
-      const text = currentText();
-      // A single expansion can render incrementally. Proper longer prefixes
-      // may wait on later mutations. Completed provider rendering may differ
-      // only in ASCII whitespace runs, preserve the exact captured prefix,
-      // and expose its one final marker on this same physical body.
-      return complete(text) || text === null || !text.startsWith(candidate.rendered)
-        || text.includes(markerLine) || !canonicalWhitespaceRuns.startsWith(whitespaceRuns(text));
-    });
-    const contextFailure = chatGPTFirstUserExpansionContextFailure(candidate);
-    if (contextFailure) return reject(contextFailure);
-    if (!changed) return reject('timeout');
-    const expandedText = currentText();
-    if (!complete(expandedText)) return reject('text_mismatch');
-    candidate.expandedText = expandedText;
-    candidate.outcome = 'expanded';
-    return true;
+    return await chatGPTObserveFirstUserExpansion(candidate);
   } catch { return reject('failed'); }
 }
 function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots) {
@@ -1546,6 +1592,10 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
     result.expansionOutcome = ['unavailable', 'ambiguous', 'disabled', 'obstructed', 'claimed', 'model_unverified',
       'timeout', 'context_changed', 'node_changed', 'text_mismatch', 'expanded', 'failed'].includes(outcome)
       ? outcome : input.allowFirstUserExpansion === true ? 'ineligible' : 'not_requested';
+    const contextFailure = globalThis.__computaModelFirstExpansion?.contextFailure;
+    if (['frame', 'provider', 'origin', 'owner', 'user_count', 'submission', 'submission_count', 'marker', 'prompt',
+      'private_pin', 'product', 'temporary', 'root', 'body', 'conversation_route', 'conversation_identity', 'url',
+      'continuation', 'deadline'].includes(contextFailure)) result.expansionContextFailure = contextFailure;
     const length = (key, value) => { if (typeof value === 'string') result[key] = Math.min(value.length, limit + 1); };
     const normalized = value => value.replace(/\r\n?/g, '\n').normalize('NFC').trim();
     const alternate = (prefix, value, lengthKey = prefix + 'Length') => {
@@ -1673,6 +1723,12 @@ if (ownedUserCount > 0) {
   const first = chatGPTUserBody(ownedMessages[0]);
   let rendered = normalizedFirstBody(first);
   const consumedExpansion = globalThis.__computaModelFirstExpansion;
+  let expansionRejected = false;
+  if (globalThis.__computaModelFirstProof == null && consumedExpansion != null
+    && input.firstUserExpansionRouteContinuation != null) {
+    expansionRejected = !await chatGPTContinueFirstUserExpansion(consumedExpansion);
+    rendered = normalizedFirstBody(first);
+  }
   if (globalThis.__computaModelFirstProof == null && consumedExpansion != null
     && (consumedExpansion.outcome !== 'expanded' || !chatGPTFirstUserExpansionContext(consumedExpansion)
       || consumedExpansion.root !== ownedMessages[0] || consumedExpansion.body !== first
@@ -1681,7 +1737,6 @@ if (ownedUserCount > 0) {
     // on a later read after failure, replacement, or a different full body.
     return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
   const expansion = chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered);
-  let expansionRejected = false;
   if (expansion) {
     expansionRejected = !await chatGPTExpandFirstUser(expansion);
     // A display click can mutate the body before a later guard rejects it.

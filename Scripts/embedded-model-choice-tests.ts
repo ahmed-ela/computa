@@ -630,6 +630,115 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect((await f.run('inspect', expansionInput)).firstUserVerified).toBe(true); expect(expand.clicks).toBe(1);
       });
 
+      const moveRoute = (f: any, url: string) => { f.document.URL = url; f.location.pathname = new URL(url).pathname; };
+      const continuation = (fromURL: string, toURL: string) => ({ ...expansionInput,
+        firstUserExpansionRouteContinuation: { fromURL, toURL } });
+      const crossedExpansion = async () => {
+        const stage = await collapsed(), fromURL = stage.f.document.URL;
+        const toURL = 'https://chatgpt.com/c/local-chatgpt:owned-expansion?temporary-chat=true';
+        stage.expand.onClick = () => { stage.f.userBody.text = stage.prompt; moveRoute(stage.f, toURL); };
+        const first = await stage.f.run('inspect', expansionInput); rejected(first);
+        expect(JSON.parse(first.debugStructure)).toMatchObject({ expansionOutcome: 'context_changed', expansionContextFailure: 'url' });
+        return { ...stage, fromURL, toURL };
+      };
+
+      test('native-certified first route continues the same expanded body without another click or Send', async () => {
+        const { f, picker, expand, send, prompt, fromURL, toURL } = await crossedExpansion();
+        const deadline = f.world.__computaModelFirstExpansion.deadline;
+        const result = await f.run('inspect', continuation(fromURL, toURL));
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(prompt));
+        expect(result.firstUserFingerprint).toBe([...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join(''));
+        expect(result.firstUserVerified).toBe(true); expect(JSON.parse(result.firstUserDebugStructure).expansionOutcome).toBe('expanded');
+        expect(result.firstUserDebugStructure).not.toContain(fromURL); expect(result.firstUserDebugStructure).not.toContain(toURL);
+        expect(f.world.__computaModelFirstExpansion.deadline).toBe(deadline);
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('two certified monotonic route edges share the original expansion and absolute deadline', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed(), fromURL = f.document.URL;
+        const local = 'https://chatgpt.com/c/local-chatgpt:owned-two-edge?temporary-chat=true';
+        const final = 'https://chatgpt.com/c/owned-two-edge-public?temporary-chat=true';
+        expand.onClick = () => moveRoute(f, local);
+        rejected(await f.run('inspect', expansionInput));
+        const deadline = f.world.__computaModelFirstExpansion.deadline;
+        f.advanceTime(200);
+        const pending = f.run('inspect', continuation(fromURL, local)); await Promise.resolve();
+        f.userBody.text = prompt; moveRoute(f, final); notify(f);
+        const crossed = await pending; rejected(crossed);
+        expect(JSON.parse(crossed.debugStructure).expansionContextFailure).toBe('url');
+        expect(f.world.__computaModelFirstExpansion.routeURL).toBe(local);
+        expect((await f.run('inspect', continuation(local, final))).firstUserVerified).toBe(true);
+        expect(f.world.__computaModelFirstExpansion.deadline).toBe(deadline);
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('missing, mismatched or malformed continuation authority cannot rescue a consumed route failure', async () => {
+        for (const alter of [
+          (request: any) => { delete request.firstUserExpansionRouteContinuation; },
+          (request: any) => { request.firstUserExpansionRouteContinuation.fromURL = 'https://chatgpt.com/c/foreign'; },
+          (request: any) => { request.firstUserExpansionRouteContinuation.toURL = 'https://chatgpt.com/c/foreign'; },
+          (request: any) => { request.firstUserExpansionRouteContinuation.extra = true; },
+          (request: any) => { request.firstUserExpansionRouteContinuation = true; },
+          (request: any) => { request.allowFirstUserExpansion = false; },
+          (request: any) => { request.allowFirstUserBinding = false; },
+          (request: any) => { request.expectedFirstUserFingerprint = 'a'.repeat(64); },
+          (request: any) => { request.firstUserExpansionModelChoice = choice(target); },
+        ]) {
+          const { f, picker, expand, send, fromURL, toURL } = await crossedExpansion();
+          const request = continuation(fromURL, toURL); alter(request);
+          rejected(await f.run('inspect', request)); expect(f.world.__computaModelFirstProof).toBeUndefined();
+          expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
+      test('certified route continuation preserves body, prompt, count, product and temporary rejection', async () => {
+        for (const [predicate, mutate] of [
+          ['root', (stage: any) => replaceFirstRoot(stage.f, stage.root, stage.f.userBody)],
+          ['prompt', (stage: any) => { stage.f.world.__computaModelFirstPrompt += 'PRIVATE MUTATION'; }],
+          ['user_count', (stage: any) => stage.f.appendUser('PRIVATE SECOND MESSAGE')],
+          ['temporary', (stage: any) => { stage.f.temporary.connected = false; }],
+          ['product', (stage: any) => { stage.f.chatMode.values['aria-pressed'] = 'false'; stage.f.workMode.values['aria-pressed'] = 'true'; }],
+        ] as [string, (stage: any) => void][]) {
+          const stage = await crossedExpansion(); mutate(stage);
+          const result = await stage.f.run('inspect', { ...continuation(stage.fromURL, stage.toURL), expectedUserCounts: [1, 2] });
+          rejected(result); expect(JSON.parse(result.debugStructure).expansionContextFailure).toBe(predicate);
+          expect(stage.f.world.__computaModelFirstProof).toBeUndefined(); expect(stage.expand.clicks).toBe(1);
+          noSend(stage.f, stage.picker, stage.send);
+        }
+      });
+
+      test('URL change accompanied by destructive drift is never classified as URL-only continuation', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed(), fromURL = f.document.URL;
+        const toURL = 'https://chatgpt.com/c/local-chatgpt:owned-and-foreign?temporary-chat=true';
+        expand.onClick = () => { f.userBody.text = prompt; moveRoute(f, toURL); f.world.__computaModelFirstPrompt += 'PRIVATE DRIFT'; };
+        const first = await f.run('inspect', expansionInput); rejected(first);
+        expect(JSON.parse(first.debugStructure).expansionContextFailure).toBe('prompt');
+        f.world.__computaModelFirstPrompt = prompt;
+        rejected(await f.run('inspect', continuation(fromURL, toURL)));
+        expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('continuation neither extends an expired deadline nor grants cleanup or model-only authority', async () => {
+        for (const action of ['expired', 'cleanup', 'stop', 'verifyModel', 'verifyProductMode', 'prepare', 'insert', 'submit']) {
+          const { f, picker, expand, send, fromURL, toURL } = await crossedExpansion();
+          if (action === 'expired') f.advanceTime(1_801);
+          const result = await f.run(action === 'expired' ? 'inspect' : action, continuation(fromURL, toURL)); rejected(result);
+          expect(JSON.parse(result.debugStructure).expansionContextFailure).toBe(action === 'expired' ? 'deadline' : 'continuation');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
+      test('a URL transition cannot conceal incompatible text and revive it after later restoration', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed(), fromURL = f.document.URL;
+        const toURL = 'https://chatgpt.com/c/local-chatgpt:text-drift?temporary-chat=true';
+        expand.onClick = () => { f.userBody.text = prompt.replace('PRIVATE LONG', 'PRIVATE OTHER'); moveRoute(f, toURL); };
+        const first = await f.run('inspect', expansionInput); rejected(first);
+        expect(JSON.parse(first.debugStructure).expansionOutcome).toBe('text_mismatch');
+        f.userBody.text = prompt;
+        rejected(await f.run('inspect', continuation(fromURL, toURL)));
+        expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
       test('synchronous expansion binds without recurring polling or an extra Send', async () => {
         const { f, picker, expand, send, prompt } = await collapsed();
         expand.onClick = () => { f.userBody.text = prompt; };
@@ -1234,7 +1343,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           'bodyTextContentAnalyzed', 'rootRenderedAnalyzed', 'rootTextContentAnalyzed', 'firstPromptAnalyzed',
           'bodyTextContentMarkerOccurrences', 'rootRenderedMarkerOccurrences', 'rootTextContentMarkerOccurrences',
           'bodyTextContentMarkerFinalLine', 'rootRenderedMarkerFinalLine', 'rootTextContentMarkerFinalLine',
-          'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount', 'expansionOutcome']);
+          'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount', 'expansionOutcome', 'expansionContextFailure']);
         expect(Object.keys(JSON.parse(result.debugStructure)).every(key => allowed.has(key))).toBe(true);
       });
 

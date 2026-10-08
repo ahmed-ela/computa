@@ -1043,6 +1043,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let outcome = rawOutcome as? String, outcomes.contains(outcome) else { return nil }
             safe["expansionOutcome"] = outcome
         }
+        if let rawFailure = value["expansionContextFailure"] {
+            let failures: Set<String> = ["frame", "provider", "origin", "owner", "user_count", "submission", "submission_count",
+                "marker", "prompt", "private_pin", "product", "temporary", "root", "body", "conversation_route",
+                "conversation_identity", "url", "continuation", "deadline"]
+            guard let failure = rawFailure as? String, failures.contains(failure) else { return nil }
+            safe["expansionContextFailure"] = failure
+        }
         for key in firstUserBodyLengths + firstUserBodyCounts {
             if let rawCount = value[key] {
                 let limit: Int64 = firstUserBodyLengths.contains(key) ? 220_001 : 1_000
@@ -1103,7 +1110,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let expectedReason, summary["reason"] as? String != expectedReason { return nil }
         let children = summary.removeValue(forKey: "descendants") as? [[String: Any]] ?? []
         var bodyObservation: [String: Any] = [:]
-        for key in ["bodySelection", "expansionOutcome"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
+        for key in ["bodySelection", "expansionOutcome", "expansionContextFailure"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
             if let value = summary.removeValue(forKey: key) { bodyObservation[key] = value }
         }
         if !bodyObservation.isEmpty {
@@ -1231,6 +1238,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true, recheckProductAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
+                      firstUserExpansionRouteContinuation: (fromURL: URL, toURL: URL)? = nil,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         if !allowBlockedProvider { try checkProviderGate(session) }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
@@ -1274,6 +1282,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
             "allowFirstUserExpansion": allowFirstUserExpansion,
         ]
+        if allowFirstUserExpansion, let continuation = firstUserExpansionRouteContinuation,
+           continuation.toURL == url {
+            // Only the immediately preceding native-certified SPA route edge
+            // may continue an already-clicked display expansion. This receipt
+            // is not forwarded to cleanup or any unrelated read refresh.
+            input["firstUserExpansionRouteContinuation"] = [
+                "fromURL": continuation.fromURL.absoluteString, "toURL": continuation.toURL.absoluteString,
+            ]
+        }
         if let choice = session.modelChoice {
             if allowFirstUserExpansion {
                 input["firstUserExpansionModelChoice"] = ["key": choice.key, "label": choice.label]
@@ -1394,6 +1411,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
                                       allowBlockedProvider: allowBlockedProvider,
+                                      firstUserExpansionRouteContinuation: allowFirstUserExpansion ? (url, currentURL) : nil,
                                       maximumWait: maximumWait)
             }
             let temporaryToggle = action == "enableTemporary" && session.state == "loading"
