@@ -1252,6 +1252,138 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testDelayedFirstBubbleBindsThroughInspectBeforeAnyModelOnlyRead() async throws {
+        for boundary in ["submit_result", "product_result", "after_send"] {
+            let choice = Self.fixtureChoice(.chatgpt)
+            let fixture = try Fixture(page: Self.acknowledgedAppendRacePage())
+            defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            var acknowledged = false, rendered = false
+            var firstPrivateBindAction: String?
+            var firstBoundDiagnostics: [String] = []
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting { firstBoundDiagnostics += $0 }
+            let renderPending = """
+                if (!window.fixturePendingUser || !window.fixturePendingTurn) return false;
+                document.getElementById('messages').appendChild(window.fixturePendingUser);
+                document.getElementById('messages').appendChild(window.fixturePendingTurn);
+                window.fixturePendingUser = null; window.fixturePendingTurn = null; return true;
+                """
+            fixture.transport.setBeforePageResultValidationDetailedForTesting { action, enforceModel in
+                if action == "submit" { acknowledged = true }
+                guard acknowledged else { return }
+                let bound = try? await self.evaluate(view, "return !!globalThis.__computaModelFirstProof;",
+                    world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+                if bound == true, firstPrivateBindAction == nil { firstPrivateBindAction = action }
+                if firstPrivateBindAction == nil {
+                    XCTAssertFalse(["verifyModel", "verifyProductMode"].contains(action), "Unbound native rechecks must use inspect")
+                }
+                let shouldRender = boundary == "submit_result" && action == "submit"
+                    || boundary == "product_result" && action == "inspect" && !enforceModel
+                if shouldRender, !rendered {
+                    rendered = true
+                    let result = try? await self.evaluate(view, renderPending) as? Bool
+                    XCTAssertEqual(result, true)
+                }
+            }
+            defer {
+                fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
+                fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil)
+            }
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": "A controlled delayed first bubble"])
+            XCTAssertEqual(sent["state"] as? String, "running")
+            if boundary == "after_send" {
+                let context = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+                XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+                XCTAssertNil(firstPrivateBindAction)
+                let renderedAfterSend = try await evaluate(view, renderPending) as? Bool
+                XCTAssertEqual(renderedAfterSend, true)
+            }
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertEqual(firstPrivateBindAction, "inspect")
+            XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+            let boundRecords = firstBoundDiagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            XCTAssertEqual(boundRecords.filter { $0["reason"] as? String == "first_bound" }.count, 1,
+                "The separate first-user diagnostic must survive without replacing completion structure (\(boundary))")
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testIdenticalFirstNodeReplacementBeforeNativeBindingReportsWithoutAdmittingOrReplaying() async throws {
+        let choice = Self.fixtureChoice(.chatgpt)
+        let fixture = try Fixture(page: Self.acknowledgedAppendRacePage())
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Controlled private first pin before native admission"])
+        let context = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+        _ = try await evaluate(view, """
+            document.getElementById('messages').appendChild(window.fixturePendingUser);
+            document.getElementById('messages').appendChild(window.fixturePendingTurn);
+            window.fixturePendingUser = null; window.fixturePendingTurn = null; return true;
+            """)
+        var armed = false
+        var diagnostics: [String] = []
+        fixture.transport.setFirstUserDiagnosticsObserverForTesting { diagnostics += $0 }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect", !armed else { return }
+            let installed = try? await self.evaluate(view, """
+                if (!globalThis.__computaModelFirstProof) return false;
+                const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
+                let replaceOnce = true;
+                crypto.subtle.digest = async (...arguments_) => {
+                    const result = await originalDigest(...arguments_);
+                    if (replaceOnce) {
+                        replaceOnce = false;
+                        const root = document.querySelector('[data-message-author-role="user"]');
+                        root.replaceWith(root.cloneNode(true));
+                    }
+                    return result;
+                };
+                return true;
+                """, world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+            armed = installed == true
+        }
+        defer {
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil)
+        }
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A private-only pin cannot authorize a crossed first-node replacement")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
+        XCTAssertTrue(armed)
+        let values = diagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        XCTAssertTrue(values.contains { $0["stage"] as? String == "adapter_rejected" })
+        XCTAssertTrue(values.contains { $0["reason"] as? String == "snapshot_before_action" })
+        let nativeStates = values.filter { $0["kind"] as? String == "first_user_native_state" }
+        XCTAssertEqual(nativeStates.count, 2)
+        XCTAssertTrue(nativeStates.allSatisfy { $0["fingerprintPresent"] as? Bool == false })
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        XCTAssertTrue(fixture.browser.webView(for: ownedID) === view)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created", "A later independent fresh proof must still be required for owned cleanup")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testAcknowledgedDelayedUserAppendDuringModelPickerReadRetainsChoiceAcrossToolContinuation() async throws {
         let choice = Self.fixtureChoice(.chatgpt)
         let fixture = try Fixture(page: Self.acknowledgedAppendRacePage())
@@ -2892,6 +3024,88 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         source["literalCodeValidJSON"] = NSNull()
         source["literalCodeKnownEnvelopeType"] = NSNull()
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+    }
+
+    func testChatGPTFirstUserDiagnosticContextIsFiniteStrictlyTypedAndLogBounded() throws {
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        let source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt",
+            "root": ["tag": "article", "classes": Array(repeating: "whitespace-pre-wrap", count: 6)],
+            "body": ["tag": "div", "classes": Array(repeating: "whitespace-pre-wrap", count: 6)],
+            "userCount": 1, "textLength": 220_001, "lineCount": 220_001, "markerOccurrences": 1, "controlDescendants": 1_000,
+            "markerFinalLine": true, "submitted": true, "markerMatches": true,
+            "reason": "binding_not_authorized", "scope": "action_final_guard", "action": "verifyProductMode",
+            "allowFirstUserBinding": false, "privatePinPresent": true, "expectedFingerprintPresent": false,
+            "markerValid": true, "firstPromptPresent": true, "firstPromptMatches": true,
+            "pinnedFingerprintMatch": true, "nativeFingerprintMatch": false,
+            "snapshot": ["rootSame": true, "bodySame": true, "bodyConnected": true, "textSame": true,
+                         "countSame": true, "urlSame": true, "originSame": true, "ownerSame": true],
+            "prompt": "private_canary", "response": "private_canary", "ownerToken": "private_canary",
+            "url": "https://private_canary", "marker": "private_canary", "fingerprint": "private_canary"]
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(source), provider: .chatgpt))
+        XCTAssertEqual(records.count, 2, "Large context must split rather than lose the failure branch")
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+        let values = try records.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        XCTAssertEqual(values[0]["reason"] as? String, "binding_not_authorized")
+        XCTAssertEqual(values[1]["kind"] as? String, "first_user_context")
+        XCTAssertEqual(values[1]["action"] as? String, "verifyProductMode")
+        XCTAssertEqual(values[1]["expectedFingerprintPresent"] as? Bool, false)
+        for key in ["allowFirstUserBinding", "privatePinPresent", "expectedFingerprintPresent", "markerValid",
+                    "firstPromptPresent", "firstPromptMatches", "pinnedFingerprintMatch", "markerFinalLine", "submitted"] {
+            for invalid in [1, 0, "private_canary", NSNull()] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        for key in ["scope", "action"] {
+            var forged = source; forged[key] = "private_canary"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
+    }
+
+    func testNativeFirstUserFailureContextProjectsPresenceWithoutPrivateValues() throws {
+        let entry = EmbeddedWebModelTransport.FirstUserNativeState(sequence: 1, confirmedUsers: 0,
+            pendingSubmission: true, submitted: true, temporary: true, fingerprintPresent: false)
+        let current = EmbeddedWebModelTransport.FirstUserNativeState(sequence: 1, confirmedUsers: 1,
+            pendingSubmission: false, submitted: true, temporary: true, fingerprintPresent: true)
+        func records(_ observed: [String: Any], action: String = "inspect",
+                     stage: EmbeddedWebModelTransport.FirstUserNativeStage = .bindingNotAuthorized) -> [String]? {
+            EmbeddedWebModelTransport.firstUserNativeDiagnosticRecords(provider: .chatgpt, action: action, stage: stage,
+                entry: entry, current: current, observed: observed, refresh: false, modelRecheck: true, productRecheck: false)
+        }
+        let fingerprint = String(repeating: "a", count: 64)
+        let projected = try XCTUnwrap(records(["firstUserVerified": true, "firstUserMarkerVerified": false,
+            "temporary": NSNumber(value: 1), "userCount": 1, "firstUserFingerprint": fingerprint,
+            "debugStructure": "private_canary", "prompt": "private_canary", "response": "private_canary",
+            "ownerToken": "private_canary", "url": "https://private_canary", "marker": "private_canary"]))
+        XCTAssertEqual(projected.count, 3)
+        XCTAssertTrue(projected.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains(fingerprint) })
+        let values = try projected.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        XCTAssertEqual(values[0]["stage"] as? String, "binding_not_authorized")
+        XCTAssertEqual(values[0]["temporary"] as? String, "invalid")
+        XCTAssertEqual(values[0]["firstUserVerified"] as? String, "true")
+        XCTAssertEqual(values[0]["firstUserMarkerVerified"] as? String, "false")
+        XCTAssertEqual(values[0]["fingerprintState"] as? String, "valid")
+        XCTAssertEqual(values[0]["adapterDiagnosticPresent"] as? Bool, true)
+        XCTAssertEqual(values[0]["adapterDiagnosticAccepted"] as? Bool, false)
+        XCTAssertEqual(values[1]["phase"] as? String, "entry")
+        XCTAssertEqual(values[1]["bindingAllowed"] as? Bool, true)
+        XCTAssertEqual(values[2]["phase"] as? String, "current")
+        XCTAssertEqual(values[2]["bindingAllowed"] as? Bool, false)
+        XCTAssertNil(records([:], action: "private_canary"))
+        for invalid in [true, -1, 1.5, 10_001, "private_canary", NSNull()] as [Any] {
+            let invalidRecords = try XCTUnwrap(records(["userCount": invalid, "firstUserFingerprint": "private_canary"]))
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(invalidRecords[0].utf8)) as? [String: Any])
+            XCTAssertEqual(value["userCountState"] as? String, "invalid")
+            XCTAssertNil(value["userCount"])
+            XCTAssertEqual(value["fingerprintState"] as? String, "invalid")
+        }
+        let absent = try XCTUnwrap(records([:]))
+        let absentValue = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(absent[0].utf8)) as? [String: Any])
+        XCTAssertEqual(absentValue["userCountState"] as? String, "absent")
+        XCTAssertEqual(absentValue["firstUserVerified"] as? String, "absent")
+        XCTAssertEqual(absentValue["fingerprintState"] as? String, "absent")
     }
 
     func testFirstUserDiagnosticsDropUnknownStringsAndRejectUnboundedMetadata() throws {

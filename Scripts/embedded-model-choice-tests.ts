@@ -582,6 +582,197 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
     });
 
+    if (provider === 'chatgpt') describe('finite first-user ownership diagnostics', () => {
+      const failure = (result: any, reason: string, scope: string, action = 'inspect') => {
+        expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+        const diagnostic = JSON.parse(result.debugStructure);
+        expect(diagnostic).toMatchObject({ kind: 'first_user_structure', provider: 'chatgpt', reason, scope, action });
+        expect(diagnostic.root.classes).toEqual([]); expect(diagnostic.body.classes).toEqual([]);
+        expect(diagnostic.descendants).toBeUndefined();
+        expect(result.debugStructure.length).toBeLessThanOrEqual(8192);
+        return diagnostic;
+      };
+      const noMutation = (f: any, picker: any) => {
+        expect(f.composer.textContent).toBe(''); expect(f.composer.events).toHaveLength(0);
+        expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      };
+      for (const [reason, mutate, overrides] of [
+        ['marker_invalid', (f: any) => { f.world.__computaModelFirstSubmitted = false; }, { expectedFirstUserMarker: 'PRIVATE INVALID MARKER' }],
+        ['submission_unclaimed', (f: any) => { f.world.__computaModelFirstSubmitted = false; f.world.__computaModelFirstMarker = 'foreign'; }, {}],
+        ['marker_mismatch', (f: any) => { f.world.__computaModelFirstMarker = 'foreign'; f.userBody.text = ''; }, {}],
+        ['body_limit', (f: any) => { f.userBody.text = 'x'.repeat(180_201); }, {}],
+        ['marker_not_final', (f: any) => { f.userBody.text = 'Synthetic\n' + markerLine + '\nTrailing control'; }, {}],
+        ['marker_duplicate', (f: any) => { f.userBody.text = 'Synthetic\n' + markerLine + '\n' + markerLine; }, {}],
+        ['body_empty', (f: any) => { f.userBody.text = markerLine; }, {}],
+      ] as [string, (f: any) => void, Record<string, unknown>][]) {
+        test(`marker/body rejection retains ${reason} precedence without editor mutation`, async () => {
+          const { f, picker } = setup(true); mutate(f);
+          failure(await f.run('inspect', overrides), reason, 'marker_validation');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noMutation(f, picker);
+        });
+      }
+
+      for (const reason of ['marker_mismatch', 'pinned_fingerprint', 'native_fingerprint']) {
+        test(`private/native pin rejection identifies ${reason} without exposing pins`, async () => {
+          const { f, picker } = setup(true);
+          const first = await f.run('inspect');
+          const overrides: Record<string, unknown> = {};
+          if (reason === 'marker_mismatch') f.world.__computaModelFirstProof.marker = 'PRIVATE PIN MARKER';
+          if (reason === 'pinned_fingerprint') f.world.__computaModelFirstProof.fingerprint = '0'.repeat(64);
+          if (reason === 'native_fingerprint') overrides.expectedFirstUserFingerprint = 'f'.repeat(64);
+          const result = await f.run('inspect', overrides), diagnostic = failure(result, reason, 'binding');
+          expect(diagnostic.privatePinPresent).toBe(true); expect(diagnostic.expectedFingerprintPresent).toBe(true);
+          expect(diagnostic.pinnedFingerprintMatch).toBe(reason !== 'pinned_fingerprint');
+          expect(diagnostic.nativeFingerprintMatch).toBe(reason !== 'native_fingerprint');
+          expect(result.debugStructure).not.toContain(first.firstUserFingerprint);
+          expect(result.debugStructure).not.toContain('PRIVATE PIN MARKER'); noMutation(f, picker);
+        });
+      }
+
+      test('an already-present unbound first bubble binds only through the pending first inspect', async () => {
+        for (const action of ['verifyModel', 'prepare', 'inspect']) {
+          const { f, picker } = setup(true);
+          const result = await f.run(action, { expectedUserCounts: [0, 1], expectedModelChoice: choice(initial),
+            ...(action === 'inspect' ? { allowFirstUserBinding: false } : {}) });
+          expect(failure(result, 'binding_not_authorized', 'binding', action)).toMatchObject({ privatePinPresent: false,
+            expectedFingerprintPresent: false, allowFirstUserBinding: action !== 'inspect' });
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noMutation(f, picker);
+        }
+        const { f, picker } = setup(true);
+        const first = await f.run('inspect', { expectedUserCounts: [0, 1], expectedModelChoice: choice(initial) });
+        expect(first.firstUserVerified).toBe(true);
+        expect(JSON.parse(first.firstUserDebugStructure)).toMatchObject({ kind: 'first_user_structure', reason: 'first_bound',
+          scope: 'binding', action: 'inspect', privatePinPresent: true, expectedFingerprintPresent: false });
+        const pendingPin = await f.run('inspect', { expectedUserCounts: [0, 1], expectedFirstUserFingerprint: undefined,
+          allowFirstUserBinding: true, expectedModelChoice: choice(initial) });
+        expect(pendingPin.firstUserFingerprint).toBe(first.firstUserFingerprint);
+        expect(pendingPin.firstUserVerified).toBe(true);
+        // An outer inspect can establish the JS pin before a nested native
+        // recheck adopts it. That eligible recheck must carry the same finite
+        // binding diagnostic; native's existing gate logs it exactly once.
+        expect(typeof pendingPin.firstUserDebugStructure).toBe('string');
+        expect(JSON.parse(pendingPin.firstUserDebugStructure)).toMatchObject({ kind: 'first_user_structure', reason: 'first_bound',
+          scope: 'binding', action: 'inspect', privatePinPresent: true, expectedFingerprintPresent: false,
+          allowFirstUserBinding: true, pinnedFingerprintMatch: true });
+        const bound = await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
+        expect(bound.firstUserVerified).toBe(true); expect(bound.firstUserDebugStructure).toBeUndefined();
+        expect(JSON.parse(bound.debugStructure)).toMatchObject({ articleUsers: 1, articleAssistants: 1 });
+        noMutation(f, picker);
+      });
+
+      test('missing first message reports absence independently of a present expected fingerprint', async () => {
+        const { f, picker } = setup(false);
+        const result = await f.run('inspect', { expectedFirstUserFingerprint: 'a'.repeat(64) });
+        expect(failure(result, 'first_missing', 'first_missing')).toMatchObject({ userCount: 0,
+          root: { tag: 'none' }, body: { tag: 'none' }, privatePinPresent: false, expectedFingerprintPresent: true });
+        expect(result.debugStructure).not.toContain('a'.repeat(64)); noMutation(f, picker);
+      });
+
+      for (const scope of ['digest', 'model_precheck', 'action_final_guard']) {
+        test(`first-body drift reports the ${scope} rejection boundary`, async () => {
+          const { f, picker } = setup(true, { genericHeader: true });
+          if (scope === 'digest') f.onDigest(() => { f.userBody.text += ' PRIVATE DIGEST DRIFT'; });
+          else {
+            await f.run('inspect', { expectedModelChoice: choice(initial) });
+            const click = picker.trigger.onClick; let opens = 0;
+            picker.trigger.onClick = () => {
+              const opening = picker.menu.values.hidden !== undefined; click();
+              if (opening && ++opens === (scope === 'model_precheck' ? 1 : 2)) f.userBody.text += ' PRIVATE MODEL DRIFT';
+            };
+          }
+          const result = await f.run('inspect', { expectedModelChoice: choice(initial) });
+          const diagnostic = failure(result, scope === 'digest' ? 'snapshot_before_action' : 'snapshot_after_action', scope);
+          expect(diagnostic.snapshot).toEqual({ rootSame: true, bodySame: true, bodyConnected: true, textSame: false,
+            countSame: true, urlSame: true, originSame: true, ownerSame: true });
+          expect(result.debugStructure).not.toContain('PRIVATE'); noMutation(f, picker);
+        });
+      }
+
+      test('replacement after private pin but before native binding remains a strict rejection', async () => {
+        const { f, picker } = setup(true, { genericHeader: true });
+        await f.run('inspect', { expectedModelChoice: choice(initial) });
+        const root = firstRoot(f), body = f.userBody, pin = f.world.__computaModelFirstProof;
+        const click = picker.trigger.onClick; let replaced = false;
+        picker.trigger.onClick = () => {
+          const opening = picker.menu.values.hidden !== undefined; click();
+          if (opening && !replaced) { replaced = true; replaceFirstRoot(f, root, body); }
+        };
+        const result = await f.run('inspect', { expectedModelChoice: choice(initial),
+          expectedFirstUserFingerprint: undefined, allowFirstUserBinding: true });
+        expect(failure(result, 'snapshot_after_action', 'model_precheck')).toMatchObject({ privatePinPresent: true,
+          expectedFingerprintPresent: false, snapshot: { rootSame: false, bodySame: false, bodyConnected: false } });
+        expect(f.world.__computaModelFirstProof).toBe(pin); noMutation(f, picker);
+      });
+
+      test('outbound first insertion and submission failures expose finite predicate booleans only', async () => {
+        for (const action of ['insert', 'submit']) for (const cause of action === 'insert' ? ['submitted', 'marker', 'suffix'] : ['submitted', 'prompt', 'suffix']) {
+          const { f, picker } = setup(false), send = new Node('BUTTON', { 'data-testid': 'send-button' });
+          f.body.append(send);
+          const prompt = 'PRIVATE OUTBOUND PROMPT\n\n' + markerLine + (cause === 'suffix' ? '\nPRIVATE TAIL' : '');
+          if (action === 'submit') { f.composer.text = prompt; f.world.__computaModelFirstPrompt = cause === 'prompt' ? 'PRIVATE OTHER PROMPT' : prompt; }
+          if (cause === 'submitted') f.world.__computaModelFirstSubmitted = true;
+          const result = await f.run(action, { prompt, ...(cause === 'marker' ? { expectedFirstUserMarker: 'PRIVATE INVALID MARKER' } : {}) });
+          const diagnostic = failure(result, action === 'insert' ? 'first_insert' : 'first_submit', action === 'insert' ? 'first_insert' : 'first_submit', action);
+          expect(diagnostic.submitted).toBe(cause === 'submitted'); expect(diagnostic.markerValid).toBe(cause !== 'marker');
+          expect(diagnostic.firstPromptPresent).toBe(action === 'submit');
+          expect(diagnostic.firstPromptMatches).toBe(action === 'submit' && cause !== 'prompt');
+          expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
+          expect(f.composer.textContent).toBe(action === 'submit' ? prompt : '');
+          expect(f.composer.events).toHaveLength(0); expect(send.clicks).toBe(0);
+          expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+        }
+      });
+
+      test('whole-article body fallback reports control-suffix rejection without changing selectors', async () => {
+        const { f, picker } = setup(true), root = firstRoot(f);
+        f.userBody.values = { 'data-user-message-bubble': '' };
+        const result = await f.run('inspect');
+        expect(failure(result, 'marker_not_final', 'marker_validation')).toMatchObject({ userCount: 1,
+          root: { tag: 'article' }, body: { tag: 'article' }, controlDescendants: 1, markerFinalLine: false });
+        expect(root.querySelector('[data-user-message-bubble]')).toBe(f.userBody);
+        expect(f.world.__computaModelFirstProof).toBeUndefined(); noMutation(f, picker);
+      });
+
+      test('poisoned content and metadata never escape the finite diagnostic projection', async () => {
+        const { f } = setup(true), root = firstRoot(f);
+        // Bootstrap the normal product owner before poisoning the diagnostic
+        // inputs, while deliberately leaving first-message proof unbound.
+        await f.run('inspect', { expectedFirstUserMarker: 'invalid' });
+        root.values = { 'data-message-author-role': 'user', id: 'PRIVATE ROOT ID', class: 'PRIVATE ROOT CLASS', 'data-private': 'PRIVATE ATTRIBUTE' };
+        root.tagName = 'PRIVATE-TAG-CANARY';
+        f.userBody.values = { class: 'whitespace-pre-wrap PRIVATE BODY CLASS', id: 'PRIVATE BODY ID' };
+        f.userBody.text = 'PRIVATE PROMPT AND REPLY';
+        f.document.URL += '&PRIVATE_URL_CANARY=secret';
+        f.world.__computaModelFirstMarker = 'PRIVATE GLOBAL MARKER';
+        f.world.__computaModelOwner = 'PRIVATE OWNER TOKEN';
+        f.world.__computaModelFirstPrompt = 'PRIVATE STORED PROMPT';
+        f.world.__computaModelFirstProof = { marker: 'PRIVATE PIN MARKER', fingerprint: 'PRIVATE PIN HASH' };
+        const result = await f.run('inspect', { ownerToken: 'PRIVATE OWNER TOKEN', expectedFirstUserMarker: 'PRIVATE INPUT MARKER',
+          expectedFirstUserFingerprint: 'PRIVATE NATIVE HASH', prompt: 'PRIVATE OUTBOUND PROMPT', unknown: 'PRIVATE UNKNOWN' });
+        expect(failure(result, 'marker_invalid', 'marker_validation').root).toEqual({ tag: 'other', classes: [] });
+        expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
+        const allowed = new Set(['kind', 'provider', 'reason', 'scope', 'action', 'userCount', 'root', 'body', 'textLength',
+          'lineCount', 'markerFinalLine', 'markerOccurrences', 'controlDescendants', 'submitted', 'markerMatches',
+          'markerValid', 'allowFirstUserBinding', 'privatePinPresent', 'expectedFingerprintPresent']);
+        expect(Object.keys(JSON.parse(result.debugStructure)).every(key => allowed.has(key))).toBe(true);
+      });
+
+      test('diagnostic construction failure or unknown action retains the original ownership error', async () => {
+        for (const broken of ['projection', 'action']) {
+          const { f, picker } = setup(true);
+          if (broken === 'projection') {
+            const query = f.userBody.querySelectorAll.bind(f.userBody);
+            f.userBody.querySelectorAll = (selector: string) => {
+              if (selector === 'button, [role="button"]') throw new Error('PRIVATE DIAGNOSTIC FAILURE');
+              return query(selector);
+            };
+          }
+          const result = await f.run(broken === 'action' ? 'PRIVATE UNKNOWN ACTION' : 'inspect', { expectedFirstUserMarker: 'invalid' });
+          expect(result).toEqual({ error: 'conversation_changed', detail: 'first_user_message' }); noMutation(f, picker);
+        }
+      });
+    });
+
     if (provider === 'claude') test('Claude first-user diagnostics distinguish model-read body drift without private text', async () => {
       const { f, picker } = setup(true, { genericHeader: true });
       await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });

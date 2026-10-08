@@ -1120,7 +1120,8 @@ async function providerPageAction(input, readLineageFingerprint = null) {
         || { error: 'conversation_changed', detail: 'user_count' };
     if (firstSnapshot && !snapshotUnchanged()) return await websiteModelReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
-        identity: () => null, temporary: chatGPTTemporaryVerified }) || { error: 'conversation_changed', detail: 'first_user_message' };
+        identity: () => null, temporary: chatGPTTemporaryVerified })
+      || chatGPTFirstUserFailure('snapshot_after_action', 'model_precheck', {}, false, readLineageFingerprint);
     modelState.evidence = proof.modelEvidence;
   }
   if (input.action === 'verifyModel') return { modelEvidence: modelState.evidence };
@@ -1262,7 +1263,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       if (globalThis.__computaModelFirstSubmitted || typeof expectedFirstUserMarker !== "string"
         || !/^[a-f0-9-]{36}$/i.test(expectedFirstUserMarker)
         || !prompt.endsWith(`\n\nComputa session marker: ${expectedFirstUserMarker}`))
-        return { error: "conversation_changed", detail: "first_user_message" };
+        return chatGPTFirstUserFailure('first_insert', 'first_insert', { rendered: prompt });
       // This is insertion data, not ownership proof. The marker becomes
       // authoritative only at the exact-text check immediately before Send.
       globalThis.__computaModelFirstPrompt = prompt;
@@ -1335,7 +1336,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     if (userCount === 0) {
       if (globalThis.__computaModelFirstSubmitted || globalThis.__computaModelFirstPrompt !== prompt
         || !prompt.endsWith(`\n\nComputa session marker: ${expectedFirstUserMarker}`))
-        return { error: "conversation_changed", detail: "first_user_message" };
+        return chatGPTFirstUserFailure('first_submit', 'first_submit', { rendered: prompt });
       globalThis.__computaModelFirstMarker = expectedFirstUserMarker;
       globalThis.__computaModelFirstSubmitted = true;
     }
@@ -1393,8 +1394,65 @@ if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includ
 let firstUserVerified = false;
 let firstUserFingerprint = null;
 let firstSnapshot = null;
+let firstUserRejectionDiagnostic;
 const normalizedFirstBody = node => (node.innerText || node.textContent || "")
   .replace(/\r\n?/g, "\n").normalize("NFC").trim();
+// Diagnostics are a finite, best-effort projection. They never authorize an
+// action, await, or publish page text, private pins, attributes, or addresses.
+function chatGPTFirstUserStructure(reason, scope, captured = {}, allowSubmittedUser = false, fingerprint = firstUserFingerprint) {
+  try {
+    const reasons = ['first_bound', 'marker_invalid', 'submission_unclaimed', 'marker_mismatch', 'body_limit',
+      'marker_not_final', 'marker_duplicate', 'body_empty', 'snapshot_before_action', 'pinned_fingerprint',
+      'native_fingerprint', 'binding_not_authorized', 'first_missing', 'snapshot_after_action', 'first_insert', 'first_submit'];
+    const scopes = ['marker_validation', 'digest', 'model_precheck', 'binding', 'action_final_guard', 'first_insert', 'first_submit', 'first_missing'];
+    const actions = ['inspect', 'ensureChatMode', 'verifyProductMode', 'enableTemporary', 'discoverModels', 'selectModel',
+      'modelDiagnostic', 'verifyModel', 'prepare', 'insert', 'sendReady', 'submit', 'stop', 'cleanup'];
+    const resolvedReason = typeof reason === 'function' ? reason() : reason;
+    if (!reasons.includes(resolvedReason) || !scopes.includes(scope) || !actions.includes(input.action)) return undefined;
+    const roots = captured.roots || chatGPTMessageRoots('user'), root = roots[0];
+    const body = captured.body || (root && chatGPTUserBody(root));
+    const rendered = typeof captured.rendered === 'string' ? captured.rendered : body ? normalizedFirstBody(body) : '';
+    const lines = rendered.split('\n'), marker = input.expectedFirstUserMarker;
+    const markerValid = typeof marker === 'string' && /^[a-f0-9-]{36}$/i.test(marker);
+    const markerLine = markerValid ? `Computa session marker: ${marker}` : null;
+    const tags = ['div', 'span', 'p', 'pre', 'code', 'button', 'section', 'article', 'a', 'strong', 'em', 'ol', 'ul', 'li', 'br', 'input', 'textarea'];
+    const shape = node => ({ tag: !node ? 'none' : tags.includes(node.tagName?.toLowerCase()) ? node.tagName.toLowerCase() : 'other', classes: [] });
+    const pinned = globalThis.__computaModelFirstProof;
+    const diagnostic = { kind: 'first_user_structure', provider: 'chatgpt', reason: resolvedReason, scope, action: input.action,
+      userCount: Math.min(roots.length, 1_000), root: shape(root), body: shape(body),
+      textLength: Math.min(rendered.length, 220_001), lineCount: Math.min(lines.length, 220_001),
+      markerFinalLine: markerLine !== null && lines.at(-1) === markerLine,
+      markerOccurrences: Math.min(markerLine === null ? 0 : lines.filter(line => line === markerLine).length, 1_000),
+      controlDescendants: Math.min(body ? body.querySelectorAll('button, [role="button"]').length : 0, 1_000),
+      submitted: globalThis.__computaModelFirstSubmitted === true, markerMatches: globalThis.__computaModelFirstMarker === marker,
+      markerValid, allowFirstUserBinding: input.allowFirstUserBinding === true,
+      privatePinPresent: pinned != null, expectedFingerprintPresent: input.expectedFirstUserFingerprint != null };
+    if (scope === 'first_insert' || scope === 'first_submit') {
+      diagnostic.firstPromptPresent = typeof globalThis.__computaModelFirstPrompt === 'string';
+      diagnostic.firstPromptMatches = globalThis.__computaModelFirstPrompt === input.prompt;
+    }
+    if (typeof fingerprint === 'string') {
+      if (typeof pinned?.fingerprint === 'string') diagnostic.pinnedFingerprintMatch = pinned.fingerprint === fingerprint;
+      if (typeof input.expectedFirstUserFingerprint === 'string') diagnostic.nativeFingerprintMatch = input.expectedFirstUserFingerprint === fingerprint;
+    }
+    if (firstSnapshot) diagnostic.snapshot = { rootSame: root === firstSnapshot.root,
+      bodySame: !!root && chatGPTUserBody(root) === firstSnapshot.body, bodyConnected: firstSnapshot.body.isConnected,
+      textSame: normalizedFirstBody(firstSnapshot.body) === firstSnapshot.text,
+      countSame: roots.length === ownedUserCount || allowSubmittedUser && roots.length === ownedUserCount + 1,
+      urlSame: document.URL === input.expectedURL, originSame: location.origin === 'https://chatgpt.com',
+      ownerSame: globalThis.__computaModelOwner === input.ownerToken };
+    const serialized = JSON.stringify(diagnostic);
+    return serialized.length <= 8_192 ? serialized : undefined;
+  } catch { return undefined; }
+}
+function chatGPTFirstUserFailure(reason, scope, captured = {}, allowSubmittedUser = false, fingerprint = firstUserFingerprint) {
+  // The outer snapshot guard can repeat the same first-user rejection after an
+  // inner model precheck. Keep its first finite cause without changing either guard.
+  const debugStructure = firstUserRejectionDiagnostic
+    || chatGPTFirstUserStructure(reason, scope, captured, allowSubmittedUser, fingerprint);
+  if (debugStructure) firstUserRejectionDiagnostic = debugStructure;
+  return { error: 'conversation_changed', detail: 'first_user_message', ...(debugStructure ? { debugStructure } : {}) };
+}
 const snapshotUnchanged = (allowSubmittedUser = false) => {
   const current = chatGPTMessageRoots('user');
   return window === window.top && location.origin === "https://chatgpt.com" && document.URL === input.expectedURL
@@ -1439,7 +1497,12 @@ if (ownedUserCount > 0) {
     || rendered.length > 180_200
     || renderedLines.at(-1) !== markerLine || renderedLines.filter(line => line === markerLine).length !== 1
     || !renderedLines.slice(0, -1).join("\n").trim())
-    return { error: "conversation_changed", detail: "first_user_message" };
+    return chatGPTFirstUserFailure(() => typeof marker !== 'string' || !/^[a-f0-9-]{36}$/i.test(marker) ? 'marker_invalid'
+      : globalThis.__computaModelFirstSubmitted !== true ? 'submission_unclaimed'
+        : globalThis.__computaModelFirstMarker !== marker ? 'marker_mismatch'
+          : rendered.length > 180_200 ? 'body_limit' : renderedLines.at(-1) !== markerLine ? 'marker_not_final'
+            : renderedLines.filter(line => line === markerLine).length !== 1 ? 'marker_duplicate' : 'body_empty',
+      'marker_validation', { roots: ownedMessages, body: first, rendered });
   firstSnapshot = { root: ownedMessages[0], body: first, text: rendered };
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
@@ -1448,7 +1511,7 @@ if (ownedUserCount > 0) {
     || await websiteModelReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
         identity: () => null, temporary: chatGPTTemporaryVerified })
-    || { error: "conversation_changed", detail: "first_user_message" };
+    || chatGPTFirstUserFailure('snapshot_before_action', 'digest', {}, false, fingerprint);
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
   firstUserFingerprint = fingerprint;
@@ -1458,13 +1521,14 @@ if (ownedUserCount > 0) {
       || input.expectedFirstUserFingerprint !== pinned.fingerprint
         && !(input.expectedFirstUserFingerprint == null && input.allowFirstUserBinding === true
           && input.action === "inspect" && ownedUserCount === 1))
-      return { error: "conversation_changed", detail: "first_user_message" };
+      return chatGPTFirstUserFailure(() => pinned.marker !== marker ? 'marker_mismatch'
+        : pinned.fingerprint !== firstUserFingerprint ? 'pinned_fingerprint' : 'native_fingerprint', 'binding');
   } else {
     // Only the native pending first submission may bind rendered lineage.
     // Markdown is lossy; exact outbound bytes were checked before one Send.
     if (input.action !== "inspect" || input.allowFirstUserBinding !== true || ownedUserCount !== 1
       || input.expectedFirstUserFingerprint != null)
-      return { error: "conversation_changed", detail: "first_user_message" };
+      return chatGPTFirstUserFailure('binding_not_authorized', 'binding');
   }
   // Pin only after this same document still confirms the owned temporary chat.
   const observed = await websiteModelFinalGuard('chatgpt', input, await chatGPTGuardedPageAction(input, firstUserFingerprint), chatGPTTemporaryVerified);
@@ -1480,7 +1544,8 @@ if (ownedUserCount > 0) {
   if (!snapshotUnchanged(input.action === "submit"))
     return await websiteModelReplacementObservation(input, ownedUserCount, firstSnapshot,
       { roots: () => chatGPTMessageRoots('user'), body: chatGPTUserBody, text: normalizedFirstBody,
-        identity: () => null, temporary: chatGPTTemporaryVerified }) || { error: "conversation_changed", detail: "first_user_message" };
+        identity: () => null, temporary: chatGPTTemporaryVerified })
+      || chatGPTFirstUserFailure('snapshot_after_action', 'action_final_guard', {}, input.action === 'submit');
   if (observed.error) return observed;
   if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
   if (!chatGPTTemporaryVerified()) return { error: "temporary_mode_unverified" };
@@ -1489,10 +1554,17 @@ if (ownedUserCount > 0) {
     globalThis.__computaModelFirstProof = { marker, fingerprint: firstUserFingerprint };
   }
   firstUserVerified = true;
-  return { ...observed, firstUserVerified, firstUserFingerprint, firstUserMarkerVerified: true };
+  // Native may adopt the first fingerprint in a nested inspect after an outer
+  // read already pinned JS lineage. Carry this metadata until native binding;
+  // its existing once-per-session log gate decides which read records it.
+  const firstUserDebugStructure = input.action === 'inspect' && input.allowFirstUserBinding === true
+    && input.expectedFirstUserFingerprint == null && ownedUserCount === 1
+      ? chatGPTFirstUserStructure('first_bound', 'binding') : undefined;
+  return { ...observed, firstUserVerified, firstUserFingerprint, firstUserMarkerVerified: true,
+    ...(firstUserDebugStructure ? { firstUserDebugStructure } : {}) };
 }
 if (input.expectedFirstUserFingerprint != null)
-  return { error: "conversation_changed", detail: "first_user_message" };
+  return chatGPTFirstUserFailure('first_missing', 'first_missing');
 const observed = await websiteModelFinalGuard('chatgpt', input, await chatGPTGuardedPageAction(input), chatGPTTemporaryVerified);
 if (!observed.error && observed.chatModeReady && !chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
 const readContextFailure = finalReadContextFailure(observed);

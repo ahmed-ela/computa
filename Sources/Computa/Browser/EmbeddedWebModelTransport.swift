@@ -299,6 +299,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     #if DEBUG
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
+    private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     #endif
 
     init(browser: EmbeddedBrowserSession) {
@@ -319,6 +320,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Separate model-enforced reads from product-only lineage observations.
     func setBeforePageResultValidationDetailedForTesting(_ hook: (@MainActor (String, Bool) async -> Void)?) {
         beforePageResultValidationDetailedForTesting = hook
+    }
+
+    func setFirstUserDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
+        firstUserDiagnosticsObserverForTesting = observer
     }
 
     func setTimeoutsForTesting(preparation: Duration, response: Duration) {
@@ -965,6 +970,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return String(data: bytes, encoding: .utf8)
     }
 
+    private static let firstUserDiagnosticActions: Set<String> = ["inspect", "prepare", "insert", "sendReady", "submit",
+        "verifyModel", "verifyProductMode", "ensureChatMode", "enableTemporary", "selectModel", "discoverModels", "modelDiagnostic", "stop", "cleanup"]
+
+    private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+
     static func sanitizedFirstUserStructure(_ raw: String, provider: Provider) -> String? {
         guard raw.utf8.count <= 8_192,
               let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
@@ -991,17 +1004,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             safe[key] = count
         }
         for key in ["markerFinalLine", "submitted", "markerMatches"] {
-            guard let flag = value[key] as? Bool else { return nil }
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
             safe[key] = flag
+        }
+        if let action = value["action"] {
+            guard let action = action as? String, firstUserDiagnosticActions.contains(action) else { return nil }
+            safe["action"] = action
+        }
+        if let scope = value["scope"] {
+            let scopes: Set<String> = ["marker_validation", "digest", "model_precheck", "binding", "action_final_guard", "first_insert", "first_submit", "first_missing"]
+            guard let scope = scope as? String, scopes.contains(scope) else { return nil }
+            safe["scope"] = scope
         }
         if let rawReason = value["reason"] {
             let reasons: Set<String> = ["first_bound", "marker_invalid", "submission_unclaimed", "marker_mismatch", "body_limit", "marker_not_final", "marker_duplicate", "body_empty", "snapshot_before_action", "pinned_fingerprint", "native_fingerprint", "binding_not_authorized", "first_missing", "snapshot_after_action", "first_insert", "first_submit"]
             guard let reason = rawReason as? String, reasons.contains(reason) else { return nil }
             safe["reason"] = reason
         }
-        for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch"] {
+        for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "privatePinPresent", "expectedFingerprintPresent",
+                    "markerValid", "firstPromptPresent", "firstPromptMatches"] {
             if let rawFlag = value[key] {
-                guard let flag = rawFlag as? Bool else { return nil }
+                guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
                 safe[key] = flag
             }
         }
@@ -1009,7 +1032,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let snapshot = rawSnapshot as? [String: Any] else { return nil }
             var projected: [String: Bool] = [:]
             for key in ["rootSame", "bodySame", "bodyConnected", "textSame", "countSame", "urlSame", "originSame", "ownerSame"] {
-                guard let flag = snapshot[key] as? Bool else { return nil }
+                guard let flag = firstUserDiagnosticBool(snapshot[key]) else { return nil }
                 projected[key] = flag
             }
             safe["snapshot"] = projected
@@ -1026,7 +1049,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     child[key] = count
                 }
                 for key in ["markerExact", "markerContained", "visible", "editable"] {
-                    guard let flag = node[key] as? Bool else { return nil }
+                    guard let flag = firstUserDiagnosticBool(node[key]) else { return nil }
                     child[key] = flag
                 }
                 projected.append(child)
@@ -1043,8 +1066,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               var summary = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] else { return nil }
         if let expectedReason, summary["reason"] as? String != expectedReason { return nil }
         let children = summary.removeValue(forKey: "descendants") as? [[String: Any]] ?? []
+        // Keep optional context separate if the full summary exceeds the same
+        // existing log cap. Adding diagnostics must not discard the branch.
+        var context: [String: Any] = [:]
+        if let bytes = try? JSONSerialization.data(withJSONObject: summary), bytes.count > 960 {
+            context = ["kind": "first_user_context", "provider": provider.rawValue]
+            for key in ["scope", "action", "allowFirstUserBinding", "privatePinPresent", "expectedFingerprintPresent",
+                        "markerValid", "firstPromptPresent", "firstPromptMatches", "snapshot"] {
+                if let value = summary.removeValue(forKey: key) { context[key] = value }
+            }
+        }
         var records: [String] = []
-        for value in [summary] + children {
+        for value in [summary] + (context.isEmpty ? [] : [context]) + children {
             guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: .sortedKeys), bytes.count <= 960 else { return nil }
             records.append(String(decoding: bytes, as: UTF8.self))
         }
@@ -1054,8 +1087,73 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func logFirstUserStructure(_ records: [String], sequence: Int) {
         for (index, safe) in records.enumerated() {
             if index == 0 { Self.inspectionLog.info("firstUserStructure sequence=\(sequence) \(safe, privacy: .public)") }
+            else if safe.contains("\"kind\":\"first_user_context\"") {
+                Self.inspectionLog.info("firstUserContext sequence=\(sequence) \(safe, privacy: .public)")
+            }
             else { Self.inspectionLog.info("firstUserChild sequence=\(sequence) index=\(index - 1) \(safe, privacy: .public)") }
         }
+        #if DEBUG
+        firstUserDiagnosticsObserverForTesting?(records)
+        #endif
+    }
+
+    enum FirstUserNativeStage: String {
+        case adapterRejected = "adapter_rejected"
+        case replacementRefreshRejected = "replacement_refresh_rejected"
+        case proofFlagsMissing = "proof_flags_missing"
+        case fingerprintInvalid = "fingerprint_invalid"
+        case fingerprintMismatch = "fingerprint_mismatch"
+        case bindingNotAuthorized = "binding_not_authorized"
+    }
+
+    /// Native state only: never retain an owner, marker, URL, fingerprint or text.
+    struct FirstUserNativeState {
+        let sequence: Int, confirmedUsers: Int
+        let pendingSubmission: Bool, submitted: Bool, temporary: Bool, fingerprintPresent: Bool
+    }
+
+    private func firstUserNativeState(_ session: Session) -> FirstUserNativeState {
+        .init(sequence: session.sequence, confirmedUsers: session.confirmedUsers,
+              pendingSubmission: session.pendingSubmission, submitted: session.submitted,
+              temporary: session.temporary, fingerprintPresent: session.firstUserFingerprint != nil)
+    }
+
+    static func firstUserNativeDiagnosticRecords(provider: Provider, action: String, stage: FirstUserNativeStage,
+                                                entry: FirstUserNativeState, current: FirstUserNativeState,
+                                                observed: [String: Any], refresh: Bool, modelRecheck: Bool, productRecheck: Bool) -> [String]? {
+        guard firstUserDiagnosticActions.contains(action) else { return nil }
+        var summary: [String: Any] = ["kind": "first_user_native", "provider": provider.rawValue, "action": action,
+            "stage": stage.rawValue, "refresh": refresh, "modelRecheck": modelRecheck, "productRecheck": productRecheck,
+            "adapterDiagnosticPresent": observed["debugStructure"] != nil,
+            "adapterDiagnosticAccepted": (observed["debugStructure"] as? String).flatMap {
+                firstUserStructureDiagnosticRecords($0, provider: provider)
+            } != nil]
+        for key in ["temporary", "firstUserVerified", "firstUserMarkerVerified"] {
+            summary[key] = observed[key] == nil ? "absent"
+                : firstUserDiagnosticBool(observed[key]).map { $0 ? "true" : "false" } ?? "invalid"
+        }
+        if let number = ComputerToolArgumentContract.exactInt64(observed["userCount"]), (0...10_000).contains(number) {
+            summary["userCountState"] = "valid"; summary["userCount"] = number
+        } else { summary["userCountState"] = observed["userCount"] == nil ? "absent" : "invalid" }
+        if let fingerprint = observed["firstUserFingerprint"] as? String,
+           fingerprint.count == 64, fingerprint.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) {
+            summary["fingerprintState"] = "valid"
+        } else { summary["fingerprintState"] = observed["firstUserFingerprint"] == nil ? "absent" : "invalid" }
+        var values = [summary]
+        for (phase, state) in [("entry", entry), ("current", current)] {
+            guard (0...10_000).contains(state.sequence), (0...10_000).contains(state.confirmedUsers) else { return nil }
+            values.append(["kind": "first_user_native_state", "phase": phase, "sequence": state.sequence,
+                "confirmedUsers": state.confirmedUsers, "pendingSubmission": state.pendingSubmission,
+                "submitted": state.submitted, "temporary": state.temporary, "fingerprintPresent": state.fingerprintPresent,
+                "bindingAllowed": action == "inspect" && state.sequence == 1 && state.pendingSubmission && !state.fingerprintPresent])
+        }
+        var records: [String] = []
+        for value in values {
+            guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: .sortedKeys),
+                  bytes.count <= 960 else { return nil }
+            records.append(String(decoding: bytes, as: UTF8.self))
+        }
+        return records
     }
 
     static func insertionDifferenceDiagnostic(_ observed: [String: Any]) -> String? {
@@ -1129,6 +1227,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Authority comes from generation, private owner, pinned route, counts
         // and pinned first-message lineage; an auxiliary ID cannot veto it.
         if let prompt { input["prompt"] = prompt }
+        let firstUserEntry = firstUserNativeState(session)
+        func recordFirstUserFailure(_ stage: FirstUserNativeStage, observed: [String: Any]) {
+            guard let records = Self.firstUserNativeDiagnosticRecords(provider: provider, action: action, stage: stage,
+                entry: firstUserEntry, current: firstUserNativeState(session), observed: observed,
+                refresh: refreshReadOnlyObservation, modelRecheck: recheckModelAfterAwait, productRecheck: recheckProductAfterAwait) else { return }
+            for record in records { Self.inspectionLog.error("firstUserNative \(record, privacy: .public)") }
+            #if DEBUG
+            firstUserDiagnosticsObserverForTesting?(records)
+            #endif
+        }
         browser.captureModelNativeFocus(tabID: session.tabID)
         defer { browser.restoreModelNativeFocus(tabID: session.tabID) }
         let result = EmbeddedScriptResult()
@@ -1282,6 +1390,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard refreshReadOnlyObservation, ["inspect", "verifyModel", "verifyProductMode"].contains(action),
                       observed["detail"] as? String == "readonly_model_observation",
                       session.submitted, session.firstUserFingerprint != nil else {
+                    recordFirstUserFailure(.replacementRefreshRejected, observed: observed)
                     throw Failure.ownershipFailure(.javaScriptFirstUser)
                 }
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
@@ -1289,6 +1398,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
                                       maximumWait: maximumWait)
             case "document_changed", "conversation_changed":
+                if observed["detail"] as? String == "first_user_message" {
+                    recordFirstUserFailure(.adapterRejected, observed: observed)
+                }
                 if observed["detail"] as? String == "first_user_message",
                    let raw = observed["debugStructure"] as? String,
                    let records = Self.firstUserStructureDiagnosticRecords(raw, provider: provider) {
@@ -1347,19 +1459,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       observed["firstUserMarkerVerified"] as? Bool == true,
                       let fingerprint = observed["firstUserFingerprint"] as? String,
                       fingerprint.count == 64, fingerprint.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else {
+                    recordFirstUserFailure(observed["firstUserVerified"] as? Bool != true || observed["firstUserMarkerVerified"] as? Bool != true
+                        ? .proofFlagsMissing : .fingerprintInvalid, observed: observed)
                     throw Failure.ownershipFailure(.javaScriptFirstUser)
                 }
                 if let pinned = session.firstUserFingerprint {
-                    guard fingerprint == pinned else { throw Failure.ownershipFailure(.javaScriptFirstUser) }
+                    guard fingerprint == pinned else {
+                        recordFirstUserFailure(.fingerprintMismatch, observed: observed)
+                        throw Failure.ownershipFailure(.javaScriptFirstUser)
+                    }
                 } else {
                     guard action == "inspect", session.sequence == 1, session.pendingSubmission,
                           count(observed, "userCount") == 1,
                           session.temporary, observed["temporary"] as? Bool == true else {
+                        recordFirstUserFailure(.bindingNotAuthorized, observed: observed)
                         throw Failure.ownershipFailure(.javaScriptFirstUser)
                     }
                     session.firstUserFingerprint = fingerprint
                     if !session.loggedFirstUserStructure,
-                       let raw = observed["debugStructure"] as? String,
+                       let raw = (observed["firstUserDebugStructure"] ?? observed["debugStructure"]) as? String,
                        let records = Self.firstUserStructureDiagnosticRecords(raw, provider: provider, expectedReason: "first_bound") {
                         session.loggedFirstUserStructure = true
                         logFirstUserStructure(records, sequence: session.sequence)
