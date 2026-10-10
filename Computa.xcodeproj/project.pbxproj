@@ -1088,6 +1088,7 @@
 				611ACEFF472E095773D0F5F8 /* Sources */,
 				9A97BB1914E9F8652DEC6B89 /* Resources */,
 				F712870A148917BCB4742C18 /* Frameworks */,
+				39EA244860C9257F8705566C /* Exclude Chrome extension test fixtures */,
 			);
 			buildRules = (
 			);
@@ -1178,6 +1179,25 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		39EA244860C9257F8705566C /* Exclude Chrome extension test fixtures */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Exclude Chrome extension test fixtures";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nextension_resources=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/BrowserExtension\"\nfor test_fixture in \"$extension_resources\"/*.test.js; do\n  if [ -f \"$test_fixture\" ]; then\n    /bin/rm -f \"$test_fixture\"\n  fi\ndone\n";
+		};
 		CBC0C64611D1462D1E61215C /* Copy Swift Objective-C Interface Header */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;

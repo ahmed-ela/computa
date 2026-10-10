@@ -18,11 +18,25 @@ final class RuntimeIsolationTransportTests: XCTestCase {
     }
 
     func testNewThreadReceivesOnlyAppOwnedInstructionsAndPrivateChildState() async throws {
-        try await checkSubmission(mode: "new", expectedThreadMethod: "thread/start")
+        for mode in AccessMode.allCases {
+            try await checkSubmission(mode: "new", expectedThreadMethod: "thread/start", accessModes: [mode])
+        }
     }
 
     func testColdExistingThreadReceivesOnlyAppOwnedInstructionsAndPrivateChildState() async throws {
-        try await checkSubmission(mode: "resume", expectedThreadMethod: "thread/resume")
+        for mode in AccessMode.allCases {
+            try await checkSubmission(mode: "resume", expectedThreadMethod: "thread/resume", accessModes: [mode])
+        }
+    }
+
+    func testLoadedThreadRestoresAskSandboxThenCanEnableFullAccessAgain() async throws {
+        try await checkSubmission(mode: "new", expectedThreadMethod: "thread/start",
+                                  accessModes: [.fullAccess, .askEveryTime, .fullAccess])
+    }
+
+    func testLegacyDirectSubmissionDefaultsToAsk() async throws {
+        try await checkSubmission(mode: "new", expectedThreadMethod: "thread/start",
+                                  accessModes: [.askEveryTime], useLegacySubmission: true)
     }
 
     private final class Audit {
@@ -38,7 +52,8 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         }
     }
 
-    private func checkSubmission(mode: String, expectedThreadMethod: String) async throws {
+    private func checkSubmission(mode: String, expectedThreadMethod: String, accessModes: [AccessMode],
+                                 useLegacySubmission: Bool = false) async throws {
         let location = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaIsolation-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: location, withIntermediateDirectories: true,
                                               attributes: [.posixPermissions: 0o700])
@@ -63,14 +78,22 @@ final class RuntimeIsolationTransportTests: XCTestCase {
             let tasks = try await runtime.loadTasks()
             XCTAssertEqual(tasks.map(\.id), mode == "resume" ? ["isolation-existing-thread"] : [])
             let taskID = mode == "resume" ? "isolation-existing-thread" : "isolation-new-task"
-            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
-            for _ in 0..<500 {
-                if audit.completed { break }
-                try await Task.sleep(for: .milliseconds(10))
+            for accessMode in accessModes {
+                audit.completed = false
+                if useLegacySubmission {
+                    try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
+                } else {
+                    try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode)
+                }
+                for _ in 0..<500 {
+                    if audit.completed { break }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTAssertTrue(audit.completed, "Fixture turn did not complete")
             }
-            XCTAssertTrue(audit.completed, "Fixture turn did not complete")
-            XCTAssertEqual(audit.assistant, ["ISOLATION_TRANSPORT_OK"])
-            try assertRecordedIsolation(root: root, configuration: configuration, threadMethod: expectedThreadMethod)
+            XCTAssertEqual(audit.assistant, Array(repeating: "ISOLATION_TRANSPORT_OK", count: accessModes.count))
+            try assertRecordedIsolation(root: root, configuration: configuration, threadMethod: expectedThreadMethod,
+                                        accessModes: accessModes)
             let report = await runtime.shutdown()
             events.cancel()
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
@@ -84,7 +107,7 @@ final class RuntimeIsolationTransportTests: XCTestCase {
     }
 
     private func assertRecordedIsolation(
-        root: URL, configuration: CodexAppServerRuntime.Configuration, threadMethod: String
+        root: URL, configuration: CodexAppServerRuntime.Configuration, threadMethod: String, accessModes: [AccessMode]
     ) throws {
         let child = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("child.json"))) as? [String: Any])
         XCTAssertEqual(child["home"] as? String, AgentRuntimeIsolation.processHomeURL(codexHomePath: root.path).path)
@@ -114,6 +137,9 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         let threadRequests = requests.filter { ["thread/start", "thread/resume"].contains($0["method"] as? String ?? "") }
         XCTAssertEqual(threadRequests.map { $0["method"] as? String }, [threadMethod])
         let params = try XCTUnwrap(threadRequests.first?["params"] as? [String: Any])
+        XCTAssertEqual(params["sandbox"] as? String, accessModes.first == .fullAccess ? "danger-full-access" : "workspace-write")
+        XCTAssertEqual(params["approvalPolicy"] as? String, accessModes.first == .fullAccess ? "never" : "on-request")
+        XCTAssertNil(params["permissions"], "Legacy sandbox fields cannot be combined with a named profile")
         // The child keeps its private default working directory, while a
         // resumed chat retains its app-recorded project selection.
         let expectedWorkspace = threadMethod == "thread/resume"
@@ -124,6 +150,7 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         XCTAssertEqual(params["developerInstructions"] as? String,
                        ComputaAgentInstructions.developerInstructions(referenceTools: threadMethod == "thread/start"))
         let config = try XCTUnwrap(params["config"] as? [String: Any])
+        XCTAssertEqual(config["include_permissions_instructions"] as? Bool, true)
         XCTAssertEqual(config["project_root_markers"] as? [String], [])
         XCTAssertNil(config["project_doc_max_bytes"])
         for key in ["developerInstructions", "baseInstructions"] {
@@ -132,7 +159,19 @@ final class RuntimeIsolationTransportTests: XCTestCase {
             XCTAssertFalse(instructions.contains("Permanent Non-Bypass Policy"))
         }
         let turnRequests = requests.filter { $0["method"] as? String == "turn/start" }
-        XCTAssertEqual(turnRequests.count, 1)
+        XCTAssertEqual(turnRequests.count, accessModes.count)
+        for (request, mode) in zip(turnRequests, accessModes) {
+            let turn = try XCTUnwrap(request["params"] as? [String: Any])
+            XCTAssertEqual(turn["threadId"] as? String, "isolation-existing-thread")
+            XCTAssertEqual(turn["approvalPolicy"] as? String, mode == .fullAccess ? "never" : "on-request")
+            let sandbox = try XCTUnwrap(turn["sandboxPolicy"] as? NSDictionary)
+            let expected: NSDictionary = mode == .fullAccess ? ["type": "dangerFullAccess"] : [
+                "type": "workspaceWrite", "writableRoots": [String](), "networkAccess": false,
+                "excludeTmpdirEnvVar": false, "excludeSlashTmp": false,
+            ]
+            XCTAssertEqual(sandbox, expected, "Each turn must explicitly replace the previous sandbox policy")
+            XCTAssertNil(turn["permissions"])
+        }
         let turn = try XCTUnwrap(turnRequests.first?["params"] as? [String: Any])
         // Each turn inherits the selected thread workspace without replacing
         // it with the child's private default directory.

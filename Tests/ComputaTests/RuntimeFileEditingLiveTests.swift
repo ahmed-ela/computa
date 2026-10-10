@@ -21,7 +21,17 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
         try await qualify(modelID: LocalModelCatalog.chatGPTBrowserModelID, failureProbes: true)
     }
 
-    private func qualify(modelID: String, failureProbes: Bool = false) async throws {
+    func testRepeatedFastCommandOutputReachesModelTimelineAndReopenedHistory() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_FILE_EDITING_ENGINE_TEST"] == "1",
+            "Set COMPUTA_FILE_EDITING_ENGINE_TEST=1 for native command transcript qualification.")
+        try await qualify(modelID: LocalModelCatalog.chatGPTBrowserModelID, commandCount: 32)
+    }
+
+    private func qualify(modelID: String, failureProbes: Bool = false, commandCount: Int = 1) async throws {
+        precondition((1...32).contains(commandCount))
+        let commandMarkers = (0..<commandCount).map {
+            commandCount == 1 ? "PATCH_TEST_OK" : String(format: "PATCH_TEST_OK_%03d", $0)
+        }
         let failuresBefore = testRun?.failureCount ?? 0
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaNativePatch-\(UUID().uuidString)", isDirectory: true)
@@ -35,13 +45,16 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
         config.codexHomePath = home.path
         config.workspacePath = home.appendingPathComponent("Workspace", isDirectory: true).path
         config.model = modelID
+        config.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
         let runtime = CodexAppServerRuntime(configuration: config)
-        let transport = NativePatchInferenceFixture(projectPath: project.path, failureProbes: failureProbes)
+        let transport = NativePatchInferenceFixture(projectPath: project.path, failureProbes: failureProbes,
+            commandMarkers: commandMarkers)
         let audit = PatchAudit()
         let taskID = UUID().uuidString.lowercased()
         let observer = Task { [audit] in
             for await event in runtime.events() { audit.receive(event) }
         }
+        var reopenedRuntime: CodexAppServerRuntime?
         do {
             // The deterministic provider supplies lease proof; the real
             // native runtime supplies its actual inference and turn context.
@@ -81,8 +94,22 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             let command = try XCTUnwrap(audit.commands.last)
             XCTAssertEqual(command.toolEvent?.status, .succeeded)
             XCTAssertTrue(command.toolEvent?.output?.contains("PATCH_TEST_OK") == true)
+            let completedCommands = audit.commands.filter { $0.toolEvent?.status == .succeeded }
+            XCTAssertEqual(Set(completedCommands.map(\.id)).count, commandCount)
+            var completedCommandIDs = [String: String]()
+            for marker in commandMarkers {
+                let matching = completedCommands.filter { $0.toolEvent?.output?.contains(marker) == true }
+                XCTAssertEqual(Set(matching.map(\.id)).count, 1,
+                    "Every fast command must retain its distinct completed transcript: \(marker)")
+                let input = try XCTUnwrap(matching.last?.toolEvent?.input)
+                XCTAssertEqual(commandMarkers.filter { input.contains($0) }, [marker],
+                    "Output must belong to the command that printed its marker")
+                completedCommandIDs[marker] = matching.last?.id
+            }
+            XCTAssertEqual(Set(completedCommandIDs.values).count, commandCount,
+                "Separate commands must have separate completed items")
             let receipt = await transport.receipt()
-            let expectedInferences = failureProbes ? 5 : 3
+            let expectedInferences = commandCount + 2 + (failureProbes ? 2 : 0)
             XCTAssertEqual(receipt.sendCount, expectedInferences)
             XCTAssertEqual(receipt.startCount, expectedInferences)
             XCTAssertEqual(receipt.finishCount, expectedInferences)
@@ -120,13 +147,33 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             observer.cancel()
             // Verify locally saved engine aggregates and upstream item history
             // survive a fresh runtime, without replaying any edit or inference.
-            let reopened = CodexAppServerRuntime(configuration: config)
+            var reopenedConfig = config
+            reopenedConfig.protocolTracePath = root.appendingPathComponent("history-reopen-protocol.jsonl").path
+            let reopened = CodexAppServerRuntime(configuration: reopenedConfig)
+            reopenedRuntime = reopened
             let tasks = try await reopened.loadTasks()
             let saved = try XCTUnwrap(tasks.first)
             XCTAssertEqual(URL(fileURLWithPath: saved.workspace, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath(),
                 project.standardizedFileURL.resolvingSymlinksInPath())
             XCTAssertTrue(saved.turnDiffs.contains(diff))
             XCTAssertEqual(saved.turnDiffs.last, noEditDiff)
+            let savedCommand = try XCTUnwrap(saved.entries.last {
+                $0.toolEvent?.name == "commandExecution" && $0.toolEvent?.status == .succeeded
+            })
+            XCTAssertTrue(savedCommand.toolEvent?.output?.contains("PATCH_TEST_OK") == true,
+                "The canonical command transcript must survive reopening saved history")
+            let savedCommands = saved.entries.filter {
+                $0.toolEvent?.name == "commandExecution" && $0.toolEvent?.status == .succeeded
+            }
+            XCTAssertEqual(savedCommands.count, commandCount)
+            for marker in commandMarkers {
+                let matching = savedCommands.filter { $0.toolEvent?.output?.contains(marker) == true }
+                XCTAssertEqual(matching.count, 1, "Saved history must retain each command: \(marker)")
+                XCTAssertEqual(matching.first?.id, completedCommandIDs[marker],
+                    "Saved history must retain the original command identity")
+                let savedInput = try XCTUnwrap(matching.first?.toolEvent?.input)
+                XCTAssertEqual(commandMarkers.filter { savedInput.contains($0) }, [marker])
+            }
             XCTAssertEqual(saved.entries.filter { $0.toolEvent?.name == "fileChange" && $0.toolEvent?.status == .succeeded }.last?.fileChanges, completed.fileChanges)
             let savedPureMove = try XCTUnwrap(saved.entries.filter { $0.toolEvent?.name == "fileChange" && $0.toolEvent?.status == .succeeded }
                 .last?.fileChanges?.first { $0.path.hasSuffix("/legacy.py") })
@@ -134,13 +181,15 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             XCTAssertEqual(savedPureMove.diff, "", "History must normalize the same metadata-only move after reopening")
             let reopenedReport = await reopened.shutdown()
             XCTAssertTrue(reopenedReport.succeeded, reopenedReport.issues.joined(separator: "; "))
+            reopenedRuntime = nil
             guard (testRun?.failureCount ?? 0) == failuresBefore else {
                 throw NSError(domain: "ComputaNativePatchQualification", code: 1,
                     userInfo: [NSLocalizedDescriptionKey: "One or more native patch qualification invariants failed; exact fixture artifacts were retained."])
             }
             try FileManager.default.removeItem(at: root)
-            print("nativePatchProvider=\(modelID) outcome=passed successfulPatchCalls=1 rejectedPatchCalls=\(failureProbes ? 2 : 0) commandCalls=1 replayedCalls=0")
+            print("nativePatchProvider=\(modelID) outcome=passed successfulPatchCalls=1 rejectedPatchCalls=\(failureProbes ? 2 : 0) commandCalls=\(commandCount) replayedCalls=0")
         } catch {
+            if let reopenedRuntime { _ = await reopenedRuntime.shutdown() }
             _ = await runtime.shutdown()
             observer.cancel()
             // Failed qualification keeps its exact bounded fixture artifacts.
@@ -192,9 +241,14 @@ private actor NativePatchInferenceFixture: WebModelTransport {
     private var token = UUID().uuidString
     private let projectPath: String
     private let failureProbes: Bool
+    private let commandMarkers: [String]
     private var response = ""
     private var observations = Receipt()
-    init(projectPath: String, failureProbes: Bool = false) { self.projectPath = projectPath; self.failureProbes = failureProbes }
+    init(projectPath: String, failureProbes: Bool = false, commandMarkers: [String] = ["PATCH_TEST_OK"]) {
+        self.projectPath = projectPath
+        self.failureProbes = failureProbes
+        self.commandMarkers = commandMarkers
+    }
     func receipt() -> Receipt { observations }
     func request(operation: String, params: Data) throws -> Data {
         var result: [String: Any]
@@ -255,13 +309,64 @@ private actor NativePatchInferenceFixture: WebModelTransport {
                 *** End Patch
                 """
                 response = try patchReply(name: XCTUnwrap(patchName), patch: patch)
-            } else if progress == 1 {
-                observations.patchOutputMatched = outputsJSON.contains("Success. Updated the following files")
+            } else if (1...commandMarkers.count).contains(progress) {
+                observations.patchOutputMatched = observations.patchOutputMatched
+                    || outputsJSON.contains("Success. Updated the following files")
                 let commandName = try XCTUnwrap(request.offeredToolNames.first { $0 == "exec_command" || $0.hasSuffix(".exec_command") })
-                let command = "/usr/bin/python3 -c 'from lib.greetings import greet; from helpers import multiply; assert greet(\"Computa\") == \"Hello, Computa!\"; assert multiply(2, 3) == 6; print(\"PATCH_TEST_OK\")'"
+                let marker = commandMarkers[progress - 1]
+                let command = "/usr/bin/python3 -c 'from lib.greetings import greet; from helpers import multiply; assert greet(\"Computa\") == \"Hello, Computa!\"; assert multiply(2, 3) == 6; print(\"\(marker)\")'"
                 response = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": commandName, "arguments": ["cmd": command, "workdir": projectPath, "yield_time_ms": 10000, "max_output_tokens": 1000]]]]), as: UTF8.self)
             } else {
-                observations.commandOutputMatched = outputsJSON.contains("PATCH_TEST_OK") && outputsJSON.contains("Process exited with code 0")
+                var commandCallIDs = Set<String>()
+                var allCommandOutputsMatched = true
+                // Keep non-Sendable JSON dictionaries inside this actor's
+                // synchronous execution, rather than capturing them in a
+                // closure invoked through an actor-isolated stored collection.
+                for marker in commandMarkers {
+                    var matchingOutput: [String: Any]?
+                    var matchingOutputCount = 0
+                    for candidate in outputs {
+                        if candidate["type"] as? String == "function_call_output",
+                           let candidateOutput = candidate["output"] as? String,
+                           candidateOutput.contains(marker) {
+                            matchingOutput = candidate
+                            matchingOutputCount += 1
+                        }
+                    }
+                    guard matchingOutputCount == 1,
+                          let output = matchingOutput?["output"] as? String,
+                          output.contains("Process exited with code 0"),
+                          let callID = matchingOutput?["call_id"] as? String, !callID.isEmpty else {
+                        allCommandOutputsMatched = false
+                        break
+                    }
+                    var matchingCall: [String: Any]?
+                    var matchingCallCount = 0
+                    for candidate in items {
+                        if candidate["type"] as? String == "function_call",
+                           candidate["call_id"] as? String == callID {
+                            matchingCall = candidate
+                            matchingCallCount += 1
+                        }
+                    }
+                    guard matchingCallCount == 1, let arguments = matchingCall?["arguments"] as? String,
+                          let params = try? JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any],
+                          let cmd = params["cmd"] as? String else {
+                        allCommandOutputsMatched = false
+                        break
+                    }
+                    var commandInputMarkers = [String]()
+                    for expectedMarker in commandMarkers where cmd.contains(expectedMarker) {
+                        commandInputMarkers.append(expectedMarker)
+                    }
+                    guard commandInputMarkers == [marker] else {
+                        allCommandOutputsMatched = false
+                        break
+                    }
+                    commandCallIDs.insert(callID)
+                }
+                observations.commandOutputMatched = allCommandOutputsMatched
+                    && commandCallIDs.count == commandMarkers.count
                 response = #"{"type":"message","text":"PATCH_HARNESS_OK"}"#
             }
             observations.sendCount += 1

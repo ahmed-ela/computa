@@ -1530,7 +1530,60 @@ function chatGPTFirstUserExpansionContextFailure(candidate) {
   return null;
 }
 function chatGPTFirstUserExpansionContext(candidate) { return chatGPTFirstUserExpansionContextFailure(candidate) === null; }
+function chatGPTFirstUserExpansionTextFacts(candidate, text) {
+  if (typeof text !== 'string' || text.length > 180_200 || typeof candidate.canonical !== 'string'
+    || candidate.canonical.length > 180_200 || typeof candidate.rendered !== 'string' || candidate.rendered.length > 180_200) return null;
+  // The full message already permits differences within ASCII whitespace
+  // runs. Apply precisely that same policy to its previously captured prefix.
+  // Every other character and every whitespace boundary remains significant.
+  const runs = value => value.replace(/[ \t\n]+/g, ' ');
+  const actual = runs(text), expected = runs(candidate.canonical), prefix = runs(candidate.rendered);
+  const prefixMatches = actual.startsWith(prefix), promptMatches = actual === expected;
+  const markerLine = `Computa session marker: ${candidate.marker}`;
+  const complete = actual.length > prefix.length && prefixMatches && promptMatches
+    && text.split('\n').at(-1) === markerLine && text.split(markerLine).length === 2;
+  const compatible = complete || prefixMatches && !text.includes(markerLine) && expected.startsWith(actual);
+  return { complete, compatible, expansionTextAnalyzed: true, expansionClicked: candidate.clicked === true,
+    expansionExactPrefixMatches: text.startsWith(candidate.rendered), expansionASCIIPrefixMatches: prefixMatches,
+    expansionASCIIPromptMatches: promptMatches, expansionASCIIRenderedLength: actual.length,
+    expansionASCIIPrefixLength: prefix.length, expansionASCIIPromptLength: expected.length };
+}
+function chatGPTLatchExpansionTextDiagnostic(candidate, text) {
+  if (candidate.textDiagnostic) return;
+  try {
+    const facts = chatGPTFirstUserExpansionTextFacts(candidate, text);
+    if (!facts) { candidate.textDiagnostic = { expansionTextAnalyzed: false, expansionClicked: candidate.clicked === true }; return; }
+    const { complete, compatible, ...diagnostic } = facts;
+    const actual = text.replace(/[ \t\n]+/g, ' '), expected = candidate.canonical.replace(/[ \t\n]+/g, ' ');
+    const count = (value, predicate) => Math.min([...value].filter(predicate).length, 1_000);
+    const unicodeSpace = value => /\p{White_Space}/u.test(value) && !/[ \t\n]/.test(value);
+    const format = value => /\p{Cf}/u.test(value);
+    let offset = 0;
+    while (offset < actual.length && offset < expected.length && actual.codePointAt(offset) === expected.codePointAt(offset))
+      offset += actual.codePointAt(offset) > 0xFFFF ? 2 : 1;
+    const scalar = value => offset < value.length ? String.fromCodePoint(value.codePointAt(offset)) : '';
+    const left = scalar(actual), right = scalar(expected);
+    const mismatch = diagnostic.expansionASCIIPromptMatches ? 'none' : !left || !right ? 'end'
+      : format(left) || format(right) ? 'format' : unicodeSpace(left) || unicodeSpace(right) ? 'unicode_space'
+        : left === ' ' || right === ' ' ? 'ascii_space'
+          : /\p{P}/u.test(left) || /\p{P}/u.test(right) ? 'punctuation' : 'content';
+    Object.assign(diagnostic, {
+      expansionUnicodeSpaceCount: count(text, unicodeSpace), expansionExpectedUnicodeSpaceCount: count(candidate.canonical, unicodeSpace),
+      expansionFormatCount: count(text, format), expansionExpectedFormatCount: count(candidate.canonical, format),
+      expansionFirstMismatchClass: mismatch,
+      ...(diagnostic.expansionASCIIPromptMatches ? {} : { expansionFirstMismatchOffset: offset }) });
+    candidate.textDiagnostic = diagnostic;
+  } catch { /* A diagnostic cannot change admission or the original error. */ }
+}
+
 function chatGPTRejectFirstUserExpansion(candidate, outcome, contextFailure = null) {
+  if (outcome === 'text_mismatch') {
+    try {
+      const raw = candidate.body.innerText || candidate.body.textContent || '';
+      chatGPTLatchExpansionTextDiagnostic(candidate, typeof raw === 'string' && raw.length <= 180_200
+        ? raw.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null);
+    } catch { /* Preserve the original failure if the physical body vanished. */ }
+  }
   if (contextFailure) candidate.contextFailure = contextFailure;
   candidate.outcome = outcome;
   return false;
@@ -1549,31 +1602,21 @@ async function chatGPTObserveFirstUserExpansion(candidate) {
     return typeof value === 'string' && value.length <= 180_200
       ? value.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
   };
-  const markerLine = `Computa session marker: ${candidate.marker}`;
-  // Preserve all non-whitespace bytes and every whitespace boundary. The
-  // provider may collapse ASCII whitespace runs; no Markdown delimiters,
-  // punctuation or message content are removed to make a display match.
-  const whitespaceRuns = text => text.replace(/[ \t\n]+/g, ' ');
-  const canonicalWhitespaceRuns = whitespaceRuns(candidate.canonical);
-  const complete = text => typeof text === 'string' && text.length > candidate.rendered.length
-    && text.startsWith(candidate.rendered) && text.split('\n').at(-1) === markerLine
-    && text.split(markerLine).length === 2 && whitespaceRuns(text) === canonicalWhitespaceRuns;
-  const compatible = text => complete(text) || typeof text === 'string' && text.startsWith(candidate.rendered)
-    && !text.includes(markerLine) && canonicalWhitespaceRuns.startsWith(whitespaceRuns(text));
+  const facts = () => chatGPTFirstUserExpansionTextFacts(candidate, currentText());
   const changed = await websiteModelWaitForChange(candidate.deadline, () => {
     if (!chatGPTFirstUserExpansionContext(candidate)) return true;
-    const text = currentText();
-    return complete(text) || text === null || !text.startsWith(candidate.rendered)
-      || text.includes(markerLine) || !canonicalWhitespaceRuns.startsWith(whitespaceRuns(text));
+    const observed = facts();
+    return !observed || observed.complete || !observed.compatible;
   });
   const contextFailure = chatGPTFirstUserExpansionContextFailure(candidate);
   // A crossed route cannot hide a changed message and later revive it. Only
   // the same complete body or a still-compatible prefix is a URL-only failure.
-  if (contextFailure === 'url' && !compatible(currentText())) return reject('text_mismatch');
+  if (contextFailure === 'url' && facts()?.compatible !== true) return reject('text_mismatch');
   if (contextFailure) return chatGPTRejectFirstUserExpansionContext(candidate);
   if (!changed || Date.now() > candidate.deadline) return chatGPTRejectFirstUserExpansion(candidate, 'timeout', 'deadline');
   const expandedText = currentText();
-  if (!complete(expandedText)) return reject('text_mismatch');
+  if (chatGPTFirstUserExpansionTextFacts(candidate, expandedText)?.complete !== true) return reject('text_mismatch');
+  chatGPTLatchExpansionTextDiagnostic(candidate, expandedText);
   candidate.expandedText = expandedText;
   candidate.outcome = 'expanded';
   return true;
@@ -1663,6 +1706,7 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
     }
     result.bodySelection = selection;
     Object.assign(result, chatGPTProductProofFailureDiagnostic());
+    Object.assign(result, globalThis.__computaModelFirstExpansion?.textDiagnostic || {});
     const outcome = globalThis.__computaModelFirstExpansion?.outcome;
     result.expansionOutcome = ['unavailable', 'ambiguous', 'disabled', 'obstructed', 'claimed', 'model_unverified',
       'timeout', 'context_changed', 'node_changed', 'text_mismatch', 'expanded', 'failed'].includes(outcome)

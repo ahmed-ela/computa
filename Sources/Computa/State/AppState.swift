@@ -1663,7 +1663,9 @@ final class AppState {
             )
             activeTurnTaskIDs.insert(taskID)
             do {
-                try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
+                // Bind the persisted native choice to this submission, rather
+                // than racing a global mode update against another task.
+                try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode)
             } catch {
                 discardAssistantDrafts(taskID: taskID)
                 discardReasoningDrafts(taskID: taskID)
@@ -1683,6 +1685,8 @@ final class AppState {
                 if case .embeddedRequired? = error as? WebModelServer.Failure {
                     rejectedBeforeDispatch = true
                 } else if error is LocalModelServerPreflight.Failure {
+                    rejectedBeforeDispatch = true
+                } else if case .accessModeUnsupported? = error as? AgentRuntimeCapabilityError {
                     rejectedBeforeDispatch = true
                 } else { rejectedBeforeDispatch = false }
                 let failure = TimelineEntry(

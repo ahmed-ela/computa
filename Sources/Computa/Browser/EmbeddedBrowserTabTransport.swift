@@ -210,7 +210,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
             result = try await run(
                 id: id, generation: generation(for: id),
                 input: ["operation": "wait", "text": text ?? "", "timeoutMS": remainingMS],
-                timeoutMS: remainingMS)
+                timeoutMS: remainingMS, deadline: deadline)
         } catch {
             try Task.checkCancellation()
             if error is CancellationError { throw error }
@@ -244,6 +244,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
 
     private func run(
         id: UUID, generation: UUID, input: [String: Any], timeoutMS: Int,
+        deadline: ContinuousClock.Instant? = nil,
         permit: BrowserMutationPermit? = nil, mutation: Bool = false
     ) async throws -> Data {
         guard let source = script, let view = session.webView(for: id), session.humanTab(id: id) != nil,
@@ -255,8 +256,17 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         let bytes: Data = try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
-                result.install(continuation, timeoutMS: timeoutMS, mutation: mutation)
+                // A wait's millisecond script budget is rounded down. Its host
+                // timer must use the original deadline so it cannot expire first
+                // and turn a normal unmatched wait into a browser failure.
+                result.install(continuation, until: deadline ?? .now + .milliseconds(timeoutMS), mutation: mutation)
                 let enqueue = {
+                    let operationID: UUID?
+                    if mutation {
+                        operationID = try self.session.prepareToolMutation(tabID: id, generation: generation)
+                    } else {
+                        operationID = nil
+                    }
                     view.callAsyncJavaScript(source, arguments: ["input": input], in: nil, in: self.world) {
                         reply in
                         do {
@@ -264,6 +274,11 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                             guard JSONSerialization.isValidJSONObject(value) else {
                                 throw BrowserTabBrokerError.browserUnavailable(
                                     "The built-in script returned an invalid result.")
+                            }
+                            if let operationID, self.session.toolPopupWasRejected(tabID: id, operationID: operationID) {
+                                result.finish(.failure(BrowserTabBrokerError.mutationRejected(
+                                    "Browser input was dispatched, but a pop-up was blocked. No replay is allowed. Open the observed destination with browser tools; human pop-ups on this document require a fresh navigation.")))
+                                return
                             }
                             result.finish(.success(try JSONSerialization.data(withJSONObject: value)))
                         } catch {
@@ -278,7 +293,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                         }
                     }
                 }
-                do { if let permit { try permit.commit(enqueue) } else { enqueue() } } catch {
+                do { if let permit { try permit.commit(enqueue) } else { try enqueue() } } catch {
                     result.finish(.failure(error))
                 }
             }
@@ -319,7 +334,7 @@ private final class EmbeddedBrowserScriptResult: @unchecked Sendable {
     private var completed: Result<Data, Error>?
     private var timer: Task<Void, Never>?
 
-    func install(_ continuation: CheckedContinuation<Data, Error>, timeoutMS: Int, mutation: Bool) {
+    func install(_ continuation: CheckedContinuation<Data, Error>, until deadline: ContinuousClock.Instant, mutation: Bool) {
         lock.lock()
         if let completed {
             lock.unlock()
@@ -329,7 +344,7 @@ private final class EmbeddedBrowserScriptResult: @unchecked Sendable {
         self.continuation = continuation
         timer = Task {
             do {
-                try await Task.sleep(for: .milliseconds(timeoutMS))
+                try await Task.sleep(until: deadline, clock: .continuous)
                 finish(
                     .failure(
                         BrowserTabBrokerError.browserUnavailable(

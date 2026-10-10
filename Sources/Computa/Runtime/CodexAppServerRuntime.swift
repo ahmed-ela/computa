@@ -666,7 +666,8 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
             "features.shell_snapshot_v2": false,
             "memories.use_memories": false,
             "skills.include_instructions": false,
-            "include_permissions_instructions": false,
+            // Let the engine describe the actual per-turn sandbox and approvals.
+            "include_permissions_instructions": true,
             "include_apps_instructions": false,
             "include_environment_context": false,
             "features.plugins": false,
@@ -846,7 +847,11 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
     }
 
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {
-        try await core.submit(prompt: prompt, taskID: taskID, modelID: modelID)
+        try await submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .askEveryTime)
+    }
+
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
+        try await core.submit(prompt: prompt, taskID: taskID, modelID: modelID, accessMode: accessMode)
     }
 
     func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws {
@@ -1225,6 +1230,7 @@ private extension CodexAppServerRuntime {
         }
         private var managedCompactions: [AgentTask.ID: ManagedCompaction] = [:]
         private var modelForTask: [AgentTask.ID: String] = [:]
+        private var accessModeForTask: [AgentTask.ID: AccessMode] = [:]
         private var tasksWithUnknownPersistedModel: Set<AgentTask.ID> = []
         private var contextForLoadedThread: [String: LocalThreadContext] = [:]
         private var lastErrorMessageForTask: [AgentTask.ID: String] = [:]
@@ -1878,7 +1884,7 @@ private extension CodexAppServerRuntime {
             }
         }
 
-        func submit(prompt: String, taskID: AgentTask.ID, modelID: String) async throws {
+        func submit(prompt: String, taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
             guard manualWebCleanupTasks.isEmpty else {
                 throw RuntimeError.serverError("Wait for this task's website session cleanup to finish.")
             }
@@ -1968,8 +1974,8 @@ private extension CodexAppServerRuntime {
                             "modelProvider": configuration.modelProvider(for: modelID),
                             "model": modelID,
                             "cwd": workspacePath(taskID: taskID),
-                            "sandbox": "workspace-write",
-                            "approvalPolicy": "on-request",
+                            "sandbox": accessMode.sandboxMode,
+                            "approvalPolicy": accessMode.approvalPolicy,
                             "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
                             "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID), embeddedBrowserTools: embeddedBrowserTools != nil),
                             "config": threadConfig(for: modelID, taskID: taskID),
@@ -2001,8 +2007,8 @@ private extension CodexAppServerRuntime {
                         "modelProvider": configuration.modelProvider(for: modelID),
                         "model": modelID,
                         "cwd": workspacePath(taskID: taskID),
-                        "sandbox": "workspace-write",
-                        "approvalPolicy": "on-request",
+                        "sandbox": accessMode.sandboxMode,
+                        "approvalPolicy": accessMode.approvalPolicy,
                         "ephemeral": false,
                         "threadSource": "local_codex",
                         "baseInstructions": baseInstructions(for: modelID),
@@ -2082,6 +2088,8 @@ private extension CodexAppServerRuntime {
                         "input": try computerTurnInput(prompt: prompt, threadID: threadID, taskID: taskID),
                         "effort": configuration.reasoningEffort,
                         "model": modelID,
+                        "sandboxPolicy": accessMode.sandboxPolicy,
+                        "approvalPolicy": accessMode.approvalPolicy,
                     ]
                 )
             } catch {
@@ -2094,6 +2102,7 @@ private extension CodexAppServerRuntime {
                 throw error
             }
             turnAccepted = true
+            accessModeForTask[taskID] = accessMode
             if supportsVisualGrounding {
                 // Start only after App Server accepts the turn so a rejected
                 // submission cannot load and retain the multi-GB sidecar.
@@ -2503,6 +2512,7 @@ private extension CodexAppServerRuntime {
 
         func compact(taskID: AgentTask.ID) async throws {
             try requireNoPendingChromeConnection()
+            let accessMode = accessModeForTask[taskID] ?? .askEveryTime
             let modelID = modelForTask[taskID] ?? configuration.model
             try requireHeadlessInferenceIdle(for: modelID)
             guard !isShuttingDown, turnIdentity.activeTurnID(for: taskID) == nil,
@@ -2537,8 +2547,8 @@ private extension CodexAppServerRuntime {
                         "modelProvider": configuration.modelProvider(for: modelID),
                         "model": modelID,
                         "cwd": workspacePath(taskID: taskID),
-                        "sandbox": "workspace-write",
-                        "approvalPolicy": "on-request",
+                        "sandbox": accessMode.sandboxMode,
+                        "approvalPolicy": accessMode.approvalPolicy,
                         "baseInstructions": baseInstructions(for: modelID, referenceTools: usesReferenceToolThread(threadID)),
                         "developerInstructions": ComputaAgentInstructions.developerInstructions(referenceTools: usesReferenceToolThread(threadID), embeddedBrowserTools: embeddedBrowserTools != nil),
                         "config": threadConfig(for: modelID, taskID: taskID),

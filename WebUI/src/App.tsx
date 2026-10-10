@@ -945,7 +945,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
                 </Button>
               </span>
             </div>
-            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access automatically approves Computa action requests; Ask every time asks before each protected action. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. Access mode resets to Ask every time when you relaunch.</p></details>
+            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access allows terminal/file commands outside the workspace and network access without engine approval prompts, and automatically approves Computa action requests. Ask every time keeps the workspace sandbox and asks before protected actions. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. New submissions use this choice; running turns keep their execution permissions. Your choice is remembered across launches.</p></details>
             <Button variant="outline" className="refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</Button>
           </section>
         </div>

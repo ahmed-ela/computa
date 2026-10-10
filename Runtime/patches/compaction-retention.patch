@@ -1350,6 +1350,637 @@ index cdb51f2..83d5333 100644
  dependencies = [
   "anyhow",
   "assert_cmd",
+diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
+index 68c48a2..1c785c9 100644
+--- a/codex-rs/app-server/src/lib.rs
++++ b/codex-rs/app-server/src/lib.rs
+@@ -1481,9 +1481,12 @@ fn test_user_config_file_from_env() -> Option<std::path::PathBuf> {
+ }
+ 
+ fn loader_overrides_with_test_user_config_file(
+-    mut loader_overrides: LoaderOverrides,
++    loader_overrides: LoaderOverrides,
+     test_user_config_file: Option<std::path::PathBuf>,
+ ) -> IoResult<LoaderOverrides> {
++    #[cfg(debug_assertions)]
++    let mut loader_overrides = loader_overrides;
++
+     #[cfg(debug_assertions)]
+     if let Some(path) = test_user_config_file {
+         let path = AbsolutePathBuf::from_absolute_path(path).map_err(|err| {
+diff --git a/codex-rs/app-server/src/main.rs b/codex-rs/app-server/src/main.rs
+index 4f36d3a..8587e93 100644
+--- a/codex-rs/app-server/src/main.rs
++++ b/codex-rs/app-server/src/main.rs
+@@ -5,6 +5,7 @@ use codex_app_server::AppServerCodeModeHostArgs;
+ use codex_app_server::AppServerRuntimeOptions;
+ use codex_app_server::AppServerTransport;
+ use codex_app_server::AppServerWebsocketAuthArgs;
++#[cfg(debug_assertions)]
+ use codex_app_server::PluginStartupTasks;
+ use codex_app_server::run_main_with_transport_options;
+ use codex_arg0::Arg0DispatchPaths;
+@@ -24,7 +25,9 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+ 
+ // Debug-only test hook: lets integration tests point the server at a temporary
+ // managed config file without writing to /etc.
++#[cfg(debug_assertions)]
+ const MANAGED_CONFIG_PATH_ENV_VAR: &str = "CODEX_APP_SERVER_MANAGED_CONFIG_PATH";
++#[cfg(debug_assertions)]
+ const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
+ 
+ #[derive(Debug, Parser)]
+diff --git a/codex-rs/app-server/tests/suite/v2/analytics.rs b/codex-rs/app-server/tests/suite/v2/analytics.rs
+index 50fdb0c..9904cf0 100644
+--- a/codex-rs/app-server/tests/suite/v2/analytics.rs
++++ b/codex-rs/app-server/tests/suite/v2/analytics.rs
+@@ -854,7 +854,10 @@ enabled = true
+     if remote {
+         builder = builder.with_exec_server_delay(Duration::ZERO);
+     }
+-    let mut mcp = builder.build().await?;
++    let mut mcp = builder
++        .build()
++        .await
++        .inspect_err(|error| eprintln!("plugin metrics fixture build failed: {error:#}"))?;
+     if remote {
+         assert_eq!(
+             mcp.auto_env_params()?.environment_id,
+diff --git a/codex-rs/app-server/tests/suite/v2/multi_agent_v2_developer_instructions.rs b/codex-rs/app-server/tests/suite/v2/multi_agent_v2_developer_instructions.rs
+index d4e0c71..9d0ea3c 100644
+--- a/codex-rs/app-server/tests/suite/v2/multi_agent_v2_developer_instructions.rs
++++ b/codex-rs/app-server/tests/suite/v2/multi_agent_v2_developer_instructions.rs
+@@ -296,6 +296,7 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
+     const CHILD_PROMPT: &str = "inspect the compacted parent history";
+     const SETUP_CALL_ID: &str = "trigger-parent-compaction";
+     const SPAWN_CALL_ID: &str = "spawn-compacted-history-worker";
++    const COMPACT_TOKEN_LIMIT: i64 = 8_192;
+ 
+     let server = responses::start_mock_server().await;
+     let compaction_requests = responses::mount_sse_sequence(
+@@ -306,7 +307,7 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
+                 responses::ev_function_call(SETUP_CALL_ID, "unsupported_tool", "{}"),
+                 responses::ev_completed_with_tokens(
+                     "parent-before-compaction",
+-                    /*total_tokens*/ 96,
++                    /*total_tokens*/ COMPACT_TOKEN_LIMIT + 1,
+                 ),
+             ]),
+             responses::sse(vec![
+@@ -373,7 +374,9 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
+     MockResponsesConfig::new(&server.uri())
+         .with_model("gpt-5.4")
+         .with_root_config(&format!(
+-            "developer_instructions = {PARENT_INSTRUCTIONS:?}\nmodel_context_window = 100\nmodel_auto_compact_token_limit = 90\ncompact_prompt = {COMPACT_PROMPT:?}"
++            // Force mid-turn compaction above the limit, while leaving room for retained receipts
++            // and instructions in both the replacement history and the subsequent fork turn.
++            "developer_instructions = {PARENT_INSTRUCTIONS:?}\nmodel_context_window = 32768\nmodel_auto_compact_token_limit = {COMPACT_TOKEN_LIMIT}\ncompact_prompt = {COMPACT_PROMPT:?}"
+         ))
+         .with_extra_config(&format!(
+             "[features.multi_agent_v2]\nenabled = true\nsubagent_developer_instructions = {CHILD_INSTRUCTIONS:?}"
+@@ -391,7 +394,7 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
+             ..Default::default()
+         })
+         .await?;
+-    timeout(
++    let completed = timeout(
+         READ_TIMEOUT,
+         app_server.start_turn_and_wait_for_completion(TurnStartParams {
+             thread_id: thread.id.clone(),
+@@ -403,6 +406,30 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
+         }),
+     )
+     .await??;
++    assert_eq!(completed.thread_id, thread.id);
++    assert_eq!(completed.turn.status, TurnStatus::Completed);
++    assert!(completed.turn.error.is_none());
++
++    let mut compaction_item_ids = Vec::new();
++    for method in ["item/started", "item/completed"] {
++        let notification = timeout(
++            READ_TIMEOUT,
++            app_server.read_stream_until_matching_notification(method, |notification| {
++                notification.method == method
++                    && notification.params.as_ref().is_some_and(|params| {
++                        params["threadId"].as_str() == Some(thread.id.as_str())
++                            && params["turnId"].as_str() == Some(completed.turn.id.as_str())
++                            && params["item"]["type"].as_str() == Some("contextCompaction")
++                    })
++            }),
++        )
++        .await??;
++        let params = notification.params.expect("compaction parameters");
++        let item_id = params["item"]["id"].as_str().expect("compaction item id");
++        assert!(!item_id.is_empty());
++        compaction_item_ids.push(item_id.to_owned());
++    }
++    assert_eq!(compaction_item_ids[0], compaction_item_ids[1]);
+ 
+     let compaction_requests = compaction_requests.requests();
+     assert_eq!(compaction_requests.len(), 3);
+diff --git a/codex-rs/app-server/tests/suite/v2/realtime_conversation.rs b/codex-rs/app-server/tests/suite/v2/realtime_conversation.rs
+index a845085..0be5dfd 100644
+--- a/codex-rs/app-server/tests/suite/v2/realtime_conversation.rs
++++ b/codex-rs/app-server/tests/suite/v2/realtime_conversation.rs
+@@ -1239,14 +1239,17 @@ async fn realtime_timeline_splits_accepted_steering_and_persists_promoted_artifa
+         .realtime_session_id
+         .context("realtime started notification should include a session ID")?;
+ 
++    let initial_input = vec![V2UserInput::Text {
++        text: "Start work".to_string(),
++        text_elements: Vec::new(),
++    }];
++    let initial_client_id = "initial-work";
+     let turn_request = harness
+         .mcp
+         .send_turn_start_request(TurnStartParams {
+             thread_id: harness.thread_id.clone(),
+-            input: vec![V2UserInput::Text {
+-                text: "Start work".to_string(),
+-                text_elements: Vec::new(),
+-            }],
++            client_user_message_id: Some(initial_client_id.to_string()),
++            input: initial_input.clone(),
+             ..Default::default()
+         })
+         .await?;
+@@ -1256,6 +1259,28 @@ async fn realtime_timeline_splits_accepted_steering_and_persists_promoted_artifa
+         .read_notification::<TurnStartedNotification>("turn/started")
+         .await?;
+ 
++    // TurnStarted precedes initial prompt recording. Wait for its completion so
++    // that prompt cannot split the transcript this test sends next.
++    timeout(DEFAULT_TIMEOUT, async {
++        loop {
++            let completed: ItemCompletedNotification =
++                harness.mcp.read_notification("item/completed").await?;
++            if completed.thread_id == harness.thread_id
++                && completed.turn_id == turn.turn.id
++                && matches!(
++                    &completed.item,
++                    ThreadItem::UserMessage { client_id, content, .. }
++                        if client_id.as_deref() == Some(initial_client_id)
++                            && content == &initial_input
++                )
++            {
++                return Ok::<(), anyhow::Error>(());
++            }
++        }
++    })
++    .await
++    .context("initial user item should complete before realtime speech")??;
++
+     harness
+         .append_text(harness.thread_id.clone(), "Trigger speech")
+         .await?;
+diff --git a/codex-rs/app-server/tests/suite/v2/selected_capability_stack.rs b/codex-rs/app-server/tests/suite/v2/selected_capability_stack.rs
+index cff3e76..6a96ea1 100644
+--- a/codex-rs/app-server/tests/suite/v2/selected_capability_stack.rs
++++ b/codex-rs/app-server/tests/suite/v2/selected_capability_stack.rs
+@@ -38,6 +38,7 @@ use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_path_uri::PathUri;
+ use core_test_support::process::wait_for_pid_file;
++use core_test_support::process::wait_for_process_exit;
+ use core_test_support::responses;
+ use core_test_support::responses::ResponsesRequest;
+ use core_test_support::stdio_server_bin;
+@@ -154,7 +155,7 @@ async fn selected_plugin_mcp_startup_respects_explicit_mentions(
+         app_server.read_stream_until_response_message(RequestId::Integer(request_id)),
+     )
+     .await??;
+-    wait_for_pid_file(&fixture.pid_file).await?;
++    let mcp_pid = wait_for_pid_file(&fixture.pid_file).await?;
+     if explicitly_mentioned {
+         // An explicit mention must outwait the optional one-second grace.
+         tokio::time::sleep(Duration::from_secs(3)).await;
+@@ -180,6 +181,17 @@ async fn selected_plugin_mcp_startup_respects_explicit_mentions(
+         explicitly_mentioned,
+     );
+ 
++    if !explicitly_mentioned {
++        // The assertions above need pending optional startup. Release that artificial
++        // barrier only during cleanup, while the executor still owns the helper.
++        std::fs::write(&initialize_barrier, "ready")?;
++        let status = timeout(READ_TIMEOUT, app_server.shutdown_gracefully()).await??;
++        anyhow::ensure!(
++            status.success(),
++            "app-server fixture shutdown failed: {status}"
++        );
++        wait_for_process_exit(&mcp_pid).await?;
++    }
+     exec_server.kill().await?;
+     apps_server_handle.abort();
+     let _ = apps_server_handle.await;
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_start_zsh_fork.rs b/codex-rs/app-server/tests/suite/v2/turn_start_zsh_fork.rs
+index 863ccb9..76c0c40 100644
+--- a/codex-rs/app-server/tests/suite/v2/turn_start_zsh_fork.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_start_zsh_fork.rs
+@@ -20,11 +20,16 @@ use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
+ use codex_app_server_protocol::CommandExecutionStatus;
+ use codex_app_server_protocol::ItemCompletedNotification;
+ use codex_app_server_protocol::ItemStartedNotification;
++use codex_app_server_protocol::JSONRPCMessage;
++use codex_app_server_protocol::RequestId;
+ use codex_app_server_protocol::ServerRequest;
+ use codex_app_server_protocol::ThreadItem;
+ use codex_app_server_protocol::ThreadStartParams;
+ use codex_app_server_protocol::ThreadStartResponse;
++use codex_app_server_protocol::ThreadTurnsListParams;
++use codex_app_server_protocol::ThreadTurnsListResponse;
+ use codex_app_server_protocol::TurnCompletedNotification;
++use codex_app_server_protocol::TurnItemsView;
+ use codex_app_server_protocol::TurnStartParams;
+ use codex_app_server_protocol::TurnStartResponse;
+ use codex_app_server_protocol::TurnStatus;
+@@ -35,6 +40,8 @@ use core_test_support::skip_if_no_network;
+ use core_test_support::skip_if_remote;
+ use pretty_assertions::assert_eq;
+ use std::collections::BTreeMap;
++use std::os::unix::fs::MetadataExt;
++use std::os::unix::fs::PermissionsExt;
+ use std::path::Path;
+ use std::path::PathBuf;
+ use tempfile::TempDir;
+@@ -166,6 +173,11 @@ async fn turn_start_shell_zsh_fork_executes_command_v2() -> Result<()> {
+     mcp.interrupt_turn_and_wait_for_aborted(thread.id, turn.id, DEFAULT_READ_TIMEOUT)
+         .await?;
+ 
++    drop(mcp);
++    drop(server);
++    tmp.close()?;
++    eprintln!("zshForkFixtureComplete=turn_start_shell_zsh_fork_executes_command_v2");
++
+     Ok(())
+ }
+ 
+@@ -297,6 +309,11 @@ async fn turn_start_shell_zsh_fork_exec_approval_decline_v2() -> Result<()> {
+     )
+     .await??;
+ 
++    drop(mcp);
++    drop(server);
++    tmp.close()?;
++    eprintln!("zshForkFixtureComplete=turn_start_shell_zsh_fork_exec_approval_decline_v2");
++
+     Ok(())
+ }
+ 
+@@ -423,6 +440,11 @@ async fn turn_start_shell_zsh_fork_exec_approval_cancel_v2() -> Result<()> {
+     assert_eq!(completed.thread_id, thread.id);
+     assert_eq!(completed.turn.status, TurnStatus::Interrupted);
+ 
++    drop(mcp);
++    drop(server);
++    tmp.close()?;
++    eprintln!("zshForkFixtureComplete=turn_start_shell_zsh_fork_exec_approval_cancel_v2");
++
+     Ok(())
+ }
+ 
+@@ -620,100 +642,121 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
+     assert!(approved_subcommand_strings[0].contains(&first_file.display().to_string()));
+     assert!(approved_subcommand_strings[1].contains(&second_file.display().to_string()));
+     let parent_completed_command_execution = timeout(DEFAULT_READ_TIMEOUT, async {
++        let mut parent = None;
+         loop {
+-            let completed_notif = mcp
+-                .read_stream_until_notification_message("item/completed")
+-                .await?;
+-            let completed: ItemCompletedNotification = serde_json::from_value(
+-                completed_notif
+-                    .params
+-                    .clone()
+-                    .expect("item/completed params"),
+-            )?;
+-            if let ThreadItem::CommandExecution { id, .. } = &completed.item
+-                && id == "call-zsh-fork-subcommand-decline"
+-            {
+-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
++            let JSONRPCMessage::Notification(notification) = mcp.read_next_message().await? else {
++                continue;
++            };
++            match notification.method.as_str() {
++                "item/completed" => {
++                    let completed: ItemCompletedNotification = serde_json::from_value(
++                        notification.params.expect("item/completed params"),
++                    )?;
++                    if let ThreadItem::CommandExecution {
++                        id,
++                        status,
++                        command,
++                        aggregated_output,
++                        ..
++                    } = &completed.item
++                        && id == "call-zsh-fork-subcommand-decline"
++                    {
++                        assert_eq!(completed.thread_id, thread.id);
++                        assert_eq!(completed.turn_id, turn.id);
++                        assert!(parent.is_none(), "duplicate parent completion");
++                        assert_eq!(*status, CommandExecutionStatus::Declined);
++                        assert!(
++                            command.contains(&shell_command),
++                            "parent command payload must be retained: {command}"
++                        );
++                        assert!(command.contains(
++                            &command_packaged_zsh_path(&codex_home).display().to_string()
++                        ));
++                        assert!(aggregated_output.as_deref().is_some_and(|output| {
++                            output.contains("exec command rejected by user")
++                        }));
++                        parent = Some(completed.item);
++                    }
++                }
++                "turn/completed" => {
++                    let completed: TurnCompletedNotification = serde_json::from_value(
++                        notification.params.expect("turn/completed params"),
++                    )?;
++                    if completed.thread_id == thread.id && completed.turn.id == turn.id {
++                        assert_eq!(completed.turn.status, TurnStatus::Interrupted);
++                        return Ok::<ThreadItem, anyhow::Error>(
++                            parent.expect("parent completion must precede interrupted turn"),
++                        );
++                    }
++                }
++                _ => {}
+             }
+         }
+     })
+-    .await;
+-
+-    match parent_completed_command_execution {
+-        Ok(Ok(parent_completed_command_execution)) => {
+-            let ThreadItem::CommandExecution {
+-                id,
+-                status,
+-                aggregated_output,
+-                ..
+-            } = parent_completed_command_execution
+-            else {
+-                unreachable!("loop ensures we break on parent command execution item");
+-            };
+-            assert_eq!(id, "call-zsh-fork-subcommand-decline");
+-            assert_eq!(status, CommandExecutionStatus::Declined);
+-            if let Some(output) = aggregated_output.as_deref() {
+-                assert!(
+-                    output == "exec command rejected by user"
+-                        || output.contains("sandbox denied exec error"),
+-                    "unexpected aggregated output: {output}"
+-                );
+-            }
++    .await??;
++    assert!(
++        !first_file.exists(),
++        "accepted first subcommand must remove first.txt"
++    );
++    assert_eq!(std::fs::read_to_string(&second_file)?, "two");
+ 
+-            match timeout(
+-                DEFAULT_READ_TIMEOUT,
+-                mcp.read_stream_until_notification_message("turn/completed"),
+-            )
+-            .await
+-            {
+-                Ok(Ok(completed_notif)) => {
+-                    let completed: TurnCompletedNotification = serde_json::from_value(
+-                        completed_notif
+-                            .params
+-                            .expect("turn/completed params must be present"),
+-                    )?;
+-                    assert_eq!(completed.thread_id, thread.id);
+-                    assert_eq!(completed.turn.id, turn.id);
+-                    assert!(matches!(
+-                        completed.turn.status,
+-                        TurnStatus::Interrupted | TurnStatus::Completed
+-                    ));
++    let history_id = mcp
++        .send_thread_turns_list_request(ThreadTurnsListParams {
++            thread_id: thread.id.clone(),
++            cursor: None,
++            limit: None,
++            sort_direction: None,
++            items_view: Some(TurnItemsView::Full),
++        })
++        .await?;
++    let ThreadTurnsListResponse {
++        data, next_cursor, ..
++    } = timeout(DEFAULT_READ_TIMEOUT, async {
++        loop {
++            match mcp.read_next_message().await? {
++                JSONRPCMessage::Response(response)
++                    if response.id == RequestId::Integer(history_id) =>
++                {
++                    return Ok::<ThreadTurnsListResponse, anyhow::Error>(serde_json::from_value(
++                        response.result,
++                    )?);
+                 }
+-                Ok(Err(error)) => return Err(error),
+-                Err(_) => {
+-                    mcp.interrupt_turn_and_wait_for_aborted(
+-                        thread.id.clone(),
+-                        turn.id.clone(),
+-                        DEFAULT_READ_TIMEOUT,
+-                    )
+-                    .await?;
++                JSONRPCMessage::Notification(notification)
++                    if notification.method == "item/completed" =>
++                {
++                    let completed: ItemCompletedNotification = serde_json::from_value(
++                        notification.params.expect("item/completed params"),
++                    )?;
++                    assert!(
++                        !matches!(completed.item, ThreadItem::CommandExecution { ref id, .. }
++                        if id == "call-zsh-fork-subcommand-decline"),
++                        "parent completion must not follow terminal turn"
++                    );
+                 }
++                JSONRPCMessage::Error(error) => anyhow::bail!("history request failed: {error:?}"),
++                _ => {}
+             }
+         }
+-        Ok(Err(error)) => return Err(error),
+-        Err(_) => {
+-            // Some zsh builds abort the turn immediately after the rejected
+-            // subcommand without emitting a parent `item/completed`, and Linux
+-            // sandbox failures can also complete the turn before the parent
+-            // completion item is observed.
+-            let completed_notif = timeout(
+-                DEFAULT_READ_TIMEOUT,
+-                mcp.read_stream_until_notification_message("turn/completed"),
+-            )
+-            .await??;
+-            let completed: TurnCompletedNotification = serde_json::from_value(
+-                completed_notif
+-                    .params
+-                    .expect("turn/completed params must be present"),
+-            )?;
+-            assert_eq!(completed.thread_id, thread.id);
+-            assert_eq!(completed.turn.id, turn.id);
+-            assert!(matches!(
+-                completed.turn.status,
+-                TurnStatus::Interrupted | TurnStatus::Completed
+-            ));
+-        }
+-    }
++    })
++    .await??;
++    assert!(
++        next_cursor.is_none(),
++        "single-turn fixture history must fit one page"
++    );
++    let turns: Vec<_> = data.iter().filter(|entry| entry.id == turn.id).collect();
++    assert_eq!(turns.len(), 1);
++    assert_eq!(turns[0].status, TurnStatus::Interrupted);
++    let parents: Vec<_> = turns[0].items.iter().filter(|item| {
++        matches!(item, ThreadItem::CommandExecution { id, .. } if id == "call-zsh-fork-subcommand-decline")
++    }).collect();
++    assert_eq!(parents, vec![&parent_completed_command_execution]);
++
++    drop(mcp);
++    drop(server);
++    tmp.close()?;
++    eprintln!(
++        "zshForkFixtureComplete=turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2"
++    );
+ 
+     Ok(())
+ }
+@@ -745,11 +788,11 @@ fn create_test_package_app_server(codex_home: &Path, zsh_path: &Path) -> Result<
+     std::fs::write(package_dir.join("codex-package.json"), "{}")?;
+ 
+     let app_server = bin_dir.join("codex-app-server");
+-    copy_with_permissions(
++    stage_with_permissions(
+         &codex_utils_cargo_bin::cargo_bin("codex-app-server")?,
+         &app_server,
+     )?;
+-    copy_with_permissions(zsh_path, &package_zsh_path)?;
++    stage_with_permissions(zsh_path, &package_zsh_path)?;
+     Ok(app_server)
+ }
+ 
+@@ -767,9 +810,118 @@ fn command_packaged_zsh_path(codex_home: &Path) -> PathBuf {
+     std::fs::canonicalize(&path).unwrap_or(path)
+ }
+ 
+-fn copy_with_permissions(source: &Path, destination: &Path) -> std::io::Result<()> {
+-    std::fs::copy(source, destination)?;
+-    std::fs::set_permissions(destination, std::fs::metadata(source)?.permissions())
++fn stage_with_permissions(source: &Path, destination: &Path) -> std::io::Result<()> {
++    // Keep the package alias while reusing the executable's existing inode on
++    // the same filesystem. Never chmod a hard link: that would change the source.
++    let staging = match std::fs::hard_link(source, destination) {
++        Ok(()) => "hardlink",
++        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
++            std::fs::copy(source, destination)?;
++            std::fs::set_permissions(destination, std::fs::metadata(source)?.permissions())?;
++            "copy_exdev"
++        }
++        Err(error) => return Err(error),
++    };
++    let source_metadata = std::fs::metadata(source)?;
++    let destination_metadata = std::fs::metadata(destination)?;
++    eprintln!(
++        "zshForkFixtureStage={staging} executable={} sourceDevice={} sourceInode={} destinationDevice={} destinationInode={}",
++        destination
++            .file_name()
++            .unwrap_or_default()
++            .to_string_lossy(),
++        source_metadata.dev(),
++        source_metadata.ino(),
++        destination_metadata.dev(),
++        destination_metadata.ino()
++    );
++    Ok(())
++}
++
++#[test]
++fn test_package_staging_preserves_hard_link_identity_and_alias() -> Result<()> {
++    let tmp = TempDir::new()?;
++    let source = tmp.path().join("source-app-server");
++    std::fs::write(&source, b"test executable contents")?;
++    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o751))?;
++    let before = std::fs::metadata(&source)?;
++    let package_dir = tmp.path().join("test-package");
++    let bin_dir = package_dir.join("bin");
++    std::fs::create_dir_all(&bin_dir)?;
++    std::fs::write(package_dir.join("codex-package.json"), "{}")?;
++    let destination = bin_dir.join("codex-app-server");
++
++    stage_with_permissions(&source, &destination)?;
++
++    let staged = std::fs::metadata(&destination)?;
++    assert!(
++        std::fs::symlink_metadata(&destination)?
++            .file_type()
++            .is_file()
++    );
++    assert_eq!((staged.dev(), staged.ino()), (before.dev(), before.ino()));
++    assert_eq!(staged.permissions().mode(), before.permissions().mode());
++    assert_eq!(
++        (staged.mtime(), staged.mtime_nsec()),
++        (before.mtime(), before.mtime_nsec())
++    );
++    assert_eq!(staged.nlink(), before.nlink() + 1);
++    let canonical_package = std::fs::canonicalize(&package_dir)?;
++    assert_eq!(
++        std::fs::canonicalize(&destination)?,
++        canonical_package.join("bin").join("codex-app-server")
++    );
++    assert_ne!(
++        std::fs::canonicalize(&destination)?,
++        std::fs::canonicalize(&source)?
++    );
++    assert!(canonical_package.join("codex-package.json").is_file());
++    assert_eq!(std::fs::read(&destination)?, std::fs::read(&source)?);
++
++    std::fs::remove_file(&destination)?;
++    let after = std::fs::metadata(&source)?;
++    assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
++    assert_eq!(after.permissions().mode(), before.permissions().mode());
++    assert_eq!(
++        (after.mtime(), after.mtime_nsec()),
++        (before.mtime(), before.mtime_nsec())
++    );
++    assert_eq!(after.nlink(), before.nlink());
++    tmp.close()?;
++    Ok(())
++}
++
++#[test]
++fn test_package_staging_rejects_existing_destination() -> Result<()> {
++    let tmp = TempDir::new()?;
++    let source = tmp.path().join("source");
++    let destination = tmp.path().join("destination");
++    std::fs::write(&source, b"source contents")?;
++    std::fs::write(&destination, b"existing contents")?;
++    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o751))?;
++    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o640))?;
++    let source_before = std::fs::metadata(&source)?;
++    let destination_before = std::fs::metadata(&destination)?;
++
++    let error = stage_with_permissions(&source, &destination).unwrap_err();
++
++    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
++    assert_eq!(std::fs::read(&source)?, b"source contents");
++    assert_eq!(std::fs::read(&destination)?, b"existing contents");
++    let source_after = std::fs::metadata(&source)?;
++    let destination_after = std::fs::metadata(&destination)?;
++    assert_eq!(source_after.nlink(), source_before.nlink());
++    assert_eq!(
++        source_after.permissions().mode(),
++        source_before.permissions().mode()
++    );
++    assert_eq!(destination_after.ino(), destination_before.ino());
++    assert_eq!(
++        destination_after.permissions().mode(),
++        destination_before.permissions().mode()
++    );
++    tmp.close()?;
++    Ok(())
+ }
+ 
+ fn create_config_toml(
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
 index 5957c19..76149f3 100644
 --- a/codex-rs/core/src/client.rs
@@ -1828,10 +2459,10 @@ index 0000000..f24d6ff
 +}
 diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..7b432b3
+index 0000000..99e10df
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts.rs
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,414 @@
 +//! Bounded, genuine current-turn receipts for local mid-turn compaction.
 +//!
 +//! These remain tool-role history, never instructions, authorization, or a replay queue. Capture
@@ -1854,7 +2485,6 @@ index 0000000..7b432b3
 +use codex_utils_output_truncation::truncate_function_output_payload;
 +
 +const MAX_PAIRS: usize = 32;
-+const MAX_CALL_BYTES: usize = 1024;
 +const MAX_OUTPUT_TEXT_BYTES: usize = 2048;
 +const MAX_OUTPUT_BYTES: usize = 3072;
 +const MAX_LATEST_OUTPUT_TEXT_BYTES: usize = 4096;
@@ -1916,8 +2546,13 @@ index 0000000..7b432b3
 +                        "current turn exceeds the 32 completed-function-call bound",
 +                    ));
 +                }
-+                if serde_json::to_vec(&envelope.item)?.len() > MAX_CALL_BYTES {
-+                    return Err(receipt_error("function call exceeds the 1 KiB bound"));
++                // Calls remain exact, including code-writing arguments and local metadata.
++                // Reject only a call that cannot fit the existing canonical receipt budget;
++                // provider projection and the complete call/result set are budgeted below.
++                if serde_json::to_vec(&envelope.item)?.len() > MAX_CANONICAL_RECEIPT_BYTES {
++                    return Err(receipt_error(
++                        "function call exceeds the 24 KiB canonical receipt budget",
++                    ));
 +                }
 +                pending.insert(call_id.as_str(), (index, envelope));
 +            }
@@ -2244,10 +2879,10 @@ index 0000000..7b432b3
 +mod tests;
 diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
 new file mode 100644
-index 0000000..ca71ca0
+index 0000000..7701d9e
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
-@@ -0,0 +1,995 @@
+@@ -0,0 +1,1077 @@
 +use super::*;
 +use codex_history::CodexHarnessMetadata;
 +use codex_protocol::models::FunctionCallOutputPayload;
@@ -2667,6 +3302,60 @@ index 0000000..ca71ca0
 +}
 +
 +#[test]
++fn large_code_edit_call_remains_exact_for_both_providers_across_compactions() {
++    let mut original = pair("inspect", "current", "verified baseline file");
++    let mut edit = pair("edit", "current", "file written once; exit code 0");
++    let source = format!("VALUE = \"{}\"\n", "x".repeat(8 * 1024));
++    let arguments = json!({
++        "cmd": format!("cat > ledger.py <<'LEDGER'\n{source}LEDGER\n"),
++        "workdir": "/owned/project",
++        "max_output_tokens": 1000,
++    })
++    .to_string();
++    assert!(arguments.len() > 8 * 1024);
++    assert!(serde_json::from_str::<serde_json::Value>(&arguments).is_ok());
++    if let ResponseItem::FunctionCall {
++        name,
++        arguments: call_arguments,
++        ..
++    } = &mut edit[0].item
++    {
++        *name = "exec_command".to_string();
++        *call_arguments = arguments;
++    }
++    edit[0].metadata.as_mut().unwrap().compaction_model_hash =
++        Some("original-edit-provenance".to_string());
++    original.extend(edit);
++    let mut verify = pair(
++        "verify",
++        "current",
++        "regression test failed; do not hide failure",
++    );
++    if let ResponseItem::FunctionCallOutput { output, .. } = &mut verify[1].item {
++        output.success = Some(false);
++    }
++    original.extend(verify);
++    for provider in [ReceiptProvider::OpenAI, ReceiptProvider::External] {
++        let retained = super::current_turn_receipts(&original, "current", provider).unwrap();
++        assert_eq!(
++            retained, original,
++            "calls, results, metadata and order stay exact"
++        );
++        assert_receipt_bounds(&retained);
++        assert_external_receipt_bounds(&retained);
++        assert_eq!(
++            super::current_turn_receipts(&retained, "current", provider).unwrap(),
++            retained,
++            "recompaction must not degrade or duplicate the completed edit"
++        );
++        assert_eq!(
++            super::current_turn_receipts(&retained, "next-turn", provider).unwrap(),
++            vec![]
++        );
++    }
++}
++
++#[test]
 +fn enforces_pair_count_call_size_aggregate_and_serialized_output_bounds() {
 +    let limit: Vec<_> = (0..MAX_PAIRS)
 +        .flat_map(|i| pair(&i.to_string(), "current", "ok"))
@@ -2682,18 +3371,46 @@ index 0000000..ca71ca0
 +    );
 +    let mut huge_call = pair("large", "current", "ok");
 +    if let ResponseItem::FunctionCall { arguments, .. } = &mut huge_call[0].item {
-+        *arguments = "x".repeat(MAX_CALL_BYTES);
++        *arguments = json!({"cmd":"x".repeat(MAX_CANONICAL_RECEIPT_BYTES)}).to_string();
 +    }
-+    assert!(current_turn_receipts(&huge_call, "current").is_err());
-+    let mut too_large: Vec<_> = (0..MAX_PAIRS)
++    assert!(
++        current_turn_receipts(&huge_call, "current")
++            .unwrap_err()
++            .to_string()
++            .contains("24 KiB canonical receipt budget")
++    );
++    let mut too_large: Vec<_> = (0..MAX_PAIRS / 2)
 +        .flat_map(|i| pair(&i.to_string(), "current", "ok"))
 +        .collect();
 +    for envelope in &mut too_large {
 +        if let ResponseItem::FunctionCall { arguments, .. } = &mut envelope.item {
-+            *arguments = "x".repeat(800);
++            *arguments = json!({"cmd":"x".repeat(800)}).to_string();
 +        }
 +    }
-+    assert!(current_turn_receipts(&too_large, "current").is_err());
++    let canonical_items: Vec<_> = too_large.iter().map(|envelope| &envelope.item).collect();
++    let canonical_metadata: Vec<_> = too_large
++        .iter()
++        .map(|envelope| &envelope.metadata)
++        .collect();
++    assert!(
++        serde_json::to_vec(&canonical_items).unwrap().len()
++            + serde_json::to_vec(&canonical_metadata).unwrap().len()
++            < MAX_CANONICAL_RECEIPT_BYTES
++    );
++    let mut projected: Vec<_> = too_large
++        .iter()
++        .map(|envelope| envelope.item.clone())
++        .collect();
++    prepare_input_for_non_openai_provider(&mut projected);
++    assert!(serde_json::to_vec(&projected).unwrap().len() > MAX_RECEIPT_BYTES);
++    for provider in [ReceiptProvider::OpenAI, ReceiptProvider::External] {
++        assert!(
++            super::current_turn_receipts(&too_large, "current", provider)
++                .unwrap_err()
++                .to_string()
++                .contains("12 KiB provider-input")
++        );
++    }
 +    let escaped = pair("escaped", "current", &"\0".repeat(1900));
 +    let retained = current_turn_receipts(&escaped, "current").unwrap();
 +    assert_receipt_bounds(&retained);
@@ -3243,6 +3960,19 @@ index 0000000..ca71ca0
 +        .sync_all()
 +        .expect("private receipt export sync failed");
 +}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index dc739a5..30abb44 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -195,7 +195,7 @@ pub async fn exec_approval(
+     }
+     match decision {
+         ReviewDecision::Abort => {
+-            sess.interrupt_task().await;
++            sess.interrupt_exec_approval(&approval_id).await;
+         }
+         other => sess.notify_approval(&approval_id, other).await,
+     }
 diff --git a/codex-rs/core/src/session/local_context_overflow.rs b/codex-rs/core/src/session/local_context_overflow.rs
 new file mode 100644
 index 0000000..a4d0d6d
@@ -3345,6 +4075,36 @@ index 0000000..a4d0d6d
 +    crate::client::prepare_input_for_non_openai_provider(&mut input);
 +    serde_json::to_vec(&input).ok().map(|bytes| bytes.len())
 +}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 9252c89..a2413e3 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3434,6 +3434,25 @@ impl Session {
+         }
+     }
+ 
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "active turn checks and turn state updates must remain atomic"
++    )]
++    pub(crate) async fn register_execution_approval(
++        &self,
++        approval_id: &str,
++        completion: crate::unified_exec::execution_completion::ExecutionCompletion,
++    ) {
++        let active = self.active_turn.lock().await;
++        if let Some(active) = active.as_ref() {
++            active
++                .turn_state
++                .lock()
++                .await
++                .insert_execution_approval(approval_id.to_string(), completion);
++        }
++    }
++
+     #[expect(
+         clippy::await_holding_invalid_type,
+         reason = "active turn checks and turn state updates must remain atomic"
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
 index 1f80548..14226d7 100644
 --- a/codex-rs/core/src/session/turn.rs
@@ -3416,6 +4176,1899 @@ index 1f80548..14226d7 100644
                  let SamplingRequestResult {
                      needs_follow_up: model_needs_follow_up,
                      last_agent_message: sampling_request_last_agent_message,
+diff --git a/codex-rs/core/src/state/turn.rs b/codex-rs/core/src/state/turn.rs
+index 01b8756..5f2816a 100644
+--- a/codex-rs/core/src/state/turn.rs
++++ b/codex-rs/core/src/state/turn.rs
+@@ -24,6 +24,7 @@ use crate::session::step_context::StepContext;
+ use crate::session::turn_context::TurnContext;
+ use crate::session::turn_context::TurnEnvironment;
+ use crate::tasks::AnySessionTask;
++use crate::unified_exec::execution_completion::ExecutionCompletion;
+ use codex_protocol::models::AdditionalPermissionProfile;
+ use codex_protocol::protocol::ReviewDecision;
+ use codex_protocol::protocol::TokenUsage;
+@@ -88,6 +89,7 @@ pub(crate) struct RunningTask {
+ #[derive(Default)]
+ pub(crate) struct TurnState {
+     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
++    pending_execution_approvals: HashMap<String, ExecutionCompletion>,
+     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
+     pending_user_input: HashMap<String, oneshot::Sender<AcceptedUserInputResponse>>,
+     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
+@@ -131,11 +133,25 @@ impl TurnState {
+         &mut self,
+         key: &str,
+     ) -> Option<oneshot::Sender<ReviewDecision>> {
++        self.pending_execution_approvals.remove(key);
+         self.pending_approvals.remove(key)
+     }
+ 
++    pub(crate) fn insert_execution_approval(
++        &mut self,
++        key: String,
++        completion: ExecutionCompletion,
++    ) {
++        self.pending_execution_approvals.insert(key, completion);
++    }
++
++    pub(crate) fn remove_execution_approval(&mut self, key: &str) -> Option<ExecutionCompletion> {
++        self.pending_execution_approvals.remove(key)
++    }
++
+     pub(crate) fn clear_pending_waiters(&mut self) {
+         self.pending_approvals.clear();
++        self.pending_execution_approvals.clear();
+         self.pending_request_permissions.clear();
+         self.pending_user_input.clear();
+         self.pending_elicitations.clear();
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 4c5cd6d..26d9623 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -37,6 +37,7 @@ use crate::state::ActiveTurn;
+ use crate::state::RunningTask;
+ use crate::state::TaskKind;
+ use crate::state::TurnState;
++use crate::unified_exec::execution_completion::ExecutionCompletion;
+ use codex_analytics::TurnProfileFact;
+ use codex_analytics::TurnTokenUsageFact;
+ use codex_context_fragments::RenderedFragment;
+@@ -504,16 +505,40 @@ impl Session {
+     }
+ 
+     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
++        self.abort_all_tasks_for_exec_approval(reason, None).await;
++    }
++
++    pub(crate) async fn interrupt_exec_approval(self: &Arc<Self>, approval_id: &str) {
++        if !self
++            .abort_all_tasks_for_exec_approval(TurnAbortReason::Interrupted, Some(approval_id))
++            .await
++        {
++            self.cancel_mcp_startup();
++        }
++    }
++
++    async fn abort_all_tasks_for_exec_approval(
++        self: &Arc<Self>,
++        reason: TurnAbortReason,
++        approval_id: Option<&str>,
++    ) -> bool {
+         let mut aborted_turn = false;
+         let mut active_turn_to_clear = None;
+         let mut turn_context = None;
+-        if let Some(mut active_turn) = self.take_active_turn(&reason).await {
++        let (active_turn, execution_completion) = self.take_active_turn(&reason, approval_id).await;
++        let had_active_turn = active_turn.is_some();
++        if let Some(mut active_turn) = active_turn {
+             let task = active_turn.task.take();
+             aborted_turn = task.is_some();
+             turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
+             if let Some(task) = task {
+-                self.handle_task_abort(task, reason.clone(), &active_turn.turn_state)
+-                    .await;
++                self.handle_task_abort(
++                    task,
++                    reason.clone(),
++                    &active_turn.turn_state,
++                    execution_completion,
++                )
++                .await;
+             }
+             if aborted_turn {
+                 active_turn_to_clear = Some(active_turn);
+@@ -532,6 +557,7 @@ impl Session {
+         if reason == TurnAbortReason::Interrupted && aborted_turn {
+             self.maybe_start_turn_for_pending_work().await;
+         }
++        had_active_turn
+     }
+ 
+     pub(crate) async fn abort_turn_if_active(
+@@ -564,7 +590,7 @@ impl Session {
+         let task = active_turn.task.take();
+         let turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
+         if let Some(task) = task {
+-            self.handle_task_abort(task, reason.clone(), &active_turn.turn_state)
++            self.handle_task_abort(task, reason.clone(), &active_turn.turn_state, None)
+                 .await;
+         }
+         if let Some(turn_context) = turn_context.as_deref() {
+@@ -832,7 +858,15 @@ impl Session {
+         }
+     }
+ 
+-    async fn take_active_turn(&self, reason: &TurnAbortReason) -> Option<ActiveTurn> {
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "taking the owning turn and recording approval cancellation must be atomic"
++    )]
++    async fn take_active_turn(
++        &self,
++        reason: &TurnAbortReason,
++        approval_id: Option<&str>,
++    ) -> (Option<ActiveTurn>, Option<ExecutionCompletion>) {
+         let mut active = self.active_turn.lock().await;
+         if matches!(
+             reason,
+@@ -843,7 +877,17 @@ impl Session {
+         {
+             self.mark_interrupted();
+         }
+-        active.take()
++        // Take the turn before waking its process watcher: process termination
++        // can otherwise wake the original tool future and finish the turn normally.
++        let active_turn = active.take();
++        let completion = match (&active_turn, approval_id) {
++            (Some(turn), Some(id)) => turn.turn_state.lock().await.remove_execution_approval(id),
++            _ => None,
++        };
++        if let Some(completion) = &completion {
++            completion.cancel();
++        }
++        (active_turn, completion)
+     }
+ 
+     pub(crate) async fn close_unified_exec_processes(&self) {
+@@ -869,6 +913,7 @@ impl Session {
+         task: RunningTask,
+         reason: TurnAbortReason,
+         turn_state: &Mutex<TurnState>,
++        execution_completion: Option<ExecutionCompletion>,
+     ) {
+         let sub_id = task.turn_context.sub_id.clone();
+         if task.cancellation_token.is_cancelled() {
+@@ -908,6 +953,13 @@ impl Session {
+             .abort(Arc::clone(self), Arc::clone(&task.turn_context))
+             .await;
+ 
++        if let Some(completion) = execution_completion {
++            // The independent watcher terminates the exact owner and drains
++            // produced output before acknowledging its canonical item completion.
++            // Startup cleanup releases this barrier if no watcher could install.
++            completion.completed().await;
++        }
++
+         if reason == TurnAbortReason::Interrupted
+             && let Some(marker) = interrupted_turn_history_marker(
+                 InterruptedTurnHistoryMarker::from_config_and_version(
+diff --git a/codex-rs/core/src/tools/approvals.rs b/codex-rs/core/src/tools/approvals.rs
+index a1513df..b6be862 100644
+--- a/codex-rs/core/src/tools/approvals.rs
++++ b/codex-rs/core/src/tools/approvals.rs
+@@ -20,6 +20,8 @@ use crate::tools::sandboxing::ApprovalRequestReasons;
+ use crate::tools::sandboxing::PermissionRequestPayload;
+ use crate::tools::sandboxing::ToolError;
+ use crate::tools::sandboxing::with_cached_approval;
++#[cfg(unix)]
++use crate::unified_exec::execution_completion::ExecutionCompletion;
+ use codex_analytics::GuardianApprovalRequestSource;
+ use codex_config::types::AppToolApproval;
+ use codex_hooks::PermissionRequestDecision;
+@@ -100,6 +102,8 @@ pub(crate) enum ApprovalAction {
+         command: Vec<String>,
+         cwd: AbsolutePathBuf,
+         additional_permissions: Option<AdditionalPermissionProfile>,
++        #[serde(skip_serializing)]
++        execution_completion: ExecutionCompletion,
+     },
+     ApplyPatch {
+         id: String,
+@@ -758,8 +762,14 @@ impl Session {
+                 command,
+                 cwd,
+                 additional_permissions,
++                execution_completion,
+                 ..
+             } => {
++                if !execution_completion.wait_for_owner().await {
++                    return ReviewDecision::Abort;
++                }
++                self.register_execution_approval(approval_id, execution_completion.clone())
++                    .await;
+                 self.request_command_approval(
+                     ctx.review_context.turn(),
+                     ExecApprovalKind::Command,
+diff --git a/codex-rs/core/src/tools/events.rs b/codex-rs/core/src/tools/events.rs
+index faa1e6d..4b37952 100644
+--- a/codex-rs/core/src/tools/events.rs
++++ b/codex-rs/core/src/tools/events.rs
+@@ -74,6 +74,7 @@ impl<'a> ToolEventCtx<'a> {
+ 
+ pub(crate) enum ToolEventStage<'a> {
+     Begin,
++    Cancelled(ExecToolCallOutput),
+     Success {
+         output: ExecToolCallOutput,
+         applied_patch_delta: Option<&'a AppliedPatchDelta>,
+@@ -240,6 +241,7 @@ impl ToolEmitter {
+     }
+ 
+     pub async fn emit(&self, ctx: ToolEventCtx<'_>, stage: ToolEventStage<'_>) {
++        let cancelled = matches!(&stage, ToolEventStage::Cancelled(_));
+         match (self, stage) {
+             (
+                 Self::ApplyPatch {
+@@ -294,14 +296,17 @@ impl ToolEmitter {
+             }
+             (
+                 Self::ApplyPatch { changes, .. },
+-                ToolEventStage::Failure(ToolEventFailure::Output(output)),
++                ToolEventStage::Failure(ToolEventFailure::Output(output))
++                | ToolEventStage::Cancelled(output),
+             ) => {
+                 emit_patch_end(
+                     ctx,
+                     changes.clone(),
+                     output.stdout.text.clone(),
+                     output.stderr.text.clone(),
+-                    if output.exit_code == 0 {
++                    if cancelled {
++                        PatchApplyStatus::Declined
++                    } else if output.exit_code == 0 {
+                         PatchApplyStatus::Completed
+                     } else {
+                         PatchApplyStatus::Failed
+@@ -521,12 +526,14 @@ async fn emit_exec_stage(
+     exec_input: ExecCommandInput<'_>,
+     stage: ToolEventStage<'_>,
+ ) {
++    let cancelled = matches!(&stage, ToolEventStage::Cancelled(_));
+     match stage {
+         ToolEventStage::Begin => {
+             emit_exec_command_begin(ctx, &exec_input).await;
+         }
+         ToolEventStage::Success { output, .. }
+-        | ToolEventStage::Failure(ToolEventFailure::Output(output)) => {
++        | ToolEventStage::Failure(ToolEventFailure::Output(output))
++        | ToolEventStage::Cancelled(output) => {
+             let exec_result = ExecCommandResult {
+                 stdout: output.stdout.text.clone(),
+                 stderr: output.stderr.text.clone(),
+@@ -537,7 +544,9 @@ async fn emit_exec_stage(
+                     &output,
+                     ctx.model_info.truncation_policy.into(),
+                 ),
+-                status: if output.exit_code == 0 {
++                status: if cancelled {
++                    ExecCommandStatus::Declined
++                } else if output.exit_code == 0 {
+                     ExecCommandStatus::Completed
+                 } else {
+                     ExecCommandStatus::Failed
+diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork.rs b/codex-rs/core/src/tools/runtimes/zsh_fork.rs
+index 4daa0f1..cb9b439 100644
+--- a/codex-rs/core/src/tools/runtimes/zsh_fork.rs
++++ b/codex-rs/core/src/tools/runtimes/zsh_fork.rs
+@@ -36,12 +36,14 @@ mod imp {
+     use super::*;
+     use crate::tools::runtimes::zsh_fork::unix_escalation;
+     use crate::unified_exec::SpawnLifecycle;
++    use crate::unified_exec::execution_completion::ExecutionCompletion;
+     use codex_shell_escalation::ESCALATE_SOCKET_ENV_VAR;
+     use codex_shell_escalation::EscalationSession;
+ 
+     #[derive(Debug)]
+     struct ZshForkSpawnLifecycle {
+         escalation_session: EscalationSession,
++        execution_completion: ExecutionCompletion,
+     }
+ 
+     impl SpawnLifecycle for ZshForkSpawnLifecycle {
+@@ -57,6 +59,17 @@ mod imp {
+         fn after_spawn(&mut self) {
+             self.escalation_session.close_client_socket();
+         }
++
++        fn execution_completion(&self) -> Option<ExecutionCompletion> {
++            Some(self.execution_completion.clone())
++        }
++    }
++
++    impl Drop for ZshForkSpawnLifecycle {
++        fn drop(&mut self) {
++            // Startup failures can drop the owner before an exit watcher exists.
++            self.execution_completion.finish();
++        }
+     }
+ 
+     pub(super) async fn maybe_prepare_unified_exec(
+@@ -83,6 +96,7 @@ mod imp {
+             exec_request: prepared.exec_request,
+             spawn_lifecycle: Box::new(ZshForkSpawnLifecycle {
+                 escalation_session: prepared.escalation_session,
++                execution_completion: prepared.execution_completion,
+             }),
+         }))
+     }
+diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
+index b32bbf1..59ed054 100644
+--- a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
++++ b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
+@@ -11,6 +11,7 @@ use crate::tools::sandboxing::SandboxAttempt;
+ use crate::tools::sandboxing::ToolCtx;
+ use crate::tools::sandboxing::ToolError;
+ use crate::tools::sandboxing::unsandboxed_execution_allowed;
++use crate::unified_exec::execution_completion::ExecutionCompletion;
+ use codex_execpolicy::Decision;
+ use codex_execpolicy::Evaluation;
+ use codex_execpolicy::MatchOptions;
+@@ -58,6 +59,7 @@ use uuid::Uuid;
+ pub(crate) struct PreparedUnifiedExecZshFork {
+     pub(crate) exec_request: ExecRequest,
+     pub(crate) escalation_session: EscalationSession,
++    pub(crate) execution_completion: ExecutionCompletion,
+ }
+ 
+ const PROMPT_CONFLICT_REASON: &str =
+@@ -143,6 +145,7 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
+         codex_linux_sandbox_exe: ctx.step_context.turn.config.codex_linux_sandbox_exe.clone(),
+         use_legacy_landlock: req.turn_environment.config().use_legacy_landlock,
+     };
++    let execution_completion = ExecutionCompletion::default();
+     let escalation_policy = CoreShellActionProvider {
+         policy: Arc::clone(&exec_policy),
+         session: Arc::clone(&ctx.session),
+@@ -160,6 +163,7 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
+         ),
+         prompt_permissions: req.additional_permissions.clone(),
+         stopwatch: Stopwatch::unlimited(),
++        execution_completion: execution_completion.clone(),
+     };
+ 
+     let escalate_server = EscalateServer::new(
+@@ -175,6 +179,7 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
+     Ok(Some(PreparedUnifiedExecZshFork {
+         exec_request,
+         escalation_session,
++        execution_completion,
+     }))
+ }
+ 
+@@ -192,6 +197,7 @@ struct CoreShellActionProvider {
+     approval_sandbox_permissions: SandboxPermissions,
+     prompt_permissions: Option<AdditionalPermissionProfile>,
+     stopwatch: Stopwatch,
++    execution_completion: ExecutionCompletion,
+ }
+ 
+ #[allow(clippy::large_enum_variant)]
+@@ -278,6 +284,7 @@ impl CoreShellActionProvider {
+             command,
+             cwd: workdir.clone(),
+             additional_permissions,
++            execution_completion: self.execution_completion.clone(),
+         };
+         match stopwatch
+             .pause_for(async {
+diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
+index 9d3c5e8..a365813 100644
+--- a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
++++ b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
+@@ -11,6 +11,7 @@ use crate::guardian::GuardianReviewContext;
+ use crate::sandboxing::SandboxPermissions;
+ use crate::session::tests::make_session_and_context;
+ use crate::tools::runtimes::tests::test_credential_broker_network_proxy;
++use crate::unified_exec::execution_completion::ExecutionCompletion;
+ use anyhow::Context;
+ use codex_execpolicy::Decision;
+ use codex_execpolicy::Evaluation;
+@@ -456,6 +457,7 @@ async fn preapproved_additional_permissions_escalate_intercepted_exec() -> anyho
+         approval_sandbox_permissions: SandboxPermissions::UseDefault,
+         prompt_permissions: Some(requested_permissions),
+         stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
++        execution_completion: ExecutionCompletion::default(),
+     };
+ 
+     let action = codex_shell_escalation::EscalationPolicy::determine_action(
+@@ -624,6 +626,7 @@ async fn execve_permission_request_hook_short_circuits_prompt() -> anyhow::Resul
+         approval_sandbox_permissions: SandboxPermissions::RequireEscalated,
+         prompt_permissions: None,
+         stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
++        execution_completion: ExecutionCompletion::default(),
+     };
+ 
+     let action = tokio::time::timeout(
+@@ -835,6 +838,7 @@ prefix_rule(pattern = ["{cat_path_literal}"], decision = "allow")
+         approval_sandbox_permissions: SandboxPermissions::UseDefault,
+         prompt_permissions: None,
+         stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
++        execution_completion: ExecutionCompletion::default(),
+     };
+ 
+     let action = codex_shell_escalation::EscalationPolicy::determine_action(
+@@ -878,6 +882,7 @@ async fn denied_reads_keep_granular_sandbox_rejection_for_escalation() -> anyhow
+         approval_sandbox_permissions: SandboxPermissions::RequireEscalated,
+         prompt_permissions: None,
+         stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
++        execution_completion: ExecutionCompletion::default(),
+     };
+ 
+     let action = codex_shell_escalation::EscalationPolicy::determine_action(
+diff --git a/codex-rs/core/src/unified_exec/async_watcher.rs b/codex-rs/core/src/unified_exec/async_watcher.rs
+index 245bdb0..72f239c 100644
+--- a/codex-rs/core/src/unified_exec/async_watcher.rs
++++ b/codex-rs/core/src/unified_exec/async_watcher.rs
+@@ -9,6 +9,7 @@ use tokio::time::Sleep;
+ 
+ use super::SharedPluginMetricsSidecar;
+ use super::UnifiedExecContext;
++use super::execution_completion::ExecutionOutcome;
+ use super::process::OutputHandles;
+ use super::process::UnifiedExecProcess;
+ use super::take_plugin_metrics_sidecar;
+@@ -50,18 +51,13 @@ struct Emitter {
+ 
+ struct Buffer<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_DELTA_MAX_BYTES> {
+     pending: Vec<u8>,
+-    transcript: Arc<Mutex<HeadTailBuffer>>,
+     emitter: Emitter,
+ }
+ 
+-/// Spawn a background task that continuously reads from the PTY, appends to the
+-/// shared transcript, and emits ExecCommandOutputDelta events on UTF‑8
+-/// boundaries.
+-pub(crate) fn start_streaming_output(
+-    process: &UnifiedExecProcess,
+-    context: &UnifiedExecContext,
+-    transcript: Arc<Mutex<HeadTailBuffer>>,
+-) {
++/// Spawn a background task that emits ExecCommandOutputDelta events on UTF-8
++/// boundaries. The producer owns transcript capture independently of this lossy
++/// subscription and the UI delta budget.
++pub(crate) fn start_streaming_output(process: &UnifiedExecProcess, context: &UnifiedExecContext) {
+     let mut receiver = process.output_receiver();
+     let output_drained = process.output_drained_notify();
+     let exit_token = process.cancellation_token();
+@@ -83,7 +79,6 @@ pub(crate) fn start_streaming_output(
+ 
+         let mut output: Buffer = Buffer {
+             pending: Vec::new(),
+-            transcript,
+             emitter,
+         };
+ 
+@@ -170,7 +165,6 @@ pub(crate) fn spawn_exit_watcher(
+     cwd: PathUri,
+     process_id: i32,
+     plugin_attribution: Option<PluginCommandAttribution>,
+-    transcript: Arc<Mutex<HeadTailBuffer>>,
+     started_at: Instant,
+     network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
+     plugin_metrics_sidecar: Option<SharedPluginMetricsSidecar>,
+@@ -183,23 +177,55 @@ pub(crate) fn spawn_exit_watcher(
+     let exit_token = process.cancellation_token();
+     let output_drained = process.output_drained_notify();
+     let interaction_lock = process.interaction_lock();
++    let transcript = process.output_transcript();
++    let execution_completion = process.execution_completion();
++    let readiness = execution_completion.clone();
+ 
+     tokio::spawn(async move {
+-        exit_token.cancelled().await;
+-        output_drained.notified().await;
+-        // Deferred network denial deliberately remains observable for a short
+-        // window after process exit. Do not classify the terminal event until
+-        // that monitor has settled, even when output closes immediately.
+-        if let Some(network_denial_monitor) = network_denial_monitor {
+-            let _ = network_denial_monitor.await;
+-        }
+-        let _interaction_guard = interaction_lock.lock_owned().await;
++        let settle = async {
++            exit_token.cancelled().await;
++            output_drained.notified().await;
++            // Deferred network denial remains observable briefly after exit.
++            if let Some(network_denial_monitor) = network_denial_monitor {
++                let _ = network_denial_monitor.await;
++            }
++            interaction_lock.lock_owned().await
++        };
++        tokio::pin!(settle);
++        let _interaction_guard = tokio::select! {
++            biased;
++            _ = async {
++                match &execution_completion {
++                    Some(completion) => completion.cancelled().await,
++                    None => std::future::pending().await,
++                }
++            } => {
++                process.request_termination();
++                settle.await
++            },
++            guard = &mut settle => guard,
++        };
+ 
+         let duration = Instant::now().saturating_duration_since(started_at);
+         let plugin_metrics_sidecar = plugin_metrics_sidecar
+             .as_ref()
+             .and_then(take_plugin_metrics_sidecar);
+-        if let Some(message) = process.failure_message() {
++        let outcome = match &execution_completion {
++            Some(completion) => match completion.claim() {
++                Some(outcome) => outcome,
++                None => return,
++            },
++            None => ExecutionOutcome::ProcessExit,
++        };
++        let _completion_guard = execution_completion
++            .as_ref()
++            .map(super::execution_completion::ExecutionCompletion::finish_on_drop);
++        if outcome == ExecutionOutcome::UserCancelled {
++            process.finish_termination_with_output_drain().await;
++        }
++        if let Some(message) = process.failure_message()
++            && outcome == ExecutionOutcome::ProcessExit
++        {
+             drop(plugin_metrics_sidecar);
+             emit_failed_exec_end_for_unified_exec(
+                 session_ref,
+@@ -242,10 +268,14 @@ pub(crate) fn spawn_exit_watcher(
+                 exit_code,
+                 duration,
+                 timed_out,
++                outcome,
+             )
+             .await;
+         }
+     });
++    if let Some(completion) = readiness {
++        completion.owner_ready();
++    }
+ }
+ 
+ impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {
+@@ -256,13 +286,7 @@ impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {
+                 "a frame must fit one UTF-8 scalar"
+             )
+         };
+-        let Self {
+-            pending,
+-            transcript,
+-            emitter,
+-        } = self;
+-
+-        transcript.lock().await.push_chunk(&bytes);
++        let Self { pending, emitter } = self;
+ 
+         // Reuse a producer chunk when it fits, retaining only an incomplete
+         // UTF-8 suffix for the next push.
+@@ -297,7 +321,6 @@ impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {
+     async fn finish(self) {
+         let Self {
+             pending,
+-            transcript: _,
+             mut emitter,
+         } = self;
+         debug_assert!(
+@@ -355,8 +378,15 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
+     exit_code: i32,
+     duration: Duration,
+     timed_out: bool,
++    outcome: ExecutionOutcome,
+ ) {
+-    let aggregated_output = resolve_aggregated_output(&transcript, fallback_output).await;
++    let mut aggregated_output = resolve_aggregated_output(&transcript, fallback_output).await;
++    if outcome == ExecutionOutcome::UserCancelled {
++        if !aggregated_output.is_empty() {
++            aggregated_output.push('\n');
++        }
++        aggregated_output.push_str("exec command rejected by user");
++    }
+     let output = ExecToolCallOutput {
+         exit_code,
+         stdout: StreamOutput::new(aggregated_output.clone()),
+@@ -379,15 +409,14 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
+         process_id,
+         plugin_attribution,
+     );
+-    emitter
+-        .emit(
+-            event_ctx,
+-            ToolEventStage::Success {
+-                output,
+-                applied_patch_delta: None,
+-            },
+-        )
+-        .await;
++    let stage = match outcome {
++        ExecutionOutcome::ProcessExit => ToolEventStage::Success {
++            output,
++            applied_patch_delta: None,
++        },
++        ExecutionOutcome::UserCancelled => ToolEventStage::Cancelled(output),
++    };
++    emitter.emit(event_ctx, stage).await;
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
+diff --git a/codex-rs/core/src/unified_exec/async_watcher_tests.rs b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
+index c2019a7..292eccf 100644
+--- a/codex-rs/core/src/unified_exec/async_watcher_tests.rs
++++ b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
+@@ -1,22 +1,32 @@
+ use std::sync::Arc;
++use std::sync::atomic::Ordering;
+ 
+ use super::Buffer;
+ use super::Emitter;
+ use super::TRAILING_OUTPUT_GRACE;
++use super::emit_exec_end_for_unified_exec;
+ use super::spawn_exit_watcher;
+ use super::start_streaming_output;
+ use super::utf8_boundary;
+ use crate::session::tests::make_session_and_context_with_rx;
++use crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES;
+ use crate::unified_exec::UnifiedExecContext;
++use crate::unified_exec::UnifiedExecProcessManager;
++use crate::unified_exec::execution_completion::ExecutionCompletion;
++use crate::unified_exec::execution_completion::ExecutionOutcome;
+ use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
+ use crate::unified_exec::process::NoopSpawnLifecycle;
++use crate::unified_exec::process::SpawnLifecycle;
++use crate::unified_exec::process::SpawnLifecycleHandle;
+ use crate::unified_exec::process::UnifiedExecProcess;
++use codex_protocol::items::CommandExecutionItem;
+ use codex_protocol::items::CommandExecutionStatus;
+ use codex_protocol::items::TurnItem;
+ use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
+ use codex_protocol::protocol::ExecOutputStream;
++use codex_protocol::protocol::HasLegacyEvent;
+ use codex_sandboxing::SandboxType;
+ 
+ use pretty_assertions::assert_eq;
+@@ -32,7 +42,180 @@ struct StreamingOutputHarness {
+     rx_event: async_channel::Receiver<Event>,
+ }
+ 
+-async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
++#[derive(Debug)]
++struct ControlledSpawnLifecycle(ExecutionCompletion);
++
++impl SpawnLifecycle for ControlledSpawnLifecycle {
++    fn execution_completion(&self) -> Option<ExecutionCompletion> {
++        Some(self.0.clone())
++    }
++}
++
++impl Drop for ControlledSpawnLifecycle {
++    fn drop(&mut self) {
++        self.0.finish();
++    }
++}
++
++#[derive(Clone, Copy)]
++enum CancelOrdering {
++    BeforeExit,
++    DuringDrain,
++    AfterCompletion,
++}
++
++async fn assert_cancel_ordering(ordering: CancelOrdering) -> anyhow::Result<()> {
++    let completion = ExecutionCompletion::default();
++    let StreamingOutputHarness {
++        process,
++        stdout_tx,
++        exit_tx,
++        context,
++        rx_event,
++        ..
++    } = output_harness(Box::new(ControlledSpawnLifecycle(completion.clone()))).await?;
++    let late_output_tx = matches!(ordering, CancelOrdering::BeforeExit).then(|| stdout_tx.clone());
++    start_streaming_output(&process, &context);
++    stdout_tx
++        .send(b"captured output".to_vec())
++        .expect("produce output");
++    wait_for_captured_output(&process, b"captured output".len()).await;
++    let guard = process.interaction_lock().lock_owned().await;
++    #[allow(deprecated)]
++    let cwd = context.step_context.turn.cwd.clone().into();
++    spawn_exit_watcher(
++        Arc::clone(&process),
++        &context,
++        vec!["parent".to_string()],
++        cwd,
++        /*process_id*/ 123,
++        /*plugin_attribution*/ None,
++        Instant::now(),
++        /*network_denial_monitor*/ None,
++        /*plugin_metrics_sidecar*/ None,
++    );
++    match ordering {
++        CancelOrdering::BeforeExit => {
++            let transcript = process.output_transcript();
++            let producer_gate = transcript.lock().await;
++            stdout_tx
++                .send(b" queued output".to_vec())
++                .expect("enqueue uncaptured output");
++            completion.cancel();
++            let termination = process.cancellation_token();
++            tokio::time::timeout(Duration::from_secs(5), termination.cancelled()).await?;
++            drop(producer_gate);
++            wait_for_captured_output(&process, b"captured output queued output".len()).await;
++            exit_tx.send(1).expect("exit after draining queued output");
++            drop(stdout_tx);
++        }
++        CancelOrdering::DuringDrain => {
++            exit_tx.send(1).expect("exit while watcher is gated");
++            drop(stdout_tx);
++            wait_for_output_closed(&process).await;
++            completion.cancel();
++        }
++        CancelOrdering::AfterCompletion => {
++            exit_tx.send(1).expect("normal failure exit");
++            drop(stdout_tx);
++        }
++    }
++    drop(guard);
++    let modern = tokio::time::timeout(Duration::from_secs(5), async {
++        loop {
++            let event = rx_event.recv().await.expect("command completion event");
++            if matches!(&event.msg, EventMsg::ItemCompleted(_)) {
++                break event;
++            }
++        }
++    })
++    .await
++    .expect("command completed");
++    let mirrors = modern
++        .msg
++        .as_legacy_events(/*show_raw_agent_reasoning*/ false);
++    assert!(matches!(mirrors.as_slice(), [EventMsg::ExecCommandEnd(_)]));
++    let expected_mirror = serde_json::to_value(Event {
++        id: modern.id.clone(),
++        msg: mirrors[0].clone(),
++    })?;
++    assert_eq!(modern.id, context.step_context.turn.sub_id);
++    let EventMsg::ItemCompleted(completed) = modern.msg else {
++        unreachable!()
++    };
++    assert_eq!(completed.turn_id, context.step_context.turn.sub_id);
++    let TurnItem::CommandExecution(item) = completed.item else {
++        panic!("expected CommandExecution");
++    };
++    assert_eq!(item.id, context.call_id);
++    tokio::time::timeout(Duration::from_secs(5), completion.completed()).await?;
++    completion.cancel();
++    let (status, output) = match ordering {
++        CancelOrdering::BeforeExit => (
++            CommandExecutionStatus::Declined,
++            "captured output queued output\nexec command rejected by user",
++        ),
++        CancelOrdering::DuringDrain => (
++            CommandExecutionStatus::Declined,
++            "captured output\nexec command rejected by user",
++        ),
++        CancelOrdering::AfterCompletion => (CommandExecutionStatus::Failed, "captured output"),
++    };
++    assert_eq!(
++        (
++            item.status,
++            item.command,
++            item.process_id,
++            item.aggregated_output,
++            item.stdout
++        ),
++        (
++            status,
++            vec!["parent".to_string()],
++            Some("123".to_string()),
++            Some(output.to_string()),
++            Some(output.to_string())
++        ),
++    );
++    assert_eq!(item.exit_code, Some(1));
++    if let Some(late_output_tx) = late_output_tx {
++        assert!(
++            late_output_tx.send(b"stale output".to_vec()).is_err(),
++            "producer must close before finalization"
++        );
++    }
++    assert_eq!(completion.claim(), None);
++    let mirror = rx_event
++        .try_recv()
++        .expect("one legacy command completion mirror");
++    assert_eq!(serde_json::to_value(mirror)?, expected_mirror);
++    assert!(
++        rx_event.try_recv().is_err(),
++        "no duplicate or trailing event after completion"
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn exit_watcher_user_cancel_preserves_transcript_and_completes_once() -> anyhow::Result<()> {
++    assert_cancel_ordering(CancelOrdering::BeforeExit).await
++}
++
++#[tokio::test]
++async fn exit_watcher_user_cancel_during_drain_marks_parent_declined() -> anyhow::Result<()> {
++    assert_cancel_ordering(CancelOrdering::DuringDrain).await
++}
++
++#[tokio::test]
++async fn exit_watcher_uncancelled_exit_one_remains_failed() -> anyhow::Result<()> {
++    assert_cancel_ordering(CancelOrdering::AfterCompletion).await
++}
++
++async fn unstreamed_output_harness() -> anyhow::Result<StreamingOutputHarness> {
++    output_harness(Box::new(NoopSpawnLifecycle)).await
++}
++
++async fn output_harness(lifecycle: SpawnLifecycleHandle) -> anyhow::Result<StreamingOutputHarness> {
+     let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+     let (stdout_tx, stdout_rx) = tokio::sync::broadcast::channel::<Vec<u8>>(8);
+     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<i32>();
+@@ -47,10 +230,8 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
+         #[cfg(windows)]
+         tty: false,
+     });
+-    let process = Arc::new(
+-        UnifiedExecProcess::from_spawned(spawned, SandboxType::None, Box::new(NoopSpawnLifecycle))
+-            .await?,
+-    );
++    let process =
++        Arc::new(UnifiedExecProcess::from_spawned(spawned, SandboxType::None, lifecycle).await?);
+     let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+     let context = UnifiedExecContext::new(
+         session,
+@@ -58,8 +239,7 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
+         tokio_util::sync::CancellationToken::new(),
+         "streaming-output-test".to_string(),
+     );
+-    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+-    start_streaming_output(&process, &context, Arc::clone(&transcript));
++    let transcript = process.output_transcript();
+ 
+     Ok(StreamingOutputHarness {
+         process,
+@@ -71,6 +251,302 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
+     })
+ }
+ 
++async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
++    let harness = unstreamed_output_harness().await?;
++    start_streaming_output(&harness.process, &harness.context);
++    Ok(harness)
++}
++
++// Subscribe to the producer notification before checking the retained count.
++// This observes actual producer progress without sleeping or feeding the buffer.
++async fn wait_for_captured_output(process: &UnifiedExecProcess, expected_bytes: usize) {
++    tokio::time::timeout(Duration::from_secs(5), async {
++        let transcript = process.output_transcript();
++        loop {
++            let changed = process.output_handles().output_notify.notified();
++            tokio::pin!(changed);
++            changed.as_mut().enable();
++            let captured = transcript.lock().await.total_bytes() >= expected_bytes;
++            let published = process
++                .output_handles()
++                .output_buffer
++                .lock()
++                .await
++                .total_bytes()
++                > 0;
++            if captured && published {
++                return;
++            }
++            changed.await;
++        }
++    })
++    .await
++    .expect("producer captured output");
++}
++
++async fn wait_for_output_closed(process: &UnifiedExecProcess) {
++    tokio::time::timeout(Duration::from_secs(5), async {
++        let output = process.output_handles();
++        let closed = output.output_closed_notify.notified();
++        tokio::pin!(closed);
++        closed.as_mut().enable();
++        if !output.output_closed.load(Ordering::Acquire) {
++            closed.await;
++        }
++        assert!(output.output_closed.load(Ordering::Acquire));
++    })
++    .await
++    .expect("producer closed output");
++}
++
++async fn completed_command(rx_event: &async_channel::Receiver<Event>) -> CommandExecutionItem {
++    tokio::time::timeout(Duration::from_secs(5), async {
++        loop {
++            let event = rx_event.recv().await.expect("command completion event");
++            if let EventMsg::ItemCompleted(completed) = event.msg {
++                let TurnItem::CommandExecution(item) = completed.item else {
++                    panic!("expected CommandExecution");
++                };
++                return item;
++            }
++        }
++    })
++    .await
++    .expect("command completed")
++}
++
++#[tokio::test]
++async fn producer_transcript_survives_late_subscription_and_destructive_polls() -> anyhow::Result<()>
++{
++    let StreamingOutputHarness {
++        process,
++        stdout_tx,
++        exit_tx,
++        transcript,
++        context,
++        rx_event,
++    } = unstreamed_output_harness().await?;
++    assert!(!process.has_exited());
++    // The first chunk is produced before any UI subscriber exists.
++    stdout_tx.send(b"EARLY-".to_vec()).expect("early output");
++    wait_for_captured_output(&process, b"EARLY-".len()).await;
++    let first_poll = UnifiedExecProcessManager::collect_output_until_deadline(
++        process.output_handles(),
++        /*pause_state*/ None,
++        Instant::now(),
++    )
++    .await;
++    assert_eq!(first_poll.to_bytes(), b"EARLY-");
++    assert_eq!(
++        process
++            .output_handles()
++            .output_buffer
++            .lock()
++            .await
++            .total_bytes(),
++        0
++    );
++    assert_eq!(transcript.lock().await.to_bytes(), b"EARLY-");
++
++    start_streaming_output(&process, &context);
++    #[allow(deprecated)]
++    let cwd = context.step_context.turn.cwd.clone().into();
++    spawn_exit_watcher(
++        Arc::clone(&process),
++        &context,
++        vec!["proof".to_string()],
++        cwd,
++        /*process_id*/ 123,
++        /*plugin_attribution*/ None,
++        Instant::now(),
++        /*network_denial_monitor*/ None,
++        /*plugin_metrics_sidecar*/ None,
++    );
++    stdout_tx.send(b"LATE".to_vec()).expect("late output");
++    wait_for_captured_output(&process, b"EARLY-LATE".len()).await;
++    let second_poll = UnifiedExecProcessManager::collect_output_until_deadline(
++        process.output_handles(),
++        /*pause_state*/ None,
++        Instant::now(),
++    )
++    .await;
++    assert_eq!(second_poll.to_bytes(), b"LATE");
++    drop(stdout_tx);
++    exit_tx.send(0).expect("send exit");
++    let item = completed_command(&rx_event).await;
++    assert_eq!(
++        (
++            item.status,
++            item.exit_code,
++            item.aggregated_output.as_deref()
++        ),
++        (
++            CommandExecutionStatus::Completed,
++            Some(0),
++            Some("EARLY-LATE")
++        )
++    );
++    assert_eq!(transcript.lock().await.to_bytes(), b"EARLY-LATE");
++    assert_eq!(
++        process
++            .output_handles()
++            .output_buffer
++            .lock()
++            .await
++            .total_bytes(),
++        0
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn producer_transcript_completes_already_exited_process_after_poll_drain()
++-> anyhow::Result<()> {
++    let StreamingOutputHarness {
++        process,
++        stdout_tx,
++        exit_tx,
++        transcript,
++        context,
++        rx_event,
++    } = unstreamed_output_harness().await?;
++    stdout_tx
++        .send(b"FAST-OUTPUT".to_vec())
++        .expect("fast output");
++    drop(stdout_tx);
++    exit_tx.send(0).expect("send exit");
++    wait_for_output_closed(&process).await;
++    process.cancellation_token().cancelled().await;
++    assert!(process.has_exited());
++    let polled = UnifiedExecProcessManager::collect_output_until_deadline(
++        process.output_handles(),
++        /*pause_state*/ None,
++        Instant::now(),
++    )
++    .await;
++    assert_eq!(polled.to_bytes(), b"FAST-OUTPUT");
++    start_streaming_output(&process, &context);
++    process.output_drained_notify().notified().await;
++    // No delta can replay output published before subscription. The completed
++    // item must still get the exact canonical transcript used by the manager.
++    assert!(rx_event.try_recv().is_err());
++    #[allow(deprecated)]
++    let cwd = context.step_context.turn.cwd.clone().into();
++    emit_exec_end_for_unified_exec(
++        Arc::clone(&context.session),
++        Arc::clone(&context.step_context.turn),
++        Arc::clone(&context.step_context.settings.model_info),
++        context.call_id.clone(),
++        vec!["proof".to_string()],
++        cwd,
++        /*process_id*/ None,
++        /*plugin_attribution*/ None,
++        process.output_transcript(),
++        String::new(),
++        process.exit_code().expect("exit code"),
++        Duration::ZERO,
++        /*timed_out*/ false,
++        ExecutionOutcome::ProcessExit,
++    )
++    .await;
++    let item = completed_command(&rx_event).await;
++    assert_eq!(
++        (
++            item.status,
++            item.exit_code,
++            item.aggregated_output.as_deref()
++        ),
++        (
++            CommandExecutionStatus::Completed,
++            Some(0),
++            Some("FAST-OUTPUT")
++        )
++    );
++    assert_eq!(transcript.lock().await.to_bytes(), b"FAST-OUTPUT");
++    Ok(())
++}
++
++#[tokio::test]
++async fn producer_transcript_keeps_head_tail_when_broadcast_lags_and_poll_drains()
++-> anyhow::Result<()> {
++    let StreamingOutputHarness {
++        process,
++        stdout_tx,
++        exit_tx,
++        transcript,
++        context,
++        rx_event,
++    } = unstreamed_output_harness().await?;
++    // Hold a slow UI receiver while the real producer publishes >64 chunks.
++    let mut slow_receiver = process.output_receiver();
++    let mut expected = HeadTailBuffer::default();
++    for index in 0..96 {
++        let mut chunk = vec![b'a' + (index % 26) as u8; 16384];
++        // Retain invalid bytes and split UTF-8 exactly as the producer saw them;
++        // the completed item applies the established lossy UTF-8 conversion.
++        chunk[0] = 0xff;
++        chunk[1..5].copy_from_slice("😀".as_bytes());
++        chunk[16383] = 0xc3;
++        expected.push_chunk(&chunk);
++        stdout_tx.send(chunk).expect("producer chunk");
++        wait_for_captured_output(&process, expected.total_bytes()).await;
++        let polled = UnifiedExecProcessManager::collect_output_until_deadline(
++            process.output_handles(),
++            /*pause_state*/ None,
++            Instant::now(),
++        )
++        .await;
++        assert_eq!(polled.total_bytes(), 16384);
++    }
++    assert!(matches!(
++        slow_receiver.try_recv(),
++        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_))
++    ));
++    drop(slow_receiver);
++    drop(stdout_tx);
++    exit_tx.send(0).expect("send exit");
++    wait_for_output_closed(&process).await;
++    assert_eq!(
++        transcript.lock().await.retained_bytes(),
++        UNIFIED_EXEC_OUTPUT_MAX_BYTES
++    );
++    assert_eq!(
++        transcript.lock().await.omitted_bytes(),
++        96 * 16384 - UNIFIED_EXEC_OUTPUT_MAX_BYTES
++    );
++    assert_eq!(*transcript.lock().await, expected);
++    assert_eq!(
++        process
++            .output_handles()
++            .output_buffer
++            .lock()
++            .await
++            .total_bytes(),
++        0
++    );
++    start_streaming_output(&process, &context);
++    #[allow(deprecated)]
++    let cwd = context.step_context.turn.cwd.clone().into();
++    spawn_exit_watcher(
++        Arc::clone(&process),
++        &context,
++        vec!["proof".to_string()],
++        cwd,
++        /*process_id*/ 123,
++        /*plugin_attribution*/ None,
++        Instant::now(),
++        /*network_denial_monitor*/ None,
++        /*plugin_metrics_sidecar*/ None,
++    );
++    let item = completed_command(&rx_event).await;
++    assert_eq!(
++        item.aggregated_output,
++        Some(String::from_utf8_lossy(&expected.to_bytes_with_omission_marker()).into_owned())
++    );
++    assert_eq!(*transcript.lock().await, expected);
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn streaming_output_preserves_multibyte_characters_across_chunks() -> anyhow::Result<()> {
+     let StreamingOutputHarness {
+@@ -207,7 +683,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() ->
+         process,
+         stdout_tx,
+         exit_tx,
+-        transcript,
++        transcript: _,
+         mut context,
+         rx_event,
+     } = streaming_output_harness().await?;
+@@ -239,7 +715,6 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() ->
+         cwd,
+         /*process_id*/ 123,
+         /*plugin_attribution*/ None,
+-        transcript,
+         Instant::now(),
+         Some(network_denial_monitor),
+         /*plugin_metrics_sidecar*/ None,
+@@ -311,24 +786,46 @@ fn utf8_boundary_batches_malformed_output() {
+ }
+ 
+ #[tokio::test]
+-async fn streaming_output_bounds_invalid_bytes_and_keeps_the_full_transcript() {
+-    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+-    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
++async fn streaming_output_bounds_invalid_bytes_and_keeps_the_full_transcript() -> anyhow::Result<()>
++{
++    let StreamingOutputHarness {
++        process,
++        stdout_tx,
++        exit_tx,
++        transcript,
++        context,
++        rx_event,
++    } = unstreamed_output_harness().await?;
++    let mut receiver = process.output_receiver();
+     let mut output = Buffer::<8> {
+         pending: Vec::new(),
+-        transcript: Arc::clone(&transcript),
+         emitter: Emitter {
+             remaining_deltas: 2,
+-            session,
+-            turn,
++            session: Arc::clone(&context.session),
++            turn: Arc::clone(&context.step_context.turn),
+             call_id: "bounded-output-test".to_string(),
+         },
+     };
+ 
+     // The first frame splits 😀; the last allowed frame leaves é incomplete.
+     let bytes = b"\xff\xff\xff\xff\xff\xff\xf0\x9f\x98\x80\xff\xff\xff\xc3\xa9";
+-    output.push(bytes.to_vec()).await;
+-    output.push(vec![0xfe, 0xfe]).await;
++    stdout_tx
++        .send(bytes.to_vec())
++        .expect("send malformed output");
++    wait_for_captured_output(&process, bytes.len()).await;
++    output
++        .push(receiver.recv().await.expect("published first chunk"))
++        .await;
++    stdout_tx
++        .send(vec![0xfe, 0xfe])
++        .expect("send output beyond delta budget");
++    wait_for_captured_output(&process, bytes.len() + 2).await;
++    output
++        .push(receiver.recv().await.expect("published second chunk"))
++        .await;
++    drop(stdout_tx);
++    exit_tx.send(0).expect("send exit");
++    wait_for_output_closed(&process).await;
+     output.finish().await;
+ 
+     let mut chunks = Vec::new();
+@@ -346,10 +843,12 @@ async fn streaming_output_bounds_invalid_bytes_and_keeps_the_full_transcript() {
+         ]
+     );
+ 
++    // Capture belongs to the producer and must survive the UI delta budget.
+     let mut expected_transcript = bytes.to_vec();
+     expected_transcript.extend([0xfe, 0xfe]);
+     assert_eq!(
+         transcript.lock().await.to_bytes_with_omission_marker(),
+         expected_transcript
+     );
++    Ok(())
+ }
+diff --git a/codex-rs/core/src/unified_exec/execution_completion.rs b/codex-rs/core/src/unified_exec/execution_completion.rs
+new file mode 100644
+index 0000000..99cf802
+--- /dev/null
++++ b/codex-rs/core/src/unified_exec/execution_completion.rs
+@@ -0,0 +1,109 @@
++use std::sync::Arc;
++use std::sync::Mutex;
++use tokio_util::sync::CancellationToken;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum ExecutionOutcome {
++    ProcessExit,
++    UserCancelled,
++}
++
++#[derive(Debug)]
++enum CompletionState {
++    Pending,
++    UserCancelled,
++    Completing,
++    Completed,
++}
++
++#[derive(Debug)]
++struct SharedCompletion {
++    state: Mutex<CompletionState>,
++    cancellation: CancellationToken,
++    completed: CancellationToken,
++    owner_ready: CancellationToken,
++}
++
++/// Coordinates an intercepted approval with its owning command's sole completion.
++/// Cancellation wakes the emitter independently of process exit or turn cleanup.
++#[derive(Clone, Debug)]
++pub(crate) struct ExecutionCompletion(Arc<SharedCompletion>);
++
++pub(crate) struct CompletionGuard(ExecutionCompletion);
++
++impl Drop for CompletionGuard {
++    fn drop(&mut self) {
++        self.0.finish();
++    }
++}
++
++impl PartialEq for ExecutionCompletion {
++    fn eq(&self, other: &Self) -> bool {
++        Arc::ptr_eq(&self.0, &other.0)
++    }
++}
++
++impl Default for ExecutionCompletion {
++    fn default() -> Self {
++        Self(Arc::new(SharedCompletion {
++            state: Mutex::new(CompletionState::Pending),
++            cancellation: CancellationToken::new(),
++            completed: CancellationToken::new(),
++            owner_ready: CancellationToken::new(),
++        }))
++    }
++}
++
++impl ExecutionCompletion {
++    pub(crate) fn owner_ready(&self) {
++        self.0.owner_ready.cancel();
++    }
++
++    pub(crate) async fn wait_for_owner(&self) -> bool {
++        tokio::select! {
++            biased;
++            _ = self.0.completed.cancelled() => false,
++            _ = self.0.owner_ready.cancelled() => true,
++        }
++    }
++
++    pub(crate) fn cancel(&self) {
++        let mut state = self.0.state.lock().expect("execution completion state");
++        if matches!(*state, CompletionState::Pending) {
++            *state = CompletionState::UserCancelled;
++            self.0.cancellation.cancel();
++        }
++    }
++
++    pub(crate) async fn cancelled(&self) {
++        self.0.cancellation.cancelled().await;
++    }
++
++    pub(crate) async fn completed(&self) {
++        self.0.completed.cancelled().await;
++    }
++
++    pub(crate) fn finish_on_drop(&self) -> CompletionGuard {
++        CompletionGuard(self.clone())
++    }
++
++    pub(crate) fn claim(&self) -> Option<ExecutionOutcome> {
++        let mut state = self.0.state.lock().expect("execution completion state");
++        let outcome = match *state {
++            CompletionState::Pending => ExecutionOutcome::ProcessExit,
++            CompletionState::UserCancelled => ExecutionOutcome::UserCancelled,
++            CompletionState::Completing | CompletionState::Completed => return None,
++        };
++        *state = CompletionState::Completing;
++        Some(outcome)
++    }
++
++    pub(crate) fn finish(&self) {
++        *self.0.state.lock().expect("execution completion state") = CompletionState::Completed;
++        self.0.completed.cancel();
++    }
++}
++
++#[cfg(test)]
++#[path = "execution_completion_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/unified_exec/execution_completion_tests.rs b/codex-rs/core/src/unified_exec/execution_completion_tests.rs
+new file mode 100644
+index 0000000..ea3e3a5
+--- /dev/null
++++ b/codex-rs/core/src/unified_exec/execution_completion_tests.rs
+@@ -0,0 +1,80 @@
++use super::ExecutionCompletion;
++use super::ExecutionOutcome;
++use pretty_assertions::assert_eq;
++use std::task::Poll;
++use tokio::time::Duration;
++use tokio::time::timeout;
++
++#[tokio::test]
++async fn approval_waits_before_watcher_owner() {
++    let completion = ExecutionCompletion::default();
++    let wait = completion.wait_for_owner();
++    tokio::pin!(wait);
++    assert_eq!(futures::poll!(&mut wait), Poll::Pending);
++    completion.owner_ready();
++    assert!(
++        timeout(Duration::from_secs(1), wait)
++            .await
++            .expect("ready owner")
++    );
++}
++
++#[tokio::test]
++async fn approval_releases_after_watcher_owner() {
++    let completion = ExecutionCompletion::default();
++    completion.owner_ready();
++    assert!(
++        timeout(Duration::from_secs(1), completion.wait_for_owner())
++            .await
++            .expect("ready owner")
++    );
++}
++
++#[tokio::test]
++async fn closed_startup_does_not_dispatch_approval() {
++    let completion = ExecutionCompletion::default();
++    let wait = completion.wait_for_owner();
++    tokio::pin!(wait);
++    assert_eq!(futures::poll!(&mut wait), Poll::Pending);
++    drop(completion.finish_on_drop());
++    completion.owner_ready();
++    assert!(
++        !timeout(Duration::from_secs(1), wait)
++            .await
++            .expect("closed owner")
++    );
++}
++
++#[tokio::test]
++async fn user_cancel_before_completion_wins_once() {
++    let completion = ExecutionCompletion::default();
++    completion.cancel();
++    completion.cancelled().await;
++    assert_eq!(completion.claim(), Some(ExecutionOutcome::UserCancelled));
++    assert_eq!(completion.claim(), None);
++    completion.finish();
++    completion.completed().await;
++    assert_eq!(completion.claim(), None);
++}
++
++#[tokio::test]
++async fn process_completion_before_user_cancel_retains_process_exit() {
++    let completion = ExecutionCompletion::default();
++    assert_eq!(completion.claim(), Some(ExecutionOutcome::ProcessExit));
++    completion.cancel();
++    assert_eq!(completion.claim(), None);
++    completion.finish();
++    completion.completed().await;
++    completion.cancel();
++    assert_eq!(completion.claim(), None);
++}
++
++#[tokio::test]
++async fn owner_finish_unblocks_cancel_without_watcher() {
++    let completion = ExecutionCompletion::default();
++    completion.cancel();
++    let guard = completion.finish_on_drop();
++    drop(guard);
++    completion.completed().await;
++    assert_eq!(completion.claim(), None);
++}
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 8f6c61f..4b183e4 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -49,6 +49,7 @@ use codex_core_plugins::PluginMetricsSidecar;
+ 
+ mod async_watcher;
+ mod errors;
++pub(crate) mod execution_completion;
+ mod head_tail_buffer;
+ mod oneshot;
+ mod process;
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index 27e21f7..647eaab 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -32,6 +32,7 @@ use codex_utils_pty::SpawnedPty;
+ use super::UNIFIED_EXEC_OUTPUT_MAX_BYTES;
+ use super::UNIFIED_EXEC_OUTPUT_MAX_TOKENS;
+ use super::UnifiedExecError;
++use super::execution_completion::ExecutionCompletion;
+ use super::head_tail_buffer::HeadTailBuffer;
+ use super::process_state::ProcessState;
+ use crate::shell_snapshot::ShellSnapshotFile;
+@@ -48,6 +49,10 @@ pub(crate) trait SpawnLifecycle: std::fmt::Debug + Send + Sync {
+     }
+ 
+     fn after_spawn(&mut self) {}
++
++    fn execution_completion(&self) -> Option<ExecutionCompletion> {
++        None
++    }
+ }
+ 
+ pub(crate) type SpawnLifecycleHandle = Box<dyn SpawnLifecycle>;
+@@ -92,6 +97,8 @@ pub(crate) struct UnifiedExecProcess {
+     process_handle: ProcessHandle,
+     output_tx: broadcast::Sender<Vec<u8>>,
+     output: OutputHandles,
++    // Captured by the producer before publication; polling never drains this.
++    output_transcript: Arc<Mutex<HeadTailBuffer>>,
+     output_drained: Arc<Notify>,
+     interaction_lock: Arc<Mutex<()>>,
+     state_tx: watch::Sender<ProcessState>,
+@@ -135,6 +142,7 @@ impl UnifiedExecProcess {
+             process_handle,
+             output_tx,
+             output,
++            output_transcript: Arc::new(Mutex::new(HeadTailBuffer::default())),
+             output_drained,
+             interaction_lock: Arc::new(Mutex::new(())),
+             state_tx,
+@@ -176,6 +184,10 @@ impl UnifiedExecProcess {
+         &self.output
+     }
+ 
++    pub(super) fn output_transcript(&self) -> Arc<Mutex<HeadTailBuffer>> {
++        Arc::clone(&self.output_transcript)
++    }
++
+     pub(super) fn output_receiver(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
+         self.output_tx.subscribe()
+     }
+@@ -192,6 +204,12 @@ impl UnifiedExecProcess {
+         Arc::clone(&self.interaction_lock)
+     }
+ 
++    pub(super) fn execution_completion(&self) -> Option<ExecutionCompletion> {
++        self._spawn_lifecycle
++            .as_ref()
++            .and_then(|lifecycle| lifecycle.execution_completion())
++    }
++
+     pub(super) fn has_exited(&self) -> bool {
+         let state = self.state_rx.borrow().clone();
+         match &self.process_handle {
+@@ -241,6 +259,30 @@ impl UnifiedExecProcess {
+         self.finish_termination();
+     }
+ 
++    /// Stop an approval's owner while retaining queued output for the existing grace.
++    pub(super) fn request_termination(&self) {
++        match &self.process_handle {
++            ProcessHandle::Local(process_handle) => process_handle.request_terminate(),
++            ProcessHandle::ExecServer(process_handle) => {
++                let process_handle = Arc::clone(process_handle);
++                tokio::spawn(async move {
++                    let _ = process_handle.terminate().await;
++                });
++            }
++        }
++        self.output.cancellation_token.cancel();
++    }
++
++    pub(super) async fn finish_termination_with_output_drain(&self) {
++        self.terminate();
++        let closed = self.output.output_closed_notify.notified();
++        tokio::pin!(closed);
++        closed.as_mut().enable();
++        if !self.output.output_closed.load(Ordering::Acquire) {
++            closed.await;
++        }
++    }
++
+     pub(super) async fn terminate_confirmed(&self) -> Result<(), UnifiedExecError> {
+         match &self.process_handle {
+             ProcessHandle::Local(process_handle) => process_handle.terminate(),
+@@ -360,6 +402,7 @@ impl UnifiedExecProcess {
+         managed.output_task = Some(Self::spawn_local_output_task(
+             output_rx,
+             managed.output_handles().clone(),
++            managed.output_transcript(),
+             managed.output_tx.clone(),
+         ));
+ 
+@@ -409,6 +452,7 @@ impl UnifiedExecProcess {
+         managed.output_task = Some(Self::spawn_exec_server_output_task(
+             started,
+             output_handles,
++            managed.output_transcript(),
+             managed.output_tx.clone(),
+             managed.state_tx.clone(),
+         ));
+@@ -437,6 +481,7 @@ impl UnifiedExecProcess {
+     fn spawn_exec_server_output_task(
+         started: StartedExecProcess,
+         output_handles: OutputHandles,
++        output_transcript: Arc<Mutex<HeadTailBuffer>>,
+         output_tx: broadcast::Sender<Vec<u8>>,
+         state_tx: watch::Sender<ProcessState>,
+     ) -> JoinHandle<()> {
+@@ -449,11 +494,12 @@ impl UnifiedExecProcess {
+         } = output_handles;
+         let process = started.process;
+         let mut events = process.subscribe_events();
++        let output_task_guard = OutputTaskGuard {
++            output_closed: Arc::clone(&output_closed),
++            output_closed_notify: Arc::clone(&output_closed_notify),
++        };
+         tokio::spawn(async move {
+-            let _output_task_guard = OutputTaskGuard {
+-                output_closed: Arc::clone(&output_closed),
+-                output_closed_notify: Arc::clone(&output_closed_notify),
+-            };
++            let _output_task_guard = output_task_guard;
+             let mut last_seq: u64 = 0;
+             loop {
+                 let event = match events.recv().await {
+@@ -517,11 +563,14 @@ impl UnifiedExecProcess {
+                     } = response;
+                     for chunk in chunks.into_iter().filter(|chunk| chunk.seq > last_seq) {
+                         let bytes = chunk.chunk.into_inner();
+-                        let mut guard = output_buffer.lock().await;
+-                        guard.push_chunk(&bytes);
+-                        drop(guard);
+-                        let _ = output_tx.send(bytes);
+-                        output_notify.notify_waiters();
++                        Self::publish_output(
++                            bytes,
++                            &output_transcript,
++                            &output_buffer,
++                            &output_tx,
++                            &output_notify,
++                        )
++                        .await;
+                     }
+                     last_seq = last_seq.max(next_seq.saturating_sub(1));
+                     if let Some(message) = failure {
+@@ -560,11 +609,14 @@ impl UnifiedExecProcess {
+                         }
+                         last_seq = chunk.seq;
+                         let bytes = chunk.chunk.into_inner();
+-                        let mut guard = output_buffer.lock().await;
+-                        guard.push_chunk(&bytes);
+-                        drop(guard);
+-                        let _ = output_tx.send(bytes);
+-                        output_notify.notify_waiters();
++                        Self::publish_output(
++                            bytes,
++                            &output_transcript,
++                            &output_buffer,
++                            &output_tx,
++                            &output_notify,
++                        )
++                        .await;
+                     }
+                     ExecProcessEvent::Exited {
+                         seq,
+@@ -604,6 +656,7 @@ impl UnifiedExecProcess {
+     fn spawn_local_output_task(
+         mut receiver: tokio::sync::broadcast::Receiver<Vec<u8>>,
+         output_handles: OutputHandles,
++        output_transcript: Arc<Mutex<HeadTailBuffer>>,
+         output_tx: broadcast::Sender<Vec<u8>>,
+     ) -> JoinHandle<()> {
+         let OutputHandles {
+@@ -613,19 +666,23 @@ impl UnifiedExecProcess {
+             output_closed_notify,
+             ..
+         } = output_handles;
++        let output_task_guard = OutputTaskGuard {
++            output_closed: Arc::clone(&output_closed),
++            output_closed_notify: Arc::clone(&output_closed_notify),
++        };
+         tokio::spawn(async move {
+-            let _output_task_guard = OutputTaskGuard {
+-                output_closed: Arc::clone(&output_closed),
+-                output_closed_notify: Arc::clone(&output_closed_notify),
+-            };
++            let _output_task_guard = output_task_guard;
+             loop {
+                 match receiver.recv().await {
+                     Ok(chunk) => {
+-                        let mut guard = output_buffer.lock().await;
+-                        guard.push_chunk(&chunk);
+-                        drop(guard);
+-                        let _ = output_tx.send(chunk);
+-                        output_notify.notify_waiters();
++                        Self::publish_output(
++                            chunk,
++                            &output_transcript,
++                            &output_buffer,
++                            &output_tx,
++                            &output_notify,
++                        )
++                        .await;
+                     }
+                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+@@ -638,6 +695,21 @@ impl UnifiedExecProcess {
+         })
+     }
+ 
++    /// Retain every producer chunk once before either consumer can observe it.
++    /// Streaming is lossy and may subscribe late; the poll buffer is destructive.
++    async fn publish_output(
++        bytes: Vec<u8>,
++        transcript: &Mutex<HeadTailBuffer>,
++        output_buffer: &Mutex<HeadTailBuffer>,
++        output_tx: &broadcast::Sender<Vec<u8>>,
++        output_notify: &Notify,
++    ) {
++        transcript.lock().await.push_chunk(&bytes);
++        output_buffer.lock().await.push_chunk(&bytes);
++        let _ = output_tx.send(bytes);
++        output_notify.notify_waiters();
++    }
++
+     fn signal_exit(&self, exit_code: Option<i32>) {
+         let state = self.state_rx.borrow().clone();
+         let _ = self.state_tx.send_replace(state.exited(exit_code));
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index e3be5f3..5dfc380 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -60,6 +60,7 @@ use crate::unified_exec::async_watcher::emit_failed_exec_end_for_unified_exec;
+ use crate::unified_exec::async_watcher::spawn_exit_watcher;
+ use crate::unified_exec::async_watcher::start_streaming_output;
+ use crate::unified_exec::clamp_yield_time;
++use crate::unified_exec::execution_completion::ExecutionOutcome;
+ use crate::unified_exec::generate_chunk_id;
+ use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
+ use crate::unified_exec::process::OutputHandles;
+@@ -392,7 +393,7 @@ fn fail_process_with_message(process: &UnifiedExecProcess, message: String) -> U
+ 
+ #[allow(clippy::too_many_arguments)]
+ async fn emit_failed_initial_exec_end_if_unstored(
+-    process_started_alive: bool,
++    process_has_watcher: bool,
+     context: &UnifiedExecContext,
+     request: &ExecCommandRequest,
+     cwd: PathUri,
+@@ -402,7 +403,7 @@ async fn emit_failed_initial_exec_end_if_unstored(
+     message: String,
+     wall_time: Duration,
+ ) {
+-    if process_started_alive {
++    if process_has_watcher {
+         return;
+     }
+ 
+@@ -554,7 +555,7 @@ impl UnifiedExecProcessManager {
+             )
+         });
+ 
+-        let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
++        let transcript = process.output_transcript();
+         let model_context = context.step_context.model_context();
+         let mut event_ctx = ToolEventCtx::new(
+             context.session.as_ref(),
+@@ -592,12 +593,16 @@ impl UnifiedExecProcessManager {
+         );
+         emitter.emit(event_ctx, ToolEventStage::Begin).await;
+ 
+-        start_streaming_output(&process, context, Arc::clone(&transcript));
++        start_streaming_output(&process, context);
+         let start = Instant::now();
+         // Persist live sessions before the initial yield wait so interrupting the
+         // turn cannot drop the last Arc and terminate the background process.
+-        let process_started_alive = !process.has_exited() && process.exit_code().is_none();
+-        let mut initial_exec_command_guard = if process_started_alive {
++        // Intercepted approvals need an independent canonical emitter even if
++        // startup already observed exit: aborting the initial tool future must
++        // not discard its parent's terminal status or completion acknowledgement.
++        let process_has_watcher = (!process.has_exited() && process.exit_code().is_none())
++            || process.execution_completion().is_some();
++        let mut initial_exec_command_guard = if process_has_watcher {
+             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
+             self.store_process(
+                 Arc::clone(&process),
+@@ -614,7 +619,6 @@ impl UnifiedExecProcessManager {
+                 deferred_network_approval.clone(),
+                 network_denial_monitor,
+                 metrics_sidecar,
+-                Arc::clone(&transcript),
+                 Arc::clone(&initial_exec_command_active),
+             )
+             .await;
+@@ -675,13 +679,13 @@ impl UnifiedExecProcessManager {
+             )
+             .await;
+             emit_failed_initial_exec_end_if_unstored(
+-                process_started_alive,
++                process_has_watcher,
+                 context,
+                 &request,
+                 cwd.clone(),
+                 plugin_attribution.clone(),
+                 Arc::clone(&transcript),
+-                text.clone(),
++                String::new(),
+                 message.clone(),
+                 wall_time,
+             )
+@@ -696,13 +700,13 @@ impl UnifiedExecProcessManager {
+             )
+             .await;
+             emit_failed_initial_exec_end_if_unstored(
+-                process_started_alive,
++                process_has_watcher,
+                 context,
+                 &request,
+                 cwd.clone(),
+                 plugin_attribution.clone(),
+                 Arc::clone(&transcript),
+-                text.clone(),
++                String::new(),
+                 message.clone(),
+                 wall_time,
+             )
+@@ -714,7 +718,7 @@ impl UnifiedExecProcessManager {
+             return Err(UnifiedExecError::process_failed(message));
+         }
+         let process_id = request.process_id;
+-        let (response_process_id, exit_code) = if process_started_alive {
++        let (response_process_id, exit_code) = if process_has_watcher {
+             match self.refresh_process_state(process_id).await {
+                 ProcessStatus::Alive {
+                     exit_code,
+@@ -774,13 +778,13 @@ impl UnifiedExecProcessManager {
+             .await;
+             if let Err(message) = finish_result {
+                 emit_failed_initial_exec_end_if_unstored(
+-                    process_started_alive,
++                    process_has_watcher,
+                     context,
+                     &request,
+                     cwd.clone(),
+                     plugin_attribution.clone(),
+                     Arc::clone(&transcript),
+-                    text.clone(),
++                    String::new(),
+                     message.clone(),
+                     wall_time,
+                 )
+@@ -803,10 +807,11 @@ impl UnifiedExecProcessManager {
+                 Some(process_id.to_string()),
+                 plugin_attribution.clone(),
+                 Arc::clone(&transcript),
+-                text.clone(),
++                String::new(),
+                 exit,
+                 wall_time,
+                 process.timed_out(),
++                ExecutionOutcome::ProcessExit,
+             )
+             .await;
+ 
+@@ -1203,7 +1208,6 @@ impl UnifiedExecProcessManager {
+         network_approval: Option<DeferredNetworkApproval>,
+         network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
+         metrics_sidecar: Option<PluginMetricsSidecar>,
+-        transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
+         initial_exec_command_active: Arc<AtomicBool>,
+     ) {
+         let plugin_metrics_sidecar =
+@@ -1223,6 +1227,19 @@ impl UnifiedExecProcessManager {
+             session: Arc::downgrade(&context.session),
+             last_used: started_at,
+         };
++        // Install before the first await after item/start and output streaming.
++        // Cancellation may abort the initial tool future during store insertion.
++        spawn_exit_watcher(
++            Arc::clone(&process),
++            context,
++            command.to_vec(),
++            cwd,
++            process_id,
++            plugin_attribution,
++            started_at,
++            network_denial_monitor,
++            plugin_metrics_sidecar,
++        );
+         let pruned_entry = {
+             let mut store = self.process_store.lock().await;
+             let pruned_entry = Self::prune_processes_if_needed(&mut store);
+@@ -1235,19 +1252,6 @@ impl UnifiedExecProcessManager {
+             unregister_network_approval_for_entry(&pruned_entry).await;
+             pruned_entry.process.terminate();
+         }
+-
+-        spawn_exit_watcher(
+-            Arc::clone(&process),
+-            context,
+-            command.to_vec(),
+-            cwd,
+-            process_id,
+-            plugin_attribution,
+-            transcript,
+-            started_at,
+-            network_denial_monitor,
+-            plugin_metrics_sidecar,
+-        );
+     }
+ 
+     #[allow(clippy::too_many_arguments)]
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
 index d8f6bab..1b62325 100644
 --- a/codex-rs/core/tests/suite/compact.rs
@@ -3505,15 +6158,16 @@ index d8f6bab..1b62325 100644
      let test = builder.build(&server).await?;
 diff --git a/codex-rs/core/tests/suite/compact_tool_receipts.rs b/codex-rs/core/tests/suite/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..432d6d0
+index 0000000..545e55a
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/compact_tool_receipts.rs
-@@ -0,0 +1,1326 @@
+@@ -0,0 +1,1539 @@
 +use anyhow::Result;
 +use base64::Engine;
 +use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 +use codex_core::StartThreadOptions;
 +use codex_core::TurnInputRequest;
++use codex_features::Feature;
 +use codex_model_provider_info::built_in_model_providers;
 +use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 +use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
@@ -3523,17 +6177,24 @@ index 0000000..432d6d0
 +use codex_protocol::models::FunctionCallOutputContentItem;
 +use codex_protocol::models::FunctionCallOutputPayload;
 +use codex_protocol::models::ImageReference;
++use codex_protocol::models::PermissionProfile;
 +use codex_protocol::models::ResponseItem;
 +use codex_protocol::openai_models::InputModality;
 +use codex_protocol::openai_models::TruncationPolicyConfig;
++use codex_protocol::protocol::AskForApproval;
 +use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::ExecCommandStatus;
 +use codex_protocol::protocol::Op;
++use codex_protocol::protocol::ThreadSettingsOverrides;
 +use codex_protocol::user_input::UserInput;
 +use codex_utils_output_truncation::TruncationPolicy;
 +use codex_utils_output_truncation::truncate_function_output_payload;
 +use core_test_support::responses::*;
 +use core_test_support::skip_if_no_network;
++use core_test_support::skip_if_sandbox;
++use core_test_support::skip_if_target_windows;
 +use core_test_support::test_codex::test_codex;
++use core_test_support::test_codex::turn_permission_fields;
 +use core_test_support::wait_for_event;
 +use pretty_assertions::assert_eq;
 +use serde_json::Value;
@@ -4093,6 +6754,211 @@ index 0000000..432d6d0
 +            )
 +        })
 +        .collect()
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn local_mid_turn_compaction_preserves_large_native_code_write_without_replay() -> Result<()>
++{
++    skip_if_target_windows!(Ok(()), "uses a POSIX-only native write fixture");
++    skip_if_no_network!(Ok(()));
++    skip_if_sandbox!(Ok(()));
++    let server = start_mock_server().await;
++    let mut provider = built_in_model_providers(None)["openai"].clone();
++    provider.name = "Local native code-write receipt test".to_string();
++    provider.base_url = Some(format!("{}/v1", server.uri()));
++    provider.supports_websockets = false;
++    let mut builder = test_codex()
++        .with_config(move |config| {
++            config.model_provider = provider;
++            config
++                .features
++                .enable(Feature::UnifiedExec)
++                .expect("test config should enable unified exec");
++            config.model_context_window = Some(32_768);
++            config.model_auto_compact_token_limit = Some(6144);
++        })
++        .with_model_info_override("gpt-5.5", |info| {
++            info.truncation_policy = TruncationPolicyConfig::tokens(10_000);
++        });
++    let test = builder.build_with_auto_env(&server).await?;
++    let original_version = test
++        .codex
++        .conversation_history_snapshot()
++        .await
++        .history_version();
++    let call_id = "native-large-code-write";
++    let expected_source = format!(
++        "# Native large-call compaction fixture\nVALUE = \"{}\"\n",
++        "x".repeat(8 * 1024)
++    );
++    // The actual built-in executor writes the code. An append-only side effect
++    // also exposes replay even if repeating the write would leave identical bytes.
++    let command = format!(
++        "printf '%s' '{expected_source}' > ledger.py && printf '%s\\n' 'native-large-code-write' >> ledger.executions && printf '%s\\n' 'NATIVE_WRITE_COMPLETE'"
++    );
++    let arguments = json!({
++        "cmd": command,
++        "login": false,
++        "tty": false,
++        "yield_time_ms": 10_000,
++        "max_output_tokens": 1024,
++    })
++    .to_string();
++    assert!((8 * 1024..9 * 1024).contains(&arguments.len()));
++    let write = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_function_call(call_id, "exec_command", &arguments),
++            // Force same-turn compaction after the real native command completes.
++            ev_completed_with_tokens("write-response", 7000),
++        ]),
++    )
++    .await;
++    let summary = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message(
++                "msg_write_summary",
++                "The code write completed. Use its receipt without repeating it.",
++            ),
++            ev_completed_with_tokens("summary-response", 10),
++        ]),
++    )
++    .await;
++    let continuation = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("msg_write_done", "DONE"),
++            ev_completed_with_tokens("done-response", 10),
++        ]),
++    )
++    .await;
++    let (sandbox_policy, permission_profile) =
++        turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
++    test.codex
++        .start_or_steer_turn(
++            TurnInputRequest::user_input(vec![UserInput::Text {
++                text: "Write ledger.py once, then report the result without repeating the write."
++                    .to_string(),
++                text_elements: vec![],
++            }])
++            .with_thread_settings(ThreadSettingsOverrides {
++                approval_policy: Some(AskForApproval::Never),
++                sandbox_policy: Some(sandbox_policy),
++                permission_profile,
++                ..Default::default()
++            }),
++        )
++        .await?;
++    let mut lifecycle = Vec::new();
++    let mut turn_id = None;
++    loop {
++        match wait_for_event(&test.codex, |event| {
++            matches!(
++                event,
++                EventMsg::ExecCommandBegin(_)
++                    | EventMsg::ExecCommandEnd(_)
++                    | EventMsg::ItemCompleted(_)
++                    | EventMsg::Error(_)
++                    | EventMsg::TurnComplete(_)
++            )
++        })
++        .await
++        {
++            EventMsg::ExecCommandBegin(event) => {
++                assert_eq!(event.call_id, call_id);
++                assert!(
++                    turn_id.is_none(),
++                    "the native write must execute exactly once"
++                );
++                turn_id = Some(event.turn_id);
++                lifecycle.push("begin");
++            }
++            EventMsg::ExecCommandEnd(event) => {
++                assert_eq!(event.call_id, call_id);
++                assert_eq!(Some(&event.turn_id), turn_id.as_ref());
++                assert_eq!(event.exit_code, 0);
++                assert_eq!(event.status, ExecCommandStatus::Completed);
++                assert_eq!(event.stdout, "NATIVE_WRITE_COMPLETE\n");
++                assert!(event.stderr.is_empty());
++                lifecycle.push("end");
++            }
++            EventMsg::ItemCompleted(event)
++                if matches!(event.item, TurnItem::ContextCompaction(_)) =>
++            {
++                assert_eq!(Some(&event.turn_id), turn_id.as_ref());
++                lifecycle.push("compaction");
++            }
++            EventMsg::Error(error) => {
++                panic!("unexpected native write or compaction failure: {error:?}")
++            }
++            EventMsg::TurnComplete(event) => {
++                assert_eq!(Some(&event.turn_id), turn_id.as_ref());
++                assert!(event.error.is_none());
++                lifecycle.push("complete");
++                break;
++            }
++            _ => {}
++        }
++    }
++    assert_eq!(lifecycle, ["begin", "end", "compaction", "complete"]);
++    // Independently read durable executor files; neither the mock answer nor a
++    // successful tool receipt is sufficient evidence that the write happened once.
++    let source_path = test.workspace_path_uri("ledger.py")?;
++    let execution_path = test.workspace_path_uri("ledger.executions")?;
++    assert_eq!(
++        test.fs()
++            .read_file_text(&source_path, Default::default(), None)
++            .await?,
++        expected_source
++    );
++    assert_eq!(
++        test.fs()
++            .read_file_text(&execution_path, Default::default(), None)
++            .await?,
++        "native-large-code-write\n"
++    );
++    for mock in [&write, &summary, &continuation] {
++        assert_eq!(
++            mock.requests().len(),
++            1,
++            "no extra sampling or compaction retries"
++        );
++    }
++    let original = tool_items(summary.single_request().input());
++    let retained = tool_items(continuation.single_request().input());
++    assert_eq!(original.len(), 2);
++    assert_eq!(original[0]["type"], "function_call");
++    assert_eq!(original[0]["call_id"], call_id);
++    assert_eq!(original[0]["name"], "exec_command");
++    assert_eq!(original[0]["arguments"], arguments);
++    assert_eq!(original[1]["type"], "function_call_output");
++    assert_eq!(original[1]["call_id"], call_id);
++    assert_eq!(
++        retained, original,
++        "retain the exact large call and genuine native result"
++    );
++    let history = test.codex.conversation_history_snapshot().await;
++    assert_eq!(history.history_version(), original_version + 1);
++    let native_receipts: Vec<_> = history
++        .items()
++        .filter_map(|item| match item {
++            ResponseItem::FunctionCall { call_id: id, .. }
++            | ResponseItem::FunctionCallOutput {
++                call_id: Some(id), ..
++            } if id == call_id => Some(item),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(native_receipts.len(), 2);
++    assert!(
++        matches!(native_receipts[0], ResponseItem::FunctionCall { arguments: retained_arguments, .. } if retained_arguments == &arguments)
++    );
++    assert!(matches!(
++        native_receipts[1],
++        ResponseItem::FunctionCallOutput { .. }
++    ));
++    Ok(())
 +}
 +
 +#[test_case::test_case(20; "twenty_mixed_receipts")]
@@ -4847,6 +7713,41 @@ index 59e4019..4df91c2 100644
  mod context_annotations;
  mod current_time_reminder;
  mod cyber_access_program;
+diff --git a/codex-rs/core/tests/suite/openai_file_mcp.rs b/codex-rs/core/tests/suite/openai_file_mcp.rs
+index 9ae4b31..c568919 100644
+--- a/codex-rs/core/tests/suite/openai_file_mcp.rs
++++ b/codex-rs/core/tests/suite/openai_file_mcp.rs
+@@ -44,7 +44,6 @@ use serde_json::json;
+ use wiremock::Mock;
+ use wiremock::MockServer;
+ use wiremock::ResponseTemplate;
+-use wiremock::matchers::body_json;
+ use wiremock::matchers::body_partial_json;
+ use wiremock::matchers::header;
+ use wiremock::matchers::method;
+diff --git a/codex-rs/core/tests/suite/remote_env.rs b/codex-rs/core/tests/suite/remote_env.rs
+index eada6c3..509f490 100644
+--- a/codex-rs/core/tests/suite/remote_env.rs
++++ b/codex-rs/core/tests/suite/remote_env.rs
+@@ -2718,7 +2718,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once()
+             );
+             config.model_provider.name = "OpenAI (test)".to_string();
+             config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
+-            config.model_context_window = Some(100);
++            config.model_context_window = Some(32_768);
+             config.model_auto_compact_token_limit = Some(90);
+         });
+     let test = expect_startup(builder.build(&server)).await;
+@@ -2750,6 +2750,9 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once()
+         })
+         .await?;
+     wait_for_event(&test.codex, |event| {
++        if let EventMsg::Error(error) = event {
++            panic!("unexpected error before compaction continuation: {error:?}");
++        }
+         matches!(event, EventMsg::TurnComplete(_))
+     })
+     .await;
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
 index 1fbf7df..bfe7562 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
@@ -4857,3 +7758,776 @@ index 1fbf7df..bfe7562 100644
      AUTO_SUMMARY
 +04:function_call/test_tool:{}
 +05:function_call_output:unsupported call: test_tool
+diff --git a/codex-rs/exec-server/tests/exec_process.rs b/codex-rs/exec-server/tests/exec_process.rs
+index b4e861d..7bfaa37 100644
+--- a/codex-rs/exec-server/tests/exec_process.rs
++++ b/codex-rs/exec-server/tests/exec_process.rs
+@@ -583,7 +583,20 @@ async fn remote_sandboxed_process_preserves_custom_arg0() -> Result<()> {
+ 
+     let context = create_process_context(/*use_remote*/ true).await?;
+     let workspace = TempDir::new()?;
+-    let outside_workspace = TempDir::new()?;
++    // macOS process sandboxes deliberately allow reads beneath scratch directories.
++    let outside_workspace = TempDir::new_in(std::env::current_dir()?)?;
++    let outside_workspace_path = outside_workspace.path().canonicalize()?;
++    assert!(
++        !outside_workspace_path.starts_with(workspace.path().canonicalize()?),
++        "denied fixture must be outside the allowed workspace"
++    );
++    #[cfg(target_os = "macos")]
++    assert!(
++        ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"]
++            .into_iter()
++            .all(|scratch_root| !outside_workspace_path.starts_with(scratch_root)),
++        "denied fixture must be outside macOS process scratch roots"
++    );
+     let denied_file = outside_workspace.path().join("denied.txt");
+     std::fs::write(&denied_file, b"denied")?;
+     let cwd = PathUri::from_host_native_path(workspace.path())?;
+diff --git a/codex-rs/login/src/auth/default_client_tests.rs b/codex-rs/login/src/auth/default_client_tests.rs
+index 4565f79..7d74443 100644
+--- a/codex-rs/login/src/auth/default_client_tests.rs
++++ b/codex-rs/login/src/auth/default_client_tests.rs
+@@ -288,8 +288,9 @@ fn test_macos() {
+     use regex_lite::Regex;
+     let user_agent = get_codex_user_agent();
+     let originator = regex_lite::escape(originator().value.as_str());
++    let build_version = regex_lite::escape(env!("CARGO_PKG_VERSION"));
+     let re = Regex::new(&format!(
+-        r"^{originator}/\d+\.\d+\.\d+ \(Mac OS \d+\.\d+\.\d+; (x86_64|arm64)\) (\S+)$"
++        r"^{originator}/{build_version} \(Mac OS \d+\.\d+\.\d+; (x86_64|arm64)\) (\S+)$"
+     ))
+     .unwrap();
+     assert!(re.is_match(&user_agent));
+diff --git a/codex-rs/network-proxy/src/credential_broker/registry.rs b/codex-rs/network-proxy/src/credential_broker/registry.rs
+index d9e1555..be4fe7e 100644
+--- a/codex-rs/network-proxy/src/credential_broker/registry.rs
++++ b/codex-rs/network-proxy/src/credential_broker/registry.rs
+@@ -410,33 +410,39 @@ pub(super) fn prioritized_credentials<'a>(
+ ) -> Vec<&'a CredentialRecord> {
+     let binding_env = state.context.with_fallbacks(env);
+     let mut credentials = state.credentials.iter().collect::<Vec<_>>();
+-    credentials.sort_unstable_by_key(|credential| {
+-        let active = env_entry(env, &credential.env_var)
+-            .is_some_and(|(_, value)| value == credential.dummy_value);
+-        let has_matching_host_binding = match &credential.provider {
+-            BrokeredCredentialProvider::Builtin(provider) => {
+-                provider.sources().iter().any(|source| {
+-                    !source.binding_env_vars.is_empty()
+-                        && (source.host_binding)(&binding_env, state.openai_api_host.as_deref())
+-                            .is_some_and(|binding| binding == credential.host_binding)
+-                })
+-            }
+-            BrokeredCredentialProvider::Configured(provider) => provider
+-                .config
+-                .url_prefix_from_env
+-                .as_deref()
+-                .is_some_and(|key| {
+-                    env_value(&binding_env, key).is_some()
+-                        && provider
+-                            .host_binding(&binding_env)
+-                            .is_some_and(|binding| binding == credential.host_binding)
+-                }),
+-        };
+-        (
+-            std::cmp::Reverse(credential.real_value.len()),
+-            std::cmp::Reverse(active),
+-            std::cmp::Reverse(has_matching_host_binding),
+-        )
+-    });
++    // Keep the sortable references and unstable sort unchanged while evaluating each key once.
++    let sort_keys = credentials
++        .iter()
++        .map(|credential| {
++            let active = env_entry(env, &credential.env_var)
++                .is_some_and(|(_, value)| value == credential.dummy_value);
++            let has_matching_host_binding = match &credential.provider {
++                BrokeredCredentialProvider::Builtin(provider) => {
++                    provider.sources().iter().any(|source| {
++                        !source.binding_env_vars.is_empty()
++                            && (source.host_binding)(&binding_env, state.openai_api_host.as_deref())
++                                .is_some_and(|binding| binding == credential.host_binding)
++                    })
++                }
++                BrokeredCredentialProvider::Configured(provider) => provider
++                    .config
++                    .url_prefix_from_env
++                    .as_deref()
++                    .is_some_and(|key| {
++                        env_value(&binding_env, key).is_some()
++                            && provider
++                                .host_binding(&binding_env)
++                                .is_some_and(|binding| binding == credential.host_binding)
++                    }),
++            };
++            let key = (
++                std::cmp::Reverse(credential.real_value.len()),
++                std::cmp::Reverse(active),
++                std::cmp::Reverse(has_matching_host_binding),
++            );
++            (std::ptr::from_ref(*credential), key)
++        })
++        .collect::<HashMap<_, _>>();
++    credentials.sort_unstable_by_key(|credential| sort_keys[&std::ptr::from_ref(*credential)]);
+     credentials
+ }
+diff --git a/codex-rs/protocol/src/permission_profile_intersection_tests.rs b/codex-rs/protocol/src/permission_profile_intersection_tests.rs
+index 0b14f14..bee352a 100644
+--- a/codex-rs/protocol/src/permission_profile_intersection_tests.rs
++++ b/codex-rs/protocol/src/permission_profile_intersection_tests.rs
+@@ -95,7 +95,8 @@ fn intersection(
+ 
+ #[test]
+ fn effective_workspace_intersection_preserves_network_metadata_and_temp() {
+-    let temp = TempDir::new().expect("workspace");
++    // Keep workspace authority separate from the inherited TMPDIR write grant.
++    let temp = TempDir::new_in(std::env::current_dir().expect("test cwd")).expect("workspace");
+     let root = canonical(&temp);
+     let project = root.join("project");
+     std::fs::create_dir(project.as_path()).expect("project directory");
+@@ -111,6 +112,12 @@ fn effective_workspace_intersection_preserves_network_metadata_and_temp() {
+     requested_policy
+         .entries
+         .push(skipped(gitdir.clone().into(), Read));
++    assert_eq!(
++        [&root, &project].map(|path| requested_policy
++            .resolve_access_for_local_path_with_cwd(path.as_path(), root.as_path())),
++        [Read, Write],
++        "workspace fixture must be outside the TMPDIR write grant"
++    );
+     let requested = PermissionProfile::from_runtime_permissions(&requested_policy, Restricted);
+     let result = intersection(&authority, &requested, &project);
+     let policy = result.file_system_sandbox_policy();
+diff --git a/codex-rs/sandboxing/src/seatbelt_tests.rs b/codex-rs/sandboxing/src/seatbelt_tests.rs
+index 4b2a36f..b8c2de6 100644
+--- a/codex-rs/sandboxing/src/seatbelt_tests.rs
++++ b/codex-rs/sandboxing/src/seatbelt_tests.rs
+@@ -1830,21 +1830,21 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
+             "-DWRITABLE_ROOT_0_EXCLUDED_0={}",
+             cwd.canonicalize()
+                 .expect("canonicalize cwd")
+-                .join(".codex")
++                .join(".git")
+                 .display()
+         ),
+         format!(
+             "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
+             cwd.canonicalize()
+                 .expect("canonicalize cwd")
+-                .join(".git")
++                .join(".agents")
+                 .display()
+         ),
+         format!(
+             "-DWRITABLE_ROOT_0_EXCLUDED_2={}",
+             cwd.canonicalize()
+                 .expect("canonicalize cwd")
+-                .join(".agents")
++                .join(".codex")
+                 .display()
+         ),
+         format!(
+@@ -2698,7 +2698,7 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
+         "missing {expected_dot_git}: {args:#?}"
+     );
+     let expected_dot_codex = format!(
+-        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
++        "-DWRITABLE_ROOT_0_EXCLUDED_2={}",
+         dot_codex_canonical.to_string_lossy()
+     );
+     assert!(
+@@ -2706,7 +2706,7 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
+         "missing {expected_dot_codex}: {args:#?}"
+     );
+     let expected_dot_agents = format!(
+-        "-DWRITABLE_ROOT_0_EXCLUDED_2={}",
++        "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
+         dot_agents_canonical.to_string_lossy()
+     );
+     assert!(
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index 2d0548d..fb738ad 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -6383,6 +6383,8 @@ async fn app_server_thread_replacement_clears_previous_transcript_before_replay(
+         !lines_to_single_string(&cell.display_lines(/*width*/ 80))
+             .contains("Previous queued history")
+     }));
++    let version_banner = format!("│ >_ OpenAI Codex (v{})", crate::version::CODEX_CLI_VERSION);
++    let mut compiled_version_banners = 0;
+     let rendered = app
+         .render_transcript_lines_for_reflow(/*width*/ 80)
+         .lines
+@@ -6391,12 +6393,27 @@ async fn app_server_thread_replacement_clears_previous_transcript_before_replay(
+             let text = rendered_line_text(line);
+             if text.contains("│ directory: ") {
+                 "│ directory: <thread cwd>                │".to_string()
++            } else if text
++                .strip_prefix(version_banner.as_str())
++                .and_then(|suffix| suffix.strip_suffix('│'))
++                .is_some_and(|padding| padding.chars().all(|ch| ch == ' '))
++            {
++                compiled_version_banners += 1;
++                format!(
++                    "{:<width$}│",
++                    "│ >_ OpenAI Codex (v0.0.0)",
++                    width = text.chars().count() - 1
++                )
+             } else {
+                 text
+             }
+         })
+         .collect::<Vec<_>>()
+         .join("\n");
++    assert_eq!(
++        compiled_version_banners, 1,
++        "expected exactly one banner with the compiled CLI version"
++    );
+     assert!(!rendered.contains("Previous thread transcript"));
+     assert!(!rendered.contains("Previous queued history"));
+     assert_snapshot!(rendered);
+diff --git a/codex-rs/tui/src/app/tests/realtime_requests.rs b/codex-rs/tui/src/app/tests/realtime_requests.rs
+index 79e257e..3e3f8df 100644
+--- a/codex-rs/tui/src/app/tests/realtime_requests.rs
++++ b/codex-rs/tui/src/app/tests/realtime_requests.rs
+@@ -30,6 +30,37 @@ fn normalize_voice_snapshot_directory(rendered: &str, cwd: &Path) -> String {
+     rendered.replace(&cwd, &padded_placeholder)
+ }
+ 
++fn normalize_voice_snapshot(rendered: &str, cwd: &Path) -> String {
++    let rendered = normalize_voice_snapshot_directory(rendered, cwd);
++    let version_banner = format!("│ >_ OpenAI Codex (v{})", crate::version::CODEX_CLI_VERSION);
++    let mut compiled_version_banners = 0;
++    let normalized = rendered
++        .lines()
++        .map(|text| {
++            if text
++                .strip_prefix(version_banner.as_str())
++                .and_then(|suffix| suffix.strip_suffix('│'))
++                .is_some_and(|padding| padding.chars().all(|ch| ch == ' '))
++            {
++                compiled_version_banners += 1;
++                format!(
++                    "{:<width$}│",
++                    "│ >_ OpenAI Codex (v0.0.0)",
++                    width = text.chars().count() - 1
++                )
++            } else {
++                text.to_string()
++            }
++        })
++        .collect::<Vec<_>>()
++        .join("\n");
++    assert_eq!(
++        compiled_version_banners, 1,
++        "expected exactly one banner with the compiled CLI version"
++    );
++    normalized
++}
++
+ #[test]
+ fn voice_snapshot_directory_keeps_header_width_for_windows_paths() {
+     let rendered = "│ directory: C:\\tmp\\project              │";
+@@ -428,7 +459,7 @@ async fn switching_threads_keeps_the_source_voice_partial_only_on_reattach() {
+     assert_eq!(rendered.matches("spoken partial completed").count(), 1);
+     insta::assert_snapshot!(
+         "voice_partial_completed_after_thread_switch",
+-        normalize_voice_snapshot_directory(&rendered, &app.config.cwd)
++        normalize_voice_snapshot(&rendered, &app.config.cwd)
+     );
+     while let Ok(event) = side_events.try_recv() {
+         if let AppEvent::InsertHistoryCell(cell) = event {
+@@ -648,7 +679,7 @@ async fn replay_reconciles_only_matching_voice_captions_one_for_one() {
+     assert_eq!(rendered.matches("different caption").count(), 1);
+     insta::assert_snapshot!(
+         "voice_replay_reconciles_matching_captions",
+-        normalize_voice_snapshot_directory(&rendered, &app.config.cwd)
++        normalize_voice_snapshot(&rendered, &app.config.cwd)
+     );
+ }
+ 
+@@ -821,7 +852,7 @@ async fn buffered_voice_items_reconcile_captions_after_thread_switch() {
+     assert_eq!(rendered.matches("buffered answer").count(), 1);
+     insta::assert_snapshot!(
+         "voice_buffered_replay_reconciles_captions",
+-        normalize_voice_snapshot_directory(&rendered, &app.config.cwd)
++        normalize_voice_snapshot(&rendered, &app.config.cwd)
+     );
+ }
+ 
+@@ -1026,7 +1057,7 @@ async fn completed_voice_caption_survives_repeated_thread_replacement() {
+         if cycle == 0 {
+             insta::assert_snapshot!(
+                 "voice_completed_after_thread_switch",
+-                normalize_voice_snapshot_directory(&rendered, &app.config.cwd)
++                normalize_voice_snapshot(&rendered, &app.config.cwd)
+             );
+         }
+     }
+diff --git a/codex-rs/tui/src/chatwidget/rendering_tests.rs b/codex-rs/tui/src/chatwidget/rendering_tests.rs
+index 902bc0e..7d242ef 100644
+--- a/codex-rs/tui/src/chatwidget/rendering_tests.rs
++++ b/codex-rs/tui/src/chatwidget/rendering_tests.rs
+@@ -1,5 +1,6 @@
+ use super::*;
+ use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
++use crate::test_support::normalize_session_header_version;
+ use pretty_assertions::assert_eq;
+ use std::sync::Arc;
+ use std::sync::atomic::AtomicUsize;
+@@ -215,8 +216,8 @@ async fn initial_session_header_starts_at_the_top_of_the_viewport() {
+                 .to_string()
+         })
+         .collect::<Vec<_>>()
+-        .join("\n")
+-        .replace(crate::version::CODEX_CLI_VERSION, "<VERSION>");
++        .join("\n");
++    let header = normalize_session_header_version(&header);
+ 
+     let cwd = widget.config.cwd.as_path().display().to_string();
+     let normalized_cwd = format!("{:<width$}", "/tmp/project", width = cwd.len());
+diff --git a/codex-rs/tui/src/custom_terminal.rs b/codex-rs/tui/src/custom_terminal.rs
+index 0023bd8..9040457 100644
+--- a/codex-rs/tui/src/custom_terminal.rs
++++ b/codex-rs/tui/src/custom_terminal.rs
+@@ -890,6 +890,7 @@ mod tests {
+ 
+     impl CaptureBackend {
+         fn new(width: u16, height: u16) -> Self {
++            crossterm::style::force_color_output(true);
+             Self {
+                 output: Vec::new(),
+                 size: Size { width, height },
+diff --git a/codex-rs/tui/src/history_cell/tests.rs b/codex-rs/tui/src/history_cell/tests.rs
+index 8385516..e55850f 100644
+--- a/codex-rs/tui/src/history_cell/tests.rs
++++ b/codex-rs/tui/src/history_cell/tests.rs
+@@ -755,18 +755,42 @@ async fn session_info_uses_availability_nux_tooltip_override() {
+ async fn session_info_availability_nux_tooltip_snapshot() {
+     let mut config = test_config().await;
+     config.cwd = test_path_buf("/tmp/project").abs();
++    let session = session_configured_event("gpt-5");
+     let cell = new_session_info(
+         &config,
+         &crate::local_settings::LocalSettings::from(&config),
+         "gpt-5",
+-        &session_configured_event("gpt-5"),
++        &session,
+         /*is_first_event*/ false,
+         Some("Model just became available".to_string()),
+         Some(PlanType::Free),
+         /*show_fast_status*/ false,
+     );
+ 
+-    let rendered = render_transcript(&cell).join("\n");
++    let header_lines = |version| {
++        render_transcript(
++            &SessionHeaderHistoryCell::new(
++                session.model.clone(),
++                session.reasoning_effort.clone(),
++                /*show_fast_status*/ false,
++                config.cwd.to_path_buf(),
++                version,
++            )
++            .with_yolo_mode(has_yolo_permissions(
++                session.approval_policy,
++                &session.permission_profile,
++            )),
++        )
++    };
++    let rendered = render_transcript(&cell);
++    let compiled_header = header_lines(crate::version::CODEX_CLI_VERSION);
++    assert!(
++        rendered.starts_with(&compiled_header),
++        "session info must begin with the exact compiled-version header"
++    );
++    let mut stable_fixture = header_lines("0.0.0");
++    stable_fixture.extend_from_slice(&rendered[compiled_header.len()..]);
++    let rendered = stable_fixture.join("\n");
+     insta::assert_snapshot!(rendered);
+ }
+ 
+@@ -1283,40 +1307,133 @@ fn web_search_history_cell_snapshot() {
+     insta::assert_snapshot!(rendered);
+ }
+ 
++fn normalize_update_available_snapshot(
++    cell: &UpdateAvailableHistoryCell,
++    action: UpdateAction,
++) -> String {
++    let width: u16 = 110;
++    let lines = render_lines(&cell.display_lines(width));
++    assert!(
++        lines.len() >= 7,
++        "update card must retain all five logical content rows"
++    );
++    let inner_width = lines[0]
++        .chars()
++        .count()
++        .checked_sub(4)
++        .expect("update card includes borders and padding");
++    assert_eq!(lines[0], format!("╭{}╮", "─".repeat(inner_width + 2)));
++    let last = lines.len() - 1;
++    assert_eq!(lines[last], format!("╰{}╯", "─".repeat(inner_width + 2)));
++    let mut content = lines[1..last]
++        .iter()
++        .map(|line| {
++            line.strip_prefix("│ ")
++                .and_then(|line| line.strip_suffix(" │"))
++                .expect("update card row must retain its border and padding")
++                .trim_end_matches(' ')
++                .to_string()
++        })
++        .collect::<Vec<_>>();
++    let instruction = format!("Run {} to update.", action.command_str());
++    let mut unwrapped_content = [
++        format!(
++            "✨\u{200A}Update available! {} -> 9.9.9",
++            crate::version::CODEX_CLI_VERSION
++        ),
++        instruction,
++        String::new(),
++        "See full release notes:".to_string(),
++        "https://github.com/openai/codex/releases/latest".to_string(),
++    ];
++    assert_eq!(
++        content[0], unwrapped_content[0],
++        "update notice must contain the exact compiled version and expected latest version"
++    );
++    assert_eq!(
++        content[1..content.len() - 3].join(" "),
++        unwrapped_content[1],
++        "wrapped update instruction must retain the entire exact command"
++    );
++    assert_eq!(
++        content[content.len() - 3..],
++        unwrapped_content[2..],
++        "update card must retain its blank row and release notes"
++    );
++    let content_width = |line: &str| line_width(&Line::from(line.to_string()));
++    assert_eq!(
++        inner_width,
++        unwrapped_content
++            .iter()
++            .map(|line| content_width(line))
++            .max()
++            .unwrap()
++            .min(usize::from(width.saturating_sub(4)))
++            .max(1),
++        "update card border must match the clamped unwrapped content width"
++    );
++    for (line, body) in lines[1..last].iter().zip(&content) {
++        assert_eq!(
++            line,
++            &format!(
++                "│ {body}{} │",
++                " ".repeat(inner_width - content_width(body))
++            ),
++            "update card must retain exact compiled-version padding"
++        );
++    }
++    unwrapped_content[0] = "✨\u{200A}Update available! 0.0.0 -> 9.9.9".to_string();
++    content[0] = unwrapped_content[0].clone();
++    let stable_inner_width = unwrapped_content
++        .iter()
++        .map(|line| content_width(line))
++        .max()
++        .unwrap()
++        .min(usize::from(width.saturating_sub(4)))
++        .max(1);
++    let mut stable_fixture = vec![format!("╭{}╮", "─".repeat(stable_inner_width + 2))];
++    stable_fixture.extend(content.iter().map(|body| {
++        format!(
++            "│ {body}{} │",
++            " ".repeat(stable_inner_width - content_width(body))
++        )
++    }));
++    stable_fixture.push(format!("╰{}╯", "─".repeat(stable_inner_width + 2)));
++    stable_fixture.join("\n")
++}
++
+ #[test]
+ fn standalone_unix_update_available_history_cell_snapshot() {
+-    let cell =
+-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneUnix));
+-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
++    let action = UpdateAction::StandaloneUnix;
++    let cell = UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(action));
++    let rendered = normalize_update_available_snapshot(&cell, action);
+ 
+     insta::assert_snapshot!(rendered);
+ }
+ 
+ #[test]
+ fn standalone_windows_update_available_history_cell_snapshot() {
+-    let cell =
+-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneWindows));
+-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
++    let action = UpdateAction::StandaloneWindows;
++    let cell = UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(action));
++    let rendered = normalize_update_available_snapshot(&cell, action);
+ 
+     insta::assert_snapshot!(rendered);
+ }
+ 
+ #[test]
+ fn pnpm_update_available_history_cell_snapshot() {
+-    let cell =
+-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::PnpmGlobalLatest));
+-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
++    let action = UpdateAction::PnpmGlobalLatest;
++    let cell = UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(action));
++    let rendered = normalize_update_available_snapshot(&cell, action);
+ 
+     insta::assert_snapshot!(rendered);
+ }
+ 
+ #[test]
+ fn vite_plus_update_available_history_cell_snapshot() {
+-    let cell = UpdateAvailableHistoryCell::new(
+-        "9.9.9".to_string(),
+-        Some(UpdateAction::VitePlusGlobalLatest),
+-    );
+-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
++    let action = UpdateAction::VitePlusGlobalLatest;
++    let cell = UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(action));
++    let rendered = normalize_update_available_snapshot(&cell, action);
+ 
+     insta::assert_snapshot!(rendered);
+ }
+diff --git a/codex-rs/tui/src/startup_draft_tests.rs b/codex-rs/tui/src/startup_draft_tests.rs
+index 39d38c8..d97216f 100644
+--- a/codex-rs/tui/src/startup_draft_tests.rs
++++ b/codex-rs/tui/src/startup_draft_tests.rs
+@@ -19,6 +19,7 @@ use crate::app_event_sender::AppEventSender;
+ use crate::legacy_core::config::ConfigBuilder;
+ use crate::render::renderable::Renderable;
+ use crate::resume_picker::SessionSelection;
++use crate::test_support::normalize_session_header_version;
+ use crate::tui::FrameRequester;
+ use crate::tui::TuiEvent;
+ 
+@@ -110,8 +111,8 @@ fn startup_draft_renders_full_empty_and_multiline_composer_frames() {
+                     .to_string()
+             })
+             .collect::<Vec<_>>()
+-            .join("\n")
+-            .replace(crate::version::CODEX_CLI_VERSION, "<VERSION>");
++            .join("\n");
++        let frame = normalize_session_header_version(&frame);
+ 
+         assert!(
+             cursor.1 >= pump.header.desired_height(width),
+@@ -138,7 +139,7 @@ async fn startup_draft_clears_loading_status_when_starting_fresh() {
+         );
+         let mut buffer = Buffer::empty(area);
+         renderable.render(area, &mut buffer);
+-        (0..area.height)
++        let frame = (0..area.height)
+             .map(|row| {
+                 (0..area.width)
+                     .map(|column| buffer[(column, row)].symbol())
+@@ -147,8 +148,8 @@ async fn startup_draft_clears_loading_status_when_starting_fresh() {
+                     .to_string()
+             })
+             .collect::<Vec<_>>()
+-            .join("\n")
+-            .replace(crate::version::CODEX_CLI_VERSION, "<VERSION>")
++            .join("\n");
++        normalize_session_header_version(&frame)
+     };
+ 
+     for (label, initial_screen, session_action) in [
+@@ -699,8 +700,8 @@ async fn startup_draft_waits_for_onboarding_before_accepting_input() {
+                 .to_string()
+         })
+         .collect::<Vec<_>>()
+-        .join("\n")
+-        .replace(crate::version::CODEX_CLI_VERSION, "<VERSION>");
++        .join("\n");
++    let visible_frame = normalize_session_header_version(&visible_frame);
+     drop(renderable);
+     frames.push_str(&format!("\n---\nafter onboarding:\n{visible_frame}"));
+     insta::assert_snapshot!("startup_draft_onboarding_transition", frames);
+diff --git a/codex-rs/tui/src/status/tests.rs b/codex-rs/tui/src/status/tests.rs
+index 41069d7..9975698 100644
+--- a/codex-rs/tui/src/status/tests.rs
++++ b/codex-rs/tui/src/status/tests.rs
+@@ -188,10 +188,29 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
+         .iter()
+         .find(|line| line.starts_with('╭'))
+         .map(|line| UnicodeWidthStr::width(line.as_str()));
+-    lines
++    let compiled_banner = format!(" >_ OpenAI Codex (v{})", crate::version::CODEX_CLI_VERSION);
++    let mut compiled_version_banners = 0;
++    let sanitized = lines
+         .into_iter()
+         .map(|line| {
+-            if let (Some(frame_width), Some(dir_pos), Some(pipe_idx)) =
++            if line.starts_with("│  >_ OpenAI Codex") {
++                let inner_width = frame_width
++                    .expect("status banner requires a frame")
++                    .checked_sub(4)
++                    .expect("status frame includes borders and padding");
++                let visible_banner = compiled_banner.chars().take(inner_width).collect::<String>();
++                assert_eq!(
++                    line,
++                    format!("│ {visible_banner:<inner_width$} │"),
++                    "status banner must contain the exact compiled version or its width-clipped prefix"
++                );
++                compiled_version_banners += 1;
++                let stable_banner = " >_ OpenAI Codex (v0.0.0)"
++                    .chars()
++                    .take(inner_width)
++                    .collect::<String>();
++                format!("│ {stable_banner:<inner_width$} │")
++            } else if let (Some(frame_width), Some(dir_pos), Some(pipe_idx)) =
+                 (frame_width, line.find("Directory: "), line.rfind('│'))
+             {
+                 let prefix = &line[..dir_pos + "Directory: ".len()];
+@@ -212,7 +231,12 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
+                 line
+             }
+         })
+-        .collect()
++        .collect();
++    assert_eq!(
++        compiled_version_banners, 1,
++        "expected exactly one status banner with the compiled CLI version"
++    );
++    sanitized
+ }
+ 
+ fn buffer_to_text(buffer: &Buffer, width: u16) -> String {
+diff --git a/codex-rs/tui/src/test_support.rs b/codex-rs/tui/src/test_support.rs
+index 44e9899..c6d0643 100644
+--- a/codex-rs/tui/src/test_support.rs
++++ b/codex-rs/tui/src/test_support.rs
+@@ -22,6 +22,48 @@ pub(crate) fn test_path_display(path: &str) -> String {
+     test_path_buf(path).display().to_string()
+ }
+ 
++/// Keep the historical snapshot placeholder without making padding depend on the build version.
++/// Validate the real header before normalizing it; the placeholder is wider than 0.0.0.
++pub(crate) fn normalize_session_header_version(frame: &str) -> String {
++    let version = crate::version::CODEX_CLI_VERSION;
++    let tag = format!("(v{version})");
++    let prefix = format!("│ >_ OpenAI Codex {tag}");
++    let rows = frame.split('\n').collect::<Vec<_>>();
++    rows.iter()
++        .enumerate()
++        .map(|(index, line)| {
++            if !line.contains(&tag) {
++                return (*line).to_string();
++            }
++            let padding = line
++                .strip_prefix(&prefix)
++                .and_then(|suffix| suffix.strip_suffix('│'))
++                .expect("compiled-version header must retain its title and right border");
++            assert!(
++                padding.chars().all(|character| character == ' '),
++                "header must contain only padding after the compiled version"
++            );
++            let border = rows[index.checked_sub(1).expect("header follows its top border")];
++            assert!(border.starts_with('╭') && border.ends_with('╮'));
++            assert_eq!(
++                line.chars().count(),
++                border.chars().count(),
++                "compiled-version header must align with the real border"
++            );
++            let stable_padding = padding.len()
++                + version
++                    .len()
++                    .checked_sub("0.0.0".len())
++                    .expect("compiled semantic version is at least as long as 0.0.0");
++            format!(
++                "│ >_ OpenAI Codex (v<VERSION>){}│",
++                " ".repeat(stable_padding)
++            )
++        })
++        .collect::<Vec<_>>()
++        .join("\n")
++}
++
+ pub(crate) fn session_source_cli<T>() -> T
+ where
+     T: DeserializeOwned,
+diff --git a/codex-rs/tui/src/update_prompt.rs b/codex-rs/tui/src/update_prompt.rs
+index 688d113..bdfcc50 100644
+--- a/codex-rs/tui/src/update_prompt.rs
++++ b/codex-rs/tui/src/update_prompt.rs
+@@ -262,7 +262,9 @@ mod tests {
+ 
+     #[test]
+     fn update_prompt_snapshot() {
+-        let screen = new_prompt();
++        let mut screen = new_prompt();
++        assert_eq!(screen.current_version, env!("CARGO_PKG_VERSION"));
++        screen.current_version = "0.0.0".to_string();
+         let mut terminal = Terminal::new(VT100Backend::new(80, 12)).expect("terminal");
+         terminal
+             .draw(|frame| frame.render_widget_ref(&screen, frame.area()))
+diff --git a/codex-rs/voice-host/src/transport.rs b/codex-rs/voice-host/src/transport.rs
+index e376909..940db34 100644
+--- a/codex-rs/voice-host/src/transport.rs
++++ b/codex-rs/voice-host/src/transport.rs
+@@ -80,6 +80,13 @@ impl Transport {
+     }
+ 
+     async fn with_runtime(runtime: Arc<dyn webrtc::runtime::Runtime>) -> Result<Self> {
++        Self::with_runtime_and_bind_addrs(runtime, &["0.0.0.0:0", "[::]:0"]).await
++    }
++
++    async fn with_runtime_and_bind_addrs(
++        runtime: Arc<dyn webrtc::runtime::Runtime>,
++        bind_addrs: &'static [&'static str],
++    ) -> Result<Self> {
+         let (media, audio) = crate::audio_track::AudioTrack::new()?;
+         let (incoming, ingress) = crate::incoming::Incoming::new();
+         let gathered = Arc::new(Notify::new());
+@@ -97,8 +104,8 @@ impl Transport {
+                 .with_runtime(runtime)
+                 .with_setting_engine(settings)
+                 .with_handler(Arc::new(Events(gathered.clone())))
+-                .with_udp_addrs(vec!["0.0.0.0:0", "[::]:0"])
+-                .with_tcp_addrs(vec!["0.0.0.0:0", "[::]:0"])
++                .with_udp_addrs(bind_addrs.to_vec())
++                .with_tcp_addrs(bind_addrs.to_vec())
+                 .with_data_channel_send_buffer_limit(/*bytes*/ 64 * 1024)
+                 .with_sctp_receive_buffer_size(/*size*/ 64 * 1024)
+                 .build()
+diff --git a/codex-rs/voice-host/src/transport_tests.rs b/codex-rs/voice-host/src/transport_tests.rs
+index 3646959..89be3d2 100644
+--- a/codex-rs/voice-host/src/transport_tests.rs
++++ b/codex-rs/voice-host/src/transport_tests.rs
+@@ -61,15 +61,18 @@ async fn check_negotiation(runtime: Arc<dyn webrtc::runtime::Runtime>) {
+                 .with_setting_engine(settings)
+                 .with_handler(Arc::new(RemoteEvents(sender, gathered.clone())));
+             let remote = if tcp {
+-                builder.with_tcp_addrs(vec!["0.0.0.0:0"])
++                builder.with_tcp_addrs(vec!["127.0.0.1:0"])
+             } else {
+-                builder.with_udp_addrs(vec!["0.0.0.0:0"])
++                builder.with_udp_addrs(vec!["127.0.0.1:0"])
+             }
+             .build()
+             .await
+             .unwrap();
+             remote.add_track(remote_audio.track.clone()).await.unwrap();
+-            let mut local = Transport::with_runtime(runtime.clone()).await.unwrap();
++            let mut local =
++                Transport::with_runtime_and_bind_addrs(runtime.clone(), &["127.0.0.1:0"])
++                    .await
++                    .unwrap();
+             let offer = RTCSessionDescription::offer(local.offer().await.unwrap()).unwrap();
+             remote.set_remote_description(offer).await.unwrap();
+             let answer = remote.create_answer(/*options*/ None).await.unwrap();
+@@ -90,7 +93,7 @@ async fn check_negotiation(runtime: Arc<dyn webrtc::runtime::Runtime>) {
+                 .apply_answer(answer)
+                 .await
+                 .unwrap_or_else(|error| panic!("tcp={tcp}: {error}"));
+-            assert_eq!(outcome, super::AnswerOutcome::Ready);
++            assert_eq!(outcome, super::AnswerOutcome::Ready, "tcp={tcp}");
+             let channel = channels.recv().await.unwrap();
+             assert_eq!(
+                 (

@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 const root = process.env.CODEX_HOME!;
 const mode = readFileSync(join(root, "scenario"), "utf8");
 const threadId = "isolation-existing-thread";
+let turnCount = 0;
 const model = "lmstudio-community/Qwen3.5-4B-MLX-4bit";
 const emit = (value: unknown) => process.stdout.write(JSON.stringify(value) + "\n");
 const result = (id: unknown, value: unknown = {}) => emit({ id, result: value });
@@ -48,7 +49,7 @@ lines.on("line", line => {
     }
     case "thread/name/set": result(request.id); break;
     case "turn/start": {
-      const turnId = "isolation-turn";
+      const turnId = `isolation-turn-${++turnCount}`;
       result(request.id, { turn: { id: turnId, status: "inProgress" } });
       setTimeout(() => {
         notify("turn/started", { turn: { id: turnId, status: "inProgress" } });

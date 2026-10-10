@@ -9,6 +9,7 @@ protocol AgentRuntimeClient: Sendable {
     func loadTasks() async throws -> [AgentTask]
     func events() -> AsyncStream<AgentRuntimeEvent>
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws
     func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws
     func steer(prompt: String, toTaskID taskID: AgentTask.ID) async throws
     func compact(taskID: AgentTask.ID) async throws
@@ -29,6 +30,12 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
+    /// Older adapters may keep their restricted submission path. They cannot
+    /// silently claim Full access without implementing its execution policy.
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
+        guard accessMode == .askEveryTime else { throw AgentRuntimeCapabilityError.accessModeUnsupported }
+        try await submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
+    }
     func retryWebsiteSessionCleanup(taskID: AgentTask.ID) async -> WebsiteSessionCleanupReceipt {
         WebsiteSessionCleanupReceipt(taskID: taskID, runtimeGeneration: UUID(), outcome: .unconfirmed,
             reason: .unsupportedRuntime, trigger: .manual)
@@ -67,6 +74,7 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
     case compactionUnsupported
     case chromeConnectionUnsupported
     case workspaceSelectionUnsupported
+    case accessModeUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -78,6 +86,8 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
             "This runtime does not support connecting to your existing Chrome session."
         case .workspaceSelectionUnsupported:
             "This runtime does not support choosing a project folder."
+        case .accessModeUnsupported:
+            "This runtime does not support Full access. Your message was not sent."
         }
     }
 }

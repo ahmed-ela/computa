@@ -1316,6 +1316,71 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testExpandedFirstPrefixAcceptsOnlyExistingASCIIWhitespaceEquivalenceWithoutReplay() async throws {
+        let mutations = [
+            "ascii": "userBody.textContent = prompt.replace('Owned ', 'Owned ' + '\\n'.repeat(15));",
+            "punctuation": "userBody.textContent = prompt.replace('Owned', 'Ow!ed');",
+            "unicode_space": "userBody.textContent = prompt.replace('Owned ', 'Owned\\u00a0');",
+            "format": "userBody.textContent = prompt.replace('Owned ', 'Owned\\u200b');",
+        ]
+        for condition in ["ascii", "punctuation", "unicode_space", "format"] {
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: try XCTUnwrap(mutations[condition])))
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let generation = fixture.browser.documentGeneration(for: ownedID)
+            var diagnostics: [String] = []
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting { diagnostics += $0 }
+            defer { fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil) }
+            let params: [String: String] = ["sessionToken": token,
+                "prompt": String(repeating: "Owned prefix comparison fixture line.\n", count: 600)]
+            if condition == "ascii" {
+                let sent = try await call(fixture.transport, "webProviderSend", params)
+                XCTAssertEqual(sent["state"] as? String, "running")
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                try assertChoiceEvidence(complete, choice: choice)
+                let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend", params)
+                    XCTFail("ASCII whitespace comparison must preserve \(condition) differences")
+                } catch { XCTAssertTrue(error is EmbeddedWebModelTransport.Failure) }
+                _ = try await evaluate(view, """
+                    document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]').textContent = window.fixturePrompts[0];
+                    return true;
+                    """)
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("Restoring text cannot revive a rejected expansion")
+                } catch { XCTAssertTrue(error is EmbeddedWebModelTransport.Failure) }
+            }
+            let values = diagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            let comparison = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_text" })
+            XCTAssertEqual(comparison["expansionTextAnalyzed"] as? Bool, true)
+            XCTAssertEqual(comparison["expansionClicked"] as? Bool, true)
+            XCTAssertEqual(comparison["expansionExactPrefixMatches"] as? Bool, false)
+            XCTAssertEqual(comparison["expansionASCIIPrefixMatches"] as? Bool, condition == "ascii")
+            XCTAssertEqual(comparison["expansionASCIIPromptMatches"] as? Bool, condition == "ascii")
+            XCTAssertEqual(comparison["expansionFirstMismatchClass"] as? String, condition == "ascii" ? "none" : condition)
+            XCTAssertTrue(diagnostics.allSatisfy { $0.utf8.count <= 960 && !$0.contains("Owned prefix comparison") })
+            XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+            let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+            XCTAssertEqual(clicks, 1)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, condition == "ascii" ? "not_created" : "failed")
+            if condition == "ascii" { try await assertHumanTabIntact(fixture) }
+            else { try await assertHumanTabIntact(fixture, retaining: ownedID) }
+        }
+    }
+
     func testFirstMessageExpansionIgnoresRenderingChurnButRetainsTransientWorkRevocation() async throws {
         for transientWork in [false, true] {
             let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: """
@@ -3588,6 +3653,70 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(bodyValues[2]["expansionOutcome"] as? String, "model_unverified")
         XCTAssertEqual(bodyValues[2]["expansionContextFailure"] as? String, "owner")
         XCTAssertNil(bodyValues[0]["bodyTextContentLength"])
+    }
+
+    func testExpansionTextComparisonDiagnosticsAreFiniteStrictAndSeparateFromBody() throws {
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        let flags = ["expansionTextAnalyzed", "expansionClicked", "expansionExactPrefixMatches",
+                     "expansionASCIIPrefixMatches", "expansionASCIIPromptMatches"]
+        let lengths = ["expansionASCIIRenderedLength", "expansionASCIIPrefixLength", "expansionASCIIPromptLength", "expansionFirstMismatchOffset"]
+        let counts = ["expansionUnicodeSpaceCount", "expansionExpectedUnicodeSpaceCount", "expansionFormatCount", "expansionExpectedFormatCount"]
+        var source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt",
+            "root": ["tag": "article", "classes": Array(repeating: "whitespace-pre-wrap", count: 6)],
+            "body": ["tag": "div", "classes": Array(repeating: "whitespace-pre-wrap", count: 6)],
+            "userCount": 1, "textLength": 220_001, "lineCount": 220_001, "markerOccurrences": 1, "controlDescendants": 1_000,
+            "markerFinalLine": true, "submitted": true, "markerMatches": true,
+            "reason": "snapshot_before_action", "scope": "action_final_guard", "action": "verifyProductMode",
+            "allowFirstUserBinding": true, "allowFirstUserExpansion": true, "privatePinPresent": false, "expectedFingerprintPresent": false,
+            "markerValid": true, "firstPromptPresent": true, "firstPromptMatches": true,
+            "snapshot": ["rootSame": true, "bodySame": true, "bodyConnected": true, "textSame": true,
+                         "countSame": true, "urlSame": true, "originSame": true, "ownerSame": true],
+            "bodySelection": "whitespace_pre_wrap", "expansionOutcome": "text_mismatch", "bodyInnerTextLength": 220_001,
+            "expansionPrivatePrefix": "private_canary", "expansionActualScalar": 123456,
+            "prompt": "private_canary", "response": "private_canary", "fingerprint": "private_canary"]
+        for key in flags { source[key] = true }
+        for key in lengths { source[key] = 180_200 }
+        for key in counts { source[key] = 1_000 }
+        for mismatch in ["none", "end", "ascii_space", "unicode_space", "format", "punctuation", "content"] {
+            var candidate = source; candidate["expansionFirstMismatchClass"] = mismatch
+            if mismatch == "none" { candidate.removeValue(forKey: "expansionFirstMismatchOffset") }
+            let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(candidate), provider: .chatgpt))
+            XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains("123456") })
+            let values = try records.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+            let text = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_text" })
+            XCTAssertEqual(text["expansionFirstMismatchClass"] as? String, mismatch)
+            XCTAssertEqual(text["expansionASCIIRenderedLength"] as? Int, 180_200)
+            XCTAssertEqual(text["expansionFormatCount"] as? Int, 1_000)
+            XCTAssertEqual(text["scope"] as? String, "action_final_guard")
+            XCTAssertNil(text["reason"], "The finite text record cannot duplicate first_bound log ownership")
+            let body = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_body" })
+            XCTAssertNil(body["expansionFirstMismatchClass"])
+        }
+        source["expansionFirstMismatchClass"] = "content"
+        for key in flags {
+            for invalid in [1, 0, "private_canary", NSNull()] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        for key in lengths + counts {
+            for invalid in [-1, lengths.contains(key) ? 180_201 : 1_001, 1.5, true, NSNull(), "private_canary"] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        for invalid in ["private_canary", 1, true, NSNull()] as [Any] {
+            var forged = source; forged["expansionFirstMismatchClass"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
+        var unavailable = source; unavailable["expansionTextAnalyzed"] = false
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(unavailable), provider: .chatgpt))
+        for key in lengths + counts + Array(flags.dropFirst(2)) + ["expansionFirstMismatchClass"] { unavailable.removeValue(forKey: key) }
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(unavailable), provider: .chatgpt))
+        var impossibleOffset = source; impossibleOffset["expansionFirstMismatchClass"] = "none"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(impossibleOffset), provider: .chatgpt))
     }
 
     func testProductProofFailureDiagnosticsAreFiniteBoundedAndSeparateFromBody() throws {

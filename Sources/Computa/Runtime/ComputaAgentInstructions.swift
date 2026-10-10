@@ -157,7 +157,7 @@ enum ComputaAgentInstructions {
 
     static let commandLine = """
     When offered, CLI commands run through exec_command and write_stdin. Use an explicit
-    working directory and bounded output. The engine enforces its workspace sandbox
+    working directory and bounded output. The engine enforces the selected execution policy
     and requests native approval when required; never bypass permissions, browser
     controls, site access restrictions, or a denied command with another tool.
     Commands use a private HOME and no login-shell initialization, so personal CLI
@@ -250,12 +250,15 @@ enum ComputaAgentInstructions {
         appropriate available tool before declaring an unsupported access block;
         do not bypass a real denial with another tool.
 
-        Native approval and execution restrictions are separate. If Full Access
-        is selected, Computa can automatically answer permitted approval requests;
-        it does not remove the local engine's workspace sandbox, private HOME,
-        no-login-shell setting, macOS privacy grants, Chrome connection consent
-        or the host's background-only/foreground capability ceiling. This contract
-        does not assert the current approval mode or a connected browser.
+        The native user's access choice is captured for each new submission. Full
+        Access permits terminal/file commands without the engine's workspace or
+        network sandbox and without engine approval prompts. Ask every time uses
+        the workspace sandbox and requests native approval for protected commands.
+        Full Access also automatically answers permitted browser/computer action
+        requests. Both modes retain private HOME, no-login-shell behavior, macOS
+        privacy grants, Chrome connection consent and the host's background-only/
+        foreground capability ceiling. Use the engine's current permissions
+        instructions; this contract does not assert a connected browser.
 
         This web model accepts text observations only; image
         and audio inputs are unsupported. The owned inference conversation is

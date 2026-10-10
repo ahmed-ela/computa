@@ -9,7 +9,7 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
         for model in websiteModels {
             let (runtime, root) = try makeRuntime(modelID: model)
             do {
-                try await runtime.submit(prompt: "Synthetic reply", toTaskID: "website-task", modelID: model)
+                try await runtime.submit(prompt: "Synthetic reply", toTaskID: UUID().uuidString, modelID: model)
                 XCTFail("The built-in model route must be explicitly configured")
             } catch {
                 XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.embeddedRequired.localizedDescription)
@@ -24,16 +24,17 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
     func testEveryWebsiteUsesTheSameLocalHarnessInstructionsAndApprovalPolicyWithoutChrome() async throws {
         var baselineBaseInstructions: String?
         var baselineTools: Data?
-        for model in websiteModels {
+        for (model, accessMode) in websiteModels.flatMap({ model in AccessMode.allCases.map { (model, $0) } }) {
             let (runtime, root) = try makeRuntime(modelID: model)
             await runtime.configureEmbeddedWebModelTransport(InertEmbeddedTransport())
             do {
-                try await runtime.submit(prompt: "Synthetic reply", toTaskID: "website-task", modelID: model)
+                try await runtime.submit(prompt: "Synthetic reply", toTaskID: UUID().uuidString, modelID: model,
+                                         accessMode: accessMode)
                 let thread = try requestParameters("thread-start", root: root)
                 XCTAssertEqual(thread["model"] as? String, model)
                 XCTAssertEqual(thread["modelProvider"] as? String, "web_browser")
-                XCTAssertEqual(thread["sandbox"] as? String, "workspace-write")
-                XCTAssertEqual(thread["approvalPolicy"] as? String, "on-request")
+                XCTAssertEqual(thread["sandbox"] as? String, accessMode == .fullAccess ? "danger-full-access" : "workspace-write")
+                XCTAssertEqual(thread["approvalPolicy"] as? String, accessMode == .fullAccess ? "never" : "on-request")
                 XCTAssertEqual(thread["developerInstructions"] as? String, ComputaAgentInstructions.developerInstructions())
                 let base = try XCTUnwrap(thread["baseInstructions"] as? String)
                 if let baselineBaseInstructions { XCTAssertEqual(base, baselineBaseInstructions) }
@@ -47,6 +48,7 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 if let baselineTools { XCTAssertEqual(toolBytes, baselineTools) }
                 else { baselineTools = toolBytes }
                 let config = try XCTUnwrap(thread["config"] as? [String: Any])
+                XCTAssertEqual(config["include_permissions_instructions"] as? Bool, true)
                 XCTAssertEqual(config["features.unified_exec"] as? Bool, true)
                 XCTAssertEqual(config["features.shell_tool"] as? Bool, true)
                 let provider = try XCTUnwrap(config["model_providers.web_browser"] as? [String: Any])
@@ -56,6 +58,13 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 XCTAssertEqual(provider["wire_api"] as? String, "responses")
                 let turn = try requestParameters("turn-start", root: root)
                 XCTAssertEqual(turn["model"] as? String, model)
+                XCTAssertEqual(turn["approvalPolicy"] as? String, accessMode == .fullAccess ? "never" : "on-request")
+                let sandbox = try XCTUnwrap(turn["sandboxPolicy"] as? NSDictionary)
+                let expected: NSDictionary = accessMode == .fullAccess ? ["type": "dangerFullAccess"] : [
+                    "type": "workspaceWrite", "writableRoots": [String](), "networkAccess": false,
+                    "excludeTmpdirEnvVar": false, "excludeSlashTmp": false,
+                ]
+                XCTAssertEqual(sandbox, expected)
                 await runtime.disconnectChrome()
                 let report = await runtime.shutdown()
                 XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
@@ -91,8 +100,19 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
           writeFileSync(join(root, `request-${request.method.replaceAll('/', '-')}.json`), JSON.stringify(request));
         }
         """
-        let sourceText = try String(contentsOf: source, encoding: .utf8)
+        var sourceText = try String(contentsOf: source, encoding: .utf8)
         XCTAssertEqual(sourceText.components(separatedBy: "const request = JSON.parse(line);").count, 2)
+        // Admission uses the production UUID contract. Keep the shared fixture's
+        // deliberately stale IDs unchanged for its streaming-isolation tests.
+        let threadDeclaration = "const threadId = 'streaming-thread';"
+        let turnDeclaration = "const turnId = currentTurn = `streaming-turn-${++turnCount}`;"
+        XCTAssertEqual(sourceText.components(separatedBy: threadDeclaration).count, 2)
+        XCTAssertEqual(sourceText.components(separatedBy: turnDeclaration).count, 2)
+        sourceText = sourceText
+            .replacingOccurrences(of: "#!/usr/bin/env bun\n",
+                                  with: "#!/usr/bin/env bun\nimport { randomUUID } from 'node:crypto';\n")
+            .replacingOccurrences(of: threadDeclaration, with: "const threadId = randomUUID();")
+            .replacingOccurrences(of: turnDeclaration, with: "const turnId = currentTurn = (++turnCount, randomUUID());")
         try Data(sourceText.replacingOccurrences(of: "const request = JSON.parse(line);", with: recorder).utf8).write(to: fixture)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.path)
         try Data("phase-contract".utf8).write(to: root.appendingPathComponent("scenario"))

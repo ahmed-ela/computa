@@ -340,7 +340,7 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
   const config = { "project_root_markers": [], "allow_login_shell": false,
     "features.shell_snapshot": false, "features.shell_snapshot_v2": false,
     "memories.use_memories": false, "skills.include_instructions": false,
-    "include_permissions_instructions": false, "include_apps_instructions": false, "include_environment_context": false,
+    "include_permissions_instructions": true, "include_apps_instructions": false, "include_environment_context": false,
     "features.plugins": false, "features.apps": false, "features.browser_use": false, "features.computer_use": false,
     "features.goals": false, "features.image_generation": false, "features.in_app_browser": false,
     "features.multi_agent": false, "features.multi_agent_v2": false,
@@ -351,7 +351,8 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
       wire_api: "responses", requires_openai_auth: false, supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } };
   // macOS refuses nested sandbox-exec profiles. The outer owned-process
   // sandbox denies external network; only the scripted /usr/bin/printf runs.
-  // This fixture differs from the app's workspace-write thread sandbox.
+  // This instruction fixture uses the app's permissions boilerplate, but its
+  // outer sandbox and inner approval policy differ from both app access modes.
   const common = { model, modelProvider: "computa_fixture", cwd: workspace, sandbox: "danger-full-access",
     approvalPolicy: "on-request", baseInstructions: rules.base, developerInstructions: rules.developer, config };
   let rpc: Rpc | undefined;

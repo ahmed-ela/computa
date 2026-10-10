@@ -2,12 +2,15 @@
 
 ## Scope
 
-Computa owns a native WKWebView tab pane beside the chat. General browsing remains
-human-operated; Qwen has no general embedded-browser tools. The Swift app's
-ChatGPT, Gemini, and Claude models use fixed inference actions in separate owned
-Temporary Chat or Incognito tabs sharing this profile. They do not require Chrome
-for inference; ordinary browser tools still use the separately approved Chrome connection.
-General agent control is [explicitly deferred](../TODO.md#embedded-browser-agent-control-deferred).
+Computa owns a native WKWebView tab pane beside the chat. People can browse in
+the pane; fresh agent chats receive the nine typed
+[built-in browser tools](BUILT-IN-BROWSER-TOOLS.md) for bounded page observation
+and actions. The Swift app's ChatGPT, Gemini and Claude adapters use separate
+owned Temporary Chat or Incognito pages in the same profile, with a fresh page
+for each [inference transaction](WEBSITE-INFERENCE-TRANSACTIONS.md). Neither path
+requires Chrome. Existing Chrome/native tools remain available independently.
+Installed Qwen tasks, arbitrary public sites and sustained concurrent human use
+retain their [separate qualification gates](../TODO.md#embedded-browser-agent-control).
 
 ## Composition
 
@@ -84,6 +87,8 @@ configuration so the opener relationship and signed-in profile remain intact.
 Closing a child from the website returns selection to its surviving opener.
 Pop-ups count toward the normal tab limit and obey the same URL policy.
 Inference-owned pages cannot create or close browser tabs this way.
+
+Browser tools also reject popups from a human document after attempting input on it, including delayed callbacks after task cleanup. Human popup use on that document requires a reload or fresh document navigation that commits; a SPA route change is insufficient. Untouched documents and declined tool actions retain normal human popup behavior. This is a conservative ownership boundary, not precise attribution of concurrent human and agent input.
 
 Downloads, file selection, camera/microphone requests, external-app schemes and
 JavaScript modal dialogs are declined. Google can independently reject embedded

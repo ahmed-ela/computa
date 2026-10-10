@@ -985,6 +985,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private static let firstUserBodyCounts = ["bodyTextContentMarkerOccurrences", "rootRenderedMarkerOccurrences", "rootTextContentMarkerOccurrences", "scopedExpandControlCount"]
     private static let firstUserBodyFlags = ["bodyTextContentAnalyzed", "rootRenderedAnalyzed", "rootTextContentAnalyzed", "firstPromptAnalyzed",
         "bodyTextContentMarkerFinalLine", "rootRenderedMarkerFinalLine", "rootTextContentMarkerFinalLine", "renderedPrefixOfFirstPrompt"]
+    private static let firstUserTextFlags = ["expansionTextAnalyzed", "expansionClicked", "expansionExactPrefixMatches",
+        "expansionASCIIPrefixMatches", "expansionASCIIPromptMatches"]
+    private static let firstUserTextLengths = ["expansionASCIIRenderedLength", "expansionASCIIPrefixLength",
+        "expansionASCIIPromptLength", "expansionFirstMismatchOffset"]
+    private static let firstUserTextCounts = ["expansionUnicodeSpaceCount", "expansionExpectedUnicodeSpaceCount",
+        "expansionFormatCount", "expansionExpectedFormatCount"]
+    private static let firstUserTextKeys = firstUserTextFlags + firstUserTextLengths + firstUserTextCounts + ["expansionFirstMismatchClass"]
 
     private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
@@ -1082,6 +1089,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 safe[key] = flag
             }
         }
+        for key in firstUserTextFlags {
+            if let rawFlag = value[key] {
+                guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
+                safe[key] = flag
+            }
+        }
+        for key in firstUserTextLengths + firstUserTextCounts {
+            if let rawCount = value[key] {
+                let limit: Int64 = firstUserTextLengths.contains(key) ? 180_200 : 1_000
+                guard let count = ComputerToolArgumentContract.exactInt64(rawCount), (0...limit).contains(count) else { return nil }
+                safe[key] = count
+            }
+        }
+        if let rawClass = value["expansionFirstMismatchClass"] {
+            guard let mismatch = rawClass as? String,
+                  ["none", "end", "ascii_space", "unicode_space", "format", "punctuation", "content"].contains(mismatch) else { return nil }
+            safe["expansionFirstMismatchClass"] = mismatch
+        }
+        let analyzedTextKeys = firstUserTextKeys.filter { !["expansionTextAnalyzed", "expansionClicked"].contains($0) }
+        if analyzedTextKeys.contains(where: { safe[$0] != nil }), safe["expansionTextAnalyzed"] as? Bool != true { return nil }
+        if safe["expansionFirstMismatchOffset"] != nil {
+            guard let mismatch = safe["expansionFirstMismatchClass"] as? String, mismatch != "none" else { return nil }
+        }
         // An unavailable alternate observation must not look like a verified
         // absence of the marker. The adapter omits these fields over its limit.
         for prefix in ["bodyTextContent", "rootRendered", "rootTextContent"] {
@@ -1128,6 +1158,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               var summary = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] else { return nil }
         if let expectedReason, summary["reason"] as? String != expectedReason { return nil }
         let children = summary.removeValue(forKey: "descendants") as? [[String: Any]] ?? []
+        var textObservation: [String: Any] = [:]
+        for key in firstUserTextKeys {
+            if let value = summary.removeValue(forKey: key) { textObservation[key] = value }
+        }
+        if !textObservation.isEmpty {
+            textObservation["kind"] = "first_user_text"; textObservation["provider"] = provider.rawValue
+            for key in ["action", "scope"] { textObservation[key] = summary[key] }
+        }
         // Product-control provenance has its own bounded record so diagnosing
         // message rendering cannot push the body observation past the log cap.
         var productObservation: [String: Any] = [:]
@@ -1158,7 +1196,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         var records: [String] = []
         for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
-            + (productObservation.isEmpty ? [] : [productObservation]) + children {
+            + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation]) + children {
             guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: .sortedKeys), bytes.count <= 960 else { return nil }
             records.append(String(decoding: bytes, as: UTF8.self))
         }
@@ -1174,6 +1212,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             else if safe.contains("\"kind\":\"first_user_body\"") {
                 Self.inspectionLog.info("firstUserBody sequence=\(sequence) \(safe, privacy: .public)")
+            }
+            else if safe.contains("\"kind\":\"first_user_text\"") {
+                Self.inspectionLog.info("firstUserText sequence=\(sequence) \(safe, privacy: .public)")
             }
             else {
                 Self.inspectionLog.info("firstUserChild sequence=\(sequence) index=\(childIndex) \(safe, privacy: .public)")

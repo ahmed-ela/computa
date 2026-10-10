@@ -64,6 +64,17 @@ targets:
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/ChromeBridge/ChromeBridgeHost
         basedOnDependencyAnalysis: false
+    postBuildScripts:
+      - name: Exclude Chrome extension test fixtures
+        script: |
+          set -eu
+          extension_resources="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/BrowserExtension"
+          for test_fixture in "$extension_resources"/*.test.js; do
+            if [ -f "$test_fixture" ]; then
+              /bin/rm -f "$test_fixture"
+            fi
+          done
+        basedOnDependencyAnalysis: false
     dependencies:
       - target: AutomationCore
     configFiles:

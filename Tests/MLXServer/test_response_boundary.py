@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "Sources/Computa/Resources/ML
 from response_boundary import (ResponseBoundary, MAX_ERROR_BODY, context_overflow_budget,
                                is_context_overflow, is_protocol_error)
 from sse_contract import ProtocolError
+from test_sse_contract import CALL, fixture, wire
 
 
 def body(value):
@@ -45,6 +46,80 @@ class ErrorShapeTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_below_cap_missing_public_output_is_a_safe_terminal_failure(self):
+        for public, reasoning in (("", "PRIVATE_SYNTHETIC_NOT_AN_ANSWER"),
+                                  ("", ""), (" \t\n", "")):
+            for tokens in (50, 4095):
+                with self.subTest(public=public, reasoning=bool(reasoning), tokens=tokens):
+                    self.output = []
+                    self.adapter = ResponseBoundary(self.adapter.send, 4096)
+                    source = fixture(public=public, reasoning=reasoning, tokens=tokens)
+                    raw = wire(source)
+                    await self.start(200, [(b"content-type", b"text/event-stream")])
+                    await self.chunk(wire(source[:-1]), True)
+                    with self.assertRaises(ProtocolError) as caught:
+                        await self.chunk(wire(source[-1:]))
+                    await self.adapter.fail(caught.exception)
+                    emitted = events(b"".join(message.get("body", b"") for message in self.output))
+                    self.assertEqual([event["type"] for event in emitted if event["type"] in
+                        ("response.completed", "response.incomplete", "response.failed")], ["response.failed"])
+                    self.assertFalse(any(event["type"].endswith(".done") for event in emitted))
+                    failure = emitted[-1]["response"]
+                    self.assertEqual(failure["status"], "failed")
+                    self.assertEqual(failure["output"], [])
+                    self.assertEqual(failure.get("output_text", ""), "")
+                    self.assertIsNone(failure["incomplete_details"])
+                    self.assertEqual(failure["error"], {
+                        "type": "model_error", "code": "invalid_prompt", "param": None, "retryable": False,
+                        "message": "Local model stream could not be validated. "
+                            f"[mlx_protocol reason=missing_generated_public_output bytes={len(raw)} "
+                            f"events={len(source)} items={2 if reasoning else 1} "
+                            "last=response.completed terminal=0 eof=1 causes=1 limited=0]"})
+                    if reasoning:
+                        self.assertNotIn(reasoning, json.dumps(failure))
+                    self.assertLess(len(failure["error"]["message"].encode()), 512)
+                    count = len(self.output)
+                    await self.adapter.fail(caught.exception)
+                    await self.adapter.finish()
+                    self.assertEqual(len(self.output), count)
+
+    async def test_at_cap_reasoning_only_remains_token_cap_incomplete(self):
+        source = fixture(public="", reasoning="PRIVATE_SYNTHETIC_NOT_AN_ANSWER", tokens=4096)
+        await self.start(200, [(b"content-type", b"text/event-stream")])
+        await self.chunk(wire(source[:-1]), True)
+        await self.chunk(wire(source[-1:]))
+        await self.adapter.finish()
+        emitted = events(b"".join(message.get("body", b"") for message in self.output))
+        self.assertEqual([event["type"] for event in emitted if event["type"] in
+            ("response.completed", "response.incomplete", "response.failed")], ["response.incomplete"])
+        final = emitted[-1]["response"]
+        self.assertEqual(final["status"], "incomplete")
+        self.assertEqual(final["incomplete_details"], {"reason": "max_output_tokens"})
+        self.assertIsNone(final["error"])
+        self.assertEqual(final["output_text"], "")
+        self.assertEqual([item["content"] for item in final["output"] if item["type"] == "message"], [[]])
+        self.assertFalse(any(item["type"] == "function_call" for item in final["output"]))
+
+    async def test_below_cap_tool_only_completes_and_releases_the_exact_call_once(self):
+        source = fixture(public="", call=CALL, tokens=4095)
+        await self.start(200, [(b"content-type", b"text/event-stream")])
+        await self.chunk(wire(source[:-1]), True)
+        before = events(b"".join(message.get("body", b"") for message in self.output))
+        self.assertFalse(any(event["type"] == "response.output_item.done" for event in before))
+        await self.chunk(wire(source[-1:]))
+        await self.adapter.finish()
+        emitted = events(b"".join(message.get("body", b"") for message in self.output))
+        self.assertEqual([event["type"] for event in emitted if event["type"] in
+            ("response.completed", "response.incomplete", "response.failed")], ["response.completed"])
+        final = emitted[-1]["response"]
+        self.assertEqual(final["status"], "completed")
+        self.assertEqual(final["output_text"], "")
+        self.assertIsNone(final["error"])
+        self.assertIsNone(final["incomplete_details"])
+        self.assertEqual([item for item in final["output"] if item["type"] == "function_call"], [CALL])
+        self.assertEqual([event["item"] for event in emitted if event["type"] == "response.output_item.done"
+                          and event["item"]["type"] == "function_call"], [CALL])
+
     async def test_missing_terminal_diagnosis_survives_safe_terminal_error(self):
         await self.start(200, [(b"content-type", b"text/event-stream")])
         created = body({"type": "response.created", "response": {

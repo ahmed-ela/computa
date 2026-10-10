@@ -91,6 +91,16 @@ Conversation-authored controls cannot establish product provenance. More than
 512 relevant mutations still revokes the proof. The first finite revocation
 reason and examined-prefix counts remain latched, with no message text in logs.
 
+Build 40 applies the same ASCII space/tab/line-break run comparison to the
+captured prefix **after** its single verified expansion click. Initial prefix
+admission and the final pre-click body check remain exact. Completion still
+requires the entire canonical prompt, one final marker, and unchanged physical
+message, owner, document, product, model, temporary state, route and deadline.
+Changing punctuation, a nonbreaking space, line separator or zero-width
+character does not pass. A finite separate text diagnostic records only
+comparison flags, bounded lengths/counts and a mismatch character class/offset;
+it contains no characters, excerpts, codepoints, content hashes or addresses.
+
 ## Durable evidence
 
 New schema-2 journals are scoped to one native turn:

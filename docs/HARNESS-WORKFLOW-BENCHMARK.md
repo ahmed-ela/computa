@@ -14,6 +14,99 @@ does not test website sign-in, selection of a concrete website model, the
 model's own judgment, or live website session cleanup. Those require separate
 qualification of the installed app and selected provider/model pair.
 
+A separate [local-model goal comparison](GOAL-MODE-BENCHMARK.md) records six
+build 39/Codex trials, their failures and limits; it does not qualify build 41.
+All six official trials failed the complete task; Computa goal mode was N/A.
+
+## Current candidate: 0.6.0 (41)
+
+Build 41 is **not yet qualified, installed or pushed**. The installed app remains
+build 39 with runtime `mactopus-5`, and is quit.
+
+The corrected Source19 engine compiled all **275 test binaries**. Fresh discovery
+covers **19,035 runnable tests and 56 declared exclusions**. Its full App Server
+follow-up passed all **1,705 tests**, with unchanged source, runtime inputs,
+binaries and protected processes. The original startup failures and diagnostic
+follow-up remain separate evidence; this passing run establishes no general
+cold-start or signing guarantee.
+
+Eight disjoint smaller-package batches cover another **7,618 tests**. The first
+five passed **953, 953, 952, 952 and 951 tests**, with preservation and fixture
+cleanup checks. The second batch required a separate re-audit after a checker
+rejected a valid Nextest header; its original validation failure remains
+recorded. The sixth batch's original timeout remains preserved; its full
+953-case follow-up passed with preservation and cleanup checks. The final two
+package batches each passed all 952 cases and completed cleanup.
+Core recorded 4,434 first-pass outcomes with unchanged source and runtime
+inputs and completed fixture cleanup. Its attributed output includes 24
+remote-only and 13 optional execve-wrapper guard exits; those are not assertion
+proof for those features. Twenty selected coding/terminal cases had first PASS
+results and no observed guard exit. CLI passed all 458 cases and completed
+cleanup. Source20 corrects five TUI test fixtures without changing production
+code or golden snapshots: version normalization now preserves validated header
+padding, and the update-card fixture accepts its wrapped Windows command.
+The ordinary graph compiled all 275 binaries; the five mapped runtime helpers
+have identical bytes to Source19. A complete 4,820-case TUI run then recorded
+4,817 PASS, three failures and seven exclusions, with unchanged source, runtime
+inputs, binary metadata and protected processes. All five corrected cases passed.
+The remaining failures are the terminal pet renderer's inline-payload assertion
+and two PTY startup cases with empty screens. The two startup cases had passed
+an earlier isolated diagnostic; their full-package failures remain recorded.
+This is not a green upstream workspace result. Computa's app-server and installed
+workflow qualification is separate from the standalone terminal UI.
+The original Source19 negative run and generated snapshots remain preserved.
+Final lint produced five reviewed source changes. Source21 makes debug-only
+imports and loader mutation explicit so release lint cannot remove declarations
+needed by debug builds. Prior Source19 and Source20 tests retain their original
+attribution. Source21 compiled all 275 debug test binaries and passed the final
+scoped lint and formatting checks with unchanged source. These phases executed
+no further tests. Release packaging passed and its current artifact freeze binds
+runtime `mactopus-6`, the source pin, patch, manifest and signed arm64 executable.
+All seven public checks passed: 123 frontend tests, 106 MLX tests with one skip,
+364 provider-adapter tests, three instruction tests and 21 identity/version tests,
+plus frontend type-checking and build. The selected native run finished with
+three failures across 652 tests and one skip. The permission fixture required
+a lifecycle item even when the native sandbox returned a denied command's
+output directly, its cleanup rejected an already absent root, and the website
+routing fixture used non-UUID identities. The corrected three-case diagnostic
+passed. A supplemental real-tokenizer check caught a stale single-event SSE
+parser; all four pinned MLX checks now pass without an asset-path override.
+The fresh shared run subsequently passed 622 tests with no skips. Complete Swift
+validation then ran 2,310 tests: 2,252 passed, 49 opt-in checks skipped and nine
+cases failed, producing 28 failure reports. Eight older website-evidence cases
+lacked the current durable turn/lease setup and journal contract. Their fixtures
+now verify schema-2 journals, fresh sessions, bounded failures and rejected
+journal admission. The WebKit failure was traced to a rounded-down inner timer
+firing before a short wait's caller deadline; the host timer now uses that same
+absolute deadline. All 68 focused checks passed, including ten complete real
+WebKit flight workflows. Fresh public final3 passed all 622 tests with no skips.
+Complete native final3 passed 2,261 tests with zero failures and 49 opt-in skips
+in 545.894 seconds. All required cohorts, scripted workflow/patch matrices,
+permission checks, 26 unique cleanup identities and source/resource/engine
+guards passed. The independent Git deadline gate verified the three regression
+passes from this same full run. Installed qualification remains pending.
+Storage was recovered from disposable old app copies, and the local
+MLX model was temporarily moved without changing its bytes; that storage change
+must be restored before delivery.
+
+The affected Git review/process suites passed all **62 tests**, including three
+new regressions for inherited output pipes, backpressured input and continuous
+output. Packaging and complete native validation passed; installed provider
+benchmarks remain pending. Historical attempts, fixture corrections and cleanup receipts
+are recorded in the [validation ledger](HARNESS-VALIDATION-NOTES.md).
+
+| Check | Current evidence and remaining work |
+| --- | --- |
+| Full upstream workspace | Source19 discovery covers 19,035 runnable identities. App Server, core, CLI and all eight smaller-package batches have 14,215 first-pass outcomes under Source19. Source20 changes four TUI test files only; its complete TUI run recorded 4,817 PASS and three failures, so the upstream workspace is not fully green. Inherited guard exits do not prove their skipped assertions. Earlier failed runs and diagnostics retain their original source attribution. |
+| Engine package | Source21 release packaging passed with unchanged bound inputs. Runtime mactopus-6 is a signed arm64 executable; the pin, patch, manifest and executable match the current engine artifact freeze. |
+| Computa native validation | Fresh final3 passed 2,261 tests with zero failures and 49 opt-in skips. All nine required cohorts, permission checks, exact workflow/patch matrices, cleanup and source/resource/engine guards passed. The independent Git deadline gate verified all three regressions. Earlier selected/full failures remain preserved separately. This does not qualify live provider behavior. |
+| Installed provider tasks | Fresh concrete-model qualification and coding, interactive terminal, Git, localhost and browser tasks are pending for ChatGPT, Claude and Gemini. Scripted inference is separate evidence. |
+| Delivery | Signed install/resource parity, owned-fixture cleanup, commit and PR push are pending. |
+
+Historical engine attempts, failed runs, fixture corrections and cleanup records
+are preserved in the [validation ledger](HARNESS-VALIDATION-NOTES.md). They do
+not qualify the current candidate.
+
 ## Reusable boundaries
 
 - `WorkflowBenchmarkFixture` owns a unique temporary project, an isolated
@@ -35,17 +128,17 @@ all nine browser tools and the native app/outcome tools, and be accepted by the
 real pinned App Server's `thread/start` parser. The browser backend is inert in
 this workflow; acceptance does not establish browser action execution.
 
-An installed build 35 check exposed a startup gap: browser tools were emitted
-in legacy form alongside canonical native definitions, so `thread/start` was
-rejected before inference. Build 36 makes that manifest consistent. The
-workflow now checks the complete combined payload and its actual native
-acceptance, closing the earlier fixture gap.
+This benchmark submits with the production Ask policy: `workspace-write`
+and `on-request`. It explicitly approves only its own disposable actions.
+A separate rejection scenario declines an elevated command and verifies that
+its requested file never appears. These decisions exercise the runtime
+approval boundary. Full access uses a different execution policy and requires
+the separate same-thread permission-boundary checks described below.
 
-Production threads retain their normal `workspace-write` sandbox and
-`on-request` approval policy. The benchmark explicitly approves only its own
-disposable actions. A separate rejection scenario declines an elevated command
-and verifies that its requested file never appears. These decisions exercise
-the runtime approval boundary; they do not qualify the app's Full Access UI.
+The native access choice is captured for each submission: Full uses
+`danger-full-access`/`never`; Ask uses `workspace-write`/`on-request`. A new
+submission overrides the policy even on an already-loaded thread. Running
+turns retain the execution policy under which they began.
 
 ## Workflow and pass criteria
 
@@ -119,124 +212,112 @@ Use the configured Xcode toolchain and serialize shared Swift build runs.
 Existing native editing qualification remains available with
 `COMPUTA_FILE_EDITING_ENGINE_TEST=1` and `RuntimeFileEditingLiveTests`.
 
-## Results
+The permission cohort checks persisted choices, provider routing and policy
+changes on an already-loaded thread. Its real-engine fixture uses scripted
+inference to verify that Full access can write outside the workspace, then
+that Ask blocks both an ordinary outside write and a declined elevated write
+on that same thread. Enable it with the workflow flag:
 
-The final native validation on 2026-10-08 passed **535 selected tests with zero
-failures in 361.278 seconds**. `native-build39-corrected.log` and
-`native-build39-corrected-validation.json` are bound to the 311 unchanged input
-hashes in `native-source-freeze-build39-corrected.json` for Computa **0.6.0 (39)**.
-The native suite includes actual combined thread startup, editing/diffs,
-protocol/streaming, isolated WebKit, approval/Stop, owned child-process and
-signal-probe tests, and durable cleanup. All 26 selected streaming/child fixture
-cleanup records verified removal. The three-provider adapter suite separately
-passed **361 tests and 6,194 assertions**, and the strict live-evidence collector
-passed **90 synthetic oracle tests**. Version checks passed nine tests.
+```sh
+COMPUTA_WORKFLOW_ENGINE_TEST=1 xcrun swift test \
+  --filter 'AppStateAccessModeTests|RuntimeIsolationTransportTests|WebModelRuntimeRoutingTests|AccessModeLiveTests'
+```
 
-Build 38 separately passed 512 native tests against 310 inputs. The extra C
-signal-probe fixture is included in build 39's freeze because the selected child
-process tests actually compile and execute it. An earlier build 39 run's one
-failed assertion incorrectly expected a rejected private website lease to have
-been closed; its log is retained. The corrected test requires the lease to remain
-private while preserving the human tab, matching the production cleanup policy.
+This does not enable the separate optional model/native-app UI fixture or
+qualify a live website model.
 
-| Scripted provider ID | Scenario | Seconds | Inference requests | Matched tool outputs | Approvals | Outcome |
-| --- | --- | ---: | ---: | ---: | ---: | --- |
-| `browser/chatgpt` | Editing, tests, Git push, localhost, TTY | 6.300 | 13 | 12 | 3 | Passed |
-| `browser/gemini` | Editing, tests, Git push, localhost, TTY | 6.158 | 13 | 12 | 3 | Passed |
-| `browser/claude` | Editing, tests, Git push, localhost, TTY | 5.881 | 13 | 12 | 3 | Passed |
-| `browser/chatgpt` | Declined command has no side effect | 1.666 | 2 | 1 | 1 | Passed |
-| `browser/chatgpt` | Stop cancels inference and reaps server | 2.806 | 2 | 1 | 1 | Passed |
+After packaging the candidate engine, run the instruction protocol check with
+the source resource directory explicitly selected. Its default searches the
+installed app first, which can select an older engine. Run the product-identity
+check against the newly packaged manifest. The version-contract cohort can run
+independently; repeat it if its source or canonical metadata changes:
 
-Every scenario confirmed removal of its owned fixture. The interrupted server's
-exit remained unconfirmed in presentation, while its PID and port were
-independently verified closed before shutdown. Five additional consecutive Stop
-runs on build 37 passed; the maximum observed physical retirement latency after logical
-acknowledgement was **98.275 ms**, with no extra signal or shutdown used to pass.
-The original immediate-PID check exposed the pinned engine's asynchronous reap
-boundary; finite structural diagnostics now survive failure cleanup.
+```sh
+COMPUTA_INSTRUCTION_TEST_RESOURCES="$PWD/Sources/Computa/Resources" \
+  bun test Scripts/persistent-instructions.integration.test.ts
+bun test Scripts/product-identity.test.ts
+bun test Scripts/version.test.ts
+```
 
-Every scripted workflow uses fresh owned website leases while retaining the
-same real native user turn. Long-history regressions verify more than 80 native
-turns, 90-turn receipt retention, summary eviction, conflicting identities,
-partial persistence failure, exact retry and storage bounds. Separate native
-patch qualification passed for all three provider IDs; malformed/stale patches
-were rejected before writes and were not replayed.
+These checks have separate source and engine bindings; a native-suite receipt
+does not establish that they passed.
 
-Build 36 installed coding attempts exposed ChatGPT's rendered whitespace change
-and Claude's virtualized old website message roots. Their failures remain
-separate records. Build 37 narrowly handles ASCII whitespace during guarded
-first-message promotion and uses [fresh website inference
-transactions](WEBSITE-INFERENCE-TRANSACTIONS.md).
+Build39's historical 311-input freeze excluded WebUI and MLX resources, which
+needed separate committed-to-bundle checks. Candidate41's expanded inventory
+includes those sources and verifies their generated payloads separately.
+Current native/stage acceptance binds the supplied current engine artifact
+freeze; historical engine pin or patch hashes cannot qualify a new package.
 
-Installed **0.6.0 (37)**, source
-`cbf199d8bebc69b146b2a58af9bd4039ff1ec7db`, completed one fresh **Claude Sonnet
-5.5** coding turn in **91.468 seconds**. The live collector verified **43/43
-checks**, including nine distinct website leases, nine durable closures and
-release before native tools, the next inference and the final response. Nine
-matched tool calls produced nine outputs: eight `exec_command` calls and one
-native `apply_patch`. The archived evidence matches the 310 frozen inputs with
-zero mismatches; `live-claude-coding-build37-receipt.json` binds the exact turn,
-process, model selection and transaction journals.
+The three synthetic provider-adapter suites can be run together independently:
 
-The model fixed addition, added test instructions, deleted the obsolete fixture
-and renamed the helper without changing its content. Both Python tests passed
-twice through native commands and again in the independent **15/15** filesystem
-oracle. Commit `367667eb070c96378efc8ac8d36210a414d1444f` matched the disposable
-bare remote; only the original user note remained dirty. The model recovered
-from a shell glob error and sandbox Git denials before using explicit elevated
-Git requests. The live run did not execute the broken baseline tests first.
+```sh
+bun test Scripts/embedded-chatgpt-adapter.test.ts \
+  Scripts/embedded-gemini-adapter.test.ts Scripts/embedded-claude-adapter.test.ts
+```
 
-Operator AX observations in `live-coding-build37-diff-ui-observations.json`
-confirmed that Last Turn showed the three files changed by the native patch,
-with 18 additions and two removals; the terminal rename was outside that
-aggregate. Commit showed
-four changes, including the 100% helper rename with zero line changes. Split
-showed `return a - b` beside `return a + b`; Unstaged showed only `notes.txt`
-with its one preserved addition. No stage or revert action was tested.
+## Fresh installed-provider qualification
 
-This live result is separate from scripted provider coverage. It proves an
-observed Claude website selection, not an immutable backend revision; guarded
-cleanup acknowledgements do not independently prove provider-side deletion.
-The push used a local remote, so external Git hosting authentication remains
-unqualified.
+Build 41 uses one shared case configuration and collector for normal ChatGPT,
+Claude and Gemini. Each provider first needs a completed opaque-marker read
+from a concrete model actually offered by its website, with current installed
+identity and confirmed temporary-session cleanup. The same natural requests
+then test code edits and selective commit/local push, flight-board browser
+search/details, a localhost preview with browser input and server stop, and a
+two-input interactive terminal session followed by rejected input after exit.
+The prompts contain no tool protocol or manually supplied capability padding.
 
-The same build completed a separate **Claude Sonnet 5.5** flight-browser turn
-in **102.777 seconds**. The collector passed **37/37** checks: thirteen matched
-browser calls (one open, seven reads, four clicks and one fill), fourteen fresh
-website transactions and fourteen durable closures. The synthetic board
-recorded one matching flight search and one gate reveal. Fresh DOM observations
-supported the final **18:37 EDT, gate B49** answer. Expected facts were absent
-from the natural-language prompt. This exercises navigation, forms and dynamic
-page results in Computa's own WebKit browser; it does not access a real United
-account or establish personal booking data.
+Independent file/Git, HTTP, native tool/output and cleanup evidence must agree;
+the model's final message alone cannot qualify a case. CAPTCHA, quota, changed
+model/session, malformed replies or uncertain cleanup stop that provider's run.
+Separate installed review fixtures cover five diff scopes, unified/split views,
+stage/unstage/revert of a single hunk and rejection of stale snapshots.
 
-A subsequent Claude combined preview attempt stopped on its actual website
-usage limit before any tool ran. Its exact cleanup receipt confirmed an
-untouched session was closed; no preview server or run directory was created.
-A separate build 37 ChatGPT flight attempt stopped before tools on first-message
-verification after a permitted initial chat route change, without replaying
-the prompt. Its cleanup remained unconfirmed. A fixture reproduced a consumed
-expansion claim that could not continue across an accepted route change; build
-38 corrects that specific regression with native-certified route continuations.
-The build 37 coarse diagnostic cannot establish which predicate failed live.
+The shared preparation has been reviewed but no installed build-41 case has
+run. Its four pure-data regression methods passed in **0.022 seconds**, covering
+atime stability, inspection versus TTY launch, ordered empty drains, missing or
+misassociated output/final facts, and preservation/revalidation of per-case
+proof at cleanup. Receipt `provider-benchmark-data-regressions-build41-1/receipt.json`
+has SHA `7fbbac49f6004a59505a738bcf8a5a534d593062c2af38877a7365ebbd4fa6e6`.
+This qualifies those collector boundaries, not the app, provider or UI.
 
-A fresh build 38 ChatGPT attempt also stopped before tools. Its finite
-diagnostic identifies `expansionContextFailure=product`, with the full first
-message and final marker present. A read-only fixture reproduced a false
-product revocation at 513 message-only mutations: the observer was counting
-conversation rendering against its product-control limit. The live batch count
-was not recorded, so this is a likely cause rather than proven causation.
-Build 39 excludes verified message-only records from that budget while retaining
-tracked product-control mutations, including controls moved into a message and
-transient Work selection. The first revocation reason and bounded counts are
-latched and logged without message content. Historical failed attempts retain
-their exact evidence and cannot become successful qualification through a later
-fix. The combined localhost preview remains pending.
+## Last qualified results and live limitations
 
-Final cleanup also archived and removed 275 historical, exactly owned streaming
-fixture roots. The immutable cleanup receipt verifies 1,914 archived regular
-files, every byte hash and mode, no live processes or open files, and final
-absence of each root. Roots without sufficient ownership evidence were preserved.
-Successful streaming and child-process tests now remove only their unchanged
-owned directory after confirmed process shutdown and successful assertions;
-failure evidence remains available.
+Build 39's native validation on 2026-10-08 passed **535 selected tests**, zero
+failures, in **361.278 seconds**, against **311 unchanged inputs**. All **26** selected
+streaming/child cleanup records verified removal. Its separate provider-adapter
+suite passed **361 tests/6,194 assertions**; the live-evidence collector passed
+**90 synthetic oracle tests**. These historical results do not qualify build 41.
+
+| Scripted provider | Scenario | Seconds | Inferences / matched outputs / approvals |
+| --- | --- | ---: | ---: |
+| ChatGPT | Editing, tests, Git push, localhost, TTY | 6.300 | 13 / 12 / 3 |
+| Gemini | Same workflow | 6.158 | 13 / 12 / 3 |
+| Claude | Same workflow | 5.881 | 13 / 12 / 3 |
+| ChatGPT | Declined command, no side effect | 1.666 | 2 / 1 / 1 |
+| ChatGPT | Stop cancels inference and reaps server | 2.806 | 2 / 1 / 1 |
+
+All five passed with owned fixture removal. Stop left command exit unconfirmed
+while independently verifying PID/socket closure before shutdown. Five extra
+build 37 Stop runs passed, with maximum physical retirement latency **98.275 ms**.
+
+Installed build 37 separately completed **Claude Sonnet 5.5** coding in **91.468 seconds**
+(**43/43** collector checks, nine tool calls/closures, **15/15** filesystem
+oracle), including native edits and a commit/push to its disposable bare remote.
+It did not run the broken baseline first. Its separate synthetic flight-board
+browser task completed in **102.777 seconds** (**37/37** checks, thirteen browser calls,
+fourteen transactions/closures), answering **18:37 EDT, gate B49** from fresh DOM.
+
+No installed ChatGPT coding/browser pass is established by this record.
+Builds 36–39 ChatGPT attempts stopped on guarded message verification; the latest
+build 39 attempt reported `text_mismatch` and cleanup remained unconfirmed.
+A Claude combined preview attempt stopped at its website usage limit before
+tools. The combined localhost preview remains pending. Synthetic flight data
+is not a real United booking; local Git pushes do not qualify external hosting
+authentication. Observed website selection is not an immutable backend revision,
+and guarded cleanup acknowledgments do not independently prove provider deletion.
+
+[Validation notes](HARNESS-VALIDATION-NOTES.md) preserve every historical result,
+failed attempt, prerequisite, source-fix detail, receipt reference and cleanup
+record moved from this page. They also explain why workspace V8/voice tests are
+separate from the shipped App Server and WebKit browser. The private receipt
+scripts are evidence, not additional reproduction tools shipped in this repo.

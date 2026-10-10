@@ -97,7 +97,7 @@ The project has moved beyond a static UI shell: it launches an isolated App Serv
 
 Computa is the product name used throughout this documentation, including reports about earlier versions. Historical filenames and compatibility identifiers retain their original spellings. The app, executable, Swift module, Xcode project/scheme, and source/test directories now use Computa. To preserve existing installations, the signing team and bundle identifier (`com.ahmedelamin.LocalCodex`), Application Support directory (`~/Library/Application Support/LocalCodex`), and saved preferences (`LocalCodex.defaultModelID`, `HeyDash.accessMode`, `HeyDash.rememberedChromeConnection`) are deliberately unchanged. No settings, conversations, or downloaded visual-grounding models are moved or reset.
 
-The internal `localCodex` WebKit bridge, `localcodex-app` resource scheme, `local_codex` App Server source identity, `MACTOPUS_*`, `LOCALCODEX_*` and `HEYDASH_*` environment variables, MLX `heydash_instance` protocol field, fingerprint domains, and benchmark schema/result identifiers also remain stable. The browser capture field `mactopusClickability` also remains a stable protocol name. The current source-pinned engine is `mactopus-5`, as recorded in `Runtime/codex-source.lock.json`. The Chrome bridge keeps its installed extension ID, `com.macndash.chrome_bridge` native host name, `macndashChromeBridgeV1` storage key, and existing Keychain and preferences identifiers so pairing survives the rename. Dated verification records and external experimental fixtures retain their original artifact names and hashes. These compatibility names are not current product branding. The repository is now `ahmed-wlb/computa`; existing clones can update their origin to `https://github.com/ahmed-wlb/computa.git`. The source and release installers target `~/Applications/Computa.app` and can migrate a compatible `~/Applications/Mactopus.app`. They refuse installation if both names exist or either app is running. The existing bundle must have the same bundle identity; it is backed up under `~/Applications/Computa Backups` with its original name, and rollback restores its original path. Saved Computa data stays in its existing location. The mounted Computa preview installer successfully exercised this migration on the existing Mac; clean-Mac validation remains separate.
+The internal `localCodex` WebKit bridge, `localcodex-app` resource scheme, `local_codex` App Server source identity, `MACTOPUS_*`, `LOCALCODEX_*` and `HEYDASH_*` environment variables, MLX `heydash_instance` protocol field, fingerprint domains, and benchmark schema/result identifiers also remain stable. The browser capture field `mactopusClickability` also remains a stable protocol name. The current source-pinned engine is `mactopus-6`, as recorded in `Runtime/codex-source.lock.json`. The Chrome bridge keeps its installed extension ID, `com.macndash.chrome_bridge` native host name, `macndashChromeBridgeV1` storage key, and existing Keychain and preferences identifiers so pairing survives the rename. Dated verification records and external experimental fixtures retain their original artifact names and hashes. These compatibility names are not current product branding. The repository is `ahmed-ela/computa`; existing clones can update their origin to `https://github.com/ahmed-ela/computa.git`. The source and release installers target `~/Applications/Computa.app` and can migrate a compatible `~/Applications/Mactopus.app`. They refuse installation if both names exist or either app is running. The existing bundle must have the same bundle identity; it is backed up under `~/Applications/Computa Backups` with its original name, and rollback restores its original path. Saved Computa data stays in its existing location. The mounted Computa preview installer successfully exercised this migration on the existing Mac; clean-Mac validation remains separate.
 
 ## Current architecture
 
@@ -129,8 +129,8 @@ New tasks default to `lmstudio-community/Qwen3.5-4B-MLX-4bit`. Settings can chan
 
 - model provider identifier: `lmstudio` (retained for saved-thread compatibility; the default endpoint is now owned MLX, not LM Studio);
 - workspace: the app-owned `~/Library/Application Support/LocalCodex/CodexHome/Workspace`;
-- sandbox: `workspace-write`;
-- approval policy: `on-request`;
+- sandbox: `workspace-write` in Ask every time, `danger-full-access` in Full access;
+- approval policy: `on-request` in Ask every time, `never` in Full access;
 - reasoning effort: `medium`;
 - declared context window: 4,096 tokens for 27B/35B (automatic compaction at 3,072), or 16,384 for 9B/4B (compaction at 12,288);
 - isolated App Server home: `~/Library/Application Support/LocalCodex/CodexHome`;
@@ -228,15 +228,20 @@ them fit. Diagnostic estimates are not displayed as measured ring occupancy.
 Access is deliberately simple and is changed only through a **native macOS
 menu**, not a web bridge action or model tool:
 
-- **Ask every time** (default): each protected action requires its own native
-  approval. Read-only inspection does not prompt.
-- **Full access**: native action-approval requests are approved automatically.
-  Tool validation, stale-target checks, sandbox rules, macOS permissions, and
-  external access controls are unchanged. This is not a grant of macOS permissions.
+- **Ask every time** (default): terminal/file commands use the workspace sandbox
+  with network access disabled. Commands allowed by that sandbox can run without
+  a prompt; protected commands and browser/computer actions require native approval.
+- **Full access**: terminal/file commands can write outside the workspace and use
+  the network without engine approval prompts. Native browser/computer action
+  requests are approved automatically. Tool validation, stale-target checks,
+  macOS permissions and external access controls still apply.
 
 The mode applies to all tasks and is remembered across app launches. A missing
-or invalid saved preference defaults to Ask every time. Switching back cannot
-undo an action already dispatched.
+or invalid saved preference defaults to Ask every time. Each new turn receives
+the selected execution policy, including turns in existing chats. Native action
+approval behavior changes immediately. Switching modes does not revoke an
+already-running command or undo a dispatched action; stop the active turn and
+its commands before starting a turn with reduced access.
 An automatic approval failure is shown as “Action paused” and is not retried in
 a loop; switch to Ask every time to review or decline it.
 
@@ -516,16 +521,22 @@ Native approval requests block both surfaces until resolved.
 
 Human pages can open pop-ups as visible tabs sharing the same sign-in profile.
 Website-closed pop-ups return to their surviving opener; the normal tab limit
-and navigation rules still apply. Model inference pages cannot open pop-ups.
+and navigation rules still apply. After an agent attempts approved input on a human page,
+pop-ups from that document stay blocked, including delayed callbacks after task
+cleanup. A reload or navigation restores human pop-ups once a new document
+commits; failed navigation and in-page navigation do not. Model inference pages cannot
+open pop-ups.
 Downloads, file pickers, camera/microphone requests, external-app schemes and
 JavaScript modal dialogs are declined. Providers can separately reject embedded
 browser sign-in, even when their pop-up opens correctly.
 
-General browsing in the pane remains human-operated. Qwen has no general embedded
-browser tools. Website-model inference uses separate owned tabs in this profile through
-the fixed website-model adapter described below; existing Chrome/native tools remain available.
-[Agent control is a deferred TODO](TODO.md#embedded-browser-agent-control-deferred).
-See [implementation and validation](docs/EMBEDDED-BROWSER.md).
+Fresh chats receive nine typed `browser_*` tools for bounded reading, navigation,
+forms and actions in this browser. Tool tabs share the signed-in profile and
+remain separate from website-model inference pages and the privileged chat UI.
+See the [built-in browser contract](docs/BUILT-IN-BROWSER-TOOLS.md) for supported
+surfaces and ownership rules, [implementation](docs/EMBEDDED-BROWSER.md), and
+[remaining qualification](TODO.md#embedded-browser-agent-control). Installed
+Qwen tasks and sustained concurrent human use still require separate qualification.
 
 ### Website models
 
@@ -535,13 +546,15 @@ extension for inference. Chrome connections remain available independently for
 ordinary browser tools.
 These website routes do not require provider API keys.
 
-Each native turn creates a new owned, inactive website chat. ChatGPT and Gemini
+Each inference creates a new owned, inactive website chat. ChatGPT and Gemini
 must confirm Temporary Chat mode, and Claude must confirm Incognito mode before
 sending; the app preserves the human sign-in tab.
-Tool-result iterations share the owned chat until the turn completes or is
-cancelled, when the app verifies temporary mode and closes that exact tab.
-Unverified cleanup retains the owned tab and reports a warning. Conversations
-and tool results remain in Computa's local transcript store.
+The app closes that exact chat and durably verifies cleanup before releasing
+the response or tool calls. Tool-result iterations use fresh website chats while
+retaining the native thread, turn, terminal sessions and browser-tool tabs.
+Unverified cleanup retains any surviving owned tab and reports a warning. Canonical
+conversation history and tool results remain local. See
+[website inference transactions](docs/WEBSITE-INFERENCE-TRANSACTIONS.md).
 
 The built-in website-model transport waits for WebKit navigation and DOM-change
 notifications, coalescing streaming changes over approximately 100 ms. Readiness,

@@ -973,6 +973,67 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(expand.clicks).toBe(1); noSend(f, picker, send);
       });
 
+      test('ASCII line breaks inside the captured prefix share the full-message whitespace policy through partial and final rendering', async () => {
+        for (const delayed of [false, true]) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          const rendered = prompt.replace('PRIVATE LONG', 'PRIVATE ' + '\n'.repeat(15) + 'LONG');
+          let clicked!: () => void; const click = new Promise<void>(resolve => { clicked = resolve; });
+          expand.onClick = () => { if (!delayed) f.userBody.text = rendered; clicked(); };
+          let settled = false;
+          const pending = f.run('inspect', expansionInput).then((result: any) => { settled = true; return result; });
+          await click; const deadline = f.world.__computaModelFirstExpansion.deadline;
+          if (delayed) {
+            f.userBody.text = rendered.slice(0, 20_000); notify(f); await Promise.resolve();
+            expect(settled).toBe(false); expect(f.world.__computaModelFirstProof).toBeUndefined();
+            f.userBody.text = rendered; notify(f);
+          }
+          const result = await pending;
+          expect(result.firstUserVerified).toBe(true);
+          expect(JSON.parse(result.firstUserDebugStructure)).toMatchObject({ expansionOutcome: 'expanded',
+            expansionTextAnalyzed: true, expansionClicked: true, expansionExactPrefixMatches: false,
+            expansionASCIIPrefixMatches: true, expansionASCIIPromptMatches: true, expansionFirstMismatchClass: 'none',
+            expansionUnicodeSpaceCount: 0, expansionFormatCount: 0 });
+          expect(f.world.__computaModelFirstExpansion.deadline).toBe(deadline);
+          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rendered));
+          expect(result.firstUserFingerprint).toBe([...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join(''));
+          expect(result.firstUserDebugStructure).not.toContain('PRIVATE'); expect(result.firstUserDebugStructure).not.toContain(firstMarker);
+          expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
+      test('prefix punctuation and Unicode whitespace or format changes fail with latched content-free diagnostics and no replay', async () => {
+        for (const [replacement, kind, spaces, formats] of [
+          ['!', 'punctuation', 0, 0], ['\u00a0', 'unicode_space', 1, 0], ['\u2028', 'unicode_space', 1, 0],
+          ['\u2029', 'unicode_space', 1, 0], ['\u200b', 'format', 0, 1], ['\ufeff', 'format', 0, 1],
+        ] as [string, string, number, number][]) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expand.onClick = () => { f.userBody.text = replacement === '!' ? prompt.replace('LONG', 'L!NG')
+            : prompt.replace('PRIVATE LONG', 'PRIVATE' + replacement + 'LONG'); };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          const diagnostic = JSON.parse(result.debugStructure);
+          expect(diagnostic).toMatchObject({ expansionOutcome: 'text_mismatch', expansionTextAnalyzed: true,
+            expansionClicked: true, expansionExactPrefixMatches: false, expansionASCIIPrefixMatches: false,
+            expansionASCIIPromptMatches: false, expansionFirstMismatchClass: kind,
+            expansionUnicodeSpaceCount: spaces, expansionFormatCount: formats,
+            expansionExpectedUnicodeSpaceCount: 0, expansionExpectedFormatCount: 0, expansionFirstMismatchOffset: replacement === '!' ? 9 : 7 });
+          const latched = { ...f.world.__computaModelFirstExpansion.textDiagnostic };
+          f.userBody.text = prompt;
+          rejected(await f.run('inspect', expansionInput));
+          expect(f.world.__computaModelFirstExpansion.textDiagnostic).toEqual(latched);
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
+      test('prefix normalization cannot authorize a display click after text changes during the model precheck', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed({ genericHeader: true });
+        const click = picker.trigger.onClick;
+        picker.trigger.onClick = () => { click(); f.userBody.text = prompt.replace('PRIVATE LONG', 'PRIVATE \nLONG'); };
+        const result = await f.run('inspect', expansionInput); rejected(result);
+        expect(JSON.parse(result.debugStructure)).toMatchObject({ expansionOutcome: 'text_mismatch', expansionClicked: false,
+          expansionTextAnalyzed: true, expansionASCIIPrefixMatches: true, expansionASCIIPromptMatches: true });
+        expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(0); noSend(f, picker, send);
+      });
+
       test('normalized completion waits for its one actual mutation and retains the same bounded event budget', async () => {
         const { f, picker, expand, send, prompt } = await collapsed();
         const suffix = '\nUse schema\n\n' + markerLine;
@@ -1544,7 +1605,11 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           'bodyTextContentMarkerOccurrences', 'rootRenderedMarkerOccurrences', 'rootTextContentMarkerOccurrences',
           'bodyTextContentMarkerFinalLine', 'rootRenderedMarkerFinalLine', 'rootTextContentMarkerFinalLine',
           'renderedPrefixOfFirstPrompt', 'scopedExpandControlCount', 'expansionOutcome', 'expansionContextFailure',
-          'productProofFailure', 'productMutationRelevantCount', 'productMutationIgnoredCount']);
+          'productProofFailure', 'productMutationRelevantCount', 'productMutationIgnoredCount',
+          'expansionTextAnalyzed', 'expansionClicked', 'expansionExactPrefixMatches', 'expansionASCIIPrefixMatches',
+          'expansionASCIIPromptMatches', 'expansionASCIIRenderedLength', 'expansionASCIIPrefixLength', 'expansionASCIIPromptLength',
+          'expansionUnicodeSpaceCount', 'expansionExpectedUnicodeSpaceCount', 'expansionFormatCount', 'expansionExpectedFormatCount',
+          'expansionFirstMismatchClass', 'expansionFirstMismatchOffset']);
         expect(Object.keys(JSON.parse(result.debugStructure)).every(key => allowed.has(key))).toBe(true);
       });
 

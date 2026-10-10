@@ -72,6 +72,12 @@ final class EmbeddedBrowserSession {
         init(_ view: NSView) { self.view = view }
     }
 
+    private struct ToolMutationPopupContext {
+        let operationID = UUID()
+        let documentID: UUID
+        var rejected = false
+    }
+
     @MainActor private final class Entry {
         let tab: EmbeddedBrowserTab
         let view: WKWebView
@@ -91,6 +97,10 @@ final class EmbeddedBrowserSession {
         // checkpoint observations advance only for a committed document.
         var humanCommittedDocumentID = UUID()
         var humanCommittedNavigation: WKNavigation?
+        // The callback that requests a popup carries no public tool-origin
+        // token. Retain the guard until a replacement document commits so
+        // delayed page callbacks cannot become human-owned after tool cleanup.
+        var toolPopupContext: ToolMutationPopupContext?
         // Ephemeral deduplication only; neither URL nor document identity is persisted.
         var humanCheckpointDocumentID: UUID?
         var humanCheckpointURL: URL?
@@ -239,6 +249,12 @@ final class EmbeddedBrowserSession {
         do {
             guard !opener.isModelOwned else { throw Failure.modelPopupUnsupported }
             guard !opener.isToolOwned else { throw Failure.toolPopupUnsupported }
+            if opener.toolPopupContext?.documentID == opener.humanCommittedDocumentID {
+                opener.toolPopupContext?.rejected = true
+                // A rejected task popup must not poison the borrowed human
+                // document's error state or prevent a subsequent read.
+                return nil
+            }
             // window.open('', name) supplies an empty relative URL rather than
             // nil/about:blank. WebKit owns that initial blank document.
             if let url, !url.absoluteString.isEmpty { try EmbeddedBrowserURLPolicy.validate(url) }
@@ -340,6 +356,24 @@ final class EmbeddedBrowserSession {
     }
 
     func webView(for id: UUID) -> WKWebView? { entries[id]?.view }
+
+    /// Called only inside the one-use mutation permit's successful enqueue.
+    /// A provisional/failed load or Stop does not replace the retained document.
+    func prepareToolMutation(tabID: UUID, generation: UUID) throws -> UUID {
+        let entry = try entry(tabID)
+        guard !entry.isModelOwned, entry.tab.documentGeneration == generation else {
+            throw BrowserTabBrokerError.staleDocument
+        }
+        let context = ToolMutationPopupContext(documentID: entry.humanCommittedDocumentID)
+        entry.toolPopupContext = context
+        return context.operationID
+    }
+
+    func toolPopupWasRejected(tabID: UUID, operationID: UUID) -> Bool {
+        guard let entry = entries[tabID], let context = entry.toolPopupContext,
+              context.operationID == operationID, context.documentID == entry.humanCommittedDocumentID else { return false }
+        return context.rejected
+    }
 
     func captureModelNativeFocus(tabID: UUID) {
         (entries[tabID]?.view as? EmbeddedModelWebView)?.captureNativeFocus()
@@ -613,6 +647,7 @@ final class EmbeddedBrowserSession {
         if !entry.isModelOwned, let navigation, entry.humanCommittedNavigation !== navigation {
             entry.humanCommittedNavigation = navigation
             entry.humanCommittedDocumentID = UUID()
+            entry.toolPopupContext = nil
         }
         refresh(tabID, view: view, committedNavigation: true)
     }

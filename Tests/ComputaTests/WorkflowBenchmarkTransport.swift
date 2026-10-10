@@ -260,7 +260,7 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
     private func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 }
 
-private enum ExpectedCall {
+enum ExpectedCall {
     case function(name: String, arguments: [String: Any])
     case patch(name: String, input: String)
 }
@@ -275,7 +275,7 @@ struct ObservedToolResult: Sendable {
     let output: String
 }
 
-private struct InferenceRequest {
+struct InferenceRequest {
     let prepared: WebModelResponseCodec.Request
     let input: [[String: Any]]
     init(params: Data) throws {

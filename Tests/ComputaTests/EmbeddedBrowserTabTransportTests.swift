@@ -25,40 +25,78 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
     };</script></main></body></html>
     """
 
+    private let popupFixture = """
+    <!doctype html><html><body>
+    <button id="sync">Open synchronous popup</button>
+    <button id="deferred">Defer popup</button><p id="result">No popup requested</p>
+    <script>
+    document.getElementById('sync').onclick=()=>{
+      window.syncClicks=(window.syncClicks||0)+1;
+      window.syncPopupBlocked=!window.open('about:blank','tool-sync-popup');
+      document.getElementById('result').textContent=window.syncPopupBlocked?'Synchronous popup blocked':'Synchronous popup opened';
+    };
+    document.getElementById('deferred').onclick=()=>{
+      new Promise(resolve=>window.releasePopup=resolve).then(()=>{
+        window.deferredPopupBlocked=!window.open('about:blank','tool-deferred-popup');
+        document.getElementById('result').textContent=window.deferredPopupBlocked?'Deferred popup blocked':'Deferred popup opened';
+      });
+      document.getElementById('result').textContent='Deferred popup scheduled';
+    };
+    </script></body></html>
+    """
+
     func testRealWebKitReadsFillsPressesAndWaitsForVisibleFlightResult() async throws {
-        let session=EmbeddedBrowserSession(persistent:false), transport=EmbeddedBrowserTabTransport(session:session)
-        defer { session.shutdown() }
-        let id=try session.createTab(), view=try XCTUnwrap(session.webView(for:id))
-        view.frame=NSRect(x:0,y:0,width:1024,height:768)
-        view.loadHTMLString(fixture,baseURL:URL(string:"http://localhost:8123/flight"))
-        try await session.waitForHumanTabReady(id:id,until:.now + .seconds(10))
-        let available=try await transport.target(id:id.uuidString)
-        let target=try XCTUnwrap(available)
-        let observed=try await transport.observe(target:target)
-        XCTAssertEqual(observed.sourceName,"computa_webkit_dom")
-        XCTAssertFalse(observed.nodes.contains { $0.name.contains("HIDDEN_PRIVATE_SENTINEL") || ($0.value ?? "").contains("PASSWORD_PRIVATE_SENTINEL") })
-        XCTAssertFalse(observed.nodes.contains { $0.name.contains("ROLE_PASSWORD_PRIVATE_SENTINEL") || ($0.value ?? "").contains("ROLE_PASSWORD_PRIVATE_SENTINEL") })
-        XCTAssertFalse(observed.nodes.contains { ($0.value ?? "").contains("INERT_PRIVATE_SENTINEL") })
-        for name in ["Fake field","Fake div","Read only"] {
-            let node=try XCTUnwrap(observed.nodes.first { $0.name==name })
-            XCTAssertTrue(node.isReadOnly)
-            XCTAssertFalse(node.isEditable)
+        for iteration in 0..<10 {
+            let session=EmbeddedBrowserSession(persistent:false), transport=EmbeddedBrowserTabTransport(session:session)
+            defer { session.shutdown() }
+            let id=try session.createTab(), view=try XCTUnwrap(session.webView(for:id))
+            view.frame=NSRect(x:0,y:0,width:1024,height:768)
+            view.loadHTMLString(fixture,baseURL:URL(string:"http://localhost:8123/flight"))
+            var phase = "navigation"
+            do {
+                try await session.waitForHumanTabReady(id:id,until:.now + .seconds(10))
+                phase = "target"
+                let available=try await transport.target(id:id.uuidString)
+                let target=try XCTUnwrap(available)
+                phase = "observation"
+                let observed=try await transport.observe(target:target)
+                XCTAssertEqual(observed.sourceName,"computa_webkit_dom")
+                XCTAssertFalse(observed.nodes.contains { $0.name.contains("HIDDEN_PRIVATE_SENTINEL") || ($0.value ?? "").contains("PASSWORD_PRIVATE_SENTINEL") })
+                XCTAssertFalse(observed.nodes.contains { $0.name.contains("ROLE_PASSWORD_PRIVATE_SENTINEL") || ($0.value ?? "").contains("ROLE_PASSWORD_PRIVATE_SENTINEL") })
+                XCTAssertFalse(observed.nodes.contains { ($0.value ?? "").contains("INERT_PRIVATE_SENTINEL") })
+                for name in ["Fake field","Fake div","Read only"] {
+                    let node=try XCTUnwrap(observed.nodes.first { $0.name==name })
+                    XCTAssertTrue(node.isReadOnly)
+                    XCTAssertFalse(node.isEditable)
+                }
+                XCTAssertTrue(observed.sourceTruncated,"An oversized custom role is explicitly omitted from complete semantic coverage")
+                let field=try XCTUnwrap(observed.nodes.first { $0.role=="textbox" && $0.name=="Flight number" })
+                phase = "fill"
+                try await transport.setText(target:target,backendNodeID:XCTUnwrap(field.backendNodeID),text:"UA 123",document:observed,permit:BrowserMutationPermit())
+                phase = "filled_observation"
+                let afterFill=try await transport.observe(target:target)
+                XCTAssertEqual(afterFill.nodes.first { $0.backendNodeID==field.backendNodeID }?.value,"UA 123")
+                let check=try XCTUnwrap(afterFill.nodes.first { $0.role=="button" && $0.name=="Check flight" })
+                phase = "press"
+                try await transport.press(target:target,backendNodeID:XCTUnwrap(check.backendNodeID),document:afterFill,permit:BrowserMutationPermit())
+                phase = "result_wait"
+                let matched=try await transport.wait(target:target,text:"UA 123 departs at 18:45",timeoutMS:2_000)
+                XCTAssertTrue(matched)
+                phase = "result_observation"
+                let result=try await transport.observe(target:target)
+                XCTAssertTrue(result.nodes.contains { $0.name=="UA 123 departs at 18:45" })
+                phase = "click_oracle"
+                let clicks=try await script(view,"return window.clicks;")
+                XCTAssertEqual(clicks,Data("1".utf8))
+                phase = "missing_result_wait"
+                let missing=try await transport.wait(target:target,text:"Does not exist",timeoutMS:20)
+                XCTAssertFalse(missing)
+            } catch {
+                let diagnostic = error as NSError
+                print("embeddedFlightFixtureFailure iteration=\(iteration) phase=\(phase) domain=\(diagnostic.domain) code=\(diagnostic.code) detail=\(String(describing: error).prefix(512))")
+                throw error
         }
-        XCTAssertTrue(observed.sourceTruncated,"An oversized custom role is explicitly omitted from complete semantic coverage")
-        let field=try XCTUnwrap(observed.nodes.first { $0.role=="textbox" && $0.name=="Flight number" })
-        try await transport.setText(target:target,backendNodeID:XCTUnwrap(field.backendNodeID),text:"UA 123",document:observed,permit:BrowserMutationPermit())
-        let afterFill=try await transport.observe(target:target)
-        XCTAssertEqual(afterFill.nodes.first { $0.backendNodeID==field.backendNodeID }?.value,"UA 123")
-        let check=try XCTUnwrap(afterFill.nodes.first { $0.role=="button" && $0.name=="Check flight" })
-        try await transport.press(target:target,backendNodeID:XCTUnwrap(check.backendNodeID),document:afterFill,permit:BrowserMutationPermit())
-        let matched=try await transport.wait(target:target,text:"UA 123 departs at 18:45",timeoutMS:2_000)
-        XCTAssertTrue(matched)
-        let result=try await transport.observe(target:target)
-        XCTAssertTrue(result.nodes.contains { $0.name=="UA 123 departs at 18:45" })
-        let clicks=try await script(view,"return window.clicks;")
-        XCTAssertEqual(clicks,Data("1".utf8))
-        let missing=try await transport.wait(target:target,text:"Does not exist",timeoutMS:20)
-        XCTAssertFalse(missing)
+        }
     }
 
     func testUnicodeRoleOverByteLimitPreservesBoundedUsableObservation() async throws {
@@ -140,6 +178,137 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let humanTarget=try XCTUnwrap(existingTarget)
         do { try await transport.closeTarget(target:humanTarget); XCTFail("Driver cannot close an existing human tab") } catch { XCTAssertEqual(error as? BrowserTabBrokerError,.ownershipMismatch) }
         XCTAssertNotNil(session.humanTab(id:human))
+    }
+
+    func testBorrowedToolMutationRejectsSynchronousAndPostCleanupDeferredPopupsWithoutSelectingOrphans() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false), selected = try session.createTab()
+        let view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString(popupFixture, baseURL: URL(string: "http://localhost:8123/tool-popup"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString)
+        let target = try XCTUnwrap(available)
+        let observation = try await transport.observe(target: target)
+        let button = try XCTUnwrap(observation.nodes.first { $0.name == "Open synchronous popup" })
+        do {
+            try await transport.press(target: target, backendNodeID: XCTUnwrap(button.backendNodeID),
+                                      document: observation, permit: BrowserMutationPermit())
+            XCTFail("A synchronously rejected popup must produce the native no-replay diagnostic")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("pop-up was blocked"))
+            XCTAssertTrue(error.localizedDescription.contains("No replay is allowed"))
+        }
+        let synchronous = try await script(view, "return window.syncPopupBlocked;")
+        XCTAssertEqual(synchronous, Data("true".utf8))
+        XCTAssertEqual(session.tabs.map(\.id), [id, selected])
+        XCTAssertEqual(session.selectedTabID, selected)
+        XCTAssertNil(session.humanTab(id: id)?.error)
+
+        let fresh = try await transport.observe(target: target)
+        let deferred = try XCTUnwrap(fresh.nodes.first { $0.name == "Defer popup" })
+        let permit = BrowserMutationPermit()
+        try await transport.press(target: target, backendNodeID: XCTUnwrap(deferred.backendNodeID),
+                                  document: fresh, permit: permit)
+        permit.revoke()
+        let cleanup = await transport.closeOwnedTargets()
+        XCTAssertTrue(cleanup.isEmpty)
+        session.stop(tabID: id)
+        // Release the page callback only after the action, permit retirement,
+        // cleanup and Stop. No timer race can make this an already-open child.
+        _ = try await script(view, "window.releasePopup(); return true;")
+        let matched = try await transport.wait(target: target, text: "Deferred popup blocked", timeoutMS: 2_000)
+        XCTAssertTrue(matched)
+        let late = try await script(view, "return window.deferredPopupBlocked;")
+        XCTAssertEqual(late, Data("true".utf8))
+        XCTAssertEqual(session.tabs.map(\.id), [id, selected])
+        XCTAssertEqual(session.selectedTabID, selected)
+        XCTAssertNil(session.humanTab(id: id)?.error)
+        let after = try await transport.observe(target: target)
+        XCTAssertTrue(after.nodes.contains { $0.name == "Deferred popup blocked" })
+    }
+
+    func testRevokedToolPermitPreservesAsyncHumanPopupPolicyAndSharedProfile() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString(popupFixture, baseURL: URL(string: "http://localhost:8123/denied-popup"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString)
+        let target = try XCTUnwrap(available)
+        let observation = try await transport.observe(target: target)
+        let button = try XCTUnwrap(observation.nodes.first { $0.name == "Open synchronous popup" })
+        let permit = BrowserMutationPermit()
+        permit.revoke()
+        do {
+            try await transport.press(target: target, backendNodeID: XCTUnwrap(button.backendNodeID),
+                                      document: observation, permit: permit)
+            XCTFail("A denied permit must not dispatch the button or change the document popup policy")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let clicks = try await script(view, "return window.syncClicks || 0;")
+        XCTAssertEqual(clicks, Data("0".utf8))
+        try await assertAsyncHumanPopup(session: session, transport: transport, target: target, opener: view)
+    }
+
+    func testCommittedReplacementDocumentRestoresAsyncHumanPopupPolicy() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString(popupFixture, baseURL: URL(string: "http://localhost:8123/old-popup-document"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString)
+        let target = try XCTUnwrap(available)
+        let observation = try await transport.observe(target: target)
+        let button = try XCTUnwrap(observation.nodes.first { $0.name == "Open synchronous popup" })
+        do {
+            try await transport.press(target: target, backendNodeID: XCTUnwrap(button.backendNodeID),
+                                      document: observation, permit: BrowserMutationPermit())
+            XCTFail("The original document's tool popup must be rejected")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("pop-up was blocked")) }
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        let deadline = ContinuousClock.now + .seconds(10)
+        view.loadHTMLString(popupFixture, baseURL: URL(string: "http://localhost:8123/replacement-popup-document"))
+        // An existing tab is ready until WebKit starts this load. Observe that
+        // transition before using its ordinary committed-load readiness gate.
+        while session.documentGeneration(for: id) == generation, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try await session.waitForHumanTabReady(id: id, until: deadline)
+        XCTAssertNotEqual(session.documentGeneration(for: id), generation)
+        try await assertAsyncHumanPopup(session: session, transport: transport, target: target, opener: view)
+    }
+
+    private func assertAsyncHumanPopup(session: EmbeddedBrowserSession, transport: EmbeddedBrowserTabTransport,
+                                      target: BrowserTarget, opener: WKWebView) async throws {
+        _ = try await script(opener, """
+        setTimeout(()=>{
+          window.humanPopup=window.open('about:blank','human-oauth-popup');
+          document.getElementById('result').textContent=window.humanPopup?'Human popup ready':'Human popup blocked';
+        },0);
+        return true;
+        """)
+        let matched = try await transport.wait(target: target, text: "Human popup ready", timeoutMS: 2_000)
+        XCTAssertTrue(matched)
+        let child = try XCTUnwrap(session.tabs.first { $0.id.uuidString != target.targetID })
+        let childView = try XCTUnwrap(session.webView(for: child.id))
+        XCTAssertTrue(child.isPopup)
+        XCTAssertEqual(session.tabs.count, 2)
+        XCTAssertEqual(session.selectedTabID, child.id)
+        XCTAssertTrue(childView.configuration.websiteDataStore === opener.configuration.websiteDataStore)
+        let usable = try await script(opener, "return !!window.humanPopup && !window.humanPopup.closed && window.humanPopup.opener === window;")
+        XCTAssertEqual(usable, Data("true".utf8))
+        session.closeTab(child.id)
+        XCTAssertEqual(session.tabs.count, 1)
+        XCTAssertEqual(session.selectedTabID?.uuidString, target.targetID)
+        let openerID = try XCTUnwrap(UUID(uuidString: target.targetID))
+        XCTAssertTrue(session.webView(for: openerID) === opener)
+        XCTAssertNil(session.humanTab(id: openerID)?.error)
     }
 
     func testTaskOwnedRenderSurfaceReattachesAfterHumanPresentation() throws {
