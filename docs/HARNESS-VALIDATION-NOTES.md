@@ -2977,3 +2977,38 @@ opt-in skips in 527.297 seconds. All required cohorts, permission boundaries,
 workflow/patch matrices and source/resource/engine/cleanup guards passed.
 Receipt SHA `f6ea7e75a957080fd3a46608c1c0480242f018707236aacfea129ba69bee9440`. This experiment does not yet prove the live failure's
 cause or qualify a provider.
+
+
+## Build 42 signed installation and ChatGPT qualification
+
+The first packaging invocation stopped in preflight because an incorrect full
+source commit ID was supplied; no build or installer ran. The fresh invocation
+bound Git's exact `293e86d89a6d3f814c6aa5abdfecca4eef9a4f4c`, passed signed
+packaging/resource checks and installed 0.6.0 (42), preserving build 41 as a
+rollback. Installed verification passed 98 checks, receipt SHA
+`2467c8b20419dc545eef10a16e8c0a476cfc9ac6450bd966d47548603040ed22`.
+An initial capture helper incorrectly expected 424 inputs after a build-number
+substitution; it failed before any prompt. The corrected helper retained the
+414-input guard and passed with a fresh capture receipt, SHA
+`d49b4e0377d1cf00108a6536ff7bd170a03b16e286f59e4ff4506cf8acb6001a`.
+These helper failures did not change the validated application or engine.
+
+One fresh ChatGPT GPT-6 task completed in 23 seconds. Its exact natural request
+produced a real `exec_command` read, a matching output and the expected marker.
+Both website inferences completed with normal Chat product/selected GPT-6
+proof and durable closed leases before tool/final release. The first collector
+passed 37 of 38 checks: its natural-prompt comparison incorrectly concatenated
+the app's separate background-interaction policy with the user request. The
+corrected check accepts only the exact prepared request and exact policy tied
+to the frozen runtime source. Six wrong-content/source controls were rejected.
+No model prompt or tool call was replayed during correction or collection.
+
+Sealed copies of the terminal rollout and journals produced a verified
+39-check qualification receipt, SHA
+`dc63943fa9150193e5a0a03ccdebc6c95993fe7d2da797258272dec91f507960`.
+The dependent-workflow qualifier accepted that receipt without creating another
+fixture or contacting a model. This is one build/provider/model qualification;
+backend model version remains unknown. Four workflows per provider, the two
+other provider qualifications, installed diff UI and the fresh same-model
+comparison remain pending. The failed build 41 case and its unconfirmed cleanup
+remain retained separately.

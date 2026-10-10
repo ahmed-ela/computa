@@ -36,8 +36,8 @@ escapes and describes the response fence without literal backticks. Parsed
 request values, tool grammar, custom patch text and ownership checks remain
 unchanged. A regression reproduces an 18-character Markdown delimiter loss and
 rejects it; the escaped request passes the same strict check and still rejects
-changed content. This is an offline experiment until a fresh installed run
-confirms the cause. Focused validation passed 69 Swift and 365 adapter tests.
+changed content. A fresh installed ChatGPT GPT-6 marker-read task now passes. The encoding
+change resolves this controlled case; broader provider workflows remain pending. Focused validation passed 69 Swift and 365 adapter tests.
 The seven public groups then passed 623 tests without failures or skips;
 complete native validation passed 2,263 tests with zero failures and 49 opt-in
 skips in 527.297 seconds.
@@ -47,10 +47,10 @@ skips in 527.297 seconds.
 | Upstream runtime | Source19/20 observations cover 19,035 runnable identities: 19,032 passed and three standalone TUI cases failed. Optional guard exits do not prove skipped assertions. Source21 compiled all 275 debug test binaries and passed scoped lint and formatting. This is not a green complete upstream workspace result. |
 | Engine package | Source21 release packaging passed. The signed arm64 App Server, source pin, patch and manifest match runtime mactopus-6. Build 42 reuses these unchanged artifacts. |
 | App validation | Build 41 passed all required native cohorts, permission checks, workflow and patch matrices, Git deadline regressions and cleanup guards. Build 42 passed 2,263 native tests and 623 public tests with zero failures; 49 native opt-in tests were skipped. |
-| Installed provider tasks | Build 41's first ChatGPT qualification failed with unconfirmed cleanup. Fresh build 42 qualification plus coding/Git, browser, localhost and interactive-terminal cases remain pending for ChatGPT, Claude and Gemini. |
+| Installed provider tasks | Build 42 ChatGPT GPT-6 qualification passed: one real file-read call, the exact marker response and two closed inference leases, with 39 verified checks. Claude/Gemini qualification and four workflow cases per provider remain pending: 14 of 15 planned live cases. Build 41's failure remains retained separately. |
 | Installed diff UI | Scope selection, split/unified views, hunk staging/unstaging/reverting and stale-state rejection still require installed-app checks. |
 | Model comparison | The earlier six build 39/Codex trials failed the complete task. Computa goal mode was N/A. A fresh comparison using the same actual model is pending. |
-| Delivery | Build 42 signed installation, live qualification, fixture/process cleanup, documentation and PR push remain pending. The temporarily moved local model is restored; eight obsolete app backups were verified in archives before retirement. |
+| Delivery | Build 42 is signed, installed and pushed to the draft PR. Installed verification passed 98 checks and the loaded process/runtime generation was captured. Remaining live/UI/comparison evidence and final cleanup/documentation are pending. The local model is restored; eight obsolete backups were verified in archives before retirement. |
 
 Detailed historical failures, corrections, receipts and source attribution remain
 in the [validation ledger](HARNESS-VALIDATION-NOTES.md).
