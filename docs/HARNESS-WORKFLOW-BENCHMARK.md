@@ -85,9 +85,12 @@ in 545.894 seconds. All required cohorts, scripted workflow/patch matrices,
 permission checks, 26 unique cleanup identities and source/resource/engine
 guards passed. The independent Git deadline gate verified the three regression
 passes from this same full run. Installed qualification remains pending.
-Storage was recovered from disposable old app copies, and the local
-MLX model was temporarily moved without changing its bytes; that storage change
-must be restored before delivery.
+Eight obsolete installed backups were preserved in verified archives before
+retirement. The temporarily relocated local MLX model has been restored and
+verified at its original internal path; the duplicate and temporary alias are
+removed. The first signed Release build passed, but exact resource validation
+rejected a repository `.gitignore` copied into AgentRuntime. Its ignore rules
+now live at the repository root; a fresh package must pass the same exact gate.
 
 The affected Git review/process suites passed all **62 tests**, including three
 new regressions for inherited output pipes, backpressured input and continuous
