@@ -18,97 +18,42 @@ A separate [local-model goal comparison](GOAL-MODE-BENCHMARK.md) records six
 build 39/Codex trials, their failures and limits; it does not qualify build 41.
 All six official trials failed the complete task; Computa goal mode was N/A.
 
-## Current candidate: 0.6.0 (41)
+## Current candidate: 0.6.0 (42)
 
-Build 41 is **not yet qualified, installed or pushed**. The installed app remains
-build 39 with runtime `mactopus-5`, and is quit.
+Build 41 passed 2,261 native tests and 622 public tests with zero failures;
+49 native opt-in tests were explicitly skipped. Its signed package and installed
+bundle passed exact resource, signature and source checks, and the new running
+process was recorded. This did not qualify live website behavior.
 
-The corrected Source19 engine compiled all **275 test binaries**. Fresh discovery
-covers **19,035 runnable tests and 56 declared exclusions**. Its full App Server
-follow-up passed all **1,705 tests**, with unchanged source, runtime inputs,
-binaries and protected processes. The original startup failures and diagnostic
-follow-up remain separate evidence; this passing run establishes no general
-cold-start or signing guarantee.
+The first installed ChatGPT GPT-6 qualification failed before any native tool
+call: the expanded first user message differed from the submitted prompt by
+18 characters after ASCII whitespace normalization. One inference was sent;
+its website cleanup remains unconfirmed. The failure and original evidence are
+retained, and the prompt was not replayed.
 
-Eight disjoint smaller-package batches cover another **7,618 tests**. The first
-five passed **953, 953, 952, 952 and 951 tests**, with preservation and fixture
-cleanup checks. The second batch required a separate re-audit after a checker
-rejected a valid Nextest header; its original validation failure remains
-recorded. The sixth batch's original timeout remains preserved; its full
-953-case follow-up passed with preservation and cleanup checks. The final two
-package batches each passed all 952 cases and completed cleanup.
-Core recorded 4,434 first-pass outcomes with unchanged source and runtime
-inputs and completed fixture cleanup. Its attributed output includes 24
-remote-only and 13 optional execve-wrapper guard exits; those are not assertion
-proof for those features. Twenty selected coding/terminal cases had first PASS
-results and no observed guard exit. CLI passed all 458 cases and completed
-cleanup. Source20 corrects five TUI test fixtures without changing production
-code or golden snapshots: version normalization now preserves validated header
-padding, and the update-card fixture accepts its wrapped Windows command.
-The ordinary graph compiled all 275 binaries; the five mapped runtime helpers
-have identical bytes to Source19. A complete 4,820-case TUI run then recorded
-4,817 PASS, three failures and seven exclusions, with unchanged source, runtime
-inputs, binary metadata and protected processes. All five corrected cases passed.
-The remaining failures are the terminal pet renderer's inline-payload assertion
-and two PTY startup cases with empty screens. The two startup cases had passed
-an earlier isolated diagnostic; their full-package failures remain recorded.
-This is not a green upstream workspace result. Computa's app-server and installed
-workflow qualification is separate from the standalone terminal UI.
-The original Source19 negative run and generated snapshots remain preserved.
-Final lint produced five reviewed source changes. Source21 makes debug-only
-imports and loader mutation explicit so release lint cannot remove declarations
-needed by debug builds. Prior Source19 and Source20 tests retain their original
-attribution. Source21 compiled all 275 debug test binaries and passed the final
-scoped lint and formatting checks with unchanged source. These phases executed
-no further tests. Release packaging passed and its current artifact freeze binds
-runtime `mactopus-6`, the source pin, patch, manifest and signed arm64 executable.
-All seven public checks passed: 123 frontend tests, 106 MLX tests with one skip,
-364 provider-adapter tests, three instruction tests and 21 identity/version tests,
-plus frontend type-checking and build. The selected native run finished with
-three failures across 652 tests and one skip. The permission fixture required
-a lifecycle item even when the native sandbox returned a denied command's
-output directly, its cleanup rejected an already absent root, and the website
-routing fixture used non-UUID identities. The corrected three-case diagnostic
-passed. A supplemental real-tokenizer check caught a stale single-event SSE
-parser; all four pinned MLX checks now pass without an asset-path override.
-The fresh shared run subsequently passed 622 tests with no skips. Complete Swift
-validation then ran 2,310 tests: 2,252 passed, 49 opt-in checks skipped and nine
-cases failed, producing 28 failure reports. Eight older website-evidence cases
-lacked the current durable turn/lease setup and journal contract. Their fixtures
-now verify schema-2 journals, fresh sessions, bounded failures and rejected
-journal admission. The WebKit failure was traced to a rounded-down inner timer
-firing before a short wait's caller deadline; the host timer now uses that same
-absolute deadline. All 68 focused checks passed, including ten complete real
-WebKit flight workflows. Fresh public final3 passed all 622 tests with no skips.
-Complete native final3 passed 2,261 tests with zero failures and 49 opt-in skips
-in 545.894 seconds. All required cohorts, scripted workflow/patch matrices,
-permission checks, 26 unique cleanup identities and source/resource/engine
-guards passed. The independent Git deadline gate verified the three regression
-passes from this same full run. Installed qualification remains pending.
-Eight obsolete installed backups were preserved in verified archives before
-retirement. The temporarily relocated local MLX model has been restored and
-verified at its original internal path; the duplicate and temporary alias are
-removed. The first signed Release build passed, but exact resource validation
-rejected a repository `.gitignore` copied into AgentRuntime. Its ignore rules
-now live at the repository root; a fresh package must pass the same exact gate.
-
-The affected Git review/process suites passed all **62 tests**, including three
-new regressions for inherited output pipes, backpressured input and continuous
-output. Packaging and complete native validation passed; installed provider
-benchmarks remain pending. Historical attempts, fixture corrections and cleanup receipts
-are recorded in the [validation ledger](HARNESS-VALIDATION-NOTES.md).
+Build 42 encodes literal backticks inside the complete request JSON as Unicode
+escapes and describes the response fence without literal backticks. Parsed
+request values, tool grammar, custom patch text and ownership checks remain
+unchanged. A regression reproduces an 18-character Markdown delimiter loss and
+rejects it; the escaped request passes the same strict check and still rejects
+changed content. This is an offline experiment until a fresh installed run
+confirms the cause. Focused validation passed 69 Swift and 365 adapter tests.
+The seven public groups then passed 623 tests without failures or skips;
+complete native validation passed 2,263 tests with zero failures and 49 opt-in
+skips in 527.297 seconds.
 
 | Check | Current evidence and remaining work |
 | --- | --- |
-| Full upstream workspace | Source19 discovery covers 19,035 runnable identities. App Server, core, CLI and all eight smaller-package batches have 14,215 first-pass outcomes under Source19. Source20 changes four TUI test files only; its complete TUI run recorded 4,817 PASS and three failures, so the upstream workspace is not fully green. Inherited guard exits do not prove their skipped assertions. Earlier failed runs and diagnostics retain their original source attribution. |
-| Engine package | Source21 release packaging passed with unchanged bound inputs. Runtime mactopus-6 is a signed arm64 executable; the pin, patch, manifest and executable match the current engine artifact freeze. |
-| Computa native validation | Fresh final3 passed 2,261 tests with zero failures and 49 opt-in skips. All nine required cohorts, permission checks, exact workflow/patch matrices, cleanup and source/resource/engine guards passed. The independent Git deadline gate verified all three regressions. Earlier selected/full failures remain preserved separately. This does not qualify live provider behavior. |
-| Installed provider tasks | Fresh concrete-model qualification and coding, interactive terminal, Git, localhost and browser tasks are pending for ChatGPT, Claude and Gemini. Scripted inference is separate evidence. |
-| Delivery | Signed install/resource parity, owned-fixture cleanup, commit and PR push are pending. |
+| Upstream runtime | Source19/20 observations cover 19,035 runnable identities: 19,032 passed and three standalone TUI cases failed. Optional guard exits do not prove skipped assertions. Source21 compiled all 275 debug test binaries and passed scoped lint and formatting. This is not a green complete upstream workspace result. |
+| Engine package | Source21 release packaging passed. The signed arm64 App Server, source pin, patch and manifest match runtime mactopus-6. Build 42 reuses these unchanged artifacts. |
+| App validation | Build 41 passed all required native cohorts, permission checks, workflow and patch matrices, Git deadline regressions and cleanup guards. Build 42 passed 2,263 native tests and 623 public tests with zero failures; 49 native opt-in tests were skipped. |
+| Installed provider tasks | Build 41's first ChatGPT qualification failed with unconfirmed cleanup. Fresh build 42 qualification plus coding/Git, browser, localhost and interactive-terminal cases remain pending for ChatGPT, Claude and Gemini. |
+| Installed diff UI | Scope selection, split/unified views, hunk staging/unstaging/reverting and stale-state rejection still require installed-app checks. |
+| Model comparison | The earlier six build 39/Codex trials failed the complete task. Computa goal mode was N/A. A fresh comparison using the same actual model is pending. |
+| Delivery | Build 42 signed installation, live qualification, fixture/process cleanup, documentation and PR push remain pending. The temporarily moved local model is restored; eight obsolete app backups were verified in archives before retirement. |
 
-Historical engine attempts, failed runs, fixture corrections and cleanup records
-are preserved in the [validation ledger](HARNESS-VALIDATION-NOTES.md). They do
-not qualify the current candidate.
+Detailed historical failures, corrections, receipts and source attribution remain
+in the [validation ledger](HARNESS-VALIDATION-NOTES.md).
 
 ## Reusable boundaries
 

@@ -946,6 +946,33 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(expand.clicks).toBe(1); expect(f.scheduledDelays).toHaveLength(0); noSend(f, picker, send);
       });
 
+      test('Markdown delimiter loss rejects expansion while JSON escapes preserve strict ownership', async () => {
+        const text = '```swift\\nlet x = 1\\n``` and ```json\\n{}\\n``` and ```text\\nkept\\n```';
+        const request = JSON.stringify({ model: 'browser/chatgpt', input: text });
+        for (const escaped of [false, true]) {
+          const { f, picker, expand, send } = await collapsed();
+          const json = escaped ? request.replaceAll('`', '\\u0060') : request;
+          expect(JSON.parse(json)).toEqual(JSON.parse(request));
+          const outbound = f.userBody.text + 'x'.repeat(10_000) + '\n' + json + '\n\n' + markerLine;
+          const rendered = outbound.replaceAll('`', '');
+          expect(outbound.length - rendered.length).toBe(escaped ? 0 : 18);
+          f.world.__computaModelFirstPrompt = outbound;
+          expand.onClick = () => { f.userBody.text = rendered; };
+          const result = await f.run('inspect', expansionInput);
+          if (escaped) {
+            expect(result.firstUserVerified).toBe(true);
+            expect((await f.run('inspect', expansionInput)).firstUserFingerprint).toBe(result.firstUserFingerprint);
+            f.userBody.text = rendered.replace('let x = 1', 'let x = 2');
+            rejected(await f.run('inspect', expansionInput));
+          } else {
+            rejected(result);
+            expect(JSON.parse(result.debugStructure).expansionOutcome).toBe('text_mismatch');
+            expect(f.world.__computaModelFirstProof).toBeUndefined();
+          }
+          expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        }
+      });
+
       test('completed provider rendering binds its actual digest when one whitespace run loses twelve source characters', async () => {
         const { f, picker, expand, send } = await collapsed();
         // The live first-message body was twelve characters shorter than the

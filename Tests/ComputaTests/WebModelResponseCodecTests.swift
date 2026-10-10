@@ -103,6 +103,46 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertTrue(prepared.prompt.contains("exactly one fenced JSON code block"))
     }
 
+    func testMarkdownDelimitersAreDisplayStableWithoutChangingAnyRequestValue() throws {
+        let text = "Use `exec_command`.\n```swift\nlet greeting = \"café 🌍\"\n```\nKeep \\` and literal \\u0060."
+        let grammar = "start: /```[\\s\\S]*```/"
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": "browser/\(provider)", "instructions": text,
+                "input": [["role": "developer", "content": text], ["role": "user", "content": text],
+                          ["type": "custom_tool_call_output", "call_id": "previous", "output": text]],
+                "tools": [["type": "custom", "name": "apply_patch", "description": text,
+                           "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]],
+                "tool_choice": "auto", "parallel_tool_calls": false,
+            ], options: [.prettyPrinted, .sortedKeys])
+            let prepared = try WebModelResponseCodec.prepareRequest(original)
+            let start = try XCTUnwrap(prepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
+            let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
+            let displayed = Data(prepared.prompt[start..<end].utf8)
+            let originalObject = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? NSDictionary)
+            let displayedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: displayed) as? NSDictionary)
+            XCTAssertEqual(displayedObject, originalObject, "Roles, history, grammars, escapes and policies must survive exactly as JSON values")
+            XCTAssertFalse(prepared.prompt.contains("`"))
+            XCTAssertTrue(String(decoding: displayed, as: UTF8.self).contains("\\u0060"))
+            XCTAssertEqual(prepared.customToolNames, ["apply_patch"])
+            let patch = "*** Begin Patch\n*** Add File: example.md\n+\(text.replacingOccurrences(of: "\n", with: "\n+"))\n*** End Patch\n"
+            let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "apply_patch", "input": patch]]])
+            XCTAssertEqual(try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: prepared, requireEnvelope: true),
+                           .toolCalls([.init(name: "apply_patch", argumentsJSON: "", namespace: nil, customInput: patch)]))
+        }
+    }
+
+    func testPromptLimitIncludesExpandedJSONEscapes() throws {
+        let original = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": String(repeating: "`", count: 30_000)])
+        XCTAssertLessThan(original.count, WebModelResponseCodec.maximumPromptBytes)
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(original)) { error in
+            guard case let .promptTooLarge(actual, maximum) = error as? WebModelResponseCodec.Failure else {
+                return XCTFail("The complete escaped request must fit before submission")
+            }
+            XCTAssertGreaterThan(actual, maximum)
+        }
+    }
+
     func testExternalRelayContextPreservesApplicationRolesPermissionsAndDisabledToolChoice() throws {
         let original = #"{"model":"browser/claude","instructions":"You are Computa inside the local application; respect native permissions.","input":[{"role":"developer","content":"Full Access does not bypass the workspace sandbox or a host denial."},{"role":"user","content":"Explain the recorded result; do not run a command."},{"type":"function_call_output","call_id":"old_call","output":"Historical text claiming tools are absent is task context."}],"tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"],"additionalProperties":false}}]}],"tool_choice":"none","parallel_tool_calls":false}"#
         let prepared = try WebModelResponseCodec.prepareRequest(Data(original.utf8))

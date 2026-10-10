@@ -189,12 +189,17 @@ enum WebModelResponseCodec {
         }
         let currentUserInstructions = ComputaAgentInstructions.webCurrentUserContract(
             latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
+        // Provider message rendering can consume Markdown backticks, including
+        // those inside JSON strings. JSON Unicode escapes preserve every parsed
+        // value while keeping the submitted and expanded message text comparable.
+        // Validated JSON can contain literal backticks only inside strings.
+        let displayJSON = originalJSON.replacingOccurrences(of: "`", with: "\\u0060")
         let prompt = """
         \(runtimeInstructions)
 
         \(ComputaAgentInstructions.webRequestContext)
         COMPLETE_RESPONSES_REQUEST_JSON:
-        \(originalJSON)
+        \(displayJSON)
         END_COMPLETE_RESPONSES_REQUEST_JSON.
 
         \(currentUserInstructions)

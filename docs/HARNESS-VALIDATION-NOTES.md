@@ -2938,3 +2938,42 @@ The independent Git deadline verifier matched the three unique passing regressio
 Eight cataloged obsolete installed backups (builds 13, 15–21) were archived and fully verified before retirement: 2,031,239,051 logical bytes in 690,743,404 archive bytes. The current installed build 39, all 414 validated inputs, the temporary model alias and protected processes were unchanged. Archive/cleanup receipt SHA `a8223fd50d5411ab0fbc3d358435a4fc75d5b3e53d00294b888d3798ff4c6590`. The original model storage was then restored: 46 nodes, 3,061,144,105 bytes, matching content and modes. Its external duplicate and held alias were retired only after internal verification; restoration receipt SHA `a410f91a8caadfd74de48411e51bc50bb87b12125eb846509f06039f2c437836`. No local-model inference or provider qualification is established by these storage operations.
 
 The signed Release build from `8d208184e277043966124bdaf02dcd6c67ca389c` completed with exit 0, unchanged source/resource/engine inputs and passing main, bridge and runtime signatures. Staging then failed its exact AgentRuntime resource gate because Xcode's folder reference also copied the tracked `.gitignore`. No installer ran. The failed stage receipt and signed build remain separate negative packaging evidence. Ignore rules for the same four generated runtime files now live in the repository root, removing this source-control file from the copied resource directory. Application/test inputs and runtime bytes are unchanged; a fresh signed package must still pass the original exact resource and signature checks.
+
+
+## Installed build 41 and first live ChatGPT failure
+
+The fresh signed package from `2665e219a820bb6f966ebb4c57c5bfd9530b2d9b`
+passed exact resource and signature checks, then installed as 0.6.0 (41).
+Installed verification passed all 98 checks, receipt SHA
+`055d78db562472783517358edbd704cbeced576e070b1a7ad518f676d62972dc`.
+The loaded main image, process birth, runtime bytes and new runtime generation
+were captured before the qualification prompt. The prior failed signed resource
+bundle was preserved; its original negative result was not overwritten.
+
+A fresh ChatGPT GPT-6 marker-read task sent one inference and failed at
+`first_user_message` before any native tool call. Automatic website cleanup
+returned unconfirmed; the task remains paused and the prompt was not replayed.
+The rollout, transaction journal, cleanup journal and finite diagnostics were
+retained in `chatgpt-qualification-installed41-r1/first-failure.json`.
+The expanded body was 46,575 characters against a 46,593-character outbound
+prompt. Exact unique final marker and captured prefix matched; ASCII-normalized
+full text differed by 18 characters, with `text_mismatch` latched after one
+expansion click. No CAPTCHA or quota classification was observed.
+
+## Build 42 display-stable request experiment
+
+The complete request JSON now replaces literal backticks with JSON Unicode
+escapes. The response handoff describes its required JSON fence without literal
+backticks. No request value, role, tool grammar, policy or custom patch input is
+dropped, and no website ownership guard is relaxed. New regressions compare the
+entire parsed request across all three providers, verify literal patch inputs,
+include escape expansion in the prompt budget, and reproduce the 18-character
+delimiter-loss rejection alongside a strictly verified escaped request.
+Focused validation passed 69 Swift tests and 365 adapter tests with zero
+failures. Seven public groups passed 623 tests without failures or skips,
+receipt SHA `af1034dadc67456a3334ef661a6f5c64dec5ef224df4c9658272d085771e16bf`.
+Complete native build 42 validation passed 2,263 tests with zero failures and 49
+opt-in skips in 527.297 seconds. All required cohorts, permission boundaries,
+workflow/patch matrices and source/resource/engine/cleanup guards passed.
+Receipt SHA `f6ea7e75a957080fd3a46608c1c0480242f018707236aacfea129ba69bee9440`. This experiment does not yet prove the live failure's
+cause or qualify a provider.
