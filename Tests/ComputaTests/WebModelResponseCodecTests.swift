@@ -3,6 +3,104 @@ import XCTest
 @testable import Computa
 
 final class WebModelResponseCodecTests: XCTestCase {
+    func testToolCommentaryAccompaniesFunctionAndPatchCallsWithoutEndingTurn() throws {
+        let commentary = "I will inspect the files, then preserve the user’s edit. 🌍"
+        let patch = "*** Begin Patch\n*** Add File: result.txt\n+exact text\n*** End Patch\n"
+        let custom: [String: Any] = ["type": "custom", "name": "apply_patch",
+                                   "format": ["type": "grammar", "syntax": "lark", "definition": "native grammar"]]
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": "browser/\(provider)", "input": "Inspect and edit the fixture", "tool_choice": "required",
+                "tools": [["type": "namespace", "name": "functions", "tools": [function, custom]]],
+            ])
+            let request = try WebModelResponseCodec.prepareRequest(original)
+            let envelope = try JSONSerialization.data(withJSONObject: [
+                "type": "tool_calls", "commentary": commentary,
+                "calls": [["name": "functions.computer_v2_snapshot", "arguments": [:]],
+                          ["name": "functions.apply_patch", "input": patch]],
+            ])
+            let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self),
+                                                             request: request, requireEnvelope: true)
+            XCTAssertEqual(reply, .toolCallsWithCommentary([
+                .init(name: "computer_v2_snapshot", argumentsJSON: "{}", namespace: "functions"),
+                .init(name: "apply_patch", argumentsJSON: "", namespace: "functions", customInput: patch),
+            ], commentary))
+            let ordinary = try XCTUnwrap(JSONSerialization.jsonObject(with: WebModelResponseCodec.completedResponse(
+                for: reply, request: request, responseID: "resp_composed", createdAt: 123)) as? [String: Any])
+            let stream = try events(WebModelResponseCodec.streamData(for: reply, request: request,
+                                                                    responseID: "resp_composed", createdAt: 123))
+            let completed = try XCTUnwrap(stream.last?["response"] as? [String: Any])
+            XCTAssertEqual(ordinary["end_turn"] as? Bool, false)
+            XCTAssertEqual(completed["end_turn"] as? Bool, false)
+            let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
+            XCTAssertEqual(output.map { $0["type"] as? String }, ["message", "function_call", "custom_tool_call"])
+            XCTAssertEqual(output[0]["phase"] as? String, "commentary")
+            let content = try XCTUnwrap(output[0]["content"] as? [[String: Any]])
+            XCTAssertEqual(content.first?["text"] as? String, commentary)
+            XCTAssertEqual(output[2]["input"] as? String, patch)
+            XCTAssertEqual(output[1]["call_id"] as? String, "call_composed_0")
+            XCTAssertEqual(output[2]["call_id"] as? String, "call_composed_1")
+            XCTAssertEqual(stream.filter { $0["type"] as? String == "response.output_item.done" }
+                .compactMap { $0["output_index"] as? Int }, [0, 1, 2])
+            XCTAssertEqual(try JSONSerialization.data(withJSONObject: ordinary["output"]!, options: .sortedKeys),
+                           try JSONSerialization.data(withJSONObject: output, options: .sortedKeys))
+        }
+    }
+
+    func testToolCommentaryNeverRepairsOutsideProseOrWeakensCallPolicy() throws {
+        let call: [String: Any] = ["name": "computer_v2_snapshot", "arguments": [:]]
+        let envelope: [String: Any] = ["type": "tool_calls", "commentary": "I will read the fixture.", "calls": [call]]
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: envelope), as: UTF8.self)
+        let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": "Inspect the fixture", "tools": [function],
+        ]))
+        // Reproduces the live shape: progress prose outside a valid envelope.
+        // No substring extraction or JSON repair may dispatch its calls.
+        for outside in ["The project is on branch main.\nJSON\n\n" + text, text + "\nI will now execute it."] {
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(outside, request: request, requireEnvelope: true)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+            }
+        }
+        // The legacy ordinary-text path retains prose as a message; it must
+        // never promote a JSON substring into executable calls.
+        let prose = "The project is on branch main.\nJSON\n\n" + text
+        XCTAssertEqual(try WebModelResponseCodec.parseReply(prose, request: request, requireEnvelope: false), .message(prose))
+        let blocked = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": "Explain without actions", "tools": [function], "tool_choice": "none",
+        ]))
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: blocked, requireEnvelope: true)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+        }
+        let repeated: [String: Any] = ["type": "tool_calls", "commentary": "Inspect twice.", "calls": [call, call]]
+        let repeatedText = String(decoding: try JSONSerialization.data(withJSONObject: repeated), as: UTF8.self)
+        for settings in [["parallel_tool_calls": false], ["max_tool_calls": 1]] as [[String: Any]] {
+            let source = ["model": "browser/chatgpt", "input": "Inspect", "tools": [function]] as [String: Any]
+            let constrained = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject:
+                source.merging(settings) { _, new in new }))
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(repeatedText, request: constrained, requireEnvelope: true)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure,
+                               settings["parallel_tool_calls"] != nil ? .parallelToolCallsUnsupported : .toolCallLimitExceeded)
+            }
+        }
+    }
+
+    func testToolCommentaryRequiresTextAndRetainsFiniteDiagnostics() throws {
+        let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": "browser/claude", "input": "Inspect", "tools": [function],
+        ]))
+        for invalid in [NSNull(), true, 7, ["private"], ["private": "value"]] as [Any] {
+            let text = String(decoding: try JSONSerialization.data(withJSONObject: [
+                "type": "tool_calls", "commentary": invalid,
+                "calls": [["name": "computer_v2_snapshot", "arguments": [:]]],
+            ]), as: UTF8.self)
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: true)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+            }
+            XCTAssertEqual(WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: request)?.reason,
+                           .invalidToolCommentary)
+        }
+    }
+
     private let function: [String: Any] = [
         "type": "function", "name": "computer_v2_snapshot", "description": "Read a bound app",
         "parameters": ["type": "object", "properties": ["view": ["type": "string"]], "required": ["view"]],
@@ -594,6 +692,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             (#"{"type":"message","text":"value","surprise":"private"}"#, .invalidEnvelopeFields),
             (#"{"type":"tool_calls","calls":[],"surprise":"private"}"#, .invalidEnvelopeFields),
             (#"{"type":"message","text":"value","phase":"private_phase"}"#, .invalidMessagePhase),
+            (#"{"type":"tool_calls","commentary":null,"calls":[{"name":"computer_v2_snapshot","arguments":{}}]}"#, .invalidToolCommentary),
             (#"{"type":"tool_calls"}"#, .invalidCalls),
             (#"{"type":"tool_calls","calls":[]}"#, .invalidCalls),
             (#"{"type":"tool_calls","calls":{}}"#, .invalidCalls),

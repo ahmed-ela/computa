@@ -18,7 +18,7 @@ A separate [local-model goal comparison](GOAL-MODE-BENCHMARK.md) records six
 build 39/Codex trials, their failures and limits; it does not qualify build 41.
 All six official trials failed the complete task; Computa goal mode was N/A.
 
-## Current candidate: 0.6.0 (42)
+## Installed baseline: 0.6.0 (42)
 
 Build 41 passed 2,261 native tests and 622 public tests with zero failures;
 49 native opt-in tests were explicitly skipped. Its signed package and installed
@@ -47,13 +47,36 @@ skips in 527.297 seconds.
 | Upstream runtime | Source19/20 observations cover 19,035 runnable identities: 19,032 passed and three standalone TUI cases failed. Optional guard exits do not prove skipped assertions. Source21 compiled all 275 debug test binaries and passed scoped lint and formatting. This is not a green complete upstream workspace result. |
 | Engine package | Source21 release packaging passed. The signed arm64 App Server, source pin, patch and manifest match runtime mactopus-6. Build 42 reuses these unchanged artifacts. |
 | App validation | Build 41 passed all required native cohorts, permission checks, workflow and patch matrices, Git deadline regressions and cleanup guards. Build 42 passed 2,263 native tests and 623 public tests with zero failures; 49 native opt-in tests were skipped. |
-| Installed provider tasks | Build 42 ChatGPT GPT-6 qualification passed: one real file-read call, the exact marker response and two closed inference leases, with 39 verified checks. Claude/Gemini qualification and four workflow cases per provider remain pending: 14 of 15 planned live cases. Build 41's failure remains retained separately. |
+| Installed provider tasks | Build 42 ChatGPT GPT-6 and Claude Sonnet 5.5 qualifications each passed a real file read, exact marker response, two closed inference leases and 39 checks. Gemini 3.1 Pro failed model verification before verified submission, with cleanup confirmed. ChatGPT's coding case and one captured diagnostic case failed on prose outside a JSON envelope; their website sessions closed. Eleven workflow cases remain unattempted. These failures are retained and the full live matrix is not qualified. |
 | Installed diff UI | Scope selection, split/unified views, hunk staging/unstaging/reverting and stale-state rejection still require installed-app checks. |
 | Model comparison | The earlier six build 39/Codex trials failed the complete task. Computa goal mode was N/A. A fresh comparison using the same actual model is pending. |
 | Delivery | Build 42 is signed, installed and pushed to the draft PR. Installed verification passed 98 checks and the loaded process/runtime generation was captured. Remaining live/UI/comparison evidence and final cleanup/documentation are pending. The local model is restored; eight obsolete backups were verified in archives before retirement. |
 
 Detailed historical failures, corrections, receipts and source attribution remain
 in the [validation ledger](HARNESS-VALIDATION-NOTES.md).
+
+## Follow-up candidate: 0.6.0 (43)
+
+A captured ChatGPT reply contained a progress paragraph before a code block
+with otherwise valid tool-call JSON. The strict parser rejected it. The relay
+now permits a `commentary` string inside `tool_calls`: it emits a standard
+Responses commentary message before the validated function/custom calls and
+keeps `end_turn=false`. Fresh instructions demonstrate this format. Outside
+prose, malformed commentary and disallowed calls remain rejected.
+
+The normal Gemini page displayed both a selected model and a selected Low
+thinking-effort row. The shared verifier treated that effort indicator as an
+invalid model selection. A regression reproduced the failure. Recognized Low
+and High effort rows now remain separate from model proof; missing,
+contradictory, duplicate and unknown model indicators still fail closed.
+
+Focused validation passed 114 Swift tests, including real App Server workflows
+for all three scripted provider routes, and all 366 adapter tests. Complete
+candidate validation then passed 624 public tests and 2,266 native tests with
+zero failures; 49 native tests were explicitly skipped. The native run executed
+2,315 tests in 509.268 seconds and retained all required permission, workflow,
+patch and cleanup guards. Signed installation and fresh website qualification
+remain pending. These changes have not yet been verified in an installed build.
 
 ## Reusable boundaries
 

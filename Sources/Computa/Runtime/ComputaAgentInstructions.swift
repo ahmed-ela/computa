@@ -383,6 +383,9 @@ enum ComputaAgentInstructions {
         historical receipts. When outputs suffice, return message.
         Use a message for a general or self-contained question, plan/summary,
         clarification, verified completion, limitation or governing-rule refusal.
+        Progress instructions use optional tool_calls.commentary, a string inside
+        this envelope. Send it alongside next calls, never outside the block;
+        it is commentary, not a final answer.
         No tools means no tool call.
         A running session is not completion: use the offered session tool; verify
         output and final exit. Do not replay uncertain calls.
@@ -402,7 +405,7 @@ enum ComputaAgentInstructions {
         characters followed by json; close with three backtick characters.
         Include one object and no outside text. Escape quotes, backslashes and
         newlines as valid JSON. Choose one envelope:
-        {"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}
+        {"type":"tool_calls","commentary":"Inspecting files.","calls":[{"name":"offered_tool_name","arguments":{}}]}
         OR
         {"type":"message","text":"Your answer or truthful remaining limitation"}
         Exact currently offered local function names: \(offeredToolNames.isEmpty ? "(none)" : offeredToolNames.sorted().joined(separator: ", "))

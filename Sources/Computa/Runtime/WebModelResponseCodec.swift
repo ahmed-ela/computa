@@ -50,6 +50,7 @@ enum WebModelResponseCodec {
         case message(String)
         case assistantMessage(String, phase: AssistantPhase)
         case toolCalls([ToolCall])
+        case toolCallsWithCommentary([ToolCall], String)
     }
 
     /// Content-free diagnostics for a reply already rejected by the parser.
@@ -65,6 +66,7 @@ enum WebModelResponseCodec {
             case invalidCallName = "invalid_call_name"
             case invalidEnvelopeFields = "invalid_envelope_fields"
             case invalidMessagePhase = "invalid_message_phase"
+            case invalidToolCommentary = "invalid_tool_commentary"
         }
 
         let reason: Reason
@@ -243,8 +245,11 @@ enum WebModelResponseCodec {
             }
             return try validated(.message(message), request: request)
         case "tool_calls":
-            guard Set(envelope.keys).isSubset(of: ["type", "calls"]),
+            guard Set(envelope.keys).isSubset(of: ["type", "calls", "commentary"]),
                   let calls = envelope["calls"] as? [[String: Any]], !calls.isEmpty else {
+                throw Failure.malformedEnvelope
+            }
+            if let commentary = envelope["commentary"], !(commentary is String) {
                 throw Failure.malformedEnvelope
             }
             let validated = try calls.map { call -> ToolCall in
@@ -265,7 +270,12 @@ enum WebModelResponseCodec {
                 let encoded = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes])
                 return ToolCall(name: tool.name, argumentsJSON: String(decoding: encoded, as: UTF8.self), namespace: tool.namespace)
             }
-            return try self.validated(.toolCalls(validated), request: request)
+            let reply: Reply = if let commentary = envelope["commentary"] as? String {
+                .toolCallsWithCommentary(validated, commentary)
+            } else {
+                .toolCalls(validated)
+            }
+            return try self.validated(reply, request: request)
         default:
             if requireEnvelope { throw Failure.malformedEnvelope }
             return try validated(.message(text), request: request)
@@ -303,7 +313,10 @@ enum WebModelResponseCodec {
             }
             return nil
         case "tool_calls":
-            guard Set(envelope.keys).isSubset(of: ["type", "calls"]) else { return diagnostic(.invalidEnvelopeFields) }
+            guard Set(envelope.keys).isSubset(of: ["type", "calls", "commentary"]) else { return diagnostic(.invalidEnvelopeFields) }
+            if let commentary = envelope["commentary"], !(commentary is String) {
+                return diagnostic(.invalidToolCommentary)
+            }
             guard let calls = envelope["calls"] as? [[String: Any]], !calls.isEmpty else {
                 return diagnostic(.invalidCalls)
             }
@@ -394,7 +407,7 @@ enum WebModelResponseCodec {
         switch reply {
         case .message, .assistantMessage:
             guard !request.toolPolicy.requiresCall else { throw Failure.rejectedToolChoice }
-        case let .toolCalls(calls):
+        case let .toolCalls(calls), let .toolCallsWithCommentary(calls, _):
             guard !calls.isEmpty else { throw Failure.malformedEnvelope }
             guard request.parallelToolCalls || calls.count == 1 else { throw Failure.parallelToolCallsUnsupported }
             if let maximum = request.maximumToolCalls, calls.count > maximum { throw Failure.toolCallLimitExceeded }
@@ -641,6 +654,9 @@ enum WebModelResponseCodec {
         case let .assistantMessage(text, phase):
             return [["id": "msg_\(identity)", "type": "message", "role": "assistant", "status": "completed", "phase": phase.rawValue,
                      "content": [["type": "output_text", "text": text, "annotations": [] as [String]]]]]
+        case let .toolCallsWithCommentary(calls, commentary):
+            return outputItems(for: .assistantMessage(commentary, phase: .commentary), responseID: responseID)
+                + outputItems(for: .toolCalls(calls), responseID: responseID)
         case let .toolCalls(calls):
             return calls.enumerated().map { index, call in
                 var item: [String: Any] = ["id": "fc_\(identity)_\(index)", "type": "function_call", "status": "completed",
@@ -663,6 +679,7 @@ enum WebModelResponseCodec {
         switch reply {
         case let .message(text): finalText = completed ? text : ""; endTurn = true
         case let .assistantMessage(text, phase): finalText = completed ? text : ""; endTurn = phase == .finalAnswer
+        case let .toolCallsWithCommentary(_, commentary): finalText = completed ? commentary : ""; endTurn = false
         case .toolCalls: finalText = ""; endTurn = false
         }
         // Configuration was validated before the browser was contacted.

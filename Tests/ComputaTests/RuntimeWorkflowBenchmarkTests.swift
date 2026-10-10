@@ -93,6 +93,8 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
             case .workflow:
                 XCTAssertEqual(audit.status, .completed)
                 XCTAssertEqual(audit.finalTexts.last, "WORKFLOW_BENCHMARK_OK")
+                XCTAssertEqual(audit.finalTexts.filter { $0 == WorkflowBenchmarkTransport.toolProgress }.count, 12,
+                    "Each tool envelope's commentary must survive the real App Server without ending the turn")
                 XCTAssertEqual(receipt.sends, 13)
                 XCTAssertEqual(receipt.matchedOutputs, 12)
                 XCTAssertEqual(receipt.finishes, 13)

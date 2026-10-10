@@ -3012,3 +3012,80 @@ backend model version remains unknown. Four workflows per provider, the two
 other provider qualifications, installed diff UI and the fresh same-model
 comparison remain pending. The failed build 41 case and its unconfirmed cleanup
 remain retained separately.
+
+
+## Build 42 live follow-ups and build 43 response/selector corrections
+
+Claude Sonnet 5.5 completed the installed opaque-marker qualification in 15
+seconds. One native `exec_command` read the actual fixture; the final response
+matched its marker. Both inference leases closed with durable cleanup receipts.
+The sealed collector passed all 39 checks, SHA
+`8eefb284c32c5862b1275ab6a4de9c06181a4d665848ad06f35d0706ca5e6ee8`.
+This qualifies the observed website selection, not a backend model version.
+
+Gemini 3.1 Pro failed before verified prompt submission. The local finite error
+was `browser_model_error` for unverified selection; no native tools ran and its
+one website session closed. The collector remained `incomplete_or_failed`, SHA
+`9656526deb2a6ea4cc0e9dd81f45b87e13979c0cd26e682e0faf9f01c7b1fbd9`.
+The engine's generic high-demand wording is not a diagnosis of Google's service.
+Refreshing the catalog retained the same choices and did not replay a prompt.
+A separate normal built-in tab showed 3.1 Pro selected and a separate selected
+Low thinking-effort row. That inspection tab was closed and the pane hidden.
+
+The first ChatGPT GPT-6 coding attempt accepted an `exec_command` and a custom
+`apply_patch`, then rejected its third inference reply as invalid JSON (716
+bytes, no accepted fence). All three website sessions closed. The independent
+file/Git oracle failed; the requested rename, tests, selective commit and push
+were not fully verified. Its initial failure summary counted only function
+calls and omitted the custom call. A sealed correction retains that mistake
+and the actual two-call count, SHA
+`16a00bb06bfd7a33ec538ed30d97fdb91781deab9276b7bbede90c05b5db1920`.
+The exact-turn collector reported the missing requested rename as a
+`collector_error`; it did not claim success.
+
+One fresh diagnostic project used an exact-task, private one-shot rejected-reply
+capture. After one real read command, the model returned progress prose outside
+a code block containing otherwise valid tool-call JSON. The 916-byte reply was
+rejected without dispatch; both sessions closed and the capture arm was
+consumed. The private snapshot SHA is
+`3db7e6388a98709e277a1dbe17828927242a6aae2cd8e59e46f3bebeebd9a045`.
+The previous unrelated capture was preserved by a reversible private rename.
+Raw replies and native histories are not included in this public ledger.
+
+Build 43 adds optional `tool_calls.commentary`, mapped into the existing
+Responses assistant-message phase before the validated calls. It does not
+extract JSON from surrounding prose or weaken tool choice, call-count or
+parallel-call restrictions. The response instructions demonstrate progress
+inside this envelope. Three new codec regressions cover stream/output ordering,
+function/custom calls across providers, malformed commentary, external prose
+and dispatch restrictions. The existing native workflow now observes all 12
+progress messages and still completes 13 inferences and 12 matched real tool
+outputs for each provider route. Focused validation passed 114 Swift tests.
+
+A Gemini fixture with a separately selected thinking row reproduced the original
+`model_unverified` failure before the selector change. The shared helper now
+excludes recognized Low/High effort rows from model-selection proof. The helper
+prefix was copied into all three standalone adapters without modifying their
+provider-specific bodies. All 366 adapter tests passed, including missing-model
+proof and the prior contradictory/duplicate/unknown-indicator controls.
+
+The first complete build 43 public run passed frontend checking, 123 frontend
+tests and frontend build, then stopped on two MLX installer tests: the host had
+only 466 MiB free, below the installer's disk-space guard. The other 109 MLX
+tests passed. This failed receipt remains preserved and native validation was
+not started by that invocation. Candidate installation and live verification
+remain pending.
+
+The owned temporary Cargo/Rustup toolchains were archived and byte-verified
+before retirement; the archive SHA is
+`39bc051fcf2cdd8249cd53b9987394e56071c3cfedffda6981cd55647cf19cc4`.
+This recovered about 1.1 GiB on the host without touching model assets, user
+toolchains or the qualified engine. The fresh public run passed all 624 tests.
+Complete native validation executed 2,315 tests: 2,266 passed, 49 were skipped
+and none failed in 509.268 seconds. Exact source/resource and engine seals,
+required permission-boundary checks, five workflow scenarios, the native patch
+matrix and actual cleanup identities all passed. The prior disk-space failure
+is retained. This is offline evidence; installed build 43 remains pending.
+
+Public receipt SHA: `ad4b410fb2823c4a1cefefdf8c40fe5094ee11b1548e630cbb9b6f4bea83f9aa`.
+Native receipt SHA: `8340e99958d5d4b8949c21b0c6e7ab5aa1d22dce088255568b0c470ff423c6f1`.

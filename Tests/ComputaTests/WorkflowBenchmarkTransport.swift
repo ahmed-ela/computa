@@ -229,10 +229,16 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
     }
 
     private func envelope(name: String, arguments: [String: Any]) throws -> String {
-        String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": name, "arguments": arguments]]]), as: UTF8.self)
+        try toolEnvelope(["name": name, "arguments": arguments])
     }
     private func envelope(name: String, input: String) throws -> String {
-        String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": name, "input": input]]]), as: UTF8.self)
+        try toolEnvelope(["name": name, "input": input])
+    }
+    static let toolProgress = "WORKFLOW_TOOL_PROGRESS"
+    private func toolEnvelope(_ call: [String: Any]) throws -> String {
+        var envelope: [String: Any] = ["type": "tool_calls", "calls": [call]]
+        if case .workflow = scenario { envelope["commentary"] = Self.toolProgress }
+        return String(decoding: try JSONSerialization.data(withJSONObject: envelope), as: UTF8.self)
     }
     private func required(_ value: String?) throws -> String {
         guard let value else { throw WorkflowBenchmarkFailure("The continuation lacks a tool result") }

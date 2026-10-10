@@ -167,6 +167,11 @@ function websiteModelPickerState(provider) {
         .some(node => physical(node) && /^(?:Upgrade|Upgrade to .+|Locked|Unavailable)$/.test(websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
       if (upgrades) continue;
       const choice = family(option);
+      // Gemini also selects a separate thinking-effort row in this menu.
+      // Its indicator neither proves nor invalidates the model selection.
+      // Keep unknown selected rows subject to the ambiguity checks below.
+      if (provider === 'gemini' && !choice && option.getAttribute('role') === 'menuitem'
+          && ['Low', 'High'].some(label => named(option, label))) continue;
       let indicatorSelected = false;
       if (provider === 'gemini' && option.getAttribute('role') === 'menuitem') {
         const markers = [...option.querySelectorAll('[aria-label="Selected"]')].slice(0, 128)

@@ -246,7 +246,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertFalse(handoff.contains("without Markdown fences"))
             let published = names.isEmpty ? "(none)" : names.sorted().joined(separator: ", ")
             XCTAssertTrue(handoff.hasSuffix("Exact currently offered local function names: \(published)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
-            XCTAssertLessThan(handoff.utf8.count, 2_200, "The shorter response handoff has a bounded budget independent of history length")
+            XCTAssertTrue(handoff.contains("optional tool_calls.commentary"))
+            XCTAssertTrue(handoff.contains("Send it alongside next calls, never outside"))
+            XCTAssertLessThan(handoff.utf8.count, 2_400, "The response handoff, including progress transport, has a bounded budget independent of history length")
         }
     }
 

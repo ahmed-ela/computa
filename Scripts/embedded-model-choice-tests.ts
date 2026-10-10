@@ -131,6 +131,28 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
     });
 
     if (provider === 'gemini') {
+      test('separate selected thinking effort neither invalidates nor proves the Gemini model', async () => {
+        for (const effort of ['Low', 'High']) {
+          const { f, picker } = setup(false, { genericHeader: true, geminiMenuitemMarkers: true });
+          const row = new Node('BUTTON', { role: 'menuitem', class: 'selected' });
+          row.append(new Node('SPAN', {}, effort), new Node('SPAN', {}, effort === 'Low' ? 'Quick and efficient' : 'Extra thorough'),
+            new Node('GEM-ICON', { 'aria-label': 'Selected' }));
+          picker.menu.append(row);
+          expect(await advance(f, 'selectModel', { modelChoice: choice(target) })).toMatchObject({ selected: true,
+            modelEvidence: { selected: choice(target), source: 'selected_model_indicator' } });
+          expect((await f.run('verifyModel', { expectedModelChoice: choice(target) })).modelEvidence)
+            .toMatchObject({ selected: choice(target), source: 'selected_model_indicator' });
+          expect(row.clicks).toBe(0);
+          picker.open();
+          for (const option of picker.options) {
+            option.values.class = '';
+            option.children = option.children.filter((node: any) => node.values['aria-label'] !== 'Selected');
+          }
+          expect((await f.run('verifyModel', { expectedModelChoice: choice(target) })).error).toBe('model_unverified');
+          expect(row.clicks).toBe(0);
+        }
+      });
+
       test('observed menuitem Selected icons and selected classes prove Gemini choices without radio attributes', async () => {
         const discovery = setup(false, { genericHeader: true, unmountMenus: true, geminiMenuitemMarkers: true });
         expect((await advance(discovery.f, 'discoverModels')).modelChoices)
