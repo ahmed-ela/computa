@@ -402,8 +402,8 @@ enum ComputaAgentInstructions {
         "Return only the file contents" constrains message.text after matching
         output; put truthful limitations or refusals there too.
         Return exactly one fenced JSON code block. Open with three backtick
-        characters followed by json; close with three backtick characters.
-        Include one object and no outside text. Escape quotes, backslashes and
+        characters, json and a newline; close after a newline with three backticks.
+        One object; no outside text. Escape quotes, backslashes and
         newlines as valid JSON. Choose one envelope:
         {"type":"tool_calls","commentary":"Inspecting files.","calls":[{"name":"offered_tool_name","arguments":{}}]}
         OR

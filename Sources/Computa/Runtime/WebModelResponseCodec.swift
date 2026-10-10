@@ -632,12 +632,22 @@ enum WebModelResponseCodec {
     }
 
     private static func removingJSONFence(_ text: String) -> String {
-        guard text.hasPrefix("```"), text.hasSuffix("```"),
-              let newline = text.firstIndex(of: "\n") else { return text }
-        let label = text[text.index(text.startIndex, offsetBy: 3)..<newline].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard label.isEmpty || label.lowercased() == "json" else { return text }
-        let content = text[text.index(after: newline)..<text.index(text.endIndex, offsetBy: -3)]
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count >= 6, text.hasPrefix("```"), text.hasSuffix("```") else { return text }
+        let end = text.index(text.endIndex, offsetBy: -3)
+        if let newline = text.firstIndex(of: "\n") {
+            let label = text[text.index(text.startIndex, offsetBy: 3)..<newline]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if label.isEmpty || label.lowercased() == "json" {
+                return text[text.index(after: newline)..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        // A website can render a whole JSON wrapper inline. Remove only its
+        // exact outer delimiters; the complete body still must parse as JSON.
+        // Never search for an object inside prose or repair damaged JSON.
+        let content = text[text.index(text.startIndex, offsetBy: 3)..<end]
+        guard let boundary = content.firstIndex(where: \.isWhitespace),
+              content[..<boundary].lowercased() == "json" else { return text }
+        return content[boundary...].trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func looksLikeToolEnvelope(_ text: String) -> Bool {

@@ -3089,3 +3089,84 @@ is retained. This is offline evidence; installed build 43 remains pending.
 
 Public receipt SHA: `ad4b410fb2823c4a1cefefdf8c40fe5094ee11b1548e630cbb9b6f4bea83f9aa`.
 Native receipt SHA: `8340e99958d5d4b8949c21b0c6e7ab5aa1d22dce088255568b0c470ff423c6f1`.
+
+
+## Installed build 43 follow-up and inline-wrapper candidate
+
+Commit `8043da18cdc104532b78ede867f478d87120a116` was pushed to draft PR #5.
+The signed build and installed bundle passed all 98 checks. A new process,
+PID 49165, reported runtime generation `2c01e38c-a04a-4570-8f5a-23066484e690`;
+the sealed runtime capture SHA is
+`81321e6a27a358118f5d61589fccc8c764c34b1fb4921461eb12ad4144b6d416`.
+The prior build 42 is retained as an installation rollback.
+
+Claude Sonnet 5.5 and Gemini 3.1 Pro each passed all 39 exact qualification
+checks, with a real marker-file read and two acknowledged/closed website
+inference sessions. Their collector receipt SHAs are, respectively,
+`db92779f98a7fc9203a60bdb29bd5e4ea8dee4c9ebf446ce1288f7fa075add35`
+and `a148ccd90c76dfe15bd3bbb3789825822f33e1c07780434d1425bbeebf210b74`.
+Gemini's selection failure did not recur in this controlled task.
+
+Claude's coding workflow completed the edits, exact-content rename, deletion,
+README, tests, selective commit and push to its disposable local bare origin.
+The user-note bytes and public tests were preserved; the pushed head matches the
+local commit. The independent coding oracle SHA is
+`cb98ee7cb65d999dee562ddb66962a0b46ecb5c7d3e0acb211953ba35630dded`;
+the exact-turn collector passed, SHA
+`30ba8aad3180bc57e6cdfb89e8b64d2d2f85fefe9e9e63f4f22a1859cc962a7b`.
+All ten inference sessions closed. The model recovered from a nonportable cat
+flag, a rejected empty rename hunk and a stale path in git add by checking
+actual state before retrying. This does not qualify external GitHub pushing.
+
+The first build 43 ChatGPT qualification failed with a 532-byte malformed
+response; no tool calls were dispatched and its one session closed. Its failed
+collector SHA is
+`3faab3550a918ca12f21fa9fb340ce4a8437d3842f0b8be8ac9d7f538c96a6d8`.
+One fresh diagnostic qualification also failed, retaining an exact-task private
+545-byte reply: a complete JSON tool envelope between triple backticks on one
+line, rather than a newline-delimited fence. It had no code DOM nodes or outside
+prose. Its private capture SHA is
+`1c5e54623ad5dfd55562b21ceacdec3a6a3b92eb483b9fecd95612b5ce12885f`;
+its failed collector SHA is
+`0213a4ed3fe0e4617efb4b0d6cc060dd07e162bc70b60dd305f8ed274e2ce2f7`.
+The capture arm was consumed and its single website session closed. Neither
+failed attempt was replayed or counted as a qualification pass.
+
+The build 44 candidate accepts only the complete inline JSON wrapper, retains
+full-body JSON parsing and the existing tool dispatch restrictions, and asks
+for canonical newlines explicitly. A synthetic reproduction failed against the
+old parser. New regressions cover all provider routes, literal custom-patch
+backticks, outside prose, multiple fences, malformed/unsupported labels, damaged
+JSON and disallowed/unoffered tools. The first focused run passed the parser,
+server and three real scripted workflows but failed six assertions tied to the
+old prompt wording; these were updated to require the new newline instructions.
+Complete build 44 validation and installed testing remain pending.
+
+
+Claude's built-in-browser flight workflow also passed the exact-turn collector,
+SHA `868d6ab525704477649d2d11be0cfb7b07e8aa39bf9b6a00d783fe066de75866`.
+It used the synthetic site's search, details and gate-reveal actions through the
+native browser tools. All thirteen website inference sessions closed. Root
+stopped its exact owned loopback fixture server and observed normal exit 0
+before sealing the browser/HTTP evidence. This does not test a real airline
+account or booking service.
+
+Claude's composition case then stopped on `website_usage_limit` after starting
+the preview. All four website inference sessions closed. The exact-turn
+collector remains failed, SHA
+`d96075e110c36252b0243cbb05353ceba98f5259ec9fef9756c56783f6e67e47`.
+The preview initially remained running; root verified its exact owned cwd and
+listening socket, sent SIGTERM to PID 59173, then independently verified that
+PID and port 57423 were closed. This is root fixture cleanup, not a successful
+model-driven stop. No Claude prompt was retried; its remaining composition and
+interactive checks require the provider quota to reset.
+
+After updating the prompt assertions, focused instruction validation passed.
+Complete build 44 validation executed 2,317 native tests: 2,268 passed, 49 were
+explicitly skipped and none failed. The native duration was 525.444 seconds.
+All required permission, workflow, patch, source/resource and engine/cleanup
+guards passed. All 624 public tests passed too. Signed installation and fresh
+ChatGPT qualification remain pending; prior failed captures stay retained.
+
+Public build 44 receipt SHA: `9676bbfdecf3122075c9cef8238a702d4647d0e7ca0a9accafd2113b9a6c024c`.
+Native build 44 receipt SHA: `865c910bdf8fa9ffa8caf24b425cbc7a6aef59beb1f94f0d47edea2bfa980ab2`.

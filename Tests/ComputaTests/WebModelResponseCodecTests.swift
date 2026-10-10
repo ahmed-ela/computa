@@ -3,6 +3,51 @@ import XCTest
 @testable import Computa
 
 final class WebModelResponseCodecTests: XCTestCase {
+    func testCompleteInlineJSONFencePreservesFunctionAndCustomCallsAcrossProviders() throws {
+        let patch = "*** Begin Patch\n*** Add File: marker.txt\n+literal ``` text\n*** End Patch\n"
+        let tools = [function, ["type": "custom", "name": "apply_patch"]]
+        let body = String(decoding: try JSONSerialization.data(withJSONObject: [
+            "type": "tool_calls", "commentary": "Reading the file.",
+            "calls": [["name": "computer_v2_snapshot", "arguments": [:]],
+                      ["name": "apply_patch", "input": patch]],
+        ] as [String: Any], options: [.sortedKeys]), as: UTF8.self)
+        for model in ["browser/chatgpt", "browser/claude", "browser/gemini"] {
+            let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+                "model": model, "input": "Read the file", "tools": tools,
+            ]))
+            for wrapper in ["```json \(body) ```", "```JSON\t\(body)```", "```json \n\(body)\n```"] {
+                let reply = try WebModelResponseCodec.parseReply(wrapper, request: prepared, requireEnvelope: true)
+                XCTAssertEqual(reply, .toolCallsWithCommentary([
+                    .init(name: "computer_v2_snapshot", argumentsJSON: "{}", namespace: nil),
+                    .init(name: "apply_patch", argumentsJSON: "", namespace: nil, customInput: patch),
+                ], "Reading the file."))
+                XCTAssertNil(WebModelResponseCodec.malformedEnvelopeDiagnostic(wrapper, request: prepared))
+            }
+        }
+    }
+
+    func testInlineJSONFenceRejectsOutsideTextAmbiguityAndDisallowedCalls() throws {
+        let body = #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}}]}"#
+        let prepared = try request(tools: [function])
+        for text in ["Before ```json \(body) ```", "```json \(body) ``` After",
+                     "```json \(body) ``` ```json \(body) ```",
+                     "```javascript \(body) ```", "```json5 \(body) ```",
+                     "```json\(body)```", "```json \(body)",
+                     "```json {'type':'tool_calls','calls':[]} ```"] {
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared, requireEnvelope: true))
+        }
+        let none = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": "Read the file", "tools": [function], "tool_choice": "none",
+        ]))
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply("```json \(body) ```", request: none,
+                                                                requireEnvelope: true)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+        }
+        let unoffered = body.replacingOccurrences(of: "computer_v2_snapshot", with: "unoffered_tool")
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply("```json \(unoffered) ```", request: prepared,
+                                                                requireEnvelope: true))
+    }
+
     func testToolCommentaryAccompaniesFunctionAndPatchCallsWithoutEndingTurn() throws {
         let commentary = "I will inspect the files, then preserve the user’s edit. 🌍"
         let patch = "*** Begin Patch\n*** Add File: result.txt\n+exact text\n*** End Patch\n"

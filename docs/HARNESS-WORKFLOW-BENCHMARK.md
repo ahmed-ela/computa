@@ -18,7 +18,7 @@ A separate [local-model goal comparison](GOAL-MODE-BENCHMARK.md) records six
 build 39/Codex trials, their failures and limits; it does not qualify build 41.
 All six official trials failed the complete task; Computa goal mode was N/A.
 
-## Installed baseline: 0.6.0 (42)
+## Installed baseline: 0.6.0 (43)
 
 Build 41 passed 2,261 native tests and 622 public tests with zero failures;
 49 native opt-in tests were explicitly skipped. Its signed package and installed
@@ -45,17 +45,17 @@ skips in 527.297 seconds.
 | Check | Current evidence and remaining work |
 | --- | --- |
 | Upstream runtime | Source19/20 observations cover 19,035 runnable identities: 19,032 passed and three standalone TUI cases failed. Optional guard exits do not prove skipped assertions. Source21 compiled all 275 debug test binaries and passed scoped lint and formatting. This is not a green complete upstream workspace result. |
-| Engine package | Source21 release packaging passed. The signed arm64 App Server, source pin, patch and manifest match runtime mactopus-6. Build 42 reuses these unchanged artifacts. |
-| App validation | Build 41 passed all required native cohorts, permission checks, workflow and patch matrices, Git deadline regressions and cleanup guards. Build 42 passed 2,263 native tests and 623 public tests with zero failures; 49 native opt-in tests were skipped. |
-| Installed provider tasks | Build 42 ChatGPT GPT-6 and Claude Sonnet 5.5 qualifications each passed a real file read, exact marker response, two closed inference leases and 39 checks. Gemini 3.1 Pro failed model verification before verified submission, with cleanup confirmed. ChatGPT's coding case and one captured diagnostic case failed on prose outside a JSON envelope; their website sessions closed. Eleven workflow cases remain unattempted. These failures are retained and the full live matrix is not qualified. |
+| Engine package | Source21 release packaging passed. The signed arm64 App Server, source pin, patch and manifest match runtime mactopus-6. Build 43 reuses these unchanged artifacts. |
+| App validation | Build 43 passed 2,266 native tests and 624 public tests with zero failures; 49 native tests were explicitly skipped. Required permission, workflow, patch and cleanup guards passed. |
+| Installed provider tasks | Build 43 Claude Sonnet 5.5 and Gemini 3.1 Pro qualifications each passed all 39 checks, a real file read and two closed inference sessions. Claude's coding and built-in-browser flight cases passed exact native-turn collection, with ten and thirteen closed sessions. Its localhost task stopped on website quota; root cleanup verified the preview PID and socket closed. Two ChatGPT qualification attempts failed on malformed reply formatting and each closed its session; a captured diagnostic identified a complete inline JSON fence. Ten workflow cases remain pending; Claude testing is stopped until its quota resets. The full live matrix is not qualified. |
 | Installed diff UI | Scope selection, split/unified views, hunk staging/unstaging/reverting and stale-state rejection still require installed-app checks. |
 | Model comparison | The earlier six build 39/Codex trials failed the complete task. Computa goal mode was N/A. A fresh comparison using the same actual model is pending. |
-| Delivery | Build 42 is signed, installed and pushed to the draft PR. Installed verification passed 98 checks and the loaded process/runtime generation was captured. Remaining live/UI/comparison evidence and final cleanup/documentation are pending. The local model is restored; eight obsolete backups were verified in archives before retirement. |
+| Delivery | Build 43 is signed, installed and pushed as 8043da1 to the draft PR. Installed verification passed 98 checks and the running process/runtime generation was captured. Build 44 is a follow-up source candidate; validation, installation and fresh ChatGPT testing remain pending. Live/UI/comparison completion and final cleanup are still required. |
 
 Detailed historical failures, corrections, receipts and source attribution remain
 in the [validation ledger](HARNESS-VALIDATION-NOTES.md).
 
-## Follow-up candidate: 0.6.0 (43)
+## Installed fixes: 0.6.0 (43)
 
 A captured ChatGPT reply contained a progress paragraph before a code block
 with otherwise valid tool-call JSON. The strict parser rejected it. The relay
@@ -75,8 +75,26 @@ for all three scripted provider routes, and all 366 adapter tests. Complete
 candidate validation then passed 624 public tests and 2,266 native tests with
 zero failures; 49 native tests were explicitly skipped. The native run executed
 2,315 tests in 509.268 seconds and retained all required permission, workflow,
-patch and cleanup guards. Signed installation and fresh website qualification
-remain pending. These changes have not yet been verified in an installed build.
+patch and cleanup guards. Signed installation passed 98 checks. Fresh Claude and Gemini qualifications
+passed; the Gemini check confirms model selection for that controlled task.
+ChatGPT returned an inline wrapper that the strict parser still rejected.
+
+## Follow-up candidate: 0.6.0 (44)
+
+An exact-task diagnostic captured a complete, valid JSON tool envelope enclosed
+in triple backticks on one line, with `json` separated from the object by a
+space. There was no surrounding prose. The parser required a newline after the
+label, so it rejected the entire response before dispatching any call.
+
+Build 44 recognizes this complete inline wrapper as well as the existing
+multiline fence. It removes only the exact outer delimiters and still parses
+the entire remaining JSON body. Outside prose, multiple objects/fences,
+unsupported labels, incomplete or malformed JSON and disallowed calls remain
+rejected. Custom patch text, including literal backticks, remains unchanged.
+Fresh response instructions explicitly request newlines. A regression failed
+with the old parser and passes with the change. Complete validation passed 624
+public tests and 2,268 native tests with zero failures and 49 explicit native
+skips. Signed installation and fresh ChatGPT qualification remain pending.
 
 ## Reusable boundaries
 
