@@ -1381,6 +1381,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         guard maximumWait > .zero else { throw Failure.pageUnavailable }
         let evaluationDeadline = ContinuousClock.now + maximumWait
+        let budgetParts = maximumWait.components
+        let allocatedBudgetMilliseconds = Int(max(0, min(45_000,
+            Double(budgetParts.seconds) * 1_000 + Double(budgetParts.attoseconds) / 1e15)))
         if !allowBlockedProvider { try checkProviderGate(session) }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
         try rejectWebsiteBlocker(session, action: action, phase: "before")
@@ -1492,7 +1495,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             try await Task.sleep(until: evaluationDeadline, clock: .continuous)
                             guard result.isPending else { return }
                             let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID, operationID: operationID)
-                            Self.inspectionLog.error("adapterTimeout provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) \(diagnostic, privacy: .public)")
+                            Self.inspectionLog.error("adapterTimeout provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) budgetMs=\(allocatedBudgetMilliseconds) \(diagnostic, privacy: .public)")
                             #if DEBUG
                             adapterTimeoutObserverForTesting?(diagnostic)
                             #endif
@@ -1698,8 +1701,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             default: throw Failure.composerUnavailable
             }
         }
+        // Once the first message is bound, the final model read also proves
+        // Chat mode and the same owned lineage. Initial binding, pending appends
+        // and replacement recovery retain their independent product recheck.
+        let combinedContextRecheck = provider == .chatgpt && action == "inspect"
+            && session.state == "running" && session.firstUserFingerprint != nil && !session.pendingSubmission
+            && refreshReadOnlyObservation && routeContinuation.isEmpty
+            && enforceModel && session.modelSelectionVerified && recheckModelAfterAwait
         try await verifyProductModeAfterAwait(observed, session: session, action: action,
-                                             recheck: recheckProductAfterAwait,
+                                             recheck: recheckProductAfterAwait && !combinedContextRecheck,
                                              refreshChangedRoute: routeRefreshAvailable,
                                              refreshReadOnlyObservation: refreshReadOnlyObservation,
                                              maximumWait: evaluationDeadline - .now,
@@ -1746,6 +1756,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                        enforceModel: enforceModel, recheck: recheckModelAfterAwait,
                                                        refreshChangedRoute: routeRefreshAvailable,
                                                        refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                                       combinedContextRecheck: combinedContextRecheck,
                                                        maximumWait: evaluationDeadline - .now)
                 if !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
@@ -1796,6 +1807,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                enforceModel: enforceModel, recheck: recheckModelAfterAwait,
                                                refreshChangedRoute: routeRefreshAvailable,
                                                refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                               combinedContextRecheck: combinedContextRecheck,
                                                maximumWait: evaluationDeadline - .now)
         guard ContinuousClock.now < evaluationDeadline else { throw Failure.pageUnavailable }
         return observed
@@ -1857,6 +1869,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func verifyModelEvidenceAfterAwait(_ observed: [String: Any], session: Session, action: String,
                                               enforceModel: Bool, recheck: Bool, refreshChangedRoute: Bool,
                                               refreshReadOnlyObservation: Bool,
+                                              combinedContextRecheck: Bool,
                                               maximumWait: Duration) async throws {
         if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
             let evidence = try validatedModelEvidence(observed, session: session)
@@ -1869,6 +1882,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let freshAction = session.pendingSubmission && session.firstUserFingerprint == nil ? "inspect" : "verifyModel"
                 let fresh = try await page(session, action: freshAction, enforceModel: enforceModel,
                                            refreshChangedRoute: refreshChangedRoute, recheckModelAfterAwait: false,
+                                           recheckProductAfterAwait: !combinedContextRecheck,
                                            refreshReadOnlyObservation: refreshReadOnlyObservation,
                                            maximumWait: maximumWait)
                 let currentEvidence = try validatedModelEvidence(fresh, session: session)

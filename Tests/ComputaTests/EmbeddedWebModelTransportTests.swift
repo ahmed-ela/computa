@@ -6,6 +6,89 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testConcreteChatGPTRechecksCurrentModelAndProductInOneFreshRead() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Prove the current model and Chat mode together"])
+        let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(first["state"] as? String, "running")
+        XCTAssertFalse((first["text"] as? String ?? "").isEmpty, "The first owned observation must establish response lineage")
+        fixture.transport.setInspectionTimeoutForTesting(.seconds(2))
+        var actions: [String] = []
+        var timeouts: [String] = []
+        fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            actions.append(action)
+            if ["verifyModel", "verifyProductMode"].contains(action) {
+                // Real asynchronous handoff delay: redundant context reads
+                // exhaust the unchanged shared inspection budget.
+                try? await Task.sleep(for: .milliseconds(800))
+            }
+        }
+        let completed: [String: Any]
+        do {
+            completed = try await waitForState("complete", fixture.transport, token: token)
+        } catch {
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            let budgetExpired = error as? EmbeddedWebModelTransport.Failure == .pageUnavailable
+            XCTFail("Combined context inspection budget expired=\(budgetExpired); native timer callbacks=\(timeouts.count); observed reads=\(actions)")
+            return
+        }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertEqual(timeouts, [])
+        XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        XCTAssertFalse(actions.isEmpty)
+        XCTAssertTrue(actions.allSatisfy { ["inspect", "verifyModel"].contains($0) }, actions.description)
+        XCTAssertEqual(actions.filter { $0 == "verifyModel" }.count, actions.filter { $0 == "inspect" }.count,
+                       "Each native await retains one fresh combined model/product/lineage proof")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testConcreteChatGPTCombinedReadRejectsWorkAndModelDriftAcrossNativeAwait() async throws {
+        for drift in ["work", "model"] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never admit a stale model or Work response"])
+            let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertFalse((first["text"] as? String ?? "").isEmpty)
+            var changed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect", !changed else { return }
+                changed = true
+                let script = drift == "model"
+                    ? "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;"
+                    : "document.getElementById('fixture-composer-mode').hidden = false; document.getElementById('fixture-chat-mode').setAttribute('aria-pressed','false'); document.getElementById('fixture-work-mode').setAttribute('aria-pressed','true'); return true;"
+                _ = try? await self.evaluate(view, script)
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("The fresh combined context must reject \(drift) drift")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                               drift == "work" ? .productModeUnverified : .modelMismatch)
+            }
+            XCTAssertTrue(changed)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, drift == "work" ? "failed" : "not_created")
+            try await assertHumanTabIntact(fixture, retaining: drift == "work" ? ownedID : nil)
+        }
+    }
+
     func testTenSecondInspectionBudgetFailsUnderVerifiedWebContentQueueDelay() async throws {
         let fixture = try Fixture()
         defer { fixture.shutdown() }

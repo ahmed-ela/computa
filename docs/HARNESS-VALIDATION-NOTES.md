@@ -4227,3 +4227,53 @@ The exact unused rejected-reply capture arm was cancelled and preserved in this
 case. The fixture, sealed traces and failed collector are retained. Receipt
 SHA-256: ea8c1d956a470cb979c8640e444f5e59ab92dc28194ff14121bf9abe16c331e3.
 Seven live workflow cases remain incomplete. No failure prompt was replayed.
+
+### Candidate 59: combine final context checks after verified first-message binding
+
+The build 58 timeout's final model operation had only seven milliseconds of
+the original shared inspection budget left. That observation does not identify
+the delay's cause. The native pipeline separately reread ChatGPT's product mode,
+then reread its model, then recursively reread the product mode again. Candidate
+59 combines the final model/product/lineage proof for an already bound, running
+ChatGPT conversation. Its adapter and native validation still check all three.
+Initial binding, pending user appends, route continuations and consumed
+replacement-recovery allowances keep their independent checks. The thirty-second
+inspection limit and overall preparation/response deadlines remain unchanged.
+Timeout logs now include the actual allocated budget for the failing operation.
+
+An initially broader candidate ran 121 browser-transport tests and failed five
+test identities with nine assertions/one unexpected error. Existing regressions
+caught changes to first-message expansion, delayed rendering and private-only
+binding; the failed log and receipt are retained. The narrowed eligibility
+passed twelve focused controls in 44.513 seconds, including the new combined
+context check, Work/model drift, expansion, delayed binding, repeated replacement,
+queued reads and late/stalled response rejection. Receipt SHA-256:
+3acbeec03682e67feecfdac039450f2000058c5e271f07ff5b2e0b3f6581ffe3.
+
+The new latency regression inserts real 800 ms native handoff delays under a
+two-second inspection budget. Against the actual old core source, the third
+negative-control run fails with the native inspection-budget error and four
+observed reads: inspect, verifyProductMode, verifyModel, verifyProductMode.
+The fixed source was restored and its hash rechecked after each control.
+Negative-control receipt SHA-256:
+82f6f94e3a6e526993070e4163ff925635f752384d5fc73cf4301cf0961a5a63.
+The first two negative receipts remain unverified: the first framework error
+hid the native cause, and the second verifier incorrectly required a timer
+callback even though the deadline can expire during post-callback validation.
+The regression now captures that finite native failure before framework handling;
+the complete suite will exercise this final test source. No website prompt was
+submitted or replayed by these controls.
+
+All 637 public candidate tests passed with no failures or skips. Receipt SHA-256:
+1afbc0d4d273669b0bbf6bc4c024eb56612dd6270980135c940a1b907e729e39.
+Complete native candidate validation executed 2,344 tests: 2,295 passed, 49
+explicit opt-in skips and zero failures in 620.684 seconds. All 414 frozen inputs,
+required permission/workflow/patch guards and 26 unique cleanup identities
+verified. The independent audit confirms that all twelve context/binding/late-
+response controls passed exactly once in the original full run, including the
+final regression source with finite failure capture. Native receipt SHA-256:
+f50ef5bee6177dc71749f093825fc26c7c8e444d9611c1d4235d57159dfa3347.
+Source freeze SHA-256:
+7daf39a6792676026469dcb3cf0e6f3f5ef989849545f931266363de4552f964.
+Signed packaging, installation and fresh live qualification remain required.
+The installed app is still build 58, and all seven workflow cases remain incomplete.
