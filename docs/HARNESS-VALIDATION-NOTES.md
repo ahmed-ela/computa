@@ -3170,3 +3170,91 @@ ChatGPT qualification remain pending; prior failed captures stay retained.
 
 Public build 44 receipt SHA: `9676bbfdecf3122075c9cef8238a702d4647d0e7ca0a9accafd2113b9a6c024c`.
 Native build 44 receipt SHA: `865c910bdf8fa9ffa8caf24b425cbc7a6aef59beb1f94f0d47edea2bfa980ab2`.
+
+
+### Installed build 44 and retained Gemini verification failure
+
+Commit `4f4bf368be5cc189e691b609edd31ea74078c8a3` is pushed to draft PR #5.
+The signed build 44 installation passed all 98 bundle/source checks. The
+installed verification receipt SHA is
+`4acdb923b9c5f37bb74fa3569550dd7e23f1b6f55ff769b8aba1b5fa1b7dedc4`.
+The running build 44 process and fresh runtime generation were captured before
+any benchmark prompt; capture SHA
+`51dfbf0ee247e73db1d559c8ed3134975c021ec1a92202ff4b10086433e7dc8e`.
+The first capture invocation used a relative receipt path and was rejected;
+that failure is retained separately. The successful invocation used the
+required exact absolute path. Build 43 is retained as an installation rollback.
+
+Gemini's build 43 coding task stopped on `website_verification_required` with
+zero native tool calls and zero verified submissions. Its website session
+cleanup remains unconfirmed (`cleanup_unverified`); local receipts are retained.
+No prompt was replayed, and no later Gemini workflow was submitted. The coding
+collector also failed to produce a completed report because the requested
+renamed file did not exist; this collector error is preserved, not counted as
+a pass or as evidence of cleanup. Collector SHA:
+`477913a356f7977fff5ee7d334ccf2fe8384362fbd9a7e3dbdb4d2750feb7116`.
+An explicit first-failure record retains the task, turn and lease identifiers.
+Automated Gemini testing requires controlled recovery of the verification
+checkpoint and uncertain session. Claude remains stopped on quota.
+
+
+Fresh ChatGPT GPT-6 qualification on installed build 44 passed all 39 checks.
+It executed a real marker-file read, returned the exact marker, and acknowledged
+and closed both website inference sessions. Exact-turn collector SHA:
+`4e0ef0c68e04863cd113c47136c5ea6f00826de0603fb4f216d95191c8cc7a59`.
+This qualifies this controlled provider/model task, not its broader workflows
+or an independently attested provider backend version.
+
+
+ChatGPT's installed build 44 coding/Git workflow passed the independent file
+oracle and exact-turn collector. Both tests passed, the rename preserved exact
+helper bytes, the dirty note and public tests were preserved, and local and
+disposable bare-origin heads matched commit
+`c01315fb0c9b133dec3adbbc737029afc227ddd4`. All nine inference sessions closed.
+Oracle SHA: `c1be743be328349c2f9160e821da9a238ae67ec9a74994bb513aa947dd3be427`.
+Collector SHA: `a60a8f16a13c03f89bbcce022edf84011e537ec94ca5a6ee8e460be5f042c978`.
+The model caught and corrected its whitespace changes before committing.
+
+The next ChatGPT browser case stopped on `browser_model_error` /
+`first_user_message` before any native tool call. One lease was acknowledged
+and none was confirmed closed. Its failed collector SHA is
+`c333d2f627e766e297052b12b42b20aa27a86420cc8d4f3efc17c280ef2f4169`.
+A bounded structural diagnostic confirmed one matching marker and an expanded
+message mismatch; the exact rendering cause is not established. The original
+failed attempt remains retained and was not replayed. Root stopped only the
+owned flight fixture server and independently verified its PID and socket
+closed. That local process cleanup does not prove website-session cleanup.
+Further ChatGPT website tasks are paused pending diagnosis and controlled
+recovery. Its earlier qualification and coding pass remain separate evidence.
+
+### Installed diff checks and native select commit regression
+
+A separate disposable build 44 review project passed exact local-model edits
+and independent preservation of its pre-existing files, Git index and HEAD.
+Installed checks then passed unified/split/wrapped views, hunk collapse and
+expansion, selective stage/unstage/revert, stale-state mutation rejection,
+binary notices, file filtering and read-only branch/commit comparisons. Each
+mutation was checked against actual files and index contents. The stale
+attempt preserved the concurrent edit and left the index unchanged.
+The ChatGPT coding case also exposed its recorded last-turn patch changes as
+read-only; that view is not a substitute for a current Git diff after later
+shell edits.
+
+Selecting a scope after switching tasks exposed a real inconsistency:
+the dropdown showed Unstaged while the native state and explanation stayed
+Last turn. The retained receipt is `scope-switch-failure.json`, SHA
+`1a6369fafba13cf667b8f54f71f763e3e08bf7ad6d8de1ac234c8917560cc76b`.
+An offscreen test of the actual bundled Octane UI and WebKit/native bridge
+reproduces commit-only selections: all four scope selections failed to reach
+native state with the old `onInput` handler. The select now listens to its
+native `change` commit event. The same regression passes after rebuilding
+the production bundle. Type checking, all 123 frontend tests, and all 16
+native review/pane tests passed. This source correction still requires a new
+installed artifact and the corresponding live UI check.
+
+The task-created build 39 installed backup was archived to
+`/Volumes/t7/computa-owned-backup-archive-build39-20261011`. All 77 members,
+file contents, modes and symlinks matched before its internal duplicate was
+retired. Archive SHA:
+`d83749af87f251086e8581a2f25bce80f4b0bec0bbc03e057512d2b85a14edce`.
+The installed build 44 and its build 43 rollback backup were retained.

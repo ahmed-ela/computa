@@ -75,3 +75,33 @@ Owned stock goals were cleared, threads archived and app-server processes stoppe
 Eighteen disposable project/origin directories were archived, with ZIP CRC/member hashes and matching live contents verified before removal. `owned-fixtures.zip` SHA-256 is `0a4533d26e0ecc3a5578665b01002ee2618a149f9df527810721c5ca082f9f93`. `owned-fixtures.zip.archive-verified.json`, `owned-fixtures.zip.cleanup-receipt.json` and `application-cleanup-receipt.json` record cleanup. Templates, controls, scripts, receipts and request traces were retained.
 
 At documentation time, source41 has applied a canonical 24 KiB receipt-budget admission rule in place of the arbitrary 1 KiB call bound. Its MLX boundary also distinguishes missing generated public output below the budget from actual output-limit incompleteness; the 107 offline MLX tests passed. These changes have **not yet been qualified by an installed build41 rerun of this benchmark**. Source edits and component tests do not alter the six historical build39/Codex outcomes or establish robust installed task completion. Computa goal support remains disabled.
+
+## Build 44 rerun in progress — 2026-10-10
+
+The fresh comparison retains the exact fixture, submitted task, model files,
+medium reasoning, 16,384 context and 12,288 compaction settings. Installed
+Computa is 0.6.0 (44); the stock Codex binary is unchanged. Both now actually
+use `danger-full-access` / `never`. Product instructions and tool catalogs
+still differ. Every trial starts in a fresh disposable project and thread,
+with no coaching or error retry.
+
+| Trial completed so far | Full task | Observed stopping condition |
+| --- | --- | --- |
+| Computa ordinary r1 | Failed | Nine real commands completed before all genuine tool receipts could no longer fit the 12 KiB provider-input / 24 KiB canonical compaction bounds. |
+| Codex ordinary r1 | Failed | The local-model protocol validator rejected an unadvertised generated tool call after six completed model responses. |
+| Codex native goal r1 | Failed | The same protocol error occurred after six completed model responses. Native goal state was blocked before owned cleanup; no additional runtime turn started. |
+| Codex native goal r2 | Failed | The protocol validator again rejected an unadvertised generated tool call after six completed model responses; no additional runtime turn started. |
+
+Independent grading confirms that none completed the required changes,
+regressions, commit and local-origin push. Each preserved the original public
+tests and dirty note. The remaining repeats are incomplete; they do not count
+as passes or failures yet. Computa goal mode remains unavailable. The first
+Computa trial overlapped independent diff UI checks, so its latency supports
+no speed comparison.
+
+Evidence remains under the same private workspace, in `trials/*build44*`,
+`codex-build44-*-runtime`, `build44-model-binary-identity.json` and
+`build44-trial-preparation.json`. The first Computa trial has its sealed actual
+rollout, independent `grade.json` and `execution-receipt.json`. Codex receipts
+retain the actual RPC goal, turn error and owned thread/process cleanup.
+These records do not change the historical build 39 results above.
