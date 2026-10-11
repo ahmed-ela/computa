@@ -917,16 +917,21 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         return true;
         """
         _ = try await script(view, invalid, world: world)
-        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"))
+        let rejected = session.modelDiagnosticSnapshot(tabID: id)
+        XCTAssertTrue(rejected.contains("phases=not_started"))
+        XCTAssertTrue(rejected.contains("diagnosticsReceived=6 diagnosticsAccepted=0 diagnosticRejected=payload"))
+        XCTAssertTrue(rejected.contains("generationCurrent=true originCurrent=true"))
         let receipt = "window.webkit.messageHandlers.computaModelDiagnostic.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', phase: 'first_user_hash'}); return true;"
         _ = try await script(view, receipt, world: world)
         XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=first_user_hash"))
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("diagnosticsReceived=7 diagnosticsAccepted=1"))
         let after = try await session.waitForModelChange(tabID: id, after: revision, until: .now + .milliseconds(100))
         XCTAssertEqual(after, revision, "Diagnostics cannot wake an inference or authorize an action")
         session.endModelDiagnostic(tabID: id, operationID: UUID())
         XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("active=true"))
         let next = UUID()
         try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: next)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("diagnosticsReceived=0 diagnosticsAccepted=0 diagnosticRejected=none"))
         XCTAssertEqual(session.modelDiagnosticSnapshot(tabID: id, operationID: operation), "state=superseded")
         session.endModelDiagnostic(tabID: id, operationID: operation)
         XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("active=true"), "Ending an older operation cannot cancel the newer diagnostic")
@@ -949,10 +954,13 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         let frame = try XCTUnwrap(childFixture.frame, "The controlled child frame must actually load")
         _ = try await script(view, nextReceipt, world: world, frame: frame)
         XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"), "A same-origin child frame has no diagnostic authority")
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("diagnosticRejected=frame"))
         view.navigationDelegate = navigationDelegate
         view.navigationDelegate?.webViewWebContentProcessDidTerminate?(view)
         _ = try await script(view, nextReceipt, world: world)
         XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"), "A changed generation invalidates the diagnostic operation")
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("generationCurrent=false originCurrent=true"))
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("diagnosticRejected=generation"))
         session.closeTab(id)
         XCTAssertEqual(session.modelDiagnosticSnapshot(tabID: id), "state=closed")
     }
@@ -976,7 +984,12 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
                 if origin == host {
                     XCTAssertTrue(snapshot.contains("phases=" + phases.suffix(8).joined(separator: ",")))
                     XCTAssertFalse(snapshot.contains("adapter_entry"))
-                } else { XCTAssertTrue(snapshot.contains("phases=not_started")) }
+                    XCTAssertTrue(snapshot.contains("diagnosticsReceived=9 diagnosticsAccepted=9 diagnosticRejected=none"))
+                } else {
+                    XCTAssertTrue(snapshot.contains("phases=not_started"))
+                    XCTAssertTrue(snapshot.contains("diagnosticsReceived=9 diagnosticsAccepted=0 diagnosticRejected=origin"))
+                    XCTAssertTrue(snapshot.contains("originCurrent=false"))
+                }
                 XCTAssertLessThan(snapshot.utf8.count, 1_024)
                 XCTAssertFalse(snapshot.contains(host))
                 XCTAssertFalse(snapshot.contains(owner))

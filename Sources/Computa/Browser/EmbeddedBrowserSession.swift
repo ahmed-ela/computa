@@ -98,6 +98,10 @@ final class EmbeddedBrowserSession {
         var modelDiagnosticStarted: ContinuousClock.Instant?
         var modelDiagnosticPhaseStarted: ContinuousClock.Instant?
         var modelDiagnosticPhases: [ModelAdapterPhase] = []
+        var modelDiagnosticReceived: UInt16 = 0
+        var modelDiagnosticAccepted: UInt16 = 0
+        var modelDiagnosticLastRejection: ModelDiagnosticRejection?
+        var modelDOMReceivedAtOperationStart: UInt16 = 0
         var modelClockWaits: [UUID: ModelClockWait] = [:]
         var modelDOMSignalsReceived: UInt16 = 0
         var modelDOMSignalsAccepted: UInt16 = 0
@@ -469,7 +473,12 @@ final class EmbeddedBrowserSession {
         case finalModelGuard = "final_model_guard"
     }
 
-    /// Only inference-owned views receive this notification-only private-world handler.
+    private enum ModelDiagnosticRejection: String {
+        case frame, generation, payload, origin
+    }
+
+    /// Install private-world notifications, diagnostics and bounded deadline
+    /// replies for one inference-owned view.
     func installModelChangeSignal(tabID: UUID, ownerToken: String, world: WKContentWorld,
                                   originHost: String = "chatgpt.com") throws {
         let entry = try entry(tabID)
@@ -489,14 +498,18 @@ final class EmbeddedBrowserSession {
     func beginModelDiagnostic(tabID: UUID, ownerToken: String, operationID: UUID) throws {
         let entry = try entry(tabID)
         guard entry.modelChanges?.ownerToken == ownerToken else { throw Failure.tabClosed }
-        // A concurrent operation supersedes diagnostics only. Instrumentation
-        // must not reject a production evaluation or affect its completion.
+        // Scope diagnostics and native clocks to one operation. A newer
+        // operation expires older waits without supplying positive proof.
         cancelModelClocks(entry)
         entry.modelDiagnosticOperation = operationID
         entry.modelDiagnosticGeneration = entry.tab.documentGeneration
         entry.modelDiagnosticStarted = .now
         entry.modelDiagnosticPhaseStarted = nil
         entry.modelDiagnosticPhases.removeAll(keepingCapacity: true)
+        entry.modelDiagnosticReceived = 0
+        entry.modelDiagnosticAccepted = 0
+        entry.modelDiagnosticLastRejection = nil
+        entry.modelDOMReceivedAtOperationStart = entry.modelDOMSignalsReceived
     }
 
     func endModelDiagnostic(tabID: UUID, operationID: UUID) {
@@ -519,8 +532,14 @@ final class EmbeddedBrowserSession {
         }
         let view = entry.view, window = view.window
         let phases = entry.modelDiagnosticPhases.map(\.rawValue).joined(separator: ",")
+        let url = view.url
+        let originCurrent = url?.scheme == "https" && url?.host == entry.modelSignalOriginHost
+            && (url?.port == nil || url?.port == 443)
         return "phases=\(phases.isEmpty ? "not_started" : phases) active=\(entry.modelDiagnosticOperation != nil)"
             + " operationAgeMs=\(milliseconds(since: entry.modelDiagnosticStarted)) phaseAgeMs=\(milliseconds(since: entry.modelDiagnosticPhaseStarted)) clocksPending=\(entry.modelClockWaits.count)"
+            + " generationCurrent=\(entry.modelDiagnosticGeneration == entry.tab.documentGeneration) originCurrent=\(originCurrent)"
+            + " diagnosticsReceived=\(entry.modelDiagnosticReceived) diagnosticsAccepted=\(entry.modelDiagnosticAccepted) diagnosticRejected=\(entry.modelDiagnosticLastRejection?.rawValue ?? "none")"
+            + " domDuringOperation=\(max(0, Int(entry.modelDOMSignalsReceived) - Int(entry.modelDOMReceivedAtOperationStart)))"
             + " domReceived=\(entry.modelDOMSignalsReceived) domAccepted=\(entry.modelDOMSignalsAccepted) revision=\((try? entry.modelChanges?.currentRevision()) ?? 0)"
             + " attached=\(view.superview != nil) hidden=\(view.isHiddenOrHasHiddenAncestor) window=\(window != nil)"
             + " visible=\(window?.isVisible == true) occluded=\(window != nil && window?.occlusionState.contains(.visible) != true)"
@@ -530,16 +549,25 @@ final class EmbeddedBrowserSession {
     }
 
     fileprivate func receivedModelDiagnostic(_ message: WKScriptMessage, tabID: UUID) {
-        guard let entry = entries[tabID], message.webView === entry.view, message.frameInfo.isMainFrame,
-              entry.modelDiagnosticGeneration == entry.tab.documentGeneration,
-              let operation = entry.modelDiagnosticOperation,
+        guard let entry = entries[tabID] else { return }
+        entry.modelDiagnosticReceived = entry.modelDiagnosticReceived == .max ? .max : entry.modelDiagnosticReceived + 1
+        guard message.webView === entry.view, message.frameInfo.isMainFrame else {
+            entry.modelDiagnosticLastRejection = .frame; return
+        }
+        guard entry.modelDiagnosticGeneration == entry.tab.documentGeneration else {
+            entry.modelDiagnosticLastRejection = .generation; return
+        }
+        guard let operation = entry.modelDiagnosticOperation,
               let body = message.body as? [String: String], Set(body.keys) == ["ownerToken", "operationID", "phase"],
               body["ownerToken"] == entry.modelChanges?.ownerToken,
               body["operationID"].flatMap(UUID.init(uuidString:)) == operation,
-              let rawPhase = body["phase"], let phase = ModelAdapterPhase(rawValue: rawPhase) else { return }
+              let rawPhase = body["phase"], let phase = ModelAdapterPhase(rawValue: rawPhase) else {
+            entry.modelDiagnosticLastRejection = .payload; return
+        }
         let origin = message.frameInfo.securityOrigin
         guard origin.`protocol` == "https", origin.host == entry.modelSignalOriginHost,
-              origin.port == 0 || origin.port == 443 else { return }
+              origin.port == 0 || origin.port == 443 else { entry.modelDiagnosticLastRejection = .origin; return }
+        entry.modelDiagnosticAccepted = entry.modelDiagnosticAccepted == .max ? .max : entry.modelDiagnosticAccepted + 1
         entry.modelDiagnosticPhaseStarted = .now
         if entry.modelDiagnosticPhases.last != phase {
             entry.modelDiagnosticPhases.append(phase)

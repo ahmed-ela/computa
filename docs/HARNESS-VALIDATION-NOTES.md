@@ -3794,3 +3794,40 @@ not entering the adapter or a receipt not reaching the native handler. The
 native-clock change has not resolved the live failure. Further investigation
 must discriminate those cases rather than assuming another verification timer
 stall. Gemini CAPTCHA and Claude quota gates remain in place.
+
+
+## Build 52: distinguish rejected receipts from missing JavaScript entry
+
+The build 51 timeout accepted no phase receipt, which alone cannot show
+whether JavaScript entered the adapter. Build 52 adds bounded per-operation
+received/accepted counters and a fixed rejection category: frame, generation,
+payload or origin. The snapshot also records current native generation/origin
+booleans and DOM receipts received during that operation. These are diagnostic
+metadata only; rejected receipts still cannot wake the inference, change a
+revision or provide model/ownership proof. The operation supersession comment
+now accurately describes cancellation of older native clock waits.
+
+All 47 focused native checks passed, including provider/origin/frame/generation
+rejection, counter reset, metadata bounds/privacy and a stalled digest's native
+completion deadline. The seven public groups passed 637 tests without failures
+or skips; receipt SHA-256:
+e489d2498f21cb67d8431b480d975e278129af5b25055b66ddf0f0a98ac6ce73.
+Complete native validation executed 2,334 tests: 2,285 passed, 49 opt-in skips,
+zero failures in 537.870 seconds. All 414 frozen inputs and the unchanged engine
+matched, all required permission/workflow/patch guards passed and 26 cleanup
+identities verified. Independent original-receipt/log audit passed without
+replay; native receipt SHA-256:
+247d7042e1da89451ae7ca2a810c8b9f66d1e724c8599c07093f1f68a839200d.
+Signed installation and fresh live qualification remain separate next steps.
+
+Additional space cleanup removed exact duplicate build 47/48 backup apps,
+retaining their complete staged copies, current build 51 and recent rollback
+apps 49/50. The first deletion stopped after 16 members because its directory
+identity guard included a link count changed by its own deletion. The saved
+manifest and unchanged staged copy were verified before resuming with stable
+device/inode/type/mode/owner checks. The resumed cleanup verified all retained
+bundles and all frozen inputs, removing 511,418,368 allocated bytes across both
+attempts (about 488 MiB). The original plan and partial failure remain recorded.
+No process was signalled. Total space cleanup is approximately 36.5 GiB.
+The successful build 51 marker project was archived, verified and removed;
+its traces and failed browser project remain retained.
