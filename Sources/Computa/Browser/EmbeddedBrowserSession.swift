@@ -17,6 +17,8 @@ final class EmbeddedBrowserTab: Identifiable {
     /// Invalidates full-document navigation receipts; SPA route changes preserve it.
     fileprivate(set) var documentGeneration = UUID()
     fileprivate(set) var error: String?
+    fileprivate(set) var isWebInspectorEnabled = false
+    fileprivate(set) var isWebInspectorAvailable = false
 
     fileprivate init(id: UUID = UUID(), isPopup: Bool = false) { self.id = id; self.isPopup = isPopup }
 }
@@ -34,6 +36,7 @@ final class EmbeddedBrowserSession {
         case modelPopupUnsupported
         case toolPopupUnsupported
         case popupProfileMismatch
+        case inspectionUnavailable
 
         var errorDescription: String? {
             switch self {
@@ -44,6 +47,7 @@ final class EmbeddedBrowserSession {
             case .modelPopupUnsupported: "Pop-up windows are not enabled for model inference pages."
             case .toolPopupUnsupported: "This task tab cannot open an unowned pop-up. Open the observed destination with the browser tools."
             case .popupProfileMismatch: "The requested pop-up did not preserve this browser's sign-in profile."
+            case .inspectionUnavailable: "Web Inspector is unavailable for this tab while a task owns or uses it."
             }
         }
     }
@@ -241,6 +245,10 @@ final class EmbeddedBrowserSession {
         let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil)
         let view = modelOwned || toolOwned ? EmbeddedModelWebView(frame: NSRect(x: 0, y: 0, width: 1_024, height: 768), configuration: configuration)
             : WKWebView(frame: .zero, configuration: configuration)
+        // Inspection is an explicit, ephemeral choice for each human tab.
+        // An inspectable opener must not grant it to a new popup.
+        view.isInspectable = false
+        tab.isWebInspectorAvailable = !modelOwned && !toolOwned
         let delegate = EmbeddedBrowserDelegate(session: self, tabID: tab.id)
         view.navigationDelegate = delegate
         view.uiDelegate = delegate
@@ -300,6 +308,9 @@ final class EmbeddedBrowserSession {
     func closeTab(_ id: UUID) {
         guard let entry = entries.removeValue(forKey: id), let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         let humanIndex = tabs.prefix(index).filter { entries[$0.id]?.isModelOwned == false }.count
+        entry.view.isInspectable = false
+        entry.tab.isWebInspectorEnabled = false
+        entry.tab.isWebInspectorAvailable = false
         entry.tab.documentID = UUID()
         entry.tab.documentGeneration = UUID()
         entry.modelChanges?.close()
@@ -373,6 +384,20 @@ final class EmbeddedBrowserSession {
 
     func webView(for id: UUID) -> WKWebView? { entries[id]?.view }
 
+    func canInspect(tabID: UUID) -> Bool {
+        guard !isShutdown, let entry = entries[tabID] else { return false }
+        return entry.tab.isWebInspectorAvailable && !entry.isModelOwned && !entry.isToolOwned
+            && entry.toolPopupContext?.documentID != entry.humanCommittedDocumentID
+    }
+
+    /// Public WebKit inspection only; no inspector is opened and no page data is captured.
+    func setWebInspectorEnabled(_ enabled: Bool, for tabID: UUID) throws {
+        let entry = try entry(tabID)
+        guard !enabled || canInspect(tabID: tabID) else { throw Failure.inspectionUnavailable }
+        entry.view.isInspectable = enabled
+        entry.tab.isWebInspectorEnabled = enabled
+    }
+
     /// Called only inside the one-use mutation permit's successful enqueue.
     /// A provisional/failed load or Stop does not replace the retained document.
     func prepareToolMutation(tabID: UUID, generation: UUID) throws -> UUID {
@@ -380,6 +405,9 @@ final class EmbeddedBrowserSession {
         guard !entry.isModelOwned, entry.tab.documentGeneration == generation else {
             throw BrowserTabBrokerError.staleDocument
         }
+        entry.view.isInspectable = false
+        entry.tab.isWebInspectorEnabled = false
+        entry.tab.isWebInspectorAvailable = false
         let context = ToolMutationPopupContext(documentID: entry.humanCommittedDocumentID)
         entry.toolPopupContext = context
         return context.operationID
@@ -817,6 +845,7 @@ final class EmbeddedBrowserSession {
             entry.humanCommittedNavigation = navigation
             entry.humanCommittedDocumentID = UUID()
             entry.toolPopupContext = nil
+            entry.tab.isWebInspectorAvailable = !entry.isToolOwned
         }
         refresh(tabID, view: view, committedNavigation: true)
     }

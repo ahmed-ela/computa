@@ -5,6 +5,98 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserSessionTests: XCTestCase {
+    func testWebInspectorOptInIsPerTabAndPreservesTheBrowserDocument() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let firstID = try session.createTab()
+        let secondID = try session.createTab(select: false)
+        let first = try XCTUnwrap(session.webView(for: firstID))
+        let second = try XCTUnwrap(session.webView(for: secondID))
+        let generation = session.documentGeneration(for: firstID)
+        XCTAssertFalse(first.isInspectable)
+        XCTAssertFalse(second.isInspectable)
+        XCTAssertTrue(session.canInspect(tabID: firstID))
+        try session.setWebInspectorEnabled(true, for: firstID)
+        XCTAssertTrue(first.isInspectable)
+        XCTAssertTrue(try XCTUnwrap(session.humanTab(id: firstID)).isWebInspectorEnabled)
+        XCTAssertFalse(second.isInspectable)
+        XCTAssertEqual(session.selectedTabID, firstID)
+        XCTAssertEqual(session.documentGeneration(for: firstID), generation)
+        XCTAssertNil(first.url)
+        XCTAssertTrue(first.configuration.userContentController.userScripts.isEmpty)
+        try session.setWebInspectorEnabled(false, for: firstID)
+        XCTAssertFalse(first.isInspectable)
+        XCTAssertFalse(try XCTUnwrap(session.humanTab(id: firstID)).isWebInspectorEnabled)
+        session.closeTab(firstID)
+        XCTAssertFalse(session.canInspect(tabID: firstID))
+        XCTAssertThrowsError(try session.setWebInspectorEnabled(true, for: firstID)) {
+            XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .tabClosed)
+        }
+    }
+
+    func testWebInspectorCannotBeEnabledForInferenceOrToolOwnedViews() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let modelID = try session.createUnloadedModelTabForTesting()
+        let toolID = try session.createToolTab(url: XCTUnwrap(URL(string: "about:blank")))
+        for id in [modelID, toolID] {
+            let view = try XCTUnwrap(session.webView(for: id))
+            XCTAssertFalse(session.canInspect(tabID: id))
+            XCTAssertThrowsError(try session.setWebInspectorEnabled(true, for: id))
+            XCTAssertFalse(view.isInspectable)
+            try session.setWebInspectorEnabled(false, for: id)
+            XCTAssertFalse(view.isInspectable)
+        }
+    }
+
+    func testWebInspectorIsRevokedBeforeToolMutationAndDoesNotResumeAfterReplacement() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab()
+        let view = try XCTUnwrap(session.webView(for: id))
+        try await loadPopupFixture(view)
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        try session.setWebInspectorEnabled(true, for: id)
+        XCTAssertTrue(view.isInspectable)
+        _ = try session.prepareToolMutation(tabID: id, generation: generation)
+        XCTAssertFalse(view.isInspectable)
+        XCTAssertFalse(try XCTUnwrap(session.humanTab(id: id)).isWebInspectorEnabled)
+        XCTAssertFalse(session.canInspect(tabID: id))
+        XCTAssertThrowsError(try session.setWebInspectorEnabled(true, for: id))
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        let ready = try await script(view, "return !!document.getElementById('ready');")
+        XCTAssertEqual(ready, Data("true".utf8))
+        try await loadPopupFixture(view)
+        XCTAssertTrue(session.canInspect(tabID: id), "A committed replacement releases the tool's old document")
+        XCTAssertFalse(view.isInspectable, "Inspection requires another explicit opt-in")
+        try session.setWebInspectorEnabled(true, for: id)
+        session.closeTab(id)
+        XCTAssertFalse(view.isInspectable, "Retaining the detached WebView cannot retain inspection access")
+    }
+
+    func testWebInspectorDoesNotPropagateToPopupsAndShutdownRevokesHeldViews() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let openerID = try session.createTab()
+        let opener = try XCTUnwrap(session.webView(for: openerID))
+        defer { session.shutdown() }
+        try await loadPopupFixture(opener)
+        try session.setWebInspectorEnabled(true, for: openerID)
+        _ = try await script(opener, "document.getElementById('blank-link').click(); return true;")
+        try await waitForPopupCount(2, session: session)
+        let childID = try XCTUnwrap(session.tabs.first(where: { $0.id != openerID })).id
+        let child = try XCTUnwrap(session.webView(for: childID))
+        XCTAssertTrue(opener.isInspectable)
+        XCTAssertFalse(child.isInspectable)
+        try session.setWebInspectorEnabled(true, for: childID)
+        session.shutdown()
+        XCTAssertFalse(opener.isInspectable)
+        XCTAssertFalse(child.isInspectable)
+        XCTAssertFalse(session.canInspect(tabID: childID))
+        XCTAssertThrowsError(try session.setWebInspectorEnabled(true, for: childID)) {
+            XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .sessionClosed)
+        }
+    }
+
     func testStartsEmptyAndCreatesBlankTabWithoutLoadingAHomepage() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

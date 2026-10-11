@@ -153,9 +153,39 @@ struct EmbeddedBrowserPane: View {
                 .disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .help("Go to address")
                 .accessibilityLabel("Go to address")
+
+            webInspectorMenu
         }
         .buttonStyle(.borderless)
         .padding(10)
+    }
+
+    private var webInspectorMenu: some View {
+        Menu {
+            if let tab = selectedTab {
+                Toggle("Allow Web Inspector", isOn: Binding(
+                    get: { tab.isWebInspectorEnabled },
+                    set: { setWebInspectorEnabled($0, for: tab.id) }
+                ))
+                .disabled(!tab.isWebInspectorEnabled && (isInteractionBlocked || !session.canInspect(tabID: tab.id)))
+                .help("Use Safari's Develop menu to inspect this tab. Inspection ends when the tab closes or a task uses it.")
+                .accessibilityIdentifier("browser-web-inspector")
+            }
+        } label: {
+            Image(systemName: "wrench.and.screwdriver")
+        }
+        .disabled(selectedTab == nil)
+        .help("Developer tools")
+        .accessibilityLabel("Developer tools")
+        .accessibilityIdentifier("browser-developer-tools")
+    }
+
+    private func setWebInspectorEnabled(_ enabled: Bool, for tabID: UUID) {
+        guard !enabled || !isInteractionBlocked else { return }
+        do {
+            try session.setWebInspectorEnabled(enabled, for: tabID)
+            addressError = nil
+        } catch { addressError = error.localizedDescription }
     }
 
     private func emptyPage(hasTab: Bool) -> some View {

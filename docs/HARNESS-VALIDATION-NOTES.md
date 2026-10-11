@@ -4785,3 +4785,45 @@ tab error separately. Existing diagnostics do not capture page fetch/XHR
 status or console failures. The live failure's cause remains unproven, so this
 installation is not a ChatGPT reliability pass. Gemini and Claude live testing
 remain deferred.
+
+
+### Build 66 candidate: opt-in public Web Inspector diagnostics
+
+A regular browser tab can opt into WebKit's public inspection API through
+Developer tools. Inspection defaults off for each new view and popup. It
+cannot be enabled for inference or task-owned tabs, and it is revoked before
+a task mutates a borrowed human document, on close and on shutdown. Committing
+a replacement document restores eligibility without enabling inspection again.
+This adds no fetch interceptor, request capture, authentication change or
+private WebKit API.
+
+Four native controls passed using actual WKWebViews, including document
+preservation, private-view rejection, borrowed-document revocation, popup
+independence and revocation from held views after shutdown. Focused log SHA-256:
+244abd6f386f5cd44537cc26e3493bb4c078c01ab073b26cf297369ea6cd1c77.
+All 644 public checks also passed, along with frontend checking and production
+build. Public receipt SHA-256:
+0cafdf3ebed209194a5ff1b2f9aced04c1bae3cdc45233ffa498fb9da1727839.
+Full native validation and installed inspection usability are pending. The
+supported public inspection route is Safari's Develop menu; enabling the view
+does not guarantee that a local Inspect Element context-menu command appears.
+The per-view guards do not claim isolation of shared-profile service workers.
+Inspection will be disabled before native qualification. No live website fix
+or response success is claimed by these diagnostic checks.
+
+
+The complete build-66 run executed 2,367 native tests in 622.167 seconds:
+2,318 passed, 49 opt-in cases skipped and no failures. All 414 frozen inputs,
+public evidence and the pinned engine stayed unchanged. The independent audit
+verified all 52 browser-session tests, four inspector controls, seventeen
+previous queue/deadline controls and 26 unique cleanup identities. Native
+receipt SHA-256:
+29bb8d30338a97d4a6e346bd97dbd145f68001517c614be8964187b492c6a36c.
+Signed installation and live inspection remain separate checks.
+
+The two unused build-44 goal-preflight roots omitted from the twelve-trial
+cleanup were archived and removed after exact device/inode, complete manifest,
+archive content/mode/symlink and finite process/cwd/open-path verification.
+The archive retains 101 members and 69,533 file/symlink bytes. Cleanup receipt
+SHA-256: 37da998d2c4acd0d7c3a750d05456480cd22e8d3188c2c24d52dabfef8b3e3cc.
+This cleanup does not establish website-session deletion or goal-mode support.
