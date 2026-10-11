@@ -4177,5 +4177,53 @@ replaying tests. Native receipt SHA-256:
 Source freeze SHA-256:
 9369cf7c11a32696249f15d83860fbeca933a2cbc68fcaf8d31944477a5f0e07.
 The changed compiled inputs are only the version, cleanup store and cleanup
-test file. Signed staging, installation and current live qualification remain
-separate pending checks.
+test file. Signed staging, installation and current live qualification are
+recorded separately below.
+
+### Build 58 installed delivery and browser failure
+
+Signed staging and installed bundle verification each passed all 98 checks.
+The verified compiled source commit is 7f5b5bbcdf5f9b0d336896be42874e20a20dc71d.
+Installed Computa 0.6.0 (58) runs as PID 43763 with runtime generation
+faabf58d-c111-401e-aab6-85f57472e231. The previous build 57 process exited
+before the official installer ran; builds 55 and 57 remain available as rollback
+apps. Removing one duplicate build 53 backup freed another 255,795,200 allocated
+bytes, bringing this cleanup pass to about 31.6 GiB removed. Later builds
+regenerate caches, so that figure is cumulative deletion, not net space gained.
+
+Fresh ChatGPT GPT-6 marker qualification passed every collector check. One real
+terminal read returned marker-bed1e68b0bcb400386291e3d77f929d4, and both inference
+leases closed with exact durable journal proof despite the full summary cache.
+Collector receipt SHA-256:
+3513a981de4c67c36e3cd57de9222e53621a01bd493f3c2a6aa5ff622af18367.
+This verifies the capacity fix in the installed app; it does not qualify the
+remaining browser, composition, interactive or Gemini workflows.
+
+The successor case preparer accepts only the exact optional-summary omission
+descriptor emitted by collector 27. Three pure-data controls accept this
+qualification, reject numeric substitutes for its true boolean fields and
+reject changed mandatory journal hashes. The earlier preparer rejected the
+optional descriptor before fixture creation or model submission. No model
+prompt was replayed for that preparation correction.
+
+The subsequent browser case submitted its plain-language flight lookup once.
+Fourteen native calls comprised one browser_open, one browser_navigate, one
+browser_tabs, ten browser_read calls and one browser_fill. The fill copied a
+previously superseded snapshot ID and was rejected before any field mutation.
+After a fresh read, the next inference's model-page verification reached its
+thirty-second inspection deadline. The final error was browser_model_error;
+no flight search, details navigation, gate action or final answer occurred.
+
+The timeout diagnostic reported action=verifyModel with accepted adapter_entry
+and first_user_hash phases, current origin/generation and seven milliseconds
+since JavaScript entry. This does not identify the cause of the preceding
+delay or prove a hashing defect. The original grade remains failed: 36 of 46
+checks passed, with ten required outcome/error/freshness checks failing.
+All fourteen inference leases have exact durable closed receipts, and the
+root-owned PID 46333 fixture server was stopped only after re-verifying its
+command, start time, working directory and unique listener. PID exit, socket
+closure and one server_closed event verified; the execution session was reaped.
+The exact unused rejected-reply capture arm was cancelled and preserved in this
+case. The fixture, sealed traces and failed collector are retained. Receipt
+SHA-256: ea8c1d956a470cb979c8640e444f5e59ab92dc28194ff14121bf9abe16c331e3.
+Seven live workflow cases remain incomplete. No failure prompt was replayed.
