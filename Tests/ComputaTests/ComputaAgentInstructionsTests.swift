@@ -155,6 +155,45 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
     }
 
+    func testBuiltInBrowserContractLocatesURLExecutionOnTheHost() {
+        let tools = ["functions.browser_open": "browser_open", "functions.browser_read": "browser_read",
+                     "computer_v2_read_page": "computer_v2_read_page"]
+        let contract = ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools)
+        XCTAssertTrue(contract.contains("Built-in browser execution is offered as: functions.browser_open, functions.browser_read."))
+        XCTAssertTrue(contract.contains("Computa resolves requested URLs on the user's computer"))
+        XCTAssertTrue(contract.contains("including localhost and loopback addresses"))
+        XCTAssertTrue(contract.contains("The website need not connect to those URLs"))
+        XCTAssertTrue(contract.contains("Chrome connection is not required for these built-in operations"))
+        XCTAssertTrue(contract.contains("applies local permissions and\napprovals"))
+        XCTAssertTrue(contract.contains("tool_choice"))
+        let absent = ComputaAgentInstructions.webInferenceContract(offeredFunctions: ["functions.exec_command": "exec_command"])
+        XCTAssertFalse(absent.contains("Built-in browser execution is offered as:"))
+        XCTAssertFalse(absent.contains("including localhost and loopback addresses"))
+        let custom = ComputaAgentInstructions.webInferenceContract(
+            offeredFunctions: ["functions.browser_open": "browser_open"],
+            customToolNames: ["functions.browser_open"])
+        XCTAssertFalse(custom.contains("Built-in browser execution is offered as:"))
+        let unknown = ComputaAgentInstructions.webInferenceContract(offeredFunctions: ["functions.browser_other": "browser_other"])
+        XCTAssertFalse(unknown.contains("Built-in browser execution is offered as:"))
+    }
+
+    func testResponseHandoffExplainsExternalBrowserExecutionOnlyWhenOffered() {
+        for name in ["browser_open", "functions.browser_open"] {
+            let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: [name])
+            XCTAssertTrue(handoff.contains("The website need not access the requested page or host network itself"))
+            XCTAssertTrue(handoff.contains("Computa executes the requested browser operation on the user's computer"))
+            XCTAssertTrue(handoff.contains("matching outputs"))
+            XCTAssertTrue(handoff.contains("tool_choice"))
+        }
+        for names in [[], ["functions.exec_command"], ["computer_v2_read_page"]] {
+            let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: names)
+            XCTAssertFalse(handoff.contains("The website need not access the requested page or host network itself"))
+        }
+        let custom = ComputaAgentInstructions.webResponseContract(
+            offeredToolNames: ["functions.browser_open"], customToolNames: ["functions.browser_open"])
+        XCTAssertFalse(custom.contains("The website need not access the requested page or host network itself"))
+    }
+
     func testWebContractsDescribeExternalRelayWithoutReassigningWebsiteIdentityOrPermissions() {
         // Source-contract checks; actual provider cooperation needs live runs.
         for manifest in [[:], ["functions.exec_command": "exec_command"]] {

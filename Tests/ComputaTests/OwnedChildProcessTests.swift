@@ -118,21 +118,44 @@ final class OwnedChildProcessTests: XCTestCase {
             .appendingPathComponent("Fixtures/OwnedChildSignalProbe.c")
         let fixture = try OwnedFixtureDirectory(prefix: "ComputaSignalProbe-")
         let binary = fixture.root.appendingPathComponent("probe")
-        let compiler = try OwnedChildProcess(executableURL: URL(fileURLWithPath: "/usr/bin/clang"),
-            arguments: [source.path, "-o", binary.path])
-        let stopped = try await waitForExit(compiler)
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: binary.path))
+        let developer = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
+        let compilerURL = developer.map {
+            URL(fileURLWithPath: $0).appendingPathComponent("Toolchains/XcodeDefault.xctoolchain/usr/bin/clang")
+        } ?? URL(fileURLWithPath: "/usr/bin/clang")
+        let sdkArguments = developer.map {
+            ["-isysroot", URL(fileURLWithPath: $0)
+                .appendingPathComponent("Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk").path]
+        } ?? []
+        let diagnosticURL = fixture.root.appendingPathComponent("compiler.log")
+        guard FileManager.default.createFile(atPath: diagnosticURL.path, contents: nil) else {
+            throw POSIXError(.EIO)
+        }
+        let diagnostics = try FileHandle(forWritingTo: diagnosticURL)
+        defer { try? diagnostics.close() }
+        let compiler = try OwnedChildProcess(executableURL: compilerURL,
+            arguments: sdkArguments + [source.path, "-o", binary.path],
+            errorDescriptor: diagnostics.fileDescriptor)
+        // Fixture compilation can pay a cold toolchain cost. Keep that budget
+        // separate from the short deadline for the signal behavior under test.
+        let stopped = try await waitForExit(compiler, timeout: .seconds(60), role: "signal fixture compiler")
+        let reader = try FileHandle(forReadingFrom: diagnosticURL)
+        defer { try? reader.close() }
+        let diagnosticText = String(decoding: try reader.read(upToCount: 1_024) ?? Data(), as: UTF8.self)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: binary.path),
+            "Signal fixture compilation failed: \(diagnosticText)")
         guard stopped, FileManager.default.isExecutableFile(atPath: binary.path) else {
             print("fixtureCleanupPreserved kind=signal_probe path=\(fixture.root.path) reason=compiler_termination_or_output_failed")
-            throw POSIXError(.ECHILD)
+            throw POSIXError(.ENOEXEC)
         }
         return CompiledProbe(binary: binary, fixture: fixture)
     }
 
-    private func waitForExit(_ child: OwnedChildProcess) async throws -> Bool {
+    private func waitForExit(_ child: OwnedChildProcess, timeout: Duration = .seconds(8),
+        role: String = "signal fixture") async throws -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
         do {
-            for _ in 0..<400 {
-                if !child.isRunning { break }
+            while child.isRunning && clock.now < deadline {
                 try await Task.sleep(for: .milliseconds(20))
             }
         } catch {
@@ -142,7 +165,7 @@ final class OwnedChildProcessTests: XCTestCase {
         }
         let exited = !child.isRunning
         let cleanup = await child.stop()
-        XCTAssertTrue(exited, "The owned signal fixture did not exit within its bound.")
+        XCTAssertTrue(exited, "The owned \(role) did not exit within its \(timeout) bound.")
         XCTAssertTrue(cleanup.succeeded, cleanup.issues.joined(separator: "; "))
         return exited && cleanup.succeeded
     }

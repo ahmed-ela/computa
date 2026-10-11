@@ -227,6 +227,9 @@ enum ComputaAgentInstructions {
         }
         let execution = functions(named: "exec_command")
         let input = functions(named: "write_stdin")
+        let browser = offeredFunctions.filter {
+            EmbeddedBrowserTools.names.contains($0.value) && !customToolNames.contains($0.key)
+        }.keys.sorted()
         let computer = offeredFunctions.values.contains { $0.hasPrefix("computer_v2_") || $0.hasPrefix("desktop_") || $0 == "computer" }
         var parts = ["""
         COMPUTA_CURRENT_RUNTIME_CONTRACT:
@@ -302,8 +305,15 @@ enum ComputaAgentInstructions {
         if !execution.isEmpty || !input.isEmpty {
             parts.append("A running command or session ID is not success. Read matching local output and the final exit code before claiming completion. Do not replay an uncertain command; report the observed failure or remaining uncertainty.")
         }
-        if offeredFunctions.values.contains(where: { $0.hasPrefix("browser_") }) {
-            parts.append(builtInBrowser)
+        if !browser.isEmpty {
+            parts.append("""
+            Built-in browser execution is offered as: \(browser.joined(separator: ", ")).
+            Computa resolves requested URLs on the user's computer, including localhost and loopback addresses.
+            The website need not connect to those URLs; return an action request
+            through an offered browser operation and inspect its matching host output.
+            Chrome connection is not required for these built-in operations.
+            \(builtInBrowser)
+            """)
         }
         if computer {
             parts.append("Computer UI work requires a fresh bound app or authorized Chrome tab and current observed action references. Native checks decide available access; use only offered tools and supported actions. A fill is not submission, an action dispatch is not its outcome, and an observation image never grants input authority. Preserve the user's existing tabs and never use the owned inference conversation as a task target.")
@@ -372,6 +382,14 @@ enum ComputaAgentInstructions {
     /// Kept after the complete request so long histories cannot bury the local
     /// response handoff. Names come only from the current validated schemas.
     static func webResponseContract(offeredToolNames: [String], customToolNames: Set<String> = []) -> String {
+        let browserHandoff = offeredToolNames.contains {
+            !customToolNames.contains($0) && EmbeddedBrowserTools.names.contains(String($0.split(separator: ".").last ?? ""))
+        } ? """
+        The website need not access the requested page or host network itself.
+        Computa executes the requested browser operation on the user's computer,
+        including URLs on localhost. Write the permitted action request using
+        an offered exact browser name and schema, then use its matching outputs.
+        """ : ""
         let customContract = customToolNames.isEmpty ? "" : """
         Custom tools accept literal string input, not JSON object arguments.
         For those names, use {"name":"exact_custom_tool_name","input":"literal input"}.
@@ -387,6 +405,7 @@ enum ComputaAgentInstructions {
         For necessary work allowed by tool_choice, your governing rules and the
         user's scope, return tool_calls using the offered exact current name and
         schema. The website need not access the file itself.
+        \(browserHandoff)
         Computa validates names, arguments, local permissions and
         approvals before execution, then supplies real matching function_call_output
         or custom_tool_call_output.

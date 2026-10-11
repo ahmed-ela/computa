@@ -4451,3 +4451,68 @@ fresh ChatGPT qualification/browser/composition/interactive checks are next;
 Gemini and Claude live checks remain deferred. A stale build-59 comparison in
 the private build-60 benchmark preparer was corrected before use, with its prior
 implementation and bindings preserved. No old failed prompt was replayed.
+
+Build 60 was committed and pushed as c8e001cfa190f3fe724f7d78897e5f66af62d1bd,
+then signed and installed as Computa 0.6.0 (60). All 98 installed bundle checks
+passed. A fresh ChatGPT / GPT-6 marker task returned the exact opaque marker
+with actual local file reads and three durably closed website transactions.
+The interactive task used the selected project without a user-supplied path,
+accepted two ordered inputs on the same TTY, returned both exact replies,
+exited zero and rejected input to the retired session. Five website transactions
+closed durably. These are normal ChatGPT website selection checks; the provider's
+internal backend version remains unknown.
+
+Two private benchmark defects were corrected without repeating either prompt.
+The marker collector expected an outdated per-turn policy literal. The interactive
+collector rejected a correct reply when its label included a short parenthetic
+annotation. The original failed receipts are retained. The corrected collectors
+verified the same sealed tool and website traces; native actions, opaque values,
+exit codes, permissions and closure checks were unchanged.
+
+The build-60 browser task genuinely failed: ChatGPT returned a capability refusal
+before issuing any of the nine offered browser tools. The actual request included
+the tools and selected working directory. Its one website transaction closed,
+and the root-owned flight fixture server stopped with its process and loopback
+listener verified absent. This failure is preserved rather than graded as success.
+
+Build 61 clarifies the external browser handoff only when a known built-in browser
+function is offered. Computa executes its URLs on the user's computer, including
+localhost; the website need not make that network connection itself. Exact tool
+names and schemas, tool choice, native permissions and current output evidence
+remain required. Unknown browser-prefixed names and same-named custom tools do
+not acquire these claims. Against the previous source, the two new contract
+tests failed nine assertions. With the change, all 82 focused instruction and
+protocol checks passed. This is contract evidence; a fresh installed browser task
+is still required to establish that the provider follows the handoff.
+
+The first full build-61 native run retained two failures in one child-process test:
+the C signal fixture compiler did not finish within the same short deadline used
+for signal behavior. The failure occurred before executing the signal probe. A
+focused rerun of the unchanged 19 child-process tests passed, so the failure does
+not establish a signal-reset regression. The failed full run remains unqualified.
+Receipt SHA-256: dfbdb33fa97271c7a3ea2b1a4df2369bb5a252a17f95e1a15b05eb3b60562ab7.
+
+The test helper now uses the selected Xcode compiler and SDK explicitly, retains
+bounded compiler diagnostics, and separates a 60-second fixture-compilation
+budget from the unchanged eight-second runtime signal budget. Both use a
+monotonic deadline; ownership, reaping, mask and parent-thread assertions remain.
+An initial direct-compiler attempt lacked its SDK and failed fixture compilation;
+that original log is retained. The corrected helper passed all 19 tests and
+verified three fixture cleanups. Receipt log SHA-256:
+bc6bc07b5af1d86f114b893e4f207c58314fcaae6e2b3ef088bb3d52f477b68f.
+The three fixtures from failed compiler preparation were archived with the exact
+original failure proofs, verified inactive and removed by recorded device/inode.
+No signals were issued during cleanup. The final native/public validation is
+repeated against this source; the earlier failed run is never rewritten as passed.
+
+Final build 61 source validation passed against all 414 unchanged inputs and the
+unchanged pinned engine. Native validation executed 2,353 tests in
+601.841 seconds: 2,304 passed, 49 opt-in tests skipped and no failures.
+Receipt SHA-256: 83589070608315834694d72991e6c699675d686234d4da5b01267f2fc5e762b6.
+The independent audit verified the instruction and child-process cohorts, all
+workflow and permission checks, and 26 unique cleanup identities.
+Final public validation passed all 637 tests without failures or skips, plus
+frontend type checking and the production build. Receipt SHA-256:
+e6db494747cd64b09b1c59b97e83d27bc01534746a496ac2c693ddb8213fa97e.
+Signed installation and fresh ChatGPT website qualification are next. Gemini and
+Claude live checks remain deferred at the user's request.
