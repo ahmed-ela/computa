@@ -3502,3 +3502,98 @@ No live prompt or runtime capture used helper 14; its unused fixture is retained
 A fresh helper-15 qualification fixture is prepared. Shipping controller
 acceptance checks and test floors were unchanged. Signed packaging, installed
 verification and fresh live qualification remain required.
+
+### Build 48 installed qualification and partial browser progress
+
+Source `802499b776e12c6132210273f6bce0eedeae6e6e` is pushed to the draft PR.
+Signed staging and installed verification each passed all 98 checks. Strict
+runtime capture recorded PID 928 and generation
+`cf8a4c4e-e324-40a9-b182-3bee8a218523`.
+
+`chatgpt-qualification-installed48-r2` passed all 39 checks with an exact native
+marker read and two acknowledged/closed inference sessions. Its fresh browser
+case accepted the longer request and executed eight native browser calls. HTTP
+logs independently confirm landing-page and search-page reads, exactly one
+correct-flight search submission, and details navigation. It did not perform
+the gate action or return a final supported response: a later native adapter
+`inspect` exceeded its 10-second call deadline. The case remains failed; no
+prompt was replayed. All eleven acknowledged website leases closed, and root
+verified its exact fixture PID 1908 and socket 53757 closed with wrapper exit 0.
+The string encoding resolves the observed ownership barrier for these
+inferences; this partial task is not a qualified complete browser workflow.
+
+### Build 48 Claude composition and interactive qualification
+
+A fresh Claude Sonnet 5.5 marker case passed all 39 checks with two closed
+inference sessions. Its localhost composition case observed the applied name,
+revision and receipt through three fresh native built-in-browser reads, then
+sent decoded Ctrl-C to the exact session observed in the real startup output.
+Native completion recorded exit 0 and matching PREVIEW_STOPPED; root confirmed
+PID 7741 absent and port 54285 closed. All twelve website leases closed.
+
+The original composition grade failed two checks. Its stop regex omitted the
+PTY's literal ^C echo before PREVIEW_STOPPED, and its blanket CLI/telemetry ban
+also prohibited legitimate shutdown verification after the browser result and
+native stop. Collector 15 admits only one optional ^C echo and a finite,
+read-only PID/HTTP/closed-state probe after the exact observed stop. Browser
+receipt evidence, actual native completion and independent fixture truth are
+still mandatory. Twenty-six controls passed, including wrong-session/PID,
+premature telemetry, fabricated browser results, HTTP writes, extra commands,
+other origins/routes, altered state and nonzero native completion rejection.
+The unchanged sealed case regrades verified (receipt SHA-256
+f8a2490f85bd327284a2c0fee20ea5c2610271e1332477a279a9e6f9301d20be).
+The original failed grade remains retained; no model request was replayed.
+
+Claude's fresh interactive case used one observed TTY session, submitted both
+requested inputs, observed both exact replies and native exit 0, then received
+Unknown process id for real nonempty input on that retired session. All five
+website leases closed. Its initial final-response grade required a contiguous
+reply label and value, rejecting the model's paired Markdown code spans.
+Additional oracle 4 preserves exact label/value identity while accepting a
+paired code span; eight data-only controls passed, including previous ordered
+transcript regressions, changed/reversed replies, incomplete spans, nonzero
+exit and claimed acceptance rejection. Collector 17 regrades the unchanged
+sealed case verified (SHA-256
+efcc073393d6dbee7af89a1e88182159a847ec878e568de9b580099e43485e2a).
+Native session, input, output and rejection checks were not relaxed.
+
+### Additional owned space cleanup
+
+The earlier cleanup removed seventeen obsolete app backups and 30,475
+regenerable Rust compilation intermediates, about 35 GiB combined. A further
+1,022,836,736 allocated bytes of build 43-46 backups were removed only after
+complete relative file/type/hash/link equality with retained signed stages.
+The installed build 48 and rollback build 47 were independently hashed before
+and after and are unchanged. Source, model weights, evidence, retained runtime
+executables and unrelated projects were preserved. The duplicate-backup
+controller's first preflight encountered a historical empty backup directory;
+it made no mutation, then was corrected to preserve that directory explicitly.
+
+### Build 48 Gemini controlled recovery and readiness failure
+
+Gemini's first fresh marker case stopped at the saved verification checkpoint
+before any website submission or native tool. Its cleanup remains unconfirmed;
+no absent transaction journal was fabricated when collector 14 could not seal
+that nonexistent file. The bounded blocker receipt and three sealed evidence
+files are retained. The normal built-in-browser Gemini page was signed in and
+showed no challenge. One explicit, prompt-free model refresh completed and
+cleared the persisted checkpoint through the production recovery path.
+
+A distinct fresh marker case then passed all 39 checks, a real native marker
+read and two acknowledged/closed website sessions (receipt SHA-256
+7cefa6d581fd2ab2eef796dd202aaabf69429277da0e95f606db3be78afd9490).
+Its subsequent fresh coding case stopped at the 45-second preparation deadline,
+with zero verified submissions and zero native tool calls. The one startup
+session closed with reason not_created. The fixture remains unchanged.
+Collector 14's independent coding oracle raised FileNotFoundError for the
+expected rename that never happened; its collector_error receipt is preserved
+as a collection limitation, not a successful workflow. The website failure is
+provider_timeout. No prompt was replayed, and remaining Gemini workflows are
+stopped pending a concrete readiness correction and fresh qualification.
+
+Exact-PID info logs show one initial coding-session readiness observation with
+a composer present, temporary mode false and no temporary action available;
+no later inspection observation appears before the deadline. This does not
+identify the underlying cause. The DOM wake channel currently relies on a
+100 ms JavaScript timer; timer starvation is a candidate for controlled testing,
+not an established cause of this live failure or ChatGPT's inspection timeout.
