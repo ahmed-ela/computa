@@ -764,7 +764,7 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             let saved = try String(contentsOf: store.directory.appendingPathComponent(taskID.lowercased() + ".jsonl"), encoding: .utf8)
             let records = try saved.split(separator: "\n").map { try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: Data($0.utf8)) }
             XCTAssertTrue(records.contains(closed), "A later current-absence observation cannot erase the causal manual closure receipt")
-        } catch { _ = await runtime.shutdown(); throw error }
+        } catch { await gate.releaseForTeardown(); _ = await runtime.shutdown(); throw error }
     }
 }
 
@@ -787,11 +787,17 @@ private final class CleanupRuntimeAudit {
 
 private actor CleanupReceiptGate {
     private var entered = false
+    private var tearingDown = false
     private var enteredWaiter: CheckedContinuation<Void, Never>?
     private var releaseWaiter: CheckedContinuation<Void, Never>?
-    func pause() async { entered = true; enteredWaiter?.resume(); enteredWaiter = nil; await withCheckedContinuation { releaseWaiter = $0 } }
+    func pause() async {
+        guard !tearingDown else { return }
+        entered = true; enteredWaiter?.resume(); enteredWaiter = nil
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
     func waitUntilEntered() async { if entered { return }; await withCheckedContinuation { enteredWaiter = $0 } }
     func release() { releaseWaiter?.resume(); releaseWaiter = nil }
+    func releaseForTeardown() { tearingDown = true; release() }
 }
 
 private actor CleanupBlockedStartTransport: WebModelTransport {
@@ -825,7 +831,7 @@ private actor CleanupReceiptTransport: WebModelTransport {
             guard parameters["sessionToken"] == ownedToken else { throw WebModelServer.Failure.invalidRequest }
             switch operation {
             case "webProviderSend": result = ["state": "running"]
-            case "webProviderPoll": result = ["state": "complete", "text": malformedReply ? "INVALID_JSON_FIXTURE" : "{\"type\":\"message\",\"text\":\"OK\"}"]
+            case "webProviderPoll": result = ["state": "complete", "text": malformedReply ? #"{"type":"tool_calls","calls":["# : "{\"type\":\"message\",\"text\":\"OK\"}"]
             case "webProviderFinish", "webProviderCancel":
                 if failFirstCleanup { failFirstCleanup = false; result = ["cleanup": "failed", "error": ["message": "PRIVATE_REPLY_CANARY"]] }
                 else { await cleanupGate?.pause(); result = ["cleanup": "deleted"] }

@@ -252,8 +252,29 @@ enum WebModelResponseCodec {
         return String(decoding: result, as: UTF8.self)
     }
 
-    /// Embedded inference requires its response contract. Generic callers keep
-    /// ordinary-text compatibility; strict callers never repair or extract JSON.
+    /// Website prose is a final message, never an action. JSON-shaped output
+    /// and code fences must satisfy the complete envelope contract; do
+    /// not extract or repair a call hidden inside surrounding prose.
+    static func parseEmbeddedReply(_ text: String, request: Request) throws -> Reply {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw Failure.emptyReply }
+        if trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "{}")) == nil,
+           !trimmed.contains("```"), !trimmed.hasPrefix("["), !trimmed.hasPrefix("\"") {
+            return try validated(.message(text), request: request)
+        }
+        return try parseReply(text, request: request, requireEnvelope: true)
+    }
+
+    static func malformedEmbeddedReplyDiagnostic(_ text: String, request: Request) -> MalformedEnvelopeDiagnostic? {
+        do { _ = try parseEmbeddedReply(text, request: request); return nil }
+        catch {
+            guard (error as? Failure) == .malformedEnvelope else { return nil }
+            return malformedEnvelopeDiagnostic(text, request: request, requireEnvelope: true)
+        }
+    }
+
+    /// Generic callers keep ordinary-text compatibility. Strict envelope
+    /// callers never repair or extract JSON.
     static func parseReply(_ text: String, request: Request, requireEnvelope: Bool = false) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }

@@ -4516,3 +4516,42 @@ frontend type checking and the production build. Receipt SHA-256:
 e6db494747cd64b09b1c59b97e83d27bc01534746a496ac2c693ddb8213fa97e.
 Signed installation and fresh ChatGPT website qualification are next. Gemini and
 Claude live checks remain deferred at the user's request.
+
+Build 61 was subsequently signed and installed with all 98 bundle checks passing.
+Its fresh ChatGPT / GPT-6 marker task performed a successful native file read,
+then failed final-response parsing with invalid_json and a 39-byte reply. Raw
+rejected bytes were not captured, so the byte count does not establish their
+exact contents. Both acknowledged website leases closed durably. This remains
+a failed qualification; no later workflow reused it as a passing prerequisite.
+
+Build 62 accepts unambiguous ordinary website prose as a final message. This
+does not dispatch an action. JSON-shaped output and code fences still require
+the complete response contract; damaged JSON is never extracted or repaired.
+Tool names, schemas, tool choice, custom inputs and native permissions keep
+their existing validation. Exact message bytes, Unicode, numeric answers,
+required tools, unknown tools and damaged envelopes have focused controls.
+The new server control failed against the old source and passed with the fix.
+All 119 focused codec, server and rejected-reply tests passed.
+
+The first full build-62 attempt exposed two deterministic test transports that
+used ordinary prose as their malformed-response fixture. Their rejection and
+cleanup expectations were consequently invalid. A cleanup assertion also held
+its gate during failure teardown. That partial run and its source/log receipts
+are retained as failed; its exact owned test process was stopped and reaped.
+The transports now send broken action JSON, and failure teardown releases the
+test gate. All seven focused bundled-engine and cleanup tests then passed,
+including HTTP failure, quota, durable history and no inference replay checks.
+The failed engine fixture was archived and verified inactive before removal.
+
+The final native run executed 2,356 tests in 618.530 seconds: 2,307 passed,
+49 opt-in tests skipped and no failures. All 414 source inputs and the pinned
+engine were unchanged; workflow, permission, patch and 26 cleanup identity
+checks passed. A private receipt grader initially expected 18 rejected-reply
+tests instead of the 14 declared and executed tests. Its corrected grader and
+independent audit verified the original immutable log without rerunning tests;
+the original failed grade is retained. Corrected receipt SHA-256:
+78ab46ef6f7b7fe1c593037a54a0eb04480da72a9f0647c2b9485f86eef1f750.
+Public validation passed all 637 tests, frontend type checking and production
+build. Receipt SHA-256:
+8edb59771ab1732b0f095adf9638ab3cec9df2a63eaafaf73c13efab77b58037.
+Fresh signed installation and ChatGPT-only live workflow checks are next.

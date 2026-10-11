@@ -669,10 +669,14 @@ actor WebModelServer {
                     guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
                     let reply: WebModelResponseCodec.Reply
                     do {
-                        reply = try WebModelResponseCodec.parseReply(text, request: request, requireEnvelope: session.route == .embedded)
+                        reply = try session.route == .embedded
+                            ? WebModelResponseCodec.parseEmbeddedReply(text, request: request)
+                            : WebModelResponseCodec.parseReply(text, request: request)
                     } catch {
-                        if let diagnostic = WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: request,
-                                                                                             requireEnvelope: session.route == .embedded) {
+                        let diagnostic = session.route == .embedded
+                            ? WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: request)
+                            : WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: request, requireEnvelope: false)
+                        if let diagnostic {
                             captureRejectedReply(text, diagnostic: .malformed(diagnostic), taskID: taskID,
                                                  inferenceID: inferenceID, session: session,
                                                  evidence: evidence, snapshot: value)

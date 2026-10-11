@@ -635,7 +635,7 @@ final class WebModelServerTests: XCTestCase {
         for provider in ["chatgpt", "gemini", "claude"] {
             for response in ["\u{E056}\njson\n" + tool,
                              #"{"type":"message","text":"Observed "Fixture marker value""}"#,
-                             "The command completed."] {
+                             "The command completed.\n{\"type\":\"tool_calls\",\"calls\":["] {
                 let transport = FixtureWebModelTransport(replyTexts: [response])
                 let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
                 await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
@@ -906,7 +906,7 @@ final class WebModelServerTests: XCTestCase {
 
     func testMalformedReplyHTTPDiagnosticsExposeOnlyFiniteStructureAndNeverRetry() async throws {
         let cases: [(String, String)] = [
-            ("private malformed content", "invalid_json"),
+            ("private malformed content {", "invalid_json"),
             (#"["private content"]"#, "not_object"),
             (#"{"type":"private type"}"#, "missing_or_unknown_type"),
             (#"{"type":"message","text":{"private":"content"}}"#, "invalid_message_text"),

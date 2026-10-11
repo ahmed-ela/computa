@@ -221,7 +221,7 @@ private actor EngineInferenceTransport: WebModelTransport {
             observations.nativeEncryptedReasoningIncludePresent = observations.nativeEncryptedReasoningIncludePresent
                 && ((object["include"] as? [String])?.contains("reasoning.encrypted_content") == true)
             if scenario == .usageLimit { throw EmbeddedWebModelTransport.Failure.usageLimited(.chatgpt) }
-            if scenario == .malformedReply { reply = "malformed deterministic model output" }
+            if scenario == .malformedReply { reply = #"{"type":"tool_calls","calls":["# }
             else if scenario == .statusTool, observations.sendCount == 1 {
                 let name = try XCTUnwrap(prepared.offeredToolNames.first {
                     $0 == "computer_v2_status" || $0.hasSuffix(".computer_v2_status")

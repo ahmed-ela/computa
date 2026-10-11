@@ -3,6 +3,44 @@ import XCTest
 @testable import Computa
 
 final class WebModelResponseCodecTests: XCTestCase {
+    func testEmbeddedPlainFinalTextPreservesBytesWithoutInventingActions() throws {
+        let prepared = try request()
+        for text in ["marker-opaque-fixture", "42", "  Hello 🌍\n ", "I cannot assist with that request.",
+                     "Verified `commit`.", "See [fixture](http://localhost)."] {
+            let reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)
+            XCTAssertEqual(reply, .message(text))
+            XCTAssertNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: prepared))
+            let data = try WebModelResponseCodec.streamData(for: reply, request: prepared)
+            let stream = String(decoding: data, as: UTF8.self)
+            XCTAssertTrue(stream.contains("response.output_text.done"))
+            XCTAssertFalse(stream.contains("response.function_call_arguments"))
+            XCTAssertFalse(stream.contains("response.custom_tool_call_input"))
+        }
+    }
+
+    func testEmbeddedPlainFinalTextCannotRelaxRequiredToolsOrRepairActionJSON() throws {
+        let prepared = try request()
+        for text in ["{\"type\":\"tool_calls\",\"calls\":[", "Prefix\n{\"type\":\"message\",\"text\":\"value\"}",
+                     "```json\n{}", "json\n{\"type\":\"tool_calls\"}", "A damaged action {", "[{}]",
+                     #"{"type":"message","text":"bad "quote""}"#] {
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: prepared)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+            }
+            XCTAssertNotNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: prepared))
+        }
+        let required = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": "Perform the action", "tools": [function], "tool_choice": "required",
+        ]))
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply("Done.", request: required)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+        }
+        XCTAssertNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic("Done.", request: required))
+        let unknown = #"{"type":"tool_calls","calls":[{"name":"unoffered","arguments":{}}]}"#
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(unknown, request: prepared)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("unoffered"))
+        }
+    }
+
     func testCompleteInlineJSONFencePreservesFunctionAndCustomCallsAcrossProviders() throws {
         let patch = "*** Begin Patch\n*** Add File: marker.txt\n+literal ``` text\n*** End Patch\n"
         let tools = [function, ["type": "custom", "name": "apply_patch"]]

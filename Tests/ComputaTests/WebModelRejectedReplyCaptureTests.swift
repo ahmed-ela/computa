@@ -4,6 +4,29 @@ import XCTest
 @testable import Computa
 
 final class WebModelRejectedReplyCaptureTests: XCTestCase {
+    func testEmbeddedPlainFinalTextUsesMessageOutputWithoutReplayOrDiagnosticCapture() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let task = UUID(), reply = "marker-plain-final-fixture"
+        try fixture.arm(task)
+        let transport = RejectedReplyTransport(reply: reply)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, rejectedReplyDirectory: fixture.directory)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        let bytes = try await server.fixtureInfer(request, taskID: task.uuidString)
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        let output = try XCTUnwrap(response["output"] as? [[String: Any]])
+        XCTAssertEqual(output.count, 1)
+        XCTAssertEqual(output[0]["type"] as? String, "message")
+        let content = try XCTUnwrap(output[0]["content"] as? [[String: Any]])
+        XCTAssertEqual(content.first?["text"] as? String, reply)
+        let operations = await transport.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+        XCTAssertFalse(fixture.exists(fixture.output))
+        XCTAssertTrue(fixture.exists(fixture.armFile))
+        let cleanup = await server.fixtureFinish(taskID: task.uuidString)
+        XCTAssertTrue(cleanup.isEmpty)
+        _ = await server.shutdown()
+    }
+
     func testUnofferedToolKeepsOriginalRejectionAndCapturesOnlyWithExactTaskArm() async throws {
         let reply = #"{"type":"tool_calls","calls":[{"name":"unoffered_fixture_tool","arguments":{}}]}"#
         for armed in [false, true] {
@@ -80,7 +103,7 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         for configured in [false, true] {
             let fixture = try Fixture(); defer { fixture.remove() }
             let task = UUID(); try fixture.arm(task)
-            let transport = RejectedReplyTransport(reply: configured ? #"{"type":"message","text":"OK"}"# : "invalid")
+            let transport = RejectedReplyTransport(reply: configured ? #"{"type":"message","text":"OK"}"# : "invalid {")
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
                 rejectedReplyDirectory: configured ? fixture.directory : nil)
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
@@ -209,7 +232,7 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         let fixture = try Fixture(); defer { fixture.remove() }
         let task = UUID(); try fixture.arm(task)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.armFile.path)
-        let transport = RejectedReplyTransport(reply: "original invalid reply")
+        let transport = RejectedReplyTransport(reply: "original invalid reply {")
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self, rejectedReplyDirectory: fixture.directory)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
         await assertMalformed(server, task: task)
