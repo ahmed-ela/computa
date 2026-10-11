@@ -50,7 +50,7 @@ enum EmbeddedBrowserTools {
                 ["url": string], ["url"]),
             specification(
                 "browser_read",
-                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for document text, all for structure; continue next_cursor with cursor. Snapshot IDs and indices authorize one subsequent action only.",
+                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for document text, all for structure; continue next_cursor with cursor. Use browser_click for observed enabled links (including follow_link=true) and controls, browser_fill for fields. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",
                 [
                     "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]],
                     "query": string, "cursor": string,

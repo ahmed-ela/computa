@@ -4010,4 +4010,99 @@ Native receipt SHA-256:
 34e07a8d7a9b83664615e0ff4d2c37fdbdd4cdc35016c1d8e307a86940ab7e76.
 Source freeze SHA-256:
 ceeb91402e6c3822544d91a13bbc7de310488e15d96b202e07570882995f077b.
-Signing, installation and fresh live provider checks remain separate next steps.
+Signed staging and installed verification each passed all 98 checks, bound to
+compiled source 4e6c7f1ad0abab3d6e48612a0a8427026553af1f. Stage verification
+SHA-256: 495cd643eb0dea7b655adbb06f4191f8dbbd5fe24cf4b2812ec6c154e970db14.
+Installed verification SHA-256:
+371ec1c0bd2205632343d0522adfeb686b8462edbee21f849dc62052e22bb723.
+The fresh installed process is PID 87724, runtime generation
+3f33a9c3-3b9a-42bf-986d-f211e8c0f053; runtime capture SHA-256:
+2c542ba048200c27782be9186177941e01af568e560a96b8191370fab589a0d2.
+
+Fresh ChatGPT GPT-6 marker qualification passed every collector check with
+four closed website leases. Two attempted reads used an incorrect path and
+failed; a subsequent read of the submitted path returned the exact marker.
+The errors and successful recovery remain in the sealed trace. Collector
+SHA-256: 62e4cc8778eb95f69086758a5932efbb60afe15cd7ce394e725d9b5537501104.
+The browser case opened the fixture and performed three page reads, then
+requested an unoffered tool. The strict parser rejected the entire reply before
+dispatch; search/details, gate reveal and a final response did not occur. All
+five website leases closed. Its collector remains incomplete_or_failed, SHA-256:
+82ab888623cfacc9f5170274edcdf18d94b4981861b83baea6fce91dfcc1fc3a.
+The exact rejected tool name was not captured, so its cause is unknown.
+Root-owned server PID 90661 exited with code 0 after exact-identity SIGTERM;
+port 51572 closed and one server_closed event verified. Event SHA-256:
+bd5fff7013ffda1ac0ad0c9ec942b401fb1f00a01f555f7fa5f97185cc73ad02.
+The original failed fixture and evidence remain; no prompt was replayed.
+
+Two closed compiler caches, PopupTests and SourceInstall/Build/Intermediates.noindex,
+were checked for open holders and removed. This recovered 1,152,368,640 allocated
+bytes; all 414 source inputs and both installed/staged build 55 executables
+were checked unchanged. Products, logs, engine, signed stages, models and
+benchmark evidence remain. No process was signalled. Cleanup receipt:
+space-cleanup-closed-compiler-caches-build55-1.json. Cumulative removal is about
+38 GiB; compiler caches can regenerate during subsequent validation.
+
+### Candidate 56: explicit built-in link routing and rejected-tool diagnostics
+
+Built-in browser reads share a link presentation with the Chrome harness:
+follow_link=true marks an observed navigation link. The built-in action is
+browser_click with the current snapshot_id and element_index. Its response
+instructions and browser_read schema now state that mapping explicitly, and
+direct the model to use observed navigation without repeating unchanged reads.
+No tool alias, action capability, snapshot authority or parser rule changes.
+This ambiguity is independently observable; it is not a proven explanation
+for build 55's uncaptured rejected name.
+
+The existing private one-shot rejected-reply capture now also covers unoffered
+tools. It still requires a mode-0700 directory and mode-0600 exact-task arm,
+captures at most once, preserves the original error and never dispatches or
+replays the rejected reply. No reply content enters ordinary logs. A new
+transport regression checks armed and unarmed cases, error identity, one send,
+file permissions and cleanup. A built-in link regression verifies its observed
+snapshot dispatches exactly one click and rejects replay.
+
+All 637 public tests passed with zero failures or skips; receipt SHA-256:
+6743694337c11bc16865420cb8fd18ff0f5d7429c7d864798ec64135e3bcea63.
+The complete native run executed 2,340 tests with 49 opt-in skips and six
+assertion failures in 559.370 seconds. All failures belong to the existing
+generic-header picker fixture; both new link and diagnostic controls passed.
+All 414 inputs stayed unchanged. Native receipt SHA-256:
+8dd6bc8c99d96172f48511acdf8c151f30de565360babb94956886cc508edaa3.
+Build 56 was not packaged or installed.
+
+### Candidate 57: event-bound picker fixture observations
+
+The picker fixture assumed an already-rendered assistant response would still
+be running after multiple read round trips. Its genuine completion notifications
+then invalidated a revision comparison intended to measure observation UI only.
+It also measured the 300 ms read-suppression window after separate native calls,
+which can legitimately outlast that window.
+
+The second synthetic reply now exposes the actual Stop control until the three
+running-state observations finish. Removing it explicitly releases completion.
+The checked-model mutation occurs synchronously in the real picker-close event,
+inside the actual private read scope. The test records connected/tracked nodes,
+checked model before/after and an active scope before/after mutation, then
+verifies native wakeup and rejection before another prompt insertion or send.
+Production adapter timing, parser rules, action counts and deadlines are unchanged.
+
+The first focused run exposed a cached completed poll bypassing the fresh read;
+the original six missing-observation assertions remain recorded. The final
+fixture triggers the fresh picker read through the next send attempt, which
+must reject drift before input. All 47 focused tests passed with zero failures
+or skips in 4.898 seconds, including link snapshot consumption, exact-task
+rejected-reply capture and the complete picker test. Focused receipt SHA-256:
+4d5af4223994503312d0a0b8f6f8df2c74bc6c3d3d6dc7f3ff8a5a34949fa447.
+All 637 public tests passed with zero failures or skips; receipt SHA-256:
+53141a3b2ac890fe1cff82f258990e8a98f5538157f52d16b36af294bf82c12f.
+Full native validation executed 2,340 tests: 2,291 passed, 49 opt-in skips
+and zero failures in 584.687 seconds. All 414 frozen inputs, permission,
+workflow/patch guards and 26 unique cleanup identities verified. An independent
+audit of the original immutable receipt/log verifies the new link and capture
+controls, revised picker fixture, unchanged review-scope regression and all
+four queue/deadline controls without test replay. Native receipt SHA-256:
+06cd28e8e7762348d4d2314eceff622aa52694e12d0ac5910a00fa2d32bfe400.
+Source freeze SHA-256:
+f36e9a43af3b6ea9537b1528de2db2324f396a37fa988606f608280aa48b9e6e.
+Signed installation and provider adherence remain separate next steps.

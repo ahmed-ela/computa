@@ -672,10 +672,15 @@ actor WebModelServer {
                     } catch {
                         if let diagnostic = WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: request,
                                                                                              requireEnvelope: session.route == .embedded) {
-                            captureRejectedReply(text, diagnostic: diagnostic, taskID: taskID,
+                            captureRejectedReply(text, diagnostic: .malformed(diagnostic), taskID: taskID,
                                                  inferenceID: inferenceID, session: session,
                                                  evidence: evidence, snapshot: value)
                             throw Failure.malformedReply(diagnostic)
+                        }
+                        if case .unknownTool = error as? WebModelResponseCodec.Failure {
+                            captureRejectedReply(text, diagnostic: .unofferedTool, taskID: taskID,
+                                                 inferenceID: inferenceID, session: session,
+                                                 evidence: evidence, snapshot: value)
                         }
                         throw error
                     }
@@ -740,20 +745,33 @@ actor WebModelServer {
         catch { throw Failure.modelUnverified }
     }
 
-    private func captureRejectedReply(_ text: String, diagnostic: WebModelResponseCodec.MalformedEnvelopeDiagnostic,
+    private enum RejectedReplyDiagnostic {
+        case malformed(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
+        case unofferedTool
+    }
+
+    private func captureRejectedReply(_ text: String, diagnostic: RejectedReplyDiagnostic,
                                       taskID: String, inferenceID: UUID, session: Session,
                                       evidence: WebsiteModelEvidence?, snapshot: [String: Any]) {
         guard let directory = rejectedReplyDirectory, let task = UUID(uuidString: taskID),
               let token = UUID(uuidString: session.token),
               text.utf8.count <= WebModelRejectedReplyCapture.maximumReplyBytes,
-              diagnostic.utf8Bytes == text.utf8.count, session.modelID.utf8.count <= 2_048,
+              session.modelID.utf8.count <= 2_048,
               ["chatgpt", "claude", "gemini"].contains(session.provider) else { return }
+        let diagnosticFields: [String: Any]
+        switch diagnostic {
+        case let .malformed(value):
+            guard value.utf8Bytes == text.utf8.count else { return }
+            diagnosticFields = ["reason": value.reason.rawValue, "utf8Bytes": value.utf8Bytes,
+                                "fenced": value.fenced]
+        case .unofferedTool:
+            diagnosticFields = ["reason": "unoffered_tool", "utf8Bytes": text.utf8.count]
+        }
         var record: [String: Any] = ["schemaVersion": 1, "timestamp": ISO8601DateFormatter().string(from: Date()),
                                     "taskID": task.uuidString.lowercased(), "inferenceID": inferenceID.uuidString.lowercased(),
                                     "sessionToken": token.uuidString.lowercased(), "provider": session.provider,
                                     "modelID": session.modelID, "replyText": text,
-                                    "diagnostic": ["reason": diagnostic.reason.rawValue, "utf8Bytes": diagnostic.utf8Bytes,
-                                                   "fenced": diagnostic.fenced], "automaticReplay": false]
+                                    "diagnostic": diagnosticFields, "automaticReplay": false]
         if let thread = evidenceThreads[task.uuidString.lowercased()] { record["threadID"] = thread }
         if let evidence { record["modelEvidence"] = evidence.dictionary }
         if let context = snapshot["modelProofContext"] as? [String: Any],

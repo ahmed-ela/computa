@@ -147,6 +147,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("Never\nrepeat uncertain input"))
         XCTAssertTrue(browser.contains("snapshot_id/element_index"))
         XCTAssertTrue(browser.contains("Model inference pages are separate"))
+        XCTAssertTrue(browser.contains("browser_click activates enabled controls and links, including\nfollow_link=true"))
+        XCTAssertTrue(browser.contains("not computer_v2 references"))
+        XCTAssertTrue(browser.contains("unchanged reads"))
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 1_100)
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)

@@ -1045,7 +1045,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     func testGenericChatGPTHeaderWithUnmountedPickerVerifiesTwoSendsWithoutSelfWakingOrReplayingSelection() async throws {
         let choice = Self.fixtureChoice(.chatgpt)
-        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, genericHeader: true, unmountClosedMenu: true))
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, genericHeader: true,
+            unmountClosedMenu: true, holdSecondReply: true))
         defer { fixture.shutdown() }
         let started = try await startChoice(choice, in: fixture)
         let token = try XCTUnwrap(started["sessionToken"] as? String)
@@ -1085,6 +1086,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 }
                 let triggerAfter = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
                 XCTAssertGreaterThan(try XCTUnwrap(triggerAfter), try XCTUnwrap(triggerBefore), "The polls must exercise actual portal reads")
+                let released = try await evaluate(view, "const stop = document.getElementById('fixture-held-response-stop'); if (!stop) return false; stop.remove(); return true;") as? Bool
+                XCTAssertEqual(released, true, "Completion is released only after the running-state observations")
             }
             let complete = try await waitForState("complete", fixture.transport, token: token)
             XCTAssertEqual(complete["sequence"] as? Int, sequence)
@@ -1096,41 +1099,49 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(escapes?["attempts"]), 0, "Controlled ChatGPT picker reads must use its actual Escape close behavior")
         XCTAssertEqual(escapes?["attempts"], escapes?["closed"])
 
-        // Change actual checked radios while the fresh-read suppression scope
-        // is still active. Selection attributes must remain observable even
-        // though the generic trigger text itself never changes family.
+        // Change actual checked radios synchronously during the next owned
+        // picker close. This measures the real active suppression scope without
+        // relying on separate native calls fitting inside its 300 ms window.
         try await Task.sleep(for: .milliseconds(50))
-        let mounted = try await evaluate(view, """
-            document.getElementById('fixture-model-trigger').click();
-            const menu = document.getElementById('fixture-model-menu');
-            return {connected: menu?.isConnected === true,
-              checked: menu ? [...menu.querySelectorAll('[data-fixture-model][aria-checked="true"]')].map(node => node.dataset.fixtureModel) : []};
-            """) as? [String: Any]
-        XCTAssertEqual(mounted?["connected"] as? Bool, true, "The model attributes must belong to the observed document")
-        XCTAssertEqual(mounted?["checked"] as? [String], [choice.label])
-        // Let native delivery of the mount settle before measuring only the
-        // subsequent checked-model mutation, still inside the 300 ms read scope.
-        try await Task.sleep(for: .milliseconds(100))
-        let suppressionActive = try await evaluate(view, "return globalThis.__computaModelReadUI?.until > Date.now();",
-            world: .world(name: "computa-chatgpt-model-v1")) as? Bool
-        XCTAssertEqual(suppressionActive, true)
         let observedBeforeDrift = try await fixture.transport.changeRevision(sessionToken: token)
         let beforeDrift = try XCTUnwrap(observedBeforeDrift)
-        let changed = try await evaluate(view, """
-            const menu = document.getElementById('fixture-model-menu');
-            if (!menu?.isConnected) throw new Error('Expected connected controlled model menu');
-            menu.querySelectorAll('[data-fixture-model]').forEach(node => node.setAttribute('aria-checked', String(node.dataset.fixtureModel === window.fixtureModelInitialLabel)));
-            return {connected: menu.isConnected,
-              checked: [...menu.querySelectorAll('[data-fixture-model][aria-checked="true"]')].map(node => node.dataset.fixtureModel)};
-            """) as? [String: Any]
-        XCTAssertEqual(changed?["connected"] as? Bool, true)
-        XCTAssertEqual(changed?["checked"] as? [String], [Self.choiceLabels(.chatgpt)[1]])
-        let woke = try await fixture.transport.waitForChange(sessionToken: token, after: beforeDrift, until: .now + .seconds(2))
-        XCTAssertGreaterThan(try XCTUnwrap(woke), beforeDrift, "An aria-checked model change must wake the native reader")
+        let armed = try await evaluate(view, """
+            globalThis.fixtureCheckedDrift = null;
+            const mutateDuringClose = event => {
+              const menu = document.getElementById('fixture-model-menu');
+              if (event.key !== 'Escape' || !menu?.isConnected) return;
+              document.removeEventListener('keydown', mutateDuringClose, true);
+              const scope = globalThis.__computaModelReadUI;
+              const checked = () => [...menu.querySelectorAll('[data-fixture-model][aria-checked="true"]')].map(node => node.dataset.fixtureModel);
+              const result = {connected: menu.isConnected, before: checked(),
+                suppressionActive: scope?.until > Date.now(),
+                tracked: scope?.roots.includes(menu) === true};
+              menu.querySelectorAll('[data-fixture-model]').forEach(node => node.setAttribute('aria-checked', String(node.dataset.fixtureModel === \(String(reflecting: Self.choiceLabels(.chatgpt)[1])))));
+              result.checked = checked();
+              result.suppressionStillActive = scope?.until > Date.now();
+              globalThis.fixtureCheckedDrift = result;
+            };
+            document.addEventListener('keydown', mutateDuringClose, true);
+            return true;
+            """, world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+        XCTAssertEqual(armed, true)
+        // A completed poll may use the cached result. The attempted next send
+        // must perform a fresh picker read and reject drift before insertion.
         do {
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must not replay selection or submit after drift"])
             XCTFail("A freshly read checked-family mismatch must reject another send")
-        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelMismatch) }
+        }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelMismatch) }
+        let changed = try await evaluate(view, "return globalThis.fixtureCheckedDrift;",
+            world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+        XCTAssertEqual(changed?["connected"] as? Bool, true, "The model attributes must belong to the observed document")
+        XCTAssertEqual(changed?["before"] as? [String], [choice.label])
+        XCTAssertEqual(changed?["tracked"] as? Bool, true)
+        XCTAssertEqual(changed?["suppressionActive"] as? Bool, true)
+        XCTAssertEqual(changed?["suppressionStillActive"] as? Bool, true)
+        XCTAssertEqual(changed?["checked"] as? [String], [Self.choiceLabels(.chatgpt)[1]])
+        let woke = try await fixture.transport.waitForChange(sessionToken: token, after: beforeDrift, until: .now + .seconds(2))
+        XCTAssertGreaterThan(try XCTUnwrap(woke), beforeDrift, "An aria-checked model change must wake the native reader")
         try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
@@ -5121,9 +5132,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                                         deferSelectionCommit: Bool = false, genericHeader: Bool = false,
                                         unmountClosedMenu: Bool = false, ignoreModelEscape: Bool = false,
                                         returnToParentAfterSelection: Bool = false, driftTemporaryInParent: Bool = false,
-                                        hideComposerInPicker: Bool = false) -> String {
+                                        hideComposerInPicker: Bool = false, holdSecondReply: Bool = false) -> String {
         precondition(!returnToParentAfterSelection || provider == .chatgpt)
         precondition(!(driftTemporaryInParent || hideComposerInPicker) || returnToParentAfterSelection)
+        precondition(!holdSecondReply || provider == .chatgpt)
         let labels = choiceLabels(provider)
         let initial = provider == .chatgpt ? labels[1] : provider == .gemini ? labels[2] : labels[0]
         let target = fixtureChoice(provider).label
@@ -5235,7 +5247,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         \(unmountClosedMenu ? "modelMenu.remove();" : "")
         </script>
         """
-        let base = provider == .chatgpt ? page : providerPage(provider)
+        var base = provider == .chatgpt ? page : providerPage(provider)
+        if holdSecondReply {
+            let append = "document.getElementById('messages').appendChild(turn);"
+            precondition(base.components(separatedBy: append).count == 2)
+            base = base.replacingOccurrences(of: append, with: append + """
+
+              if (window.fixturePrompts.length === 2) {
+                const stop = document.createElement('button'); stop.id = 'fixture-held-response-stop';
+                stop.setAttribute('data-testid', 'stop-button'); stop.setAttribute('aria-label', 'Stop generating');
+                stop.textContent = 'Stop generating'; document.body.appendChild(stop);
+              }
+            """)
+        }
         return base.replacingOccurrences(of: "</body>", with: picker + "</body>")
     }
 

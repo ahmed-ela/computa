@@ -43,6 +43,27 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(end.closes,1)
     }
 
+    func testObservedBuiltInLinkUsesBrowserClickAndConsumesOneSnapshot() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.setLink("http://localhost:8123/details")
+        _ = try await call(controller,"browser_open",["url":"http://localhost:8123/flight"])
+        let read = try await call(controller,"browser_read",["view":"overview"])
+        let linkLine = try XCTUnwrap(read.split(separator:"\n").first { $0.contains("label=\"Destination\"") })
+        XCTAssertTrue(linkLine.contains("follow_link=true"))
+        let index = try XCTUnwrap(Int(linkLine.dropFirst().prefix { $0.isNumber }))
+        let id = try snapshotID(read)
+        let definition = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" })
+        XCTAssertTrue((definition["description"] as? String)?.contains("Use browser_click for observed enabled links (including follow_link=true)") == true)
+        _ = try await call(controller,"browser_click",["snapshot_id":id,"element_index":index])
+        do { _ = try await call(controller,"browser_click",["snapshot_id":id,"element_index":index]); XCTFail("Consumed link snapshot cannot replay input") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError,.staleSnapshot) }
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.presses,1)
+        XCTAssertEqual(counts.fills,0)
+        let cleanup = await controller.release(taskKey:"turn-a")
+        XCTAssertTrue(cleanup.isEmpty)
+    }
+
     func testHumanTabLeaseRejectsOtherTaskAndCleanupPreservesExistingTab() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport:backend)
         let human = await backend.humanID

@@ -4,6 +4,35 @@ import XCTest
 @testable import Computa
 
 final class WebModelRejectedReplyCaptureTests: XCTestCase {
+    func testUnofferedToolKeepsOriginalRejectionAndCapturesOnlyWithExactTaskArm() async throws {
+        let reply = #"{"type":"tool_calls","calls":[{"name":"unoffered_fixture_tool","arguments":{}}]}"#
+        for armed in [false, true] {
+            let fixture = try Fixture(); defer { fixture.remove() }
+            let task = UUID(), transport = RejectedReplyTransport(reply: reply)
+            if armed { try fixture.arm(task) }
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, rejectedReplyDirectory: fixture.directory)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            do { _ = try await server.fixtureInfer(request, taskID: task.uuidString); XCTFail("An unoffered tool must remain rejected") }
+            catch { XCTAssertEqual(error as? WebModelResponseCodec.Failure,.unknownTool("unoffered_fixture_tool")) }
+            let operations = await transport.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count,1,"Diagnostics must not replay inference")
+            if armed {
+                let value = try fixture.record()
+                XCTAssertEqual(value["replyText"] as? String,reply)
+                XCTAssertEqual(value["taskID"] as? String,task.uuidString.lowercased())
+                XCTAssertEqual(value["automaticReplay"] as? Bool,false)
+                let diagnostic = try XCTUnwrap(value["diagnostic"] as? [String:Any])
+                XCTAssertEqual(diagnostic["reason"] as? String,"unoffered_tool")
+                XCTAssertEqual(diagnostic["utf8Bytes"] as? Int,reply.utf8.count)
+                XCTAssertFalse(fixture.exists(fixture.armFile))
+                XCTAssertEqual(try fixture.permissions(fixture.output),0o600)
+            } else { XCTAssertFalse(fixture.exists(fixture.output),"A configured directory alone cannot capture reply content") }
+            let cleanup = await server.fixtureFinish(taskID: task.uuidString)
+            XCTAssertTrue(cleanup.isEmpty)
+            _ = await server.shutdown()
+        }
+    }
+
     func testMalformedReplyCapturesExactInputOnceWithoutDispatchOrReplay() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let task = UUID(), thread = UUID(), reply = "Rejected prose with JSON-looking text { and escaped \\\n🙂"
