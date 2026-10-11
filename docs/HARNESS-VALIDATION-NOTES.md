@@ -4827,3 +4827,21 @@ archive content/mode/symlink and finite process/cwd/open-path verification.
 The archive retains 101 members and 69,533 file/symlink bytes. Cleanup receipt
 SHA-256: 37da998d2c4acd0d7c3a750d05456480cd22e8d3188c2c24d52dabfef8b3e3cc.
 This cleanup does not establish website-session deletion or goal-mode support.
+
+
+Build 66 was committed and pushed as
+63fe9af835609cdc68844d24f2ea45edf79e2553. Signed staging and installed bundle
+verification each passed all 98 checks. The fresh installed process is PID
+64246, runtime generation bdf6dc4a-ad11-437d-837f-42a21b0edbc6. Installed receipt
+SHA-256: 21dc845a76de8f0c2184a2e49bef93d28e07da9a7c5ebc68c05462ba0a241ff2.
+Runtime capture SHA-256:
+33edc61a80ba3c36050efcd46536167a1d96a9b9ef4cebb6f19edab4f1ac06f1.
+
+The installed Developer tools menu is disabled without a tab and available on
+a new regular tab; Allow Web Inspector was visibly unchecked. This control
+neither enabled inspection nor opened an inspector. Its owned blank tab closed,
+the browser pane returned to its prior hidden state and the runtime is
+connected. Safari's developer menu is off, and confirmation to enable it
+temporarily is pending under the computer-use tool's settings policy. The
+request failure has not yet been captured, and no build-66 provider inference
+or workflow success is claimed.
