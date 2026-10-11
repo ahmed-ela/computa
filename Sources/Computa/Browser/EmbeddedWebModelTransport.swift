@@ -239,6 +239,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var response = ""
         var lastChanged = ContinuousClock.now
         var turnStarted = ContinuousClock.now
+        var readTimeoutCount = 0
+        var responseReadRetryUsed = false
         var conversation: String?
         var routeContext: String?
         var conversationIdentity: String?
@@ -405,6 +407,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.candidateSince = nil
                 session.lastChanged = .now
                 session.turnStarted = .now
+                session.responseReadRetryUsed = false
                 // Claim submission before clicking: even a lost reply must not replay Send.
                 session.submitted = true
                 session.sequence += 1
@@ -616,6 +619,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let deadline = session.state == "loading" ? session.created + preparationTimeout : session.turnStarted + responseTimeout
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         let observed: [String: Any]
+        let readTimeoutCount = session.readTimeoutCount
         // WebKit may queue an inspection while the provider renders its reply.
         // The adapter's own waits remain bounded; allow queue time without
         // extending the inference's preparation or response deadline.
@@ -630,6 +634,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // observation is admitted; the versioned DOM signal wakes a
                 // fresh read which recomputes every ownership proof.
                 return try snapshot(session)
+            }
+            if (error as? Failure) == .pageUnavailable,
+               session.readTimeoutCount > readTimeoutCount, !session.responseReadRetryUsed,
+               session.state == "running", session.submitted, session.temporary,
+               session.firstUserFingerprint != nil, !session.pendingSubmission {
+                // A route promotion or queued context read can consume one
+                // inspection budget after owned lineage is already bound.
+                // Discard that observation and make one fresh read within the
+                // unchanged response deadline. No insertion, Send, model
+                // selection or expansion action may be replayed here.
+                session.responseReadRetryUsed = true
+                Self.inspectionLog.info("inspectionReadRecovery provider=\(session.provider.rawValue, privacy: .public) sequence=\(session.sequence) retry=1 reason=bound_read_timeout")
+                return try await poll(session)
             }
             // Retry only the initial read, before any mode toggle or submission.
             if session.state == "loading", !session.temporaryRequested, !session.modelSelectionRequested,
@@ -1496,6 +1513,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             guard result.isPending else { return }
                             let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID, operationID: operationID)
                             Self.inspectionLog.error("adapterTimeout provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) budgetMs=\(allocatedBudgetMilliseconds) \(diagnostic, privacy: .public)")
+                            if ["inspect", "verifyModel", "verifyProductMode"].contains(action) {
+                                session.readTimeoutCount += 1
+                            }
                             #if DEBUG
                             adapterTimeoutObserverForTesting?(diagnostic)
                             #endif

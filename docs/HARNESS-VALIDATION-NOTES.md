@@ -4555,3 +4555,66 @@ Public validation passed all 637 tests, frontend type checking and production
 build. Receipt SHA-256:
 8edb59771ab1732b0f095adf9638ab3cec9df2a63eaafaf73c13efab77b58037.
 Fresh signed installation and ChatGPT-only live workflow checks are next.
+
+
+Build 62 was signed and installed with all 98 bundle checks passing. A fresh
+ChatGPT / GPT-6 marker qualification passed, including a real native file read,
+the exact final marker and two durably closed inference leases. Qualification
+receipt SHA-256:
+686666a385516c3b9bfbb627f3ee0aeff66926ae9fae872d193a7830aa3118ef.
+Its browser workflow searched for the requested flight and read the matching
+results, then failed inspection before opening details or returning facts.
+All fifteen acknowledged leases closed, and the independently owned HTTP server
+was stopped and reaped before collection. Failed receipt SHA-256:
+6b1026d77c4656fdae326ace578e27fda9f5ef923ae0e79015cd97dc34345afc.
+This remains a failed browser case; the prompt and browser actions were not replayed.
+
+The bounded diagnostic shows a temporary-conversation URL promotion during
+model verification. That read consumed about 21 seconds of the shared 30-second
+inspection budget; its subsequent inspection timed out with no accepted adapter
+phase and 6,273 milliseconds allocated. The observed timing does not establish
+why WebKit queued the read. The 300-second response deadline was not reached.
+Build 63 permits one fresh read after an actual native inspection timeout,
+only after temporary-session ownership and first-message lineage are bound.
+It discards the prior observation, rechecks the current route, generation,
+model and Chat mode, and retains the original response deadline. It cannot
+replay insertion, Send, model selection or first-message expansion. Website
+verification, quota and typed ownership errors keep their terminal behavior.
+
+Four focused controls passed using real WebContent queue delays: successful
+read recovery, a second timeout stopping recovery, the unchanged response
+deadline and rejection of model/Work-mode drift. The original 850-millisecond
+deadline fixture incorrectly outlasted two 300-millisecond read budgets; its
+failed log is retained. The corrected 450-millisecond case verifies both read
+timeouts and the original deadline. The old-source control initially lost its
+original error during fixture teardown; that failure is retained. Waiting for
+the deliberate fixture queue delay before teardown then produced the expected
+old-source timeout failure, with one timeout and one send. Old-source negative
+receipt SHA-256:
+b2dc6d6c2b004adc06ffc67a311bb515df883d8b10eff7f021ef46d26c81a8f0.
+Full candidate validation and a fresh signed ChatGPT qualification follow.
+Gemini and Claude live work remain deferred at the user's request.
+
+The first complete build-63 run executed 2,360 tests with 49 explicit skips.
+One older ten-second queue-delay control had two failed assertions; all other
+cases passed. Its diagnostic confirms the native timer fired at 10,009 ms,
+then the new bounded recovery succeeded. The control had still required the
+pre-recovery immediate failure. The run remains failed and immutable. The
+control now gives the original response eleven seconds, verifies the ten-second
+read timeout and one bounded follow-up timeout, rejects the queued late reply,
+and checks unchanged submission and cleanup ledgers. Production code and its
+300-second response deadline are unchanged. Original failed receipt SHA-256:
+48d7b530544ef655d938e5c026379540c4405af1abd9d80b1bba120409d6e8f6.
+
+Final build-63 validation executed 2,360 native tests in 602.533 seconds:
+2,311 passed, 49 opt-in cases explicitly skipped and no failures. All 414
+source inputs, public evidence and the pinned engine stayed unchanged.
+The independent audit verified all sixteen required read, deadline, binding
+and model/product controls, the 125-test browser transport suite, the required
+workflow/permission/patch checks and 26 unique cleanup identities. Native
+receipt SHA-256:
+2869375c5bed5006ae7b9372e013933c3f885e3224bfbea6b52aab1b006b7630.
+Public validation passed all 637 tests, frontend type checking and the
+production build. Receipt SHA-256:
+c222214359888e98c91bb4fb6642ce578938a15a138c59168a53308cf65d3b14.
+Signing, installation and fresh ChatGPT-only workflow checks follow.
