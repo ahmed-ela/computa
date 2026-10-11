@@ -3831,3 +3831,40 @@ attempts (about 488 MiB). The original plan and partial failure remain recorded.
 No process was signalled. Total space cleanup is approximately 36.5 GiB.
 The successful build 51 marker project was archived, verified and removed;
 its traces and failed browser project remain retained.
+
+### Build 52 installed qualification and delayed WebKit dispatch
+
+Build 52 was signed, staged and installed from
+25a13850ce720231d6c180193fb51d7a21d86097, preserving build 51 as a rollback.
+Staging and installed verification each passed 98 checks. Installed receipt
+SHA-256: a77555754332282bb8513c4a7b30dad410f16b45b6d81e2b18377191f6e74d18.
+The new process was PID 23872, runtime generation
+c3e175df-8519-4768-967c-61a94580a562, captured before any model prompt.
+
+ChatGPT GPT-6 marker qualification passed all 39 checks with two closed leases;
+receipt SHA-256: afa6646d44bc184f0c6f25c71f7d3297366fea983e06437194ec1b4f62fb72a2.
+The browser case recovered from an invalid snapshot identifier by reading a
+fresh snapshot. Nine native browser actions succeeded, including one flight
+search and a results read, but an inspection timeout stopped it before details
+navigation or a final answer. Its collector remains incomplete_or_failed;
+receipt SHA-256: 3c80bc0825be05b64ef30c8704740a6a6aa5e9b004aae8c54f51eab7ea1f2163.
+All eleven website leases closed. The exact owned fixture server PID 25173
+exited with code zero, its port refused connections and one server_closed event
+was verified independently. No failed prompt was replayed.
+
+The exact-PID timeout reported operationAgeMs=10665, clocksPending=0,
+generationCurrent=true, originCurrent=true, diagnosticsReceived=0,
+diagnosticsAccepted=0, diagnosticRejected=none and domDuringOperation=3.
+The view remained attached, visible and nonoccluded. This rules out native
+phase-receipt rejection as the observed failure and does not alone prove that
+the adapter never entered JavaScript.
+
+WebKit's correlated host/page/process logs show the native evaluation queued
+at 02:36:43.563419 and WebContent PID 27039 entering it at 02:36:57.570422,
+14.007003 seconds later. Computa's ten-second native inspection timeout fired
+before that entry. The subsequent late evaluation completed without replay,
+followed by guarded cleanup. The finite timeline projection has SHA-256
+23993ed1102cd95a881bbe0ae4bf74baf81cf8f3cc37e5ae9ac08e64b1c964dd.
+These logs identify a queue delay, not the website workload that caused it.
+A controlled queue-delay fixture and bounded inspection-budget change are the
+next investigation. Gemini CAPTCHA and Claude quota gates remain in place.
