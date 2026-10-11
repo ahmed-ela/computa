@@ -3767,3 +3767,30 @@ The native clock control is not evidence that the prior live failure is fixed.
 
 The successful build 50 marker project's exact owned directory was archived,
 verified and removed. Its evidence and failed browser fixture remain retained.
+
+
+Build 51 was signed, staged and installed from
+e57628c6636d4effe648033345d2961b45a0a0de. Staged and installed
+verification each passed 98 checks. The initial redundant installation
+preflight read a check's field as passed instead of verified and stopped before
+any installation; the corrected guard and canonical successful receipts are
+retained. Build 50 is preserved as a rollback. A fresh process and runtime
+generation were captured before the first model prompt.
+
+ChatGPT GPT-6 passed fresh marker qualification, all 39 checks, with two
+acknowledged/closed leases. The browser task then completed eight native
+browser actions, submitted the flight search and read its results, but failed
+before details navigation or the final answer. The original collector remains
+incomplete_or_failed. All nine leases closed. The root-owned HTTP fixture's
+exact process was stopped; its port refused connections and one server_closed
+event was independently verified. The failed prompt was not replayed.
+
+The exact-PID timeout snapshot reports phases=not_started,
+operationAgeMs=10431, phaseAgeMs=0 and clocksPending=0. The view was attached,
+visible and nonoccluded, with 120 accepted DOM receipts and revision 48.
+This failure occurred before any adapter phase receipt was accepted. It does
+not distinguish a stale generation/origin rejecting receipts from JavaScript
+not entering the adapter or a receipt not reaching the native handler. The
+native-clock change has not resolved the live failure. Further investigation
+must discriminate those cases rather than assuming another verification timer
+stall. Gemini CAPTCHA and Claude quota gates remain in place.
