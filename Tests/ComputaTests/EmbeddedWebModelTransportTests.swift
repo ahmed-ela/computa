@@ -6,6 +6,56 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testStalledFirstUserDigestReportsNativePhaseAndCannotAcceptAReply() async throws {
+        let fixture = try Fixture(page: Self.page)
+        defer { fixture.shutdown() }
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "PRIVATE_PROMPT_CANARY"])
+        _ = try await evaluate(view, """
+        const original = crypto.subtle.digest.bind(crypto.subtle);
+        crypto.subtle.digest = (...args) => {
+          globalThis.__computaFixtureDigestPromise = new Promise(resolve => {
+            globalThis.__computaFixtureDigestResolve = async () => resolve(await original(...args));
+          });
+          return globalThis.__computaFixtureDigestPromise;
+        };
+        return true;
+        """,
+                               world: .world(name: "computa-chatgpt-model-v1"))
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .seconds(2))
+        var diagnostics: [String] = []
+        fixture.transport.setAdapterTimeoutObserverForTesting { diagnostics.append($0) }
+        let began = ContinuousClock.now
+        do {
+            let reply = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertNotEqual(reply["state"] as? String, "complete")
+            XCTAssertNil(reply["response"])
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline)
+        }
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(4))
+        XCTAssertEqual(diagnostics.count, 1)
+        let diagnostic = try XCTUnwrap(diagnostics.first)
+        XCTAssertTrue(diagnostic.contains("first_user_hash"), diagnostic)
+        XCTAssertTrue(diagnostic.contains("width="))
+        XCTAssertFalse(diagnostic.contains("PRIVATE_PROMPT_CANARY"))
+        XCTAssertFalse(diagnostic.contains("Fixture reply"))
+        XCTAssertFalse(diagnostic.contains(token))
+        XCTAssertFalse(diagnostic.contains("chatgpt.com"))
+        XCTAssertLessThan(diagnostic.utf8.count, 1_024)
+        let ended = fixture.browser.modelDiagnosticSnapshot(tabID: try XCTUnwrap(fixture.createdTabs.last))
+        XCTAssertTrue(ended.contains("active=false"))
+        _ = try await evaluate(view, "await globalThis.__computaFixtureDigestResolve(); return true;",
+                               world: .world(name: "computa-chatgpt-model-v1"))
+        await Task.yield()
+        XCTAssertTrue(fixture.browser.modelDiagnosticSnapshot(tabID: try XCTUnwrap(fixture.createdTabs.last)).contains("active=false"))
+        XCTAssertEqual(diagnostics.count, 1, "A late completion cannot restart the native timeout or operation")
+    }
+
     func testProductDiagnosticsPermitOnlyFiniteStructuralFields() throws {
         let control: [String: Any] = ["tag": "button", "role": NSNull(), "pressed": "true", "checked": NSNull(), "visible": true, "enabled": false]
         let raw: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": 1,
@@ -3500,7 +3550,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             } catch {
                 XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline)
                 XCTAssertTrue(error.localizedDescription.contains("45-second"))
-                XCTAssertTrue(error.localizedDescription.contains("No prompt was sent"))
+                XCTAssertTrue(error.localizedDescription.contains("This website inference was not submitted"))
                 XCTAssertFalse(error.localizedDescription.contains("five-minute"))
                 timedOut = true; break
             }

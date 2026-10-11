@@ -57,7 +57,7 @@ actor WebModelServer {
             case .invalidRequest: "The browser model request could not be validated."
             case .busy: "This browser model already has a request running."
             case .providerFailed: "The website could not produce a response. Check its sign-in, usage limit, or error message in the browser."
-            case .preparationDeadline: "The website did not become ready before the 45-second preparation deadline. No prompt was sent."
+            case .preparationDeadline: "The website did not become ready before the 45-second preparation deadline. This website inference was not submitted."
             case .deadline: "The website did not finish its response before the five-minute deadline."
             case .cleanupFailed: "The web conversation cleanup could not be verified. Its local transcript has been retained."
             case .productModeUnverified: "ChatGPT normal Chat mode could not be verified. No response was accepted and no prompt was replayed. Refresh website models before retrying."

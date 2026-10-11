@@ -1,5 +1,18 @@
 // Shared source copied into each standalone private-world provider adapter.
 // Model names come only from the provider's associated picker, never messages.
+// This private-world notification carries no page content and grants no authority.
+function websiteModelDiagnosticPhase(phase) {
+  try {
+    const phases = ['adapter_entry', 'model_proof', 'model_wait', 'model_wait_done', 'first_user_hash',
+      'first_user_expand', 'first_user_expand_wait', 'page_action', 'final_model_guard'];
+    if (typeof input !== 'object' || input === null || !phases.includes(phase)
+      || !/^[a-f0-9-]{36}$/i.test(input.ownerToken || '') || !/^[a-f0-9-]{36}$/i.test(input.operationID || '')
+      || window !== window.top) return;
+    window.webkit?.messageHandlers?.computaModelDiagnostic?.postMessage({
+      ownerToken: input.ownerToken, operationID: input.operationID, phase });
+  } catch { /* An unavailable diagnostic channel must not change adapter behavior. */ }
+}
+websiteModelDiagnosticPhase('adapter_entry');
 function websiteModelNormalize(value) {
   return typeof value === 'string' ? value.normalize('NFC').replace(/\s+/g, ' ').trim() : '';
 }
@@ -73,6 +86,7 @@ async function websiteModelReplacementObservation(request, capturedCount, snapsh
     || !identityMatches()) return null;
   if (websiteModelReplacementObservationAttempted) return null;
   websiteModelReplacementObservationAttempted = true;
+  websiteModelDiagnosticPhase('first_user_hash');
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   const replacementFingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   const current = access.roots();
@@ -306,8 +320,9 @@ function websiteModelGuard(state, expected) {
   if (!websiteModelChoiceEqual(state.selected, expected)) return { error: 'model_mismatch', modelEvidence: state.evidence };
   return null;
 }
-function websiteModelWaitForChange(until, condition) {
+function websiteModelWaitForChange(until, condition, phase = 'model_wait') {
   if (condition()) return Promise.resolve(true);
+  websiteModelDiagnosticPhase(phase);
   return new Promise(resolve => {
     let finished = false, timer;
     const observer = new MutationObserver(() => { if (condition()) finish(true); });
@@ -316,6 +331,7 @@ function websiteModelWaitForChange(until, condition) {
       finished = true;
       observer.disconnect?.();
       if (typeof clearTimeout === 'function') clearTimeout(timer);
+      websiteModelDiagnosticPhase('model_wait_done');
       resolve(changed);
     };
     observer.observe(document.documentElement || document, { subtree: true, childList: true, characterData: true,
@@ -431,6 +447,7 @@ function websiteModelHitTestTarget(node) {
   } catch { return false; }
 }
 async function websiteModelReadEvidence(provider, expected, openingRecovery = null, context = null) {
+  websiteModelDiagnosticPhase('model_proof');
   if (!websiteModelChoiceValid(expected)) return { error: 'model_unverified' };
   const owner = globalThis.__computaModelOwner, url = document.URL;
   const recovery = provider === 'chatgpt' && openingRecovery?.attempt?.clicked === true
@@ -703,6 +720,7 @@ async function websiteModelPickerAction(state, request, fresh, freshGuard = null
   return { pending: true, modelEvidence: state.evidence };
 }
 async function websiteModelFinalGuard(provider, request, observed, currentTemporary = null) {
+  websiteModelDiagnosticPhase('final_model_guard');
   if (observed.error || request.action === 'stop' || request.expectedModelChoice == null
     || ['discoverModels', 'selectModel', 'modelDiagnostic'].includes(request.action)) return observed;
   const proof = await websiteModelReadEvidence(provider, request.expectedModelChoice, null,
@@ -1158,6 +1176,7 @@ function chatGPTStructure(visible) {
   return serialized;
 }
 async function providerPageAction(input, readLineageFingerprint = null) {
+  websiteModelDiagnosticPhase('page_action');
   const modelState = websiteModelPickerState('chatgpt');
   if (['discoverModels', 'selectModel', 'modelDiagnostic'].includes(input.action)) {
     const result = await websiteModelPickerAction(modelState, input, ownedUserCount === 0
@@ -1248,6 +1267,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       || firstUserIdentity.length > 256 || normalizedBody.length > 180_200
       || expectedFirstUserIdentity && firstUserIdentity !== expectedFirstUserIdentity
       || !expectedFirstUserFingerprint && ["prepare", "submit"].includes(action)) return { error: "conversation_changed" };
+    websiteModelDiagnosticPhase('first_user_hash');
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalizedBody));
     firstUserFingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
     // Digesting yields the event loop. Recheck the same first DOM message and
@@ -1605,6 +1625,7 @@ function chatGPTRejectFirstUserExpansionContext(candidate) {
     failure ? ['root', 'body'].includes(failure) ? 'node_changed' : 'context_changed' : 'text_mismatch', failure);
 }
 async function chatGPTObserveFirstUserExpansion(candidate) {
+  websiteModelDiagnosticPhase('first_user_expand');
   const reject = outcome => chatGPTRejectFirstUserExpansion(candidate, outcome);
   if (!Number.isFinite(candidate.deadline) || Date.now() > candidate.deadline)
     return chatGPTRejectFirstUserExpansion(candidate, 'timeout', 'deadline');
@@ -1618,7 +1639,7 @@ async function chatGPTObserveFirstUserExpansion(candidate) {
     if (!chatGPTFirstUserExpansionContext(candidate)) return true;
     const observed = facts();
     return !observed || observed.complete || !observed.compatible;
-  });
+  }, 'first_user_expand_wait');
   const contextFailure = chatGPTFirstUserExpansionContextFailure(candidate);
   // A crossed route cannot hide a changed message and later revive it. Only
   // the same complete body or a still-compatible prefix is a URL-only failure.
@@ -1889,6 +1910,7 @@ if (ownedUserCount > 0) {
   if (expansionRejected)
     return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
   firstSnapshot = { root: ownedMessages[0], body: first, text: rendered };
+  websiteModelDiagnosticPhase('first_user_hash');
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rendered));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   if (!snapshotUnchanged()) return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length,

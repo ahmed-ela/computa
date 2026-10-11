@@ -93,6 +93,11 @@ final class EmbeddedBrowserSession {
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
+        var modelDiagnosticOperation: UUID?
+        var modelDiagnosticGeneration: UUID?
+        var modelDiagnosticPhases: [ModelAdapterPhase] = []
+        var modelDOMSignalsReceived: UInt16 = 0
+        var modelDOMSignalsAccepted: UInt16 = 0
         // Model generations also invalidate on provisional loads. Human
         // checkpoint observations advance only for a committed document.
         var humanCommittedDocumentID = UUID()
@@ -293,6 +298,7 @@ final class EmbeddedBrowserSession {
         entry.navigationChanges.close()
         if let world = entry.modelSignalWorld {
             entry.view.configuration.userContentController.removeScriptMessageHandler(forName: Self.modelSignalName, contentWorld: world)
+            entry.view.configuration.userContentController.removeScriptMessageHandler(forName: Self.modelDiagnosticName, contentWorld: world)
         }
         entry.delegate.invalidate()
         entry.observations.forEach { $0.invalidate() }
@@ -437,6 +443,20 @@ final class EmbeddedBrowserSession {
     func documentGeneration(for id: UUID) -> UUID? { entries[id]?.tab.documentGeneration }
 
     static let modelSignalName = "computaChatGPTSignal"
+    static let modelDiagnosticName = "computaModelDiagnostic"
+
+    /// Fixed categories only. Diagnostics never change revisions or grant page authority.
+    enum ModelAdapterPhase: String, CaseIterable {
+        case adapterEntry = "adapter_entry"
+        case modelProof = "model_proof"
+        case modelWait = "model_wait"
+        case modelWaitDone = "model_wait_done"
+        case firstUserHash = "first_user_hash"
+        case firstUserExpand = "first_user_expand"
+        case firstUserExpandWait = "first_user_expand_wait"
+        case pageAction = "page_action"
+        case finalModelGuard = "final_model_guard"
+    }
 
     /// Only inference-owned views receive this notification-only private-world handler.
     func installModelChangeSignal(tabID: UUID, ownerToken: String, world: WKContentWorld,
@@ -449,6 +469,58 @@ final class EmbeddedBrowserSession {
         entry.modelSignalOriginHost = originHost
         entry.view.configuration.userContentController.add(EmbeddedModelSignalHandler(session: self, tabID: tabID),
                                                            contentWorld: world, name: Self.modelSignalName)
+        entry.view.configuration.userContentController.add(EmbeddedModelDiagnosticHandler(session: self, tabID: tabID),
+                                                           contentWorld: world, name: Self.modelDiagnosticName)
+    }
+
+    func beginModelDiagnostic(tabID: UUID, ownerToken: String, operationID: UUID) throws {
+        let entry = try entry(tabID)
+        guard entry.modelChanges?.ownerToken == ownerToken else { throw Failure.tabClosed }
+        // A concurrent operation supersedes diagnostics only. Instrumentation
+        // must not reject a production evaluation or affect its completion.
+        entry.modelDiagnosticOperation = operationID
+        entry.modelDiagnosticGeneration = entry.tab.documentGeneration
+        entry.modelDiagnosticPhases.removeAll(keepingCapacity: true)
+    }
+
+    func endModelDiagnostic(tabID: UUID, operationID: UUID) {
+        guard let entry = entries[tabID], entry.modelDiagnosticOperation == operationID else { return }
+        entry.modelDiagnosticOperation = nil
+        entry.modelDiagnosticGeneration = nil
+    }
+
+    /// A synchronous native snapshot remains available when JavaScript is stalled.
+    /// Values are bounded geometry, booleans, counters and enum names, never page data.
+    func modelDiagnosticSnapshot(tabID: UUID, operationID: UUID? = nil) -> String {
+        guard let entry = entries[tabID] else { return "state=closed" }
+        if let operationID, entry.modelDiagnosticOperation != operationID { return "state=superseded" }
+        func dimension(_ value: CGFloat) -> Int { value.isFinite ? Int(max(0, min(16_384, value.rounded()))) : 0 }
+        let view = entry.view, window = view.window
+        let phases = entry.modelDiagnosticPhases.map(\.rawValue).joined(separator: ",")
+        return "phases=\(phases.isEmpty ? "not_started" : phases) active=\(entry.modelDiagnosticOperation != nil)"
+            + " domReceived=\(entry.modelDOMSignalsReceived) domAccepted=\(entry.modelDOMSignalsAccepted) revision=\((try? entry.modelChanges?.currentRevision()) ?? 0)"
+            + " attached=\(view.superview != nil) hidden=\(view.isHiddenOrHasHiddenAncestor) window=\(window != nil)"
+            + " visible=\(window?.isVisible == true) occluded=\(window != nil && window?.occlusionState.contains(.visible) != true)"
+            + " width=\(dimension(view.bounds.width)) height=\(dimension(view.bounds.height))"
+            + " visibleWidth=\(dimension(view.visibleRect.width)) visibleHeight=\(dimension(view.visibleRect.height))"
+            + " hostWidth=\(dimension(view.superview?.bounds.width ?? 0)) hostHeight=\(dimension(view.superview?.bounds.height ?? 0))"
+    }
+
+    fileprivate func receivedModelDiagnostic(_ message: WKScriptMessage, tabID: UUID) {
+        guard let entry = entries[tabID], message.webView === entry.view, message.frameInfo.isMainFrame,
+              entry.modelDiagnosticGeneration == entry.tab.documentGeneration,
+              let operation = entry.modelDiagnosticOperation,
+              let body = message.body as? [String: String], Set(body.keys) == ["ownerToken", "operationID", "phase"],
+              body["ownerToken"] == entry.modelChanges?.ownerToken,
+              body["operationID"].flatMap(UUID.init(uuidString:)) == operation,
+              let rawPhase = body["phase"], let phase = ModelAdapterPhase(rawValue: rawPhase) else { return }
+        let origin = message.frameInfo.securityOrigin
+        guard origin.`protocol` == "https", origin.host == entry.modelSignalOriginHost,
+              origin.port == 0 || origin.port == 443 else { return }
+        if entry.modelDiagnosticPhases.last != phase {
+            entry.modelDiagnosticPhases.append(phase)
+            if entry.modelDiagnosticPhases.count > 8 { entry.modelDiagnosticPhases.removeFirst() }
+        }
     }
 
     func modelChangeRevision(for id: UUID) throws -> UInt64 {
@@ -469,13 +541,15 @@ final class EmbeddedBrowserSession {
     }
 
     fileprivate func receivedModelSignal(_ message: WKScriptMessage, tabID: UUID) {
-        guard let entry = entries[tabID], message.webView === entry.view, message.frameInfo.isMainFrame,
-              let channel = entry.modelChanges,
+        guard let entry = entries[tabID], message.webView === entry.view else { return }
+        if entry.modelDOMSignalsReceived < .max { entry.modelDOMSignalsReceived += 1 }
+        guard message.frameInfo.isMainFrame, let channel = entry.modelChanges,
               let body = message.body as? [String: String], body.count == 2, Set(body.keys) == ["ownerToken", "kind"],
               body["ownerToken"] == channel.ownerToken, body["kind"] == "dom_changed" else { return }
         let origin = message.frameInfo.securityOrigin
         guard origin.`protocol` == "https", origin.host == entry.modelSignalOriginHost,
               origin.port == 0 || origin.port == 443 else { return }
+        if entry.modelDOMSignalsAccepted < .max { entry.modelDOMSignalsAccepted += 1 }
         channel.signalDOMChange()
     }
 
@@ -798,6 +872,17 @@ private final class EmbeddedModelSignalHandler: NSObject, WKScriptMessageHandler
     init(session: EmbeddedBrowserSession, tabID: UUID) { self.session = session; self.tabID = tabID }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         session?.receivedModelSignal(message, tabID: tabID)
+    }
+}
+
+@MainActor
+private final class EmbeddedModelDiagnosticHandler: NSObject, WKScriptMessageHandler {
+    private weak var session: EmbeddedBrowserSession?
+    private let tabID: UUID
+
+    init(session: EmbeddedBrowserSession, tabID: UUID) { self.session = session; self.tabID = tabID }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        session?.receivedModelDiagnostic(message, tabID: tabID)
     }
 }
 

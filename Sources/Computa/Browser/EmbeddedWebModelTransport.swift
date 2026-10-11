@@ -208,7 +208,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
             case .humanVerificationRequired(let provider): "\(provider.displayName)'s website requires human verification. Open its website in Computa's built-in browser, complete the verification, then refresh website models before retrying. No prompt was replayed."
             case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
-            case .preparationDeadline: "The website did not prepare a verified temporary or incognito chat before the 45-second deadline. No prompt was sent."
+            case .preparationDeadline: "The website did not prepare a verified temporary or incognito chat before the 45-second deadline. This website inference was not submitted."
             case .deadline: "The website did not finish its response before the five-minute deadline."
             }
         }
@@ -301,6 +301,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
     #endif
 
@@ -326,6 +327,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFirstUserDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
         firstUserDiagnosticsObserverForTesting = observer
+    }
+
+    func setAdapterTimeoutObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        adapterTimeoutObserverForTesting = observer
     }
 
     func setFirstUserExpansionRouteCheckpointForTesting(_ hook: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?) {
@@ -496,7 +501,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 try Task.checkCancellation()
                 let revision = try browser.modelChangeRevision(for: session.tabID)
                 _ = try await poll(session)
-                guard ContinuousClock.now < deadline else { throw Failure.preparationDeadline }
+                guard ContinuousClock.now < deadline else { throw preparationFailure(session) }
                 if session.state != "ready" { _ = try await waitForChange(sessionToken: token, after: revision, until: deadline) }
             }
             while ContinuousClock.now < deadline {
@@ -535,7 +540,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 _ = try await waitForChange(sessionToken: token, after: revision, until: deadline)
             }
-            throw Failure.preparationDeadline
+            throw preparationFailure(session)
         } catch {
             recordProviderGate(error, provider: provider)
             if closed { throw error }
@@ -586,6 +591,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         throw Failure.editorFailure("send_unavailable")
     }
 
+    private func preparationFailure(_ session: Session) -> Failure {
+        let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID)
+        Self.inspectionLog.error("preparationTimeout provider=\(session.provider.rawValue, privacy: .public) \(diagnostic, privacy: .public)")
+        return .preparationDeadline
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
@@ -593,17 +604,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         try rejectWebsiteBlocker(session, action: "inspect", phase: "before")
         if session.state == "loading", session.view.isLoading {
             session.initialReadRetry = nil
-            guard ContinuousClock.now - session.created < preparationTimeout else { throw Failure.preparationDeadline }
+            guard ContinuousClock.now - session.created < preparationTimeout else { throw preparationFailure(session) }
             return try snapshot(session)
         }
         let timeoutFailure: Failure = session.state == "loading" ? .preparationDeadline : .deadline
         let deadline = session.state == "loading" ? session.created + preparationTimeout : session.turnStarted + responseTimeout
-        guard ContinuousClock.now < deadline else { throw timeoutFailure }
+        guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         let observed: [String: Any]
         do { observed = try await page(session, action: "inspect", maximumWait: min(.seconds(10), deadline - .now)) }
         catch {
             if let failure = error as? Failure, failure.diagnosticCode != nil { throw failure }
-            if !Task.isCancelled, ContinuousClock.now >= deadline { throw timeoutFailure }
+            if !Task.isCancelled, ContinuousClock.now >= deadline { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
             if (error as? Failure) == .submissionObservationPending {
                 try Task.checkCancellation()
                 // The fixed adapter discarded a read crossed only by the
@@ -624,7 +635,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             throw error
         }
-        guard ContinuousClock.now < deadline else { throw timeoutFailure }
+        guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         session.initialReadRetry = nil
         logInspection(observed, session: session)
         if session.state == "loading" {
@@ -690,7 +701,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
             }
             guard session.state == "ready" || ContinuousClock.now - session.created < preparationTimeout else {
-                throw Failure.preparationDeadline
+                throw preparationFailure(session)
             }
         } else {
             let previouslyCandidate = session.completionCandidate
@@ -1441,6 +1452,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Authority comes from generation, private owner, pinned route, counts
         // and pinned first-message lineage; an auxiliary ID cannot veto it.
         if let prompt { input["prompt"] = prompt }
+        let operationID = UUID()
+        input["operationID"] = operationID.uuidString
+        try browser.beginModelDiagnostic(tabID: session.tabID, ownerToken: session.token, operationID: operationID)
+        defer { browser.endModelDiagnostic(tabID: session.tabID, operationID: operationID) }
         let firstUserEntry = firstUserNativeState(session)
         func recordFirstUserFailure(_ stage: FirstUserNativeStage, observed: [String: Any]) {
             guard let records = Self.firstUserNativeDiagnosticRecords(provider: provider, action: action, stage: stage,
@@ -1465,14 +1480,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     let timeout = Task {
                         do {
                             try await Task.sleep(for: maximumWait)
-                            Self.inspectionLog.error("adapterTimeout provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence)")
+                            guard result.isPending else { return }
+                            let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID, operationID: operationID)
+                            Self.inspectionLog.error("adapterTimeout provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) \(diagnostic, privacy: .public)")
+                            #if DEBUG
+                            adapterTimeoutObserverForTesting?(diagnostic)
+                            #endif
                             result.complete(.failure(Failure.pageUnavailable))
-                    } catch { }
-                }
-                result.setTimeout(timeout)
-                guard result.isPending else { return }
-                session.view.callAsyncJavaScript(script, arguments: ["input": input], in: nil, in: world) { reply in
-                    switch reply {
+                        } catch { }
+                    }
+                    result.setTimeout(timeout)
+                    guard result.isPending else { return }
+                    session.view.callAsyncJavaScript(script, arguments: ["input": input], in: nil, in: world) { reply in
+                        switch reply {
                     case .success(let value):
                         do { result.complete(.success(try JSONSerialization.data(withJSONObject: value))) }
                         catch {
@@ -1493,10 +1513,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         // Exception messages can contain page or prompt data.
                         Self.inspectionLog.error("adapterFailure provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) code=\(native.code) kind=\(kind, privacy: .public) line=\(line) column=\(column)")
                         result.complete(.failure(Failure.pageUnavailable))
+                        }
                     }
                 }
-            }
-        } onCancel: { result.complete(.failure(CancellationError())) }
+            } onCancel: { result.complete(.failure(CancellationError())) }
         } catch {
             if !Task.isCancelled, browser.webView(for: session.tabID) === session.view {
                 // A challenge redirect can destroy the JavaScript context. Use
@@ -1505,6 +1525,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             throw error
         }
+        browser.endModelDiagnostic(tabID: session.tabID, operationID: operationID)
         #if DEBUG
         await beforePageResultValidationForTesting?(action)
         await beforePageResultValidationDetailedForTesting?(action, enforceModel)

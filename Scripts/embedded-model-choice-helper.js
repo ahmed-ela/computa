@@ -1,5 +1,18 @@
 // Shared source copied into each standalone private-world provider adapter.
 // Model names come only from the provider's associated picker, never messages.
+// This private-world notification carries no page content and grants no authority.
+function websiteModelDiagnosticPhase(phase) {
+  try {
+    const phases = ['adapter_entry', 'model_proof', 'model_wait', 'model_wait_done', 'first_user_hash',
+      'first_user_expand', 'first_user_expand_wait', 'page_action', 'final_model_guard'];
+    if (typeof input !== 'object' || input === null || !phases.includes(phase)
+      || !/^[a-f0-9-]{36}$/i.test(input.ownerToken || '') || !/^[a-f0-9-]{36}$/i.test(input.operationID || '')
+      || window !== window.top) return;
+    window.webkit?.messageHandlers?.computaModelDiagnostic?.postMessage({
+      ownerToken: input.ownerToken, operationID: input.operationID, phase });
+  } catch { /* An unavailable diagnostic channel must not change adapter behavior. */ }
+}
+websiteModelDiagnosticPhase('adapter_entry');
 function websiteModelNormalize(value) {
   return typeof value === 'string' ? value.normalize('NFC').replace(/\s+/g, ' ').trim() : '';
 }
@@ -73,6 +86,7 @@ async function websiteModelReplacementObservation(request, capturedCount, snapsh
     || !identityMatches()) return null;
   if (websiteModelReplacementObservationAttempted) return null;
   websiteModelReplacementObservationAttempted = true;
+  websiteModelDiagnosticPhase('first_user_hash');
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   const replacementFingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   const current = access.roots();
@@ -306,8 +320,9 @@ function websiteModelGuard(state, expected) {
   if (!websiteModelChoiceEqual(state.selected, expected)) return { error: 'model_mismatch', modelEvidence: state.evidence };
   return null;
 }
-function websiteModelWaitForChange(until, condition) {
+function websiteModelWaitForChange(until, condition, phase = 'model_wait') {
   if (condition()) return Promise.resolve(true);
+  websiteModelDiagnosticPhase(phase);
   return new Promise(resolve => {
     let finished = false, timer;
     const observer = new MutationObserver(() => { if (condition()) finish(true); });
@@ -316,6 +331,7 @@ function websiteModelWaitForChange(until, condition) {
       finished = true;
       observer.disconnect?.();
       if (typeof clearTimeout === 'function') clearTimeout(timer);
+      websiteModelDiagnosticPhase('model_wait_done');
       resolve(changed);
     };
     observer.observe(document.documentElement || document, { subtree: true, childList: true, characterData: true,
@@ -431,6 +447,7 @@ function websiteModelHitTestTarget(node) {
   } catch { return false; }
 }
 async function websiteModelReadEvidence(provider, expected, openingRecovery = null, context = null) {
+  websiteModelDiagnosticPhase('model_proof');
   if (!websiteModelChoiceValid(expected)) return { error: 'model_unverified' };
   const owner = globalThis.__computaModelOwner, url = document.URL;
   const recovery = provider === 'chatgpt' && openingRecovery?.attempt?.clicked === true
@@ -703,6 +720,7 @@ async function websiteModelPickerAction(state, request, fresh, freshGuard = null
   return { pending: true, modelEvidence: state.evidence };
 }
 async function websiteModelFinalGuard(provider, request, observed, currentTemporary = null) {
+  websiteModelDiagnosticPhase('final_model_guard');
   if (observed.error || request.action === 'stop' || request.expectedModelChoice == null
     || ['discoverModels', 'selectModel', 'modelDiagnostic'].includes(request.action)) return observed;
   const proof = await websiteModelReadEvidence(provider, request.expectedModelChoice, null,

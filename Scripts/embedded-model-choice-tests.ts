@@ -40,6 +40,37 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(source.startsWith(helper + '\n')).toBe(true);
     });
 
+    test('diagnostic phases are finite, opt in to one operation and contain no page content', async () => {
+      const { f } = setup();
+      const posted: any[] = [];
+      f.window.webkit.messageHandlers.computaModelDiagnostic = { postMessage: (body: any) => posted.push(body) };
+      await f.run('inspect');
+      expect(posted).toEqual([]);
+      const operationID = 'a909845c-2857-4b22-a66b-261b22281513';
+      await f.run('inspect', { operationID });
+      expect(posted.length).toBeGreaterThan(0);
+      const swift = readFileSync(new URL('../Sources/Computa/Browser/EmbeddedBrowserSession.swift', import.meta.url), 'utf8');
+      const enumBody = swift.split('enum ModelAdapterPhase: String, CaseIterable {')[1].split('\n    }')[0];
+      const phases = [...enumBody.matchAll(/case \w+ = "([a-z_]+)"/g)].map(match => match[1]);
+      for (const body of posted) {
+        expect(Object.keys(body).sort()).toEqual(['operationID', 'ownerToken', 'phase']);
+        expect(body.operationID).toBe(operationID);
+        expect(body.ownerToken).toMatch(/^[a-f0-9-]{36}$/i);
+        expect(phases).toContain(body.phase);
+      }
+    });
+
+    test('a missing or throwing diagnostic sink cannot change the adapter result', async () => {
+      const baseline = setup().f;
+      const expected = await baseline.run('inspect');
+      const missing = setup().f;
+      const throwing = setup().f;
+      throwing.window.webkit.messageHandlers.computaModelDiagnostic = { postMessage: () => { throw new Error('PRIVATE_RAW_PAGE_CANARY'); } };
+      const request = { operationID: 'a909845c-2857-4b22-a66b-261b22281513' };
+      expect(await missing.run('inspect', request)).toEqual(expected);
+      expect(await throwing.run('inspect', request)).toEqual(expected);
+    });
+
     test('discovery exposes enabled family leaves and excludes descriptions, effort and upgrades', async () => {
       const { f, picker } = setup();
       const result = await advance(f, 'discoverModels');

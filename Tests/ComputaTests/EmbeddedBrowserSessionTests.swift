@@ -890,9 +890,119 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertThrowsError(try session.modelChangeRevision(for: id), "An unsupported origin must not install a channel")
     }
 
-    private func script(_ view: WKWebView, _ body: String, world: WKContentWorld = .page) async throws -> Data {
+    func testModelDiagnosticsRejectForeignAndLateReceiptsWithoutWakingTheChannel() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false)
+        let human = try XCTUnwrap(session.webView(for: session.createTab()))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let owner = UUID().uuidString, operation = UUID()
+        let world = WKContentWorld.world(name: "computa-diagnostic-test")
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world)
+        try await loadDiagnosticFixture(view, host: "chatgpt.com")
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+        let hidden = "return !window.webkit?.messageHandlers?.computaModelDiagnostic;"
+        let pageHidden = try await script(view, hidden)
+        let humanHidden = try await script(human, hidden, world: world)
+        XCTAssertEqual(pageHidden, Data("true".utf8))
+        XCTAssertEqual(humanHidden, Data("true".utf8))
+        let revision = try session.modelChangeRevision(for: id)
+        let invalid = """
+        const handler = window.webkit.messageHandlers.computaModelDiagnostic;
+        const valid = {ownerToken: '\(owner)', operationID: '\(operation.uuidString)', phase: 'first_user_hash'};
+        for (const body of [{...valid, ownerToken: '\(UUID().uuidString)'},
+          {...valid, operationID: '\(UUID().uuidString)'}, {...valid, phase: 'PRIVATE_RAW_PAGE_CANARY'},
+          {...valid, text: 'PRIVATE_RAW_PAGE_CANARY'}, {...valid, operationID: null},
+          {ownerToken: valid.ownerToken, phase: valid.phase}]) handler.postMessage(body);
+        return true;
+        """
+        _ = try await script(view, invalid, world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"))
+        let receipt = "window.webkit.messageHandlers.computaModelDiagnostic.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', phase: 'first_user_hash'}); return true;"
+        _ = try await script(view, receipt, world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=first_user_hash"))
+        let after = try await session.waitForModelChange(tabID: id, after: revision, until: .now + .milliseconds(100))
+        XCTAssertEqual(after, revision, "Diagnostics cannot wake an inference or authorize an action")
+        session.endModelDiagnostic(tabID: id, operationID: UUID())
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("active=true"))
+        let next = UUID()
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: next)
+        XCTAssertEqual(session.modelDiagnosticSnapshot(tabID: id, operationID: operation), "state=superseded")
+        session.endModelDiagnostic(tabID: id, operationID: operation)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("active=true"), "Ending an older operation cannot cancel the newer diagnostic")
+        _ = try await script(view, receipt, world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"), "A late callback cannot contaminate the next operation")
+        let nextReceipt = receipt.replacingOccurrences(of: operation.uuidString, with: next.uuidString)
+        let childFixture = DiagnosticChildFrameFixture()
+        view.configuration.userContentController.add(childFixture, name: "fixtureFrame")
+        defer { view.configuration.userContentController.removeScriptMessageHandler(forName: "fixtureFrame") }
+        // Production navigation rejects about:srcdoc. Permit this local fixture
+        // only so the independent message handler's frame guard is exercised.
+        let navigationDelegate = view.navigationDelegate
+        view.navigationDelegate = nil
+        defer { view.navigationDelegate = navigationDelegate }
+        _ = try await script(view, "const frame = document.createElement('iframe'); frame.srcdoc = '<script>window.webkit.messageHandlers.fixtureFrame.postMessage(\"ready\")<\\/script>'; document.body.appendChild(frame); return true;")
+        let childDeadline = ContinuousClock.now + .seconds(5)
+        while childFixture.frame == nil, ContinuousClock.now < childDeadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let frame = try XCTUnwrap(childFixture.frame, "The controlled child frame must actually load")
+        _ = try await script(view, nextReceipt, world: world, frame: frame)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"), "A same-origin child frame has no diagnostic authority")
+        view.navigationDelegate = navigationDelegate
+        view.navigationDelegate?.webViewWebContentProcessDidTerminate?(view)
+        _ = try await script(view, nextReceipt, world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"), "A changed generation invalidates the diagnostic operation")
+        session.closeTab(id)
+        XCTAssertEqual(session.modelDiagnosticSnapshot(tabID: id), "state=closed")
+    }
+
+    func testModelDiagnosticsPinOriginsAndBoundPhaseHistoryAndNativeGeometry() async throws {
+        for host in ["chatgpt.com", "claude.ai", "gemini.google.com"] {
+            let session = EmbeddedBrowserSession(persistent: false)
+            defer { session.shutdown() }
+            let id = try session.createTab(select: false)
+            let view = try XCTUnwrap(session.webView(for: id))
+            let owner = UUID().uuidString, world = WKContentWorld.world(name: "computa-diagnostic-\(host)")
+            try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world, originHost: host)
+            for origin in [host, "foreign.example.test"] {
+                try await loadDiagnosticFixture(view, host: origin)
+                let operation = UUID()
+                try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+                let phases = EmbeddedBrowserSession.ModelAdapterPhase.allCases.map(\.rawValue)
+                let encoded = try String(decoding: JSONSerialization.data(withJSONObject: phases), as: UTF8.self)
+                _ = try await script(view, "for (const phase of \(encoded)) window.webkit.messageHandlers.computaModelDiagnostic.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', phase}); return true;", world: world)
+                let snapshot = session.modelDiagnosticSnapshot(tabID: id)
+                if origin == host {
+                    XCTAssertTrue(snapshot.contains("phases=" + phases.suffix(8).joined(separator: ",")))
+                    XCTAssertFalse(snapshot.contains("adapter_entry"))
+                } else { XCTAssertTrue(snapshot.contains("phases=not_started")) }
+                XCTAssertLessThan(snapshot.utf8.count, 1_024)
+                XCTAssertFalse(snapshot.contains(host))
+                XCTAssertFalse(snapshot.contains(owner))
+                XCTAssertFalse(snapshot.contains(operation.uuidString))
+                XCTAssertFalse(snapshot.contains("PRIVATE_RAW_PAGE_CANARY"))
+                session.endModelDiagnostic(tabID: id, operationID: operation)
+            }
+        }
+    }
+
+    private func loadDiagnosticFixture(_ view: WKWebView, host: String) async throws {
+        view.loadHTMLString("<p id='ready'>PRIVATE_RAW_PAGE_CANARY</p>", baseURL: URL(string: "https://\(host)/"))
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            if !view.isLoading, (try? await script(view, "return !!document.getElementById('ready');")) == Data("true".utf8) {
+                try await Task.sleep(for: .milliseconds(150))
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("The local diagnostic fixture did not load")
+    }
+
+    private func script(_ view: WKWebView, _ body: String, world: WKContentWorld = .page, frame: WKFrameInfo? = nil) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
-            view.callAsyncJavaScript(body, arguments: [:], in: nil, in: world) { result in
+            view.callAsyncJavaScript(body, arguments: [:], in: frame, in: world) { result in
                 switch result {
                 case .success(let value):
                     do { continuation.resume(returning: try JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed)) }
@@ -998,5 +1108,13 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         for input in ["javascript:alert(1)", "file:///tmp/test", "data:text/html,x", "custom:search"] {
             XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validate(XCTUnwrap(URL(string: input))), input)
         }
+    }
+}
+
+@MainActor
+private final class DiagnosticChildFrameFixture: NSObject, WKScriptMessageHandler {
+    var frame: WKFrameInfo?
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if !message.frameInfo.isMainFrame, message.body as? String == "ready" { frame = message.frameInfo }
     }
 }

@@ -557,7 +557,7 @@ final class WebModelServerTests: XCTestCase {
                 return XCTFail("Expected a preparation deadline, received \(error.localizedDescription)")
             }
             XCTAssertTrue(error.localizedDescription.contains("45-second preparation deadline"))
-            XCTAssertTrue(error.localizedDescription.contains("No prompt was sent"))
+            XCTAssertTrue(error.localizedDescription.contains("This website inference was not submitted"))
             XCTAssertFalse(error.localizedDescription.contains("five-minute"))
         }
         let beforeCleanup = await transport.operations()

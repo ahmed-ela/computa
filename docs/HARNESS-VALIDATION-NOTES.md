@@ -3658,3 +3658,46 @@ That later observation does not prove the cause of the earlier readiness
 timeout. No challenge was completed and no failed prompt was replayed. Gemini
 is blocked on human recovery; Claude is blocked on quota reset. The current
 full live workflow matrix remains unqualified.
+
+### Build 50 bounded adapter diagnostics
+
+Each native adapter evaluation now gets an ephemeral operation ID. A separate
+notification-only handler in its existing private WebKit content world records
+up to eight fixed phase names. It requires the exact view, main frame, owner,
+operation, document generation and pinned HTTPS provider origin. Unknown fields,
+unknown phases, stale operations and foreign frames/origins are rejected. The
+handler neither advances the DOM revision nor grants page or tool authority.
+Concurrent evaluations supersede diagnostic state without rejecting the existing
+production operation. Closing the tab removes both native handlers.
+
+Adapter and preparation deadline logs synchronously include the last phases,
+bounded native dimensions, attachment/visibility flags and saturated DOM signal
+counters. The snapshot requires no second JavaScript evaluation. It contains no
+prompt, response, page text, URL, cookie or operation token. The existing one-shot
+completion and deadline rules remain in place; this instrumentation does not
+claim to fix the live inspection stall. Preparation errors now say that the
+current website inference was not submitted, avoiding a misleading implication
+that earlier inferences in the user's task never ran.
+
+Focused validation passed all 372 adapter tests and three native diagnostic
+tests. The native tests cover foreign, stale and same-origin child-frame
+receipts, unchanged DOM revisions, bounded phase history, a deliberately stalled
+first-message digest and ignored late completion. Initial fixture runs failed
+because an unrooted promise was rejected before the timeout and production
+navigation correctly rejected about:srcdoc. Those logs remain; the controlled
+fixtures now retain the promise and allow only their local child-frame setup
+while independently testing the production message handler. The three new
+adapter diagnostic regressions fail against the previous build 49 source, with
+zero website prompts sent. Missing/throwing diagnostic sinks leave adapter
+results unchanged.
+
+All seven public groups passed 631 tests with zero failures or skips. Receipt
+SHA-256: a7834ab5ae3115607ecac4d822324c8e1eedb3fd0adccba536fbab49497aae5a.
+Complete native validation executed 2,331 tests: 2,282 passed, 49 opt-in tests
+skipped, zero failures, in 516.472 seconds. All 414 frozen inputs and the engine
+artifacts matched. Required suite, permission, workflow and patch guards passed;
+26 unique cleanup identities verified. The declared browser-session suite size
+was updated to 43 before the run. An independent audit verified the original
+receipt and immutable log without rerunning tests. Native receipt SHA-256:
+ea9d50f90823807eb7df323bea9ca53db4256701dd9edb62a03de989a82e44ba.
+Signed installation and new installed qualification are pending.
