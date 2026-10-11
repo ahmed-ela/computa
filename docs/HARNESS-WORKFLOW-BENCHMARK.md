@@ -14,9 +14,10 @@ does not test website sign-in, selection of a concrete website model, the
 model's own judgment, or live website session cleanup. Those require separate
 qualification of the installed app and selected provider/model pair.
 
-A separate [local-model goal comparison](GOAL-MODE-BENCHMARK.md) records six
-build 39/Codex trials, their failures and limits; it does not qualify build 41.
-All six official trials failed the complete task; Computa goal mode was N/A.
+A separate [local-model goal comparison](GOAL-MODE-BENCHMARK.md) records the
+completed build 39 and build 44 comparisons. All six trials in each comparison
+failed the complete task; Computa goal mode was N/A. These results do not
+establish a product ranking.
 
 ## Installed baseline: 0.6.0 (44)
 
@@ -49,7 +50,7 @@ skips in 527.297 seconds.
 | App validation | Build 44 passed 2,268 native tests and 624 public tests with zero failures; 49 native tests were explicitly skipped. Required permission, workflow, patch and cleanup guards passed. |
 | Installed provider tasks | Build 43 Claude Sonnet 5.5 and Gemini 3.1 Pro qualifications each passed all 39 checks, a real file read and two closed inference sessions. Claude's coding and built-in-browser flight cases passed exact native-turn collection, with ten and thirteen closed sessions. Its localhost task stopped on website quota; root cleanup verified the preview PID and socket closed. Two ChatGPT qualification attempts failed on malformed reply formatting and each closed its session; a captured diagnostic identified a complete inline JSON fence. Gemini's subsequent coding task stopped on website verification before any native tool call; website cleanup is unconfirmed and its remaining tasks are paused. ChatGPT build 44 passed coding/Git with nine closed sessions, then its browser case failed first-message ownership before any native tool call and left website cleanup unconfirmed. Nine workflow cases remain incomplete; Claude testing is stopped until its quota resets. The full live matrix is not qualified. |
 | Installed diff UI | Build 44 passed split/unified/wrapped presentation, hunk collapse, selective staging/unstaging/reverting, stale-snapshot rejection, binary notices, filtering and read-only branch/commit comparisons. Independent Git/file snapshots verify preservation. A scope selection after switching chats changed the dropdown without changing native state. A native commit-event regression reproduces that failure; the source correction passes the rebuilt UI tests but still needs installed verification. |
-| Model comparison | The earlier six build 39/Codex trials failed the complete task. Fresh build 44 trials use the same pinned local model and actual Full access settings in both products. Computa ordinary r1 failed the receipt compaction byte budget; Codex ordinary r1 and both goal trials failed on unadvertised generated tool calls. Two ordinary repeats remain incomplete. Computa goal mode remains N/A. |
+| Model comparison | All six fresh build 44 trials are complete and failed the full task. They use the same pinned local model and actual Full access settings in both products. Both Computa ordinary trials stopped at the receipt compaction bounds. Codex ordinary r1 and both goal trials stopped on unadvertised generated tool calls; ordinary r2 stopped on missing generated public output. Computa goal mode remains N/A. The twelve owned project/origin directories were verified against their archive and removed. |
 | Delivery | Build 44 is signed, installed and pushed as 4f4bf36 to the draft PR. Installed verification passed 98 checks and the running process/runtime generation was captured. Fresh ChatGPT GPT-6 qualification passed all 39 checks and closed both inference sessions. Website tests are paused on ChatGPT ownership, Claude quota and Gemini verification blocks. Live/UI/comparison completion and final cleanup are still required. |
 
 Detailed historical failures, corrections, receipts and source attribution remain
@@ -269,7 +270,7 @@ proof at cleanup. Receipt `provider-benchmark-data-regressions-build41-1/receipt
 has SHA `7fbbac49f6004a59505a738bcf8a5a534d593062c2af38877a7365ebbd4fa6e6`.
 This qualifies those collector boundaries, not the app, provider or UI.
 
-## Last qualified results and live limitations
+## Earlier qualification and limitations (builds 37–39)
 
 Build 39's native validation on 2026-10-08 passed **535 selected tests**, zero
 failures, in **361.278 seconds**, against **311 unchanged inputs**. All **26** selected
@@ -296,7 +297,7 @@ It did not run the broken baseline first. Its separate synthetic flight-board
 browser task completed in **102.777 seconds** (**37/37** checks, thirteen browser calls,
 fourteen transactions/closures), answering **18:37 EDT, gate B49** from fresh DOM.
 
-No installed ChatGPT coding/browser pass is established by this record.
+Those earlier builds established no installed ChatGPT coding/browser pass.
 Builds 36–39 ChatGPT attempts stopped on guarded message verification; the latest
 build 39 attempt reported `text_mismatch` and cleanup remained unconfirmed.
 A Claude combined preview attempt stopped at its website usage limit before

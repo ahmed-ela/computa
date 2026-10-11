@@ -76,7 +76,7 @@ Eighteen disposable project/origin directories were archived, with ZIP CRC/membe
 
 At documentation time, source41 has applied a canonical 24 KiB receipt-budget admission rule in place of the arbitrary 1 KiB call bound. Its MLX boundary also distinguishes missing generated public output below the budget from actual output-limit incompleteness; the 107 offline MLX tests passed. These changes have **not yet been qualified by an installed build41 rerun of this benchmark**. Source edits and component tests do not alter the six historical build39/Codex outcomes or establish robust installed task completion. Computa goal support remains disabled.
 
-## Build 44 rerun in progress — 2026-10-10
+## Completed build 44 rerun — 2026-10-10
 
 The fresh comparison retains the exact fixture, submitted task, model files,
 medium reasoning, 16,384 context and 12,288 compaction settings. Installed
@@ -85,17 +85,19 @@ use `danger-full-access` / `never`. Product instructions and tool catalogs
 still differ. Every trial starts in a fresh disposable project and thread,
 with no coaching or error retry.
 
-| Trial completed so far | Full task | Observed stopping condition |
+| Trial | Full task | Observed stopping condition |
 | --- | --- | --- |
 | Computa ordinary r1 | Failed | Nine real commands completed before all genuine tool receipts could no longer fit the 12 KiB provider-input / 24 KiB canonical compaction bounds. |
 | Codex ordinary r1 | Failed | The local-model protocol validator rejected an unadvertised generated tool call after six completed model responses. |
 | Codex native goal r1 | Failed | The same protocol error occurred after six completed model responses. Native goal state was blocked before owned cleanup; no additional runtime turn started. |
 | Codex native goal r2 | Failed | The protocol validator again rejected an unadvertised generated tool call after six completed model responses; no additional runtime turn started. |
+| Codex ordinary r2 | Failed | The protocol validator rejected missing generated public output after five completed responses. This does not establish output-token exhaustion. |
+| Computa ordinary r2 | Failed | Eight real commands completed before the same compaction receipt bounds stopped the turn. This trial had no concurrent diff UI checks. |
 
 Independent grading confirms that none completed the required changes,
 regressions, commit and local-origin push. Each preserved the original public
-tests and dirty note. The remaining repeats are incomplete; they do not count
-as passes or failures yet. Computa goal mode remains unavailable. The first
+tests and dirty note. All six repeats are complete and none passed the full task.
+Computa goal mode remains unavailable. The first
 Computa trial overlapped independent diff UI checks, so its latency supports
 no speed comparison.
 
@@ -105,3 +107,16 @@ Evidence remains under the same private workspace, in `trials/*build44*`,
 rollout, independent `grade.json` and `execution-receipt.json`. Codex receipts
 retain the actual RPC goal, turn error and owned thread/process cleanup.
 These records do not change the historical build 39 results above.
+
+The sealed aggregate `benchmark-analysis-build44.json` has SHA-256
+`09d025188c06cdbc60b4a07b9604ab22fe499dccc2cf3851dfee868b2a5aeaa3`.
+No first-request instruction trace was captured for the build 44 stock goal
+trials; their RPC goal state and actual turn errors are retained. These results
+support no product or speed ranking and do not measure automatic continuation.
+
+All twelve owned project/origin directories were archived with matching member
+hashes and CRC checks before removal. `owned-fixtures-build44.zip` has SHA-256
+`a047c35dd300a68f2dd72caea09d21eff7540c0b9822f6cd3310d918fb17ce31`.
+Reports, templates, controls and traces remain available. The build 44 app PID
+exited and its local model port closed; unrelated Codex processes remained
+running. This local shutdown does not confirm website conversation cleanup.

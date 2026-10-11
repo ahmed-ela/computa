@@ -1369,6 +1369,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(comparison["expansionASCIIPrefixMatches"] as? Bool, condition == "ascii")
             XCTAssertEqual(comparison["expansionASCIIPromptMatches"] as? Bool, condition == "ascii")
             XCTAssertEqual(comparison["expansionFirstMismatchClass"] as? String, condition == "ascii" ? "none" : condition)
+            let expectedCharacters = ["punctuation": ("exclamation", "other"), "unicode_space": ("no_break_space", "ascii_space"), "format": ("zero_width_space", "ascii_space")]
+            if let pair = expectedCharacters[condition] {
+                XCTAssertEqual(comparison["expansionFirstActualCharacter"] as? String, pair.0)
+                XCTAssertEqual(comparison["expansionFirstExpectedCharacter"] as? String, pair.1)
+            } else {
+                XCTAssertNil(comparison["expansionFirstActualCharacter"])
+                XCTAssertNil(comparison["expansionFirstExpectedCharacter"])
+            }
             XCTAssertTrue(diagnostics.allSatisfy { $0.utf8.count <= 960 && !$0.contains("Owned prefix comparison") })
             XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
             let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
@@ -3695,6 +3703,36 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertNil(body["expansionFirstMismatchClass"])
         }
         source["expansionFirstMismatchClass"] = "content"
+        var measured = source
+        measured["expansionASCIIPromptMatches"] = false
+        measured["expansionFirstActualCharacter"] = "backslash"
+        measured["expansionFirstExpectedCharacter"] = "double_quote"
+        let characterRecords = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(measured), provider: .chatgpt))
+        let characterValues = try characterRecords.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        let characterText = try XCTUnwrap(characterValues.first { $0["kind"] as? String == "first_user_text" })
+        XCTAssertEqual(characterText["expansionFirstActualCharacter"] as? String, "backslash")
+        XCTAssertEqual(characterText["expansionFirstExpectedCharacter"] as? String, "double_quote")
+        XCTAssertTrue(characterRecords.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains("123456") })
+        for key in ["expansionFirstActualCharacter", "expansionFirstExpectedCharacter"] {
+            for invalid in [65, 123456, 1.5, true, NSNull(), "private_canary", "A", "123456"] as [Any] {
+                var forged = measured; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        var incomplete = measured; incomplete.removeValue(forKey: "expansionFirstExpectedCharacter")
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(incomplete), provider: .chatgpt))
+        var equal = measured; equal["expansionFirstExpectedCharacter"] = "backslash"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(equal), provider: .chatgpt))
+        equal["expansionFirstActualCharacter"] = "other"; equal["expansionFirstExpectedCharacter"] = "other"
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(equal), provider: .chatgpt))
+        var matching = measured; matching["expansionASCIIPromptMatches"] = true
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(matching), provider: .chatgpt))
+        var noOffset = measured; noOffset.removeValue(forKey: "expansionFirstMismatchOffset")
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(noOffset), provider: .chatgpt))
+        var end = measured; end["expansionFirstMismatchClass"] = "end"; end["expansionFirstActualCharacter"] = "end"
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(end), provider: .chatgpt))
+        end["expansionFirstExpectedCharacter"] = "end"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(end), provider: .chatgpt))
         for key in flags {
             for invalid in [1, 0, "private_canary", NSNull()] as [Any] {
                 var forged = source; forged[key] = invalid

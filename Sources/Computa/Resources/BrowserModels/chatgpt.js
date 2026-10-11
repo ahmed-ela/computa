@@ -1568,6 +1568,17 @@ function chatGPTLatchExpansionTextDiagnostic(candidate, text) {
       offset += actual.codePointAt(offset) > 0xFFFF ? 2 : 1;
     const scalar = value => offset < value.length ? String.fromCodePoint(value.codePointAt(offset)) : '';
     const left = scalar(actual), right = scalar(expected);
+    // A finite syntax vocabulary distinguishes rendering changes without
+    // logging arbitrary content scalars, letters, digits or text fragments.
+    const character = value => offset >= value.length ? 'end' : ({
+      32: 'ascii_space', 33: 'exclamation', 34: 'double_quote', 35: 'hash', 36: 'dollar',
+      38: 'ampersand', 39: 'apostrophe', 40: 'left_parenthesis', 41: 'right_parenthesis',
+      42: 'asterisk', 45: 'hyphen', 46: 'period', 47: 'slash', 58: 'colon',
+      60: 'less_than', 62: 'greater_than', 91: 'left_bracket', 92: 'backslash',
+      93: 'right_bracket', 95: 'underscore', 96: 'backtick', 123: 'left_brace',
+      125: 'right_brace', 126: 'tilde', 160: 'no_break_space', 8203: 'zero_width_space',
+      8288: 'word_joiner', 65279: 'byte_order_mark',
+    })[value.codePointAt(offset)] || 'other';
     const mismatch = diagnostic.expansionASCIIPromptMatches ? 'none' : !left || !right ? 'end'
       : format(left) || format(right) ? 'format' : unicodeSpace(left) || unicodeSpace(right) ? 'unicode_space'
         : left === ' ' || right === ' ' ? 'ascii_space'
@@ -1576,7 +1587,11 @@ function chatGPTLatchExpansionTextDiagnostic(candidate, text) {
       expansionUnicodeSpaceCount: count(text, unicodeSpace), expansionExpectedUnicodeSpaceCount: count(candidate.canonical, unicodeSpace),
       expansionFormatCount: count(text, format), expansionExpectedFormatCount: count(candidate.canonical, format),
       expansionFirstMismatchClass: mismatch,
-      ...(diagnostic.expansionASCIIPromptMatches ? {} : { expansionFirstMismatchOffset: offset }) });
+      ...(diagnostic.expansionASCIIPromptMatches ? {} : {
+        expansionFirstMismatchOffset: offset,
+        expansionFirstActualCharacter: character(actual),
+        expansionFirstExpectedCharacter: character(expected),
+      }) });
     candidate.textDiagnostic = diagnostic;
   } catch { /* A diagnostic cannot change admission or the original error. */ }
 }

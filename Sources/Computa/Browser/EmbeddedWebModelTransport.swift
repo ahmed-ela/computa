@@ -991,7 +991,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "expansionASCIIPromptLength", "expansionFirstMismatchOffset"]
     private static let firstUserTextCounts = ["expansionUnicodeSpaceCount", "expansionExpectedUnicodeSpaceCount",
         "expansionFormatCount", "expansionExpectedFormatCount"]
-    private static let firstUserTextKeys = firstUserTextFlags + firstUserTextLengths + firstUserTextCounts + ["expansionFirstMismatchClass"]
+    private static let firstUserTextCharacters = ["expansionFirstActualCharacter", "expansionFirstExpectedCharacter"]
+    private static let firstUserCharacterLabels: Set<String> = ["end", "other", "ascii_space", "exclamation", "double_quote",
+        "hash", "dollar", "ampersand", "apostrophe", "left_parenthesis", "right_parenthesis", "asterisk", "hyphen", "period",
+        "slash", "colon", "less_than", "greater_than", "left_bracket", "backslash", "right_bracket", "underscore", "backtick",
+        "left_brace", "right_brace", "tilde", "no_break_space", "zero_width_space", "word_joiner", "byte_order_mark"]
+    private static let firstUserTextKeys = firstUserTextFlags + firstUserTextLengths + firstUserTextCounts + firstUserTextCharacters + ["expansionFirstMismatchClass"]
 
     private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
@@ -1111,6 +1116,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if analyzedTextKeys.contains(where: { safe[$0] != nil }), safe["expansionTextAnalyzed"] as? Bool != true { return nil }
         if safe["expansionFirstMismatchOffset"] != nil {
             guard let mismatch = safe["expansionFirstMismatchClass"] as? String, mismatch != "none" else { return nil }
+        }
+        if firstUserTextCharacters.contains(where: { value[$0] != nil }) {
+            guard safe["expansionFirstMismatchOffset"] != nil,
+                  safe["expansionASCIIPromptMatches"] as? Bool == false,
+                  safe["expansionTextAnalyzed"] as? Bool == true else { return nil }
+            for key in firstUserTextCharacters {
+                guard let label = value[key] as? String, firstUserCharacterLabels.contains(label) else { return nil }
+                if label == "end" {
+                    guard safe["expansionFirstMismatchClass"] as? String == "end" else { return nil }
+                }
+                safe[key] = label
+            }
+            // Distinct letters/digits deliberately collapse to "other".
+            let actual = safe[firstUserTextCharacters[0]] as? String
+            let expected = safe[firstUserTextCharacters[1]] as? String
+            guard actual != expected || actual == "other" else { return nil }
         }
         // An unavailable alternate observation must not look like a verified
         // absence of the marker. The adapter omits these fields over its limit.

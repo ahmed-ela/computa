@@ -3258,3 +3258,53 @@ file contents, modes and symlinks matched before its internal duplicate was
 retired. Archive SHA:
 `d83749af87f251086e8581a2f25bce80f4b0bec0bbc03e057512d2b85a14edce`.
 The installed build 44 and its build 43 rollback backup were retained.
+
+### Candidate 45 validation and disk cleanup — 2026-10-10
+
+The first candidate 45 public run stopped at two tiny fake-download installer
+tests because the host had less free space than the production 512 MiB reserve.
+The production guard remains unchanged. Successful fake downloads now use
+controlled capacity. A regression checks one byte below the reserve, exact
+capacity, staging cleanup, preservation of an unrelated file and reuse of a
+verified existing model with zero free space. All ten installer tests passed.
+
+The next public run passed every declared cohort: 123 frontend, 112 MLX,
+366 provider-adapter, three instruction and 21 identity/version tests, plus
+type checking and production frontend bundling. Its packaging check then
+rejected a stale resource inventory naming the old JavaScript asset. The
+successor inventory changes only that generated asset name; command definitions,
+source-input membership and test requirements remain unchanged. A separate
+sealed receipt reuses the seven successful immutable logs, verifies unchanged
+audited source and checks the actual generated resources. Both original failed
+receipts remain retained. Public receipt SHA-256:
+`66592227ee9df243886f57ae93ea865425ecf80322e122ec53863202705b57db`.
+
+Complete native validation executed 2,318 tests in 505.698 seconds: 2,269 passed,
+49 were explicitly skipped and none failed. All required permission, workflow,
+patch, source/resource and actual fixture-cleanup guards passed. The packaged
+engine stayed byte-identical. Native receipt SHA-256:
+`3148f894cb32a36564b43014808c7e6cf0de19e0d694f1be59c7802dbe6bbf44`.
+Candidate 45 therefore has 2,894 passing public/native tests. Installation and
+the native scope-selector UI recheck remain separate qualification steps.
+
+The first-message diagnostic now reports a finite pair of syntax/spacing labels
+at the first mismatch. It does not log raw characters, Unicode scalars, letters,
+digits or prompt text. The actual WebKit expansion and native sanitizer tests
+passed. This improves diagnosis; it does not change message ownership checks,
+replay an inference or establish the cause of build 44's rendering mismatch.
+
+At the user's cleanup request, seventeen obsolete Computa backups below build
+43 were removed after checking their identity; installed build 44 and rollback
+build 43 were kept. Regenerable Rust object/metadata/archive/dependency files
+were removed from the owned test/release build directories. All 560 retained
+runtime executables and libraries kept their file identities, and the packaged
+engine hash stayed unchanged. Cleanup freed approximately 35 GiB across the
+two disks. Source, active model files, test reports and benchmark traces were
+preserved. Future Rust source changes will require recompiling those removed
+intermediates.
+
+All six build 44 local-model comparison trials are graded and failed the full
+task. Their twelve disposable project/origin directories were archived,
+member-hash verified and removed. The separate comparison report records these
+failures and the limits of goal-mode evidence; passing regression tests do not
+turn a failed model task into a pass.
