@@ -66,7 +66,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testLegacyInstructionsRemainAvailableForExistingToolDefinitions() {
         let legacy = ComputaAgentInstructions.developerInstructions(referenceTools: false)
-        XCTAssertEqual(legacy, ComputaAgentInstructions.legacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
+        XCTAssertEqual(legacy, ComputaAgentInstructions.legacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
         XCTAssertTrue(legacy.contains("computer_v2_follow_link with only"))
         XCTAssertTrue(legacy.contains(ComputerV2ToolContract.regionChangedPressArgumentShape))
         XCTAssertTrue(legacy.contains("Being inside main does not make a toolbar or composer a"))
@@ -75,7 +75,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testInstructionsAreSelfContainedAndBasePromptHasNoForeignPolicy() {
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(),
-                       ComputaAgentInstructions.scope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
+                       ComputaAgentInstructions.scope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
         let base = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
         XCTAssertFalse(base.localizedCaseInsensitiveContains("StudyLock"))
         XCTAssertTrue(base.contains("Respect approvals and access controls"))
@@ -93,7 +93,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(instructions.contains("Respect Stop, denied access and recovery limits"))
             XCTAssertTrue(instructions.contains("A requested plan, partial observation, or necessary clarification"))
             XCTAssertTrue(instructions.contains("do not force extra actions beyond what the user asked"))
+            XCTAssertTrue(instructions.contains(ComputaAgentInstructions.taskCompletion))
         }
+        XCTAssertLessThan(ComputaAgentInstructions.taskCompletion.utf8.count, 350)
         XCTAssertLessThan(ComputaAgentInstructions.finalResponse.utf8.count, 900,
                           "Terminal guidance has its own small, explicit instruction budget.")
     }
@@ -226,7 +228,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(handoff.contains("Use only matching outputs as execution proof, never invented results or\nhistorical receipts"))
             XCTAssertTrue(handoff.contains("A running session is not completion"))
             XCTAssertTrue(handoff.contains("output and final exit"))
-            XCTAssertTrue(handoff.contains("When outputs suffice, return message"))
+            XCTAssertTrue(handoff.contains(ComputaAgentInstructions.taskCompletion))
+            XCTAssertTrue(handoff.contains("When outputs suffice for the requested result, return message"))
             XCTAssertTrue(handoff.contains("Do not replay uncertain calls"))
             XCTAssertTrue(handoff.contains("Repeat completed work only when requested"))
             XCTAssertTrue(handoff.contains("Start no unrequested\ninteractive/background work"))
@@ -249,7 +252,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(handoff.hasSuffix("Exact currently offered local function names: \(published)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertTrue(handoff.contains("optional tool_calls.commentary"))
             XCTAssertTrue(handoff.contains("Send it alongside next calls, never outside"))
-            XCTAssertLessThan(handoff.utf8.count, 2_400, "The response handoff, including progress transport, has a bounded budget independent of history length")
+            XCTAssertLessThan(handoff.utf8.count, 2_750, "The response handoff, including completion and progress guidance, has a bounded budget independent of history length")
         }
     }
 

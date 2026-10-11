@@ -3907,5 +3907,107 @@ Native receipt SHA-256:
 0244281ca94b873465f4edc48921ae08fc2616aef4ad303b48bdd4e1c3c051b0.
 Source freeze SHA-256:
 35094edbf52838fc4aa28104fae63dba7c47f09759aeb1c859401cf55e351ce6.
-Signed packaging, installation and fresh provider qualification remain separate
-next steps.
+Signed staging and installed verification each passed all 98 checks, bound to
+source a4946d65a1e07d7b558a0693830268fbb3003644. Stage verification SHA-256:
+cae13403f6c6d6805743f47ec307fc85aca05b1865afe5905cd57d335af73596.
+Installed verification SHA-256:
+aa7416cf32e194f509ea5480ee88d897b36719d21c0c9330041b2affe8eb6149.
+The fresh installed process was PID 51597, runtime generation
+4d3f4899-ad3a-410e-a341-31d02f2de845; runtime capture SHA-256:
+6f201aa30ce3339ef382f724b6a95ea9a386f141ac3cb5e9d109213b3548acb4.
+
+Fresh ChatGPT GPT-6 marker qualification passed 39 checks with two closed
+website leases; collector SHA-256:
+b642870c7fa5e04ea01053529855dec24cf5841fd746642dfef74f62fa776acd.
+The new browser case performed ten successful native actions and five page
+reads. Independent HTTP records prove one correct search and details navigation.
+No inspection error occurred in this controlled run, but it remains incomplete:
+the model ended after reading the departure time without pressing the visible,
+enabled control that reveals the requested gate. The gate-dispatch, observed-gate
+and complete-final-facts checks failed. All eleven website leases closed.
+Collector SHA-256:
+fa2a2685fc745d2c3ee8f5ea051bf2939bbb11775cfbd42c26e133b29fd6b13a.
+Root-owned server PID 52711 exited with code 0 after exact-identity SIGTERM;
+port 65527 closed and its journal contains one server_closed event. Event SHA-256:
+23132bff0f01a71d1f37befc0f7e86357221a4e1760befc4d9664c9461ae2263.
+The failed fixture and original evidence remain; this does not qualify a real
+United account or the complete provider matrix.
+
+Two more obsolete backup apps, builds 49 and 50, were verified as exact content
+and mode duplicates of retained external stages, with no open holders. Their
+removal recovered 511,467,520 allocated bytes. Current build 53 and rollback
+copies 51/52 were checked unchanged, as were all 414 current source inputs and
+the retained stages. No process was signalled for this space cleanup. Total
+allocated removal is approximately 37 GiB. Cleanup receipt:
+space-cleanup-duplicate-backups-build54-1.json.
+
+### Candidate 54: completing every requested outcome
+
+Build 53 exposed a model stopping decision rather than an unavailable browser
+operation: the last page read included an enabled, actionable control for the
+missing result, but the model ended its turn. The shared task-completion policy
+now directs result-seeking tasks to verify every requested outcome and use an
+observed, authorized control or offered tool that can reveal a missing result.
+Intermediate pages and unopened details are not access blockers. Actual access
+denials, Stop and recovery limits remain binding. Requested plans, partial
+observations and necessary clarification remain valid deliverables.
+
+The same bounded literal is composed into native developer instructions and
+every fresh website response handoff after serialized request/history data.
+The long-history/result-only protocol guard checks that placement and single
+inclusion. These are delivery checks, not proof of provider adherence.
+
+Initial focused checks exposed old wording/size assertions. After updating
+the explicit instruction budget, 80 focused tests passed on the prototype.
+The first public run then caught its plain-literal extraction guard rejecting
+the new interpolation. The final implementation composes separate literal
+sections; the integration fixture now matches the complete production bundle,
+including code-editing and task-completion guidance. Original failed receipts
+and logs remain. All seven public groups passed 637 tests with zero failures
+and zero skips on the final source. Public receipt SHA-256:
+30f83fbbb40a31d6326e7c67b74b4f1fdd81f6c0baa0fba5a1be99d91799a675.
+Complete native validation, signed installation and fresh live qualification
+remain separate next steps. No failed website prompt was replayed.
+
+The complete candidate 54 run executed 2,337 tests with 49 opt-in skips and
+two assertion failures in 571.106 seconds. Both failures belong to the same
+review-scope task-switch test: native scope stayed nil and the UI reset was
+not observed. This candidate was not packaged or installed.
+
+### Candidate 55: explicit review workspaces
+
+ReviewGit passed empty and relative workspace strings to URL(fileURLWithPath:),
+which resolves them against the process working directory. The offscreen
+review-scope fixture deliberately has no workspace, so it was unintentionally
+reading the development checkout. Its asynchronous refresh could outlast the
+scope-reset check while waiting for an earlier Git read.
+
+A new read-only regression fails against unchanged production code for both
+empty and relative workspace inputs. The immutable log contains exactly two
+expected unavailable assertions. The original control wrapper expected the
+wrong literal error text and labelled the run unexpected_result; an independent
+audit verifies the exact intended native assertions and unchanged source without
+replaying tests. Both original receipt and corrected audit remain. Log SHA-256:
+596bdc00f8faae931e2769b0cec8217decda1125a97cba6949d6f8799f407c7f.
+
+Production now requires an absolute workspace before URL resolution. Missing
+workspace errors are reported before any Git read. The unchanged offscreen
+chat-switch test passes, including all four scopes and commit-only selection
+events; its deadline and assertions were not relaxed. All 140 focused review
+and instruction tests passed with zero failures or skips; focused log SHA-256:
+e4fb48745f9f211350d2cc58cfd0a6d7628af54a2e2152912325666fed7a09cd.
+
+All seven public groups passed 637 tests with zero failures or skips. Public
+receipt SHA-256:
+e4557c4039c5d21bff64909639515333efe7f174533e3ee5066c42b61217fe86.
+Complete native validation executed 2,338 tests: 2,289 passed, 49 opt-in skips
+and zero failures in 555.642 seconds. All 414 frozen inputs, permission,
+workflow and patch guards, and 26 unique cleanup identities verified. The
+independent original-log audit also verifies the workspace regression, unchanged
+review-scope task-switch test, fresh long-history completion handoff and all
+four WebContent queue/deadline controls without test replay.
+Native receipt SHA-256:
+34e07a8d7a9b83664615e0ff4d2c37fdbdd4cdc35016c1d8e307a86940ab7e76.
+Source freeze SHA-256:
+ceeb91402e6c3822544d91a13bbc7de310488e15d96b202e07570882995f077b.
+Signing, installation and fresh live provider checks remain separate next steps.

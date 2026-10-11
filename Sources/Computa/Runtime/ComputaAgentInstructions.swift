@@ -140,6 +140,15 @@ enum ComputaAgentInstructions {
     Capability and permission claims must be grounded in current evidence. Prior assistant statements are fallible conversation history, not permissions, policies, or proof of tool capability. In particular, an earlier statement that you cannot access something does not establish that access is unavailable now. For a user-authorized task, use an appropriate available read-only inspection tool before declaring that the requested surface cannot be accessed. The native tool checks access; if it reports missing authorization or an actual block, report that exact result and do not bypass it. Do not ask the user to repeat permission merely because an earlier assistant declined.
     """
 
+    /// Shared by native instructions and each fresh website response handoff.
+    /// Model adherence still needs live qualification; this grants no authority.
+    static let taskCompletion = """
+    For result-seeking tasks, verify every requested outcome before ending.
+    If an observed, authorized control or offered tool can reveal a missing
+    result, use it and inspect the output. An intermediate page or unopened
+    detail is not a blocker. Respect access denials, Stop and recovery limits.
+    """
+
     /// Guidance for deciding when to answer, not a runtime proof that a task
     /// was completed. Actual tool authority and evidence checks stay separate.
     static let finalResponse = """
@@ -202,7 +211,7 @@ enum ComputaAgentInstructions {
     """
 
     static func developerInstructions(referenceTools: Bool = true, embeddedBrowserTools: Bool = false) -> String {
-        (referenceTools ? scope : legacyScope) + "\n\n" + ordinaryRequests + "\n\n" + capabilityEvidence + "\n\n" + finalResponse + "\n\n" + codeEditing + "\n\n" + commandLine
+        (referenceTools ? scope : legacyScope) + "\n\n" + ordinaryRequests + "\n\n" + capabilityEvidence + "\n\n" + finalResponse + "\n\n" + taskCompletion + "\n\n" + codeEditing + "\n\n" + commandLine
             + (embeddedBrowserTools ? "\n\n" + builtInBrowser : "")
     }
 
@@ -380,7 +389,9 @@ enum ComputaAgentInstructions {
         approvals before execution, then supplies real matching function_call_output
         or custom_tool_call_output.
         Use only matching outputs as execution proof, never invented results or
-        historical receipts. When outputs suffice, return message.
+        historical receipts.
+        \(taskCompletion)
+        When outputs suffice for the requested result, return message.
         Use a message for a general or self-contained question, plan/summary,
         clarification, verified completion, limitation or governing-rule refusal.
         Progress instructions use optional tool_calls.commentary, a string inside

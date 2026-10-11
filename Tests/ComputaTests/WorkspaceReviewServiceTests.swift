@@ -27,6 +27,14 @@ final class WorkspaceReviewServiceTests: XCTestCase, @unchecked Sendable {
         service = nil
     }
 
+    func testMissingOrRelativeWorkspaceNeverFallsBackToProcessWorkingDirectory() async {
+        for workspace in ["", "."] {
+            await assertFailure(.unavailable("Choose an existing workspace folder to review its files.")) {
+                _ = try await self.service.load(workspace: workspace, scope: .lastTurn)
+            }
+        }
+    }
+
     func testUnstagedAndStagedAreDistinctAndStagePreservesWorktree() async throws {
         try write("code.swift", "let number = 2\nlet name = \"original\"\n")
         _ = try git(["add", "code.swift"])

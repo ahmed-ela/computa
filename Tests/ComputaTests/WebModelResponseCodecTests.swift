@@ -457,6 +457,14 @@ final class WebModelResponseCodecTests: XCTestCase {
         let continuationSuffix = try assertContiguousRequestValues(continuation, in: next)
         XCTAssertTrue(completeSuffix.contains("COMPLETE_RESPONSES_REQUEST_JSON.input[88]"))
         XCTAssertTrue(continuationSuffix.contains("No top-level user message is present"))
+        // The completion policy must be refreshed after request/history data,
+        // including result-only continuations; this is transport, not model proof.
+        for suffix in [completeSuffix, continuationSuffix] {
+            let handoff = try XCTUnwrap(suffix.range(of: "COMPUTA_LOCAL_RESPONSE_HANDOFF:"))
+            let completion = try XCTUnwrap(suffix.range(of: ComputaAgentInstructions.taskCompletion))
+            XCTAssertGreaterThan(completion.lowerBound, handoff.lowerBound)
+            XCTAssertEqual(suffix.components(separatedBy: ComputaAgentInstructions.taskCompletion).count, 2)
+        }
         XCTAssertFalse(prepared.runtimeInstructions.contains("Historical message"))
         XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"pwd"}}]}"#, request: next),
                        .toolCalls([.init(name: "exec_command", argumentsJSON: #"{"cmd":"pwd"}"#, namespace: nil)]))

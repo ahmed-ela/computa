@@ -71,7 +71,7 @@ async function appInstructions() {
     base: base.split("\n").map(line => line.startsWith("                ") ? line.slice(16) : line).join("\n"),
     // Match the app's reference-tool developer bundle. Legacy scope and the
     // model-specific Swift base additions are intentionally separate coverage.
-    developer: ["scope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "commandLine"]
+    developer: ["scope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "taskCompletion", "codeEditing", "commandLine"]
       .map(name => literal(app, name)).join("\n\n"),
   };
 }
@@ -447,7 +447,7 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
       coldResume: true, noToolsCompaction: true, postCompaction: true, syntheticHistoryMessages: 80,
       coldResumeDeveloperOverrideObserved: developerOverrideObserved, coldResumeBaseOverrideObserved: true,
       fixtureThreadSandbox: "danger-full-access inside outbound-denying OS sandbox",
-      appLiteralSections: ["scope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "commandLine"],
+      appLiteralSections: ["scope", "ordinaryRequests", "capabilityEvidence", "finalResponse", "taskCompletion", "codeEditing", "commandLine"],
       modelSpecificSwiftBaseAdditionsNotInstantiated: true, realChatGPTBehavior: false, externalNetworkDenied: true }));
   } catch (error) {
     throw modelFailure ?? error;

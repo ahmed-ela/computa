@@ -101,6 +101,11 @@ private enum ReviewGit {
 
     static func load(workspace: String, scope: FileReviewScope, reference: String?, turnDiff: String?,
                      turnChanges: [AgentFileChange] = []) throws -> RetainedReview {
+        // URL(fileURLWithPath:) resolves empty/relative input against the host's
+        // working directory. A task without a chosen workspace must not read it.
+        guard workspace.hasPrefix("/") else {
+            throw FileReviewError.unavailable("Choose an existing workspace folder to review its files.")
+        }
         let root = URL(fileURLWithPath: workspace, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
         var directory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &directory), directory.boolValue else {
