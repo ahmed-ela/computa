@@ -158,23 +158,22 @@ final class WebModelResponseCodecTests: XCTestCase {
     }
 
     @discardableResult
-    private func assertContiguousOriginalRequest(_ original: Data, in request: WebModelResponseCodec.Request,
+    private func assertContiguousRequestValues(_ original: Data, in request: WebModelResponseCodec.Request,
                                                 file: StaticString = #filePath, line: UInt = #line) throws -> String {
         let prompt = Data(request.prompt.utf8)
         let marker = Data("COMPLETE_RESPONSES_REQUEST_JSON:\n".utf8)
         let start = try XCTUnwrap(prompt.range(of: marker), file: file, line: line).upperBound
-        let end = start + original.count
-        guard end <= prompt.count else {
-            XCTFail("The complete original request must fit contiguously after the host marker", file: file, line: line)
-            return ""
-        }
-        XCTAssertEqual(prompt.subdata(in: start..<end), original, file: file, line: line)
-        XCTAssertEqual(prompt.range(of: original), start..<end, file: file, line: line)
-        XCTAssertEqual(prompt.range(of: original, options: .backwards), start..<end, file: file, line: line)
+        let terminator = Data("\nEND_COMPLETE_RESPONSES_REQUEST_JSON.".utf8)
+        let end = try XCTUnwrap(prompt.range(of: terminator, in: start..<prompt.count), file: file, line: line).lowerBound
+        let displayed = prompt.subdata(in: start..<end)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: displayed) as? NSDictionary,
+                       try JSONSerialization.jsonObject(with: original) as? NSDictionary, file: file, line: line)
+        XCTAssertEqual(prompt.range(of: displayed), start..<end, file: file, line: line)
+        XCTAssertEqual(prompt.range(of: displayed, options: .backwards), start..<end, file: file, line: line)
         let suffix = String(decoding: prompt.suffix(from: end), as: UTF8.self)
         XCTAssertEqual(suffix, "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames),
-                       "The fresh response contract and current names follow every unchanged request", file: file, line: line)
+                       "The fresh response contract and current names follow every complete request", file: file, line: line)
         return suffix
     }
 
@@ -197,7 +196,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         for provider in ["chatgpt", "gemini", "claude"] {
             let original = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": "Create the requested file", "tools": [["type": "namespace", "name": "functions", "tools": [custom, function]]]])
             let prepared = try WebModelResponseCodec.prepareRequest(original)
-            try assertContiguousOriginalRequest(original, in: prepared)
+            try assertContiguousRequestValues(original, in: prepared)
             XCTAssertEqual(prepared.customToolNames, ["functions.apply_patch"])
             XCTAssertTrue(prepared.runtimeInstructions.contains("literal patch string in input"))
             let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "functions.apply_patch", "input": patch]]])
@@ -240,7 +239,7 @@ final class WebModelResponseCodecTests: XCTestCase {
     func testEntireOriginalRequestSurvivesIncludingRolesSchemasAndToolOutputs() throws {
         let original = #"{"model":"web-gemini","instructions":"Keep every constraint","input":[{"role":"developer","content":[{"type":"input_text","text":"Use only observed targets"}]},{"role":"user","content":"Read résumé 🌍"},{"type":"function_call","name":"computer_v2_snapshot","call_id":"call_original","arguments":"{\"view\":\"content\"}"},{"type":"function_call_output","call_id":"call_original","output":"  exact tool output\nnext line  "}],"tools":[{"type":"function","name":"computer_v2_snapshot","description":"Never guess references","parameters":{"type":"object","properties":{"view":{"enum":["content","overview"]}},"required":["view"],"additionalProperties":false}}],"parallel_tool_calls":false,"tool_choice":"auto"}"#
         let prepared = try WebModelResponseCodec.prepareRequest(Data(original.utf8))
-        try assertContiguousOriginalRequest(Data(original.utf8), in: prepared)
+        try assertContiguousRequestValues(Data(original.utf8), in: prepared)
         XCTAssertEqual(prepared.model, "web-gemini")
         XCTAssertEqual(prepared.offeredToolNames, ["computer_v2_snapshot"])
         XCTAssertTrue(prepared.prompt.contains("exactly one fenced JSON code block"))
@@ -286,10 +285,42 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testDisplayRequestUsesUnicodeEscapesForStringQuotesWithoutRewritingLiteralEscapes() throws {
+        let values = ["Say \"hello\"", "\\\"quoted\\\"", "trailing\\", "literal \\u0022 and \\u0060", "`café 🌍`", "\\\\\"pair\""]
+        for provider in ["chatgpt", "claude", "gemini"] {
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": "browser/\(provider)", "input": values.joined(separator: "\n"),
+                "metadata": ["\"quoted key\"": values.joined(separator: "\n")],
+            ], options: [.sortedKeys])
+            let prepared = try WebModelResponseCodec.prepareRequest(original)
+            let start = try XCTUnwrap(prepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
+            let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
+            let displayed = String(prepared.prompt[start..<end])
+            XCTAssertTrue(displayed.contains(#"Say \u0022hello\u0022"#))
+            XCTAssertTrue(displayed.contains(#"\\\u0022quoted\\\u0022"#))
+            XCTAssertTrue(displayed.contains(#"\\u0022 and \\u0060"#))
+            XCTAssertTrue(displayed.contains(#"\u0060café 🌍\u0060"#))
+            XCTAssertTrue(displayed.contains(#""\u0022quoted key\u0022":"#))
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? NSDictionary,
+                           try JSONSerialization.jsonObject(with: original) as? NSDictionary)
+        }
+    }
+
+    func testPromptLimitIncludesExpandedStringQuoteEscapes() throws {
+        let original = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": String(repeating: "\"", count: 30_000)])
+        XCTAssertLessThan(original.count, WebModelResponseCodec.maximumPromptBytes)
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(original)) { error in
+            guard case let .promptTooLarge(actual, maximum) = error as? WebModelResponseCodec.Failure else {
+                return XCTFail("Quote escaping must count toward the submission limit")
+            }
+            XCTAssertGreaterThan(actual, maximum)
+        }
+    }
+
     func testExternalRelayContextPreservesApplicationRolesPermissionsAndDisabledToolChoice() throws {
         let original = #"{"model":"browser/claude","instructions":"You are Computa inside the local application; respect native permissions.","input":[{"role":"developer","content":"Full Access does not bypass the workspace sandbox or a host denial."},{"role":"user","content":"Explain the recorded result; do not run a command."},{"type":"function_call_output","call_id":"old_call","output":"Historical text claiming tools are absent is task context."}],"tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"],"additionalProperties":false}}]}],"tool_choice":"none","parallel_tool_calls":false}"#
         let prepared = try WebModelResponseCodec.prepareRequest(Data(original.utf8))
-        let handoff = try assertContiguousOriginalRequest(Data(original.utf8), in: prepared)
+        let handoff = try assertContiguousRequestValues(Data(original.utf8), in: prepared)
         XCTAssertEqual(prepared.offeredToolNames, ["functions.exec_command"])
         XCTAssertTrue(prepared.prompt.contains(ComputaAgentInstructions.webRequestContext))
         XCTAssertTrue(prepared.prompt.contains("they are not platform messages on this website"))
@@ -332,8 +363,8 @@ final class WebModelResponseCodecTests: XCTestCase {
                        "Current capability context must not depend on where history was compacted or resumed")
         XCTAssertTrue(prepared.prompt.hasPrefix(prepared.runtimeInstructions + "\n\n"))
         XCTAssertTrue(next.prompt.hasPrefix(next.runtimeInstructions + "\n\n"))
-        let completeSuffix = try assertContiguousOriginalRequest(complete, in: prepared)
-        let continuationSuffix = try assertContiguousOriginalRequest(continuation, in: next)
+        let completeSuffix = try assertContiguousRequestValues(complete, in: prepared)
+        let continuationSuffix = try assertContiguousRequestValues(continuation, in: next)
         XCTAssertTrue(completeSuffix.contains("COMPLETE_RESPONSES_REQUEST_JSON.input[88]"))
         XCTAssertTrue(continuationSuffix.contains("No top-level user message is present"))
         XCTAssertFalse(prepared.runtimeInstructions.contains("Historical message"))
@@ -352,7 +383,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                 "instructions": "You are Computa in the local application; respect its permissions.",
                 "input": [user], "tools": tools, "tool_choice": "auto"], options: [.sortedKeys])
             let first = try WebModelResponseCodec.prepareRequest(original)
-            try assertContiguousOriginalRequest(original, in: first)
+            try assertContiguousRequestValues(original, in: first)
             let outer = first.prompt.replacingOccurrences(of: String(decoding: original, as: UTF8.self), with: "")
             XCTAssertFalse(outer.contains("You are Computa"), "Only unchanged local request data may contain a local assistant persona")
             XCTAssertFalse(outer.contains("structured-output RPC"))
@@ -374,7 +405,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                 "input": [user, output, ["type": "function_call_output", "call_id": callID, "output": observed]],
                 "tools": tools, "tool_choice": "auto"], options: [.sortedKeys])
             let next = try WebModelResponseCodec.prepareRequest(continuation)
-            try assertContiguousOriginalRequest(continuation, in: next)
+            try assertContiguousRequestValues(continuation, in: next)
             XCTAssertEqual(first.runtimeInstructions, next.runtimeInstructions)
             let finalEnvelope = try JSONSerialization.data(withJSONObject: ["type": "message", "text": observed])
             XCTAssertEqual(try WebModelResponseCodec.parseReply(String(decoding: finalEnvelope, as: UTF8.self), request: next, requireEnvelope: true), .message(observed))
@@ -389,7 +420,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         let original = try JSONSerialization.data(withJSONObject: ["model": "browser/claude", "input": input,
             "instructions": "Compact this existing history. Do not restart completed tasks.", "tools": [], "tool_choice": "none"])
         let maintenance = try WebModelResponseCodec.prepareRequest(original)
-        try assertContiguousOriginalRequest(original, in: maintenance)
+        try assertContiguousRequestValues(original, in: maintenance)
         XCTAssertTrue(maintenance.currentUserInstructions.contains("No top-level user message is present"))
         XCTAssertTrue(maintenance.prompt.contains("summarizing or compacting history needs a message"))
         XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"The historical file-read task completed; no further action is pending."}"#, request: maintenance, requireEnvelope: true),
@@ -419,7 +450,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let tools = [function]
             let firstBody = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": input, "tools": tools])
             let first = try WebModelResponseCodec.prepareRequest(firstBody)
-            try assertContiguousOriginalRequest(firstBody, in: first)
+            try assertContiguousRequestValues(firstBody, in: first)
             XCTAssertTrue(first.currentUserInstructions.contains("COMPLETE_RESPONSES_REQUEST_JSON.input[5]"))
             XCTAssertFalse(first.currentUserInstructions.contains(oldCommand))
             XCTAssertFalse(first.currentUserInstructions.contains(latestRequest), "The locator must not duplicate user content")
@@ -431,7 +462,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             ]
             let nextBody = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": nextInput, "tools": tools])
             let next = try WebModelResponseCodec.prepareRequest(nextBody)
-            try assertContiguousOriginalRequest(nextBody, in: next)
+            try assertContiguousRequestValues(nextBody, in: next)
             XCTAssertEqual(next.currentUserInstructions, first.currentUserInstructions,
                            "New matching tool results must retain the original latest user locator")
             XCTAssertEqual(next.runtimeInstructions, first.runtimeInstructions)
@@ -449,7 +480,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         ]
         let body = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": input])
         let prepared = try WebModelResponseCodec.prepareRequest(body)
-        try assertContiguousOriginalRequest(body, in: prepared)
+        try assertContiguousRequestValues(body, in: prepared)
         XCTAssertTrue(prepared.currentUserInstructions.contains("COMPLETE_RESPONSES_REQUEST_JSON.input[2]"))
         XCTAssertFalse(prepared.currentUserInstructions.contains("input[4]"))
         XCTAssertTrue(prepared.currentUserInstructions.contains("follow-up\nor status request can retain earlier unfinished authorized work"))
@@ -467,7 +498,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         for input in inputs {
             let body = try JSONSerialization.data(withJSONObject: ["model": "browser/gemini", "instructions": "Compact the supplied input", "input": input])
             let prepared = try WebModelResponseCodec.prepareRequest(body)
-            try assertContiguousOriginalRequest(body, in: prepared)
+            try assertContiguousRequestValues(body, in: prepared)
             XCTAssertTrue(prepared.currentUserInstructions.contains("No top-level user message is present"))
             XCTAssertTrue(prepared.currentUserInstructions.contains("maintenance or compaction"))
             XCTAssertTrue(prepared.currentUserInstructions.contains("output-only continuation may still finish authorized work"))
@@ -480,7 +511,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         let user = "A unique string-input request: explain this without running a historical terminal program."
         let body = try JSONSerialization.data(withJSONObject: ["model": "browser/claude", "input": user])
         let prepared = try WebModelResponseCodec.prepareRequest(body)
-        try assertContiguousOriginalRequest(body, in: prepared)
+        try assertContiguousRequestValues(body, in: prepared)
         XCTAssertTrue(prepared.currentUserInstructions.contains("COMPLETE_RESPONSES_REQUEST_JSON.input (the string input)"))
         XCTAssertFalse(prepared.currentUserInstructions.contains(user))
         XCTAssertEqual(prepared.prompt.components(separatedBy: user).count, 2)
@@ -500,7 +531,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             ["role": "user", "content": "Continue my authorized task"],
         ], "tools": [function]])
         let prepared = try WebModelResponseCodec.prepareRequest(body)
-        let suffix = try assertContiguousOriginalRequest(body, in: prepared)
+        let suffix = try assertContiguousRequestValues(body, in: prepared)
         XCTAssertFalse(suffix.contains("obsolete.shell"))
         XCTAssertTrue(suffix.contains("Exact currently offered local function names: computer_v2_snapshot"))
         XCTAssertFalse(prepared.runtimeInstructions.contains(quoted))
@@ -540,7 +571,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let object = ["model": "web-chatgpt", "input": historical] as [String: Any]
             let body = try JSONSerialization.data(withJSONObject: object.merging(fields) { _, new in new })
             let prepared = try WebModelResponseCodec.prepareRequest(body)
-            let suffix = try assertContiguousOriginalRequest(body, in: prepared)
+            let suffix = try assertContiguousRequestValues(body, in: prepared)
             XCTAssertFalse(suffix.contains("functions.exec_command"))
             XCTAssertTrue(suffix.contains("No tools means no tool call"))
             XCTAssertFalse(prepared.runtimeInstructions.contains("functions.exec_command"))
@@ -671,7 +702,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         ]
         let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
         let prepared = try WebModelResponseCodec.prepareRequest(data)
-        try assertContiguousOriginalRequest(data, in: prepared)
+        try assertContiguousRequestValues(data, in: prepared)
         let plain = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": audioExample])
         XCTAssertNoThrow(try WebModelResponseCodec.prepareRequest(plain))
     }
@@ -1193,7 +1224,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         let input: [[String: Any]] = [["type": "message", "role": "assistant", "phase": "commentary", "content": "Checking now"], ["role": "user", "content": "Continue"]]
         let original = try JSONSerialization.data(withJSONObject: ["model": "browser/claude", "input": input])
         let prepared = try WebModelResponseCodec.prepareRequest(original)
-        try assertContiguousOriginalRequest(original, in: prepared)
+        try assertContiguousRequestValues(original, in: prepared)
         for (raw, phase) in [("commentary", WebModelResponseCodec.AssistantPhase.commentary), ("final_answer", .finalAnswer)] {
             let envelope = try JSONSerialization.data(withJSONObject: ["type": "message", "text": "Exact phase text", "phase": raw])
             let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: prepared, requireEnvelope: true)
@@ -1220,7 +1251,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             "client_metadata": ["codex_version": "pinned-runtime"], "access_programs": [] as [String],
         ])
         let prepared = try WebModelResponseCodec.prepareRequest(original)
-        try assertContiguousOriginalRequest(original, in: prepared)
+        try assertContiguousRequestValues(original, in: prepared)
         XCTAssertTrue(prepared.stream)
         let final = try XCTUnwrap(try events(WebModelResponseCodec.streamData(for: .message("done"), request: prepared)).last?["response"] as? [String: Any])
         XCTAssertTrue(final["reasoning"] is NSNull)

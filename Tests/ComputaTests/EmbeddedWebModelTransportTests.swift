@@ -1316,6 +1316,61 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testStringQuoteEncodingSurvivesExtraEscapeRenderingWithoutRelaxingOwnership() async throws {
+        // Reproduce the observed first mismatch (backslash versus quote) and
+        // +17 rendered characters. This controls the transformation rather than
+        // claiming which website component introduced it in the live failure.
+        let original = try JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt",
+            "input": String(repeating: "Owned quote rendering fixture line.\n", count: 600) + String(repeating: "\"", count: 17),
+        ], options: [.sortedKeys])
+        let prepared = try WebModelResponseCodec.prepareRequest(original)
+        let start = try XCTUnwrap(prepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
+        let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
+        let legacy = prepared.prompt.replacingCharacters(in: start..<end, with: String(decoding: original, as: UTF8.self))
+        for (prompt, succeeds) in [(legacy, false), (prepared.prompt, true)] {
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: #"userBody.textContent = prompt.replace(/\\(?=")/g, '\\\\');"#))
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            var diagnostics: [String] = []
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting { diagnostics += $0 }
+            defer { fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil) }
+            if succeeds {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                try assertChoiceEvidence(complete, choice: choice)
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                    XCTFail("The original escaped quote mutation must still fail ownership")
+                } catch { XCTAssertTrue(error is EmbeddedWebModelTransport.Failure) }
+            }
+            let values = diagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            let comparison = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_text" })
+            XCTAssertEqual(comparison["expansionASCIIPromptMatches"] as? Bool, succeeds)
+            if !succeeds {
+                XCTAssertEqual(comparison["expansionFirstActualCharacter"] as? String, "backslash")
+                XCTAssertEqual(comparison["expansionFirstExpectedCharacter"] as? String, "double_quote")
+                XCTAssertEqual(try XCTUnwrap(comparison["expansionASCIIRenderedLength"] as? Int) -
+                               XCTUnwrap(comparison["expansionASCIIPromptLength"] as? Int), 17)
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let expansionClicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+            XCTAssertEqual(expansionClicks, 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, succeeds ? "not_created" : "failed")
+            if succeeds { try await assertHumanTabIntact(fixture) }
+            else { try await assertHumanTabIntact(fixture, retaining: ownedID) }
+        }
+    }
+
     func testExpandedFirstPrefixAcceptsOnlyExistingASCIIWhitespaceEquivalenceWithoutReplay() async throws {
         let mutations = [
             "ascii": "userBody.textContent = prompt.replace('Owned ', 'Owned ' + '\\n'.repeat(15));",

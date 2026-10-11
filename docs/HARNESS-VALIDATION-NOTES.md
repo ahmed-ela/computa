@@ -3308,3 +3308,81 @@ task. Their twelve disposable project/origin directories were archived,
 member-hash verified and removed. The separate comparison report records these
 failures and the limits of goal-mode evidence; passing regression tests do not
 turn a failed model task into a pass.
+
+### Installed build 45 and quote-rendering follow-up — 2026-10-10
+
+Build 45 source `cdd13de7d41d81db5375aecf9677ac69cd1bf3d3` is signed, installed
+and pushed to draft PR #5. Staged and installed verification each passed 98 checks.
+The installed receipt SHA is
+`6f04d4811e6bbc07688144c5e6e1ddf6778c4d116a6b5cc7122f9deaf2b75e4c`.
+The running app is PID 32628, generation
+`3f962ae1-8350-4f96-927d-dca3d7f762b6`; capture receipt SHA is
+`f167957fbfdf8d92c88f59177f0ce832215f4300f9ea47a8960a5e00e9abaa50`.
+An initial private capture helper still expected build 44 and failed before
+startup capture. The corrected helper retains the same checks with build 45
+identity guards; the original failed receipt is preserved.
+
+The installed diff scope recheck passed Last turn, Unstaged, Staged and Against
+branch, including Unstaged after switching chats. Independent snapshots retained
+the same HEAD, index tree, status, files and diffs. Recheck receipt SHA is
+`59e4d51ba48a9b9b92f3da55bec45887a058a8969e15c00d6a6d38df5d06f667`.
+This rechecks scope selection; build 44's earlier hunk-mutation observations
+remain separate evidence.
+
+Fresh ChatGPT GPT-6 qualification `chatgpt-qualification-installed45-r1` passed
+all 39 checks, a real marker read and two closed website sessions. Collector SHA:
+`388495299745a8ecec0efdce072c34d92933a7156f0901a55a9674d5ccb2e1b5`.
+The subsequent fresh browser case `chatgpt-browser-installed45-r1` failed
+`first_user_message` before any native tool ran. Its one acknowledged lease
+has no verified closure; collector SHA:
+`a169d368aab1ff7c35ef735bcf6518dab6ec769da354832b50c2e92c314df133`.
+The owned synthetic flight server PID 35836 exited zero and port 64669 closed;
+that local cleanup does not confirm website cleanup. No failed prompt was replayed.
+
+The bounded diagnostic was accepted. The first actual character was a backslash
+where a double quote was expected, at offset 13764. ASCII-normalized prompt and
+rendered lengths were 46882 and 46899; their 10108-character prefixes matched.
+No extra Unicode space or format characters were counted. Diagnostic receipt SHA:
+`b100ebc1ef01f28483e202a5593968ec130dde39ba1c3d5ac9ff4e464469203c`.
+The two identical logged text observations are not two inferences. Read-only
+queries initially omitted INFO or assumed a single observation; those collector
+errors did not change the app or its result. The emitting website component
+and full transformation have not been established.
+
+Candidate 46 represents JSON string quotes as `\u0022`, alongside the existing
+backtick escape. Complete escape pairs preserve literal backslashes, Unicode
+escape text, quoted keys, history and parsed request values. Prompt limits count
+the expanded bytes. A controlled WebKit fixture inserts the observed extra
+backslash before 17 escaped quotes: the original request fails ownership, while
+the equivalent encoded JSON completes after one insertion, one Send and one
+expansion. This simulates the observed difference; it does not establish the
+website's cause or a live fix. All ownership predicates remain unchanged.
+The two new codec regressions fail against the old codec; after implementation,
+59 focused codec/WebKit tests pass. An invalid first test fixture and a test-only
+async assertion compile error were corrected, with original logs retained.
+Full candidate validation, packaging, installation and fresh live verification
+remain pending at this checkpoint.
+
+Candidate 46's first full native run executed 2,321 tests with 49 skips and
+two assertion failures in one instruction test. All other 2,271 cases passed.
+The shared test helper still sliced the display payload using the original byte
+length; quote escaping correctly changes that length. Its correction compares
+the complete parsed request values and the exact following current-user and
+response contracts. Production code is unchanged from the focused run. The
+failed native receipt and source freeze remain preserved; they do not qualify
+the candidate. All seven public groups will run again against the corrected
+test source before the second complete native run.
+
+Candidate 46's second complete run passed: 2,321 native tests executed,
+2,272 passed, 49 explicitly skipped and zero failures in 526.946 seconds.
+All four quote/instruction regression cases have one actual PASS record each.
+The required permission boundary, provider workflow/patch matrices, 26 unique
+fixture cleanup records, unchanged frozen engine and all 414 input bindings
+passed. Native receipt SHA:
+`5b9bf12f8d375616af76819cd4fc8b1401d300ba2df4bd5d4a85225d85a2fd66`.
+The fresh public run passed all seven groups and 625 tests with zero failures
+or skips; receipt SHA:
+`c0bfee3ec266432e3c15aa15147dab32bb15424b551a28f644076709b584f64b`.
+Together these are 2,897 passing app/public tests and 49 declared native skips.
+The original failed run remains unchanged. Signing, installed identity and live
+website behavior are separate gates and remain pending at this checkpoint.

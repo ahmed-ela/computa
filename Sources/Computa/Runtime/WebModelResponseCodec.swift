@@ -191,11 +191,7 @@ enum WebModelResponseCodec {
         }
         let currentUserInstructions = ComputaAgentInstructions.webCurrentUserContract(
             latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
-        // Provider message rendering can consume Markdown backticks, including
-        // those inside JSON strings. JSON Unicode escapes preserve every parsed
-        // value while keeping the submitted and expanded message text comparable.
-        // Validated JSON can contain literal backticks only inside strings.
-        let displayJSON = originalJSON.replacingOccurrences(of: "`", with: "\\u0060")
+        let displayJSON = displayStableJSON(originalJSON)
         let prompt = """
         \(runtimeInstructions)
 
@@ -218,6 +214,27 @@ enum WebModelResponseCodec {
                        toolPolicy: policy, parallelToolCalls: parallel,
                        maximumToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue,
                        responseConfiguration: configuration)
+    }
+
+    /// Keep string quotes and Markdown backticks out of provider rendering's
+    /// escape handling. The JSON has already been validated: backslashes and
+    /// backticks can occur only in strings. Consume complete escape pairs so a
+    /// literal backslash followed by a quote or Unicode escape retains its value.
+    private static func displayStableJSON(_ original: String) -> String {
+        var bytes = original.utf8.makeIterator()
+        var result: [UInt8] = []
+        result.reserveCapacity(original.utf8.count)
+        while let byte = bytes.next() {
+            if byte == 92, let escaped = bytes.next() {
+                if escaped == 34 { result.append(contentsOf: #"\u0022"#.utf8) }
+                else { result.append(byte); result.append(escaped) }
+            } else if byte == 96 {
+                result.append(contentsOf: #"\u0060"#.utf8)
+            } else {
+                result.append(byte)
+            }
+        }
+        return String(decoding: result, as: UTF8.self)
     }
 
     /// Embedded inference requires its response contract. Generic callers keep

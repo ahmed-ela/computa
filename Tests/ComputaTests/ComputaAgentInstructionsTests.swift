@@ -266,7 +266,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 "tools": tools, "tool_choice": "auto", "parallel_tool_calls": false,
             ])
             let request = try WebModelResponseCodec.prepareRequest(original)
-            let handoff = try assertOriginalRequestAndHandoff(original, request: request)
+            let handoff = try assertRequestValuesAndHandoff(original, request: request)
             XCTAssertTrue(handoff.hasSuffix("Exact currently offered local function names: relay.exec_command, relay.write_stdin\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertFalse(handoff.contains("obsolete.exec_command"))
             XCTAssertFalse(handoff.contains("functions.exec_command"))
@@ -287,7 +287,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             ], "tools": [], "tool_choice": "none",
         ])
         let request = try WebModelResponseCodec.prepareRequest(original)
-        let handoff = try assertOriginalRequestAndHandoff(original, request: request)
+        let handoff = try assertRequestValuesAndHandoff(original, request: request)
         XCTAssertTrue(handoff.contains("No tools means no tool call"))
         XCTAssertTrue(handoff.hasSuffix("Exact currently offered local function names: (none)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
         XCTAssertFalse(handoff.contains("old.exec_command"))
@@ -308,7 +308,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 "model": "browser/claude", "input": "Make the authorized change.", "tools": tools, "tool_choice": choice,
             ])
             let request = try WebModelResponseCodec.prepareRequest(original)
-            let handoff = try assertOriginalRequestAndHandoff(original, request: request)
+            let handoff = try assertRequestValuesAndHandoff(original, request: request)
             XCTAssertTrue(handoff.contains("Custom tools accept literal string input, not JSON object arguments"))
             XCTAssertTrue(handoff.contains("Do not include arguments on a custom call"))
             XCTAssertTrue(handoff.contains("Exact currently offered custom names: relay.apply_patch"))
@@ -338,7 +338,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             "tools": [["type": "function", "name": "exec_command", "parameters": ["type": "object"]]],
         ])
         let request = try WebModelResponseCodec.prepareRequest(original)
-        let handoff = try assertOriginalRequestAndHandoff(original, request: request)
+        let handoff = try assertRequestValuesAndHandoff(original, request: request)
         let rule = try XCTUnwrap(handoff.range(of: "\"Return only the file contents\" constrains message.text after matching\noutput; put truthful limitations or refusals there too."))
         let format = try XCTUnwrap(handoff.range(of: "Return exactly one fenced JSON code block"))
         XCTAssertLessThan(rule.upperBound, format.lowerBound, "The return-only decision belongs immediately before the required envelope format")
@@ -353,16 +353,14 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                        .message("The requested operation is unavailable."))
     }
 
-    private func assertOriginalRequestAndHandoff(_ original: Data, request: WebModelResponseCodec.Request,
+    private func assertRequestValuesAndHandoff(_ original: Data, request: WebModelResponseCodec.Request,
                                                  file: StaticString = #filePath, line: UInt = #line) throws -> String {
         let prompt = Data(request.prompt.utf8)
         let start = try XCTUnwrap(prompt.range(of: Data("COMPLETE_RESPONSES_REQUEST_JSON:\n".utf8)), file: file, line: line).upperBound
-        let end = start + original.count
-        guard end <= prompt.count else {
-            XCTFail("The entire original request must remain in the prompt", file: file, line: line)
-            return ""
-        }
-        XCTAssertEqual(prompt.subdata(in: start..<end), original, file: file, line: line)
+        let terminator = Data("\nEND_COMPLETE_RESPONSES_REQUEST_JSON.".utf8)
+        let end = try XCTUnwrap(prompt.range(of: terminator, in: start..<prompt.count), file: file, line: line).lowerBound
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: prompt.subdata(in: start..<end)) as? NSDictionary,
+                       try JSONSerialization.jsonObject(with: original) as? NSDictionary, file: file, line: line)
         let suffix = String(decoding: prompt[end...], as: UTF8.self)
         XCTAssertEqual(suffix, "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames),
