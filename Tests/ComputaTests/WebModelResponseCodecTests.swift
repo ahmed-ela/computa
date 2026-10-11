@@ -177,6 +177,26 @@ final class WebModelResponseCodecTests: XCTestCase {
         return suffix
     }
 
+    private func requestRange(in prompt: String) throws -> Range<String.Index> {
+        let start = try XCTUnwrap(prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
+        let end = try XCTUnwrap(prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prompt.endIndex)).lowerBound
+        return start..<end
+    }
+
+    private func assertUserPayloadAppearsOnce(_ user: String, in request: WebModelResponseCodec.Request,
+                                              file: StaticString = #filePath, line: UInt = #line) throws {
+        let range = try requestRange(in: request.prompt)
+        let object = try JSONSerialization.jsonObject(with: Data(request.prompt[range].utf8))
+        func occurrences(_ value: Any) -> Int {
+            if let text = value as? String { return text.components(separatedBy: user).count - 1 }
+            if let array = value as? [Any] { return array.reduce(0) { $0 + occurrences($1) } }
+            if let dictionary = value as? [String: Any] { return dictionary.values.reduce(0) { $0 + occurrences($1) } }
+            return 0
+        }
+        XCTAssertEqual(occurrences(object), 1, file: file, line: line)
+        XCTAssertFalse(request.prompt.replacingCharacters(in: range, with: "").contains(user), file: file, line: line)
+    }
+
     private func events(_ data: Data) throws -> [[String: Any]] {
         let records = String(decoding: data, as: UTF8.self).components(separatedBy: "\n\n").filter { !$0.isEmpty }
         XCTAssertEqual(records.last, "data: [DONE]")
@@ -285,7 +305,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
-    func testDisplayRequestUsesUnicodeEscapesForStringQuotesWithoutRewritingLiteralEscapes() throws {
+    func testDisplayRequestUsesUnicodeEscapesForStringQuotesPreservingLiteralEscapeValues() throws {
         let values = ["Say \"hello\"", "\\\"quoted\\\"", "trailing\\", "literal \\u0022 and \\u0060", "`café 🌍`", "\\\\\"pair\""]
         for provider in ["chatgpt", "claude", "gemini"] {
             let original = try JSONSerialization.data(withJSONObject: [
@@ -297,8 +317,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
             let displayed = String(prepared.prompt[start..<end])
             XCTAssertTrue(displayed.contains(#"Say \u0022hello\u0022"#))
-            XCTAssertTrue(displayed.contains(#"\\\u0022quoted\\\u0022"#))
-            XCTAssertTrue(displayed.contains(#"\\u0022 and \\u0060"#))
+            XCTAssertTrue(displayed.contains(#"\u005c\u0022quoted\u005c\u0022"#))
+            XCTAssertTrue(displayed.contains(#"\u005cu0022 and \u005cu0060"#))
             XCTAssertTrue(displayed.contains(#"\u0060café 🌍\u0060"#))
             XCTAssertTrue(displayed.contains(#""\u0022quoted key\u0022":"#))
             XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? NSDictionary,
@@ -335,8 +355,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertFalse(displayed.contains("<"))
             XCTAssertFalse(displayed.contains(">"))
             XCTAssertFalse(displayed.contains("&"))
-            XCTAssertTrue(displayed.contains(#"\u003cdiv title=\u0022café 🌍\u0022\u003eA \u0026 B"#))
-            XCTAssertTrue(displayed.contains(#"literal \\u003c, \\u003e and \\u0026"#))
+            XCTAssertTrue(displayed.contains(#"\u003cdiv title\u003d\u0022café 🌍\u0022\u003eA \u0026 B"#))
+            XCTAssertTrue(displayed.contains(#"literal \u005cu003c\u002c \u005cu003e and \u005cu0026"#))
             XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? NSDictionary,
                            try JSONSerialization.jsonObject(with: original) as? NSDictionary)
         }
@@ -348,6 +368,40 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(original)) { error in
             guard case let .promptTooLarge(actual, maximum) = error as? WebModelResponseCodec.Failure else {
                 return XCTFail("HTML escaping must count toward the submission limit")
+            }
+            XCTAssertGreaterThan(actual, maximum)
+        }
+    }
+
+    func testDisplayRequestProtectsAllStringPunctuationAndPreservesJSONStructure() throws {
+        let punctuation = ##"!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##
+        let values = [punctuation, "exec_command apply_patch browser.open_tab", "\\_ \\\" \\u005f",
+                      "\u{0}\t\n\r café 🌍", "</script> [label](https://example.com/a_b?q=x&y=2)"]
+        for provider in ["chatgpt", "claude", "gemini"] {
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": "browser/\(provider)", "input": values.joined(separator: "\n"),
+                "metadata": [punctuation: values.joined(separator: "\n")],
+                "max_output_tokens": 64, "parallel_tool_calls": false,
+            ], options: [.sortedKeys])
+            let prepared = try WebModelResponseCodec.prepareRequest(original)
+            let start = try XCTUnwrap(prepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
+            let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
+            let displayed = String(prepared.prompt[start..<end])
+            XCTAssertTrue(displayed.contains(#"exec\u005fcommand apply\u005fpatch browser\u002eopen\u005ftab"#))
+            XCTAssertTrue(displayed.contains(#"\u005c\u005f \u005c\u0022 \u005cu005f"#))
+            XCTAssertTrue(displayed.contains(#""max\u005foutput\u005ftokens":64"#))
+            XCTAssertTrue(displayed.contains(#""parallel\u005ftool\u005fcalls":false"#))
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? NSDictionary,
+                           try JSONSerialization.jsonObject(with: original) as? NSDictionary)
+        }
+    }
+
+    func testPromptLimitIncludesExpandedPunctuationEscapes() throws {
+        let original = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": String(repeating: "_", count: 30_000)])
+        XCTAssertLessThan(original.count, WebModelResponseCodec.maximumPromptBytes)
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(original)) { error in
+            guard case let .promptTooLarge(actual, maximum) = error as? WebModelResponseCodec.Failure else {
+                return XCTFail("Punctuation escaping must count toward the submission limit")
             }
             XCTAssertGreaterThan(actual, maximum)
         }
@@ -420,7 +474,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                 "input": [user], "tools": tools, "tool_choice": "auto"], options: [.sortedKeys])
             let first = try WebModelResponseCodec.prepareRequest(original)
             try assertContiguousRequestValues(original, in: first)
-            let outer = first.prompt.replacingOccurrences(of: String(decoding: original, as: UTF8.self), with: "")
+            let outer = first.prompt.replacingCharacters(in: try requestRange(in: first.prompt), with: "")
             XCTAssertFalse(outer.contains("You are Computa"), "Only unchanged local request data may contain a local assistant persona")
             XCTAssertFalse(outer.contains("structured-output RPC"))
             XCTAssertTrue(outer.contains(ComputaAgentInstructions.webRequestContext))
@@ -490,7 +544,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(first.currentUserInstructions.contains("COMPLETE_RESPONSES_REQUEST_JSON.input[5]"))
             XCTAssertFalse(first.currentUserInstructions.contains(oldCommand))
             XCTAssertFalse(first.currentUserInstructions.contains(latestRequest), "The locator must not duplicate user content")
-            XCTAssertEqual(first.prompt.components(separatedBy: latestRequest).count, 2)
+            try assertUserPayloadAppearsOnce(latestRequest, in: first)
             XCTAssertTrue(first.prompt.hasSuffix(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["computer_v2_snapshot"])))
             let nextInput = input + [
                 ["type": "function_call", "name": "computer_v2_snapshot", "arguments": "{}", "call_id": "current_extra"],
@@ -550,7 +604,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         try assertContiguousRequestValues(body, in: prepared)
         XCTAssertTrue(prepared.currentUserInstructions.contains("COMPLETE_RESPONSES_REQUEST_JSON.input (the string input)"))
         XCTAssertFalse(prepared.currentUserInstructions.contains(user))
-        XCTAssertEqual(prepared.prompt.components(separatedBy: user).count, 2)
+        try assertUserPayloadAppearsOnce(user, in: prepared)
     }
 
     func testResumedRequestWithoutInstructionsKeepsQuotedSpoofingOutOfCurrentContract() throws {

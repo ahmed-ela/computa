@@ -3445,3 +3445,60 @@ controller succeeded with the canonical absolute path. This is a validation
 launcher error, not an application failure. All predecessor evidence remains.
 Build 47 still requires signed staging, installed verification and a fresh live
 qualification before any browser workflow can be claimed.
+
+### Build 47 installed qualification and fresh browser failure
+
+Source `26654e6a27a354276a45e63fdd18db2d410aebb3` was pushed to the draft PR.
+Signed staging and installed bundle verification each passed all 98 checks.
+The new installed process was PID 85324, runtime generation
+`d4f2cc07-8962-437d-b071-5fa8d5f06cb1`; strict startup capture passed.
+
+`chatgpt-qualification-installed47-r1` passed all 39 checks, a real native
+marker-file read and two acknowledged/closed inference sessions. The fresh
+`chatgpt-browser-installed47-r1` case failed first-message ownership before
+any native tool call. Its receipt is `incomplete_or_failed`, with one
+acknowledged lease and zero verified closures. No prompt was replayed.
+Bounded exact-PID diagnostics show two extra ASCII characters, beginning with
+a backslash at an expected underscore at offset 19,592. The first 10,108
+characters match exactly; Unicode-space and format-character counts are zero.
+The actual emitting website component remains unidentified. The previous
+HTML mismatch is absent, but a live browser fix is not established.
+
+Root independently verified and stopped only its owned fixture PID 86479 and
+confirmed port 52528 closed and wrapper exit 0. This local cleanup does not
+prove website conversation deletion. Failed provider evidence remains retained.
+
+### Build 48 punctuation candidate
+
+A small JSON string lexer now encodes all printable ASCII punctuation in string
+keys/values, including underscores and literal backslashes. JSON structure,
+control escapes and non-ASCII bytes remain intact; parsed request values and
+strict ownership admission remain unchanged. The expanded byte limit still
+applies before submission. Focused validation passed 81 tests: 62 codec,
+18 instruction and one WebKit test with five controlled cases.
+
+The first focused run retained old raw-text assertions and used an unsupported
+non-default temperature in a new fixture; these were corrected to decoded-value
+checks and a supported numeric field. Its simulated underscore mutation also
+touched the fixed instruction prefix, unlike the live diagnostic, so the
+mutation is now scoped to the complete request JSON. The original failed log
+is retained. Complete candidate validation and installed/live checks remain.
+
+### Build 48 complete validation checkpoint
+
+All seven public groups passed with 625 tests, zero failures and zero skips.
+Native validation executed 2,325 cases: 2,276 passed, 49 explicitly skipped,
+zero failed, in 522.468 seconds. The five controlled WebKit cases and new
+punctuation/value/byte-limit regressions passed in the full run. Required
+permission, workflow, patch and cleanup guards passed, with 26 verified
+cleanup records, all 414 frozen inputs unchanged and unchanged engine bytes.
+
+Review caught an accidental run-ID regex-limit change in preparation helper 14
+from a broad build-number replacement. Helper 15 restores the exact original
+47-character suffix bound; its delta from qualified helper 13 allows only
+explicit build/receipt identities. The initial shape-only audit's acceptance
+parity statement is superseded by the correction and explicit-constant audit.
+No live prompt or runtime capture used helper 14; its unused fixture is retained.
+A fresh helper-15 qualification fixture is prepared. Shipping controller
+acceptance checks and test floors were unchanged. Signed packaging, installed
+verification and fresh live qualification remain required.

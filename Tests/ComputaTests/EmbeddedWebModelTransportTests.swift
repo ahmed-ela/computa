@@ -1316,8 +1316,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
-    func testQuoteAndHTMLDelimiterEncodingSurvivesExtraEscapeRenderingWithoutRelaxingOwnership() async throws {
-        // Control the observed +17 quote/markup and remaining +5 markup
+    func testStringPunctuationEncodingSurvivesExtraEscapeRenderingWithoutRelaxingOwnership() async throws {
+        // Control the observed +17 quote/markup, +5 markup and +2 underscore
         // differences. This simulates their transformation rather than
         // claiming which website component introduced it in the live failure.
         let original = try JSONSerialization.data(withJSONObject: [
@@ -1331,9 +1331,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let quoteOnly = prepared.prompt.replacingOccurrences(of: #"\u003c"#, with: "<")
             .replacingOccurrences(of: #"\u003e"#, with: ">")
             .replacingOccurrences(of: #"\u0026"#, with: "&")
-        for (prompt, extraCharacters) in [(legacy, 17), (quoteOnly, 5), (prepared.prompt, 0)] {
+        let underscoreOriginal = try JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt",
+            "input": String(repeating: "Owned underscore rendering fixture line.\n", count: 600) + "a_b c_d",
+        ], options: [.sortedKeys])
+        let underscorePrepared = try WebModelResponseCodec.prepareRequest(underscoreOriginal)
+        let underscoreStart = try XCTUnwrap(underscorePrepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
+        let underscoreEnd = try XCTUnwrap(underscorePrepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: underscoreStart..<underscorePrepared.prompt.endIndex)).lowerBound
+        let underscoreLegacy = underscorePrepared.prompt.replacingCharacters(in: underscoreStart..<underscoreEnd,
+                                                                            with: String(decoding: underscoreOriginal, as: UTF8.self))
+        for (prompt, extraCharacters) in [(legacy, 17), (quoteOnly, 5), (prepared.prompt, 0), (underscoreLegacy, 2), (underscorePrepared.prompt, 0)] {
             let succeeds = extraCharacters == 0
-            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: #"userBody.textContent = prompt.replace(/\\(?=")|</g, match => match === '<' ? '\\<' : '\\\\');"#))
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: #"const start = prompt.indexOf('COMPLETE_RESPONSES_REQUEST_JSON:\n') + 'COMPLETE_RESPONSES_REQUEST_JSON:\n'.length; const end = prompt.indexOf('\nEND_COMPLETE_RESPONSES_REQUEST_JSON.', start); userBody.textContent = prompt.slice(0, start) + prompt.slice(start, end).replace(/\\(?=")|<|_/g, match => match === '\\' ? '\\\\' : '\\' + match) + prompt.slice(end);"#))
             defer { fixture.shutdown() }
             let choice = Self.fixtureChoice(.chatgpt)
             let started = try await startChoice(choice, in: fixture)
@@ -1361,7 +1370,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(comparison["expansionASCIIPromptMatches"] as? Bool, succeeds)
             if !succeeds {
                 XCTAssertEqual(comparison["expansionFirstActualCharacter"] as? String, "backslash")
-                XCTAssertEqual(comparison["expansionFirstExpectedCharacter"] as? String, extraCharacters == 17 ? "double_quote" : "less_than")
+                XCTAssertEqual(comparison["expansionFirstExpectedCharacter"] as? String,
+                               extraCharacters == 17 ? "double_quote" : extraCharacters == 5 ? "less_than" : "underscore")
                 XCTAssertEqual(try XCTUnwrap(comparison["expansionASCIIRenderedLength"] as? Int) -
                                XCTUnwrap(comparison["expansionASCIIPromptLength"] as? Int), extraCharacters)
             }

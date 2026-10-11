@@ -19,7 +19,7 @@ completed build 39 and build 44 comparisons. All six trials in each comparison
 failed the complete task; Computa goal mode was N/A. These results do not
 establish a product ranking.
 
-## Installed baseline: 0.6.0 (46)
+## Installed baseline: 0.6.0 (47)
 
 Build 41 passed 2,261 native tests and 622 public tests with zero failures;
 49 native opt-in tests were explicitly skipped. Its signed package and installed
@@ -46,12 +46,12 @@ skips in 527.297 seconds.
 | Check | Current evidence and remaining work |
 | --- | --- |
 | Upstream runtime | Source19/20 observations cover 19,035 runnable identities: 19,032 passed and three standalone TUI cases failed. Optional guard exits do not prove skipped assertions. Source21 compiled all 275 debug test binaries and passed scoped lint and formatting. This is not a green complete upstream workspace result. |
-| Engine package | Source21 release packaging passed. The signed arm64 App Server, source pin, patch and manifest match runtime mactopus-6. Build 46 reuses these unchanged artifacts. |
-| App validation | Build 46 passed 2,272 native tests and 625 public tests with zero failures; 49 native tests were explicitly skipped. Required permission, workflow, patch and cleanup guards passed. |
+| Engine package | Source21 release packaging passed. The signed arm64 App Server, source pin, patch and manifest match runtime mactopus-6. Build 47 reuses these unchanged artifacts. |
+| App validation | Build 47 passed 2,274 native tests and 625 public tests with zero failures; 49 native tests were explicitly skipped. Required permission, workflow, patch and cleanup guards passed. |
 | Installed provider tasks | Build 43 Claude Sonnet 5.5 and Gemini 3.1 Pro qualifications each passed all 39 checks, a real file read and two closed inference sessions. Claude's coding and built-in-browser flight cases passed exact native-turn collection, with ten and thirteen closed sessions. Its localhost task stopped on website quota; root cleanup verified the preview PID and socket closed. Two ChatGPT qualification attempts failed on malformed reply formatting and each closed its session; a captured diagnostic identified a complete inline JSON fence. Gemini's subsequent coding task stopped on website verification before any native tool call; website cleanup is unconfirmed and its remaining tasks are paused. ChatGPT build 44 passed coding/Git with nine closed sessions, then its browser case failed first-message ownership before any native tool call and left website cleanup unconfirmed. Build 45 passed a fresh ChatGPT marker qualification with two closed sessions, then its browser case again failed first-message ownership before any native tool call. The expanded message was 17 characters longer; bounded diagnostics identified an extra backslash at an expected quote. Its website cleanup remains unconfirmed. Nine workflow cases remain incomplete; Claude testing is stopped until its quota resets. The full live matrix is not qualified. |
 | Installed diff UI | Build 44 passed split/unified/wrapped presentation, hunk collapse, selective staging/unstaging/reverting, stale-snapshot rejection, binary notices, filtering and read-only branch/commit comparisons. Independent Git/file snapshots verify preservation. A scope selection after switching chats changed the dropdown without changing native state. A native commit-event regression reproduces that failure. Installed build 45 now passes all four scope selections, including Unstaged after switching chats; independent before/after snapshots prove that this recheck changed no fixture files or Git state. |
 | Model comparison | All six fresh build 44 trials are complete and failed the full task. They use the same pinned local model and actual Full access settings in both products. Both Computa ordinary trials stopped at the receipt compaction bounds. Codex ordinary r1 and both goal trials stopped on unadvertised generated tool calls; ordinary r2 stopped on missing generated public output. Computa goal mode remains N/A. The twelve owned project/origin directories were verified against their archive and removed. |
-| Delivery | Build 46 is signed, installed and pushed as dee317a to the draft PR. Installed verification passed 98 checks and the running process/runtime generation was captured. Website tests remain paused on ChatGPT ownership, Claude quota and Gemini verification blocks. Build 46 passed fresh ChatGPT qualification with two closed sessions; its browser case still failed before native tool use. The remaining mismatch begins with an extra backslash before `<`, with five extra characters. The six local comparison trials and their fixture cleanup are complete. The remaining live matrix and final cleanup are still required. |
+| Delivery | Build 47 is signed, installed and pushed as 26654e6 to the draft PR. Installed verification passed 98 checks and the new process/runtime generation was captured. ChatGPT qualification passed all 39 checks with two closed sessions, but the fresh browser case failed before native tools. The remaining difference is two extra backslashes before underscores; website cleanup is unconfirmed. Its owned local fixture PID/socket were verified closed. Candidate 48's punctuation encoding has passed 81 focused tests; complete validation and a fresh installed check remain. The six local comparison trials and their fixture cleanup are complete. The remaining live matrix and final cleanup are still required. |
 
 Detailed historical failures, corrections, receipts and source attribution remain
 in the [validation ledger](HARNESS-VALIDATION-NOTES.md).
@@ -321,3 +321,13 @@ opt-in cases were explicitly skipped. The controlled WebKit regression rejects
 the original 17-character alteration and remaining five-character alteration,
 and accepts the encoded request after one Send. This does not yet prove a live
 website fix. Signed staging, installed verification and fresh live checks remain.
+
+## Validated candidate: 0.6.0 (48)
+
+The JSON string encoder now covers all printable ASCII punctuation, including
+underscores and literal backslashes, while preserving decoded values, JSON
+structure, control escapes and Unicode. The complete suite passed 2,276 native
+and 625 public tests with zero failures; 49 native opt-in cases were skipped.
+The five-case WebKit regression rejects the observed quote, HTML and underscore
+mutations and accepts protected requests without relaxing ownership. Signed
+packaging, installed checks and a fresh live browser task remain required.

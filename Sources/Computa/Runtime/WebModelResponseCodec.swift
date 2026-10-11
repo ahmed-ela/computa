@@ -216,26 +216,37 @@ enum WebModelResponseCodec {
                        responseConfiguration: configuration)
     }
 
-    /// Keep string quotes, Markdown backticks and HTML delimiters out of provider
-    /// rendering's escape handling. Backslashes and literal markup characters in
-    /// validated JSON occur only in strings. Consume complete escape pairs so a
-    /// literal backslash followed by a quote or Unicode escape retains its value.
+    /// Keep punctuation in JSON strings out of website Markdown/HTML escaping.
+    /// Structural JSON punctuation remains intact. Consume complete escape pairs
+    /// so quotes, slashes and literal backslashes retain their decoded values.
     private static func displayStableJSON(_ original: String) -> String {
         var bytes = original.utf8.makeIterator()
         var result: [UInt8] = []
         result.reserveCapacity(original.utf8.count)
+        let hex = Array("0123456789abcdef".utf8)
+        var inString = false
+        func appendUnicodeEscape(_ byte: UInt8) {
+            result.append(contentsOf: [92, 117, 48, 48, hex[Int(byte >> 4)], hex[Int(byte & 15)]])
+        }
         while let byte = bytes.next() {
+            if !inString {
+                result.append(byte)
+                if byte == 34 { inString = true }
+                continue
+            }
+            if byte == 34 {
+                result.append(byte)
+                inString = false
+                continue
+            }
             if byte == 92, let escaped = bytes.next() {
-                if escaped == 34 { result.append(contentsOf: #"\u0022"#.utf8) }
+                if escaped == 34 || escaped == 47 || escaped == 92 { appendUnicodeEscape(escaped) }
                 else { result.append(byte); result.append(escaped) }
+            } else if (33...47).contains(byte) || (58...64).contains(byte)
+                        || (91...96).contains(byte) || (123...126).contains(byte) {
+                appendUnicodeEscape(byte)
             } else {
-                switch byte {
-                case 96: result.append(contentsOf: #"\u0060"#.utf8)
-                case 60: result.append(contentsOf: #"\u003c"#.utf8)
-                case 62: result.append(contentsOf: #"\u003e"#.utf8)
-                case 38: result.append(contentsOf: #"\u0026"#.utf8)
-                default: result.append(byte)
-                }
+                result.append(byte)
             }
         }
         return String(decoding: result, as: UTF8.self)
