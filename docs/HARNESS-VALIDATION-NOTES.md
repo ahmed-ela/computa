@@ -3700,4 +3700,31 @@ artifacts matched. Required suite, permission, workflow and patch guards passed;
 was updated to 43 before the run. An independent audit verified the original
 receipt and immutable log without rerunning tests. Native receipt SHA-256:
 ea9d50f90823807eb7df323bea9ca53db4256701dd9edb62a03de989a82e44ba.
-Signed installation and new installed qualification are pending.
+Signed staging and installed verification each passed 98 checks. Computa
+0.6.0 (50), compiled from afa950a921749579e3b720b32445cf2da355d006, was
+installed with build 49 preserved as a rollback. Its fresh runtime generation
+and process identity were captured before any benchmark prompt. A redundant
+staging preflight expected the label verified rather than the verifier's actual
+success label passed; the correction audit confirms all 98 checks passed and
+the exact source/build matched. The canonical staging controller had already
+verified the artifact.
+
+The fresh installed ChatGPT GPT-6 marker qualification passed all 39 checks,
+including a native file read, exact marker and two acknowledged/closed website
+leases. Its subsequent browser experiment performed seven native browser
+actions and submitted the synthetic flight search. The eighth inference then
+failed at the inspect deadline before details navigation, gate observation or a
+final answer. The original collector remains incomplete_or_failed. All eight
+leases closed. The exact owned HTTP fixture PID was stopped, its port refused
+connections, and one server_closed event was independently recorded.
+
+The exact-PID timeout log reports phases adapter_entry, first_user_hash,
+page_action, model_proof and model_wait. The native render surface was attached,
+not hidden, and in a visible, nonoccluded window. All 70 DOM notifications were
+accepted, with revision 37. This localizes the outstanding await to the shared
+model-verification wait; it does not prove why that wait was still pending.
+The current phase history lacks elapsed times, so it cannot distinguish a
+delayed website timer from earlier evaluation work consuming the overall
+deadline. No failed prompt was replayed. Further diagnosis and a bounded
+native-clock wait mechanism remain under investigation. Gemini CAPTCHA and
+Claude quota blocks remain external gates.
