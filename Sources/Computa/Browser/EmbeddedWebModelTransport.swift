@@ -146,7 +146,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
         case submissionObservationPending
         case modelUnverified, modelMismatch, modelUnavailable, productModeUnverified, discoveryCleanupFailed
-        case usageLimited(Provider)
+        case usageLimited(Provider), responseFailed(Provider)
         case humanVerificationRequired(Provider), unexpectedPage(Provider)
         case editorFailure(String)
         case ownershipFailure(OwnershipReason)
@@ -156,6 +156,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .humanVerificationRequired: "website_verification_required"
             case .signInRequired: "sign_in_required"
             case .usageLimited: "website_usage_limit"
+            case .responseFailed: "website_response_failed"
             case .unexpectedPage: "unexpected_website_page"
             case .productModeUnverified: "product_mode_unverified"
             default: nil
@@ -167,6 +168,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .humanVerificationRequired: "complete_website_verification"
             case .signInRequired: "sign_in"
             case .usageLimited: "wait_for_quota_reset"
+            case .responseFailed: "inspect_website"
             case .unexpectedPage: "inspect_website"
             case .productModeUnverified: "refresh_website_models"
             default: nil
@@ -205,6 +207,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .discoveryCleanupFailed: "The model menu session could not be closed. Restart Computa to refresh website models."
             case .responseTooLarge: "The website's response exceeded the local browser transport limit."
             case .responseInterrupted: "The website interrupted its response. No send was retried."
+            case .responseFailed(let provider): "\(provider.displayName)'s website reported that the response failed to load. Check its page in Computa's built-in browser before starting a new task. No prompt was replayed."
             case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
             case .humanVerificationRequired(let provider): "\(provider.displayName) has a saved or current website-verification block. Check its website in Computa's built-in browser and resolve any challenge shown. Once the page is clear, refresh website models before retrying. No prompt was replayed."
             case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
@@ -733,6 +736,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.completionCandidate = false
             guard observed["temporary"] as? Bool == true else { throw Failure.temporaryUnverified }
             guard observed["interrupted"] as? Bool != true else { throw Failure.responseInterrupted }
+            if session.provider == .chatgpt, observed["responseLoadFailed"] as? Bool == true {
+                guard session.submitted, session.firstUserFingerprint != nil, !session.pendingSubmission else {
+                    throw Failure.ownershipFailure(.promotionFirstUser)
+                }
+                throw Failure.responseFailed(.chatgpt)
+            }
             let response = observed["text"] as? String ?? ""
             guard response.utf8.count <= 220_000 else { throw Failure.responseTooLarge }
             if count(observed, "responseCount") > session.baseline,

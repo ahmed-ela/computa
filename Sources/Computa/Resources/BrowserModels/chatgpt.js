@@ -1187,6 +1187,24 @@ function chatGPTStructure(visible) {
   }
   return serialized;
 }
+function chatGPTResponseLoadFailed(visible) {
+  // Match the website's error beside its Retry control. Quoted errors in a
+  // prompt, answer, editor, menu or sidebar cannot become transport failures.
+  const users = chatGPTMessageRoots('user');
+  const content = node => users.some(user => user === node || user.contains(node))
+    || !!node.closest('[data-markdown-text-style="assistant-message"], .markdown, #prompt-textarea, [contenteditable="true"], textarea, [role="menu"], [role="dialog"], nav, aside');
+  const retries = [...document.querySelectorAll('main button')].filter(node => visible(node) && !content(node)
+    && (node.getAttribute('aria-label') || node.innerText || '').trim() === 'Retry');
+  for (const retry of retries) {
+    for (let region = retry.parentElement, depth = 0; region && depth < 4; region = region.parentElement, depth++) {
+      if (!region.closest('main') || users.some(user => region === user || region.contains(user))
+        || region.querySelector('[data-markdown-text-style="assistant-message"], .markdown')) break;
+      if ([...region.querySelectorAll('span, p, div')].some(node => visible(node) && !content(node)
+        && node.childElementCount === 0 && (node.innerText || node.textContent || '').trim() === 'Load failed')) return true;
+    }
+  }
+  return false;
+}
 async function providerPageAction(input, readLineageFingerprint = null) {
   websiteModelDiagnosticPhase('page_action');
   const modelState = websiteModelPickerState('chatgpt');
@@ -1245,6 +1263,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   const conversationIdentity = conversationIdentities.length === 1 ? conversationIdentities[0] : null;
   if (expectedConversationIdentity && conversationIdentity !== expectedConversationIdentity) return { error: "conversation_changed", detail: "conversation_identity" };
   const enabled = node => visible(node) && !node.disabled && node.getAttribute("aria-disabled") !== "true";
+  const responseLoadFailed = action === 'inspect' && chatGPTResponseLoadFailed(visible);
   const find = selectors => selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(visible);
   const labelled = (nodes, expression) => [...nodes].filter(visible).find(node => expression.test(
     [node.getAttribute("aria-label"), node.getAttribute("data-testid"), node.getAttribute("title"), node.innerText].filter(Boolean).join(" ").trim()));
@@ -1336,7 +1355,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     : find(['button[aria-label="Temporary chat"]']));
   const state = { modelEvidence: modelState.evidence, url: document.URL, temporary, temporaryActionAvailable, conversationIdentity, composer: !!composer, responseCount: answers.length, userCount,
     firstUserIdentity, firstUserFingerprint, firstUserMarkerVerified,
-    busy: !!stop || claudeStreaming, interrupted, text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
+    busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
   if (action === "inspect") {
     const signIn = !composer && !!labelled(document.querySelectorAll('a, button'), /^(?:Log in|Sign in)(?:\s|$)/i);
     return { ...state, signIn, debugStructure: chatGPTStructure(visible) };

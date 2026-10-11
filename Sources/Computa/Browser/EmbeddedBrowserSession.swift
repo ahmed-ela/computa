@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import OSLog
 import WebKit
 
 @MainActor @Observable
@@ -1079,6 +1080,7 @@ final class EmbeddedModelChangeChannel {
 
 @MainActor
 private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
+    private static let policyLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedBrowserPolicy")
     private weak var session: EmbeddedBrowserSession?
     private let tabID: UUID
 
@@ -1103,6 +1105,9 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             try EmbeddedBrowserURLPolicy.validate(url)
             decisionHandler(.allow)
         } catch {
+            let kind = EmbeddedBrowserURLPolicy.diagnosticAddressKind(navigationAction.request.url)
+            let target = navigationAction.targetFrame.map { $0.isMainFrame ? "main" : "subframe" } ?? "new_window"
+            Self.policyLog.error("navigationRejected addressKind=\(kind, privacy: .public) target=\(target, privacy: .public)")
             deny(error.localizedDescription, view: webView)
             decisionHandler(.cancel)
         }

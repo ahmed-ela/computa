@@ -6,6 +6,44 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testChatGPTLoadFailureIsTypedTerminalAndDoesNotReplayOrBlockOtherSessions() async throws {
+        for alreadyBound in [false, true] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Detect the website's actual load failure", bindFirstRead: alreadyBound)
+            defer { fixture.shutdown() }
+            _ = try await evaluate(view, """
+                const main = document.createElement('main');
+                document.body.appendChild(main);
+                const error = document.createElement('div');
+                const text = document.createElement('span'); text.textContent = 'Load failed';
+                const retry = document.createElement('button'); retry.textContent = 'Retry';
+                window.fixtureRetryClicks = 0;
+                retry.addEventListener('click', () => window.fixtureRetryClicks++);
+                error.append(text, retry); main.append(error); return true;
+                """)
+            let began = ContinuousClock.now
+            for _ in 0..<2 {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("A visible Load failed / Retry response must not wait for the response deadline")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFailed(.chatgpt)) }
+            }
+            XCTAssertLessThan(ContinuousClock.now - began, .seconds(3))
+            let failure = EmbeddedWebModelTransport.Failure.responseFailed(.chatgpt)
+            XCTAssertEqual(failure.diagnosticCode, "website_response_failed")
+            XCTAssertEqual(failure.requiredAction, "inspect_website")
+            XCTAssertFalse(failure.blocksProviderUntilRefresh)
+            let retryClicks = try await evaluate(view, "return window.fixtureRetryClicks;")
+            XCTAssertEqual(retryClicks as? Int, 0)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            try await assertHumanTabIntact(fixture)
+            let next = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let nextToken = try XCTUnwrap(next["sessionToken"] as? String)
+            _ = try await waitForState("ready", fixture.transport, token: nextToken)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": nextToken])
+        }
+    }
+
     func testBoundInspectionTimeoutGetsOneFreshReadWithoutResending() async throws {
         let prompt = "Recover an owned read without resending"
         let (fixture, token, view) = try await boundInspectionFixture(prompt: prompt)
@@ -117,7 +155,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    private func boundInspectionFixture(prompt: String) async throws -> (Fixture, String, WKWebView) {
+    private func boundInspectionFixture(prompt: String, bindFirstRead: Bool = true) async throws -> (Fixture, String, WKWebView) {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
         do {
             let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
@@ -125,9 +163,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
             _ = try await waitForState("ready", fixture.transport, token: token)
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
-            let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-            XCTAssertEqual(first["state"] as? String, "running")
-            XCTAssertFalse((first["text"] as? String ?? "").isEmpty)
+            if bindFirstRead {
+                let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(first["state"] as? String, "running")
+                XCTAssertFalse((first["text"] as? String ?? "").isEmpty)
+            }
             return (fixture, token, view)
         } catch { fixture.shutdown(); throw error }
     }

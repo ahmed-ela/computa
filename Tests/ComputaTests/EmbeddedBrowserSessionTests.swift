@@ -1235,6 +1235,17 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         }
     }
 
+    func testNavigationRejectionDiagnosticsNeverIncludePageOrCredentialData() {
+        let inputs = ["about:srcdoc": "about_srcdoc", "about:blank": "about_blank", "about:config": "about_other",
+                      "blob:https://example.com/private-identifier": "blob", "data:text/html,private-content": "data",
+                      "file:///private/name": "file", "javascript:secret()": "javascript",
+                      "https://user:password@example.com/private?token=secret": "https", "custom:secret": "other"]
+        XCTAssertEqual(EmbeddedBrowserURLPolicy.diagnosticAddressKind(nil), "missing")
+        for (input, expected) in inputs {
+            XCTAssertEqual(EmbeddedBrowserURLPolicy.diagnosticAddressKind(URL(string: input)), expected)
+        }
+    }
+
     func testWebsiteNavigationDoesNotUseSearchFallback() throws {
         for input in ["javascript:alert(1)", "file:///tmp/test", "data:text/html,x", "custom:search"] {
             XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validate(XCTUnwrap(URL(string: input))), input)

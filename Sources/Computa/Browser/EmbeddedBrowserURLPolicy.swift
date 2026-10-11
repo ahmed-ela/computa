@@ -32,6 +32,23 @@ enum EmbeddedBrowserURLPolicy {
         }
     }
 
+    /// Finite diagnostics never include an address, credentials or page data.
+    static func diagnosticAddressKind(_ url: URL?) -> String {
+        guard let url else { return "missing" }
+        if url.absoluteString == "about:srcdoc" { return "about_srcdoc" }
+        if url.absoluteString == "about:blank" { return "about_blank" }
+        switch url.scheme?.lowercased() {
+        case "http": return "http"
+        case "https": return "https"
+        case "about": return "about_other"
+        case "blob": return "blob"
+        case "data": return "data"
+        case "file": return "file"
+        case "javascript": return "javascript"
+        default: return "other"
+        }
+    }
+
     static func normalize(_ address: String) throws -> URL {
         let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { throw Rejection.invalidAddress }

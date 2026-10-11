@@ -236,6 +236,56 @@ defineWebsiteModelChoiceTests('chatgpt', (owned = false) => {
   return { ...f, run: (action: string, overrides: Record<string, unknown> = {}) => f.inspect({ ...overrides, action }) };
 }, Element);
 
+describe('ChatGPT response load failure', () => {
+  const errorRegion = () => {
+    const region = new Element('DIV'), error = new Element('SPAN', {}, 'Load failed');
+    const retry = new Element('BUTTON', {}, 'Retry'); region.append(error, retry);
+    return { region, error, retry };
+  };
+  test('an owned response error beside Retry fails immediately without clicking', async () => {
+    const f = fixture({ response: false, userPrompt: 'Read the fixture marker' });
+    const e = errorRegion(); f.body.querySelector('main')!.append(e.region);
+    const observed = await f.inspect();
+    expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+    expect(observed.responseLoadFailed).toBe(true);
+    expect(e.retry.clicks).toBe(0);
+  });
+  test('quoted errors in user and assistant content are not website failures', async () => {
+    for (const target of ['user', 'assistant']) {
+      const f = fixture({ userPrompt: target === 'user' ? 'Load failedRetry' : 'Explain the text Load failed' }), e = errorRegion();
+      if (target === 'user') {
+        f.userBody!.text = ''; f.userBody!.append(e.region, new Element('SPAN', {}, '\n\n' + markerLine));
+      } else f.answer.append(e.region);
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false); expect(e.retry.clicks).toBe(0);
+    }
+  });
+  test('hidden, detached, unpaired and non-conversation errors cannot stop a response', async () => {
+    for (const variant of ['hidden-error', 'hidden-retry', 'detached', 'no-retry', 'sidebar', 'editor', 'menu']) {
+      const f = fixture({ response: false, userPrompt: 'Read the fixture marker' }), e = errorRegion();
+      if (variant === 'hidden-error') e.error.values.hidden = '';
+      if (variant === 'hidden-retry') e.retry.values['aria-hidden'] = 'true';
+      if (variant === 'detached') e.region.connected = false;
+      if (variant === 'no-retry') e.retry.text = 'Something else';
+      if (variant === 'menu') e.region.values.role = 'menu';
+      if (variant === 'sidebar') { const sidebar = new Element('ASIDE'); sidebar.append(e.region); f.body.append(sidebar); }
+      else if (variant === 'editor') f.composer.append(e.region);
+      else f.body.querySelector('main')!.append(e.region);
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false); expect(e.retry.clicks).toBe(0);
+    }
+  });
+  test('response failure cannot override a changed first message or product mode', async () => {
+    for (const drift of ['user', 'work']) {
+      const f = fixture({ response: false, userPrompt: 'Read the fixture marker' }), e = errorRegion();
+      await f.inspect(); f.body.querySelector('main')!.append(e.region);
+      if (drift === 'user') f.userBody!.text = 'Different prompt\n\n' + markerLine;
+      else { f.workMode.values['aria-pressed'] = 'true'; f.chatMode.values['aria-pressed'] = 'false'; }
+      expect((await f.inspect()).error).toBe(drift === 'user' ? 'conversation_changed' : 'product_mode_unverified');
+    }
+  });
+});
+
 describe('normal ChatGPT product provenance', () => {
   test('recognized disabled Chat controls wait without proof or clicks until both actually enable', async () => {
     const f = fixture({ response: false, normalRoot: true }); f.chatMode.disabled = true; f.workMode.disabled = true;

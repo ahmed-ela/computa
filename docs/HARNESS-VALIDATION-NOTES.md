@@ -4618,3 +4618,53 @@ Public validation passed all 637 tests, frontend type checking and the
 production build. Receipt SHA-256:
 c222214359888e98c91bb4fb6642ce578938a15a138c59168a53308cf65d3b14.
 Signing, installation and fresh ChatGPT-only workflow checks follow.
+
+### Build 63 installed qualification and website controls
+
+Build 63 was committed and pushed as
+326c4a2f56c18902844c3eb2062409471f3c74ef. Signed staging and installed
+verification each passed all 98 bundle checks. Fresh ChatGPT / GPT-6 marker
+qualification executed the requested native terminal read successfully, but
+the inference following that tool result reached its five-minute response
+deadline. The final marker was not returned. Both acknowledged inference
+leases closed durably; the collector remains failed with its original sealed
+evidence. Receipt SHA-256:
+2e33b7216d2448cf218397caef2e1bdbfe9ddc63abb57d33a7fb535c53271498.
+
+Two small prompts were then sent once each on fresh visible temporary ChatGPT
+pages in Computa, outside its native task relay. The offered GPT-6 model was
+verified. Both Pro and Instant effort showed the website's “Load failed” / Retry
+error and produced no answer. Retry was not clicked. The original Pro effort
+was restored and both owned human test tabs were closed. These controls show
+a website failure too; they do not establish its cause or prove that the
+earlier native timeout had the same cause. Missing repeated inspection logs
+are not evidence of missing reads: the logger deduplicates unchanged state.
+
+### Build 64 candidate: fail promptly on a verified ChatGPT load error
+
+The adapter recognizes the observed error only beside a Retry control within
+conversation content. User and assistant quotations, hidden or detached
+controls, editors, menus and sidebars cannot trigger it. The observation still
+passes first-message, model, normal Chat and temporary-session checks. Native
+polling then reports `website_response_failed` without retrying Send or Retry.
+Normal owned-session closure remains available, and the error does not latch
+an account-wide provider gate. Four adapter cases and the native control
+passed, including failures before and after first-message binding, exact
+submission counts, repeated failure polling, cleanup and a fresh next session.
+The old build-63 adapter fails the positive control; restoration was verified.
+Negative receipt SHA-256:
+008d0150aeda8b6cf3f9c5f210b3d557f08404613ad1d33e54d536e675b85068.
+
+Navigation rejection diagnostics now record only a finite address kind and
+whether the target is a main frame, subframe or new window. They contain no
+URL, credentials, query, page text or prompt. Navigation policy is unchanged.
+Final build-64 validation executed 2,362 native tests in 610.042 seconds:
+2,313 passed, 49 opt-in cases explicitly skipped and no failures. The independent
+audit verified the 414 frozen source inputs, seventeen required response/read
+controls, the 47-test browser session suite and 26 unique cleanup identities.
+Native receipt SHA-256:
+5a144555670061d543b3214337518ab909543d42e9f2c2236aadf8c3d3c0a820.
+Public validation passed all 641 tests, frontend type checking and the production
+build. Receipt SHA-256:
+cbc92d49c10fa134effd907a3e8b4eabc3d6e7e86ba0de128eac6f1511985b78.
+Signed installation and fresh ChatGPT controls follow; no live success is claimed.
