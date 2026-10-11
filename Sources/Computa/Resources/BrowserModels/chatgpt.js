@@ -1428,27 +1428,18 @@ if (globalThis.__computaModelOwner !== input.ownerToken) {
   else return { error: "document_changed", detail: "owner_token" };
 }
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
-  const signal = { ownerToken: input.ownerToken, queued: false, observer: null };
+  const signal = { ownerToken: input.ownerToken, observer: null };
   signal.observer = new MutationObserver(records => {
     const productProof = globalThis.__computaChatProductMode;
     const mode = productProof ? chatGPTProductModeState() : null;
     if (productProof) chatGPTObserveProductMutations(productProof, mode, records);
-    if (!records.some(record => !websiteModelIgnoreOwnPickerMutation(record)) || signal.queued) return;
-    signal.queued = true;
-    // Batch streaming mutations into one wake-up; this timer is scheduled
-    // only by an actual change, never as a recurring website poll.
-    setTimeout(() => {
-      signal.queued = false;
-      if (window !== window.top || location.origin !== "https://chatgpt.com"
-        || globalThis.__computaModelOwner !== signal.ownerToken) return;
-      // This notification carries no page content and grants no native action.
-      // The native receiver validates this exact model view and ownership again.
-      try {
-        window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({
-          ownerToken: signal.ownerToken, kind: "dom_changed"
-        });
-      } catch { }
-    }, 100);
+    if (!records.some(record => !websiteModelIgnoreOwnPickerMutation(record))) return;
+    if (window !== window.top || location.origin !== 'https://chatgpt.com'
+      || globalThis.__computaModelOwner !== signal.ownerToken) return;
+    // Notification only. Native batches bursts without an inactive-page timer.
+    // No page text, tool requests, or native mutation authority cross this bridge.
+    try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ ownerToken: signal.ownerToken, kind: 'dom_changed' }); }
+    catch { }
   });
   signal.observer.observe(document.documentElement || document, {
     subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true,

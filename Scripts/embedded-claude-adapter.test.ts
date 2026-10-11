@@ -904,14 +904,21 @@ describe("embedded Claude fixed adapter", () => {
     expect(await foreign.run()).toMatchObject({ error: "document_changed" });
   });
 
-  test("mutation notifications coalesce with no page text or recurring polling", async () => {
+  test("mutation notifications deliver without page timers and carry only ownership and kind", async () => {
     const f = fixture(provider); await f.run(); await f.run();
     expect(f.observers).toHaveLength(1); expect(f.delays).toEqual([]); expect(f.posted).toEqual([]);
+    // Leave the fixture's timer queue undrained: a parked background timer
+    // must not prevent either actual DOM change reaching the native receiver.
     f.observers[0].callback([{ type: "childList" }]); f.observers[0].callback([{ type: "attributes" }]);
-    expect(f.delays).toEqual([100]); f.flush();
-    expect(f.posted).toEqual([{ ownerToken: "f33c8869-a5d3-4b9d-b29e-7b6f591a8e30", kind: "dom_changed" }]);
-    f.observers[0].callback([{ type: "characterData" }]); f.world.__computaModelOwner = "foreign"; f.flush();
-    expect(f.posted).toHaveLength(1);
+    expect(f.delays).toEqual([]);
+    expect(f.posted).toEqual(Array(2).fill({ ownerToken: "f33c8869-a5d3-4b9d-b29e-7b6f591a8e30", kind: "dom_changed" }));
+    f.world.__computaModelOwner = "foreign";
+    f.observers[0].callback([{ type: "characterData" }]);
+    expect(f.posted).toHaveLength(2);
+    f.world.__computaModelOwner = "f33c8869-a5d3-4b9d-b29e-7b6f591a8e30";
+    f.location.origin = "https://example.test";
+    f.observers[0].callback([{ type: "characterData" }]);
+    expect(f.posted).toHaveLength(2);
   });
 
   test("incognito requires its query, header badge and Exit button together", async () => {

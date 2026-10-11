@@ -777,6 +777,43 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         catch { XCTAssertEqual(error as? EmbeddedBrowserSession.Failure, .tabClosed) }
     }
 
+    func testNativeDOMSignalBatchingDoesNotDependOnWebsiteTimers() async throws {
+        let channel = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
+        let before = try channel.currentRevision()
+        for _ in 0..<500 { channel.signalDOMChange() }
+        let first = try await channel.wait(after: before, until: .now + .seconds(2))
+        XCTAssertEqual(first, before + 1, "A burst produces one native wake")
+        let settled = try await channel.wait(after: first, until: .now + .milliseconds(150))
+        XCTAssertEqual(settled, first, "The native timer is one-shot, never recurring polling")
+        for _ in 0..<500 { channel.signalDOMChange() }
+        let second = try await channel.wait(after: first, until: .now + .seconds(2))
+        XCTAssertEqual(second, first + 1, "A later actual change starts a fresh batch")
+        channel.close()
+    }
+
+    func testNativeNavigationSignalBypassesPendingDOMBatch() async throws {
+        let channel = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
+        defer { channel.close() }
+        channel.signalDOMChange()
+        channel.signal()
+        XCTAssertEqual(try channel.currentRevision(), 1, "Native navigation/profile changes wake synchronously")
+        let after = try await channel.wait(after: 1, until: .now + .seconds(2))
+        XCTAssertEqual(after, 2)
+    }
+
+    func testClosingNativeChannelCancelsDOMBatchAndResumesWaiterOnce() async throws {
+        let channel = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
+        let waiting = Task { try await channel.wait(after: 0, until: .now + .seconds(2)) }
+        await Task.yield()
+        channel.signalDOMChange()
+        channel.close()
+        do { _ = try await waiting.value; XCTFail("Closed channel must reject the pending read") }
+        catch { XCTAssertEqual(error as? EmbeddedBrowserSession.Failure, .tabClosed) }
+        channel.signalDOMChange()
+        channel.signal()
+        XCTAssertThrowsError(try channel.currentRevision())
+    }
+
     func testModelNotificationHandlerIsPrivateAndAcceptsOnlyItsExactReceipt() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

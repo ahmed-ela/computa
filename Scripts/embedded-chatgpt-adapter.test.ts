@@ -828,24 +828,22 @@ describe("embedded ChatGPT fixed adapter", () => {
     }
   });
 
-  test("private-world mutation notifications coalesce and carry only ownership and kind", async () => {
+  test("private-world mutation notifications deliver without page timers", async () => {
     const f = fixture();
     await f.inspect(); await f.inspect();
     expect(f.observers).toHaveLength(1);
-    expect(f.posted).toEqual([]);
-    expect(f.scheduledDelays).toEqual([]);
+    expect(f.posted).toEqual([]); expect(f.scheduledDelays).toEqual([]);
     expect(f.observers[0].options?.attributeFilter).toContain("disabled");
     expect(f.observers[0].options?.attributeFilter).toContain("aria-hidden");
     expect(f.observers[0].options?.attributeFilter).toContain("data-turn");
     expect(f.observers[0].options?.attributeFilter).toContain("data-user-message-bubble");
+    // Do not flush parked page timers; delivery is an actual mutation event.
     f.observers[0].callback([{ type: "childList" }]);
     f.observers[0].callback([{ type: "characterData" }]);
-    expect(f.scheduledDelays).toEqual([100]);
-    f.flush();
-    expect(f.posted).toEqual([{ ownerToken: "f33c8869-a5d3-4b9d-b29e-7b6f591a8e30", kind: "dom_changed" }]);
-    f.observers[0].callback([{ type: "attributes" }]);
+    expect(f.scheduledDelays).toEqual([]);
+    expect(f.posted).toEqual(Array(2).fill({ ownerToken: "f33c8869-a5d3-4b9d-b29e-7b6f591a8e30", kind: "dom_changed" }));
     f.location.origin = "https://example.test";
-    f.flush();
-    expect(f.posted).toHaveLength(1);
+    f.observers[0].callback([{ type: "attributes" }]);
+    expect(f.posted).toHaveLength(2);
   });
 });

@@ -3597,3 +3597,30 @@ no later inspection observation appears before the deadline. This does not
 identify the underlying cause. The DOM wake channel currently relies on a
 100 ms JavaScript timer; timer starvation is a candidate for controlled testing,
 not an established cause of this live failure or ChatGPT's inspection timeout.
+
+### Build 49 native DOM notification batching
+
+All three website adapters now post actual DOM changes immediately through
+their existing private, owner-bound message handler. The native channel batches
+bursts once per 100 ms on its monotonic clock. Closing the channel cancels the
+pending batch; navigation and profile changes still signal synchronously.
+There is no recurring poll. Existing origin, ownership, proof and action guards
+remain unchanged. Model-proof waits still contain website timers; this change
+does not establish the cause or resolution of the earlier live failures.
+
+Focused validation passed all 366 adapter tests and five native signal tests.
+The three notification tests each failed against the previous build 48 source
+with its page timer queue undrained, and passed against build 49. This confirms
+that the regressions detect the dependency being removed.
+
+Complete validation passed 625 public tests and executed 2,328 native tests:
+2,279 passed, 49 opt-in tests skipped, zero test failures. All 414 frozen inputs
+and the packaged engine remained unchanged; the five provider/scenario
+workflows, patch matrix, permission boundary and 26 unique cleanup records
+passed. The original native receipt failed its coverage guard because it still
+declared 38 browser-session tests rather than the new 41. The immutable log was
+regraded with that exact count correction and six negative controls, without
+replaying tests. The failed receipt and original log are retained. Corrected
+receipt SHA-256: 47c60effdc49aef1b10da975606028de3f7367c2a0a4391d3e41dd9aca77d5c7.
+Public receipt SHA-256: 54096323f640b3ca9c37e1a03d3279ff53cd6d115ad31116280ed6047576747a.
+Signed installation and new installed-provider qualification are still pending.

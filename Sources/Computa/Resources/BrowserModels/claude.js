@@ -1006,18 +1006,15 @@ if (globalThis.__computaModelOwner !== input.ownerToken) {
   else return { error: 'document_changed', detail: 'owner_token' };
 }
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
-  const signal = { ownerToken: input.ownerToken, queued: false, observer: null };
+  const signal = { ownerToken: input.ownerToken, observer: null };
   signal.observer = new MutationObserver(records => {
-    if (!records.some(record => !websiteModelIgnoreOwnPickerMutation(record)) || signal.queued) return;
-    signal.queued = true;
-    setTimeout(() => {
-      signal.queued = false;
-      if (window !== window.top || location.origin !== 'https://claude.ai'
-        || globalThis.__computaModelOwner !== signal.ownerToken) return;
-      // Notification only. No page text, tool requests, or native mutation authority.
-      try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ ownerToken: signal.ownerToken, kind: 'dom_changed' }); }
-      catch { }
-    }, 100);
+    if (!records.some(record => !websiteModelIgnoreOwnPickerMutation(record))) return;
+    if (window !== window.top || location.origin !== 'https://claude.ai'
+      || globalThis.__computaModelOwner !== signal.ownerToken) return;
+    // Notification only. Native batches bursts without an inactive-page timer.
+    // No page text, tool requests, or native mutation authority cross this bridge.
+    try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ ownerToken: signal.ownerToken, kind: 'dom_changed' }); }
+    catch { }
   });
   signal.observer.observe(document.documentElement || document, { subtree: true, childList: true,
     characterData: true, attributes: true, attributeOldValue: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',

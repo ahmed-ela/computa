@@ -476,7 +476,7 @@ final class EmbeddedBrowserSession {
         let origin = message.frameInfo.securityOrigin
         guard origin.`protocol` == "https", origin.host == entry.modelSignalOriginHost,
               origin.port == 0 || origin.port == 443 else { return }
-        channel.signal()
+        channel.signalDOMChange()
     }
 
     private func signalModelChange(_ entry: Entry) {
@@ -804,7 +804,7 @@ private final class EmbeddedModelSignalHandler: NSObject, WKScriptMessageHandler
 /// Revision is recorded before inspection. A change between inspection and
 /// registration returns immediately instead of disappearing into a missed wakeup.
 @MainActor
-private final class EmbeddedModelChangeChannel {
+final class EmbeddedModelChangeChannel {
     let ownerToken: String
     private var revision: UInt64 = 0
     private var closed = false
@@ -813,11 +813,26 @@ private final class EmbeddedModelChangeChannel {
         let timeout: Task<Void, Never>
     }
     private var waiters: [UUID: Waiter] = [:]
+    private var pendingDOMSignal: Task<Void, Never>?
 
     init(ownerToken: String) { self.ownerToken = ownerToken }
     func currentRevision() throws -> UInt64 {
         guard !closed else { throw EmbeddedBrowserSession.Failure.tabClosed }
         return revision
+    }
+
+    /// Website timers may be suspended in an inactive view. Deliver its
+    /// notification immediately; batch DOM bursts on the native monotonic clock.
+    /// Navigation/profile signals still wake readers synchronously via signal().
+    func signalDOMChange() {
+        guard !closed, pendingDOMSignal == nil else { return }
+        pendingDOMSignal = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(100)) }
+            catch { return }
+            guard let self, !self.closed else { return }
+            self.pendingDOMSignal = nil
+            self.signal()
+        }
     }
 
     func signal() {
@@ -831,6 +846,8 @@ private final class EmbeddedModelChangeChannel {
 
     func close() {
         closed = true
+        pendingDOMSignal?.cancel()
+        pendingDOMSignal = nil
         let pending = Array(waiters.values)
         waiters.removeAll()
         for waiter in pending {
