@@ -95,7 +95,10 @@ final class EmbeddedBrowserSession {
         var modelSignalOriginHost: String?
         var modelDiagnosticOperation: UUID?
         var modelDiagnosticGeneration: UUID?
+        var modelDiagnosticStarted: ContinuousClock.Instant?
+        var modelDiagnosticPhaseStarted: ContinuousClock.Instant?
         var modelDiagnosticPhases: [ModelAdapterPhase] = []
+        var modelClockWaits: [UUID: ModelClockWait] = [:]
         var modelDOMSignalsReceived: UInt16 = 0
         var modelDOMSignalsAccepted: UInt16 = 0
         // Model generations also invalidate on provisional loads. Human
@@ -296,9 +299,11 @@ final class EmbeddedBrowserSession {
         entry.tab.documentGeneration = UUID()
         entry.modelChanges?.close()
         entry.navigationChanges.close()
+        cancelModelClocks(entry)
         if let world = entry.modelSignalWorld {
             entry.view.configuration.userContentController.removeScriptMessageHandler(forName: Self.modelSignalName, contentWorld: world)
             entry.view.configuration.userContentController.removeScriptMessageHandler(forName: Self.modelDiagnosticName, contentWorld: world)
+            entry.view.configuration.userContentController.removeScriptMessageHandler(forName: Self.modelClockName, contentWorld: world)
         }
         entry.delegate.invalidate()
         entry.observations.forEach { $0.invalidate() }
@@ -444,6 +449,12 @@ final class EmbeddedBrowserSession {
 
     static let modelSignalName = "computaChatGPTSignal"
     static let modelDiagnosticName = "computaModelDiagnostic"
+    static let modelClockName = "computaModelClock"
+
+    private struct ModelClockWait {
+        let task: Task<Void, Never>
+        let reply: @MainActor @Sendable (Any?, String?) -> Void
+    }
 
     /// Fixed categories only. Diagnostics never change revisions or grant page authority.
     enum ModelAdapterPhase: String, CaseIterable {
@@ -471,6 +482,8 @@ final class EmbeddedBrowserSession {
                                                            contentWorld: world, name: Self.modelSignalName)
         entry.view.configuration.userContentController.add(EmbeddedModelDiagnosticHandler(session: self, tabID: tabID),
                                                            contentWorld: world, name: Self.modelDiagnosticName)
+        entry.view.configuration.userContentController.addScriptMessageHandler(EmbeddedModelClockHandler(session: self, tabID: tabID),
+                                                                                contentWorld: world, name: Self.modelClockName)
     }
 
     func beginModelDiagnostic(tabID: UUID, ownerToken: String, operationID: UUID) throws {
@@ -478,8 +491,11 @@ final class EmbeddedBrowserSession {
         guard entry.modelChanges?.ownerToken == ownerToken else { throw Failure.tabClosed }
         // A concurrent operation supersedes diagnostics only. Instrumentation
         // must not reject a production evaluation or affect its completion.
+        cancelModelClocks(entry)
         entry.modelDiagnosticOperation = operationID
         entry.modelDiagnosticGeneration = entry.tab.documentGeneration
+        entry.modelDiagnosticStarted = .now
+        entry.modelDiagnosticPhaseStarted = nil
         entry.modelDiagnosticPhases.removeAll(keepingCapacity: true)
     }
 
@@ -487,6 +503,7 @@ final class EmbeddedBrowserSession {
         guard let entry = entries[tabID], entry.modelDiagnosticOperation == operationID else { return }
         entry.modelDiagnosticOperation = nil
         entry.modelDiagnosticGeneration = nil
+        cancelModelClocks(entry)
     }
 
     /// A synchronous native snapshot remains available when JavaScript is stalled.
@@ -495,9 +512,15 @@ final class EmbeddedBrowserSession {
         guard let entry = entries[tabID] else { return "state=closed" }
         if let operationID, entry.modelDiagnosticOperation != operationID { return "state=superseded" }
         func dimension(_ value: CGFloat) -> Int { value.isFinite ? Int(max(0, min(16_384, value.rounded()))) : 0 }
+        func milliseconds(since instant: ContinuousClock.Instant?) -> Int {
+            guard let instant else { return 0 }
+            let parts = (ContinuousClock.now - instant).components
+            return Int(max(0, min(45_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
+        }
         let view = entry.view, window = view.window
         let phases = entry.modelDiagnosticPhases.map(\.rawValue).joined(separator: ",")
         return "phases=\(phases.isEmpty ? "not_started" : phases) active=\(entry.modelDiagnosticOperation != nil)"
+            + " operationAgeMs=\(milliseconds(since: entry.modelDiagnosticStarted)) phaseAgeMs=\(milliseconds(since: entry.modelDiagnosticPhaseStarted)) clocksPending=\(entry.modelClockWaits.count)"
             + " domReceived=\(entry.modelDOMSignalsReceived) domAccepted=\(entry.modelDOMSignalsAccepted) revision=\((try? entry.modelChanges?.currentRevision()) ?? 0)"
             + " attached=\(view.superview != nil) hidden=\(view.isHiddenOrHasHiddenAncestor) window=\(window != nil)"
             + " visible=\(window?.isVisible == true) occluded=\(window != nil && window?.occlusionState.contains(.visible) != true)"
@@ -517,10 +540,53 @@ final class EmbeddedBrowserSession {
         let origin = message.frameInfo.securityOrigin
         guard origin.`protocol` == "https", origin.host == entry.modelSignalOriginHost,
               origin.port == 0 || origin.port == 443 else { return }
+        entry.modelDiagnosticPhaseStarted = .now
         if entry.modelDiagnosticPhases.last != phase {
             entry.modelDiagnosticPhases.append(phase)
             if entry.modelDiagnosticPhases.count > 8 { entry.modelDiagnosticPhases.removeFirst() }
         }
+    }
+
+    /// A bounded one-shot deadline, independent of website timers. Its reply can
+    /// only expire a JavaScript wait; it cannot supply model or ownership proof.
+    fileprivate func receivedModelClock(_ message: WKScriptMessage, tabID: UUID,
+                                       reply: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
+        guard let entry = entries[tabID], message.webView === entry.view, message.frameInfo.isMainFrame,
+              entry.modelDiagnosticGeneration == entry.tab.documentGeneration,
+              let operation = entry.modelDiagnosticOperation,
+              let body = message.body as? [String: Any], Set(body.keys) == ["ownerToken", "operationID", "milliseconds"],
+              body["ownerToken"] as? String == entry.modelChanges?.ownerToken,
+              (body["operationID"] as? String).flatMap(UUID.init(uuidString:)) == operation,
+              let number = body["milliseconds"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite, (1...10_000).contains(number.doubleValue),
+              number.doubleValue.rounded(.towardZero) == number.doubleValue, entry.modelClockWaits.count < 32 else {
+            reply(nil, "model_clock_rejected"); return
+        }
+        let origin = message.frameInfo.securityOrigin
+        guard origin.`protocol` == "https", origin.host == entry.modelSignalOriginHost,
+              origin.port == 0 || origin.port == 443 else { reply(nil, "model_clock_rejected"); return }
+        let id = UUID()
+        let task = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(number.intValue))
+                self?.finishModelClock(tabID: tabID, operationID: operation, id: id)
+            } catch { }
+        }
+        entry.modelClockWaits[id] = ModelClockWait(task: task, reply: reply)
+    }
+
+    private func finishModelClock(tabID: UUID, operationID: UUID, id: UUID) {
+        guard let entry = entries[tabID], let wait = entry.modelClockWaits.removeValue(forKey: id) else { return }
+        guard entry.modelDiagnosticOperation == operationID, entry.modelDiagnosticGeneration == entry.tab.documentGeneration else {
+            wait.reply(nil, "model_clock_cancelled"); return
+        }
+        wait.reply(true, nil)
+    }
+
+    private func cancelModelClocks(_ entry: Entry) {
+        let waits = Array(entry.modelClockWaits.values)
+        entry.modelClockWaits.removeAll(keepingCapacity: true)
+        for wait in waits { wait.task.cancel(); wait.reply(nil, "model_clock_cancelled") }
     }
 
     func modelChangeRevision(for id: UUID) throws -> UInt64 {
@@ -883,6 +949,19 @@ private final class EmbeddedModelDiagnosticHandler: NSObject, WKScriptMessageHan
     init(session: EmbeddedBrowserSession, tabID: UUID) { self.session = session; self.tabID = tabID }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         session?.receivedModelDiagnostic(message, tabID: tabID)
+    }
+}
+
+@MainActor
+private final class EmbeddedModelClockHandler: NSObject, WKScriptMessageHandlerWithReply {
+    private weak var session: EmbeddedBrowserSession?
+    private let tabID: UUID
+
+    init(session: EmbeddedBrowserSession, tabID: UUID) { self.session = session; self.tabID = tabID }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
+                               replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
+        guard let session else { replyHandler(nil, "model_clock_cancelled"); return }
+        session.receivedModelClock(message, tabID: tabID, reply: replyHandler)
     }
 }
 

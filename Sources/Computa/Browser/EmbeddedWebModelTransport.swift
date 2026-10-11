@@ -1493,26 +1493,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     guard result.isPending else { return }
                     session.view.callAsyncJavaScript(script, arguments: ["input": input], in: nil, in: world) { reply in
                         switch reply {
-                    case .success(let value):
-                        do { result.complete(.success(try JSONSerialization.data(withJSONObject: value))) }
-                        catch {
-                            Self.inspectionLog.error("adapterResultInvalid provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence)")
+                        case .success(let value):
+                            do { result.complete(.success(try JSONSerialization.data(withJSONObject: value))) }
+                            catch {
+                                Self.inspectionLog.error("adapterResultInvalid provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence)")
+                                result.complete(.failure(Failure.pageUnavailable))
+                            }
+                        case .failure(let error):
+                            let native = error as NSError
+                            let message = native.userInfo["WKJavaScriptExceptionMessage"] as? String ?? ""
+                            let kind = ["TypeError", "ReferenceError", "SyntaxError", "RangeError"].first {
+                                message.hasPrefix($0 + ":")
+                            } ?? "unknown"
+                            let rawLine = native.userInfo["WKJavaScriptExceptionLineNumber"] as? Int ?? -1
+                            let rawColumn = native.userInfo["WKJavaScriptExceptionColumnNumber"] as? Int ?? -1
+                            let line = (0...999_999).contains(rawLine) ? rawLine : -1
+                            let column = (0...99_999).contains(rawColumn) ? rawColumn : -1
+                            // Log finite categories and source positions only.
+                            // Exception messages can contain page or prompt data.
+                            Self.inspectionLog.error("adapterFailure provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) code=\(native.code) kind=\(kind, privacy: .public) line=\(line) column=\(column)")
                             result.complete(.failure(Failure.pageUnavailable))
-                        }
-                    case .failure(let error):
-                        let native = error as NSError
-                        let message = native.userInfo["WKJavaScriptExceptionMessage"] as? String ?? ""
-                        let kind = ["TypeError", "ReferenceError", "SyntaxError", "RangeError"].first {
-                            message.hasPrefix($0 + ":")
-                        } ?? "unknown"
-                        let rawLine = native.userInfo["WKJavaScriptExceptionLineNumber"] as? Int ?? -1
-                        let rawColumn = native.userInfo["WKJavaScriptExceptionColumnNumber"] as? Int ?? -1
-                        let line = (0...999_999).contains(rawLine) ? rawLine : -1
-                        let column = (0...99_999).contains(rawColumn) ? rawColumn : -1
-                        // Log finite categories and source positions only.
-                        // Exception messages can contain page or prompt data.
-                        Self.inspectionLog.error("adapterFailure provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) code=\(native.code) kind=\(kind, privacy: .public) line=\(line) column=\(column)")
-                        result.complete(.failure(Failure.pageUnavailable))
                         }
                     }
                 }

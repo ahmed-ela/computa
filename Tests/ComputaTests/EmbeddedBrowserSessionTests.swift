@@ -987,6 +987,124 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         }
     }
 
+    func testModelClockUsesNativeDeadlineWhenWebsiteTimersNeverRun() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false), owner = UUID().uuidString, operation = UUID()
+        let view = try XCTUnwrap(session.webView(for: id)), world = WKContentWorld.world(name: "computa-clock-test")
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world)
+        try await loadDiagnosticFixture(view, host: "chatgpt.com")
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+        let hidden = try await script(view, "return !window.webkit?.messageHandlers?.computaModelClock;")
+        XCTAssertEqual(hidden, Data("true".utf8), "The page world has no clock handler")
+        _ = try await script(view, "window.webkit.messageHandlers.computaModelDiagnostic.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', phase: 'model_wait'}); globalThis.setTimeout = () => { throw new Error('website timer must not run'); }; return true;", world: world)
+        let revision = try session.modelChangeRevision(for: id), began = ContinuousClock.now
+        let elapsed = try await script(view, "return await window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 100});", world: world)
+        XCTAssertEqual(elapsed, Data("true".utf8))
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - began, .milliseconds(80))
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(2))
+        XCTAssertEqual(try session.modelChangeRevision(for: id), revision)
+        let snapshot = session.modelDiagnosticSnapshot(tabID: id)
+        let ageField = try XCTUnwrap(snapshot.split(separator: " ").first { $0.hasPrefix("phaseAgeMs=") })
+        let age = try XCTUnwrap(Int(ageField.dropFirst("phaseAgeMs=".count)))
+        XCTAssertGreaterThanOrEqual(age, 80)
+        XCTAssertLessThanOrEqual(age, 45_000)
+        XCTAssertTrue(snapshot.contains("clocksPending=0"))
+        XCTAssertFalse(snapshot.contains(owner))
+        XCTAssertFalse(snapshot.contains("PRIVATE_RAW_PAGE_CANARY"))
+        session.endModelDiagnostic(tabID: id, operationID: operation)
+    }
+
+    func testModelClockRejectsInvalidReceiptsAndCancelsExactlyOnceOnSupersedeAndClose() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false), owner = UUID().uuidString, operation = UUID()
+        let view = try XCTUnwrap(session.webView(for: id)), world = WKContentWorld.world(name: "computa-clock-scope-test")
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world)
+        try await loadDiagnosticFixture(view, host: "chatgpt.com")
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+        let invalid = """
+        const valid = {ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 100};
+        const bodies = [-1, 0, 0.5, 10001, true, '100', null].map(milliseconds => ({...valid, milliseconds}));
+        bodies.push({...valid, ownerToken: '\(UUID().uuidString)'}, {...valid, operationID: '\(UUID().uuidString)'},
+          {...valid, pageText: 'PRIVATE_RAW_PAGE_CANARY'}, {ownerToken: valid.ownerToken, operationID: valid.operationID});
+        let rejected = 0;
+        for (const body of bodies) {
+          try { await window.webkit.messageHandlers.computaModelClock.postMessage(body); }
+          catch (error) { if(error.message === 'model_clock_rejected') rejected++; }
+        }
+        return rejected === bodies.length;
+        """
+        let invalidRejected = try await script(view, invalid, world: world)
+        XCTAssertEqual(invalidRejected, Data("true".utf8))
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=0"))
+        _ = try await script(view, "globalThis.clockReplies = 0; for(let index = 0; index < 33; index++) window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 5000}).then(() => globalThis.clockReplies++, () => globalThis.clockReplies++); return true;", world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=32"), "Pending native clocks are bounded")
+        let next = UUID()
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: next)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=0"))
+        let superseded = try await script(view, "return globalThis.clockReplies;", world: world)
+        XCTAssertEqual(superseded, Data("33".utf8))
+        _ = try await script(view, "window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(next.uuidString)', milliseconds: 5000}).then(() => globalThis.clockReplies++, () => globalThis.clockReplies++); return true;", world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=1"))
+        session.closeTab(id)
+        let closed = try await script(view, "return globalThis.clockReplies;", world: world)
+        XCTAssertEqual(closed, Data("34".utf8))
+        XCTAssertEqual(session.modelDiagnosticSnapshot(tabID: id), "state=closed")
+    }
+
+    func testModelClockPinsProviderMainFrameAndDocumentGeneration() async throws {
+        for host in ["chatgpt.com", "claude.ai", "gemini.google.com"] {
+            let session = EmbeddedBrowserSession(persistent: false)
+            defer { session.shutdown() }
+            let id = try session.createTab(select: false), owner = UUID().uuidString
+            let view = try XCTUnwrap(session.webView(for: id)), world = WKContentWorld.world(name: "computa-clock-origin-\(host)")
+            try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world, originHost: host)
+            for origin in [host, "foreign.example.test"] {
+                try await loadDiagnosticFixture(view, host: origin)
+                let operation = UUID()
+                try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+                let receipt = "try { await window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 1}); return 'expired'; } catch(error) { return error.message; }"
+                let result = try await script(view, receipt, world: world)
+                XCTAssertEqual(result, Data("\"\(origin == host ? "expired" : "model_clock_rejected")\"".utf8))
+                session.endModelDiagnostic(tabID: id, operationID: operation)
+            }
+        }
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab(select: false), owner = UUID().uuidString, operation = UUID()
+        let view = try XCTUnwrap(session.webView(for: id)), world = WKContentWorld.world(name: "computa-clock-frame-test")
+        let human = try XCTUnwrap(session.webView(for: session.createTab()))
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner, world: world)
+        let humanHidden = try await script(human, "return !window.webkit?.messageHandlers?.computaModelClock;", world: world)
+        XCTAssertEqual(humanHidden, Data("true".utf8))
+        try await loadDiagnosticFixture(view, host: "chatgpt.com")
+        try session.beginModelDiagnostic(tabID: id, ownerToken: owner, operationID: operation)
+        let receipt = "try { await window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 100}); return 'expired'; } catch(error) { return error.message; }"
+        let childFixture = DiagnosticChildFrameFixture()
+        view.configuration.userContentController.add(childFixture, name: "fixtureFrame")
+        defer { view.configuration.userContentController.removeScriptMessageHandler(forName: "fixtureFrame") }
+        let navigationDelegate = view.navigationDelegate
+        view.navigationDelegate = nil // Allow only this controlled about:srcdoc test frame.
+        defer { view.navigationDelegate = navigationDelegate }
+        _ = try await script(view, "const frame = document.createElement('iframe'); frame.srcdoc = '<script>window.webkit.messageHandlers.fixtureFrame.postMessage(\"ready\")<\\/script>'; document.body.appendChild(frame); return true;")
+        let deadline = ContinuousClock.now + .seconds(5)
+        while childFixture.frame == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        let frame = try XCTUnwrap(childFixture.frame)
+        let childResult = try await script(view, receipt, world: world, frame: frame)
+        XCTAssertEqual(childResult, Data("\"model_clock_rejected\"".utf8))
+        _ = try await script(view, "globalThis.clockResult = null; window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 100}).then(() => globalThis.clockResult = 'expired', error => globalThis.clockResult = error.message); return true;", world: world)
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=1"))
+        view.navigationDelegate = navigationDelegate
+        view.navigationDelegate?.webViewWebContentProcessDidTerminate?(view)
+        try await Task.sleep(for: .milliseconds(150))
+        let staleReply = try await script(view, "return globalThis.clockResult;", world: world)
+        XCTAssertEqual(staleReply, Data("\"model_clock_cancelled\"".utf8))
+        let staleReceipt = try await script(view, receipt, world: world)
+        XCTAssertEqual(staleReceipt, Data("\"model_clock_rejected\"".utf8))
+        XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("clocksPending=0"))
+    }
+
     private func loadDiagnosticFixture(_ view: WKWebView, host: String) async throws {
         view.loadHTMLString("<p id='ready'>PRIVATE_RAW_PAGE_CANARY</p>", baseURL: URL(string: "https://\(host)/"))
         let deadline = ContinuousClock.now + .seconds(10)

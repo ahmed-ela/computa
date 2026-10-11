@@ -3728,3 +3728,42 @@ delayed website timer from earlier evaluation work consuming the overall
 deadline. No failed prompt was replayed. Further diagnosis and a bounded
 native-clock wait mechanism remain under investigation. Gemini CAPTCHA and
 Claude quota blocks remain external gates.
+
+
+## Build 51: native one-shot deadlines for shared model verification
+
+Build 50 localized the ChatGPT browser failure to a model-verification wait,
+without elapsed phase times. Build 51 makes the shared verification deadline
+independent of website timers through a private-world native one-shot clock.
+DOM changes still wake the existing condition immediately. A clock reply only
+expires a wait; model selection and conversation ownership must still provide
+positive proof. The reply handler accepts exact owner/operation receipts from
+the pinned provider main frame and document generation, bounds delay to
+1–10,000 ms and outstanding clocks to 32, and cancels pending replies exactly
+once when the operation is superseded, ends, or its tab closes. Native
+operation/phase ages are bounded metadata and contain no page text.
+
+All 378 adapter tests passed, including a fixture whose website timers never
+run, DOM success before late clock expiry and rejected clocks failing closed.
+Against the unchanged build 50 helper, the timer control deliberately fails
+once per provider (three failures, zero passes); no production source mutation
+or website prompt was used. Three focused native clock tests passed for all
+provider origins, foreign origins, private-world isolation, child frames,
+stale generations, receipt limits and cancellation. The initial compile probe
+required the Swift 6 WebKit reply closure's MainActor/Sendable annotations;
+its failed log is retained alongside the corrected successful run.
+
+The seven public groups passed 637 tests with zero failures or skips. Receipt
+SHA-256: a21240c25c53e8b4876ffba2d530f8d00a575dd87de3820907aed033b43a905f.
+Complete native validation executed 2,334 tests: 2,285 passed, 49 opt-in skips,
+zero failures, in 543.989 seconds. The browser-session suite declared 46 tests
+before execution. All 414 frozen inputs and the unchanged engine matched;
+permission, workflow and patch guards passed and 26 unique cleanup identities
+verified. An independent audit verified the original immutable receipts and
+log without replay. Native receipt SHA-256:
+a9f0d461a20d3f77fb84d9d722a47405f22d8c6729b5239701b359a2bb4656c6.
+Signed installation and fresh live qualification remain separate next steps.
+The native clock control is not evidence that the prior live failure is fixed.
+
+The successful build 50 marker project's exact owned directory was archived,
+verified and removed. Its evidence and failed browser fixture remain retained.

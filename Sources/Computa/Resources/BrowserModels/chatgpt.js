@@ -337,7 +337,19 @@ function websiteModelWaitForChange(until, condition, phase = 'model_wait') {
     observer.observe(document.documentElement || document, { subtree: true, childList: true, characterData: true,
       attributes: true, attributeFilter: ['aria-expanded', 'aria-hidden', 'aria-controls', 'aria-labelledby', 'aria-checked',
         'aria-selected', 'aria-label', 'aria-disabled', 'disabled', 'data-state', 'role', 'class', 'style', 'hidden', 'inert'] });
-    timer = setTimeout(() => finish(false), Math.max(1, until - Date.now()));
+    const milliseconds = Math.max(1, Math.min(10_000, Math.ceil(until - Date.now())));
+    const clock = window.webkit?.messageHandlers?.computaModelClock;
+    if (clock && typeof input?.operationID === 'string') {
+      try {
+        // A native reply expires this wait only. All existing conditions and
+        // model/owner guards must still supply their own positive proof.
+        Promise.resolve(clock.postMessage({ ownerToken: input.ownerToken,
+          operationID: input.operationID, milliseconds })).then(() => finish(false), () => finish(false));
+      } catch { finish(false); }
+    } else {
+      // Standalone fixtures and nonnative adapters retain the bounded fallback.
+      timer = setTimeout(() => finish(false), milliseconds);
+    }
     if (condition()) finish(true); // A synchronous mount cannot fall between read and arm.
   });
 }

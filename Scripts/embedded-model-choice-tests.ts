@@ -71,6 +71,47 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(await throwing.run('inspect', request)).toEqual(expected);
     });
 
+    test('native clock expires a wait when website timers never run and supplies no positive proof', async () => {
+      const helper = readFileSync(new URL('./embedded-model-choice-helper.js', import.meta.url), 'utf8');
+      const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+      const execute = new AsyncFunction('input', 'window', 'document', 'MutationObserver', 'setTimeout', 'globalThis',
+        helper + '\nreturn await websiteModelWaitForChange(Date.now() + 25, () => false);');
+      const input = { ownerToken: 'f33c8869-a5d3-4b9d-b29e-7b6f591a8e30', operationID: 'a909845c-2857-4b22-a66b-261b22281513' };
+      const posted: any[] = []; let pageTimers = 0, disconnected = 0;
+      const window: any = { webkit: { messageHandlers: { computaModelClock: { postMessage: (body: any) => {
+        posted.push(body); return new Promise(resolve => setTimeout(() => resolve(true), 25));
+      } } } } }; window.top = window;
+      class Observer { constructor(_callback: any) {} observe() {} disconnect() { disconnected++; } }
+      const pending = execute(input, window, { documentElement: {} }, Observer, () => { pageTimers++; }, {});
+      const result = await Promise.race([pending, new Promise((_, reject) => setTimeout(() => reject(new Error('native clock control deadline')), 200))]);
+      expect(result).toBe(false);
+      expect(pageTimers).toBe(0);
+      expect(disconnected).toBe(1);
+      expect(posted).toHaveLength(1);
+      expect(Object.keys(posted[0]).sort()).toEqual(['milliseconds', 'operationID', 'ownerToken']);
+      expect(posted[0]).toMatchObject(input);
+      expect(posted[0].milliseconds).toBeGreaterThan(0);
+      expect(posted[0].milliseconds).toBeLessThanOrEqual(25);
+    });
+
+    test('a real DOM condition wins once over a later native expiry and rejected clocks fail closed', async () => {
+      const helper = readFileSync(new URL('./embedded-model-choice-helper.js', import.meta.url), 'utf8');
+      const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+      const execute = new AsyncFunction('input', 'window', 'document', 'MutationObserver', 'setTimeout', 'globalThis', 'condition',
+        helper + '\nreturn await websiteModelWaitForChange(Date.now() + 100, condition);');
+      const input = { ownerToken: 'f33c8869-a5d3-4b9d-b29e-7b6f591a8e30', operationID: 'a909845c-2857-4b22-a66b-261b22281513' };
+      let wake: (() => void) | undefined, expire: ((value: any) => void) | undefined, condition = false, disconnects = 0;
+      const window: any = { webkit: { messageHandlers: { computaModelClock: { postMessage: () => new Promise(resolve => { expire = resolve; }) } } } }; window.top = window;
+      class Observer { constructor(callback: any) { wake = callback; } observe() {} disconnect() { disconnects++; } }
+      const pending = execute(input, window, { documentElement: {} }, Observer, () => { throw new Error('page timer must not run'); }, {}, () => condition);
+      condition = true; wake!();
+      expect(await pending).toBe(true);
+      expire!(true); await Promise.resolve(); await Promise.resolve();
+      expect(disconnects).toBe(1);
+      window.webkit.messageHandlers.computaModelClock.postMessage = () => Promise.reject(new Error('clock rejected'));
+      expect(await execute(input, window, { documentElement: {} }, Observer, () => { throw new Error('page timer must not run'); }, {}, () => false)).toBe(false);
+    });
+
     test('discovery exposes enabled family leaves and excludes descriptions, effort and upgrades', async () => {
       const { f, picker } = setup();
       const result = await advance(f, 'discoverModels');
