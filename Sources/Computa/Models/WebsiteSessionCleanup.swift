@@ -117,7 +117,13 @@ struct WebsiteSessionCleanupStore: Sendable {
                 try synchronize(file); return true
             }
             if existing.isEmpty {
-                guard try summaryFiles().count < limits.summaryTasks else { return false }
+                if try summaryFiles().count >= limits.summaryTasks {
+                    // The summary is a bounded UI cache. A transaction already
+                    // has its exact synced/read-back proof, and latest() reads
+                    // that journal even when no summary slot is available.
+                    // Legacy observations still require their summary file.
+                    return receipt.isTransactionLinked
+                }
             }
             var retained = existing + [receipt], removed: [WebsiteSessionCleanupReceipt] = []
             var data = try encoded(retained)

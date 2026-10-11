@@ -344,6 +344,59 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
         XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [closed])
     }
 
+    func testFullSummaryCacheKeepsExactTransactionProofWithoutGrowingCacheOrAcceptingLegacy() throws {
+        let root = try directory(), oldScope = Scope(), newScope = Scope()
+        var limits = WebsiteSessionCleanupStore.Limits(); limits.summaryTasks = 1
+        let store = WebsiteSessionCleanupStore(directory: root, limits: limits), old = legacy(oldScope.task)
+        XCTAssertTrue(store.save(old))
+        let originalSummary = try Data(contentsOf: root.appendingPathComponent(oldScope.task + ".jsonl"))
+        let unresolved = receipt(newScope, outcome: .unconfirmed)
+        XCTAssertTrue(store.save(unresolved)); XCTAssertTrue(store.save(unresolved))
+        XCTAssertEqual(try store.transactionRecords(for: newScope.task, turnID: newScope.turn), [unresolved])
+        XCTAssertTrue(store.latest().contains(unresolved), "A full cache cannot hide a retained lease")
+        let closed = receipt(newScope)
+        XCTAssertTrue(store.save(closed)); XCTAssertTrue(store.save(closed))
+        XCTAssertEqual(try store.transactionRecords(for: newScope.task, turnID: newScope.turn), [unresolved, closed])
+        XCTAssertEqual(Set(store.latest().map(\.attemptID)), Set([old.attemptID, closed.attemptID]))
+        XCTAssertFalse(store.save(legacy(Scope().task)), "A legacy observation has no durable transaction proof")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(newScope.task + ".jsonl").path))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(oldScope.task + ".jsonl")), originalSummary)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.count, 1)
+        let journal = journalFile(root, newScope), validJournal = try Data(contentsOf: journal)
+        try Data("corrupt\n".utf8).write(to: journal)
+        XCTAssertFalse(store.save(closed), "Cache capacity never excuses a corrupt durable proof")
+        try validJournal.write(to: journal)
+        limits.transactionRecords = 2
+        XCTAssertFalse(WebsiteSessionCleanupStore(directory: root, limits: limits).save(receipt(newScope)),
+            "The durable journal retains its finite record budget")
+    }
+
+    func testInferenceReleasesResponseWithFullDefaultSummaryCacheAndOneDurableClosure() async throws {
+        let root = try directory(), store = WebsiteSessionCleanupStore(directory: root)
+        for _ in 0..<256 { XCTAssertTrue(store.save(legacy(Scope().task))) }
+        let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString, generation = UUID()
+        let transport = CleanupReceiptTransport(), server = WebModelServer(), audit = CleanupReceiptAudit()
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: root, runtimeGeneration: generation) { await audit.append($0) }
+        let response = try await server.fixtureInfer(Data("{\"model\":\"browser/claude\",\"input\":\"Synthetic\",\"tools\":[]}".utf8),
+            taskID: task, threadID: thread, turnID: turn, runtimeGeneration: generation)
+        XCTAssertFalse(response.isEmpty)
+        let observation = await audit.last(), closed = try XCTUnwrap(observation)
+        XCTAssertTrue(closed.receiptSaved); XCTAssertEqual(closed.outcome, .closed)
+        XCTAssertEqual(try store.transactionRecords(for: task.lowercased(), turnID: turn.lowercased()), [closed])
+        let repeated = await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
+        XCTAssertEqual(repeated, closed)
+        let calls = await transport.calls()
+        XCTAssertEqual(calls.map(\.0), ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+        XCTAssertEqual(store.latest().count, 257)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.count, 256)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(task.lowercased() + ".jsonl").path))
+        _ = await server.shutdown()
+    }
+
     func testArchiveCountBudgetFailsBeforeEvictingHistoricalProof() throws {
         let root = try directory(), scope = Scope()
         var limits = WebsiteSessionCleanupStore.Limits(); limits.summaryRecords = 2; limits.archiveRecords = 1

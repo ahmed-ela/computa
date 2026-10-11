@@ -4106,3 +4106,76 @@ four queue/deadline controls without test replay. Native receipt SHA-256:
 Source freeze SHA-256:
 f36e9a43af3b6ea9537b1528de2db2324f396a37fa988606f608280aa48b9e6e.
 Signed installation and provider adherence remain separate next steps.
+
+
+### Installed 57: summary-cache capacity blocked a durable cleanup
+
+Signed staging and installed verification each passed 98 checks. The fresh
+process was PID 20020, runtime generation c763cb17-db96-40d7-944f-a620c1e2b098,
+from committed source 82032be6c85c617754d5c758ea8bea8d33dfa5cc.
+The fresh ChatGPT GPT-6 qualification reached complete website model evidence,
+then failed with inference_evidence_unsaved before any response or tool release.
+The exact transaction closure was already durable and receiptSaved=true in its
+per-turn journal. Its optional per-task summary could not be created because
+256 summary files already occupied the configured cache limit. An isolated copy
+of the actual store reproduces save=false despite a valid durable transaction.
+No source permissions, journal corruption or exhausted byte budget was found.
+The original failed rollout and both exact journals are sealed; no prompt replay
+or passing qualification is claimed. Its runtime warning still reports the save
+failure. Failure receipt: chatgpt-qualification-installed57-r1/
+persistence-failure-receipt.json.
+
+### Candidate 58: durable cleanup survives a full summary cache
+
+The cleanup store now reports success for a transaction whose exact journal
+write, sync, readback and finite identity checks already succeeded, even when no
+optional summary slot remains. latest() already reads those transaction journals.
+The cache remains bounded at 256 summary tasks. Legacy receipts still require a
+summary slot; failed writes, corrupt proofs, conflicting identities and journal
+budgets still reject. No old records are deleted or synthesized.
+
+New regressions cover a one-slot summary cache, unresolved and exact closed
+leases, idempotent retries, preserved existing summary bytes, rejected legacy
+observations, corrupt proof and exhausted journal budget. A production-server
+fixture fills all 256 default summary slots, then verifies response release,
+one send/finish, one exact durable closure and no new summary file.
+The first focused runner selected only 13 tests and missed the transaction-store
+class. Its guard correctly marked validation failed; that receipt is preserved.
+The successor filter includes every cleanup store/runtime class.
+
+Collector 27 treats a per-task summary as optional only in inference-transaction
+mode; exact journals and every release/closure/model/causal identity check remain
+mandatory. Eight controls prove a valid omitted cache passes and missing,
+foreign, duplicate or invented durable proofs and conflicting supplied summaries
+fail. Original model outcomes are unchanged; these controls do not run inference.
+
+The latest cleanup verified and removed 32,195,080,192 allocated bytes of closed
+Rust CI test cache, 943,579,136 bytes of compiler caches and 511,586,304 bytes of
+duplicate internal app backups. It preserved all 414 source inputs at deletion,
+installed/staged build 57 executables, models and test evidence, with no signals.
+The external drive then reported about 45 GiB free. Rust CI executables can be
+rebuilt from preserved source; their immutable test receipts remain available.
+
+
+The second focused run executed 35 tests; both new regressions passed, while one
+TypeScript fixture reported unavailable because the ad-hoc runner omitted the
+pinned MACTOPUS_TEST_BUN environment. No app-source change was made for that
+failure. With the same fixture runtime as the full suite, all 35 cleanup tests
+passed in 22.004 seconds, including all four required controls and unchanged
+414 inputs. Full native validation is now running. Public validation passed
+637 tests with no failures or skips; receipt SHA-256:
+3375fccfe68ecb2a96936f3a5644a0940836ce1d97781a13006ecab64ef21c0d.
+
+
+Full candidate 58 validation executed 2,342 tests: 2,293 passed, 49 explicit
+opt-in skips and zero failures in 585.205 seconds. All 414 frozen inputs,
+permission/workflow/patch guards and 26 unique cleanup identities verified.
+An independent audit checked the immutable log/receipt and all new capacity,
+existing corrupt-write/archive, link/capture and queue/deadline controls without
+replaying tests. Native receipt SHA-256:
+9c26d1300e7cb4d6e5b1532e36aaf58b39571e6ccc8a2be4ee5a02a9c417f195.
+Source freeze SHA-256:
+9369cf7c11a32696249f15d83860fbeca933a2cbc68fcaf8d31944477a5f0e07.
+The changed compiled inputs are only the version, cleanup store and cleanup
+test file. Signed staging, installation and current live qualification remain
+separate pending checks.
