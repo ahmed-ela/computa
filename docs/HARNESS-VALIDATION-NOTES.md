@@ -3623,4 +3623,38 @@ regraded with that exact count correction and six negative controls, without
 replaying tests. The failed receipt and original log are retained. Corrected
 receipt SHA-256: 47c60effdc49aef1b10da975606028de3f7367c2a0a4391d3e41dd9aca77d5c7.
 Public receipt SHA-256: 54096323f640b3ca9c37e1a03d3279ff53cd6d115ad31116280ed6047576747a.
-Signed installation and new installed-provider qualification are still pending.
+Signed staging and installed verification each passed 98 checks. Computa
+0.6.0 (49), compiled from 4876590724eb495187a62ccff1967a99c44c3b25,
+was installed with build 48 retained as a rollback. The running process and
+runtime generation were captured independently.
+
+Fresh marker qualifications passed for Gemini 3.1 Pro, ChatGPT GPT-6 and
+Claude Sonnet 5.5. Each passed all 39 checks, including a real native marker
+read and two acknowledged/closed website leases. These small qualifications
+do not establish full workflow reliability.
+
+All three subsequent workflow cases failed. Gemini coding performed an initial
+terminal read, then its second inference hit the preparation deadline. No edits
+or commit occurred; both leases closed. ChatGPT browser use performed nine
+native actions and reached search/details navigation, then an inspect operation
+hit its 10-second adapter deadline. All ten leases closed. The owned synthetic
+HTTP server was separately stopped, with its exact PID absent and port closed.
+Claude composition completed initial project reads, then hit a website usage
+limit before starting its preview; all three leases closed. Gemini and Claude
+collectors also raised missing-effect errors for work never performed. Those
+original failed receipts and immutable traces remain intact; separate finite
+projections verify the provider failure and cleanup without qualifying effects.
+
+Exact-PID diagnostics show the Gemini second-inference readiness observation
+with a composer, temporary mode false and no temporary action available, then
+no further observation before its deadline. ChatGPT records an inspect timeout
+without an await-phase diagnosis. Native DOM batching has not resolved either
+live failure. Shared model-proof waits still use page timers, but their causal
+role remains unproven. Further controlled diagnostics are required.
+
+A subsequent normal Gemini browser tab showed Google's unusual-traffic CAPTCHA.
+The persisted Gemini human-verification gate was independently confirmed.
+That later observation does not prove the cause of the earlier readiness
+timeout. No challenge was completed and no failed prompt was replayed. Gemini
+is blocked on human recovery; Claude is blocked on quota reset. The current
+full live workflow matrix remains unqualified.
