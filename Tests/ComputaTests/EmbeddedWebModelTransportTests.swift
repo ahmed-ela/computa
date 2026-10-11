@@ -6,6 +6,103 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testTenSecondInspectionBudgetFailsUnderVerifiedWebContentQueueDelay() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .seconds(45))
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Verify a queued read expires without replay"])
+        fixture.transport.setInspectionTimeoutForTesting(.seconds(10))
+        var timeouts: [String] = []
+        fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+        let blocker = FixtureWebContentWork(view: view)
+        defer { blocker.detach() }
+        try await blocker.start(milliseconds: 12_000)
+        let began = ContinuousClock.now
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("The old inspection budget must expire before the blocked queue becomes available")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .pageUnavailable) }
+        XCTAssertGreaterThan(ContinuousClock.now - began, .seconds(9))
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(11))
+        XCTAssertEqual(timeouts.count, 1)
+        XCTAssertTrue(timeouts.first?.contains("diagnosticsReceived=0") == true)
+        try await blocker.waitForCompletion()
+        XCTAssertEqual(timeouts.count, 1)
+        let prompts = try await capturedUserPrompts(view)
+        XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, ["Verify a queued read expires without replay"])
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
+    }
+
+    func testInspectionSurvivesWebContentQueueDelayBeyondTenSeconds() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .seconds(45))
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "One submission across queued inspection"])
+        var timeouts: [String] = []
+        fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+        let blocker = FixtureWebContentWork(view: view)
+        defer { blocker.detach() }
+        try await blocker.start(milliseconds: 12_000)
+        let began = ContinuousClock.now
+        _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertGreaterThan(ContinuousClock.now - began, .seconds(10), "The fixture must actually delay native inspection beyond the old budget")
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(20))
+        try await blocker.waitForCompletion()
+        let completed = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        XCTAssertEqual(timeouts, [])
+        let prompts = try await capturedUserPrompts(view)
+        XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, ["One submission across queued inspection"])
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
+    }
+
+    func testQueuedInspectionStillStopsAtResponseDeadlineWithoutAcceptingLateReply() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never accept a reply after its deadline"])
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .milliseconds(400))
+        var timeouts: [String] = []
+        fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+        let blocker = FixtureWebContentWork(view: view)
+        defer { blocker.detach() }
+        try await blocker.start(milliseconds: 1_500)
+        let began = ContinuousClock.now
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("Queued inspection must not extend the response deadline")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(1))
+        XCTAssertEqual(timeouts.count, 1)
+        XCTAssertTrue(timeouts.first?.contains("diagnosticsReceived=0") == true)
+        try await blocker.waitForCompletion()
+        XCTAssertEqual(timeouts.count, 1, "A late callback cannot reopen the timed-out operation")
+        XCTAssertTrue(fixture.browser.modelDiagnosticSnapshot(tabID: try XCTUnwrap(fixture.createdTabs.last)).contains("active=false"))
+        let prompts = try await capturedUserPrompts(view)
+        XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, ["Never accept a reply after its deadline"])
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
+    }
+
     func testStalledFirstUserDigestReportsNativePhaseAndCannotAcceptAReply() async throws {
         let fixture = try Fixture(page: Self.page)
         defer { fixture.shutdown() }
@@ -5277,6 +5374,66 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     private final class FixtureRenderWindow: NSWindow {
         override var canBecomeKey: Bool { false }
         override var canBecomeMain: Bool { false }
+    }
+
+    /// Occupy a real WebContent queue before enqueuing the transport read.
+    /// The start receipt is independent of the blocked script's completion.
+    private final class FixtureWebContentWork: NSObject, WKScriptMessageHandler {
+        private weak var view: WKWebView?
+        private let started = FixtureScriptResult()
+        private let completed = FixtureScriptResult()
+        private static let handler = "computaFixtureWorkStarted"
+
+        init(view: WKWebView) {
+            self.view = view
+            super.init()
+            view.configuration.userContentController.add(self, name: Self.handler)
+        }
+
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.webView === view, message.frameInfo.isMainFrame,
+                  message.body as? String == "started" else { return }
+            started.complete(.success(Data()))
+        }
+
+        func start(milliseconds: Int) async throws {
+            let view = try XCTUnwrap(view)
+            _ = try await wait(started, maximumWait: .seconds(2)) {
+                view.callAsyncJavaScript("""
+                    window.webkit.messageHandlers.computaFixtureWorkStarted.postMessage('started');
+                    const until = performance.now() + milliseconds;
+                    while (performance.now() < until) { }
+                    return true;
+                    """, arguments: ["milliseconds": milliseconds], in: nil, in: .page) { [completed] result in
+                    switch result {
+                    case .success: completed.complete(.success(Data()))
+                    case .failure(let error): completed.complete(.failure(error))
+                    }
+                }
+            }
+        }
+
+        func waitForCompletion() async throws {
+            _ = try await wait(completed, maximumWait: .seconds(20), enqueue: {})
+        }
+
+        func detach() {
+            view?.configuration.userContentController.removeScriptMessageHandler(forName: Self.handler)
+        }
+
+        private func wait(_ result: FixtureScriptResult, maximumWait: Duration,
+                          enqueue: () -> Void) async throws -> Data {
+            try await withCheckedThrowingContinuation { continuation in
+                result.install(continuation)
+                result.setTimeout(Task {
+                    do {
+                        try await Task.sleep(for: maximumWait)
+                        result.complete(.failure(FixtureFailure.evaluationTimeout))
+                    } catch { }
+                })
+                enqueue()
+            }
+        }
     }
 
     @MainActor

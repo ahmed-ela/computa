@@ -3868,3 +3868,44 @@ followed by guarded cleanup. The finite timeline projection has SHA-256
 These logs identify a queue delay, not the website workload that caused it.
 A controlled queue-delay fixture and bounded inspection-budget change are the
 next investigation. Gemini CAPTCHA and Claude quota gates remain in place.
+
+## Build 53: bounded allowance for WebKit inspection queue time
+
+Response inspections now have a maximum 30-second native budget, still capped
+by the remaining 45-second preparation or five-minute response deadline.
+Recursive route reads and subsequent product/model checks consume the same
+remaining evaluation budget. A callback cannot gain page authority after that
+deadline, even if it becomes runnable before the timeout task. Editor actions
+retain their existing ten-second maximum. No response or model-ownership
+predicate was relaxed, and no retry or prompt replay was added.
+
+Four focused native checks passed: actual twelve-second WebContent queue work
+survives the new inspection budget, the ten-second control expires while the
+queue remains occupied, the response deadline still rejects a queued late
+reply, and the existing stalled-digest/late-completion control still passes.
+Each queue fixture verifies one submission and closes its exact owned tab.
+Focused receipt SHA-256:
+93335be13837d8386f432a957819b4dcaeb5dd4ed5ee5fd6e4f302089a62dbcf.
+
+An earlier separate control package failed without the expected native timeout
+evidence, reporting an InvalidTransition error. Its result remains inconclusive
+and is not counted as a successful negative control. Before that run, a setup
+comparison stopped before executing any test and was corrected. Both owned
+temporary package roots were verified and removed; their logs/receipts remain.
+The successful ten-second control instead runs in the normal native fixture
+runner with an explicit test-only inspection budget.
+
+The seven public groups passed all 637 tests without failures or skips;
+receipt SHA-256:
+f525267058f33b69f54030a3c2b22eeb06267865a1c02d93344c8a8cc665295c.
+Complete native validation executed 2,337 tests: 2,288 passed, 49 opt-in skips
+and zero failures in 578.293 seconds. All 414 frozen inputs, required
+permission/workflow/patch guards and 26 unique cleanup identities verified.
+Independent original-log/receipt audit also verified all four queue/deadline
+controls by their exact passing test identities, without replay.
+Native receipt SHA-256:
+0244281ca94b873465f4edc48921ae08fc2616aef4ad303b48bdd4e1c3c051b0.
+Source freeze SHA-256:
+35094edbf52838fc4aa28104fae63dba7c47f09759aeb1c859401cf55e351ce6.
+Signed packaging, installation and fresh provider qualification remain separate
+next steps.

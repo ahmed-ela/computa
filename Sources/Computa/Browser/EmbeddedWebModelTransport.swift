@@ -290,6 +290,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var scripts: [Provider: String] = [:]
     private var preparationTimeout: Duration = .seconds(45)
     private var responseTimeout: Duration = .seconds(300)
+    private var inspectionTimeout: Duration = .seconds(30)
     private static let inspectionLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
     private struct InspectionSignature: Equatable {
         let responses: Int, users: Int, sequence: Int, textBytes: Int
@@ -340,6 +341,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     func setTimeoutsForTesting(preparation: Duration, response: Duration) {
         preparationTimeout = max(.milliseconds(1), min(.seconds(45), preparation))
         responseTimeout = max(.milliseconds(1), min(.seconds(300), response))
+    }
+
+    func setInspectionTimeoutForTesting(_ timeout: Duration) {
+        inspectionTimeout = max(.milliseconds(1), min(.seconds(30), timeout))
     }
     #endif
 
@@ -611,7 +616,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let deadline = session.state == "loading" ? session.created + preparationTimeout : session.turnStarted + responseTimeout
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         let observed: [String: Any]
-        do { observed = try await page(session, action: "inspect", maximumWait: min(.seconds(10), deadline - .now)) }
+        // WebKit may queue an inspection while the provider renders its reply.
+        // The adapter's own waits remain bounded; allow queue time without
+        // extending the inference's preparation or response deadline.
+        do { observed = try await page(session, action: "inspect", maximumWait: min(inspectionTimeout, deadline - .now)) }
         catch {
             if let failure = error as? Failure, failure.diagnosticCode != nil { throw failure }
             if !Task.isCancelled, ContinuousClock.now >= deadline { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
@@ -1371,6 +1379,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
+        guard maximumWait > .zero else { throw Failure.pageUnavailable }
+        let evaluationDeadline = ContinuousClock.now + maximumWait
         if !allowBlockedProvider { try checkProviderGate(session) }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
         try rejectWebsiteBlocker(session, action: action, phase: "before")
@@ -1479,7 +1489,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     result.install(continuation)
                     let timeout = Task {
                         do {
-                            try await Task.sleep(for: maximumWait)
+                            try await Task.sleep(until: evaluationDeadline, clock: .continuous)
                             guard result.isPending else { return }
                             let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID, operationID: operationID)
                             Self.inspectionLog.error("adapterTimeout provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) \(diagnostic, privacy: .public)")
@@ -1525,6 +1535,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             throw error
         }
+        // A callback and its timeout can become runnable together. A late
+        // result must not win that scheduling race and gain page authority.
+        guard ContinuousClock.now < evaluationDeadline else { throw Failure.pageUnavailable }
         browser.endModelDiagnostic(tabID: session.tabID, operationID: operationID)
         #if DEBUG
         await beforePageResultValidationForTesting?(action)
@@ -1576,7 +1589,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
                                       allowBlockedProvider: allowBlockedProvider,
                                       firstUserExpansionRouteContinuation: nextContinuation,
-                                      maximumWait: maximumWait)
+                                      maximumWait: evaluationDeadline - .now)
             }
             let temporaryToggle = action == "enableTemporary" && session.state == "loading"
                 && !session.submitted && current == nil && nextConversation == nil
@@ -1624,7 +1637,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
-                                      maximumWait: maximumWait)
+                                      maximumWait: evaluationDeadline - .now)
             case "first_user_observation_replaced":
                 // Provider frameworks can replace an unchanged message while
                 // its model picker is being read. The adapter only signals a
@@ -1640,7 +1653,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
-                                      maximumWait: maximumWait)
+                                      maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
                 if observed["detail"] as? String == "first_user_message" {
                     recordFirstUserFailure(.adapterRejected, observed: observed)
@@ -1689,7 +1702,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                              recheck: recheckProductAfterAwait,
                                              refreshChangedRoute: routeRefreshAvailable,
                                              refreshReadOnlyObservation: refreshReadOnlyObservation,
-                                             maximumWait: maximumWait,
+                                             maximumWait: evaluationDeadline - .now,
                                              allowBlockedProvider: allowBlockedProvider,
                                              allowPendingModelTemporary: allowPendingModelTemporary)
         // Submit returns only its acknowledgment; observations carry ownership state.
@@ -1733,7 +1746,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                        enforceModel: enforceModel, recheck: recheckModelAfterAwait,
                                                        refreshChangedRoute: routeRefreshAvailable,
                                                        refreshReadOnlyObservation: refreshReadOnlyObservation,
-                                                       maximumWait: maximumWait)
+                                                       maximumWait: evaluationDeadline - .now)
                 if !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
                     // a later promotion still requires the first-message proof.
@@ -1783,7 +1796,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                enforceModel: enforceModel, recheck: recheckModelAfterAwait,
                                                refreshChangedRoute: routeRefreshAvailable,
                                                refreshReadOnlyObservation: refreshReadOnlyObservation,
-                                               maximumWait: maximumWait)
+                                               maximumWait: evaluationDeadline - .now)
+        guard ContinuousClock.now < evaluationDeadline else { throw Failure.pageUnavailable }
         return observed
     }
 
