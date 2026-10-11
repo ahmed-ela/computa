@@ -4275,5 +4275,57 @@ final regression source with finite failure capture. Native receipt SHA-256:
 f50ef5bee6177dc71749f093825fc26c7c8e444d9611c1d4235d57159dfa3347.
 Source freeze SHA-256:
 7daf39a6792676026469dcb3cf0e6f3f5ef989849545f931266363de4552f964.
-Signed packaging, installation and fresh live qualification remain required.
-The installed app is still build 58, and all seven workflow cases remain incomplete.
+Signed staging and installed verification each passed all 98 checks from source
+ef192e0e785cddf8c1a2ce6d3a0bb611d8a14d5f. The idle build 58 process exited
+before installation, and its bundle is preserved for rollback. Installed build
+59 runs as PID 76917 with runtime generation e84579ae-6dd2-4f30-a43a-b48008f10814,
+captured before any model prompt. Installed verification receipt SHA-256:
+9d49e529ca89241e84fb839ba38ef0fc911c37de8a1be4522d2b2a47ef13bb31.
+
+Fresh ChatGPT GPT-6 qualification returned the exact synthetic marker after a
+real terminal file read. Its exact task and turn passed the collector, with two
+acknowledged inference leases durably closed. Qualification receipt SHA-256:
+53ca14614a453f8e8ed4e79de58497d93ce8fff3b356bb74942427bc8eda5dcb.
+The fresh browser workflow completed four calls: open, overview read, content
+read and structural read. No browser-model or tool error occurred. The final
+message acknowledged that no search result or details had been verified but
+stopped before following the exposed enabled "Find United flights" link.
+This is a task-completion failure, not proof that the timeout is resolved in a
+complete workflow. The original collector passed 40 of 46 checks; six required
+search/navigation/facts/freshness checks failed. All five inference leases
+closed durably. The root-owned PID 78056 server was stopped after exact command,
+start, cwd and listener checks; process exit, socket closure and one server_closed
+event verified. The unused private capture arm was cancelled and preserved;
+no failed prompt was replayed. Browser receipt SHA-256:
+6b2712d2a95cda103962432f8fd4cb18eece4106e2b82705fe38f17cea013a55.
+All seven workflow cases remain incomplete.
+
+The build 59 ChatGPT composition task executed one real `exec_command` listing
+the fixture's README and preview server, with exit code zero. The next response
+refused the local relay rather than requesting the needed read/start/browser
+operations. No `.preview-run` directory or server was created. Its two
+acknowledged inference leases have exact durable closed receipts. The original
+collector remains `collector_error` because the preview address does not exist;
+a separate finite failure projection verifies these observed effects and cleanup
+without turning missing outcomes into a pass. Projection SHA-256:
+17f6d071d55a409dedd3561b100956ee6fbe5a2bda3a890c6ab52918cd603531.
+
+Before Gemini qualification, a normal built-in tab showed a signed-in account,
+no CAPTCHA and the website's selected 3.1 Pro model. Only that root-created
+inspection tab was closed. Qualification nevertheless hit the durable saved
+verification checkpoint before any acknowledged session, submission or tool
+call. The native turn finished; the task is paused with unconfirmed cleanup.
+The full 256-task summary cache rejected this token-less legacy startup receipt.
+The transaction directories contain only 58 cleanup tasks and 60 model-evidence
+tasks, far below their limits: this is the summary-only failure path, not a
+transaction-journal capacity failure. No cleanup receipt or closure was
+fabricated. The exact start_requested/failed journal, closed native turn and
+cleanup absence are sealed in the fixture. Projection SHA-256:
+2213242c885cfc596e3e22ee231fa4664fad18a00cf6e0308e54621e7652eb55.
+Gemini testing stopped without replay. Normal-page sign-in does not itself clear
+the saved checkpoint; explicit prompt-free model recovery is still required.
+
+Remaining work includes the seven live workflows, ChatGPT's premature final
+responses, persistence of unconfirmed startup diagnostics when the UI summary
+cache is full, verified Gemini recovery, and the three standalone upstream TUI
+failures. The current full provider matrix remains unqualified.
