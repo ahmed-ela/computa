@@ -484,7 +484,8 @@ actor WebModelServer {
                 runtimeGeneration: attempt.context.runtimeGeneration, outcome: .unconfirmed,
                 provider: WebsiteSessionCleanupReceipt.Provider(rawValue: attempt.provider),
                 route: attempt.route == .embedded ? .embedded : .chrome, modelID: attempt.modelID,
-                reason: .cleanupUnverified, trigger: trigger)
+                reason: .cleanupUnverified, trigger: trigger,
+                inferenceID: attempt.inferenceID.uuidString.lowercased())
             receipt.receiptSaved = true
             if cleanupReceiptStore?.save(receipt) != true { receipt.receiptSaved = false }
             unresolvedStartReceipts[taskID] = receipt

@@ -9,8 +9,12 @@ struct WorkflowBenchmarkFixture: Sendable {
     let home: URL
     let remote: URL
     let marker: String
+    let startupDelaySeconds: Double
 
-    init() throws {
+    init(startupDelaySeconds: Double = 0) throws {
+        try WorkflowBenchmarkFailure.require(startupDelaySeconds.isFinite && (0...5).contains(startupDelaySeconds),
+            "The fixture startup delay must be finite and bounded")
+        self.startupDelaySeconds = startupDelaySeconds
         root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaWorkflow-\(UUID().uuidString)", isDirectory: true)
         project = root.appendingPathComponent("Project with spaces", isDirectory: true)
@@ -45,9 +49,10 @@ struct WorkflowBenchmarkFixture: Sendable {
         try write("user-note.txt", "seed\n")
         try write("server.py", serverSource)
         try write("interactive.py", """
-        import os, sys
+        import os, sys, time
         from pathlib import Path
         Path('.benchmark/interactive.pid').write_text(str(os.getpid()))
+        time.sleep(\(startupDelaySeconds))
         print('INTERACTIVE_READY', flush=True)
         answer = sys.stdin.readline().strip()
         print('INTERACTIVE_RESULT=' + answer, flush=True)
@@ -242,7 +247,7 @@ struct WorkflowBenchmarkFixture: Sendable {
 
     private var serverSource: String {
         """
-        import json, os
+        import json, os, time
         from http.server import BaseHTTPRequestHandler, HTTPServer
         from pathlib import Path
         class Handler(BaseHTTPRequestHandler):
@@ -260,6 +265,7 @@ struct WorkflowBenchmarkFixture: Sendable {
                 pass
         server = HTTPServer(('127.0.0.1', 0), Handler)
         Path('.benchmark/server.json').write_text(json.dumps({'pid': os.getpid(), 'port': server.server_port, 'marker': '\(marker)'}))
+        time.sleep(\(startupDelaySeconds))
         print('SERVER_READY port=' + str(server.server_port), flush=True)
         try:
             server.serve_forever()

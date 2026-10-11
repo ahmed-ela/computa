@@ -4329,3 +4329,125 @@ Remaining work includes the seven live workflows, ChatGPT's premature final
 responses, persistence of unconfirmed startup diagnostics when the UI summary
 cache is full, verified Gemini recovery, and the three standalone upstream TUI
 failures. The current full provider matrix remains unqualified.
+
+### Build 60: durable unresolved startup observations
+
+The startup failure above did not return an acknowledged website session token.
+Its cleanup observation consequently used the legacy summary-only path, which
+cannot accept another task once the 256-task UI cache is full. Build 60 records
+that unresolved startup as schema 3 with the actual inference identity and no
+session token. The append-only inference journal persists it before any optional
+summary update. It remains `unconfirmed` with `cleanupUnverified`; it cannot claim
+a closed lease or borrow another inference's closure. Existing schema 2 lease
+proofs retain their token requirements. Nil tokens do not collide with other nil
+tokens, and all journal budgets and conflict checks still apply. The server
+continues to pause uncertain startup attempts without replaying a prompt.
+
+Four new regressions exercised the original build 59 source: all four failed
+with 20 assertions and no unexpected failures, confirming the missing behavior.
+Negative-control receipt SHA-256:
+734a4d067caaa3994ccfd370d2e266b400b9ac7f3ae3ae09f64bf2ab3a95a8c7.
+The fixed cleanup/server cohort passed all 80 tests with no skips or failures,
+including full-cache persistence, reopened-store observation, cross-inference
+isolation, finite budgets and rejected inference retries. Receipt SHA-256:
+577894bc623a5a61ea73df863fa92a9a2e561653ca543792a0d52df3e3adb65b.
+The first fixed-cohort run remains preserved: its separate TypeScript runtime
+fixture lacked the documented pinned Bun environment and threw `unavailable`.
+The second run supplied that environment and corrected the controller's test
+name parser to match XCTest's actual Objective-C-style log entries. This did not
+change the production fix or hide the original failed run.
+
+All 637 public build 60 tests passed with no failures or skips. Receipt SHA-256:
+bbb8235e70b5e28dcd122f53c7551338717620e8038d0e996b359a6b57303ad3.
+The complete native candidate run and signed installed verification are pending.
+The verification message now distinguishes a saved checkpoint from a challenge
+currently visible on the website and directs the user to refresh models once
+the page is clear. This persistence and diagnostic change does not qualify the
+seven unfinished live workflows or clear a verification checkpoint by itself.
+
+The first complete native build 60 run executed 2,348 tests with 49 skips and
+two unexpected failures. Both failures came from the scripted workflow oracle
+requiring `SERVER_READY` in the first one-second terminal response. The actual
+tool returned a valid running session before its first output. The failed run
+is preserved, including its unchanged source and engine observations. Receipt
+SHA-256: c2b2ef9cd30838a5202157b98cce0ac7eeee1d582945a7a2b5ae2c971cbd0656.
+The oracle now polls that same observed session with empty stdin under a finite
+budget. It never restarts the command or sends interactive input before readiness.
+Command identity and the separately matched readiness output remain distinct
+when verifying interruption. Two deterministic 2.5-second startup controls passed
+with the existing workflow cohort: five tests, no failures or skips. Receipt
+SHA-256: 08ec240324de169fac88bdf6f793b1305b043a66c06b52adb90ed3d0bfb90f91.
+
+Current live testing is narrowed to ChatGPT at the user's request. Its browser,
+composition and interactive workflows remain open; Gemini and Claude live work
+is deferred. The three standalone upstream TUI fixture failures remain separate
+evidence, not a prerequisite for the installed ChatGPT checks.
+
+A fresh installed build 59 ChatGPT interactive task stopped before any tool call
+and asked for the project working directory. The sealed native rollout's `cwd`
+matches the selected project, but that path and environment context are absent
+from the model's message history. One exact inference lease closed durably. The
+original missing-result `collector_error` remains preserved; a separate finite
+failure projection records these facts without calling the task successful.
+Projection SHA-256:
+7a3f7ba94d65bda535921202f4226e73ed08c7b6fc50bd9a7b197f76f302ac64.
+
+Computa explicitly set `include_environment_context` to false. Build 60 enables
+the engine's environment context so the selected working directory and shell
+reach the model. Parent-project/config discovery, login-shell initialization and
+unoffered application features remain disabled. A new real-engine regression
+selects a task folder different from the default, supplies no path in the user
+prompt and derives command `workdir` from the engine's actual model-visible
+environment. With the old setting it genuinely failed with the missing-context
+error: one test, one unexpected failure. Negative-control receipt SHA-256:
+28f2ab82c29b159a71594a25eeae9b91e1a337be2bfe334845c8eb5046f2e5c4.
+Its initial compiler-only attempt used an unavailable FoundationXML module and
+is retained as an unverified control; the actual failing control uses macOS
+Foundation's XML parser. With the fixed setting all six workflow tests passed
+with no failures or skips in 92.162 seconds, including selected-directory,
+permission, delayed readiness, interactive input, process exit and cleanup
+checks. Receipt SHA-256:
+20ada3419b3f801e176f50ccd527635ea042c288ffe6bee034b82268b5cba42e.
+
+The second full native run was deliberately cancelled before changing its frozen
+inputs to include the diagnosed workspace fix. Its partial receipt is not a
+qualified native result; the three observed controller/test processes exited.
+The prior public validations also predate this workspace change. Complete final
+public/native validation, signed installation and fresh ChatGPT live tests are
+still required. Build 60 has not been installed, committed or pushed yet.
+
+The per-turn background policy also retained an outdated "Background AX/authorized
+Chrome only" description after built-in browser tools were added. It now permits
+only offered background AX, authorized Chrome or built-in browser UI operations
+and explicitly distinguishes terminal/file permissions from the UI interaction
+ceiling. Activation, global input, image limitations and the Full Access ceiling
+are unchanged. The actual transport regression failed against the old wording
+with two assertions in one test; negative-control receipt SHA-256:
+09c4681e8ef2e84e13bf3e2107ceb5401d5631638bd757b7f7e6f7e2730ca5e5.
+The final combined workflow/isolation cohort passed all ten tests with no skips
+or failures in 94.094 seconds. This includes new, cold, loaded and legacy
+submissions, selected working directories, native permission restoration,
+delayed readiness, interactive input and cleanup. Receipt SHA-256:
+be0af6d2e3017152a4330196e2870b1f90cacfff83a85a14f6df42b9f3ee1857.
+This corrects model-visible context; it does not yet prove live ChatGPT task
+completion. Final public validation now uses final4 and full native validation
+will use final3, with 2,351 expected tests and the existing 49 opt-in skips.
+
+Final build 60 validation passed against 414 unchanged frozen inputs and the
+unchanged pinned engine. The full native run executed 2,351 tests in 687.370
+seconds: 2,302 passed, 49 opt-in tests skipped, and no failures. It includes the
+six workflow tests, four isolation tests, real selected-workspace propagation,
+startup durability, permission denial, delayed readiness and exact process
+cleanup. Native receipt SHA-256:
+a3f871e3f392291c49b3a09ba82a723c23449a6d90b6c4a293115f85053c0f30.
+The independent audit verified all required cohorts and 26 unique fixture cleanup
+identities. Audit SHA-256:
+50e7112fb16888d4ec7ba8ba822f9ad1f6449ccd436a421d9120916c8681532f.
+Final public validation passed all 637 tests with no skips or failures, plus the
+frontend type check and production build. Receipt SHA-256:
+b984545d0f270e31ce743fa99a603826e630060079d7fe3967a5dd7b61005315.
+These results qualify source validation only. Signed build 60 installation and
+fresh ChatGPT qualification/browser/composition/interactive checks are next;
+Gemini and Claude live checks remain deferred. A stale build-59 comparison in
+the private build-60 benchmark preparer was corrected before use, with its prior
+implementation and bindings preserved. No old failed prompt was replayed.

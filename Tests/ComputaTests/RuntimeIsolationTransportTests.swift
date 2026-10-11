@@ -181,6 +181,12 @@ final class RuntimeIsolationTransportTests: XCTestCase {
         XCTAssertEqual(inputs.count, 2)
         XCTAssertEqual(inputs.last?["type"], "text")
         XCTAssertTrue(inputs.last?["text"]?.hasPrefix("APP_RUNTIME_INTERACTION_POLICY: background_only.") == true)
+        let interactionPolicy = try XCTUnwrap(inputs.last?["text"])
+        XCTAssertTrue(interactionPolicy.contains("built-in browser"),
+            "Background mode must describe the offered built-in browser instead of implying Chrome is the only browser.")
+        XCTAssertTrue(interactionPolicy.contains("Terminal/file"),
+            "The UI interaction ceiling must remain distinct from engine terminal/file permissions.")
+        XCTAssertTrue(interactionPolicy.contains("No activation or global input"))
         XCTAssertFalse(requests.contains { $0["method"] as? String == "thread/compact/start" })
     }
 }

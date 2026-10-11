@@ -17,7 +17,8 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
     let taskID: String
     let threadID: String?
     let turnID: String?
-    /// Schema 2 identifies the one website transaction this observation retires.
+    /// Schema 2 binds an acknowledged lease. Schema 3 records an unresolved
+    /// startup attempt with its inference identity, without inventing a token.
     let inferenceID: String?
     let sessionToken: String?
     let runtimeGeneration: String
@@ -33,7 +34,7 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
     init(taskID: String, threadID: String? = nil, turnID: String? = nil, runtimeGeneration: UUID, outcome: Outcome, provider: Provider? = nil,
          route: Route? = nil, modelID: String? = nil, reason: Reason, trigger: Trigger, receiptSaved: Bool = false,
          inferenceID: String? = nil, sessionToken: String? = nil) {
-        schemaVersion = inferenceID == nil && sessionToken == nil ? 1 : 2
+        schemaVersion = inferenceID == nil && sessionToken == nil ? 1 : sessionToken == nil ? 3 : 2
         attemptID = UUID().uuidString.lowercased()
         self.taskID = taskID.lowercased()
         self.threadID = threadID?.lowercased(); self.turnID = turnID?.lowercased()
@@ -47,14 +48,19 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
     }
 
     var isValid: Bool {
-        guard [1, 2].contains(schemaVersion), UUID(uuidString: attemptID) != nil, UUID(uuidString: taskID) != nil,
+        guard [1, 2, 3].contains(schemaVersion), UUID(uuidString: attemptID) != nil, UUID(uuidString: taskID) != nil,
               UUID(uuidString: runtimeGeneration) != nil, timestamp.utf8.count <= 32 else { return false }
         guard threadID == nil || UUID(uuidString: threadID!) != nil,
               turnID == nil || (threadID != nil && UUID(uuidString: turnID!) != nil) else { return false }
-        if schemaVersion == 2 {
-            guard let threadID, let turnID, let inferenceID, let sessionToken,
-                  [attemptID, taskID, threadID, turnID, runtimeGeneration, inferenceID, sessionToken].allSatisfy(Self.canonicalUUID),
+        if schemaVersion == 2 || schemaVersion == 3 {
+            guard let threadID, let turnID, let inferenceID,
+                  [attemptID, taskID, threadID, turnID, runtimeGeneration, inferenceID].allSatisfy(Self.canonicalUUID),
                   provider != nil, route != nil, modelID != nil, outcome != .noOwnedSession else { return false }
+            if schemaVersion == 2 {
+                guard let sessionToken, Self.canonicalUUID(sessionToken) else { return false }
+            } else {
+                guard sessionToken == nil, outcome == .unconfirmed, reason == .cleanupUnverified else { return false }
+            }
         } else if inferenceID != nil || sessionToken != nil || trigger == .inference { return false }
         let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         guard formatter.date(from: timestamp) != nil else { return false }
@@ -70,13 +76,15 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
     }
 
     var isTransactionLinked: Bool { schemaVersion == 2 && inferenceID != nil && sessionToken != nil }
+    var isStartupAttemptLinked: Bool { schemaVersion == 3 && inferenceID != nil && sessionToken == nil }
+    fileprivate var isJournalLinked: Bool { isTransactionLinked || isStartupAttemptLinked }
 
     fileprivate static func canonicalUUID(_ value: String) -> Bool {
         UUID(uuidString: value)?.uuidString.lowercased() == value
     }
 }
 
-/// Full transaction proofs are append-only. The per-task file is a bounded UI
+/// Lease proofs and unresolved startup observations are append-only. The per-task file is a bounded UI
 /// summary: it can evict rows only after their exact durable proof is verified.
 /// The owning server serializes writes and retries an identical receipt after a
 /// storage failure, without performing physical website cleanup a second time.
@@ -107,7 +115,7 @@ struct WebsiteSessionCleanupStore: Sendable {
 
     func save(_ receipt: WebsiteSessionCleanupReceipt) -> Bool {
         guard receipt.isValid, receipt.receiptSaved else { return false }
-        if receipt.isTransactionLinked, !saveTransaction(receipt) { return false }
+        if receipt.isJournalLinked, !saveInferenceObservation(receipt) { return false }
         let file = summaryFile(receipt.taskID)
         do {
             try prepareDirectory(directory)
@@ -121,8 +129,10 @@ struct WebsiteSessionCleanupStore: Sendable {
                     // The summary is a bounded UI cache. A transaction already
                     // has its exact synced/read-back proof, and latest() reads
                     // that journal even when no summary slot is available.
+                    // An unresolved startup also has a synced inference record;
+                    // that records uncertainty, never an acknowledged lease.
                     // Legacy observations still require their summary file.
-                    return receipt.isTransactionLinked
+                    return receipt.isJournalLinked
                 }
             }
             var retained = existing + [receipt], removed: [WebsiteSessionCleanupReceipt] = []
@@ -130,12 +140,12 @@ struct WebsiteSessionCleanupStore: Sendable {
             while retained.count > limits.summaryRecords || data.count > limits.summaryBytes {
                 // A legacy-only store retains its original finite semantics;
                 // compaction is enabled only by a verified new transaction.
-                guard receipt.isTransactionLinked, retained.count > 1 else { return false }
+                guard receipt.isJournalLinked, retained.count > 1 else { return false }
                 removed.append(retained.removeFirst())
                 data = try encoded(retained)
             }
             for row in removed {
-                if row.isTransactionLinked {
+                if row.isJournalLinked {
                     guard let turnID = row.turnID,
                           try transactionRecords(for: row.taskID, turnID: turnID).contains(row) else { return false }
                 } else if !saveArchivedLegacy(row) { return false }
@@ -148,7 +158,12 @@ struct WebsiteSessionCleanupStore: Sendable {
     /// Appends one transaction observation, or verifies an identical retry.
     /// A conflict, malformed existing proof or exceeded finite budget fails.
     func saveTransaction(_ receipt: WebsiteSessionCleanupReceipt) -> Bool {
-        guard receipt.isValid, receipt.receiptSaved, receipt.isTransactionLinked,
+        guard receipt.isTransactionLinked else { return false }
+        return saveInferenceObservation(receipt)
+    }
+
+    private func saveInferenceObservation(_ receipt: WebsiteSessionCleanupReceipt) -> Bool {
+        guard receipt.isValid, receipt.receiptSaved, receipt.isJournalLinked,
               let turnID = receipt.turnID else { return false }
         let taskDirectory = transactionsDirectory.appendingPathComponent(receipt.taskID, isDirectory: true)
         let file = taskDirectory.appendingPathComponent(turnID + ".jsonl")
@@ -177,7 +192,8 @@ struct WebsiteSessionCleanupStore: Sendable {
                     maximumRecords: limits.transactionRecords, maximumBytes: limits.transactionBytes, requireTransactions: true)
                 for row in rows {
                     if row.attemptID == receipt.attemptID { return false }
-                    if row.inferenceID == receipt.inferenceID || row.sessionToken == receipt.sessionToken {
+                    let sharesToken = receipt.sessionToken != nil && row.sessionToken == receipt.sessionToken
+                    if row.inferenceID == receipt.inferenceID || sharesToken {
                         guard row.taskID == receipt.taskID, row.inferenceID == receipt.inferenceID, row.sessionToken == receipt.sessionToken,
                               row.turnID == receipt.turnID, row.threadID == receipt.threadID,
                               row.runtimeGeneration == receipt.runtimeGeneration, row.provider == receipt.provider,
@@ -207,7 +223,7 @@ struct WebsiteSessionCleanupStore: Sendable {
         guard WebsiteSessionCleanupReceipt.canonicalUUID(taskID), !isLink(directory), !isLink(archiveDirectory) else { throw corrupt() }
         let rows = try records(archiveDirectory.appendingPathComponent(taskID + ".jsonl"), taskID: taskID,
             maximumRecords: limits.archiveRecords, maximumBytes: limits.archiveBytes)
-        guard rows.allSatisfy({ !$0.isTransactionLinked }) else { throw corrupt() }
+        guard rows.allSatisfy({ !$0.isJournalLinked }) else { throw corrupt() }
         return rows
     }
 
@@ -240,7 +256,7 @@ struct WebsiteSessionCleanupStore: Sendable {
     }
 
     private func saveArchivedLegacy(_ receipt: WebsiteSessionCleanupReceipt) -> Bool {
-        guard !receipt.isTransactionLinked else { return false }
+        guard !receipt.isJournalLinked else { return false }
         let taskID = receipt.taskID.lowercased()
         let file = archiveDirectory.appendingPathComponent(taskID + ".jsonl")
         do {
@@ -338,11 +354,11 @@ struct WebsiteSessionCleanupStore: Sendable {
         let result = try lines.map { line in
             guard !line.isEmpty, line.count <= limits.recordBytes,
                   let raw = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                  Set(raw.keys).isSubset(of: (raw["schemaVersion"] as? Int) == 2 ? legacy.union(["inferenceID", "sessionToken"]) : legacy) else { throw corrupt() }
+                  Set(raw.keys).isSubset(of: [2, 3].contains(raw["schemaVersion"] as? Int ?? 0) ? legacy.union(["inferenceID", "sessionToken"]) : legacy) else { throw corrupt() }
             let value = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: Data(line))
             guard value.isValid, value.receiptSaved, value.taskID.lowercased() == taskID.lowercased(),
                   turnID == nil || value.turnID == turnID,
-                  !requireTransactions || value.isTransactionLinked,
+                  !requireTransactions || value.isJournalLinked,
                   seen.insert(value.attemptID).inserted else { throw corrupt() }
             return value
         }
@@ -350,13 +366,16 @@ struct WebsiteSessionCleanupStore: Sendable {
             var inferences: [String: WebsiteSessionCleanupReceipt] = [:], tokens: [String: String] = [:]
             for row in result {
                 guard row.threadID == result.first?.threadID, row.runtimeGeneration == result.first?.runtimeGeneration else { throw corrupt() }
-                let inferenceID = row.inferenceID!, token = row.sessionToken!
+                let inferenceID = row.inferenceID!
                 if let previous = inferences[inferenceID] {
-                    guard previous.sessionToken == token, previous.provider == row.provider,
+                    guard previous.sessionToken == row.sessionToken, previous.provider == row.provider,
                           previous.route == row.route, previous.modelID == row.modelID else { throw corrupt() }
                 }
-                if let previous = tokens[token], previous != inferenceID { throw corrupt() }
-                inferences[inferenceID] = row; tokens[token] = inferenceID
+                if let token = row.sessionToken {
+                    if let previous = tokens[token], previous != inferenceID { throw corrupt() }
+                    tokens[token] = inferenceID
+                }
+                inferences[inferenceID] = row
             }
         }
         return result

@@ -340,7 +340,7 @@ test.skipIf(resources === undefined)("pinned App Server retains app instructions
   const config = { "project_root_markers": [], "allow_login_shell": false,
     "features.shell_snapshot": false, "features.shell_snapshot_v2": false,
     "memories.use_memories": false, "skills.include_instructions": false,
-    "include_permissions_instructions": true, "include_apps_instructions": false, "include_environment_context": false,
+    "include_permissions_instructions": true, "include_apps_instructions": false, "include_environment_context": true,
     "features.plugins": false, "features.apps": false, "features.browser_use": false, "features.computer_use": false,
     "features.goals": false, "features.image_generation": false, "features.in_app_browser": false,
     "features.multi_agent": false, "features.multi_agent_v2": false,

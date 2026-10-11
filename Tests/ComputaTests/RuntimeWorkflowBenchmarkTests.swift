@@ -24,6 +24,24 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
         try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .interruptedServer)
     }
 
+    func testDelayedServerAndInteractiveStartupPollExactSessionsWithoutReplay() async throws {
+        try requireEngine()
+        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .workflow,
+            startupDelaySeconds: 2.5, emitWorkflowMatrix: false)
+    }
+
+    func testDelayedServerReadinessRetainsOriginalCommandForInterruptAndCleanup() async throws {
+        try requireEngine()
+        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .interruptedServer,
+            startupDelaySeconds: 2.5, emitWorkflowMatrix: false)
+    }
+
+    func testSelectedWorkspaceReachesModelWithoutUserSuppliedPath() async throws {
+        try requireEngine()
+        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .workflow,
+            emitWorkflowMatrix: false)
+    }
+
     private func requireEngine() throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_WORKFLOW_ENGINE_TEST"] == "1",
             "Set COMPUTA_WORKFLOW_ENGINE_TEST=1 to run the bundled editing, terminal, Git and localhost benchmark.")
@@ -32,16 +50,20 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
         _ = try ComputaRuntimeArtifact.resolve()
     }
 
-    private func qualify(model: String, scenario: WorkflowBenchmarkTransport.Scenario, approve: Bool = true) async throws {
+    private func qualify(model: String, scenario: WorkflowBenchmarkTransport.Scenario, approve: Bool = true,
+                         startupDelaySeconds: Double = 0, emitWorkflowMatrix: Bool = true) async throws {
         let failuresBefore = testRun?.failureCount ?? 0
-        let fixture = try WorkflowBenchmarkFixture()
+        let fixture = try WorkflowBenchmarkFixture(startupDelaySeconds: startupDelaySeconds)
         let traceURL = fixture.root.appendingPathComponent("app-server-wire.jsonl")
         let taskID = UUID().uuidString
         let transport = WorkflowBenchmarkTransport(fixture: fixture, scenario: scenario)
         var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
         configuration.model = model
         configuration.codexHomePath = fixture.home.path
-        configuration.workspacePath = fixture.project.path
+        // The per-task selection must override this different default. The
+        // prompt supplies no path; the oracle derives tool workdir from the
+        // engine's actual model-visible environment context.
+        configuration.workspacePath = fixture.root.path
         configuration.protocolTracePath = traceURL.path
         let runtime = CodexAppServerRuntime(configuration: configuration)
         let audit = WorkflowEventAudit(taskID: taskID)
@@ -88,16 +110,21 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
             XCTAssertEqual(Set(receipt.createdTokens).count, receipt.starts)
             XCTAssertEqual(receipt.closedTokens, receipt.createdTokens,
                 "Every inference must close its exact website lease before the next tool continuation")
+            if startupDelaySeconds > 0 {
+                XCTAssertGreaterThan(receipt.serverReadinessPolls, 0)
+                if scenario == .workflow { XCTAssertGreaterThan(receipt.interactiveReadinessPolls, 0) }
+            }
             XCTAssertEqual(receipt.requestModels, Array(repeating: model, count: receipt.sends))
+            XCTAssertEqual(receipt.observedWorkspace, fixture.project.path)
             switch scenario {
             case .workflow:
                 XCTAssertEqual(audit.status, .completed)
                 XCTAssertEqual(audit.finalTexts.last, "WORKFLOW_BENCHMARK_OK")
-                XCTAssertEqual(audit.finalTexts.filter { $0 == WorkflowBenchmarkTransport.toolProgress }.count, 12,
+                XCTAssertEqual(audit.finalTexts.filter { $0 == WorkflowBenchmarkTransport.toolProgress }.count, 12 + receipt.readinessPolls,
                     "Each tool envelope's commentary must survive the real App Server without ending the turn")
-                XCTAssertEqual(receipt.sends, 13)
-                XCTAssertEqual(receipt.matchedOutputs, 12)
-                XCTAssertEqual(receipt.finishes, 13)
+                XCTAssertEqual(receipt.sends, 13 + receipt.readinessPolls)
+                XCTAssertEqual(receipt.matchedOutputs, 12 + receipt.readinessPolls)
+                XCTAssertEqual(receipt.finishes, 13 + receipt.readinessPolls)
                 XCTAssertEqual(receipt.cancels, 0)
                 _ = try fixture.verifyCommittedOutcome()
                 try fixture.verifyServerClosed()
@@ -123,10 +150,10 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
             case .interruptedServer:
                 XCTAssertEqual(audit.status, .waiting)
                 XCTAssertTrue(audit.finalTexts.isEmpty)
-                XCTAssertEqual(receipt.sends, 2)
-                XCTAssertEqual(receipt.matchedOutputs, 1)
+                XCTAssertEqual(receipt.sends, 2 + receipt.readinessPolls)
+                XCTAssertEqual(receipt.matchedOutputs, 1 + receipt.readinessPolls)
                 XCTAssertEqual(receipt.cancels, 1)
-                XCTAssertEqual(receipt.finishes, 1)
+                XCTAssertEqual(receipt.finishes, 1 + receipt.readinessPolls)
                 XCTAssertEqual(audit.approvals, 1)
                 // Session termination precedes the engine's asynchronous PTY
                 // reap. Only observed ESRCH plus ECONNREFUSED within this
@@ -164,7 +191,8 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
                     (($0.object["params"] as? [String: Any])?["item"] as? [String: Any])?["type"] as? String == "commandExecution" })
             }
             let duration = began.duration(to: .now)
-            receiptSummary = "workflowBenchmark model=\(model) scenario=\(scenario) duration=\(duration) actualInferences=\(receipt.sends) matchedToolOutputs=\(receipt.matchedOutputs) approvals=\(audit.approvals)"
+            let label = emitWorkflowMatrix ? "workflowBenchmark" : "workflowReadinessBenchmark"
+            receiptSummary = "\(label) model=\(model) scenario=\(scenario) duration=\(duration) actualInferences=\(receipt.sends) matchedToolOutputs=\(receipt.matchedOutputs) approvals=\(audit.approvals) readinessPolls=\(receipt.readinessPolls)"
             if let stopReapLatency {
                 receiptSummary? += " stopReapLatency=\(stopReapLatency) processAbsent=true portRefused=true observedBeforeShutdown=true"
             }
@@ -251,13 +279,20 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
         receipt: WorkflowBenchmarkTransport.Receipt, audit: WorkflowEventAudit,
         fixture: WorkflowBenchmarkFixture) throws {
         let observed = try XCTUnwrap(receipt.interruptedServerCall)
+        let readiness = try XCTUnwrap(receipt.interruptedServerReadiness)
         let session = try XCTUnwrap(receipt.interruptedServerSession)
         XCTAssertTrue(observed.name == "exec_command" || observed.name.hasSuffix(".exec_command"))
         let script = fixture.project.appendingPathComponent("server.py").path
         let expectedCommand = "/usr/bin/python3 '" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"
         XCTAssertEqual(observed.command, expectedCommand)
         XCTAssertEqual(observed.workdir, fixture.project.path)
-        XCTAssertTrue(observed.output.contains("SERVER_READY"))
+        XCTAssertTrue(readiness.output.contains("SERVER_READY"))
+        if readiness.callID != observed.callID {
+            XCTAssertTrue(readiness.name == "write_stdin" || readiness.name.hasSuffix(".write_stdin"))
+            XCTAssertEqual(readiness.sessionID, session)
+            XCTAssertNil(readiness.command)
+            XCTAssertNil(readiness.workdir)
+        }
         XCTAssertTrue(observed.output.contains("Process running with session ID \(session)"))
         XCTAssertFalse(observed.output.contains("Process exited with code"))
 

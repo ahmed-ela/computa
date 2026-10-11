@@ -17,7 +17,12 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
         var stages = [String]()
         var readyToInterrupt = false
         var interruptedServerCall: ObservedToolResult?
+        var interruptedServerReadiness: ObservedToolResult?
         var interruptedServerSession: Int?
+        var readinessPolls = 0
+        var serverReadinessPolls = 0
+        var interactiveReadinessPolls = 0
+        var observedWorkspace: String?
         var failure: String?
         var createdTokens = [String]()
         var closedTokens = [String]()
@@ -36,6 +41,10 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
     private var pending: ExpectedCall?
     private var serverSession: Int?
     private var interactiveSession: Int?
+    private var workflowStepIndex = 0
+    private var readinessDeadlines = [String: ContinuousClock.Instant]()
+    private var readinessPollCounts = [String: Int]()
+    private var executionWorkspace: String?
     init(fixture: WorkflowBenchmarkFixture, scenario: Scenario) {
         self.fixture = fixture
         self.scenario = scenario
@@ -100,6 +109,13 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
     }
 
     private func nextReply(_ request: InferenceRequest) throws -> String {
+        if receiptValue.sends == 0 {
+            let directory = try request.selectedWorkspace()
+            try WorkflowBenchmarkFailure.require(directory == fixture.project.path,
+                "The engine did not expose the selected per-task workspace")
+            executionWorkspace = directory
+            receiptValue.observedWorkspace = directory
+        }
         let previousResult = try pending.map { try request.matchingOutput($0) }
         let previousOutput = previousResult?.output
         if pending != nil { receiptValue.matchedOutputs += 1 }
@@ -121,10 +137,14 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
         case .interruptedServer:
             if receiptValue.sends == 0 { return try startServer(request) }
             let output = try required(previousOutput)
-            serverSession = try sessionID(output)
-            try expect(output, contains: "SERVER_READY")
+            if receiptValue.interruptedServerCall == nil {
+                receiptValue.interruptedServerCall = previousResult
+            }
+            if let poll = try readinessPoll(request, output: output, marker: "SERVER_READY", session: &serverSession) {
+                return poll
+            }
             _ = try fixture.serverRecord()
-            receiptValue.interruptedServerCall = previousResult
+            receiptValue.interruptedServerReadiness = previousResult
             receiptValue.interruptedServerSession = serverSession
             receiptValue.readyToInterrupt = true
             receiptValue.stages.append("interrupt_ready")
@@ -133,9 +153,18 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
     }
 
     private func workflowReply(_ request: InferenceRequest, previousOutput: String?) throws -> String {
-        guard receiptValue.sends < Step.allCases.count else { throw WorkflowBenchmarkFailure("Unexpected workflow replay") }
-        let step = Step.allCases[receiptValue.sends]
+        guard workflowStepIndex < Step.allCases.count else { throw WorkflowBenchmarkFailure("Unexpected workflow replay") }
+        let step = Step.allCases[workflowStepIndex]
+        if step == .httpRequest,
+           let poll = try readinessPoll(request, output: required(previousOutput), marker: "SERVER_READY", session: &serverSession) {
+            return poll
+        }
+        if step == .interactiveInput,
+           let poll = try readinessPoll(request, output: required(previousOutput), marker: "INTERACTIVE_READY", session: &interactiveSession) {
+            return poll
+        }
         receiptValue.stages.append(step.rawValue)
+        workflowStepIndex += 1
         switch step {
         case .failingTests:
             return try exec(request, stage: step.rawValue, command: "/usr/bin/python3 -m unittest discover -s tests")
@@ -165,7 +194,6 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
             return try startServer(request)
         case .httpRequest:
             let output = try required(previousOutput)
-            serverSession = try sessionID(output)
             try expect(output, contains: "SERVER_READY")
             let record = try fixture.serverRecord()
             return try exec(request, stage: step.rawValue,
@@ -180,7 +208,6 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
                 command: "/usr/bin/python3 " + shellQuote(fixture.project.appendingPathComponent("interactive.py").path), tty: true)
         case .interactiveInput:
             let output = try required(previousOutput)
-            interactiveSession = try sessionID(output)
             try expect(output, contains: "INTERACTIVE_READY")
             return try stdin(request, session: requiredSession(interactiveSession), text: "composable\n")
         case .commandFailure:
@@ -207,10 +234,34 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
             tty: true, elevated: true)
     }
 
+    /// A running session may yield before its first byte. Observe readiness by
+    /// polling that exact session; never restart the command or send input early.
+    private func readinessPoll(_ request: InferenceRequest, output: String, marker: String,
+                               session: inout Int?) throws -> String? {
+        try WorkflowBenchmarkFailure.require(!output.contains("Process exited with code"),
+            "The owned session exited before readiness: \(output.prefix(700))")
+        let observed = try sessionID(output)
+        try WorkflowBenchmarkFailure.require(session == nil || session == observed,
+            "Readiness output changed the owned session identity")
+        session = observed
+        if output.contains(marker) { return nil }
+        let deadline = readinessDeadlines[marker] ?? ContinuousClock.now + .seconds(10)
+        readinessDeadlines[marker] = deadline
+        let count = readinessPollCounts[marker, default: 0]
+        try WorkflowBenchmarkFailure.require(count < 6 && ContinuousClock.now < deadline,
+            "The owned session did not produce \(marker) within its finite readiness budget")
+        readinessPollCounts[marker] = count + 1
+        receiptValue.readinessPolls += 1
+        if marker == "SERVER_READY" { receiptValue.serverReadinessPolls += 1 }
+        else { receiptValue.interactiveReadinessPolls += 1 }
+        return try stdin(request, session: observed, text: "")
+    }
+
     private func exec(_ request: InferenceRequest, stage: String, command: String,
                       tty: Bool = false, elevated: Bool = false) throws -> String {
         let name = try request.tool("exec_command")
-        var arguments: [String: Any] = ["cmd": command, "workdir": fixture.project.path,
+        guard let executionWorkspace else { throw WorkflowBenchmarkFailure("No model-observed workspace is available") }
+        var arguments: [String: Any] = ["cmd": command, "workdir": executionWorkspace,
             "yield_time_ms": tty ? 1000 : 10000, "max_output_tokens": 2000, "tty": tty]
         if elevated {
             arguments["sandbox_permissions"] = "require_escalated"
@@ -278,6 +329,7 @@ struct ObservedToolResult: Sendable {
     let name: String
     let command: String?
     let workdir: String?
+    let sessionID: Int?
     let output: String
 }
 
@@ -307,6 +359,24 @@ struct InferenceRequest {
             "The offered \(base) schema has the wrong custom/function type")
         return name
     }
+    func selectedWorkspace() throws -> String {
+        let contexts = input.filter { $0["role"] as? String == "user" }
+            .flatMap { ($0["content"] as? [[String: Any]]) ?? [] }
+            .compactMap { $0["text"] as? String }
+            .filter { $0.hasPrefix("<environment_context>") }
+        for text in contexts.reversed() {
+            let reader = WorkspaceEnvironmentReader()
+            let parser = XMLParser(data: Data(text.utf8))
+            parser.delegate = reader
+            guard parser.parse() else { throw WorkflowBenchmarkFailure("Engine environment context was not valid XML") }
+            if let path = reader.primaryDirectories.last {
+                try WorkflowBenchmarkFailure.require(reader.primaryDirectories.count == 1 && path.hasPrefix("/"),
+                    "Engine environment context did not expose one absolute primary workspace")
+                return path
+            }
+        }
+        throw WorkflowBenchmarkFailure("The model request lacks engine environment context with its selected workspace")
+    }
     func matchingOutput(_ expected: ExpectedCall) throws -> ObservedToolResult {
         let calls = input.filter { ["function_call", "custom_tool_call"].contains($0["type"] as? String ?? "") }
         let matches = calls.filter { call in
@@ -318,8 +388,13 @@ struct InferenceRequest {
                 return actual == arguments as NSDictionary
             }
         }
-        guard matches.count == 1, let call = matches.first,
-              let id = call["call_id"] as? String, !id.isEmpty, id.utf8.count <= 512 else {
+        // Repeated read-only polls can have identical arguments, but each has
+        // its own call identity. Match only the latest call, never an older
+        // output with the same arguments or a duplicated call ID.
+        guard let call = matches.last, let latest = calls.last,
+              let id = call["call_id"] as? String, !id.isEmpty, id.utf8.count <= 512,
+              latest["call_id"] as? String == id,
+              calls.filter({ $0["call_id"] as? String == id }).count == 1 else {
             throw WorkflowBenchmarkFailure("The native continuation does not retain its exact offered tool call")
         }
         let results = input.filter { ["function_call_output", "custom_tool_call_output"].contains($0["type"] as? String ?? "") && $0["call_id"] as? String == id }
@@ -334,11 +409,38 @@ struct InferenceRequest {
         else { arguments = [:] }
         return ObservedToolResult(callID: id, name: qualifiedName(call),
             command: arguments["cmd"] as? String, workdir: arguments["workdir"] as? String,
+            sessionID: arguments["session_id"] as? Int,
             output: output)
     }
     private func qualifiedName(_ call: [String: Any]) -> String {
         let name = call["name"] as? String ?? ""
         guard let namespace = call["namespace"] as? String, !namespace.isEmpty else { return name }
         return namespace + "." + name
+    }
+}
+
+/// Decode only the engine's primary cwd, including XML-escaped path characters.
+/// Fixture commands must use this observation rather than a setup-only path.
+private final class WorkspaceEnvironmentReader: NSObject, XMLParserDelegate {
+    private var path = [String]()
+    private var primary = [Bool]()
+    private var directory: String?
+    private(set) var primaryDirectories = [String]()
+    func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?,
+                qualifiedName: String?, attributes: [String: String]) {
+        path.append(name)
+        if name == "environment" { primary.append(attributes["primary"] == "true") }
+        if name == "cwd", path.first == "environment_context", primary.last != false { directory = "" }
+    }
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if directory != nil { directory? += string }
+    }
+    func parser(_ parser: XMLParser, didEndElement name: String, namespaceURI: String?, qualifiedName: String?) {
+        if name == "cwd", let directory {
+            primaryDirectories.append(directory)
+            self.directory = nil
+        }
+        if name == "environment" { _ = primary.popLast() }
+        _ = path.popLast()
     }
 }

@@ -162,6 +162,105 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
             reason: .noOwnedSession, trigger: .automatic, receiptSaved: true)
     }
 
+    private func startup(_ scope: Scope, inference: String? = nil) -> WebsiteSessionCleanupReceipt {
+        WebsiteSessionCleanupReceipt(taskID: scope.task, threadID: scope.thread, turnID: scope.turn,
+            runtimeGeneration: scope.generation, outcome: .unconfirmed, provider: .claude, route: .embedded,
+            modelID: "browser/claude", reason: .cleanupUnverified, trigger: .inference, receiptSaved: true,
+            inferenceID: inference ?? scope.inference)
+    }
+
+    func testStartupAttemptHasCausalIdentityButCannotClaimLeaseOrClosure() throws {
+        let scope = Scope(), pending = startup(scope)
+        XCTAssertEqual(pending.schemaVersion, 3)
+        XCTAssertTrue(pending.isValid)
+        XCTAssertFalse(pending.isTransactionLinked)
+        XCTAssertNil(pending.sessionToken)
+        for field in ["inferenceID", "threadID", "turnID"] {
+            XCTAssertFalse(try changed(pending, [:], removing: [field]).isValid, field)
+        }
+        for field in ["attemptID", "taskID", "threadID", "turnID", "runtimeGeneration", "inferenceID"] {
+            XCTAssertFalse(try changed(pending, [field: UUID().uuidString.uppercased()]).isValid, field)
+        }
+        XCTAssertFalse(try changed(pending, ["sessionToken": scope.token]).isValid)
+        XCTAssertFalse(try changed(pending, ["outcome": "closed", "reason": "not_created"]).isValid)
+        XCTAssertFalse(try changed(pending, ["outcome": "no_owned_session", "reason": "no_owned_session"]).isValid)
+        XCTAssertFalse(try changed(pending, ["schemaVersion": 1]).isValid)
+    }
+
+    func testFullSummaryCachePersistsUnconfirmedStartupWithoutInventingLease() throws {
+        let root = try directory(), oldScope = Scope(), scope = Scope(), otherScope = Scope()
+        var limits = WebsiteSessionCleanupStore.Limits(); limits.summaryTasks = 1
+        let store = WebsiteSessionCleanupStore(directory: root, limits: limits), old = legacy(oldScope.task)
+        XCTAssertTrue(store.save(old))
+        let originalSummary = try Data(contentsOf: root.appendingPathComponent(oldScope.task + ".jsonl"))
+        let pending = startup(scope), other = startup(otherScope)
+        XCTAssertTrue(store.save(pending)); XCTAssertTrue(store.save(pending))
+        XCTAssertTrue(store.save(other), "Two missing tokens are not a shared session identity")
+        XCTAssertFalse(store.saveTransaction(pending), "An unacknowledged attempt is not a lease proof")
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [pending])
+        XCTAssertEqual(try store.transactionRecords(for: otherScope.task, turnID: otherScope.turn), [other])
+        let reopened = WebsiteSessionCleanupStore(directory: root, limits: limits)
+        XCTAssertEqual(Set(reopened.latest().map(\.attemptID)), Set([old.attemptID, pending.attemptID, other.attemptID]))
+        XCTAssertFalse(store.save(receipt(scope)), "An acknowledged token cannot be invented for the same startup attempt")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(scope.task + ".jsonl").path))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(oldScope.task + ".jsonl")), originalSummary)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.count, 1)
+        let journal = journalFile(root, scope), validJournal = try Data(contentsOf: journal)
+        try Data("corrupt\n".utf8).write(to: journal)
+        XCTAssertFalse(store.save(pending), "A full summary cache cannot excuse a corrupt attempt journal")
+        try validJournal.write(to: journal)
+    }
+
+    func testUnconfirmedStartupCannotBorrowAnotherClosureAndKeepsJournalBudget() throws {
+        let root = try directory(), scope = Scope()
+        var limits = WebsiteSessionCleanupStore.Limits(); limits.transactionRecords = 2
+        let store = WebsiteSessionCleanupStore(directory: root, limits: limits)
+        let previous = receipt(scope, inference: UUID().uuidString.lowercased()), pending = startup(scope)
+        XCTAssertTrue(store.save(previous)); XCTAssertTrue(store.save(pending))
+        XCTAssertTrue(store.save(legacy(scope.task)))
+        XCTAssertEqual(store.latest(), [pending], "Another closure or current absence cannot retire an unknown startup")
+        let journal = journalFile(root, scope), original = try Data(contentsOf: journal)
+        XCTAssertTrue(store.save(pending), "An identical persistence retry consumes no new record")
+        XCTAssertFalse(store.save(startup(scope, inference: UUID().uuidString.lowercased())))
+        XCTAssertEqual(try Data(contentsOf: journal), original)
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [previous, pending])
+    }
+
+    func testUnacknowledgedStartupWithFullCachePersistsAndCannotRetryInference() async throws {
+        let root = try directory(), store = WebsiteSessionCleanupStore(directory: root)
+        for _ in 0..<256 { XCTAssertTrue(store.save(legacy(Scope().task))) }
+        let scope = Scope(), transport = CleanupBlockedStartTransport(), server = WebModelServer(), audit = CleanupReceiptAudit()
+        await server.configureEmbeddedTransport(transport)
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: root, runtimeGeneration: scope.generation) { await audit.append($0) }
+        do {
+            _ = try await server.fixtureInfer(Data("{\"model\":\"browser/gemini\",\"input\":\"Synthetic\",\"tools\":[]}".utf8),
+                taskID: scope.task, threadID: scope.thread, turnID: scope.turn, runtimeGeneration: scope.generation)
+            XCTFail("The saved provider gate cannot release a response")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+        let issues = await server.fixtureFinish(taskID: scope.task, runtimeGeneration: scope.generation)
+        XCTAssertEqual(issues, [WebModelServer.Failure.startOwnershipUnconfirmed.localizedDescription])
+        let observed = await audit.last(), pending = try XCTUnwrap(observed)
+        XCTAssertEqual(pending.schemaVersion, 3); XCTAssertTrue(pending.receiptSaved)
+        XCTAssertEqual(pending.outcome, .unconfirmed); XCTAssertNil(pending.sessionToken)
+        XCTAssertEqual(pending.taskID, scope.task); XCTAssertEqual(pending.threadID, scope.thread)
+        XCTAssertEqual(pending.turnID, scope.turn); XCTAssertNotNil(pending.inferenceID)
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [pending])
+        XCTAssertTrue(WebsiteSessionCleanupStore(directory: root).latest().contains(pending))
+        let retried = await server.retryWebsiteSessionCleanup(taskID: scope.task, runtimeGeneration: scope.generation)
+        XCTAssertEqual(retried, pending, "Manual cleanup preserves the exact unknown attempt and does not invent ownership")
+        do {
+            _ = try await server.fixtureInfer(Data("{\"model\":\"browser/claude\",\"input\":\"No replay\",\"tools\":[]}".utf8),
+                taskID: scope.task, threadID: scope.thread, turnID: scope.turn, runtimeGeneration: scope.generation)
+            XCTFail("Changing providers cannot replay an unresolved Start")
+        } catch { XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.startOwnershipUnconfirmed.localizedDescription) }
+        let calls = await transport.calls(); XCTAssertEqual(calls, ["webProviderStart"])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.count, 256)
+        _ = await server.shutdown()
+    }
+
     private func changed(_ receipt: WebsiteSessionCleanupReceipt, _ fields: [String: Any], removing: [String] = []) throws -> WebsiteSessionCleanupReceipt {
         var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(receipt)) as? [String: Any])
         fields.forEach { raw[$0.key] = $0.value }; removing.forEach { raw.removeValue(forKey: $0) }
@@ -693,6 +792,16 @@ private actor CleanupReceiptGate {
     func pause() async { entered = true; enteredWaiter?.resume(); enteredWaiter = nil; await withCheckedContinuation { releaseWaiter = $0 } }
     func waitUntilEntered() async { if entered { return }; await withCheckedContinuation { enteredWaiter = $0 } }
     func release() { releaseWaiter?.resume(); releaseWaiter = nil }
+}
+
+private actor CleanupBlockedStartTransport: WebModelTransport {
+    private var operations: [String] = []
+    func calls() -> [String] { operations }
+    func request(operation: String, params: Data) async throws -> Data {
+        operations.append(operation)
+        guard operation == "webProviderStart" else { throw WebModelServer.Failure.invalidRequest }
+        throw EmbeddedWebModelTransport.Failure.humanVerificationRequired(.gemini)
+    }
 }
 
 private actor CleanupReceiptTransport: WebModelTransport {
