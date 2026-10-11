@@ -4668,3 +4668,94 @@ Public validation passed all 641 tests, frontend type checking and the productio
 build. Receipt SHA-256:
 cbc92d49c10fa134effd907a3e8b4eabc3d6e7e86ba0de128eac6f1511985b78.
 Signed installation and fresh ChatGPT controls follow; no live success is claimed.
+
+### Build 64 installed controls and frame compatibility
+
+Build 64 was committed and pushed as
+9974ac05160ee0218755949febcd1ed9e5365695. Signed staging and installed
+verification each passed 98 checks. The fresh process was PID 83393 with runtime
+generation d7ebc8c2-be0d-441f-a617-29293ba245c1. Installed verification receipt
+SHA-256: 23e0e9c55ca2403b5d2306196ae1e003b7ccbd6607fdc26a8db53d10416c56b1.
+
+Loading a fresh ChatGPT page recorded exactly the finite rejection
+`navigationRejected addressKind=about_srcdoc target=subframe` in that process.
+A single small prompt on the visible temporary page then returned the exact
+marker with verified GPT-6 / Pro selection and completed response controls.
+Its owned tab was closed without Retry. Receipt SHA-256:
+313e8d2b61c466927baae56e704d6decd861a5f23b4b392f36f4e8ae1a41fa62.
+Because the response succeeded despite the blocked frame, this result does
+not establish that iframe rejection caused the earlier website load errors.
+
+Fresh native harness qualification submitted one prompt, returned no answer
+before the original five-minute deadline and ran no terminal command. Its one
+acknowledged lease closed durably. The collector remains failed; no replay or
+workflow dispatch followed. Receipt SHA-256:
+788dd3d3e4c2dd9ecfc7cc079395c49a501ca9a5f07bf4b1be5fc2d384e8fd7b.
+
+### Build 65 candidate: standard srcdoc frames through production policy
+
+The navigation delegate now accepts exact `about:srcdoc` only for a subframe
+within a valid HTTP(S) main document. Top-level address entry, popup validation
+and other schemes retain their existing checks. WebKit still enforces frame
+origins; child frames do not gain native diagnostic or clock authority.
+
+Two prior child-frame tests disabled the production navigation delegate to
+load their fixtures. They now use that delegate throughout and require the
+frame to load before checking rejection by both native handlers. The actual
+old build-64 delegate fails both controls because no frame loads; the candidate
+was restored byte-for-byte after that negative run. Negative receipt SHA-256:
+2902159cb1a4f55566bd6b6de348c1409237be9afd6521b0ff2aae811b3ce49f.
+Focused/full candidate validation and installed controls are pending. This
+compatibility change is not yet claimed to fix the ChatGPT response timeout.
+
+### Build 65 candidate: model-picker observations must not wake themselves
+
+The 48-test browser-session suite passed through production navigation policy.
+The first full native run was interrupted and remains incomplete. The second
+executed 2,363 tests with 49 skips and three failed assertions in one picker
+test; its original failed receipt is preserved. A stronger reproduction waited
+for a real delayed composer notification and a quiet native event channel before
+each read. It still observed one extra notification per picker read, confirming
+that the failure was not an early test baseline.
+
+The model menu's mount-time visibility mutation arrived before the awaited
+reader tracked the new menu root. Visibility checks now recognize a menu only
+through the observation's exact controlled portal ID and menu role. Message
+boundaries, real selection attributes, unrelated IDs and wrong roles still
+notify the reader. All three standalone adapters retain the same shared helper;
+live provider testing remains scoped to ChatGPT.
+
+The native reproduction now passes, including two inference sends, three actual
+picker remounts with no extra wake, a real checked-model change that wakes and
+rejects another send, exact submission counts and owned cleanup. Ten focused
+adapter checks also pass. Full validation, installation and fresh ChatGPT
+qualification remain pending; this fix is not yet a live reliability claim.
+
+The next full run passed the picker control but failed one signal-mask test
+before exercising its assertions: the fixture compiler exceeded its unchanged
+60-second deadline. Its failed receipt is preserved with SHA-256
+6d0bdc3d1792dfd8c2fa9dcd765f0564f1e236190431e1e0f3557e1c0aee81a7.
+An unrelated bulk backup move was running at that time. After that move finished,
+both actual compiler/signal controls passed in 5.472 seconds without changing
+source, deadlines or assertions. Focused receipt SHA-256:
+73e02c1ea6ffaeb5a85996f0cc505d2cf6d7150b978ec486d21333f323b43fd6.
+This supports a fresh serial full run; it does not establish the timeout's cause
+or replace the failed full-suite result.
+
+The requested cleanup relocated 4,633,155,310 bytes of legacy Mactopus app
+backups to the external drive. The copy was verified against the complete
+1,170-entry byte/mode/symlink manifest before removal of the internal source,
+then verified again. No process was running from those backups. The installed
+Computa app and current Computa rollback backups were untouched. Receipt SHA-256:
+cd7fa9039a3b474ebcfc039c81bb0193557cd46589a5736a3a565ca04bf4e59f.
+
+The final serial run executed 2,363 native tests in 615.545 seconds: 2,314
+passed, 49 opt-in tests explicitly skipped and no failures. The independent
+audit verified all 414 frozen inputs, the unchanged pinned engine, all 48
+browser-session tests, required model/picker/deadline and permission controls,
+and 26 unique cleanup identities. Native receipt SHA-256:
+bbea42ea9f9d2570dff36165a86b6e3a8dcc3fcc6f5323a31d8d348839a098ce.
+Public validation passed all 644 tests, frontend type checking and the
+production build. Receipt SHA-256:
+f5bfd4e9f81fb79cf9d7fe6cab64de4a87a7f7fc8633d9777383d5bb72301270.
+Signed installation and fresh ChatGPT qualification follow.

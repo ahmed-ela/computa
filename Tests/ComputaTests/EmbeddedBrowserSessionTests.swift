@@ -941,17 +941,16 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         let childFixture = DiagnosticChildFrameFixture()
         view.configuration.userContentController.add(childFixture, name: "fixtureFrame")
         defer { view.configuration.userContentController.removeScriptMessageHandler(forName: "fixtureFrame") }
-        // Production navigation rejects about:srcdoc. Permit this local fixture
-        // only so the independent message handler's frame guard is exercised.
+        // The production delegate must load the frame while its independent
+        // native message handler continues to reject child-frame authority.
         let navigationDelegate = view.navigationDelegate
-        view.navigationDelegate = nil
-        defer { view.navigationDelegate = navigationDelegate }
         _ = try await script(view, "const frame = document.createElement('iframe'); frame.srcdoc = '<script>window.webkit.messageHandlers.fixtureFrame.postMessage(\"ready\")<\\/script>'; document.body.appendChild(frame); return true;")
         let childDeadline = ContinuousClock.now + .seconds(5)
         while childFixture.frame == nil, ContinuousClock.now < childDeadline {
             try await Task.sleep(for: .milliseconds(25))
         }
         let frame = try XCTUnwrap(childFixture.frame, "The controlled child frame must actually load")
+        XCTAssertNil(session.tabs.first(where: { $0.id == id })?.error)
         _ = try await script(view, nextReceipt, world: world, frame: frame)
         XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("phases=not_started"), "A same-origin child frame has no diagnostic authority")
         XCTAssertTrue(session.modelDiagnosticSnapshot(tabID: id).contains("diagnosticRejected=frame"))
@@ -1098,12 +1097,11 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         view.configuration.userContentController.add(childFixture, name: "fixtureFrame")
         defer { view.configuration.userContentController.removeScriptMessageHandler(forName: "fixtureFrame") }
         let navigationDelegate = view.navigationDelegate
-        view.navigationDelegate = nil // Allow only this controlled about:srcdoc test frame.
-        defer { view.navigationDelegate = navigationDelegate }
         _ = try await script(view, "const frame = document.createElement('iframe'); frame.srcdoc = '<script>window.webkit.messageHandlers.fixtureFrame.postMessage(\"ready\")<\\/script>'; document.body.appendChild(frame); return true;")
         let deadline = ContinuousClock.now + .seconds(5)
         while childFixture.frame == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(25)) }
         let frame = try XCTUnwrap(childFixture.frame)
+        XCTAssertNil(session.tabs.first(where: { $0.id == id })?.error)
         let childResult = try await script(view, receipt, world: world, frame: frame)
         XCTAssertEqual(childResult, Data("\"model_clock_rejected\"".utf8))
         _ = try await script(view, "globalThis.clockResult = null; window.webkit.messageHandlers.computaModelClock.postMessage({ownerToken: '\(owner)', operationID: '\(operation.uuidString)', milliseconds: 100}).then(() => globalThis.clockResult = 'expired', error => globalThis.clockResult = error.message); return true;", world: world)
@@ -1233,6 +1231,24 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         for input in ["", "  ", "javascript:alert(1)", "javascript:alert('hello world')", "file:///tmp/test", "data:text/html,x", "mailto:user@example.com", "about:config", "https://user:secret@example.com", "https://", "https://example.com:70000", "example.com:abc"] {
             XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.normalize(input), input)
         }
+    }
+
+    func testSrcdocNavigationRequiresSubframeWithinValidWebDocument() throws {
+        let srcdoc = try XCTUnwrap(URL(string: "about:srcdoc"))
+        for parent in ["https://example.test/", "http://localhost:5181/"] {
+            let document = try XCTUnwrap(URL(string: parent))
+            XCTAssertNoThrow(try EmbeddedBrowserURLPolicy.validateNavigation(srcdoc, isMainFrame: false, mainDocumentURL: document))
+            XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validateNavigation(srcdoc, isMainFrame: true, mainDocumentURL: document))
+        }
+        for parent in [nil, "about:blank", "file:///tmp/page.html", "https://user:secret@example.test/", "https://example.test:70000/"] as [String?] {
+            XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validateNavigation(srcdoc, isMainFrame: false, mainDocumentURL: parent.flatMap(URL.init(string:))))
+        }
+        XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validate(srcdoc))
+        XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.normalize("about:srcdoc"))
+        for address in ["about:srcdoc#other", "about:config", "file:///tmp/page.html", "javascript:alert(1)", "data:text/html,hello", "custom:page"] {
+            XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validateNavigation(XCTUnwrap(URL(string: address)), isMainFrame: false, mainDocumentURL: URL(string: "https://example.test/")))
+        }
+        XCTAssertNoThrow(try EmbeddedBrowserURLPolicy.validateNavigation(XCTUnwrap(URL(string: "https://example.test/path")), isMainFrame: true, mainDocumentURL: nil))
     }
 
     func testNavigationRejectionDiagnosticsNeverIncludePageOrCredentialData() {

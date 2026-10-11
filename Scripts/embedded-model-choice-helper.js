@@ -419,17 +419,26 @@ function websiteModelIgnoreOwnPickerMutation(record) {
   const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
   if (!target || target.closest?.(boundary)) return false;
   const belongs = node => !!node && scope.roots.some(root => root === node || root.contains(node));
+  const controlledPortal = node => {
+    const menu = node.closest?.('[role="menu"], [role="dialog"], [role="listbox"]');
+    return !!menu && scope.ids.includes(menu.getAttribute('id'))
+      && !menu.closest?.(boundary) && !menu.querySelector?.(boundary);
+  };
   if (record.type === 'attributes') {
     // Real selection/fallback attributes and response content always wake the
     // native reader. Only this observation's menu visibility/chrome is omitted.
     if (!['aria-expanded', 'aria-hidden', 'aria-controls', 'aria-labelledby', 'class', 'style', 'hidden', 'inert', 'data-state'].includes(record.attributeName)) return false;
+    const ownedChrome = belongs(target) || controlledPortal(target);
     if (scope.provider === 'gemini' && record.attributeName === 'class' && target.isConnected
-      && target.getAttribute('role') === 'menuitem' && belongs(target)) {
+      && target.getAttribute('role') === 'menuitem' && ownedChrome) {
       // Gemini's actual model rows use a selected token plus an aria-labelled
       // icon, not checked radios. Active/focus changes remain picker chrome.
       if (record.oldValue === undefined || /(?:^|\s)selected(?:\s|$)/.test(record.oldValue || '') !== target.classList.contains('selected')) return false;
     }
-    return belongs(target) || ['aria-hidden', 'inert', 'style'].includes(record.attributeName)
+    // A newly mounted portal can deliver visibility records before the next
+    // awaited read tracks its root. Its exact aria-controls ID owns only this
+    // chrome; selected attributes and message boundaries still notify above.
+    return ownedChrome || ['aria-hidden', 'inert', 'style'].includes(record.attributeName)
       && scope.roots.some(root => target.contains(root));
   }
   if (record.type !== 'childList') return false;

@@ -1316,19 +1316,26 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(sent["state"] as? String, "running")
             try assertChoiceEvidence(sent, choice: choice)
             if sequence == 2 {
-                // Drain the genuine user/assistant append signals first. These
-                // polls must actually remount/read/close the picker, but that
-                // observation UI must not wake the native reader again.
+                // A genuine composer update can arrive after the old 100 ms
+                // baseline, followed by the native 100 ms burst batch. Observe
+                // that late event before testing read-only picker operations.
+                let delayedComposerUpdate = Task { @MainActor in
+                    try await Task.sleep(for: .milliseconds(180))
+                    return try await evaluate(view, "const send = document.querySelector('[data-testid=\"send-button\"]'); if (!send) return false; send.setAttribute('aria-busy', 'false'); return true;") as? Bool
+                }
                 try await Task.sleep(for: .milliseconds(100))
-                let observedRevision = try await fixture.transport.changeRevision(sessionToken: token)
-                let revision = try XCTUnwrap(observedRevision)
+                let observedEarlyRevision = try await fixture.transport.changeRevision(sessionToken: token)
+                let earlyRevision = try XCTUnwrap(observedEarlyRevision)
+                let updated = try await delayedComposerUpdate.value
+                XCTAssertEqual(updated, true)
+                let revision = try await waitForQuietRevision(fixture.transport, token: token)
+                XCTAssertGreaterThan(revision, earlyRevision, "The old fixed-delay baseline precedes a genuine delayed notification")
                 let triggerBefore = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
                 for _ in 0..<3 {
                     let observed = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
                     XCTAssertEqual(observed["state"] as? String, "running")
                     try assertChoiceEvidence(observed, choice: choice)
-                    try await Task.sleep(for: .milliseconds(100))
-                    let after = try await fixture.transport.changeRevision(sessionToken: token)
+                    let after = try await waitForQuietRevision(fixture.transport, token: token)
                     XCTAssertEqual(after, revision, "Read-only picker observations must not create a native DOM wake loop")
                     let closed = try await evaluate(view, "return document.getElementById('fixture-model-menu') === null;") as? Bool
                     XCTAssertEqual(closed, true)
@@ -5538,6 +5545,23 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertFalse(prompts.dropFirst().contains { $0.contains("Computa session marker:") }, "Only the first website submission carries transport metadata")
         }
         return prompts
+    }
+
+    private func waitForQuietRevision(_ transport: EmbeddedWebModelTransport, token: String) async throws -> UInt64 {
+        // Use the same event channel as production. A quiet window must exceed
+        // its 100 ms native burst batch; any signal resets this bounded wait.
+        let deadline = ContinuousClock.now + .seconds(2)
+        let observedRevision = try await transport.changeRevision(sessionToken: token)
+        var revision = try XCTUnwrap(observedRevision)
+        while ContinuousClock.now < deadline {
+            let quietDeadline = min(deadline, ContinuousClock.now + .milliseconds(250))
+            let observed = try await transport.waitForChange(sessionToken: token, after: revision, until: quietDeadline)
+            let after = try XCTUnwrap(observed)
+            if after == revision, quietDeadline < deadline { return after }
+            revision = after
+        }
+        XCTFail("Fixture notification channel did not become quiet within its deadline")
+        throw FixtureFailure.timeout
     }
 
     private func waitForState(_ state: String, _ transport: EmbeddedWebModelTransport,

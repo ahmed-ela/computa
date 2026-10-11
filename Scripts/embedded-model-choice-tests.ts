@@ -2361,6 +2361,48 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(JSON.stringify(f.posted)).not.toContain('PRIVATE');
     });
 
+    test('mount-time visibility of an exact controlled portal stays quiet before its root is tracked', async () => {
+      const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
+      const open = picker.trigger.onClick;
+      let mountObserved = false;
+      picker.trigger.onClick = () => {
+        open();
+        if (!picker.menu.isConnected || mountObserved) return;
+        mountObserved = true;
+        const scope = f.world.__computaModelReadUI;
+        expect(scope.ids).toContain(picker.menu.getAttribute('id'));
+        expect(scope.roots.includes(picker.menu)).toBe(false);
+        // A real MutationObserver can deliver the newly appended portal's
+        // visibility record before the awaited reader tracks its new root.
+        f.observers[0].callback([
+          { type: 'childList', target: f.body, addedNodes: [picker.menu], removedNodes: [] },
+          { type: 'attributes', target: picker.menu, attributeName: 'style' },
+          { type: 'attributes', target: picker.menu.children[0], attributeName: 'aria-hidden' },
+        ]);
+        f.flush(); expect(f.posted.length).toBe(0);
+        f.observers[0].callback([{ type: 'attributes', target: picker.options[0], attributeName: 'aria-checked' }]);
+        f.flush(); expect(f.posted.length).toBe(1);
+        const unrelated = new Node('DIV', { role: 'menu', id: 'unrelated-popup', hidden: '' }); f.body.append(unrelated);
+        f.observers[0].callback([{ type: 'attributes', target: unrelated, attributeName: 'style' }]);
+        f.flush(); expect(f.posted.length).toBe(2);
+        const wrongRole = new Node('BUTTON', { id: picker.menu.getAttribute('id'), hidden: '' }); f.body.append(wrongRole);
+        f.observers[0].callback([{ type: 'attributes', target: wrongRole, attributeName: 'style' }]);
+        f.flush(); expect(f.posted.length).toBe(3);
+        const messagePortal = new Node('DIV', { role: 'menu', id: picker.menu.getAttribute('id'), hidden: '' });
+        messagePortal.append(new Node('SPAN', { 'data-message-author-role': 'assistant' }, 'PRIVATE RESPONSE'));
+        f.body.append(messagePortal);
+        f.observers[0].callback([{ type: 'attributes', target: messagePortal, attributeName: 'style' }]);
+        f.flush(); expect(f.posted.length).toBe(4);
+        expect(JSON.stringify(f.posted)).not.toContain('PRIVATE');
+        for (const extra of [unrelated, wrongRole, messagePortal]) {
+          f.body.children = f.body.children.filter((node: any) => node !== extra);
+          extra.parentElement = null; extra.connected = false;
+        }
+      };
+      expect((await f.run('verifyModel', { expectedModelChoice: choice(initial) })).modelEvidence.selected).toEqual(choice(initial));
+      expect(mountObserved).toBe(true);
+    });
+
     if (provider === 'gemini') test('real Gemini selection class and marker changes wake while active-only chrome and portal changes do not', async () => {
       const { f, picker } = setup(false, { genericHeader: true, geminiMenuitemMarkers: true });
       await f.run('verifyModel', { expectedModelChoice: choice(initial) });

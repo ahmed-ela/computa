@@ -1102,7 +1102,8 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
         }
         do {
             guard let url = navigationAction.request.url else { throw EmbeddedBrowserURLPolicy.Rejection.invalidAddress }
-            try EmbeddedBrowserURLPolicy.validate(url)
+            try EmbeddedBrowserURLPolicy.validateNavigation(url,
+                isMainFrame: navigationAction.targetFrame?.isMainFrame ?? true, mainDocumentURL: webView.url)
             decisionHandler(.allow)
         } catch {
             let kind = EmbeddedBrowserURLPolicy.diagnosticAddressKind(navigationAction.request.url)
@@ -1118,7 +1119,8 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
         guard session?.owns(webView, tabID: tabID) == true else { decisionHandler(.cancel); return }
         do {
             guard let url = navigationResponse.response.url else { throw EmbeddedBrowserURLPolicy.Rejection.invalidAddress }
-            try EmbeddedBrowserURLPolicy.validate(url)
+            try EmbeddedBrowserURLPolicy.validateNavigation(url,
+                isMainFrame: navigationResponse.isForMainFrame, mainDocumentURL: webView.url)
         } catch {
             deny(error.localizedDescription, view: webView)
             decisionHandler(.cancel)
