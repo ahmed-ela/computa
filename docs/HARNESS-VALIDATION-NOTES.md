@@ -4759,3 +4759,29 @@ Public validation passed all 644 tests, frontend type checking and the
 production build. Receipt SHA-256:
 f5bfd4e9f81fb79cf9d7fe6cab64de4a87a7f7fc8633d9777383d5bb72301270.
 Signed installation and fresh ChatGPT qualification follow.
+
+
+### Build 65 installed controls: live website failure remains
+
+Source 4d03c287820de9a26664182c2fd8c6a0728b9e91 was pushed to PR #5.
+Signed staging and installed verification each passed all 98 bundle checks.
+The installed app is 0.6.0 (65), PID 33501, runtime generation
+2772f561-b383-45ec-966e-7038fd13c71c. Installed verification receipt SHA-256:
+7898e3519a3e18f38119fdb9a3cf4a96e8e08cfea2f8c4969782ae52267a5756.
+
+Two separately recorded synthetic controls on fresh visible temporary ChatGPT
+pages verified the offered GPT-6 family. Pro and Instant effort each showed
+“Load failed” beside Retry at the first post-Send observation and returned no
+answer. Each control sent once; Retry was never clicked. Pro effort was
+restored and both owned tabs were closed. Pro receipt SHA-256:
+a9813e416c90842a0e7a789539ae4a35ec95a23140eed7b7ec1bf8a5f109ccd0.
+Instant receipt SHA-256:
+83f7cfe22083b9719541a68e3aaca66f7ea02d175a46c5db793f9080c2c58787.
+No native build-65 qualification prompt or workflow task was dispatched.
+
+The finite navigation-action URL rejection log had no matches. That does not
+exclude every delegate denial: response/MIME/download paths report a native
+tab error separately. Existing diagnostics do not capture page fetch/XHR
+status or console failures. The live failure's cause remains unproven, so this
+installation is not a ChatGPT reliability pass. Gemini and Claude live testing
+remain deferred.
