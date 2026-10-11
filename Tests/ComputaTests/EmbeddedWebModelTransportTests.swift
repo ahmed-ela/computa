@@ -1316,20 +1316,24 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
-    func testStringQuoteEncodingSurvivesExtraEscapeRenderingWithoutRelaxingOwnership() async throws {
-        // Reproduce the observed first mismatch (backslash versus quote) and
-        // +17 rendered characters. This controls the transformation rather than
+    func testQuoteAndHTMLDelimiterEncodingSurvivesExtraEscapeRenderingWithoutRelaxingOwnership() async throws {
+        // Control the observed +17 quote/markup and remaining +5 markup
+        // differences. This simulates their transformation rather than
         // claiming which website component introduced it in the live failure.
         let original = try JSONSerialization.data(withJSONObject: [
             "model": "browser/chatgpt",
-            "input": String(repeating: "Owned quote rendering fixture line.\n", count: 600) + String(repeating: "\"", count: 17),
+            "input": String(repeating: "Owned quote rendering fixture line.\n", count: 600) + String(repeating: "\"", count: 12) + String(repeating: "<tag>&", count: 5),
         ], options: [.sortedKeys])
         let prepared = try WebModelResponseCodec.prepareRequest(original)
         let start = try XCTUnwrap(prepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
         let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
         let legacy = prepared.prompt.replacingCharacters(in: start..<end, with: String(decoding: original, as: UTF8.self))
-        for (prompt, succeeds) in [(legacy, false), (prepared.prompt, true)] {
-            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: #"userBody.textContent = prompt.replace(/\\(?=")/g, '\\\\');"#))
+        let quoteOnly = prepared.prompt.replacingOccurrences(of: #"\u003c"#, with: "<")
+            .replacingOccurrences(of: #"\u003e"#, with: ">")
+            .replacingOccurrences(of: #"\u0026"#, with: "&")
+        for (prompt, extraCharacters) in [(legacy, 17), (quoteOnly, 5), (prepared.prompt, 0)] {
+            let succeeds = extraCharacters == 0
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: #"userBody.textContent = prompt.replace(/\\(?=")|</g, match => match === '<' ? '\\<' : '\\\\');"#))
             defer { fixture.shutdown() }
             let choice = Self.fixtureChoice(.chatgpt)
             let started = try await startChoice(choice, in: fixture)
@@ -1349,7 +1353,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             } else {
                 do {
                     _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
-                    XCTFail("The original escaped quote mutation must still fail ownership")
+                    XCTFail("An extra escape must still fail ownership")
                 } catch { XCTAssertTrue(error is EmbeddedWebModelTransport.Failure) }
             }
             let values = diagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
@@ -1357,9 +1361,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(comparison["expansionASCIIPromptMatches"] as? Bool, succeeds)
             if !succeeds {
                 XCTAssertEqual(comparison["expansionFirstActualCharacter"] as? String, "backslash")
-                XCTAssertEqual(comparison["expansionFirstExpectedCharacter"] as? String, "double_quote")
+                XCTAssertEqual(comparison["expansionFirstExpectedCharacter"] as? String, extraCharacters == 17 ? "double_quote" : "less_than")
                 XCTAssertEqual(try XCTUnwrap(comparison["expansionASCIIRenderedLength"] as? Int) -
-                               XCTUnwrap(comparison["expansionASCIIPromptLength"] as? Int), 17)
+                               XCTUnwrap(comparison["expansionASCIIPromptLength"] as? Int), extraCharacters)
             }
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             let expansionClicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int

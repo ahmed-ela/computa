@@ -3386,3 +3386,62 @@ or skips; receipt SHA:
 Together these are 2,897 passing app/public tests and 49 declared native skips.
 The original failed run remains unchanged. Signing, installed identity and live
 website behavior are separate gates and remain pending at this checkpoint.
+
+### Installed build 46 and remaining markup mismatch — 2026-10-10
+
+Source `dee317a1c70c7df10c9c12b1842762a3fdebfd8e` is pushed to draft PR #5.
+The signed stage and installed bundle each passed 98 checks. Installed receipt
+SHA: `50cd2c5c14c48de4c2f602de89cdcf1979111fb441b0ecd675f08312fb03a419`.
+Running PID 63671, generation `9ea78cab-954b-4762-9462-0710fab0a0cf`,
+passed strict capture; receipt SHA:
+`003bc4912181a42717b926f3b641d01b5412b1a5cd81e4b094554366cf1036e0`.
+The initial capture invocation omitted a required receipt argument and exited
+before observation; the corrected invocation passed. Previous build 45 is
+preserved as an installation backup. The three unrelated protected PIDs remain
+running.
+
+Fresh ChatGPT GPT-6 qualification `chatgpt-qualification-installed46-r1` passed
+all 39 checks, a real marker read and two verified session closures. Collector
+SHA: `e761b47953b44af2cbe118143a2beeab9e12f7d2ba133c73db451061f5420b33`.
+The fresh browser case then failed first-message ownership before native tools.
+Its one acknowledged session has no confirmed closure. Failed collector SHA:
+`c3d8a0d421d60a7f641527807d3589394a7fae31887c5d7ebc7b72a79bb03da3`.
+The owned synthetic server PID 65585 exited zero and port 50951 closed; local
+cleanup does not establish website cleanup. No failed prompt was replayed.
+
+The new first mismatch is an extra backslash at an expected less-than sign,
+offset 13917. Normalized lengths are 47362 expected and 47367 actual, with the
+10108-character prefix intact. The two identical text diagnostics are repeated
+observations of one inference. Diagnostic SHA:
+`15873802930b24b2fb27da7e53e6be60b4f67bf8a500b2da50a2802d9ecfe722`.
+The quote encoding did not establish a live browser fix: the discrepancy moved
+from 17 extra characters to five. The emitting website component is still unknown.
+
+Candidate 47 also encodes literal HTML delimiters `<`, `>` and `&` inside the
+validated JSON as equivalent Unicode escapes. Escaped quote handling, literal
+backslashes and Unicode escape text are preserved. Round-trip checks cover all
+three providers, message roles/history, quoted metadata keys, tool descriptions
+and custom grammar. Both quote and HTML expansion count toward the prompt limit.
+The controlled WebKit fixture now rejects a 17-character quote/markup alteration
+and the five-character markup-only alteration, while the encoded request passes
+after exactly one insertion, one Send and one expansion. This simulates the
+observed patterns; it does not prove the website cause or live behavior. All
+60 codec tests and this WebKit case passed. Full validation, signing, installation
+and fresh live verification remain pending for candidate 47.
+
+### Build 47 complete validation checkpoint
+
+The canonical public receipt `public-validation-build47-final1.json` passed all
+seven groups, with 625 tests and zero failures or skips. Native validation
+`native-build47-final1-validation.json` executed 2,323 cases: 2,274 passed,
+49 explicitly skipped, zero failed, in 540.888 seconds. Required permission,
+provider/workflow, patch and cleanup guards passed; all 414 frozen inputs and
+the packaged engine were unchanged. The three quote/HTML rendering cases and
+two new HTML codec regressions passed in the complete run.
+
+The first launcher invocation supplied a relative public receipt path and was
+rejected before native tests or a source freeze were published. The unchanged
+controller succeeded with the canonical absolute path. This is a validation
+launcher error, not an application failure. All predecessor evidence remains.
+Build 47 still requires signed staging, installed verification and a fresh live
+qualification before any browser workflow can be claimed.

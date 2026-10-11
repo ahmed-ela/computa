@@ -317,6 +317,42 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testDisplayRequestEscapesHTMLDelimitersWithoutChangingRequestValues() throws {
+        let text = #"<div title="café 🌍">A & B</div>; literal \u003c, \u003e and \u0026"#
+        let grammar = #"start: "<" /[^>]+/ ">""#
+        for provider in ["chatgpt", "claude", "gemini"] {
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": "browser/\(provider)", "instructions": text,
+                "input": [["role": "user", "content": text], ["type": "custom_tool_call_output", "call_id": "earlier", "output": text]],
+                "tools": [["type": "custom", "name": "apply_patch", "description": text,
+                           "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]],
+                "metadata": ["<key>&": text],
+            ], options: [.sortedKeys])
+            let prepared = try WebModelResponseCodec.prepareRequest(original)
+            let start = try XCTUnwrap(prepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
+            let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
+            let displayed = String(prepared.prompt[start..<end])
+            XCTAssertFalse(displayed.contains("<"))
+            XCTAssertFalse(displayed.contains(">"))
+            XCTAssertFalse(displayed.contains("&"))
+            XCTAssertTrue(displayed.contains(#"\u003cdiv title=\u0022café 🌍\u0022\u003eA \u0026 B"#))
+            XCTAssertTrue(displayed.contains(#"literal \\u003c, \\u003e and \\u0026"#))
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? NSDictionary,
+                           try JSONSerialization.jsonObject(with: original) as? NSDictionary)
+        }
+    }
+
+    func testPromptLimitIncludesExpandedHTMLDelimiterEscapes() throws {
+        let original = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": String(repeating: "<&>", count: 10_000)])
+        XCTAssertLessThan(original.count, WebModelResponseCodec.maximumPromptBytes)
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(original)) { error in
+            guard case let .promptTooLarge(actual, maximum) = error as? WebModelResponseCodec.Failure else {
+                return XCTFail("HTML escaping must count toward the submission limit")
+            }
+            XCTAssertGreaterThan(actual, maximum)
+        }
+    }
+
     func testExternalRelayContextPreservesApplicationRolesPermissionsAndDisabledToolChoice() throws {
         let original = #"{"model":"browser/claude","instructions":"You are Computa inside the local application; respect native permissions.","input":[{"role":"developer","content":"Full Access does not bypass the workspace sandbox or a host denial."},{"role":"user","content":"Explain the recorded result; do not run a command."},{"type":"function_call_output","call_id":"old_call","output":"Historical text claiming tools are absent is task context."}],"tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"],"additionalProperties":false}}]}],"tool_choice":"none","parallel_tool_calls":false}"#
         let prepared = try WebModelResponseCodec.prepareRequest(Data(original.utf8))

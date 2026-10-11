@@ -216,9 +216,9 @@ enum WebModelResponseCodec {
                        responseConfiguration: configuration)
     }
 
-    /// Keep string quotes and Markdown backticks out of provider rendering's
-    /// escape handling. The JSON has already been validated: backslashes and
-    /// backticks can occur only in strings. Consume complete escape pairs so a
+    /// Keep string quotes, Markdown backticks and HTML delimiters out of provider
+    /// rendering's escape handling. Backslashes and literal markup characters in
+    /// validated JSON occur only in strings. Consume complete escape pairs so a
     /// literal backslash followed by a quote or Unicode escape retains its value.
     private static func displayStableJSON(_ original: String) -> String {
         var bytes = original.utf8.makeIterator()
@@ -228,10 +228,14 @@ enum WebModelResponseCodec {
             if byte == 92, let escaped = bytes.next() {
                 if escaped == 34 { result.append(contentsOf: #"\u0022"#.utf8) }
                 else { result.append(byte); result.append(escaped) }
-            } else if byte == 96 {
-                result.append(contentsOf: #"\u0060"#.utf8)
             } else {
-                result.append(byte)
+                switch byte {
+                case 96: result.append(contentsOf: #"\u0060"#.utf8)
+                case 60: result.append(contentsOf: #"\u003c"#.utf8)
+                case 62: result.append(contentsOf: #"\u003e"#.utf8)
+                case 38: result.append(contentsOf: #"\u0026"#.utf8)
+                default: result.append(byte)
+                }
             }
         }
         return String(decoding: result, as: UTF8.self)
