@@ -228,6 +228,95 @@ final class APIProviderRuntimeContractTests: XCTestCase {
         }
     }
 
+    #if DEBUG
+    func testSuccessfulFailedHistoryCompactionRetiresAPILeaseBeforeOnePendingNormalTurn() async throws {
+        try XCTSkipUnless((try? FixtureBunExecutable.resolve()) != nil,
+                         "The deterministic App Server fixture requires the installed Bun executable.")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaAPICompaction-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let model = APIModelDefinition(id: "fixture-compaction", name: "Fixture API", contextWindow: 65_536)
+        let provider = APIProviderDefinition(id: "fixture-api", name: "Synthetic API",
+            baseURL: URL(string: "https://provider-fixture.invalid/v1")!, wireAPI: .chatCompletions, models: [model])
+        let modelID = APIProviderCatalog.appModelID(providerID: provider.id, modelID: model.id)
+        let threadID = UUID().uuidString.lowercased()
+        let priorTurnID = UUID().uuidString.lowercased()
+        let maintenanceTurnID = UUID().uuidString.lowercased()
+        let fixtureSource = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/ManagedCompactionAppServer.ts")
+        var fixtureText = try String(contentsOf: fixtureSource, encoding: .utf8)
+        let substitutions = [
+            ("#!/usr/bin/env bun\n", "#!/usr/bin/env bun\nimport { randomUUID } from 'node:crypto';\n"),
+            ("const threadId = \"fixture-thread\";", "const threadId = \"\(threadID)\";"),
+            ("const modelId = \"lmstudio-community/Qwen3.5-4B-MLX-4bit\";", "const modelId = \"\(modelID)\";"),
+            ("const resumedTurnId = \"resume-prior-turn\";", "const resumedTurnId = \"\(priorTurnID)\";"),
+            ("const turnId = \"maintenance-turn\";", "const turnId = \"\(maintenanceTurnID)\";"),
+            ("const turnId = `user-turn-${index}`;", "const turnId = randomUUID();"),
+            ("id: resumedTurnId, status: \"completed\", error: null, itemsView: \"full\", items: [",
+             "id: resumedTurnId, status: \"failed\", error: {message:'Synthetic prior failure'}, itemsView: \"full\", items: ["),
+        ]
+        for (original, replacement) in substitutions {
+            guard fixtureText.components(separatedBy: original).count == 2 else {
+                throw APICompactionFixtureFailure("The isolated compaction fixture source changed.")
+            }
+            fixtureText = fixtureText.replacingOccurrences(of: original, with: replacement)
+        }
+        let fixture = root.appendingPathComponent("fixture.ts")
+        try Data(fixtureText.utf8).write(to: fixture)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.path)
+        try Data("resume-failed-history-api".utf8).write(to: root.appendingPathComponent("scenario"))
+        try Data("release".utf8).write(to: root.appendingPathComponent("release-injection"))
+        let server = APIModelServer(credentials: APICompactionNoCredentials())
+        var configuration = CodexAppServerRuntime.Configuration.localQwen
+        configuration.executable = .fixture(path: fixture.path)
+        configuration.model = modelID
+        configuration.codexHomePath = root.path
+        configuration.workspacePath = root.path
+        let traceURL = root.appendingPathComponent("protocol.jsonl")
+        configuration.protocolTracePath = traceURL.path
+        configuration.apiModelServerForTesting = server
+        let runtime = CodexAppServerRuntime(configuration: configuration)
+        do {
+            try await runtime.configureAPIProviders([provider])
+            let tasks = try await runtime.loadTasks()
+            XCTAssertEqual(tasks.map(\.id), [threadID])
+            XCTAssertEqual(tasks.first?.model, modelID)
+            // This exercises Core's actual maintenance preparation and the
+            // actor's unchanged fail-closed admission. The native fixture makes
+            // no HTTP inference; a stale maintenance lease rejects this submit.
+            try await runtime.submit(prompt: "ONE_PENDING_SYNTHETIC_PROMPT", toTaskID: threadID, modelID: modelID)
+            let trace = try AppServerWireTrace.load(traceURL)
+            XCTAssertEqual(trace.parseFailures, [])
+            let requests = trace.messages.filter { $0.direction == .clientToServer }
+            XCTAssertFalse(requests.contains { $0.method == "thread/start" })
+            XCTAssertEqual(requests.filter { $0.method == "thread/resume" }.count, 1)
+            let compact = try XCTUnwrap(requests.first { $0.method == "thread/compact/start" })
+            XCTAssertEqual(requests.filter { $0.method == "thread/compact/start" }.count, 1)
+            let compactTerminal = try XCTUnwrap(trace.messages.first {
+                guard $0.method == "turn/completed", let params = $0.object["params"] as? [String: Any],
+                      let turn = params["turn"] as? [String: Any] else { return false }
+                return turn["id"] as? String == maintenanceTurnID && turn["status"] as? String == "completed"
+            })
+            let starts = requests.filter { $0.method == "turn/start" }
+            XCTAssertEqual(starts.count, 1, "Maintenance must not consume or replay the pending normal prompt.")
+            let start = try XCTUnwrap(starts.first)
+            XCTAssertLessThan(compact.sequence, compactTerminal.sequence)
+            XCTAssertLessThan(compactTerminal.sequence, start.sequence)
+            let params = try XCTUnwrap(start.object["params"] as? [String: Any])
+            XCTAssertEqual(params["threadId"] as? String, threadID)
+            XCTAssertEqual(params["model"] as? String, modelID)
+            let input = try XCTUnwrap(params["input"] as? [[String: Any]])
+            XCTAssertEqual(input.filter { $0["text"] as? String == "ONE_PENDING_SYNTHETIC_PROMPT" }.count, 1)
+            let report = await runtime.shutdown()
+            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+        } catch {
+            _ = await runtime.shutdown()
+            throw error
+        }
+    }
+    #endif
+
     private func apiID(_ model: APIModelDefinition) -> String {
         APIProviderCatalog.appModelID(providerID: "cerebras", modelID: model.id)
     }
@@ -275,3 +364,22 @@ final class APIProviderRuntimeContractTests: XCTestCase {
         return (CodexAppServerRuntime(configuration: configuration), root)
     }
 }
+
+#if DEBUG
+private struct APICompactionNoCredentials: APIProviderCredentials {
+    func key(for providerID: String) throws -> String? {
+        throw APICompactionFixtureFailure("A protocol-only compaction fixture must not read credentials.")
+    }
+    func save(_ key: String, for providerID: String) throws {
+        throw APICompactionFixtureFailure("A protocol-only compaction fixture must not save credentials.")
+    }
+    func remove(for providerID: String) throws {
+        throw APICompactionFixtureFailure("A protocol-only compaction fixture must not remove credentials.")
+    }
+}
+
+private struct APICompactionFixtureFailure: LocalizedError {
+    let errorDescription: String?
+    init(_ message: String) { errorDescription = message }
+}
+#endif

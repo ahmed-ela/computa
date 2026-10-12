@@ -57,6 +57,64 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try decode(["role": "assistant", "content": "done"], request: request(["tool_choice": "required"])))
         XCTAssertThrowsError(try decode(["role": "assistant", "content": "done"], model: "different-model"))
     }
+    func testCustomGrammarContractSurvivesFunctionWrappingAndNativeResponsesRemainUnchanged() throws {
+        // The pinned engine's apply_patch custom format defines these sentinels;
+        // its short description alone does not provide them to the model.
+        let grammar = #"""
+        start: begin_patch hunk+ end_patch
+        begin_patch: "*** Begin Patch" LF
+        end_patch: "*** End Patch" LF?
+        hunk: "*** Add File: " /(.+)/ LF ("+" /(.*)/ LF)+
+        %import common.LF
+        """#
+        let original = "This is a FREEFORM tool, so do not wrap the patch in JSON."
+        let patch: [String: Any] = ["type": "custom", "name": "apply_patch", "description": original,
+                                    "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]
+        let regex: [String: Any] = ["type": "custom", "name": "version_text", "format": ["type": "grammar", "syntax": "regex", "definition": #"v[0-9]+\.[0-9]+"#]]
+        let nativeTools: [[String: Any]] = [["type": "namespace", "name": "editing", "tools": [patch]], regex]
+        let prepared = try request(["tools": nativeTools])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+        let wireTools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        let wrapped = try XCTUnwrap(wireTools[0]["function"] as? [String: Any])
+        let description = try XCTUnwrap(wrapped["description"] as? String)
+        XCTAssertTrue(description.hasPrefix(original)); XCTAssertTrue(description.contains(grammar))
+        XCTAssertTrue(description.contains("decoded input string is passed unchanged"))
+        XCTAssertTrue(description.contains("transport wrapper")); XCTAssertTrue(description.contains("native lark grammar"))
+        XCTAssertTrue(((wireTools[1]["function"] as? [String: Any])?["description"] as? String ?? "").contains(#"v[0-9]+\.[0-9]+"#))
+        let payload = "*** Begin Patch\n*** Add File: sample.txt\n+verbatim 🙂\n*** End Patch\n"
+        let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": payload]), as: UTF8.self)
+        let reply = try decode(["role": "assistant", "tool_calls": [["id": "patch-grammar", "type": "function", "function": ["name": "computa_tool_0", "arguments": arguments]]]], finish: "tool_calls", request: prepared)
+        let output = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(output["type"] as? String, "custom_tool_call"); XCTAssertEqual(output["namespace"] as? String, "editing")
+        XCTAssertEqual(output["name"] as? String, "apply_patch"); XCTAssertEqual(output["input"] as? String, payload)
+        let responses = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: .responses, models: provider.models)
+        let nativeBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request(["tools": nativeTools], provider: responses).body) as? [String: Any])
+        XCTAssertEqual(nativeBody["tools"] as? NSArray, nativeTools as NSArray)
+    }
+    func testCustomFormatValidationRejectsUnknownMalformedAndOversizedContracts() throws {
+        func tool(_ format: Any?) -> [String: Any] {
+            var value: [String: Any] = ["type": "custom", "name": "text_tool"]
+            if let format { value["format"] = format }; return value
+        }
+        for format: Any? in [nil, ["type": "text"]] {
+            let prepared = try request(["tools": [tool(format)]])
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+            let function = try XCTUnwrap((body["tools"] as? [[String: Any]])?.first?["function"] as? [String: Any])
+            XCTAssertTrue((function["description"] as? String ?? "").contains("native tool accepts raw text"))
+        }
+        let invalid: [Any] = [NSNull(), "text", ["type": "unknown"], ["type": "text", "definition": "ignored"],
+            ["type": "grammar", "syntax": "lark"], ["type": "grammar", "syntax": "unknown", "definition": "start: /.+/"],
+            ["type": "grammar", "syntax": "lark", "definition": 42], ["type": "grammar", "syntax": "lark", "definition": " \n "],
+            ["type": "grammar", "syntax": "lark", "definition": "start: /.+/", "ignored": true],
+            ["type": "grammar", "syntax": "regex", "definition": String(repeating: "🙂", count: 4_097)]]
+        for format in invalid {
+            XCTAssertThrowsError(try request(["tools": [tool(format)]])) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool) }
+        }
+        let boundary = ["type": "grammar", "syntax": "regex", "definition": String(repeating: "a", count: 16_384)]
+        XCTAssertNoThrow(try request(["tools": [tool(boundary)]]))
+        var oversized = tool(boundary); oversized["description"] = String(repeating: "a", count: 64_000)
+        XCTAssertThrowsError(try request(["tools": [oversized]])) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool) }
+    }
     func testReasoningCapsuleRoundTripsAcrossCodecRecreationAndRejectsDifferentBindings() throws {
         let reply = try decode(["role": "assistant", "content": NSNull(), "reasoning": "PRIVATE_REASONING", "tool_calls": [["id": "a", "type": "function", "function": ["name": "computa_tool_0", "arguments": "{\"path\":\"ok\"}"]]]], finish: "tool_calls")
         let items = try XCTUnwrap(reply.response["output"] as? [[String: Any]])

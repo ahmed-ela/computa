@@ -2577,6 +2577,13 @@ private extension CodexAppServerRuntime {
                     let issues = await cleanup.value
                     guard issues.isEmpty else { throw WebModelServer.Failure.cleanupFailed }
                     try requireManagedCompaction(taskID: taskID, operationID: operationID, generation: generation)
+                } else if APIProviderCatalog.identity(for: modelID) != nil {
+                    // Maintenance consumes its own API preparation/context. Drain
+                    // that lease before admitting the pending user's new turn.
+                    // Use the maintenance model, which can differ from a queued
+                    // selection, and retain the barrier across the actor hop.
+                    await apiModelServer.finish(taskID: taskID)
+                    try requireManagedCompaction(taskID: taskID, operationID: operationID, generation: generation)
                 }
                 events.yield(.contextUsageUpdated(taskID: taskID, usage: nil))
                 events.yield(.contextCompactionChanged(taskID: taskID, state: .completed))
