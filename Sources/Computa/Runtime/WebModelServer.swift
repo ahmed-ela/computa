@@ -573,10 +573,11 @@ actor WebModelServer {
         let taskID = try Self.canonicalID(taskID)
         guard !shuttingDown, active[taskID] == nil, cleanupTasks[taskID] == nil,
               !retiringTaskIDs.contains(taskID) else { throw Failure.busy }
-        guard let provider = Self.provider(for: request.model) else {
+        guard let selection = WebsiteModelCatalog.inferenceSelection(for: request.model) else {
             if request.model.hasPrefix("browser/") { throw Failure.invalidRequest }
             throw Failure.modelNotFound
         }
+        let provider = selection.provider
         // All catalog website models use the app-owned browser. The Chrome
         // connection is an independent computer-tool capability.
         let route: Route = .embedded
@@ -601,9 +602,21 @@ actor WebModelServer {
               identity == NativeRequestIdentity(threadID: context.threadID, turnID: context.turnID) else {
             throw Failure.inferenceContextRequired
         }
-        let choice = WebsiteModelCatalog.choice(for: request.model)
+        guard let selection = WebsiteModelCatalog.inferenceSelection(for: request.model),
+              selection.provider == provider else { throw Failure.invalidRequest }
+        let choice = selection.choice
         let inferenceID = UUID()
         var lease: Session?
+        var pinnedModelEvidence: WebsiteModelEvidence?
+        func verifiedModelEvidence(_ snapshot: [String: Any], session: Session) throws -> WebsiteModelEvidence? {
+            let current = try Self.modelEvidence(snapshot, session: session)
+            if let pinnedModelEvidence {
+                guard let current, pinnedModelEvidence.isSameResolvedSelection(as: current) else {
+                    throw Failure.modelMismatch
+                }
+            } else if let current { pinnedModelEvidence = current }
+            return current
+        }
         do {
             var params = ["provider": provider]
             if let choice {
@@ -633,7 +646,7 @@ actor WebModelServer {
                 throw Failure.invalidRequest
             }
             guard ["ready", "loading"].contains(reply["state"] as? String ?? "") else { throw Self.snapshotFailure(reply) }
-            if reply["state"] as? String == "ready" { _ = try Self.modelEvidence(reply, session: session) }
+            if reply["state"] as? String == "ready" { _ = try verifiedModelEvidence(reply, session: session) }
             let readinessDeadline = ContinuousClock.now + readinessTimeout
             var ready = reply["state"] as? String == "ready"
             while !ready, ContinuousClock.now < readinessDeadline {
@@ -642,7 +655,7 @@ actor WebModelServer {
                 guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
                 let state = try await call(transport, operation: "webProviderPoll", params: ["sessionToken": session.token])
                 guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
-                if ["ready", "running"].contains(state["state"] as? String ?? "") { _ = try Self.modelEvidence(state, session: session) }
+                if ["ready", "running"].contains(state["state"] as? String ?? "") { _ = try verifiedModelEvidence(state, session: session) }
                 if state["state"] as? String == "ready" { ready = true }
                 else if !["loading", "running"].contains(state["state"] as? String ?? "") { throw Self.snapshotFailure(state) }
                 if !ready { try await waitForNextPoll(session, after: revision, until: readinessDeadline) }
@@ -653,7 +666,7 @@ actor WebModelServer {
                                       params: ["sessionToken": session.token, "prompt": request.prompt])
             guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
             try Self.verifySingleInferenceSnapshot(sent, session: session)
-            let submittedEvidence = try Self.modelEvidence(sent, session: session)
+            let submittedEvidence = try verifiedModelEvidence(sent, session: session)
             try recordEvidence(submittedEvidence, snapshot: sent, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
             let end = ContinuousClock.now + responseTimeout
             while ContinuousClock.now < end {
@@ -665,7 +678,7 @@ actor WebModelServer {
                 switch value["state"] as? String {
                 case "complete":
                     try Self.verifySingleInferenceSnapshot(value, session: session)
-                    let evidence = try Self.modelEvidence(value, session: session)
+                    let evidence = try verifiedModelEvidence(value, session: session)
                     guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
                     let reply: WebModelResponseCodec.Reply
                     do {
@@ -707,7 +720,7 @@ actor WebModelServer {
                     try Task.checkCancellation()
                     return encoded
                 case "running":
-                    _ = try Self.modelEvidence(value, session: session)
+                    _ = try verifiedModelEvidence(value, session: session)
                     try await waitForNextPoll(session, after: revision, until: end)
                 default: throw Self.snapshotFailure(value)
                 }

@@ -178,7 +178,9 @@ final class WebSnapshotTests: XCTestCase {
         XCTAssertTrue(snapshot.tasks.first?.isBusy == true)
         XCTAssertFalse(snapshot.tasks.first?.canSteer ?? true)
         XCTAssertTrue(snapshot.tasks.last?.queuedPrompts.isEmpty == true)
-        XCTAssertEqual(snapshot.modelOptions.map(\.id), LocalModelCatalog.options.map(\.id))
+        XCTAssertEqual(snapshot.modelOptions.map(\.id), LocalModelCatalog.options
+            .filter { $0.id != LocalModelCatalog.chatGPTBrowserModelID }.map(\.id))
+        XCTAssertFalse(snapshot.modelOptions.contains { $0.id == LocalModelCatalog.chatGPTBrowserModelID })
 
         let encoded = try JSONEncoder().encode(snapshot)
         let encodedText = try XCTUnwrap(String(data: encoded, encoding: .utf8))

@@ -357,7 +357,7 @@ describe('normal ChatGPT product provenance', () => {
     const picker = installObservedModelPicker(f, 'chatgpt', Element);
     expect(await f.inspect()).toMatchObject({ chatModeReady: true, temporary: false, productModeEvidence: {
       product: 'chatgpt', mode: 'chat', source: 'composer_mode_control', temporaryTransition: 'not_requested' } });
-    expect(f.chatMode.clicks).toBe(0); expect(picker.options.some(option => option.textContent.includes('GPT-5.6 Sol'))).toBe(true);
+    expect(f.chatMode.clicks).toBe(0); expect(picker.familyOptions.some(option => option.textContent.includes('GPT-5.6 Sol'))).toBe(true);
     expect(await f.inspect({ action: 'enableTemporary' })).toMatchObject({ temporary: true,
       productModeEvidence: { temporaryTransition: 'acknowledged' } });
     expect(f.temporary.clicks).toBe(1);
@@ -553,7 +553,7 @@ describe('normal ChatGPT product provenance', () => {
     f.composer.text = 'Owned synthetic request\n\n' + markerLine;
     const send = new Element('BUTTON', { 'aria-label': 'Send prompt' }); f.body.append(send);
     const result = await f.inspect({ action: 'sendReady', prompt: f.composer.text,
-      expectedModelChoice: { key: 'GPT-5.6 Sol', label: 'GPT-5.6 Sol' } });
+      expectedModelChoice: { key: 'chat/latest/medium', label: 'Medium' } });
     expect(['product_mode_unverified', 'temporary_mode_unverified', 'model_unverified']).toContain(result.error);
     expect(result.sendReady).toBeUndefined(); expect(send.clicks).toBe(0); expect(f.composer.events).toEqual([]);
   });

@@ -12,8 +12,8 @@ final class WebsiteModelCatalogTests: XCTestCase {
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
         XCTAssertNotNil(preferences.data(forKey: WebsiteModelCatalog.preferenceKey))
         WebsiteModelCatalog.save([normalLabelAlsoOfferedInWork] + others, to: preferences)
-        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), [normalLabelAlsoOfferedInWork] + others,
-                       "The label is valid after guarded normal-Chat discovery; it must not be blacklisted")
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others,
+                       "A family-only choice no longer proves a Chat power preset")
     }
 
     func testLegacyCatalogValidationCannotBeHiddenByProductMigration() throws {
@@ -29,7 +29,9 @@ final class WebsiteModelCatalogTests: XCTestCase {
     func testConcreteChoicesRoundTripWithoutARegisteredOrGuessedModelList() throws {
         let configuration = CodexAppServerRuntime.Configuration.localQwen
         for provider in WebsiteModelCatalog.providers {
-            let choice = WebsiteModelChoice(provider: provider, key: "fixture-key/with-symbols", label: "Fixture Model 東京 👋")
+            let choice = provider == "chatgpt"
+                ? WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium")
+                : WebsiteModelChoice(provider: provider, key: "fixture-key/with-symbols", label: "Fixture Model 東京 👋")
             XCTAssertTrue(choice.isValid)
             XCTAssertEqual(WebsiteModelCatalog.choice(for: choice.modelID), choice)
             XCTAssertEqual(WebsiteModelCatalog.selection(for: choice.modelID)?.provider, provider)
@@ -121,7 +123,8 @@ final class WebsiteModelCatalogTests: XCTestCase {
 
     func testObservedMenuCachePersistsExactChoicesAndRejectsCorruptData() throws {
         let preferences = isolatedTestPreferences()
-        let choices = WebsiteModelCatalog.providers.map { WebsiteModelChoice(provider: $0, key: "fixture-key", label: "Fixture Label") }
+        let choices = WebsiteModelCatalog.providers.map {  $0 == "chatgpt" ? WebsiteModelChoice(provider: $0, key: "chat/latest/medium", label: "Medium")
+                : WebsiteModelChoice(provider: $0, key: "fixture-key", label: "Fixture Label") }
         WebsiteModelCatalog.save(choices, to: preferences)
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), choices)
         for invalid in [Data("{}".utf8), Data("[{}]".utf8), try JSONEncoder().encode([choices[0], choices[0]]),
@@ -151,12 +154,12 @@ final class WebsiteModelCatalogTests: XCTestCase {
             XCTAssertFalse(choice.isRetired, "Retirement applies only to the requested ChatGPT family")
             XCTAssertTrue(choice.isSelectable)
         }
-        XCTAssertTrue(WebsiteModelChoice(provider: "chatgpt", key: "Latest-preview", label: "Latest preview").isSelectable)
+        XCTAssertFalse(WebsiteModelChoice(provider: "chatgpt", key: "Latest-preview", label: "Latest preview").isSelectable)
         XCTAssertFalse(WebsiteModelChoice(provider: "unknown", key: "fixture", label: "Fixture").isSelectable)
     }
 
     func testLoadingValidRawLatestCachePrunesItsPersistedEntryWithoutChangingOtherProviders() throws {
-        let retained = [WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5"),
+        let retained = [WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium"),
                         WebsiteModelChoice(provider: "gemini", key: "3.1 Pro", label: "3.1 Pro"),
                         WebsiteModelChoice(provider: "claude", key: "Sonnet 5.5", label: "Sonnet 5.5")]
         for retired in retiredLatestChoices {
@@ -177,7 +180,7 @@ final class WebsiteModelCatalogTests: XCTestCase {
     }
 
     func testSavingFiltersRetiredChatGPTChoicesAndPreservesOtherProviderLatestIdentities() throws {
-        let retained = [WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.6 Sol", label: "GPT-5.6 Sol"),
+        let retained = [WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium"),
                         WebsiteModelChoice(provider: "gemini", key: "Latest", label: "Latest"),
                         WebsiteModelChoice(provider: "claude", key: "Latest", label: "Latest")]
         for retired in retiredLatestChoices {
@@ -191,7 +194,7 @@ final class WebsiteModelCatalogTests: XCTestCase {
 
     func testRetirementCannotHideInvalidDuplicateOrOversizedRawCaches() throws {
         let latest = retiredLatestChoices[0]
-        let baseline = [WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")]
+        let baseline = [WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")]
         let invalidLists = [
             [latest, latest],
             [latest, WebsiteModelChoice(provider: "chatgpt", key: "other-key", label: "Latest")],

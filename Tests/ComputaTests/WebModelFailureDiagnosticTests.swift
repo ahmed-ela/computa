@@ -5,7 +5,7 @@ import XCTest
 final class WebModelFailureDiagnosticTests: XCTestCase {
     func testAuthenticatedHTTPFailureRetainsTheExactFiniteGateDiagnosticForItsOwnTaskOnce() async throws {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .quota)))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .quota), defaultChatChoice: syntheticChatGPTChoice))
         do {
             let base = try await server.start()
             let (body, status) = try await Self.post(base, server: server, taskID: "receipt-task")
@@ -25,7 +25,7 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
     func testNewTurnSuccessCleanupAndShutdownEachClearPendingDiagnostics() async throws {
         for boundary in ["turn", "success", "cleanup", "shutdown"] {
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .failureThenSuccess)))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .failureThenSuccess), defaultChatChoice: syntheticChatGPTChoice))
             do {
                 let base = try await server.start()
                 let (_, failureStatus) = try await Self.post(base, server: server, taskID: boundary)
@@ -49,7 +49,7 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
     func testLateHTTPFailureCannotRestoreADiagnosticAfterTheNextTurnHasRegistered() async throws {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
         let transport = FailureReceiptTransport(mode: .pausedQuota)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         do {
             let base = try await server.start()
             let request = Task.detached {
@@ -75,7 +75,7 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
 
     func testArbitraryTransportProseIsNotPromotedIntoALocalFailureReceipt() async throws {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .arbitraryError)))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(FailureReceiptTransport(mode: .arbitraryError), defaultChatChoice: syntheticChatGPTChoice))
         do {
             let base = try await server.start()
             let (_, status) = try await Self.post(base, server: server, taskID: "untrusted-task")
@@ -125,7 +125,7 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
         request.setValue(try websiteInferenceFixtureMetadata(taskID: taskID), forHTTPHeaderField: "x-codex-turn-metadata")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": LocalModelCatalog.chatGPTBrowserModelID, "input": "Synthetic failure receipt check", "stream": true,
+            "model": syntheticChatGPTModelID, "input": "Synthetic failure receipt check", "stream": true,
         ])
         let (data, response) = try await URLSession.shared.data(for: request)
         return (data, try XCTUnwrap(response as? HTTPURLResponse).statusCode)

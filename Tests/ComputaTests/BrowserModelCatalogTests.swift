@@ -33,7 +33,7 @@ final class BrowserModelCatalogTests: XCTestCase {
 
     func testBrowserModelsRouteToTheirWebsitesWithoutLocalInferenceRequirements() throws {
         let configuration = CodexAppServerRuntime.Configuration.localQwen
-        for (model, provider) in [(LocalModelCatalog.chatGPTBrowserModelID, "chatgpt"),
+        for (model, provider) in [(syntheticChatGPTModelID, "chatgpt"),
                                   (LocalModelCatalog.geminiBrowserModelID, "gemini"),
                                   (LocalModelCatalog.claudeBrowserModelID, "claude")] {
             XCTAssertNotNil(LocalModelCatalog.option(for: model))

@@ -7,8 +7,11 @@ are scripted. Filesystem changes, reported command exit codes, terminal
 sessions, Git commits, pushes and HTTP requests are real. Process termination
 is verified separately from command success.
 
-The same workflow runs with `browser/chatgpt`, `browser/gemini` and
-`browser/claude`. Every inference request must retain the requested provider ID.
+The same workflow runs with ChatGPT's canonical `chat/latest/medium` choice,
+`browser/gemini` and `browser/claude`. Every inference request must retain the
+requested model ID. The ChatGPT fixture supplies an explicit synthetic plain
+GPT family, Medium power and highest-offered-family proof; it does not observe
+the live website.
 This checks provider routing and tool composition with scripted inference. It
 does not test website sign-in, selection of a concrete website model, the
 model's own judgment, or live website session cleanup. Those require separate
@@ -61,7 +64,8 @@ skips in 527.297 seconds.
 | Build 63 read recovery | One actual inspection timeout can get a fresh read only after temporary-session ownership and first-message lineage are bound. The original response deadline and current model/Chat-mode checks remain. Insertion, Send, selection and expansion cannot replay. Four queue-delay controls passed; the old source fails the recovery control. An older ten-second immediate-failure expectation was updated to reject a late reply at the original response deadline. Its original complete failed run is retained; the final complete run is green. |
 | Installed diff UI | Build 44 passed split/unified/wrapped presentation, hunk collapse, selective staging/unstaging/reverting, stale-snapshot rejection, binary notices, filtering and read-only branch/commit comparisons. Independent Git/file snapshots verify preservation. A scope selection after switching chats changed the dropdown without changing native state. A native commit-event regression reproduces that failure. Installed build 45 now passes all four scope selections, including Unstaged after switching chats; independent before/after snapshots prove that this recheck changed no fixture files or Git state. |
 | Model comparison | All six fresh build 44 trials are complete and failed the full task. They use the same pinned local model and actual Full access settings in both products. Both Computa ordinary trials stopped at the receipt compaction bounds. Codex ordinary r1 and both goal trials stopped on unadvertised generated tool calls; ordinary r2 stopped on missing generated public output. Computa goal mode remains N/A. The twelve owned project/origin directories were verified against their archive and removed. |
-| Delivery | Build 66 is signed, installed and pushed as 63fe9af to draft PR #5. Its fresh runtime identity and default-off inspector toolbar state verified. Build 65 visible temporary ChatGPT/GPT-6 controls failed with “Load failed” in both Pro and Instant effort; the failure cause remains unproven. Build 66 adds public inspection diagnostics. Approval to temporarily enable Safari’s developer menu is pending; no build-66 provider inference ran. ChatGPT qualification and the five live workflows remain incomplete. Gemini and Claude live work remain deferred. |
+| Delivery | Build 66 is signed, installed and pushed as 63fe9af to draft PR #5. Its runtime identity and default-off inspector toolbar state verified. Four single-send human controls failed: original GPT-6 Pro temporary chat, the same control after normal app restart, GPT-5.6 Sol temporary chat, and GPT-6 Pro ordinary chat. Each correlated native failure is NSURLErrorDomain -1000 with underlying POSIX EINVAL; the original Inspector control identified the conversation POST. Restart, family and temporary-mode changes were insufficient; the cause remains unproven. Owned tabs and inspection windows closed, Safari's developer setting returned to off, and the browser pane returned to hidden. No build-66 native provider inference ran. ChatGPT qualification and the five live workflows remain incomplete. Gemini and Claude live work remain deferred. |
+| Current requested Chat selector | The user now requests Chat-only power presets—Instant, Medium, High, Extra High and Pro—with automatic selection of the highest observed enabled plain GPT family, excluding Sol and Work. This supersedes the earlier request to remove Latest as an option. “Latest” is this family-selection policy, not a literal website menu item. Empty-page structural inspection supports the selector shape; it establishes neither implementation qualification nor a network fix. |
 
 Detailed historical failures, corrections, receipts and source attribution remain
 in the [validation ledger](HARNESS-VALIDATION-NOTES.md).
@@ -367,7 +371,83 @@ verified. Signed staging and installed verification each passed 98 checks,
 bound to source 63fe9af835609cdc68844d24f2ea45edf79e2553. The fresh runtime
 identity and installed toolbar's default-off state were checked separately.
 
-Inspection has not been opened. Temporarily enabling Safari's developer menu
-requires the pending confirmation before request diagnosis can proceed. The
-ChatGPT website failure, native qualification and five live workflow checks
-remain unresolved. This diagnostic installation is not a website fix.
+After human approval, Safari's developer menu was enabled temporarily and the
+public inspector attached only to an owned temporary ChatGPT test tab. One
+GPT-6 / Pro control failed with `Load failed` at the first read, 923 ms after
+Send. For the conversation fetch, POST `/backend-api/f/conversation`, Inspector
+exposed neither an HTTP status nor a transfer-byte count; its correlated console
+error was `Failed to load resource: bad URL`. Three preparation requests returned
+HTTP 200. The app logged resource 4419 failing after 98.403 ms, closely matching
+Inspector's 98.5 ms. Its proved Networking process links that resource to task 61,
+which failed with NSURLErrorDomain -1000 and underlying NSPOSIXErrorDomain 22
+(EINVAL). Native logs redact the request URL; their independent endpoint match
+remains unverified. The specific invalid argument and cause remain unproven.
+
+No Retry or native inference was dispatched. The owned inspector, inspection
+list and test tab closed; Safari's developer setting returned to off and the
+Computa browser pane returned to its prior hidden state. Sanitized control
+and log receipts retain no headers, cookies, bodies or HAR. The ChatGPT website
+failure, native qualification and five live workflows remain unresolved.
+
+Three additional single-send human controls isolated normal app restart,
+model-family selection and temporary-chat mode. The restarted app was still
+the identical installed build 66; its new app PID 3257 and owned Networking
+PID 3261 were independently verified. GPT-6 / Pro temporary chat failed at the
+first UI read after 829 ms, GPT-5.6 Sol / Pro temporary chat after 806 ms, and
+GPT-6 / Pro ordinary chat after 1,051 ms. All three have exact native
+task/resource associations for the same -1000 / POSIX 22 error chain. The
+restart also reproduced the connection write/read EINVAL sequence. This is a
+normal-app-restart comparison, not a Networking-only or HTTP/2-only reset.
+Other preparatory POST requests succeeded in the original Inspector control;
+these results do not establish a generic POST failure. No Retry or native
+inference followed, and closing the tabs did not independently verify website
+conversation deletion.
+
+## Requested Chat power presets and selector observations
+
+The latest human instruction replaces the earlier remove-Latest preference:
+offer Chat powers **Instant, Medium, High, Extra High and Pro**, while choosing
+the highest observed enabled plain GPT family automatically. Sol and Work are
+excluded. The website did not expose a literal Latest family. This section
+records the requested contract and observed controls; implementation and live
+qualification require their own evidence.
+
+On an owned empty Chat page with zero prompts, Chat was pressed and Work was
+not. The native power control exposed values 1–5 in that order. Public Inspector
+showed a `SPAN` slider with range 0–4, current value 0 / Instant, horizontal
+orientation and tabindex -1, without a label, labelledby or describedby. Its
+owning `DIV` menuitem was labelled Power. The containing menu was exactly the
+popup referenced by the expanded **Select ChatGPT model** button. That same
+popup contained three enabled family radios: GPT-6 selected, Sol unselected,
+and GPT-5.5 unselected with a separate “Leaving on Oct 14” notice. Family radios
+and power values are distinct controls.
+
+GPT-6 and Pro 5 of 5 were restored before the owned tab and inspection windows
+closed at 2026-10-12T00:36:46.174Z. Safari's developer setting was 0 with Develop
+absent, the browser pane was hidden, and the human's Gemini 3.8 Flash new task
+was preserved. No inference followed the human correction. These structural
+observations do not resolve the network failure. The immutable root-observation
+receipts and native correlations are listed in the validation ledger.
+
+## Build 67 Chat preset validation
+
+ChatGPT now exposes Instant, Medium, High, Extra High and the observed GPT-6
+Pro choice. Each new inference resolves the highest offered enabled plain GPT
+family. Work and Sol cannot satisfy this contract. Family and power are pinned
+within an inference; a change rejects the response without repairing selection
+or replaying the prompt. Pro keeps a stable saved intent while its observed
+family label can advance after discovery.
+
+The final frozen source passed 2,335 native tests with zero failures and 49
+explicit opt-in skips (2,384 executed, 581.843 seconds). The seven public
+cohorts passed 663 tests with zero failures or skips, including 404 adapter
+tests. Actual WebKit fixtures exercise all five powers through two responses
+each. The bundled-engine fixtures verify real patches, interactive commands,
+Git commits/pushes, localhost requests, permissions and owned process cleanup
+using scripted model replies. They do not prove live ChatGPT cooperation.
+
+A queue regression covers bare and historical Chat selections rejected before
+dispatch. The queued prompt remains saved, discovery can recover its model,
+and only explicit Resume sends it. Generic delivery failures remain uncertain.
+Signed packaging, installed selector observation and fresh live qualification
+are separate steps; the earlier direct website network failure remains open.

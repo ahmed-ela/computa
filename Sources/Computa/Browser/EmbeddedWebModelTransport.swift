@@ -363,9 +363,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let raw = values["provider"], let provider = Provider(rawValue: raw) else { throw Failure.unsupportedProvider }
             let choice: WebsiteModelChoice?
             if let encoded = values["modelChoice"] {
-                guard let parsed = WebsiteModelChoice.parse(encoded), parsed.provider == raw else { throw Failure.invalidRequest }
+                guard let parsed = WebsiteModelChoice.parse(encoded), parsed.provider == raw,
+                      parsed.isSelectable else { throw Failure.invalidRequest }
                 choice = parsed
             } else { choice = nil }
+            guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
             let session = try createSession(provider: provider, choice: choice, isDiscovery: false)
             return try snapshot(session)
         }
@@ -525,7 +527,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     let parsed = try choices.map { choice -> WebsiteModelChoice in
                         guard Set(choice.keys) == ["key", "label"], let key = choice["key"], let label = choice["label"] else { throw Failure.modelUnverified }
                         let model = WebsiteModelChoice(provider: rawProvider, key: key, label: label)
-                        guard model.isValid else { throw Failure.modelUnverified }
+                        guard model.isObservedChoice else { throw Failure.modelUnverified }
                         return model
                     }
                     guard Set(parsed.map(\.key)).count == parsed.count, Set(parsed.map(\.label)).count == parsed.count else { throw Failure.modelUnverified }
@@ -1915,16 +1917,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                            refreshReadOnlyObservation: refreshReadOnlyObservation,
                                            maximumWait: maximumWait)
                 let currentEvidence = try validatedModelEvidence(fresh, session: session)
-                guard evidence.selected == currentEvidence.selected else { throw Failure.modelMismatch }
+                guard evidence.isSameResolvedSelection(as: currentEvidence) else { throw Failure.modelMismatch }
             }
             session.modelEvidence = evidence
         }
     }
 
     private func validatedModelEvidence(_ observation: [String: Any], session: Session) throws -> WebsiteModelEvidence {
-        do { return try WebsiteModelEvidence.parse(observation["modelEvidence"], provider: session.provider.rawValue, expected: session.modelChoice) }
+        let current: WebsiteModelEvidence
+        do { current = try WebsiteModelEvidence.parse(observation["modelEvidence"], provider: session.provider.rawValue, expected: session.modelChoice) }
         catch WebsiteModelEvidence.Failure.mismatch { throw Failure.modelMismatch }
         catch { throw Failure.modelUnverified }
+        guard session.modelEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else { throw Failure.modelMismatch }
+        return current
     }
 
     static func sanitizedProductModeDiagnostic(_ raw: Any?) -> String? {

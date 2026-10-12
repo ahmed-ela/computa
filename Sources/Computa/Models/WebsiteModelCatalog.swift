@@ -14,18 +14,58 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
 
     /// Retired choices retain their canonical identity for existing history,
     /// but cannot return through discovery, cache restoration or selection.
-    var isRetired: Bool { provider == "chatgpt" && (key == "Latest" || label == "Latest") }
+    enum ChatGPTPower: String, CaseIterable, Sendable {
+        case instant, medium, high, extraHigh = "extra-high", pro
+        var label: String {
+            switch self {
+            case .instant: "Instant"
+            case .medium: "Medium"
+            case .high: "High"
+            case .extraHigh: "Extra High"
+            case .pro: "Pro"
+            }
+        }
+        var modelKey: String { "chat/latest/" + rawValue }
+    }
+
+    var chatGPTPower: ChatGPTPower? {
+        guard provider == "chatgpt" else { return nil }
+        return ChatGPTPower.allCases.first { key == $0.modelKey }
+    }
+
+    var isRetired: Bool {
+        guard provider == "chatgpt" else { return false }
+        guard let power = chatGPTPower else { return true }
+        if power == .pro {
+            return label != "Pro" && (!label.hasSuffix(" Pro") || WebsiteModelCatalog.plainGPTVersion(String(label.dropLast(4))) == nil)
+        }
+        return label != power.label
+    }
     var isSelectable: Bool { isValid && !isRetired }
+
+    /// A canonical Pro intent names a policy, not an observed family label.
+    /// Discovery and cached availability require the actual family display.
+    var isObservedChoice: Bool { isSelectable && (chatGPTPower != .pro || label != "Pro") }
 
     /// Self-contained identity preserves the exact website key and label across
     /// history/default restoration without a mutable global model registry.
     var modelID: String {
+        policyChoice.rawModelID
+    }
+
+    fileprivate var rawModelID: String {
         guard isValid, let data = try? Self.encoder.encode(Identity(key: key, label: label)) else { return "" }
         return "browser/\(provider)/choice/" + Self.base64URL(data)
     }
 
+    /// The observed Pro family label is presentation. Its request identity
+    /// follows the automatic family policy rather than freezing today's family.
+    fileprivate var policyChoice: Self {
+        chatGPTPower == .pro && isSelectable ? Self(provider: provider, key: key, label: "Pro") : self
+    }
+
     var canonicalJSONString: String? {
-        guard isValid, let data = try? Self.encoder.encode(self) else { return nil }
+        guard isValid, let data = try? Self.encoder.encode(policyChoice) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
@@ -65,7 +105,8 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
 enum WebsiteModelCatalog {
     static let providers = ["chatgpt", "gemini", "claude"]
     static let maximumChoicesPerProvider = 32
-    static let preferenceKey = "Computa.websiteModelChoices.v2-chat-product"
+    static let preferenceKey = "Computa.websiteModelChoices.v3-chat-latest-power"
+    static let priorPreferenceKey = "Computa.websiteModelChoices.v2-chat-product"
     static let legacyPreferenceKey = "Computa.websiteModelChoices.v1"
 
     struct Selection: Equatable, Sendable {
@@ -109,18 +150,64 @@ enum WebsiteModelCatalog {
         let choice = WebsiteModelChoice(provider: String(parts[1]), key: identity.key, label: identity.label)
         // Equality rejects duplicate/extra JSON fields, whitespace, alternate
         // Unicode escapes, padding and noncanonical encodings of the same choice.
-        guard choice.isValid, choice.modelID == modelID else { return nil }
+        guard choice.isValid, choice.rawModelID == modelID else { return nil }
         return Selection(provider: choice.provider, choice: choice)
     }
 
     static func choice(for modelID: String) -> WebsiteModelChoice? { selection(for: modelID)?.choice }
 
+    /// History retains structurally valid old IDs; a new inference must use the
+    /// current normal-Chat preset contract, including an explicit power choice.
+    static func inferenceSelection(for modelID: String) -> Selection? {
+        guard let selected = selection(for: modelID) else { return nil }
+        if selected.provider == "chatgpt" {
+            guard let choice = selected.choice, choice.isSelectable, choice.modelID == modelID else { return nil }
+        } else if let choice = selected.choice, !choice.isSelectable { return nil }
+        return selected
+    }
+
+    /// Decimal components are bounded by the existing 128-byte field limit and
+    /// compared without machine-integer conversion or lexical version ordering.
+    static func plainGPTVersion(_ label: String) -> [String]? {
+        guard label.utf8.count <= 128, label.hasPrefix("GPT-") else { return nil }
+        var components = label.dropFirst(4).split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard !components.isEmpty, components.allSatisfy({ component in
+            !component.isEmpty && component.utf8.allSatisfy { (48...57).contains($0) }
+                && (component == "0" || component.first != "0")
+        }), components[0] != "0" else { return nil }
+        while components.count > 1 && components.last == "0" { components.removeLast() }
+        return components
+    }
+
+    static func highestOfferedPlainGPTFamily(_ labels: [String]) -> String? {
+        guard !labels.isEmpty, labels.count <= maximumChoicesPerProvider else { return nil }
+        var seen = Set<[String]>()
+        var highest: (String, [String])?
+        for label in labels {
+            guard let version = plainGPTVersion(label), seen.insert(version).inserted else { return nil }
+            if let prior = highest {
+                var greater = false
+                for index in 0..<max(version.count, prior.1.count) {
+                    let lhs = index < version.count ? version[index] : "0"
+                    let rhs = index < prior.1.count ? prior.1[index] : "0"
+                    if lhs == rhs { continue }
+                    greater = lhs.count == rhs.count ? lhs > rhs : lhs.count > rhs.count
+                    break
+                }
+                if greater { highest = (label, version) }
+            } else { highest = (label, version) }
+        }
+        return highest?.0
+    }
+
     static func option(for choice: WebsiteModelChoice, available: Bool = true) -> LocalModelOption {
-        let selectable = available && choice.isSelectable
+        let selectable = available && choice.isObservedChoice
         return LocalModelOption(id: choice.modelID,
             label: "\(providerLabel(choice.provider)) / \(choice.label) · Built-in browser",
             detail: choice.isRetired
                 ? "This website model choice has been removed. Choose another model to continue."
+                : selectable && choice.provider == "chatgpt"
+                ? "Uses the newest available GPT family in ChatGPT Chat with \(choice.chatGPTPower?.label ?? choice.label) power. Computa verifies the website's family and power before sending and accepting a response. Website limits still apply."
                 : selectable
                 ? "Selects \(choice.label) in signed-in \(providerLabel(choice.provider)). Computa verifies the website's selected model before sending and accepting a response. Website limits still apply."
                 : "Saved website choice: \(choice.label). It is absent from the latest observed menu. Refresh website models after signing in; Computa will not substitute another model.",
@@ -134,9 +221,16 @@ enum WebsiteModelCatalog {
               Set(choices.map(\.label)).count == choices.count else { throw Failure.invalidChoices }
     }
 
+    static func validateObserved(_ choices: [WebsiteModelChoice], provider: String) throws {
+        try validate(choices, provider: provider)
+        guard choices.allSatisfy(\.isObservedChoice) else { throw Failure.invalidChoices }
+    }
+
     static func load(from preferences: UserDefaults) -> [WebsiteModelChoice] {
-        let legacy = preferences.data(forKey: preferenceKey) == nil
-        guard let data = preferences.data(forKey: legacy ? legacyPreferenceKey : preferenceKey), data.count <= 100 * 1_024,
+        let storedKey = preferences.data(forKey: preferenceKey) != nil ? preferenceKey
+            : preferences.data(forKey: priorPreferenceKey) != nil ? priorPreferenceKey : legacyPreferenceKey
+        let legacy = storedKey != preferenceKey
+        guard let data = preferences.data(forKey: storedKey), data.count <= 100 * 1_024,
               let choices = try? JSONDecoder().decode([WebsiteModelChoice].self, from: data),
               choices.count <= providers.count * maximumChoicesPerProvider else { return [] }
         for provider in providers {
@@ -148,9 +242,9 @@ enum WebsiteModelCatalog {
         guard choices.allSatisfy(\.isValid) else { return [] }
         // Validate the complete stored catalog first: retiring a choice must
         // not hide duplicate or malformed entries from cache validation.
-        // The previous catalog never proved Chat versus Work. Retire only
-        // those ChatGPT entries until an explicit guarded discovery refresh.
-        let selectable = choices.filter { $0.isSelectable && (!legacy || $0.provider != "chatgpt") }
+        // Earlier catalogs did not bind an automatic latest family to a Chat
+        // power preset. Retire only those provider entries until fresh discovery.
+        let selectable = choices.filter { $0.isObservedChoice && (!legacy || $0.provider != "chatgpt") }
         if legacy || selectable.count != choices.count { save(selectable, to: preferences) }
         return selectable
     }
@@ -163,7 +257,7 @@ enum WebsiteModelCatalog {
                 do { try validate(subset, provider: provider) } catch { return }
             }
         }
-        guard let data = try? WebsiteModelChoice.encoder.encode(choices.filter(\.isSelectable)) else { return }
+        guard let data = try? WebsiteModelChoice.encoder.encode(choices.filter(\.isObservedChoice)) else { return }
         preferences.set(data, forKey: preferenceKey)
     }
 }

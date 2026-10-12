@@ -55,6 +55,7 @@ export class Element {
 export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini' | 'claude', Node: any = Element,
   behavior: { genericHeader?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean; geminiMenuitemMarkers?: boolean;
     escapeOnlyClose?: boolean; inlineFamilyPanel?: boolean; parentReturnAfterSelection?: boolean } = {}) {
+  if (provider === 'chatgpt') return installObservedChatPowerPicker(f, Node, behavior);
   const initial = provider === 'chatgpt' ? 'GPT-5.6 Sol' : provider === 'gemini' ? '3.1 Pro' : 'Sonnet 5.5';
   let selectedLabel = initial;
   const triggerLabel = () => provider === 'chatgpt' ? 'Select ChatGPT model'
@@ -168,6 +169,110 @@ export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini
       options.forEach(option => { option.values['aria-checked'] = option.children[0].text === label ? 'true' : 'false'; });
       syncIndicators();
     } };
+}
+
+// Mirrors the measured Chat-only zero-based slider and same-popup family panel.
+// Power entries below are telemetry for keyboard steps, not invented DOM radios.
+function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
+  const labels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
+  let powerIndex = 1, selectedFamily = 'GPT-6';
+  const primary = new Node('SPAN', {}, behavior.genericHeader ? '' : selectedFamily);
+  const trigger = new Node('BUTTON', { id: 'model-picker-button', 'aria-label': 'Select ChatGPT model',
+    'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'model-picker-menu' });
+  trigger.append(primary);
+  let menu = new Node('DIV', { id: 'model-picker-menu', role: 'menu', 'aria-labelledby': 'model-picker-button', hidden: '' });
+  const powerItem = new Node('DIV', { role: 'menuitem', 'aria-label': 'Power', tabindex: '-1' });
+  const slider = new Node('SPAN', { role: 'slider', 'aria-valuemin': '0', 'aria-valuemax': '4', 'aria-valuenow': '1',
+    'aria-orientation': 'horizontal', tabindex: '-1' });
+  slider.focus = () => { f.document.activeElement = slider; };
+  powerItem.append(slider);
+  const secondary = new Node('DIV', { role: 'menuitem', 'aria-label': 'Select model', tabindex: '-1' }, 'Select model');
+  const familyOptions = ['GPT-6', 'GPT-5.6 Sol', 'GPT-5.5'].map(label => {
+    const node = new Node('DIV', { role: 'menuitemradio', 'aria-checked': label === selectedFamily ? 'true' : 'false' });
+    node.append(new Node('DIV', {}, label === 'GPT-5.5' ? label + '\nLeaving on October 14' : label));
+    node.onClick = () => {
+      selectedFamily = label; if (!behavior.genericHeader) primary.text = label;
+      familyOptions.forEach(other => { other.values['aria-checked'] = other === node ? 'true' : 'false'; });
+      if (behavior.parentReturnAfterSelection) showPower(); else close();
+    };
+    return node;
+  });
+  const options = labels.map((label, index) => {
+    const node = new Node('SPAN'); node.append(new Node('SPAN', {}, label));
+    node.values = new Proxy({} as Record<string, string>, {
+      get: (_target, name: string) => name === 'aria-checked' ? String(powerIndex === index) : undefined,
+      set: (_target, name: string, value: string) => {
+        if (name === 'aria-checked' && value === 'true') selected(label);
+        else if (name === 'aria-disabled' && value === 'true') slider.values['aria-disabled'] = 'true';
+        return true;
+      },
+    });
+    return node;
+  });
+  const mount = (children: any[]) => {
+    menu.children.forEach((node: any) => { node.parentElement = null; });
+    menu.children = []; menu.append(...children);
+    menu.connected = true; delete menu.values.hidden; menu.values['data-state'] = 'open';
+    trigger.values['aria-expanded'] = 'true';
+  };
+  const showPower = () => mount([powerItem, secondary]);
+  const close = () => {
+    menu.values.hidden = ''; menu.values['data-state'] = 'closed'; trigger.values['aria-expanded'] = 'false';
+    if (behavior.unmountMenus) menu.connected = false;
+  };
+  trigger.onClick = () => {
+    if (menu.values.hidden === undefined) { if (!behavior.escapeOnlyClose) close(); }
+    else showPower();
+  };
+  secondary.onClick = () => mount(familyOptions);
+  menu.onDispatch = (event: any) => { if (event.type === 'keydown' && event.key === 'Escape') close(); };
+  slider.onDispatch = (event: any) => {
+    if (event.type !== 'keydown' || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    const next = Math.max(0, Math.min(4, powerIndex + (event.key === 'ArrowRight' ? 1 : -1)));
+    if (next !== powerIndex) { powerIndex = next; slider.values['aria-valuenow'] = String(next); options[next].clicks++; }
+  };
+  function selected(label: string) {
+    const index = labels.indexOf(label === 'GPT-6 Pro' ? 'Pro' : label);
+    if (index >= 0) { powerIndex = index; slider.values['aria-valuenow'] = String(index); }
+    else {
+      selectedFamily = label;
+      familyOptions.forEach(node => { node.values['aria-checked'] = node.children[0].text.split('\n')[0] === label ? 'true' : 'false'; });
+      if (!behavior.genericHeader) primary.text = label;
+    }
+  }
+  f.body.append(trigger, menu);
+  const seedPriorSelection = (action: string, overrides: any) => {
+    // Mid-turn ownership fixtures begin after native selection; fresh selector
+    // tests never seed their own evidence. A later drift cannot replace this pin.
+    if ((overrides.expectedModelChoice || overrides.firstUserExpansionModelChoice)
+      && !f.world.__computaChatPresetPin && action !== 'selectModel')
+      f.world.__computaChatPresetPin = { owner: ownerToken, document: f.document,
+        selection: { family: { key: selectedFamily, label: selectedFamily },
+          power: { key: ['instant', 'medium', 'high', 'extra-high', 'pro'][powerIndex], label: labels[powerIndex] } } };
+  };
+  if (typeof f.run === 'function') {
+    const run = f.run.bind(f);
+    f.run = (action = 'inspect', overrides: any = {}, adopt = true) => {
+      seedPriorSelection(action, overrides); return run(action, overrides, adopt);
+    };
+  } else {
+    const inspect = f.inspect.bind(f);
+    f.inspect = (overrides: any = {}, adopt = true) => {
+      seedPriorSelection(overrides.action || 'inspect', overrides); return inspect(overrides, adopt);
+    };
+  }
+  return { trigger, get menu() { return menu; }, get nested() { return menu; }, secondary, primary,
+    options, familyOptions, slider, powerItem, selected, open: showPower, showPower,
+    showFamily: () => mount(familyOptions), close,
+    replaceMenu: (id: string) => {
+      menu.connected = false; menu.values.hidden = '';
+      menu = new Node('DIV', { id, role: 'menu', 'aria-labelledby': 'model-picker-button', hidden: '' });
+      menu.onDispatch = (event: any) => { if (event.type === 'keydown' && event.key === 'Escape') close(); };
+      menu.connected = !behavior.unmountMenus; f.body.append(menu);
+      trigger.values['aria-controls'] = id;
+      return menu;
+    } };
+
 }
 function selectorParts(selector: string): string[] {
   const parts: string[] = []; let start = 0, bracket = 0, quote = "";

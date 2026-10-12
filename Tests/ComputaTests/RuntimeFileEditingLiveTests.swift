@@ -10,7 +10,7 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
     func testAllWebsiteModelIDsUseNativePatchCommandAndAggregateDiffWithoutChrome() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_FILE_EDITING_ENGINE_TEST"] == "1",
             "Set COMPUTA_FILE_EDITING_ENGINE_TEST=1 for the bundled native patch executor qualification.")
-        for model in [LocalModelCatalog.chatGPTBrowserModelID, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID] {
+        for model in [syntheticChatGPTModelID, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID] {
             try await qualify(modelID: model)
         }
     }
@@ -18,13 +18,13 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
     func testMalformedAndStaleContextPatchesRejectWithoutWritesBeforeExplicitValidRetry() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_FILE_EDITING_ENGINE_TEST"] == "1",
             "Set COMPUTA_FILE_EDITING_ENGINE_TEST=1 for native patch rejection and continuation qualification.")
-        try await qualify(modelID: LocalModelCatalog.chatGPTBrowserModelID, failureProbes: true)
+        try await qualify(modelID: syntheticChatGPTModelID, failureProbes: true)
     }
 
     func testRepeatedFastCommandOutputReachesModelTimelineAndReopenedHistory() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_FILE_EDITING_ENGINE_TEST"] == "1",
             "Set COMPUTA_FILE_EDITING_ENGINE_TEST=1 for native command transcript qualification.")
-        try await qualify(modelID: LocalModelCatalog.chatGPTBrowserModelID, commandCount: 32)
+        try await qualify(modelID: syntheticChatGPTModelID, commandCount: 32)
     }
 
     private func qualify(modelID: String, failureProbes: Bool = false, commandCount: Int = 1) async throws {
@@ -58,7 +58,7 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
         do {
             // The deterministic provider supplies lease proof; the real
             // native runtime supplies its actual inference and turn context.
-            await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(transport))
+            await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
             try await runtime.submit(prompt: "Apply the requested isolated fixture edits and run its assertion.",
                 toTaskID: taskID, modelID: modelID)

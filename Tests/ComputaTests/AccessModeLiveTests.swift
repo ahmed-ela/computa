@@ -38,7 +38,7 @@ final class AccessModeLiveTests: XCTestCase {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         }
         let traceURL = root.appendingPathComponent("protocol.jsonl")
-        let model = LocalModelCatalog.chatGPTBrowserModelID
+        let model = syntheticChatGPTModelID
         let taskID = UUID().uuidString
         let transport = PermissionBoundaryTransport(project: project, sibling: sibling)
         var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
@@ -560,7 +560,7 @@ private actor PermissionBoundaryTransport: WebModelTransport {
         if ["webProviderFinish", "webProviderCancel"].contains(operation) {
             value.closed += 1; token = nil
         }
-        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result))
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result, modelChoice: syntheticChatGPTChoice))
     }
 
     private func nextReply(_ request: InferenceRequest) throws -> String {

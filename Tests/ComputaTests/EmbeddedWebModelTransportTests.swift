@@ -133,7 +133,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 guard action == "inspect", !changed else { return }
                 changed = true
                 let script = drift == "model"
-                    ? "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;"
+                    ? "window.fixtureModelSelect('GPT-5.5'); return true;"
                     : "document.getElementById('fixture-composer-mode').hidden = false; document.getElementById('fixture-chat-mode').setAttribute('aria-pressed','false'); document.getElementById('fixture-work-mode').setAttribute('aria-pressed','true'); return true;"
                 _ = try? await self.evaluate(view, script)
             }
@@ -1259,8 +1259,12 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testConcreteChoicesSelectExactlyOnceAndRetainProofAcrossTwoInferenceSends() async throws {
-        for provider in Self.choiceProviders {
-            let choice = Self.fixtureChoice(provider)
+        let chatChoices = WebsiteModelChoice.ChatGPTPower.allCases.map {
+            WebsiteModelChoice(provider: "chatgpt", key: $0.modelKey, label: $0.label)
+        }
+        let choices = chatChoices + Self.choiceProviders.filter { $0 != .chatgpt }.map(Self.fixtureChoice)
+        for choice in choices {
+            let provider = try XCTUnwrap(EmbeddedWebModelTransport.Provider(rawValue: choice.provider))
             let fixture = try Fixture(page: Self.modelChoicePage(provider))
             defer { fixture.shutdown() }
             let started = try await startChoice(choice, in: fixture)
@@ -1271,6 +1275,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let generation = try XCTUnwrap(fixture.browser.documentGeneration(for: ownedID))
             let ready = try await waitForState("ready", fixture.transport, token: token)
             try assertChoiceEvidence(ready, choice: choice)
+            let expectedPowerEvents = choice.chatGPTPower.flatMap { WebsiteModelChoice.ChatGPTPower.allCases.firstIndex(of: $0) }
+            if let expectedPowerEvents {
+                let events = try await evaluate(view, "return window.fixturePowerKeyEvents;")
+                XCTAssertEqual(events as? Int, expectedPowerEvents, "The real SPAN slider must acknowledge exactly the selected zero-based preset")
+            }
             try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
             for sequence in 1...2 {
                 let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic model choice inference \(sequence)"])
@@ -1281,6 +1290,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
                 try assertChoiceEvidence(complete, choice: choice)
                 try await assertChoiceLedger(view, insertions: sequence, sends: sequence, selections: 1)
+                if let expectedPowerEvents {
+                    let events = try await evaluate(view, "return window.fixturePowerKeyEvents;")
+                    XCTAssertEqual(events as? Int, expectedPowerEvents, "Read-only inference proof must not change the selected power")
+                }
             }
             XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
             let prompts = try await capturedUserPrompts(view)
@@ -1305,7 +1318,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let ready = try await waitForState("ready", fixture.transport, token: token)
         try assertChoiceEvidence(ready, choice: choice)
         XCTAssertEqual(try WebsiteModelEvidence.parse(ready["modelEvidence"], provider: "chatgpt", expected: choice).source,
-            "checked_model_option")
+            "selected_model_indicator")
         let generic = try await evaluate(view, "return document.getElementById('fixture-model-header').textContent;") as? String
         XCTAssertEqual(generic, "ChatGPT", "The closed trigger cannot supply a family identity")
         let initiallyUnmounted = try await evaluate(view, "return document.getElementById('fixture-model-menu') === null;") as? Bool
@@ -1391,7 +1404,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let changed = try await evaluate(view, "return globalThis.fixtureCheckedDrift;",
             world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
         XCTAssertEqual(changed?["connected"] as? Bool, true, "The model attributes must belong to the observed document")
-        XCTAssertEqual(changed?["before"] as? [String], [choice.label])
+        XCTAssertEqual(changed?["before"] as? [String], ["GPT-6"])
         XCTAssertEqual(changed?["tracked"] as? Bool, true)
         XCTAssertEqual(changed?["suppressionActive"] as? Bool, true)
         XCTAssertEqual(changed?["suppressionStillActive"] as? Bool, true)
@@ -1437,6 +1450,66 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testChatGPTReadOnlyCloseRequiresEnabledClosedTriggerAndWaitsForActualAcknowledgment() async throws {
+        for closure in ["disabled", "open", "delayed"] {
+            let choice = Self.fixtureChoice(.chatgpt)
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, unmountClosedMenu: true))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await evaluate(view, """
+                window.fixtureClosureDriftArmed = true;
+                window.fixtureClosureTransitions = 0; window.fixtureClosureAcknowledgments = 0;
+                window.fixtureClosurePendingInputs = null; window.fixtureClosurePendingSends = null;
+                document.addEventListener('keydown', event => {
+                  const trigger = document.getElementById('fixture-model-trigger');
+                  if (event.key !== 'Escape' || !window.fixtureClosureDriftArmed
+                    || trigger.getAttribute('aria-expanded') !== 'false') return;
+                  window.fixtureClosureDriftArmed = false; window.fixtureClosureTransitions++;
+                  window.fixtureClosurePendingInputs = window.fixtureInputCount;
+                  window.fixtureClosurePendingSends = window.fixturePrompts.length;
+                  trigger.disabled = '\(closure)' !== 'open';
+                  trigger.setAttribute('data-state', '\(closure)' === 'disabled' ? 'closed' : 'open');
+                  if ('\(closure)' === 'delayed') setTimeout(() => {
+                    trigger.disabled = false; trigger.setAttribute('data-state', 'closed');
+                    window.fixtureClosureAcknowledgments++;
+                  }, 80);
+                });
+                return true;
+                """)
+            if closure == "delayed" {
+                let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": "Send only after the same trigger acknowledges closed state"])
+                try assertChoiceEvidence(sent, choice: choice)
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                try assertChoiceEvidence(complete, choice: choice)
+                XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+                try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                        "prompt": "Must not send through an unsettled model trigger"])
+                    XCTFail("An absent popup cannot admit a \(closure) trigger")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+                try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
+            }
+            let acknowledgment = try await evaluate(view, """
+                return {transitions: window.fixtureClosureTransitions, acknowledgments: window.fixtureClosureAcknowledgments,
+                  pendingInputs: window.fixtureClosurePendingInputs, pendingSends: window.fixtureClosurePendingSends};
+                """) as? [String: Int]
+            XCTAssertEqual(acknowledgment?["transitions"], 1, "A failed closure cannot replay its dismissal")
+            XCTAssertEqual(acknowledgment?["acknowledgments"], closure == "delayed" ? 1 : 0)
+            XCTAssertEqual(acknowledgment?["pendingInputs"], 0)
+            XCTAssertEqual(acknowledgment?["pendingSends"], 0)
+            _ = try await evaluate(view, "const trigger = document.getElementById('fixture-model-trigger'); trigger.disabled = false; trigger.setAttribute('data-state','closed'); return true;")
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testChatGPTClosingTransitionRecoversOneConsumedFreshOpeningWithoutFramesOrSendReplay() async throws {
         let choice = Self.fixtureChoice(.chatgpt)
         let previousKeyWindow = NSApplication.shared.keyWindow
@@ -1464,7 +1537,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let ready = try await waitForState("ready", fixture.transport, token: token)
         try assertChoiceEvidence(ready, choice: choice)
         XCTAssertEqual(try WebsiteModelEvidence.parse(ready["modelEvidence"], provider: "chatgpt", expected: choice).source,
-            "checked_model_option")
+            "selected_model_indicator")
         let recovery = try await evaluate(view, """
             return {ignored: window.fixtureModelIgnoredClosingOpens,
               freshOpens: window.fixtureFirstPostFamilyOpenAttempts,
@@ -1510,7 +1583,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testChatGPTFamilyReturningToParentClosesOnceBeforeFreshProofAndTwoSends() async throws {
-        let choice = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")
+        let choice = Self.fixtureChoice(.chatgpt)
         let previousKeyWindow = NSApplication.shared.keyWindow
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, genericHeader: true,
             unmountClosedMenu: true, returnToParentAfterSelection: true))
@@ -1521,35 +1594,27 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
         try await waitForFixture(view)
         let generation = fixture.browser.documentGeneration(for: ownedID)
-        var observedReturnedParent = false
-        fixture.transport.setBeforePageResultValidationForTesting { action in
-            guard action == "selectModel" else { return }
-            let parent = try? await self.evaluate(view, """
-                const menu = document.getElementById('fixture-model-menu');
-                const checked = menu?.querySelector('[data-fixture-model][aria-checked="true"]');
-                return {active: window.fixtureModelParentActive === true,
-                  connected: menu?.isConnected === true, expanded: document.getElementById('fixture-model-trigger').getAttribute('aria-expanded') === 'true',
-                  checked: checked?.dataset.fixtureModel ?? null, checkedHidden: checked?.hidden === true,
-                  temporaryHidden: document.querySelector('[aria-label="Turn off temporary chat"]').getAttribute('aria-hidden') === 'true',
-                  users: document.querySelectorAll('[data-message-author-role="user"]').length,
-                  assistants: document.querySelectorAll('[data-message-author-role="assistant"]').length};
-                """) as? [String: Any]
-            if parent?["active"] as? Bool == true {
-                observedReturnedParent = true
-                XCTAssertEqual(parent?["connected"] as? Bool, true)
-                XCTAssertEqual(parent?["expanded"] as? Bool, true)
-                XCTAssertEqual(parent?["checked"] as? String, choice.label)
-                XCTAssertEqual(parent?["checkedHidden"] as? Bool, true, "Hidden checked rows cannot prove the current model")
-                XCTAssertEqual(parent?["temporaryHidden"] as? Bool, true, "The exact modal temporarily hides the mode controls")
-                XCTAssertEqual(parent?["users"] as? Int, 0)
-                XCTAssertEqual(parent?["assistants"] as? Int, 0)
-            }
-        }
         let ready = try await waitForState("ready", fixture.transport, token: token)
-        XCTAssertTrue(observedReturnedParent, "The actual family click must leave the associated parent popup open")
+        // The adapter now awaits family/power proof within one native call.
+        // Record the actual intermediate DOM at the site's family click,
+        // before Escape acknowledges the associated returned parent closure.
+        let parentObservations = try await evaluate(view, "return window.fixtureModelParentObservations;")
+        let parents = try XCTUnwrap(parentObservations as? [[String: Any]])
+        XCTAssertEqual(parents.count, 1)
+        let parent = try XCTUnwrap(parents.first)
+        XCTAssertEqual(parent["active"] as? Bool, true)
+        XCTAssertEqual(parent["connected"] as? Bool, true)
+        XCTAssertEqual(parent["expanded"] as? Bool, true)
+        XCTAssertEqual(parent["checked"] as? String, "GPT-6")
+        XCTAssertEqual(parent["checkedHidden"] as? Bool, true, "Hidden checked rows cannot prove the current model")
+        XCTAssertEqual(parent["temporaryHidden"] as? Bool, true, "The exact modal temporarily hides the mode controls")
+        XCTAssertEqual(parent["users"] as? Int, 0)
+        XCTAssertEqual(parent["assistants"] as? Int, 0)
+        XCTAssertEqual(parent["inputs"] as? Int, 0)
+        XCTAssertEqual(parent["sends"] as? Int, 0)
         try assertChoiceEvidence(ready, choice: choice)
         XCTAssertEqual(try WebsiteModelEvidence.parse(ready["modelEvidence"], provider: "chatgpt", expected: choice).source,
-            "checked_model_option")
+            "selected_model_indicator")
         let settled = try await evaluate(view, """
             return {returns: window.fixtureModelParentReturns, attempts: window.fixtureModelParentEscapeEvents,
               closed: window.fixtureModelParentEscapeClosures, freshReads: window.fixtureModelFreshProofReadOpens,
@@ -1589,7 +1654,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testChatGPTParentModeDriftBeforeCloseCannotClaimReadyOrInsertSend() async throws {
-        let choice = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")
+        let choice = Self.fixtureChoice(.chatgpt)
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, genericHeader: true,
             unmountClosedMenu: true, returnToParentAfterSelection: true, driftTemporaryInParent: true))
         defer { fixture.shutdown() }
@@ -1630,7 +1695,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testChatGPTParentModalHidingComposerAdvancesOnlyThroughOwnedCloseAndFreshAdmission() async throws {
-        let choice = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")
+        let choice = Self.fixtureChoice(.chatgpt)
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, genericHeader: true,
             unmountClosedMenu: true, returnToParentAfterSelection: true, hideComposerInPicker: true))
         defer { fixture.shutdown() }
@@ -1638,25 +1703,16 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let token = try XCTUnwrap(started["sessionToken"] as? String)
         let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
         try await waitForFixture(view)
-        var observedHiddenComposer = false
-        fixture.transport.setBeforePageResultValidationForTesting { action in
-            guard action == "selectModel" else { return }
-            let modal = try? await self.evaluate(view, """
-                return {parent: window.fixtureModelParentActive === true,
-                  composerHidden: document.getElementById('fixture-editor').closest('[aria-hidden="true"]') != null,
-                  temporaryHidden: document.querySelector('[aria-label="Turn off temporary chat"]').getAttribute('aria-hidden') === 'true',
-                  inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};
-                """) as? [String: Any]
-            if modal?["parent"] as? Bool == true {
-                observedHiddenComposer = true
-                XCTAssertEqual(modal?["composerHidden"] as? Bool, true)
-                XCTAssertEqual(modal?["temporaryHidden"] as? Bool, true)
-                XCTAssertEqual(modal?["inputs"] as? Int, 0)
-                XCTAssertEqual(modal?["sends"] as? Int, 0)
-            }
-        }
         let ready = try await waitForState("ready", fixture.transport, token: token)
-        XCTAssertTrue(observedHiddenComposer, "The pending owned selection must really cross an unavailable composer observation")
+        let modalObservations = try await evaluate(view, "return window.fixtureModelParentObservations;")
+        let modals = try XCTUnwrap(modalObservations as? [[String: Any]])
+        XCTAssertEqual(modals.count, 1)
+        let modal = try XCTUnwrap(modals.first)
+        XCTAssertEqual(modal["active"] as? Bool, true, "The owned selection really returned to its modal")
+        XCTAssertEqual(modal["composerHidden"] as? Bool, true, "The pending owned selection really crosses an unavailable composer")
+        XCTAssertEqual(modal["temporaryHidden"] as? Bool, true)
+        XCTAssertEqual(modal["inputs"] as? Int, 0)
+        XCTAssertEqual(modal["sends"] as? Int, 0)
         try assertChoiceEvidence(ready, choice: choice)
         let restored = try await evaluate(view, """
             const editor = document.getElementById('fixture-editor');
@@ -1735,7 +1791,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         // differences. This simulates their transformation rather than
         // claiming which website component introduced it in the live failure.
         let original = try JSONSerialization.data(withJSONObject: [
-            "model": "browser/chatgpt",
+            "model": syntheticChatGPTModelID,
             "input": String(repeating: "Owned quote rendering fixture line.\n", count: 600) + String(repeating: "\"", count: 12) + String(repeating: "<tag>&", count: 5),
         ], options: [.sortedKeys])
         let prepared = try WebModelResponseCodec.prepareRequest(original)
@@ -1746,7 +1802,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             .replacingOccurrences(of: #"\u003e"#, with: ">")
             .replacingOccurrences(of: #"\u0026"#, with: "&")
         let underscoreOriginal = try JSONSerialization.data(withJSONObject: [
-            "model": "browser/chatgpt",
+            "model": syntheticChatGPTModelID,
             "input": String(repeating: "Owned underscore rendering fixture line.\n", count: 600) + "a_b c_d",
         ], options: [.sortedKeys])
         let underscorePrepared = try WebModelResponseCodec.prepareRequest(underscoreOriginal)
@@ -3086,9 +3142,12 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(temporaryClaims, 1)
         var changed = false
         fixture.transport.setBeforePageResultValidationForTesting { action in
-            guard action == "inspect", !changed else { return }
+            // The initial inspection intentionally precedes automatic family
+            // selection. Change an actual checked plain family after the
+            // selection acknowledgment, before its native readiness admission.
+            guard action == "selectModel", !changed else { return }
             changed = true
-            _ = try? await self.evaluate(view, "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;")
+            _ = try? await self.evaluate(view, "window.fixtureModelSelect('GPT-5.5'); return true;")
         }
         do {
             let ready = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
@@ -3188,16 +3247,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let id = try XCTUnwrap(fixture.createdTabs.last)
             let view = try XCTUnwrap(fixture.browser.webView(for: id))
             let choices = try await discovery.value
-            let advertised = Self.choiceLabels(provider).filter { provider != .chatgpt || $0 != "Latest" }
+            let advertised = provider == .chatgpt ? WebsiteModelChoice.ChatGPTPower.allCases.map {
+                $0 == .pro ? "GPT-6 Pro" : $0.label
+            } : Self.choiceLabels(provider)
             XCTAssertEqual(choices.map(\.label), advertised)
-            XCTAssertEqual(choices.map(\.key), advertised)
+            XCTAssertEqual(choices.map(\.key), provider == .chatgpt
+                ? WebsiteModelChoice.ChatGPTPower.allCases.map(\.modelKey) : advertised)
             XCTAssertTrue(choices.allSatisfy { $0.provider == provider.rawValue && $0.isValid })
-            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: provider == .chatgpt ? 1 : 0)
             let clicks = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
             let escapes = try await evaluate(view, "return {attempts: window.fixtureModelEscapeEvents, closed: window.fixtureModelEscapeClosures};") as? [String: Int]
             if provider == .chatgpt {
-                XCTAssertEqual(clicks, 1, "Discovery opens the associated ChatGPT model menu once")
-                XCTAssertEqual(escapes, ["attempts": 1, "closed": 1], "Discovery closes that menu with one acknowledged Escape")
+                XCTAssertEqual(clicks, 4, "Discovery selects the latest family once and obtains independent family/power observations")
+                XCTAssertEqual(escapes, ["attempts": 3, "closed": 3], "Each discovery read closes its associated popup with acknowledged Escape")
             } else {
                 XCTAssertEqual(clicks, 2, "The associated model menu is opened and closed once")
                 XCTAssertEqual(escapes, ["attempts": 0, "closed": 0])
@@ -3291,7 +3353,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": discoveryToken, "prompt": "Discovery must never insert or send this"])
             XCTFail("Even a valid private discovery token cannot submit a prompt")
         } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .invalidRequest) }
-        try await assertChoiceLedger(discoveryView, insertions: 0, sends: 0, selections: 0)
+        try await assertChoiceLedger(discoveryView, insertions: 0, sends: 0, selections: 1)
         do {
             _ = try await fixture.transport.discoverModels(provider: "chatgpt")
             XCTFail("Only one discovery page may be active")
@@ -3305,7 +3367,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
         release?.resume(); release = nil
         let choices = try await discovery.value
-        XCTAssertEqual(choices.map(\.label), Self.choiceLabels(.chatgpt).filter { $0 != "Latest" })
+        XCTAssertEqual(choices.map(\.label), WebsiteModelChoice.ChatGPTPower.allCases.map { $0 == .pro ? "GPT-6 Pro" : $0.label })
         XCTAssertNil(fixture.browser.webView(for: discoveryID))
         XCTAssertTrue(inferenceIDs.allSatisfy { fixture.browser.webView(for: $0) != nil })
         fixture.transport.setBeforePageResultValidationForTesting(nil)
@@ -5163,6 +5225,12 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(evidence.selected.label, choice.label, file: file, line: line)
         XCTAssertEqual(evidence.verification, "website_selection", file: file, line: line)
         XCTAssertNil(evidence.response, "The fixture exposes selection controls, not backend response attribution", file: file, line: line)
+        if let power = choice.chatGPTPower {
+            XCTAssertEqual(evidence.chatSelection?.family, WebsiteModelEvidence.Identity(key: "GPT-6", label: "GPT-6"), file: file, line: line)
+            XCTAssertEqual(evidence.chatSelection?.power, WebsiteModelEvidence.Identity(key: power.rawValue, label: power.label), file: file, line: line)
+            XCTAssertEqual(evidence.chatSelection?.automaticFamily.policy, "highest_offered_plain_gpt", file: file, line: line)
+            XCTAssertEqual(evidence.source, "selected_model_indicator", file: file, line: line)
+        }
     }
 
     private func assertChoiceLedger(_ view: WKWebView, insertions: Int, sends: Int, selections: Int,
@@ -5206,13 +5274,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     private static func choiceLabels(_ provider: EmbeddedWebModelTransport.Provider) -> [String] {
         switch provider {
-        case .chatgpt: ["Latest", "GPT-5.6 Sol", "GPT-5.5"]
+        case .chatgpt: ["GPT-6", "GPT-5.6 Sol", "GPT-5.5"]
         case .gemini: ["3.5 Flash-Lite", "3.8 Flash", "3.1 Pro"]
         case .claude: ["Sonnet 5.5", "Haiku 4.5", "Sonnet 5", "Sonnet 4.6"]
         }
     }
 
     private static func fixtureChoice(_ provider: EmbeddedWebModelTransport.Provider) -> WebsiteModelChoice {
+        if provider == .chatgpt { return syntheticChatGPTChoice }
         let label = choiceLabels(provider)[provider == .gemini ? 1 : choiceLabels(provider).count - 1]
         return WebsiteModelChoice(provider: provider.rawValue, key: label, label: label)
     }
@@ -5388,29 +5457,44 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                                         deferSelectionCommit: Bool = false, genericHeader: Bool = false,
                                         unmountClosedMenu: Bool = false, ignoreModelEscape: Bool = false,
                                         returnToParentAfterSelection: Bool = false, driftTemporaryInParent: Bool = false,
-                                        hideComposerInPicker: Bool = false, holdSecondReply: Bool = false) -> String {
+                                        hideComposerInPicker: Bool = false, holdSecondReply: Bool = false,
+                                        basePage: String? = nil) -> String {
         precondition(!returnToParentAfterSelection || provider == .chatgpt)
         precondition(!(driftTemporaryInParent || hideComposerInPicker) || returnToParentAfterSelection)
         precondition(!holdSecondReply || provider == .chatgpt)
         let labels = choiceLabels(provider)
         let initial = provider == .chatgpt ? labels[1] : provider == .gemini ? labels[2] : labels[0]
-        let target = fixtureChoice(provider).label
+        let target = provider == .chatgpt ? labels[0] : fixtureChoice(provider).label
         let aria = provider == .chatgpt ? "Select ChatGPT model" : provider == .gemini
             ? "Open mode picker, currently Gemini Pro" : "Model: \(initial) Medium"
         let disabled = provider == .chatgpt ? "GPT-4.9" : provider == .gemini ? "3.7 Flash" : "Opus 4.5"
         let upgrade = provider == .chatgpt ? "GPT-5.9" : provider == .gemini ? "4.0 Pro" : "Fable 5.5"
         let escapeClosesPopup = provider == .chatgpt
         let rows = labels.map { label in
-            "<button role=\"menuitemradio\" aria-checked=\"false\" data-fixture-model=\"\(label)\" \(disableTarget && label == target ? "disabled" : "")><span>\(label)</span><span>Fixture description, independent of the family label</span></button>"
+            if provider == .chatgpt {
+                return "<div role=\"menuitemradio\" tabindex=\"-1\" aria-checked=\"false\" data-fixture-model=\"\(label)\"><span>\(label)</span></div>"
+            }
+            return "<button role=\"menuitemradio\" aria-checked=\"false\" data-fixture-model=\"\(label)\" \(disableTarget && label == target ? "disabled" : "")><span>\(label)</span><span>Fixture description, independent of the family label</span></button>"
         }.joined()
         let picker = """
         <button id="fixture-model-trigger" aria-label="\(aria)" aria-controls="fixture-model-menu" aria-haspopup="menu" aria-expanded="false"><span id="fixture-model-header"></span></button>
         <div id="fixture-model-menu" role="menu" aria-labelledby="fixture-model-trigger" style="display:none">
+        \(provider == .chatgpt ? """
+        <div id="fixture-chat-power-view">
+          <div role="menuitem" aria-label="Power" tabindex="-1">
+            <span id="fixture-chat-power-slider" role="slider" aria-valuemin="0" aria-valuemax="4" aria-valuenow="\(initiallySelectTarget ? 1 : 0)" tabindex="-1" aria-orientation="horizontal" style="display:block;width:120px;height:20px" \(disableTarget ? "aria-disabled=\"true\"" : "")></span>
+          </div>
+          <div id="fixture-select-family" role="menuitem" tabindex="-1">Select model</div>
+        </div>
+        <div id="fixture-chat-family-view" hidden>
+        """ : "")
         \(rows)
+        \(provider == .chatgpt ? "</div>" : """
         <button role="menuitemradio" disabled><span>\(disabled)</span></button>
         <button role="menuitemradio"><span>\(upgrade)</span><span>Upgrade</span></button>
         <button role="menuitemradio"><span>Extended thinking</span></button>
         <button role="menuitemradio"><span>Medium</span></button>
+        """)
         \(returnToParentAfterSelection ? "<button id=\"fixture-parent-option\" role=\"menuitem\" hidden>Adjust thinking time</button>" : "")
         </div>
         <script>
@@ -5419,8 +5503,27 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         window.fixtureModelEscapeEvents = 0; window.fixtureModelEscapeClosures = 0;
         const modelTrigger = document.getElementById('fixture-model-trigger');
         const modelMenu = document.getElementById('fixture-model-menu');
+        \(provider == .chatgpt ? """
+        window.fixturePowerKeyEvents = 0;
+        window.fixtureShowPowerView = () => {
+          document.getElementById('fixture-chat-power-view').hidden = false;
+          document.getElementById('fixture-chat-family-view').hidden = true;
+        };
+        document.getElementById('fixture-select-family').addEventListener('click', () => {
+          document.getElementById('fixture-chat-power-view').hidden = true;
+          document.getElementById('fixture-chat-family-view').hidden = false;
+        });
+        document.getElementById('fixture-chat-power-slider').addEventListener('keydown', event => {
+          if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || event.target.getAttribute('aria-disabled') === 'true') return;
+          event.preventDefault(); window.fixturePowerKeyEvents++;
+          const direction = event.key === 'ArrowRight' ? 1 : -1;
+          const value = Number(event.target.getAttribute('aria-valuenow'));
+          event.target.setAttribute('aria-valuenow', String(Math.max(0, Math.min(4, value + direction))));
+        });
+        """ : "")
         \(returnToParentAfterSelection ? """
         window.fixtureModelParentActive = false; window.fixtureModelParentReturns = 0;
+        window.fixtureModelParentObservations = [];
         window.fixtureModelParentEscapeEvents = 0; window.fixtureModelParentEscapeClosures = 0;
         window.fixtureModelFreshProofReadOpens = 0;
         window.fixtureModelTemporaryDrifted = false;
@@ -5446,6 +5549,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
           const open = !modelMenu.isConnected || modelMenu.style.display === 'none';
           \(escapeClosesPopup ? "if (!open) return; // Observed ChatGPT clicks do not close an already-open portal." : "")
           if (open && !modelMenu.isConnected) document.body.appendChild(modelMenu);
+          \(provider == .chatgpt ? "if (open) window.fixtureShowPowerView();" : "")
           modelMenu.style.display = open ? 'block' : 'none';
           modelTrigger.setAttribute('aria-expanded', String(open));
           \(returnToParentAfterSelection ? """
@@ -5485,11 +5589,23 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
           \(deferSelectionCommit ? "window.fixturePendingModelSelection = node.dataset.fixtureModel;" : "window.fixtureModelSelect(node.dataset.fixtureModel);")
           \(returnToParentAfterSelection ? """
           window.fixtureModelParentActive = true; window.fixtureModelParentReturns++;
+          window.fixtureShowPowerView();
           modelMenu.querySelectorAll('[role="menuitemradio"]').forEach(row => { row.hidden = true; });
           document.getElementById('fixture-parent-option').hidden = false;
           modelMenu.style.display = 'block'; modelTrigger.setAttribute('aria-expanded', 'true');
           modelMenu.setAttribute('data-state', 'open'); modelTrigger.setAttribute('data-state', 'open');
           window.fixtureModelSetModalHidden(true);
+          const checkedFamily = modelMenu.querySelector('[data-fixture-model][aria-checked="true"]');
+          window.fixtureModelParentObservations.push({
+            active: window.fixtureModelParentActive, connected: modelMenu.isConnected,
+            expanded: modelTrigger.getAttribute('aria-expanded') === 'true',
+            checked: checkedFamily?.dataset.fixtureModel ?? null, checkedHidden: checkedFamily?.hidden === true,
+            temporaryHidden: temporaryButtons[0].getAttribute('aria-hidden') === 'true',
+            composerHidden: document.getElementById('fixture-editor').closest('[aria-hidden="true"]') != null,
+            users: document.querySelectorAll('[data-message-author-role="user"]').length,
+            assistants: document.querySelectorAll('[data-message-author-role="assistant"]').length,
+            inputs: window.fixtureInputCount, sends: window.fixturePrompts.length
+          });
           \(driftTemporaryInParent ? """
           temporaryButtons[0].setAttribute('aria-label', 'Start temporary chat');
           temporaryButtons[0].textContent = 'Start temporary chat'; window.fixtureModelTemporaryDrifted = true;
@@ -5503,7 +5619,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         \(unmountClosedMenu ? "modelMenu.remove();" : "")
         </script>
         """
-        var base = provider == .chatgpt ? page : providerPage(provider)
+        var base = basePage ?? (provider == .chatgpt ? page : providerPage(provider))
         if holdSecondReply {
             let append = "document.getElementById('messages').appendChild(turn);"
             precondition(base.components(separatedBy: append).count == 2)
@@ -5521,7 +5637,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     private func call(_ transport: EmbeddedWebModelTransport, _ operation: String,
                       _ params: [String: String]) async throws -> [String: Any] {
-        let data = try JSONSerialization.data(withJSONObject: params)
+        var parameters = params
+        if operation == "webProviderStart", parameters["provider"] == "chatgpt", parameters["modelChoice"] == nil {
+            parameters["modelChoice"] = syntheticChatGPTChoice.canonicalJSONString
+        }
+        let data = try JSONSerialization.data(withJSONObject: parameters)
         let response: Data
         do { response = try await transport.request(operation: operation, params: data) }
         catch {
@@ -5772,7 +5892,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 let id = try self.browser.createUnloadedModelTabForTesting()
                 let view = try XCTUnwrap(self.browser.webView(for: id))
                 view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
-                view.loadHTMLString(self.page, baseURL: self.initialURL ?? url)
+                let html = url.host == "chatgpt.com" && !self.page.contains("fixture-model-trigger")
+                    ? EmbeddedWebModelTransportTests.modelChoicePage(.chatgpt, basePage: self.page) : self.page
+                view.loadHTMLString(html, baseURL: self.initialURL ?? url)
                 self.createdTabs.append(id)
                 return id
             })

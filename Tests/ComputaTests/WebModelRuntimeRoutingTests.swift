@@ -76,9 +76,9 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
     }
 
     private var websiteModels: [String] {
-        [LocalModelCatalog.chatGPTBrowserModelID, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID]
+        [syntheticChatGPTModelID, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID]
             + WebsiteModelCatalog.providers.map {
-                WebsiteModelChoice(provider: $0, key: "fixture-choice", label: "Fixture Choice").modelID
+                syntheticWebsiteChoice(provider: $0, key: "fixture-choice", label: "Fixture Choice").modelID
             }
     }
 

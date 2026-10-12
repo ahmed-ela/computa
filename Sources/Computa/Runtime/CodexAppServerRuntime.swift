@@ -761,7 +761,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
             return modelProvider == "lmstudio" ? backend : .external
         }
         func validateSelectedModel(_ modelID: String) throws {
-            if LocalModelCatalog.isWebBrowser(modelID) { return }
+            if WebsiteModelCatalog.inferenceSelection(for: modelID) != nil { return }
             if modelID.hasPrefix("browser/") { throw WebsiteModelCatalog.Failure.invalidModelID }
             guard effectiveBackend == .headlessMLX,
                   !LocalModelCatalog.supportsHeadlessMLX(modelID) else { return }

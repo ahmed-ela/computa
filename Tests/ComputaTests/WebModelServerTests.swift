@@ -3,12 +3,12 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
-    private let request = Data("{\"model\":\"browser/chatgpt\",\"input\":[{\"role\":\"user\",\"content\":\"Say OK\"}],\"tools\":[],\"stream\":true}".utf8)
+    private let request = Data("{\"model\":\"\(syntheticChatGPTModelID)\",\"input\":[{\"role\":\"user\",\"content\":\"Say OK\"}],\"tools\":[],\"stream\":true}".utf8)
 
     func testEveryInferenceClosesItsFreshSessionBeforeReturningAndFinishPreservesProof() async throws {
         let transport = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         for task in ["task-one", "task-one", "task-two"] {
             let response = try await server.fixtureInfer(request, taskID: task)
             XCTAssertTrue(String(decoding: response, as: UTF8.self).contains("response.completed"))
@@ -28,7 +28,7 @@ final class WebModelServerTests: XCTestCase {
 
     func testConcreteWebsiteChoicesAreVerifiedAgainForEachFreshInference() async throws {
         for provider in ["chatgpt", "gemini", "claude"] {
-            let choice = WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
+            let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
             let transport = ChoiceWebModelTransport()
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
@@ -48,8 +48,8 @@ final class WebModelServerTests: XCTestCase {
     func testChoiceAndProviderSwitchesStartOnlyAfterThePriorInferenceClosure() async throws {
         for oldProvider in ["chatgpt", "gemini", "claude"] {
             for newProvider in [oldProvider, oldProvider == "claude" ? "chatgpt" : "claude"] {
-                let old = WebsiteModelChoice(provider: oldProvider, key: "fixture-old", label: "Fixture Old")
-                let new = WebsiteModelChoice(provider: newProvider, key: "fixture-new", label: "Fixture New")
+                let old = syntheticWebsiteChoice(provider: oldProvider, key: "fixture-old", label: "Fixture Old")
+                let new = syntheticWebsiteChoice(provider: newProvider, key: "fixture-new", label: "Fixture New")
                 let transport = ChoiceWebModelTransport()
                 let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
                 await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
@@ -68,7 +68,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testUnconfirmedClosureBlocksEveryReplacementUntilOriginalTokenIsResolved() async throws {
-        let old = WebsiteModelChoice(provider: "chatgpt", key: "fixture-old", label: "Fixture Old")
+        let old = syntheticWebsiteChoice(provider: "chatgpt", key: "fixture-old", label: "Fixture Old")
         let new = WebsiteModelChoice(provider: "claude", key: "fixture-new", label: "Fixture New")
         let original = ChoiceWebModelTransport(cleanupFailsOnce: true)
         let replacement = ChoiceWebModelTransport()
@@ -117,7 +117,7 @@ final class WebModelServerTests: XCTestCase {
         for provider in ["chatgpt", "gemini", "claude"] {
             for point in ChoiceSnapshotPoint.allCases {
                 for mutation in [ChoiceEvidenceMutation.wrongSelectedKey, .wrongSelectedLabel] {
-                    let choice = WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
+                    let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
                     let transport = ChoiceWebModelTransport(point: point, mutation: mutation)
                     let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
                     await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
@@ -162,7 +162,7 @@ final class WebModelServerTests: XCTestCase {
 
     func testContradictoryResponseModelCannotBeAdmittedEvenWhenPickerStillMatches() async throws {
         for provider in ["chatgpt", "gemini", "claude"] {
-            let choice = WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
+            let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
             let transport = ChoiceWebModelTransport(point: .complete, mutation: .wrongResponse)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
@@ -197,7 +197,7 @@ final class WebModelServerTests: XCTestCase {
 
     func testSelectionOnlyProofAndMatchingResponseProofRemainDistinctSupportedCases() async throws {
         for responseProof in [false, true] {
-            let choice = WebsiteModelChoice(provider: "chatgpt", key: "fixture-fast", label: "Fixture Fast")
+            let choice = WebsiteModelChoice(provider: "claude", key: "fixture-fast", label: "Fixture Fast")
             let transport = ChoiceWebModelTransport(includeResponseProof: responseProof)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
@@ -216,7 +216,7 @@ final class WebModelServerTests: XCTestCase {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("computa-composition-" + UUID().uuidString)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
             let transport = FixtureWebModelTransport()
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             var input: [[String: Any]] = [["role": "user", "content": "Keep the entire controlled history."]]
             for iteration in 0..<9 {
                 if iteration > 0 {
@@ -225,7 +225,7 @@ final class WebModelServerTests: XCTestCase {
                         "arguments": "{\"cmd\":\"printf controlled-history\"}"],
                         ["type": "function_call_output", "call_id": call, "output": "controlled-output-\(iteration); exit 0"]]
                 }
-                let object: [String: Any] = ["model": "browser/\(provider)", "input": input,
+                let object: [String: Any] = ["model": syntheticWebsiteModelID(provider), "input": input,
                     "instructions": "Preserve fixture scope", "tools": [["type": "function", "name": "exec_command", "parameters": ["type": "object"]]],
                     "stream": iteration % 2 == 0]
                 _ = try await server.fixtureInfer(JSONSerialization.data(withJSONObject: object), taskID: provider)
@@ -257,7 +257,7 @@ final class WebModelServerTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("computa-many-turns-" + UUID().uuidString)
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
         let transport = FixtureWebModelTransport()
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased()
         var turns = [String]()
         for _ in 0..<81 {
@@ -298,7 +298,7 @@ final class WebModelServerTests: XCTestCase {
         await server.configureCleanupReceipts(directory: blocked, runtimeGeneration: websiteInferenceFixtureGeneration) {
             await audit.append($0)
         }
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         do {
             _ = try await server.fixtureInfer(request, taskID: "persistence")
             XCTFail("Unsaved physical closure cannot release a response")
@@ -336,7 +336,7 @@ final class WebModelServerTests: XCTestCase {
             let base = FixtureWebModelTransport()
             let transport = GatedLeaseFixtureTransport(base: base, operation: point, gate: gate)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             let controlledRequest = request
             let inference = Task { try await server.fixtureInfer(controlledRequest, taskID: point) }
             addTeardownBlock { inference.cancel(); await gate.resume() }
@@ -365,7 +365,7 @@ final class WebModelServerTests: XCTestCase {
     func testNativeRequestMetadataRejectsMissingStaleAndContradictoryTurnBeforeStart() async throws {
         let transport = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let label = "metadata"
         let task = try await bindWebsiteInferenceFixtureTurn(server, taskID: label)
         let matching = try websiteInferenceFixtureMetadata(taskID: label)
@@ -399,7 +399,7 @@ final class WebModelServerTests: XCTestCase {
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
             let base = FixtureWebModelTransport()
             let transport = UnownedStartFixtureTransport(base: base, lostReply: lostReply)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             let label = "unknown-start"
             _ = try await server.fixtureInfer(request, taskID: label)
             let firstReceipts = await server.latestCleanupReceipts()
@@ -432,7 +432,7 @@ final class WebModelServerTests: XCTestCase {
         for cancel in [false, true] {
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
             let transport = FixtureWebModelTransport()
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             let label = "retired-metadata"
             let task = try await bindWebsiteInferenceFixtureTurn(server, taskID: label)
             var object = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
@@ -455,7 +455,7 @@ final class WebModelServerTests: XCTestCase {
     func testPreparedContextWaitsForActualNativeTurnAndRejectsOldPreparation() async throws {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
         let transport = FixtureWebModelTransport()
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
         let preparation = UUID()
         try await server.prepareInferenceTurn(taskID: task, threadID: thread,
@@ -481,7 +481,7 @@ final class WebModelServerTests: XCTestCase {
     func testMissingDurableStorageFailsBeforeAnyWebsiteStart() async throws {
         let server = WebModelServer()
         let transport = FixtureWebModelTransport()
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let task = UUID().uuidString
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
         object["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: task)]
@@ -513,7 +513,7 @@ final class WebModelServerTests: XCTestCase {
     func testEmbeddedInferenceRecordsRevisionBeforeReadAndWaitsForChanges() async throws {
         let transport = EventWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let result = try await server.fixtureInfer(request, taskID: "event-task")
         XCTAssertTrue(String(decoding: result, as: UTF8.self).contains("response.completed"))
         let trace = await transport.trace()
@@ -527,7 +527,7 @@ final class WebModelServerTests: XCTestCase {
         for readiness in [true, false] {
             let transport = LateWebModelTransport(readiness: readiness)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             await server.setTimeoutsForTesting(readiness: .milliseconds(10), response: .milliseconds(10))
             do {
                 _ = try await server.fixtureInfer(request, taskID: "late")
@@ -546,7 +546,7 @@ final class WebModelServerTests: XCTestCase {
     func testNeverReadyWebsiteReportsPreparationDeadlineWithoutSendingAndStillCleansUp() async throws {
         let transport = NeverReadyWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         await server.setTimeoutsForTesting(readiness: .milliseconds(100), response: .seconds(2))
         let input = Data("{\"model\":\"browser/gemini\",\"input\":\"Never submit this fixture\",\"tools\":[],\"stream\":true}".utf8)
         do {
@@ -575,7 +575,7 @@ final class WebModelServerTests: XCTestCase {
     func testClaudeRoutesEachInferenceToANewClosedSession() async throws {
         let transport = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let claudeRequest = Data("{\"model\":\"browser/claude\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
         _ = try await server.fixtureInfer(claudeRequest, taskID: "claude-task")
         _ = try await server.fixtureInfer(claudeRequest, taskID: "claude-task")
@@ -599,7 +599,7 @@ final class WebModelServerTests: XCTestCase {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
         await server.setTransportForTesting(chrome)
         for provider in ["chatgpt", "gemini", "claude"] {
-            let input = Data("{\"model\":\"browser/\(provider)\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
+            let input = Data("{\"model\":\"\(syntheticWebsiteModelID(provider))\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
             do {
                 _ = try await server.fixtureInfer(input, taskID: provider)
                 XCTFail("Website models must not fall back to Chrome")
@@ -615,9 +615,9 @@ final class WebModelServerTests: XCTestCase {
     func testEveryWebsiteUsesEmbeddedTransportAndClosesBeforeShutdown() async throws {
         let embedded = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(embedded))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(embedded, defaultChatChoice: syntheticChatGPTChoice))
         for provider in ["chatgpt", "gemini", "claude"] {
-            let input = Data("{\"model\":\"browser/\(provider)\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
+            let input = Data("{\"model\":\"\(syntheticWebsiteModelID(provider))\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
             let result = try await server.fixtureInfer(input, taskID: provider)
             XCTAssertTrue(String(decoding: result, as: UTF8.self).contains("response.completed"))
         }
@@ -638,8 +638,8 @@ final class WebModelServerTests: XCTestCase {
                              "The command completed.\n{\"type\":\"tool_calls\",\"calls\":["] {
                 let transport = FixtureWebModelTransport(replyTexts: [response])
                 let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-                await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
-                let input = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": "Run the fixture",
+                await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
+                let input = try JSONSerialization.data(withJSONObject: ["model": syntheticWebsiteModelID(provider), "input": "Run the fixture",
                     "tools": [["type": "function", "name": "exec_command", "parameters": ["type": "object"]]], "stream": true])
                 do {
                     let stream = try await server.fixtureInfer(input, taskID: provider)
@@ -674,12 +674,12 @@ final class WebModelServerTests: XCTestCase {
                 #"{"type":"message","text":"Observed fixture output"}"#,
             ])
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             let firstInput: [[String: Any]] = [
                 ["role": "developer", "content": [["type": "input_text", "text": developer]]],
                 ["role": "user", "content": "Run the harmless fixture"],
             ]
-            let first = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)",
+            let first = try JSONSerialization.data(withJSONObject: ["model": syntheticWebsiteModelID(provider),
                 "instructions": "Preserve fixture scope", "input": firstInput, "tools": tools, "stream": true])
             let functionStream = try await server.fixtureInfer(first, taskID: provider)
             let events = try String(decoding: functionStream, as: UTF8.self).split(separator: "\n")
@@ -698,7 +698,7 @@ final class WebModelServerTests: XCTestCase {
                  "arguments": #"{"cmd":"printf fixture"}"#],
                 ["type": "function_call_output", "call_id": callID, "output": "fixture output; exit 0"],
             ]
-            let next = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)",
+            let next = try JSONSerialization.data(withJSONObject: ["model": syntheticWebsiteModelID(provider),
                 "instructions": "Preserve fixture scope", "input": nextInput, "tools": tools, "stream": true])
             let final = try await server.fixtureInfer(next, taskID: provider)
             XCTAssertTrue(String(decoding: final, as: UTF8.self).contains("Observed fixture output"))
@@ -726,9 +726,9 @@ final class WebModelServerTests: XCTestCase {
             let embedded = FixtureWebModelTransport(startGate: gate)
             let chrome = FixtureWebModelTransport()
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(embedded))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(embedded, defaultChatChoice: syntheticChatGPTChoice))
             await server.setTransportForTesting(chrome)
-            let input = Data("{\"model\":\"browser/\(provider)\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
+            let input = Data("{\"model\":\"\(syntheticWebsiteModelID(provider))\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
             let inference = Task { try await server.fixtureInfer(input, taskID: provider) }
             addTeardownBlock { inference.cancel(); await gate.resume() }
             try await gate.waitUntilEntered()
@@ -764,7 +764,7 @@ final class WebModelServerTests: XCTestCase {
     func testUnverifiedCleanupIsReportedBeforeResponseAndRetriedWithoutReplay() async throws {
         let transport = FixtureWebModelTransport(cleanupFailsOnce: true)
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         do {
             _ = try await server.fixtureInfer(request, taskID: "one")
             XCTFail("Unverified closure must prevent response handoff")
@@ -791,7 +791,7 @@ final class WebModelServerTests: XCTestCase {
         for (point, state, code) in cases {
             let transport = DiagnosticWebModelTransport(point: point, state: state, code: code)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             do {
                 _ = try await server.fixtureInfer(request, taskID: "one")
                 XCTFail("Expected a failed website snapshot")
@@ -808,7 +808,7 @@ final class WebModelServerTests: XCTestCase {
         for code in ["web_document_changed\nPRIVATE PAGE CONTENT", "web_future_error", nil] {
             let transport = DiagnosticWebModelTransport(point: .responsePoll, code: code)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             do {
                 _ = try await server.fixtureInfer(request, taskID: "one")
                 XCTFail("Expected a failed website snapshot")
@@ -824,7 +824,7 @@ final class WebModelServerTests: XCTestCase {
     func testHTTPErrorPreservesDirectBridgeWebsiteReason() async throws {
         let transport = DiagnosticWebModelTransport(point: .sendThrown, code: "web_prompt_not_inserted")
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let endpoint = try await server.start().appendingPathComponent("responses")
         var urlRequest = URLRequest(url: endpoint)
         urlRequest.httpMethod = "POST"; urlRequest.httpBody = request
@@ -847,7 +847,7 @@ final class WebModelServerTests: XCTestCase {
             for point in [DiagnosticFailurePoint.start, .readinessPoll, .sendThrown, .responsePoll] {
                 let transport = ExternalGateWebModelTransport(point: point, failure: failure)
                 let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-                await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+                await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
                 let endpoint = try await server.start().appendingPathComponent("responses")
                 var urlRequest = URLRequest(url: endpoint)
                 urlRequest.httpMethod = "POST"
@@ -916,7 +916,7 @@ final class WebModelServerTests: XCTestCase {
         for (reply, reason) in cases {
             let transport = FixtureWebModelTransport(replyTexts: [reply])
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             let endpoint = try await server.start().appendingPathComponent("responses")
             var urlRequest = URLRequest(url: endpoint)
             urlRequest.httpMethod = "POST"
@@ -947,16 +947,16 @@ final class WebModelServerTests: XCTestCase {
 
     private var externalGateCases: [(String, EmbeddedWebModelTransport.Failure, String, String)] {
         [("browser/gemini", .humanVerificationRequired(.gemini), "website_verification_required", "complete_website_verification"),
-         ("browser/chatgpt", .signInRequired, "sign_in_required", "sign_in"),
+         (syntheticChatGPTModelID, .signInRequired, "sign_in_required", "sign_in"),
          ("browser/claude", .usageLimited(.claude), "website_usage_limit", "wait_for_quota_reset"),
-         ("browser/chatgpt", .unexpectedPage(.chatgpt), "unexpected_website_page", "inspect_website")]
+         (syntheticChatGPTModelID, .unexpectedPage(.chatgpt), "unexpected_website_page", "inspect_website")]
     }
 
     func testCleanupPreservesSafeReasonAndRetriesOnlyTheOwnedToken() async throws {
         for failure in [DiagnosticCleanupFailure.snapshot("web_document_changed"), .bridge("web_cleanup_unverified")] {
             let transport = DiagnosticWebModelTransport(cleanupFailure: failure)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             do {
                 _ = try await server.fixtureInfer(request, taskID: "one")
                 XCTFail("Failed cleanup cannot release the model reply")
@@ -975,7 +975,7 @@ final class WebModelServerTests: XCTestCase {
         for failure in [DiagnosticCleanupFailure.snapshot("web_document_changed PRIVATE PAGE CONTENT"), .untrusted] {
             let transport = DiagnosticWebModelTransport(cleanupFailure: failure)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             do {
                 _ = try await server.fixtureInfer(request, taskID: "one")
                 XCTFail("Failed cleanup cannot release model output")
@@ -989,7 +989,7 @@ final class WebModelServerTests: XCTestCase {
     func testHTTPRejectsWebsiteOriginWithoutInvokingProvider() async throws {
         let transport = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let endpoint = try await server.start().appendingPathComponent("responses")
         var urlRequest = URLRequest(url: endpoint)
         urlRequest.httpMethod = "POST"; urlRequest.httpBody = request
@@ -1016,7 +1016,7 @@ final class WebModelServerTests: XCTestCase {
     func testConcurrentFinishAndShutdownShareOneCleanup() async throws {
         let transport = FixtureWebModelTransport(cleanupDelay: true)
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         _ = try await server.fixtureInfer(request, taskID: "one")
         async let finished = server.fixtureFinish(taskID: "one")
         async let disposed = server.shutdown()
@@ -1514,6 +1514,10 @@ private actor ChoiceWebModelTransport: WebModelTransport {
         let selected: [String: Any] = ["key": choice.key, "label": choice.label]
         var evidence: [String: Any] = ["selected": selected, "verification": "website_selection"]
         if let selectionSource { evidence["source"] = selectionSource }
+        if let context = syntheticChatSelection(choice) {
+            evidence["source"] = "selected_model_indicator"
+            evidence["chatSelection"] = context
+        }
         if current == .complete && includeResponseProof {
             evidence["response"] = selected.merging(["source": "response_label"]) { _, value in value }
             evidence["verification"] = "response_reported"

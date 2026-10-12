@@ -6,6 +6,25 @@ import XCTest
 /// Explicit synthetic provenance for standalone protocol tests. Native-engine
 /// workflow tests use their actual task, thread, turn and runtime identities.
 let websiteInferenceFixtureGeneration = UUID(uuidString: "10913cbc-442d-4d04-b1a5-b372df40c52c")!
+let syntheticChatGPTChoice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
+let syntheticChatGPTModelID = syntheticChatGPTChoice.modelID
+
+func syntheticWebsiteModelID(_ provider: String) -> String {
+    provider == "chatgpt" ? syntheticChatGPTModelID : "browser/" + provider
+}
+
+func syntheticWebsiteChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
+    guard provider == "chatgpt" else { return WebsiteModelChoice(provider: provider, key: key, label: label) }
+    let power: WebsiteModelChoice.ChatGPTPower = key.contains("old") ? .instant : key.contains("new") ? .high : .medium
+    return WebsiteModelChoice(provider: provider, key: power.modelKey, label: power.label)
+}
+
+func syntheticChatSelection(_ choice: WebsiteModelChoice) -> [String: Any]? {
+    guard let power = choice.chatGPTPower else { return nil }
+    return ["family": ["key": "GPT-6", "label": "GPT-6"],
+            "power": ["key": power.rawValue, "label": power.label],
+            "automaticFamily": ["policy": "highest_offered_plain_gpt", "offered": ["GPT-6", "GPT-5.5"]]]
+}
 
 func websiteInferenceFixtureTaskID(_ label: String) -> String {
     if let value = UUID(uuidString: label) { return value.uuidString.lowercased() }
@@ -83,7 +102,12 @@ extension WebModelServer {
 actor WebsiteInferenceFixtureTransport: WebModelTransport {
     private let base: any WebModelTransport
     private var generations: [String: String] = [:]
-    init(_ base: any WebModelTransport) { self.base = base }
+    private var providers: [String: String] = [:]
+    private let defaultChatChoice: WebsiteModelChoice?
+    init(_ base: any WebModelTransport, defaultChatChoice: WebsiteModelChoice? = nil) {
+        self.base = base
+        self.defaultChatChoice = defaultChatChoice
+    }
 
     func changeRevision(sessionToken: String) async throws -> UInt64? {
         try await base.changeRevision(sessionToken: sessionToken)
@@ -97,8 +121,17 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
               let input = try JSONSerialization.jsonObject(with: params) as? [String: String] else { return bytes }
         if operation == "webProviderStart", let token = snapshot["sessionToken"] as? String {
             generations[token] = UUID().uuidString.lowercased()
+            providers[token] = input["provider"]
         }
         let token = snapshot["sessionToken"] as? String ?? input["sessionToken"]
+        if ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? ""),
+           let token, providers[token] == "chatgpt", let choice = defaultChatChoice,
+           snapshot["modelEvidence"] == nil, let context = syntheticChatSelection(choice) {
+            // Explicit fixture configuration supplies a fixed synthetic menu,
+            // never a substituted request ID or repaired contradictory proof.
+            snapshot["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
+                "source": "selected_model_indicator", "verification": "website_selection", "chatSelection": context]
+        }
         if ["running", "complete"].contains(snapshot["state"] as? String ?? ""), let token {
             if snapshot["sessionToken"] == nil { snapshot["sessionToken"] = token }
             if snapshot["sequence"] == nil { snapshot["sequence"] = 1 }
@@ -113,6 +146,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
         if ["webProviderFinish", "webProviderCancel"].contains(operation),
            ["deleted", "not_created"].contains(snapshot["cleanup"] as? String ?? ""), let token {
             generations.removeValue(forKey: token)
+            providers.removeValue(forKey: token)
         }
         return try JSONSerialization.data(withJSONObject: snapshot)
     }

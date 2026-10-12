@@ -45,6 +45,7 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
     private var readinessDeadlines = [String: ContinuousClock.Instant]()
     private var readinessPollCounts = [String: Int]()
     private var executionWorkspace: String?
+    private var activeProvider: String?
     init(fixture: WorkflowBenchmarkFixture, scenario: Scenario) {
         self.fixture = fixture
         self.scenario = scenario
@@ -61,6 +62,7 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
             }
             switch operation {
             case "webProviderStart":
+                activeProvider = input["provider"]
                 try WorkflowBenchmarkFailure.require(token == nil, "A new website page started before the prior lease closed")
                 let created = UUID().uuidString.lowercased()
                 token = created
@@ -105,7 +107,7 @@ actor WorkflowBenchmarkTransport: WebModelTransport {
             receiptValue.failure = error.localizedDescription
             throw error
         }
-        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result))
+        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result, modelChoice: activeProvider == "chatgpt" ? syntheticChatGPTChoice : nil))
     }
 
     private func nextReply(_ request: InferenceRequest) throws -> String {

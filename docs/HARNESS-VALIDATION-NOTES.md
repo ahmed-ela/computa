@@ -4845,3 +4845,189 @@ connected. Safari's developer menu is off, and confirmation to enable it
 temporarily is pending under the computer-use tool's settings policy. The
 request failure has not yet been captured, and no build-66 provider inference
 or workflow success is claimed.
+
+### Build 66 approved inspector control
+
+After human approval, Safari's Show features for web developers setting was
+temporarily enabled. The public inspector attached to the single owned
+temporary ChatGPT tab through Develop > Inspect Apps and Devices > Computa.
+The current website family was GPT-6, selected value 1, with Pro power 5 of 5.
+One synthetic marker prompt was sent at 2026-10-11T23:36:16.533Z. The first UI
+read at 23:36:17.456Z showed Load failed, with no completed marker response.
+No Retry and no native provider inference were dispatched.
+
+The conversation fetch was POST `/backend-api/f/conversation` on chatgpt.com,
+lasting 98.5 ms with no observed HTTP status or transferred bytes. Its console
+link identified that same endpoint followed by `Failed to load resource: bad
+URL`. Three preparation fetches returned HTTP 200. Headers, cookies, bodies and
+HAR were not captured. Control receipt SHA-256:
+c7a1509be6c5a958ecd0cbbd09efcfa56f7f2e52c775595db5a958c71d4e08e7.
+
+A finite projection of only owned Computa PID 64246 logs in the five-second
+failure window found resource 4419 on page 111133 / frame 4294967299. Its
+willSendRequestInternal-to-didFail interval was 98.403 ms, with error type 1 and
+code -1000. The projection did not expose an NSError domain or underlying
+numeric fields, and its retained fields do not independently map the resource
+ID to the request URL. No enabled system HTTP/HTTPS/SOCKS/PAC/autodiscovery
+configuration was observed. That excludes no Network Extension or private
+relay behavior. The native cause remains unproven; no speculative WebKit,
+header, privacy or protocol change was applied. Log receipt SHA-256:
+1f696235fa87907b91e5d4d01d7c9a35ee4e11a44794d904890370b781e25e58.
+
+The owned inspector and inspection list closed. Test tab
+C0570C0A-3559-41AE-9A19-30B036BB7850 closed, revoking its inspection opt-in.
+Safari's developer setting was visibly restored to 0 with Develop absent;
+Computa's browser pane was hidden again and the runtime remained connected.
+Restoration completed at 23:39:07.346Z. The human task was not modified, and
+website conversation deletion was not independently verified. The installed
+executable still matched the sealed build-66 SHA-256
+8c2b5e75e1457b5955d377f2048aa98c625de8ab65fa2ce04252e4e61a7a17b8.
+
+The app's own startup logs explicitly acquired NetworkProcess assertions for
+PID 64279 at 19:17:40.200926Z and 19:17:40.201345Z. Public libproc executable and
+start-time metadata verified that process as Apple WebKit.Networking, launched
+at 19:17:40.084328Z, excluding PID reuse. No private API or debugger was used.
+Only that proved process's logs were then read in the original failure window.
+Its task 61 logged NSURLErrorDomain -1000 with underlying NSPOSIXErrorDomain 22
+(EINVAL) at 23:36:16.613881Z. An earlier task record explicitly links task 61 to
+resource 4419 / frame 4294967299. This establishes the native error chain and
+task/resource association. The failing-URL key is redacted, so native logs do
+not independently confirm the endpoint observed in Inspector. The particular
+invalid argument remains unknown; this is not yet a filter, proxy, header,
+body or protocol diagnosis. Ownership/error receipt SHA-256:
+c771bd51b2bf7af1ec6d397e4144ca2d43750e725f17efaab64e693ddec8ef2a.
+Task correlation receipt SHA-256:
+9033d8e5040ea099f64f7819a93abb44092c7115cf0a0e215ce653f5f8b5b4e4.
+
+### Build 66 native failure stages and single-variable human controls
+
+The original task 61 explicitly maps to connection C66. That connection
+reported ready, then `nw_write_request_report` and `nw_read_request_report`
+failed with Invalid argument before the NSError. An HTTP/2 stream function
+also appeared. This identifies a native connection write/read failure, not
+the particular invalid argument. Later cancellation is not evidence that app
+cancellation initiated it. The full task identity was compared only in memory;
+the sealed receipt retains its numeric suffix and equality result, not the
+session UUID. Stage receipt `installed66-webkit-owned-task61-stages1.json`:
+c9176a560415060d02f7c36a301238a648644b4a318394e550e24196176a86d0.
+
+Three further normal human controls each sent one new synthetic marker and
+stopped after Load failed. They did not run native inference or click Retry.
+All times below are UTC on 2026-10-12; elapsed time is to the first observed UI
+failure, not a measured request duration.
+
+| Control | Family / power / chat mode | Send | First failure read | Owned tab closed | Native task / resource / frame |
+| --- | --- | --- | --- | --- | --- |
+| 2: normal app restart | GPT-6 / Pro 5 of 5 / temporary | 00:03:38.697 | 00:03:39.526 (829 ms) | 00:04:02.776 | 57 / 2102 / 4294967299 |
+| 3: family change | GPT-5.6 Sol / Pro 5 of 5 / temporary | 00:05:39.671 | 00:05:40.477 (806 ms) | 00:06:14.695 | 123 / 3430 / 4294967301 |
+| 4: ordinary chat | GPT-6 / Pro 5 of 5 / ordinary | 00:10:23.612 | 00:10:24.663 (1,051 ms) | 00:12:39.680 | 202 / 1780 / 4294967303 |
+
+The normal Cmd-Q/reopen replaced both prior processes. New app PID 3257 began
+at 00:00:55.418276; its own startup logs twice identify NetworkProcess PID 3261,
+whose public executable and start time 00:00:55.758204 were verified. The app
+remained version 0.6.0 (66), at the same installed path, with main SHA-256
+8c2b5e75e1457b5955d377f2048aa98c625de8ab65fa2ce04252e4e61a7a17b8.
+This reset app and networking volatile state together. It is not an isolated
+Networking or HTTP/2 experiment. Ownership receipt
+`installed66-normal-restart-ownership1.json`:
+6a3806fd3151f1f95864ebca2841cd64ebd6dfa34e6796811dbe86ea59045156.
+
+Each control independently maps its exact native task to the stated resource
+and app failure. All three reproduce NSURLErrorDomain -1000 with underlying
+NSPOSIXErrorDomain 22. The restarted control explicitly links task 57 to C59,
+which repeats write/read EINVAL before the NSError. Process identities were
+checked before and after each bounded log projection. No new stage scan was
+needed for controls 3 and 4 because their error chains were unchanged.
+`installed66-normal-restart-failure-log1.json` has SHA-256
+3bce2320d2aa5f22861cf4783d89b10b03de384b0eea2632bae7419ac476673c;
+`installed66-family-mode-comparison-failure-log1.json` has SHA-256
+83035b6c53967e079dc8bc6134db48319b6e131c9a1192c1b79c3d35f1031cdc.
+
+The exclusive root UI receipts are `installed66-direct-service-control2.json`,
+`installed66-direct-service-control3.json` and
+`installed66-direct-service-control4.json`. Their complete owned tab IDs and
+synthetic marker identities are preserved, alongside the separate native
+receipt references. HTTP status and transfer bytes were not measured for
+these three controls. The browser pane returned to hidden after each tab
+closed; control 3 restored GPT-6 / Pro. Website conversation deletion was not
+independently verified, especially for the ordinary-chat control.
+
+Normal restart, family selection and temporary-chat mode changes were
+insufficient. This does not establish a malformed URL, header/body defect,
+proxy/filter cause, HTTP/2 incompatibility or CAPTCHA. Other preparatory POST
+requests returned 200 in the original Inspector control, so POST itself is
+not shown to fail globally. The installed website failure and native workflow
+qualification remain unresolved; no network setting or speculative protocol
+change was applied.
+
+### Build 66 empty Chat selector structure and revised requested policy
+
+The root operator inspected only owned empty tab
+A82C1F0E-732E-4372-9CE8-47A76B1DE9C2, with zero prompts and zero Sends. Chat was
+pressed and Work was not. The native power control exposed five values 1–5:
+Instant, Medium, High, Extra High and Pro. Public Inspector showed a `SPAN`
+slider with min 0, max 4, value 0 / Instant, horizontal orientation and tabindex
+-1. It had no aria-label, aria-labelledby or aria-describedby. Its owning
+`DIV` menuitem had aria-label Power and tabindex -1; the containing `DIV` menu
+was the exact popup referenced by the **Select ChatGPT model** button's
+aria-controls, with haspopup menu and expanded true.
+
+The same popup had three enabled `DIV` menuitemradio family choices: GPT-6
+checked, Sol unchecked, and GPT-5.5 unchecked with the separate-line notice
+“Leaving on Oct 14”. A literal Latest option was not observed. Family selection
+and power selection therefore have separate structures; a missing direct
+slider label does not erase its observed owning Power menuitem.
+
+The new human instruction is Chat-only power presets with automatic selection
+of the highest observed enabled plain GPT family, excluding Sol and Work.
+This supersedes the earlier remove-Latest-option preference. “Latest” now
+describes the requested family-selection policy, not a literal website label.
+The observation does not itself qualify the new implementation or establish
+a network fix, and no further inference followed the human correction.
+
+GPT-6 and Pro 5 of 5 were restored. The owned tab, inspector and apps inspection
+list closed; Safari's developer setting returned to 0 with Develop absent and
+Computa's browser pane hidden. Restoration completed at
+2026-10-12T00:36:46.174Z, preserving the human's Gemini 3.8 Flash new task.
+The finite receipt `installed66-chat-selector-structure1.json` has SHA-256
+81ff790efaffe834364e196945837160d6f503a94219d5eb5d3a8dfbce5e00df.
+All four new root-observation receipts were created exclusively and indexed by
+`installed66-human-control-receipts-seal1.json`, SHA-256
+2fc1b8ec8391adc991d7575ef5e966027a5c07308f787c048eba24866b9fadad.
+They retain no raw inspector DOM, headers, cookies, request bodies or HAR. The
+sealing agent performed no UI, provider request, process or setting action.
+
+### Build 67 final Chat-only source validation
+
+Final3 contains the five Chat power presets, automatic newest plain GPT family
+selection, independent native family/power verification, stable Pro intent,
+observed-choice-only cache admission and pre-dispatch queue recovery. Work,
+Sol, bare Chat defaults and historical family IDs cannot start new inference.
+History remains readable; discovery does not replay failed queued prompts.
+
+The final native run passed 2,335 tests, skipped 49 explicit opt-in tests and
+failed none (2,384 executed, 581.843 seconds). Exact required cohorts include
+Chat admission 5, Chat selection 9, embedded model transport 127, queue 33,
+website model state 17 and web snapshot 9. The seven public cohorts passed
+663 tests with zero failures/skips, including 404 provider/policy adapter tests.
+All 417 frozen inputs stayed unchanged and the pinned engine was not rebuilt.
+These are automated source and controlled-runtime results, not live provider
+or installed-product qualification.
+
+Private sealed artifacts in the benchmark workspace:
+
+- `public-validation-build67-final3.json`:
+  088c92ca2901eeefb5170f612b7c8ddeb5ebc891e4099bcff066dbd8b97ae392.
+- `native-build67-final3-validation.json`:
+  6671da9aa31e85e244c42d338d24a04f574b1abb968a68b7856124195f395e82.
+- `native-source-freeze-build67-final3.json`:
+  9966bb496eb7403b7f0d3edd320882da77bfdb9caa45cc86804e151c5bf12714.
+- `public-build67-final3-source-freeze-independent-audit1.json`:
+  67e43c5ae4f95c632d274f8562d8ffc090a9642fc97fe872cc4d54f89163b86d.
+
+Final2's earlier 2,383-test zero-failure run and the focused 50-test queue/state
+regression are preserved separately. An initial final3 controller invocation
+used a relative public-receipt path and was rejected before freezing or
+running tests; the successful invocation used the required absolute path.
+No failed or interrupted run is counted as a pass. Signed delivery and a
+fresh installed website response remain separate evidence.

@@ -8,22 +8,22 @@ import XCTest
 @MainActor
 final class OpenResponsesAppServerTests: XCTestCase {
     func testBundledEngineConsumesCanonicalTextSSEForEveryWebsiteProvider() async throws {
-        for model in [LocalModelCatalog.chatGPTBrowserModelID, LocalModelCatalog.geminiBrowserModelID,
+        for model in [syntheticChatGPTModelID, LocalModelCatalog.geminiBrowserModelID,
                       LocalModelCatalog.claudeBrowserModelID] {
             try await qualify(model: model, scenario: .text)
         }
     }
 
     func testBundledEngineExecutesReadOnlyHostToolAndReturnsItsMatchingOutputToTheModel() async throws {
-        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .statusTool)
+        try await qualify(model: syntheticChatGPTModelID, scenario: .statusTool)
     }
 
     func testBundledEngineStopsAfterModel500WithoutReplayingInference() async throws {
-        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .malformedReply)
+        try await qualify(model: syntheticChatGPTModelID, scenario: .malformedReply)
     }
 
     func testBundledEngineStopsAfterQuota429WithoutReplayingInference() async throws {
-        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .usageLimit)
+        try await qualify(model: syntheticChatGPTModelID, scenario: .usageLimit)
     }
 
     private func qualify(model: String, scenario: EngineInferenceScenario) async throws {
@@ -66,7 +66,7 @@ final class OpenResponsesAppServerTests: XCTestCase {
         do {
             // Only the provider proof is synthetic. The actual bundled HTTP
             // client and native turn notifications supply inference context.
-            await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(inference))
+            await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(inference, defaultChatChoice: syntheticChatGPTChoice))
             let initial = try await runtime.loadTasks()
             XCTAssertTrue(initial.isEmpty, "Only this isolated Codex home may supply thread history")
             try await runtime.configureWorkspace(path: workspace.path, forTaskID: taskID)

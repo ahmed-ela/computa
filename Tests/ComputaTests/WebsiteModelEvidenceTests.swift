@@ -5,7 +5,7 @@ import XCTest
 /// These checks distinguish selected UI identity, reported response identity and
 /// request echo; a website label never becomes backend attestation by itself.
 final class WebsiteModelEvidenceTests: XCTestCase {
-    private let choice = WebsiteModelChoice(provider: "chatgpt", key: "fixture-fast", label: "Fixture Fast")
+    private let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
     private static let privateCanary = "PRIVATE_RAW_PROMPT_TOOL_AND_RESPONSE_CANARY"
 
     func testNormalChatProductProofRequiresExactControlsAndOwnedTemporaryTransition() throws {
@@ -74,6 +74,7 @@ final class WebsiteModelEvidenceTests: XCTestCase {
     }
 
     func testFiniteResponseAndSelectionSourcesRemainDistinctAndRoundTrip() throws {
+        let choice = WebsiteModelChoice(provider: "claude", key: "fixture-fast", label: "Fixture Fast")
         for responseSource in ["response_attribute", "response_label"] {
             for selectionSource in ["model_picker_label", "checked_model_option", "selected_model_indicator"] {
                 var raw = selection(choice, responseSource: responseSource)
@@ -396,6 +397,10 @@ final class WebsiteModelEvidenceTests: XCTestCase {
         var value: [String: Any] = ["selected": ["key": choice.key, "label": choice.label],
                                     "verification": responseSource == nil ? "website_selection" : "response_reported"]
         if let responseSource { value["response"] = ["key": choice.key, "label": choice.label, "source": responseSource] }
+        if let context = chatSelectionEvidenceFixture(choice) {
+            value["source"] = "selected_model_indicator"
+            value["chatSelection"] = context
+        }
         return value
     }
 
@@ -519,8 +524,12 @@ private actor EvidenceExportTransport: WebModelTransport {
         case .fractionalBaseline: receipt["baselineResponseCount"] = 0.5
         case .oversizedBaseline: receipt["baselineResponseCount"] = 10_001
         }
+        var evidence: [String: Any] = ["selected": selected, "verification": "website_selection"]
+        if let choice, let context = chatSelectionEvidenceFixture(choice) {
+            evidence["source"] = "selected_model_indicator"; evidence["chatSelection"] = context
+        }
         return ["state": state, "sessionToken": token, "sequence": exposedSequence,
-                "modelEvidence": ["selected": selected, "verification": "website_selection"],
+                "modelEvidence": evidence,
                 "modelProofContext": receipt,
                 "productModeEvidence": ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control", "temporaryTransition": "acknowledged"]]
     }
@@ -528,10 +537,15 @@ private actor EvidenceExportTransport: WebModelTransport {
 
 /// Synthetic loopback fixtures simulate a fully prepared normal Chat session.
 /// Actual WebKit fixtures acquire this evidence through real DOM actions.
-func syntheticPreparedWebsiteSnapshot(_ value: [String: Any]) -> [String: Any] {
+func syntheticPreparedWebsiteSnapshot(_ value: [String: Any], modelChoice: WebsiteModelChoice? = nil) -> [String: Any] {
     guard ["ready", "running", "complete"].contains(value["state"] as? String ?? "") else { return value }
-    return value.merging(["productModeEvidence": ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control",
+    var snapshot = value.merging(["productModeEvidence": ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control",
         "temporaryTransition": "acknowledged"]]) { _, simulated in simulated }
+    if snapshot["modelEvidence"] == nil, let choice = modelChoice, let context = syntheticChatSelection(choice) {
+        snapshot["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
+            "source": "selected_model_indicator", "verification": "website_selection", "chatSelection": context]
+    }
+    return snapshot
 }
 
 private enum ProductSnapshotPoint: CaseIterable, Sendable { case ready, send, complete }
@@ -544,6 +558,7 @@ private actor ProductEvidenceTransport: WebModelTransport {
     private let mutation: ProductSnapshotMutation
     private var sends = 0
     private var selected: [String: String] = [:]
+    private var chatContext: [String: Any]?
     init(point: ProductSnapshotPoint, mutation: ProductSnapshotMutation) { self.point = point; self.mutation = mutation }
     func sendCount() -> Int { sends }
     func request(operation: String, params: Data) throws -> Data {
@@ -554,6 +569,7 @@ private actor ProductEvidenceTransport: WebModelTransport {
             let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
             let choice = try XCTUnwrap(WebsiteModelChoice.parse(try XCTUnwrap(input["modelChoice"])))
             selected = ["key": choice.key, "label": choice.label]
+            chatContext = chatSelectionEvidenceFixture(choice)
             value = ["sessionToken": token, "state": "ready"]; current = .ready
         case "webProviderSend": sends += 1; value = ["state": "running"]; current = .send
         case "webProviderPoll": value = ["state": "complete", "text": #"{"type":"message","text":"OK"}"#]; current = .complete
@@ -561,7 +577,9 @@ private actor ProductEvidenceTransport: WebModelTransport {
         default: throw WebModelServer.Failure.invalidRequest
         }
         if current != nil {
-            value["modelEvidence"] = ["selected": selected, "verification": "website_selection"]
+            var evidence: [String: Any] = ["selected": selected, "verification": "website_selection"]
+            if let chatContext { evidence["source"] = "selected_model_indicator"; evidence["chatSelection"] = chatContext }
+            value["modelEvidence"] = evidence
             var product = ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control", "temporaryTransition": "acknowledged"]
             if current == point {
                 switch mutation {
@@ -575,4 +593,11 @@ private actor ProductEvidenceTransport: WebModelTransport {
         }
         return try JSONSerialization.data(withJSONObject: value)
     }
+}
+
+private func chatSelectionEvidenceFixture(_ choice: WebsiteModelChoice) -> [String: Any]? {
+    guard let power = choice.chatGPTPower else { return nil }
+    return ["family": ["key": "GPT-6", "label": "GPT-6"],
+            "power": ["key": power.rawValue, "label": power.label],
+            "automaticFamily": ["policy": "highest_offered_plain_gpt", "offered": ["GPT-6", "GPT-5.5"]]]
 }

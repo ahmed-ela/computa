@@ -8,7 +8,7 @@ import XCTest
 final class RuntimeWorkflowBenchmarkTests: XCTestCase {
     func testEveryWebsiteProviderEditsBuildsCommitsPushesAndServesLocalhost() async throws {
         try requireEngine()
-        for model in [LocalModelCatalog.chatGPTBrowserModelID, LocalModelCatalog.geminiBrowserModelID,
+        for model in [syntheticChatGPTModelID, LocalModelCatalog.geminiBrowserModelID,
                       LocalModelCatalog.claudeBrowserModelID] {
             try await qualify(model: model, scenario: .workflow)
         }
@@ -16,29 +16,29 @@ final class RuntimeWorkflowBenchmarkTests: XCTestCase {
 
     func testDeclinedTerminalApprovalNeverWritesTheRequestedSideEffect() async throws {
         try requireEngine()
-        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .deniedWrite, approve: false)
+        try await qualify(model: syntheticChatGPTModelID, scenario: .deniedWrite, approve: false)
     }
 
     func testInterruptedTurnAndShutdownReapAnOwnedLocalServer() async throws {
         try requireEngine()
-        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .interruptedServer)
+        try await qualify(model: syntheticChatGPTModelID, scenario: .interruptedServer)
     }
 
     func testDelayedServerAndInteractiveStartupPollExactSessionsWithoutReplay() async throws {
         try requireEngine()
-        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .workflow,
+        try await qualify(model: syntheticChatGPTModelID, scenario: .workflow,
             startupDelaySeconds: 2.5, emitWorkflowMatrix: false)
     }
 
     func testDelayedServerReadinessRetainsOriginalCommandForInterruptAndCleanup() async throws {
         try requireEngine()
-        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .interruptedServer,
+        try await qualify(model: syntheticChatGPTModelID, scenario: .interruptedServer,
             startupDelaySeconds: 2.5, emitWorkflowMatrix: false)
     }
 
     func testSelectedWorkspaceReachesModelWithoutUserSuppliedPath() async throws {
         try requireEngine()
-        try await qualify(model: LocalModelCatalog.chatGPTBrowserModelID, scenario: .workflow,
+        try await qualify(model: syntheticChatGPTModelID, scenario: .workflow,
             emitWorkflowMatrix: false)
     }
 

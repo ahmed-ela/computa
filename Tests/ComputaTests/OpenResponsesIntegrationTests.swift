@@ -8,13 +8,13 @@ final class OpenResponsesIntegrationTests: XCTestCase {
     func testJSONAndSSEModesThroughHTTPAndOfficialSchema() async throws {
         let transport = OpenResponsesFixtureTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let base = try await server.start()
         do {
             var artifacts: [[String: Any]] = []
             let root = try artifactRoot()
             for (name, stream) in [("default-json", Optional<Bool>.none), ("explicit-json", false), ("text-stream", true)] {
-                var body: [String: Any] = ["model": "browser/chatgpt", "input": "Synthetic HTTP contract", "metadata": ["fixture": "open-responses"]]
+                var body: [String: Any] = ["model": syntheticChatGPTModelID, "input": "Synthetic HTTP contract", "metadata": ["fixture": "open-responses"]]
                 if let stream { body["stream"] = stream }
                 let (data, response) = try await send(body, to: base, server: server)
                 XCTAssertEqual(response.statusCode, 200)
@@ -26,23 +26,23 @@ final class OpenResponsesIntegrationTests: XCTestCase {
                     XCTAssertEqual(resource["object"] as? String, "response")
                     XCTAssertEqual(resource["status"] as? String, "completed")
                     XCTAssertTrue(resource["usage"] is NSNull)
-                    XCTAssertEqual((resource["metadata"] as? [String: String])?["fixture"], "open-responses")
+                    XCTAssertEqual((resource["metadata"] as? [String: Any])?["fixture"] as? String, "open-responses")
                 }
                 try export(data, name: name, kind: stream == true ? "sse" : "response", root: root, cases: &artifacts)
             }
             let function: [String: Any] = ["type": "function", "name": "get_weather", "parameters": ["type": "object"]]
             for stream in [false, true] {
-                let (data, response) = try await send(["model": "browser/chatgpt", "input": "Parallel tool contract", "stream": stream,
+                let (data, response) = try await send(["model": syntheticChatGPTModelID, "input": "Parallel tool contract", "stream": stream,
                     "tools": [function], "tool_choice": "required", "parallel_tool_calls": true], to: base, server: server)
                 XCTAssertEqual(response.statusCode, 200)
                 try export(data, name: stream ? "function-stream" : "function-json", kind: stream ? "sse" : "response", root: root, cases: &artifacts)
             }
-            let (custom, customResponse) = try await send(["model": "browser/chatgpt", "input": "Custom tool contract", "stream": true,
+            let (custom, customResponse) = try await send(["model": syntheticChatGPTModelID, "input": "Custom tool contract", "stream": true,
                 "tools": [["type": "namespace", "name": "functions", "tools": [["type": "custom", "name": "apply_patch", "format": ["type": "text"]]]]],
                 "tool_choice": "required"], to: base, server: server)
             XCTAssertEqual(customResponse.statusCode, 200)
             try export(custom, name: "codex-custom-stream", kind: "sse", profile: "codex-custom-tools", root: root, cases: &artifacts)
-            let (error, errorResponse) = try await send(["model": "browser/chatgpt", "input": "Synthetic", "stream": "true"], to: base, server: server)
+            let (error, errorResponse) = try await send(["model": syntheticChatGPTModelID, "input": "Synthetic", "stream": "true"], to: base, server: server)
             XCTAssertEqual(errorResponse.statusCode, 400)
             try export(error, name: "request-error", kind: "error", root: root, cases: &artifacts)
             try JSONSerialization.data(withJSONObject: ["version": 1, "cases": artifacts], options: [.prettyPrinted, .sortedKeys])
@@ -57,7 +57,7 @@ final class OpenResponsesIntegrationTests: XCTestCase {
     func testUpstreamAcceptanceTemplatesAgainstRealHTTPListener() async throws {
         let transport = OpenResponsesFixtureTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let base = try await server.start()
         do {
             let taskID = UUID().uuidString.lowercased()
@@ -69,7 +69,7 @@ final class OpenResponsesIntegrationTests: XCTestCase {
                 .write(to: contextURL, options: [.atomic])
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: contextURL.path)
             defer { try? FileManager.default.removeItem(at: contextURL) }
-            let result = try await runConformance(["--official", "--base-url", base.absoluteString, "--model", "browser/chatgpt",
+            let result = try await runConformance(["--official", "--base-url", base.absoluteString, "--model", syntheticChatGPTModelID,
                 "--fixture-headers", contextURL.path], token: server.bearerToken)
             XCTAssertEqual(result.status, 0, result.output)
             print(result.output)
@@ -83,17 +83,17 @@ final class OpenResponsesIntegrationTests: XCTestCase {
     func testUnsupportedRequestsAndSecurityFailBeforeTransport() async throws {
         let transport = OpenResponsesFixtureTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
         let base = try await server.start()
         do {
             let invalid: [([String: Any], Int, String?)] = [
                 (["model": "unknown/model", "input": "fixture"], 404, "model"),
-                (["model": "browser/chatgpt", "input": "fixture", "store": true], 400, "store"),
-                (["model": "browser/chatgpt", "input": "fixture", "background": true], 400, "background"),
-                (["model": "browser/chatgpt", "input": "fixture", "temperature": 0.3], 400, "temperature"),
-                (["model": "browser/chatgpt", "input": "fixture", "previous_response_id": "resp_fixture"], 400, "previous_response_id"),
-                (["model": "browser/chatgpt", "input": [["type": "item_reference", "id": "msg_missing"]]], 400, "input.item_reference"),
-                (["model": "browser/chatgpt", "input": "fixture", "tool_choice": "required"], 400, "tool_choice"),
+                (["model": syntheticChatGPTModelID, "input": "fixture", "store": true], 400, "store"),
+                (["model": syntheticChatGPTModelID, "input": "fixture", "background": true], 400, "background"),
+                (["model": syntheticChatGPTModelID, "input": "fixture", "temperature": 0.3], 400, "temperature"),
+                (["model": syntheticChatGPTModelID, "input": "fixture", "previous_response_id": "resp_fixture"], 400, "previous_response_id"),
+                (["model": syntheticChatGPTModelID, "input": [["type": "item_reference", "id": "msg_missing"]]], 400, "input.item_reference"),
+                (["model": syntheticChatGPTModelID, "input": "fixture", "tool_choice": "required"], 400, "tool_choice"),
             ]
             for (body, status, param) in invalid {
                 let (data, response) = try await send(body, to: base, server: server)
@@ -103,7 +103,7 @@ final class OpenResponsesIntegrationTests: XCTestCase {
                 XCTAssertNotNil(error["code"])
             }
             for (headers, expected) in [(["Authorization": "Bearer invalid"], 401), (["Origin": "https://fixture.invalid"], 403), (["Content-Type": "text/plain"], 415)] {
-                let (_, response) = try await send(["model": "browser/chatgpt", "input": "fixture"], to: base, server: server, headers: headers)
+                let (_, response) = try await send(["model": syntheticChatGPTModelID, "input": "fixture"], to: base, server: server, headers: headers)
                 XCTAssertEqual(response.statusCode, expected)
             }
             let sends = await transport.sendCount()
@@ -118,10 +118,10 @@ final class OpenResponsesIntegrationTests: XCTestCase {
             let reply = policy == "none" ? #"{"type":"tool_calls","calls":[{"name":"get_weather","arguments":{}}]}"# : #"{"type":"message","text":"Synthetic"}"#
             let transport = OpenResponsesFixtureTransport(forcedReply: reply)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             let base = try await server.start()
             do {
-                let (data, response) = try await send(["model": "browser/chatgpt", "input": "fixture", "stream": true, "tool_choice": policy,
+                let (data, response) = try await send(["model": syntheticChatGPTModelID, "input": "fixture", "stream": true, "tool_choice": policy,
                     "tools": [["type": "function", "name": "get_weather", "parameters": ["type": "object"]]]], to: base, server: server)
                 XCTAssertEqual(response.statusCode, 500)
                 let error = try XCTUnwrap(try object(data)["error"] as? [String: Any])

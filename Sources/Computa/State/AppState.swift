@@ -159,11 +159,16 @@ final class AppState {
     var modelOptions: [LocalModelOption] {
         var options = LocalModelCatalog.options.flatMap { option -> [LocalModelOption] in
             guard let provider = LocalModelCatalog.webProvider(for: option.id) else { return [option] }
-            return [option] + websiteModelChoices.filter { $0.provider == provider && $0.isSelectable }.map { WebsiteModelCatalog.option(for: $0) }
+            let observed = websiteModelChoices.filter { $0.provider == provider && $0.isObservedChoice }.map { WebsiteModelCatalog.option(for: $0) }
+            return provider == "chatgpt" ? observed : [option] + observed
         }
         for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
             where id.hasPrefix("browser/") && !options.contains(where: { $0.id == id }) {
-            if let choice = WebsiteModelCatalog.choice(for: id) {
+            if id == "browser/chatgpt" {
+                options.append(LocalModelOption(id: id, label: "ChatGPT / Choose a Chat preset",
+                    detail: "Refresh website models after signing in, then choose a Chat power preset. The saved website default cannot send a prompt.",
+                    highMemory: false, available: false))
+            } else if let choice = WebsiteModelCatalog.choice(for: id) {
                 guard !choice.isRetired else { continue }
                 options.append(WebsiteModelCatalog.option(for: choice, available: false))
             } else {
@@ -178,14 +183,19 @@ final class AppState {
     /// Explicitly removed choices migrate only the next inference's selection.
     /// Recorded messages and active/queued turns retain their original identity.
     private func retireWebsiteModelSelections() {
-        let choices = websiteModelChoices.filter { $0.provider == "chatgpt" && $0.isSelectable }
-        let replacement = choices.first { $0.key == "GPT-5.6 Sol" }?.modelID
+        let choices = websiteModelChoices.filter { $0.provider == "chatgpt" && $0.isObservedChoice }
+        let replacement = choices.first { $0.chatGPTPower == .medium }?.modelID
+            ?? choices.first { $0.chatGPTPower == .instant }?.modelID
             ?? choices.first?.modelID ?? "browser/chatgpt"
-        if WebsiteModelCatalog.choice(for: defaultModel)?.isRetired == true {
+        func retired(_ model: String) -> Bool {
+            WebsiteModelCatalog.selection(for: model)?.provider == "chatgpt"
+                && WebsiteModelCatalog.inferenceSelection(for: model) == nil
+        }
+        if retired(defaultModel), defaultModel != replacement {
             defaultModel = replacement
             preferences.set(replacement, forKey: Self.defaultModelPreferenceKey)
         }
-        for index in tasks.indices where WebsiteModelCatalog.choice(for: tasks[index].model)?.isRetired == true {
+        for index in tasks.indices where retired(tasks[index].model) && tasks[index].model != replacement {
             let taskID = tasks[index].id
             guard canChangeModel(for: taskID) else { continue }
             tasks[index].model = replacement
@@ -256,9 +266,9 @@ final class AppState {
                     }
                     guard !Task.isCancelled, !self.isShuttingDown,
                           self.websiteModelRefreshGeneration == generation else { break }
-                    try WebsiteModelCatalog.validate(choices, provider: provider)
+                    try WebsiteModelCatalog.validateObserved(choices, provider: provider)
                     self.websiteModelChoices.removeAll { $0.provider == provider }
-                    self.websiteModelChoices.append(contentsOf: choices.filter(\.isSelectable))
+                    self.websiteModelChoices.append(contentsOf: choices)
                     WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
                     self.retireWebsiteModelSelections()
                 } catch is CancellationError {
@@ -1683,6 +1693,8 @@ final class AppState {
                 tasks[currentIndex].status = .waiting
                 let rejectedBeforeDispatch: Bool
                 if case .embeddedRequired? = error as? WebModelServer.Failure {
+                    rejectedBeforeDispatch = true
+                } else if case .invalidModelID? = error as? WebsiteModelCatalog.Failure {
                     rejectedBeforeDispatch = true
                 } else if error is LocalModelServerPreflight.Failure {
                     rejectedBeforeDispatch = true
