@@ -5,7 +5,7 @@ import CoreFoundation
 /// credential storage and application-level retries are deliberately disabled.
 final class APIProviderHTTPClient: @unchecked Sendable {
     enum Failure: String, Error, LocalizedError, Sendable {
-        case invalidEndpoint, missingCredential, unauthorized, rateLimited, timeout, modelNotFound, contextLimit, invalidRequest
+        case invalidEndpoint, missingCredential, unauthorized, rateLimited, providerBusy, timeout, modelNotFound, contextLimit, invalidRequest
         case redirectRejected, unavailable, invalidResponse, responseTooLarge, cancelled
         case invalidMessages, invalidTools, invalidToolChoice, invalidParallelToolCalls, invalidReasoningEffort, invalidClearThinking
         case invalidMaxCompletionTokens, invalidStreamOptions, invalidStream, invalidChoiceCount, invalidResponseFormat, invalidModel, invalidTemperature, invalidTopP
@@ -21,6 +21,7 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             case .missingCredential: "Save an API key for this provider in Settings."
             case .unauthorized: "The API provider rejected its credentials. Check the key in Settings."
             case .rateLimited: "The API provider rate limit was reached. No request was replayed."
+            case .providerBusy: "The API provider is busy because of high traffic. Try again shortly. No request was replayed."
             case .timeout: "The API provider request timed out. No request was replayed."
             case .redirectRejected: "The API provider redirected its request. Credentials were not forwarded."
             case .unavailable: "The API provider request failed. No request was replayed."
@@ -130,21 +131,26 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             case 200...299: break
             case 300...399: throw Failure.redirectRejected
             case 401, 403: throw Failure.unauthorized
-            case 429: throw Failure.rateLimited
+            case 429: break
             case 404: throw Failure.modelNotFound
             case 400, 413, 422: break
             default: throw Failure.unavailable
             }
+            if http.statusCode == 429, http.expectedContentLength > 16_384 { throw Failure.rateLimited }
             guard http.expectedContentLength <= Int64(Self.maximumResponseBytes) else { throw Failure.responseTooLarge }
             var data = Data()
             let maximum = http.statusCode >= 400 ? 16_384 : Self.maximumResponseBytes
             for try await byte in bytes {
-                guard data.count < maximum else { throw Failure.responseTooLarge }
+                guard data.count < maximum else {
+                    if http.statusCode == 429 { throw Failure.rateLimited }
+                    throw Failure.responseTooLarge
+                }
                 data.append(byte)
             }
             try Task.checkCancellation()
             if http.statusCode >= 400 {
                 if let onRejection { onRejection(Self.rejectionDiagnostic(status: http.statusCode, body: data, modelID: modelID, key: key, requestBody: body)) }
+                if http.statusCode == 429 { throw Self.rateLimitFailure(body: data) }
                 throw Self.rejectedRequest(status: http.statusCode, body: data)
             }
             return Result(body: data, contentType: http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? "")
@@ -157,6 +163,24 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             default: throw Failure.unavailable
             }
         } catch { throw Failure.unavailable }
+    }
+
+    /// Capacity and account throttling both use HTTP 429. Keep the cause finite;
+    /// arbitrary vendor text never enters the normal error or model transcript.
+    static func rateLimitFailure(body: Data) -> Failure {
+        guard body.count <= 16_384,
+              let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return .rateLimited }
+        let value = object["error"] ?? object
+        let fields = value as? [String: Any]
+        for key in ["code", "type"] {
+            if let code = fields?[key] as? String,
+               ["overloaded", "overloaded_error", "server_overloaded", "model_overloaded", "capacity_exceeded"].contains(code) {
+                return .providerBusy
+            }
+        }
+        let message = (fields?["message"] as? String) ?? (value as? String)
+        if message == "We're experiencing high traffic right now! Please try again soon." { return .providerBusy }
+        return .rateLimited
     }
 
     /// Classify bounded, untrusted validation errors without retaining their text,

@@ -190,6 +190,115 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         }
     }
 
+    func testBundledEngineHighTrafficStopsAfterOneUpstreamRequestWithoutRunningTools() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
+            "Set TEST_RUNNER_COMPUTA_API_ENGINE_TEST=1 for the isolated bundled API harness qualification.")
+        let artifact: ComputaRuntimeArtifact
+        do { artifact = try ComputaRuntimeArtifact.resolve() }
+        catch ComputaRuntimeArtifact.ValidationError.resourcesUnavailable {
+            throw XCTSkip("The bundled AgentRuntime resources are absent in this source-only checkout.")
+        } catch ComputaRuntimeArtifact.ValidationError.unavailableFile {
+            throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
+        }
+        XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-6")
+        let failuresBefore = testRun?.failureCount ?? 0
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("ComputaAPIRateLimit-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("PrivateCodexHome", isDirectory: true)
+        let project = root.appendingPathComponent("Project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
+        let target = project.appendingPathComponent("fixture.txt")
+        try Data("unchanged\n".utf8).write(to: target)
+        let fakeKey = "SYNTHETIC_ONLY_API_KEY_" + UUID().uuidString
+        let rawRemoteMessage = "UNTRUSTED_RATE_LIMIT_TEXT_" + UUID().uuidString
+        let credentials = APIHarnessCredentials(providerID: "fixture-rate-limit", value: fakeKey)
+        let observations = APIHarnessRateLimitObservations()
+        // The visible provider log established this message and HTTP 429.
+        // The wrapper is a controlled fixture shape, not a claimed vendor code.
+        let body = try JSONSerialization.data(withJSONObject: ["error": [
+            "message": "We're experiencing high traffic right now! Please try again soon.",
+            "detail": rawRemoteMessage,
+        ]])
+        let upstream = try APIHarnessHTTPFixture { request in
+            await observations.record(request)
+            return .init(status: "429 Too Many Requests", body: body, contentType: "application/json")
+        }
+        var ownedRuntime: CodexAppServerRuntime?
+        var pump: Task<Void, Never>?
+        do {
+            let model = APIModelDefinition(id: "fixture-rate-limited-model", name: "Synthetic Rate Limit", contextWindow: 65_536)
+            let provider = APIProviderDefinition(id: "fixture-rate-limit", name: "Synthetic Loopback",
+                baseURL: try await upstream.start(), wireAPI: .chatCompletions, models: [model])
+            let modelID = APIProviderCatalog.appModelID(providerID: provider.id, modelID: model.id)
+            let traceURL = root.appendingPathComponent("native-protocol.jsonl")
+            var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
+            configuration.executable = .bundled
+            configuration.model = modelID
+            configuration.codexHomePath = home.path
+            configuration.workspacePath = project.path
+            configuration.protocolTracePath = traceURL.path
+            configuration.apiModelServerForTesting = APIModelServer(credentials: credentials,
+                capsules: try APIReasoningCapsules(key: Data(repeating: 0x6B, count: 32)))
+            let runtime = CodexAppServerRuntime(configuration: configuration, visualGrounder: APIHarnessNoVisualGrounder())
+            ownedRuntime = runtime
+            let taskID = UUID().uuidString.lowercased()
+            let audit = APIHarnessEventAudit(taskID: taskID)
+            pump = Task { for await event in runtime.events() { audit.receive(event) } }
+            try await runtime.configureAPIProviders([provider])
+            let tasks = try await runtime.loadTasks()
+            XCTAssertTrue(tasks.isEmpty)
+            try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
+            try await runtime.submit(prompt: "Change fixture.txt to changed using apply_patch, verify it with a command, then report the result.",
+                                     toTaskID: taskID, modelID: modelID)
+            try await waitForTerminal(audit)
+            XCTAssertEqual(audit.status, .waiting)
+            let errors = audit.errors.joined(separator: "\n")
+            XCTAssertTrue(errors.contains("The API provider is busy because of high traffic. Try again shortly. No request was replayed."), errors)
+            XCTAssertFalse(errors.contains("exceeded retry limit"), errors)
+            XCTAssertFalse(errors.lowercased().contains("quota"), errors)
+            XCTAssertFalse(errors.lowercased().contains("account rate limit"), errors)
+            XCTAssertFalse(errors.contains(rawRemoteMessage), "Untrusted provider text must not become the native error.")
+            XCTAssertTrue(audit.finalTexts.isEmpty)
+            XCTAssertTrue(audit.commands.isEmpty)
+            XCTAssertTrue(audit.fileEntries.isEmpty)
+            XCTAssertTrue(audit.toolEvents.isEmpty)
+            XCTAssertEqual(audit.approvals, 0)
+            XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "unchanged\n")
+            let receipt = await observations.receipt()
+            XCTAssertEqual(receipt.requests, 1, "A failed provider request must never be replayed.")
+            XCTAssertTrue(receipt.streaming)
+            XCTAssertTrue(receipt.commandOffered, "The blocked turn must use the normal native tool-enabled harness.")
+            XCTAssertTrue(receipt.patchOffered)
+            XCTAssertEqual(credentials.counts().reads, 1)
+            XCTAssertEqual(credentials.counts().mutations, 0)
+            let shutdown = await runtime.shutdown()
+            XCTAssertTrue(shutdown.succeeded, shutdown.issues.joined(separator: "; "))
+            pump?.cancel()
+            let trace = try AppServerWireTrace.load(traceURL)
+            XCTAssertEqual(trace.parseFailures, [])
+            XCTAssertEqual(trace.messages.filter { $0.direction == .clientToServer && $0.method == "turn/start" }.count, 1)
+            XCTAssertFalse(trace.messages.contains { $0.method == "item/tool/call" })
+            let nativeWire = trace.messages.map { String(decoding: $0.wireData, as: UTF8.self) }.joined(separator: "\n")
+            XCTAssertTrue(nativeWire.contains("rateLimitExceeded"), "The native engine must retain the semantic rate-limit category.")
+            XCTAssertFalse(nativeWire.contains("responseTooManyFailedAttempts"))
+            assertNoPrivateState(in: trace, fakeKey: fakeKey, reasoning: [rawRemoteMessage])
+            try assertNoPrivateState(in: [traceURL, home], fakeKey: fakeKey, reasoning: [rawRemoteMessage])
+            guard (testRun?.failureCount ?? 0) == failuresBefore else {
+                throw APIHarnessFailure("The bundled rate-limit invariants failed.")
+            }
+            await upstream.stop()
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            if let ownedRuntime { _ = await ownedRuntime.shutdown() }
+            pump?.cancel()
+            await upstream.stop()
+            print("syntheticAPIRateLimitFailureArtifacts=\(root.path)")
+            throw error
+        }
+    }
+
     private func waitForTerminal(_ audit: APIHarnessEventAudit) async throws {
         let deadline = ContinuousClock.now + .seconds(60)
         while !audit.terminal, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
@@ -263,6 +372,7 @@ private final class APIHarnessEventAudit {
     var finalTexts = [String]()
     var fileEntries = [TimelineEntry]()
     var commands = [TimelineEntry]()
+    var toolEvents = [ToolEvent]()
     var diffs = [AgentTurnDiff]()
     var approvals = 0
     init(taskID: String) { self.taskID = taskID }
@@ -273,6 +383,7 @@ private final class APIHarnessEventAudit {
             if value == .running { began = true }
             if began && (value == .completed || value == .waiting) { terminal = true }
         case .timelineEntryAppended(let id, let entry) where id == taskID:
+            if let tool = entry.toolEvent { toolEvents.append(tool) }
             if entry.kind == .assistant { finalTexts.append(entry.body) }
             if entry.toolEvent?.name == "fileChange" { fileEntries.append(entry) }
             if entry.toolEvent?.name == "commandExecution" { commands.append(entry) }
@@ -306,6 +417,33 @@ private final class APIHarnessCredentials: APIProviderCredentials, @unchecked Se
         lock.withLock { mutations += 1 }; throw APIHarnessFailure("Inference must not remove a credential.")
     }
     func counts() -> (reads: Int, mutations: Int) { lock.withLock { (reads, mutations) } }
+}
+
+private actor APIHarnessRateLimitObservations {
+    private var requests = 0
+    private var streaming = false
+    private var commandOffered = false
+    private var patchOffered = false
+
+    func record(_ request: APIModelServer.HTTPRequest) {
+        requests += 1
+        guard request.method == "POST", request.path == "/v1/chat/completions",
+              let body = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+              let tools = body["tools"] as? [[String: Any]] else { return }
+        streaming = body["stream"] as? Bool == true
+        for tool in tools {
+            guard let function = tool["function"] as? [String: Any],
+                  let schema = function["parameters"] as? [String: Any],
+                  let properties = schema["properties"] as? [String: Any] else { continue }
+            if properties["cmd"] != nil { commandOffered = true }
+            if properties["input"] != nil,
+               (function["description"] as? String ?? "").lowercased().contains("patch") { patchOffered = true }
+        }
+    }
+
+    func receipt() -> (requests: Int, streaming: Bool, commandOffered: Bool, patchOffered: Bool) {
+        (requests, streaming, commandOffered, patchOffered)
+    }
 }
 
 private actor APIHarnessInference {

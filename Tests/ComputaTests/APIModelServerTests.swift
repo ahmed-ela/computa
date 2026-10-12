@@ -223,6 +223,66 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(models.map(\.id), ["qwen-3.8-27b"]); XCTAssertEqual(models.first?.contextWindow, 32_768); XCTAssertEqual(models.first?.supportsImages, false)
         let first = await records.first(); XCTAssertEqual(first?.method, "GET"); XCTAssertEqual(first?.path, "/v1/models")
     }
+    func test429CapacityClassifierNeverEchoesUnknownVendorText() throws {
+        let message = "We're experiencing high traffic right now! Please try again soon."
+        let recognized: [[String: Any]] = [["message": message], ["error": ["message": message]], ["error": message], ["error": ["code": "model_overloaded"]]]
+        for value in recognized {
+            XCTAssertEqual(APIProviderHTTPClient.rateLimitFailure(body: try JSONSerialization.data(withJSONObject: value)), .providerBusy)
+        }
+        let unknown: [[String: Any]] = [["message": message + " fixture-secret"], ["error": ["code": "unknown", "message": "PRIVATE_DETAIL"]], ["error": true]]
+        for value in unknown {
+            XCTAssertEqual(APIProviderHTTPClient.rateLimitFailure(body: try JSONSerialization.data(withJSONObject: value)), .rateLimited)
+        }
+        XCTAssertEqual(APIProviderHTTPClient.rateLimitFailure(body: Data(repeating: 65, count: 16_385)), .rateLimited)
+        XCTAssertEqual(APIProviderHTTPClient.rateLimitFailure(body: Data("not-json".utf8)), .rateLimited)
+        XCTAssertEqual(APIModelServer.errorStatus(APIProviderHTTPClient.Failure.providerBusy), "429 Too Many Requests")
+    }
+    func test429PreservesCauseForStreamAndHTTPWithoutReplayAndCapturesOnlyWhenArmed() async throws {
+        guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        defer { free(resolved) }
+        let temporary = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+        for busy in [false, true] {
+            for stream in [false, true] {
+                let root = temporary.appendingPathComponent("API429-\(UUID().uuidString)")
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                defer { try? FileManager.default.removeItem(at: root) }
+                let records = APIRequestRecorder(), credentials = APICredentialCounter()
+                let message = busy ? "We're experiencing high traffic right now! Please try again soon." : "PRIVATE_DETAIL fixture-secret"
+                let body = try JSONSerialization.data(withJSONObject: ["error": ["message": message, "detail": ["secret": "fixture-secret"]]])
+                let remote = try APILoopbackFixture { request in
+                    await records.record(request)
+                    return .init(status: "429 Too Many Requests", headers: ["Content-Type": "application/json"], body: body)
+                }; defer { remote.stop() }
+                let p = provider(try await remote.start())
+                let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)), rejectionDiagnosticsDirectory: root)
+                try await server.updateProviders([p]); let url = try await server.start()
+                let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString, preparation = UUID()
+                let arm = try JSONSerialization.data(withJSONObject: ["taskID": task, "threadID": thread])
+                try arm.write(to: root.appendingPathComponent("arm.json"))
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: root.appendingPathComponent("arm.json").path)
+                try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation)
+                try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+                var request = try localRequest(base: url, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
+                var input = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
+                input["stream"] = stream; request.httpBody = try JSONSerialization.data(withJSONObject: input)
+                let (data, response) = try await URLSession.shared.data(for: request)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, stream ? 200 : 429)
+                let text = String(decoding: data, as: UTF8.self)
+                XCTAssertFalse(text.contains("fixture-secret")); XCTAssertFalse(text.contains("PRIVATE_DETAIL"))
+                let cause = busy ? APIProviderHTTPClient.Failure.providerBusy : .rateLimited
+                XCTAssertTrue(text.contains(cause.localizedDescription))
+                XCTAssertEqual(text.contains("response.failed"), stream)
+                XCTAssertFalse(text.contains("response.completed")); XCTAssertFalse(text.contains("output_item"))
+                let count = await records.count(); XCTAssertEqual(count, 1); XCTAssertEqual(credentials.counts().reads, 1)
+                let captured = try Data(contentsOf: root.appendingPathComponent("rejected-request.json"))
+                let capture = try XCTUnwrap(JSONSerialization.jsonObject(with: captured) as? [String: Any])
+                XCTAssertEqual((capture["diagnostic"] as? [String: Any])?["httpStatus"] as? Int, 429)
+                XCTAssertFalse(String(decoding: captured, as: UTF8.self).contains("fixture-secret"))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("arm.json").path))
+                await server.finish(taskID: task); await server.shutdown()
+            }
+        }
+    }
     func testRejectedRequestClassifierAcceptsOnlyKnownBoundedParametersAndPrefixes() throws {
         let parameters: [(String, APIProviderHTTPClient.Failure)] = [
             ("messages[3].content", .invalidMessages), ("tools.0.function.parameters", .invalidTools),

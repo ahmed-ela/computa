@@ -559,6 +559,27 @@ enum APIModelResponseCodec {
                           text: text, arguments: (0..<calls.count).map { calls[$0]!.arguments })
     }
 
+    /// An admitted streaming request that received an upstream 429 terminates with
+    /// the Responses failure event the engine understands. Never emit output items
+    /// or invent usage, quota, or provider retry instructions for this failure.
+    static func encodeRateLimitFailure(request: Request,
+                                       failure: APIProviderHTTPClient.Failure = .rateLimited) throws -> Data {
+        guard request.stream, failure == .rateLimited || failure == .providerBusy else { throw Failure.invalidRequest }
+        var failed = response(id: "resp_" + UUID().uuidString, request: request, output: [], text: "", usage: NSNull())
+        failed["status"] = "failed"
+        failed["error"] = ["code": "rate_limit_exceeded", "message": failure.localizedDescription]
+        var initial = failed
+        initial["status"] = "in_progress"; initial["completed_at"] = NSNull(); initial["error"] = NSNull(); initial["end_turn"] = false
+        var result = Data()
+        for (sequence, event) in [("response.created", initial), ("response.in_progress", initial), ("response.failed", failed)].enumerated() {
+            result.append(Data("event: \(event.0)\ndata: ".utf8))
+            result.append(try json(["type": event.0, "sequence_number": sequence, "response": event.1]))
+            result.append(Data("\n\n".utf8))
+        }
+        result.append(Data("data: [DONE]\n\n".utf8))
+        return result
+    }
+
     static func encode(_ reply: Reply, stream: Bool) throws -> Data {
         if !stream { return try json(reply.response) }
         var result = Data(), sequence = 0

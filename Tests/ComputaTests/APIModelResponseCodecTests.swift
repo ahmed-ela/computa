@@ -313,6 +313,88 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testRateLimitFailureTerminatesStreamingRequestWithoutOutputOrInventedUsage() throws {
+        let config: [String: Any] = ["input": "PRIVATE_REQUEST_INPUT", "instructions": "Native instruction", "tools": [function],
+                                     "tool_choice": "required", "metadata": ["fixture": "failure"], "max_output_tokens": 128]
+        for wireAPI: APIProviderDefinition.WireAPI in [.chatCompletions, .responses] {
+            let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: wireAPI, models: provider.models)
+            let prepared = try request(config, provider: p)
+            for failure: APIProviderHTTPClient.Failure in [.rateLimited, .providerBusy] {
+                let data = try APIModelResponseCodec.encodeRateLimitFailure(request: prepared, failure: failure)
+                let stream = String(decoding: data, as: UTF8.self)
+                let events = try stream.components(separatedBy: "\n\n").compactMap { frame -> [String: Any]? in
+                    guard let payload = frame.components(separatedBy: "\n").first(where: { $0.hasPrefix("data: {") }) else { return nil }
+                    return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload.dropFirst(6).utf8)) as? [String: Any])
+                }
+                XCTAssertEqual(events.compactMap { $0["type"] as? String }, ["response.created", "response.in_progress", "response.failed"])
+                XCTAssertEqual(events.compactMap { $0["sequence_number"] as? Int }, [0, 1, 2])
+                XCTAssertTrue(stream.hasSuffix("data: [DONE]\n\n"))
+                XCTAssertFalse(stream.contains("PRIVATE_REQUEST_INPUT")); XCTAssertFalse(stream.contains("response.output_item"))
+                XCTAssertFalse(stream.contains("response.completed")); XCTAssertFalse(stream.contains("insufficient_quota"))
+                let responses = try events.map { try XCTUnwrap($0["response"] as? [String: Any]) }
+                XCTAssertEqual(Set(responses.compactMap { $0["id"] as? String }).count, 1)
+                for (index, response) in responses.enumerated() {
+                    XCTAssertEqual(response["model"] as? String, prepared.localModelID)
+                    XCTAssertEqual(response["instructions"] as? String, "Native instruction")
+                    XCTAssertEqual(response["metadata"] as? [String: String], ["fixture": "failure"])
+                    XCTAssertEqual(response["tool_choice"] as? String, "required")
+                    XCTAssertEqual(response["max_output_tokens"] as? Int, 128)
+                    XCTAssertEqual((response["output"] as? [Any])?.count, 0)
+                    XCTAssertTrue(response["usage"] is NSNull)
+                    XCTAssertEqual(response["status"] as? String, index == 2 ? "failed" : "in_progress")
+                    XCTAssertEqual(response["end_turn"] as? Bool, index == 2)
+                    if index < 2 { XCTAssertTrue(response["error"] is NSNull); XCTAssertTrue(response["completed_at"] is NSNull) }
+                }
+                let terminal = try XCTUnwrap(responses.last), error = try XCTUnwrap(terminal["error"] as? [String: String])
+                XCTAssertEqual(error, ["code": "rate_limit_exceeded", "message": failure.localizedDescription])
+                XCTAssertNotNil(terminal["completed_at"] as? Int)
+            }
+            XCTAssertThrowsError(try APIModelResponseCodec.encodeRateLimitFailure(request: prepared, failure: .unauthorized)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidRequest)
+            }
+        }
+        let nonstream = try request(["stream": false])
+        XCTAssertThrowsError(try APIModelResponseCodec.encodeRateLimitFailure(request: nonstream)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidRequest)
+        }
+    }
+
+    func testRateLimitFailuresPassActualVendoredResponseAndLifecycleEventSchemas() throws {
+        let prepared = try request(["tools": [function], "instructions": "Native failure fixture", "metadata": ["fixture": "429"]])
+        let cases = try [APIProviderHTTPClient.Failure.rateLimited, .providerBusy].map { failure in
+            ["stream": String(decoding: try APIModelResponseCodec.encodeRateLimitFailure(request: prepared, failure: failure), as: UTF8.self),
+             "message": failure.localizedDescription]
+        }
+        let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let process = Process(), input = Pipe(), output = Pipe()
+        process.executableURL = try FixtureBunExecutable.resolve(); process.currentDirectoryURL = repo
+        process.arguments = ["--eval", #"""
+        import { responseResourceSchema } from './Scripts/OpenResponses/vendor/src/generated/kubb/zod/responseResourceSchema.ts';
+        import { responseCreatedStreamingEventSchema } from './Scripts/OpenResponses/vendor/src/generated/kubb/zod/responseCreatedStreamingEventSchema.ts';
+        import { responseInProgressStreamingEventSchema } from './Scripts/OpenResponses/vendor/src/generated/kubb/zod/responseInProgressStreamingEventSchema.ts';
+        import { responseFailedStreamingEventSchema } from './Scripts/OpenResponses/vendor/src/generated/kubb/zod/responseFailedStreamingEventSchema.ts';
+        const cases = JSON.parse(await Bun.stdin.text());
+        const schemas = [responseCreatedStreamingEventSchema, responseInProgressStreamingEventSchema, responseFailedStreamingEventSchema];
+        for (const c of cases) {
+          const frames = c.stream.split('\n\n').filter(x => x.startsWith('event: '));
+          if (frames.length !== 3) throw new Error('exact three lifecycle events required');
+          for (let i = 0; i < frames.length; i++) {
+            const event = JSON.parse(frames[i].split('\n').find(x => x.startsWith('data: ')).slice(6));
+            schemas[i].parse(event); responseResourceSchema.parse(event.response);
+            if (event.sequence_number !== i || !frames[i].startsWith('event: ' + event.type + '\n')) throw new Error('invalid event sequence');
+            if (event.response.output.length !== 0 || event.response.usage !== null) throw new Error('failure fabricated output or usage');
+            if (i === 2 && (event.response.status !== 'failed' || event.response.error.code !== 'rate_limit_exceeded' || event.response.error.message !== c.message)) throw new Error('failure cause changed');
+          }
+        }
+        console.log('validated two 429 causes against actual response resource and three lifecycle event schemas');
+        """#]
+        process.environment = ProcessInfo.processInfo.environment.filter { ["PATH", "HOME", "TMPDIR"].contains($0.key) }
+        process.standardInput = input; process.standardOutput = output; process.standardError = output
+        try process.run(); try input.fileHandleForWriting.write(contentsOf: JSONSerialization.data(withJSONObject: cases)); try input.fileHandleForWriting.close()
+        let diagnostic = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, String(decoding: diagnostic, as: UTF8.self))
+    }
+
     func testCompleteResponsesConfigurationAndActualVendoredSchemaForJSONAndSSE() throws {
         let config: [String: Any] = ["instructions": "Native instruction", "metadata": ["fixture": "schema"], "tools": [function],
                                      "reasoning": ["effort": "medium", "summary": "auto"], "max_output_tokens": 128, "temperature": 0.5,

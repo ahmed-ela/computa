@@ -251,7 +251,20 @@ actor APIModelServer {
             }
             let lane = Lane(id: UUID(), request: requestTask); lanes[taskID] = lane
             defer { if lanes[taskID]?.id == lane.id { lanes.removeValue(forKey: taskID) } }
-            let reply = try await withTaskCancellationHandler { try await requestTask.value } onCancel: { requestTask.cancel() }
+            let reply: APIModelResponseCodec.Reply
+            do {
+                reply = try await withTaskCancellationHandler { try await requestTask.value } onCancel: { requestTask.cancel() }
+            } catch let failure as APIProviderHTTPClient.Failure
+                where prepared.stream && [.rateLimited, .providerBusy].contains(failure) {
+                try Task.checkCancellation()
+                guard !stopped, contexts[taskID] == context, lanes[taskID]?.id == lane.id else { throw Failure.cancelled }
+                // The native client's HTTP-429 bridge drops the provider cause.
+                // Standard Responses failure events preserve it without replay,
+                // while non-streaming callers retain the HTTP status below.
+                try await Self.send(connection, status: "200 OK", type: "text/event-stream",
+                    body: APIModelResponseCodec.encodeRateLimitFailure(request: prepared, failure: failure))
+                return
+            }
             try Task.checkCancellation()
             guard !stopped, contexts[taskID] == context, lanes[taskID]?.id == lane.id else { throw Failure.cancelled }
             try await Self.send(connection, status: "200 OK", type: prepared.stream ? "text/event-stream" : "application/json",
@@ -263,7 +276,7 @@ actor APIModelServer {
     }
     static func errorStatus(_ error: any Error) -> String {
         if error as? Failure == .unauthorized || error as? APIProviderHTTPClient.Failure == .unauthorized || error as? APIProviderHTTPClient.Failure == .missingCredential { return "401 Unauthorized" }
-        if error as? APIProviderHTTPClient.Failure == .rateLimited { return "429 Too Many Requests" }
+        if let failure = error as? APIProviderHTTPClient.Failure, [.rateLimited, .providerBusy].contains(failure) { return "429 Too Many Requests" }
         if error as? Failure == .modelUnavailable || error as? APIProviderHTTPClient.Failure == .modelNotFound { return "404 Not Found" }
         return "400 Bad Request"
     }
