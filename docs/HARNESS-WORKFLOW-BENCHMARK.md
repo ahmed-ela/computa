@@ -527,3 +527,16 @@ the model precheck rejected before clicking and discarded its detailed cause.
 The catalog result does not qualify a response. Further live tests stopped;
 the following diagnostic correction preserves that missing finite cause without
 weakening verification or replaying the prompt.
+
+## Build 71 installed diagnostic correction
+
+Signed installed 0.6.0 (71) passed 98 staged and 98 installed bundle checks and
+matched its running identity. UI inspection showed the retained five Chat
+choices—Instant, Medium, High, Extra High and GPT-6 Pro—with Medium selected;
+Work, Sol and a separate Latest choice were absent. No provider prompt,
+refresh or cleanup retry ran. The zero-event diagnostic projection is not fresh
+discovery or response proof. Build71 retains its 676 public checks and three
+affected native diagnostic passes, without a full native-suite or live-response
+claim. The failed build-70 evidence is archived with originals retained; its
+one acknowledged lease still has zero confirmed closures. The five live
+workflows remain incomplete.

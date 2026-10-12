@@ -5297,7 +5297,44 @@ native inputs held, and the compiled Chat script matched the source.
 The original native parser omitted module-qualified suite names and recorded
 zero parsed methods despite the terminal three-pass log. Its failed receipt is
 preserved; the corrected immutable receipt reparses that same source-bound log,
-without a test rerun. Build 71 has a source-only 417-input freeze, a fresh public
-run and these three diagnostic methods; no complete native-71 run, signed
-installation or live-provider result is claimed. Installed build 70's selector
-pass and failed Medium qualification remain its current product evidence.
+without a test rerun. At this checkpoint, build 71 had a source-only 417-input
+freeze, a fresh public run and these three diagnostic methods; no complete
+native-71 run, signed installation or live-provider result was claimed.
+Installed build 70's selector pass and failed Medium qualification remained
+the product evidence.
+
+### Build 71 signed installation and retained Chat catalog
+
+Source 911c2e15a3b533be5f572343451873a65c42e816 was signed and installed as
+0.6.0 (71). Staged and installed verification each passed all 98 bundle checks.
+Running PID 98596 matched main SHA-256
+31f55622eef7eb499e2a2d13cbeedfc51c58d156cfffa880277c77c581e018b3
+and runtime generation 315b1b0c-7a4a-47d8-a8d6-b5aa0ab9ac85; the process
+started at 06:13:29 UTC and configured at 06:13:31.363693 UTC.
+
+Root UI inspection confirmed Instant, Medium, High, Extra High and GPT-6 Pro,
+with Medium selected and no Work, Sol or separate Latest choice. This used the
+retained catalog: no provider prompt, refresh or cleanup retry was invoked.
+The browser pane stayed hidden, and the failed build-70 task remained paused
+with unconfirmed cleanup. The scoped finite log contained zero events, zero
+model diagnostics and zero rejected diagnostics; it is not fresh discovery proof.
+
+Delivery preserves the existing scope: 676 public checks and the three affected
+native diagnostic methods passed. No full native-71 suite or completed live
+provider response is claimed. The earlier source-only paragraph records the
+checkpoint before this installation; build-70's failed Medium qualification
+remains the latest live result. Its failed evidence was byte-verified into a
+private archive, with originals retained and the original lease counts unchanged:
+one acknowledged, zero confirmed closed.
+
+Receipts (SHA-256):
+
+- Release/stage: 952b6dda6ccfdc2925d7b70640b1b117756dfe8f4e77143c06a0ee9d511c352d.
+- Built outputs: 5d2f12023062330df0ed12168b626463089b6020bca56e61b6ae957c3a121955.
+- Staged 98 checks: 1fd958f500efaae550cd70ea9bac9d3c46bb660a0c206a5a7957d13e8c46a9c6.
+- Installed 98 checks: 96a65dc64a6abb56a7e1188db194ef21fe204435c71f08136bb6f6a9e8197ba1.
+- Runtime capture: ab3f6a491f8d1fab9c953a7a30af5c2b004ebb0044cba8ced918e2554bd227f1.
+- Retained catalog UI: 371df6db46eddd0888686e3d2a626d7dcac6747f99cfcf2b1d684bbb10ca462a.
+- Finite log: ad2ea1381e0206bdd9b11f7720c643e079b9a1869c7a6f013f87c70432db30c6.
+- Failed build-70 archive receipt: 997974c21fea98343c8bbab01434df1f597e0a80d57edb8f87ba8f28d395b707.
+- Failed build-70 ZIP: fd7ce7878bbf506545e2e9ca0b552dc8c7d2bda249bcfb5d3014ce29c5f12792.
