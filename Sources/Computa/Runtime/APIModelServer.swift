@@ -23,6 +23,7 @@ actor APIModelServer {
     private let credentials: any APIProviderCredentials
     private let client: APIProviderHTTPClient
     private let suppliedCapsules: APIReasoningCapsules?
+    private let rejectionDiagnosticsDirectory: URL?
     private var capsules: APIReasoningCapsules?
     private var providers: [APIProviderDefinition] = []
     private var listener: NWListener?
@@ -46,8 +47,10 @@ actor APIModelServer {
     private var retirementWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
 
     init(credentials: any APIProviderCredentials = APIProviderCredentialStore(),
-         client: APIProviderHTTPClient = APIProviderHTTPClient(), capsules: APIReasoningCapsules? = nil) {
+         client: APIProviderHTTPClient = APIProviderHTTPClient(), capsules: APIReasoningCapsules? = nil,
+         rejectionDiagnosticsDirectory: URL? = nil) {
         self.credentials = credentials; self.client = client; suppliedCapsules = capsules
+        self.rejectionDiagnosticsDirectory = rejectionDiagnosticsDirectory
     }
     func updateProviders(_ values: [APIProviderDefinition]) throws {
         try APIProviderCatalog.validate(values)
@@ -235,8 +238,14 @@ actor APIModelServer {
             guard let capsules else { throw Failure.credentialUnavailable }
             let prepared = try APIModelResponseCodec.prepare(request.body, selection: selection, threadID: context.identity.threadID, capsules: capsules)
             let client = self.client
-            let requestTask = Task {
-                let result = try await client.request(provider: prepared.provider, key: key, path: prepared.path, body: prepared.body)
+            let capture = APIRejectedRequestCapture.consume(directory: rejectionDiagnosticsDirectory, taskID: UUID(uuidString: taskID)!,
+                threadID: UUID(uuidString: context.identity.threadID)!, turnID: UUID(uuidString: context.identity.turnID)!)
+            let onRejection: (@Sendable (APIProviderHTTPClient.RejectionDiagnostic) -> Void)?
+            if let capture { onRejection = { diagnostic in capture.capture(diagnostic) } }
+            else { onRejection = nil }
+            let requestTask = Task<APIModelResponseCodec.Reply, Error> {
+                let result = try await client.request(provider: prepared.provider, key: key, path: prepared.path, body: prepared.body,
+                    modelID: prepared.model.id, onRejection: onRejection)
                 try Task.checkCancellation()
                 return try APIModelResponseCodec.decode(result, request: prepared)
             }

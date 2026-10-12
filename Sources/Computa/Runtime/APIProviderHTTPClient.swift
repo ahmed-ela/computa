@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// Credentials enter only this native HTTP boundary. Redirects, cookies,
 /// credential storage and application-level retries are deliberately disabled.
@@ -53,6 +54,27 @@ final class APIProviderHTTPClient: @unchecked Sendable {
     }
 
     struct Result: Sendable { let body: Data; let contentType: String }
+    struct RejectionDiagnostic: Codable, Sendable {
+        let httpStatus: Int
+        let modelID: String?
+        let envelope: String
+        let error: Fields?
+        let details: [Fields]
+        let requestSummary: RequestSummary?
+        struct Fields: Codable, Sendable { let message: String?; let type: String?; let code: String?; let param: String? }
+        struct RequestSummary: Codable, Sendable {
+            struct Options: Codable, Sendable {
+                let n: Int?, stream: Bool?, reasoningEffort: String?, maxCompletionTokens: Int?, parallelToolCalls: Bool?, clearThinking: Bool?
+            }
+            let options: Options
+            let messageRoleCounts: [String: Int]
+            let emptyContentCount: Int
+            let totalTextUTF8Bytes: Int
+            let toolCount: Int
+            let schemaKeywordCounts: [String: Int]
+            let schemaAnalysisComplete: Bool
+        }
+    }
     private final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         func urlSession(_ session: URLSession, task: URLSessionTask,
                         willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
@@ -89,7 +111,8 @@ final class APIProviderHTTPClient: @unchecked Sendable {
         return url
     }
 
-    func request(provider: APIProviderDefinition, key: String, path: String, body: Data?) async throws -> Result {
+    func request(provider: APIProviderDefinition, key: String, path: String, body: Data?, modelID: String? = nil,
+                 onRejection: (@Sendable (RejectionDiagnostic) -> Void)? = nil) async throws -> Result {
         let url = try Self.endpoint(provider.baseURL, path: path)
         guard !key.isEmpty, key.utf8.count <= 16_384,
               !key.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw Failure.missingCredential }
@@ -121,6 +144,7 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             }
             try Task.checkCancellation()
             if http.statusCode >= 400 {
+                if let onRejection { onRejection(Self.rejectionDiagnostic(status: http.statusCode, body: data, modelID: modelID, key: key, requestBody: body)) }
                 throw Self.rejectedRequest(status: http.statusCode, body: data)
             }
             return Result(body: data, contentType: http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? "")
@@ -140,8 +164,12 @@ final class APIProviderHTTPClient: @unchecked Sendable {
     static func rejectedRequest(status: Int, body: Data) -> Failure {
         if status == 413 { return .contextLimit }
         guard [400, 422].contains(status), body.count <= 16_384,
-              let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
-              let error = object["error"] as? [String: Any] else { return .invalidRequest }
+              let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return .invalidRequest }
+        let envelope = object["error"] ?? object
+        let error: [String: Any]
+        if let fields = envelope as? [String: Any] { error = fields }
+        else if let message = envelope as? String { error = ["message": message] }
+        else { return .invalidRequest }
         let codes = [error["code"] as? String, error["type"] as? String].compactMap { $0 }.filter { $0.utf8.count <= 128 }
         if codes.contains(where: { ["context_length_exceeded", "context_window_exceeded", "context_limit_exceeded", "max_tokens_exceeded"].contains($0) }) { return .contextLimit }
         let parameters: [(String, Failure)] = [
@@ -176,6 +204,120 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             if beginnings.contains(where: prefix.hasPrefix) { return failure }
         }
         return .invalidRequest
+    }
+
+    /// Created only for an explicitly armed request. Never copies arbitrary response
+    /// objects: validation input/ctx, headers, and request content have no output path.
+    static func rejectionDiagnostic(status: Int, body: Data, modelID: String?, key: String, requestBody: Data? = nil) -> RejectionDiagnostic {
+        func clean(_ value: Any?) -> String? {
+            guard var text = value as? String else { return nil }
+            if !key.isEmpty { text = text.replacingOccurrences(of: key, with: "[REDACTED]") }
+            for pattern in [#"(?im)authorization\s*[:=]\s*[^\r\n]*"#, #"(?i)bearer\s+[^\s\"'<>]+"#, #"(?i)csk-[A-Za-z0-9._~+/=-]+"#] {
+                text = text.replacingOccurrences(of: pattern, with: "[REDACTED]", options: .regularExpression)
+            }
+            var bounded = "", count = 0
+            for scalar in text.unicodeScalars {
+                let next = String(scalar)
+                guard count + next.utf8.count <= 2_048 else { break }
+                bounded += next; count += next.utf8.count
+            }
+            return bounded
+        }
+        func fields(_ object: [String: Any]) -> RejectionDiagnostic.Fields {
+            .init(message: clean(object["message"] ?? object["msg"]), type: clean(object["type"]), code: clean(object["code"]), param: clean(object["param"]))
+        }
+        var shape = "non_json", projected: RejectionDiagnostic.Fields?, details: [RejectionDiagnostic.Fields] = []
+        if body.count > 16_384 { shape = "oversized" }
+        else if let raw = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed]) {
+            var value: Any = raw
+            if let object = raw as? [String: Any] {
+                if let wrapped = object["error"] { value = wrapped; shape = "wrapped" }
+                else { shape = "bare" }
+            } else { shape = "other_json" }
+            if let object = value as? [String: Any] {
+                shape += "_object"; projected = fields(object)
+                let rawDetails: [[String: Any]]
+                if let rows = object["detail"] as? [[String: Any]] { rawDetails = Array(rows.prefix(8)) }
+                else if let row = object["detail"] as? [String: Any] { rawDetails = [row] }
+                else { rawDetails = [] }
+                details = rawDetails.map { row in
+                    var selected = row
+                    // Preserve only finite request-root location, never arbitrary JSON
+                    // property names or user values embedded in validation locations.
+                    if selected["param"] == nil, let location = row["loc"] as? [Any], location.count <= 8 {
+                        let parts = location.compactMap { $0 as? String }
+                        let roots = ["messages", "tools", "tool_choice", "parallel_tool_calls", "reasoning_effort", "clear_thinking", "max_completion_tokens", "max_tokens", "stream_options", "stream", "n", "response_format", "model", "temperature", "top_p"]
+                        let candidate = parts.first == "body" ? parts.dropFirst().first : parts.first
+                        if let candidate, roots.contains(candidate) { selected["param"] = candidate }
+                    }
+                    return fields(selected)
+                }
+                if projected?.message == nil, let text = object["detail"] as? String {
+                    projected = .init(message: clean(text), type: projected?.type, code: projected?.code, param: projected?.param)
+                }
+            } else if let text = value as? String { shape += "_string"; projected = .init(message: clean(text), type: nil, code: nil, param: nil) }
+        }
+        let boundedModel = clean(modelID).map { String($0.prefix(256)) }
+        let summary = requestSummary(requestBody)
+        var result = RejectionDiagnostic(httpStatus: status, modelID: boundedModel, envelope: shape, error: projected, details: details, requestSummary: summary)
+        // Keep the entire encoded diagnostic below 7 KiB, leaving room for the
+        // private capture's native identity fields within its 8 KiB record limit.
+        while ((try? JSONEncoder().encode(result).count) ?? Int.max) > 7_168 {
+            if !details.isEmpty { details.removeLast() }
+            else if let value = projected {
+                func half(_ text: String?) -> String? { text.map { String($0.prefix($0.count / 2)) } }
+                projected = .init(message: half(value.message), type: half(value.type), code: half(value.code), param: half(value.param))
+            } else { break }
+            result = .init(httpStatus: status, modelID: boundedModel, envelope: shape, error: projected, details: details, requestSummary: summary)
+        }
+        return result
+    }
+
+    private static func requestSummary(_ data: Data?) -> RejectionDiagnostic.RequestSummary? {
+        guard let data, data.count <= 2_000_000,
+              let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        func integer(_ key: String) -> Int? {
+            guard let value = body[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+                  value.doubleValue.isFinite, value.doubleValue.rounded() == value.doubleValue,
+                  (0...10_000_000).contains(value.doubleValue) else { return nil }; return value.intValue
+        }
+        func boolean(_ key: String) -> Bool? {
+            guard let value = body[key] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }; return value.boolValue
+        }
+        let effort = body["reasoning_effort"] as? String
+        let options = RejectionDiagnostic.RequestSummary.Options(n: integer("n"), stream: boolean("stream"),
+            reasoningEffort: effort.flatMap { ["none", "low", "medium", "high", "xhigh", "minimal"].contains($0) ? $0 : nil },
+            maxCompletionTokens: integer("max_completion_tokens"), parallelToolCalls: boolean("parallel_tool_calls"), clearThinking: boolean("clear_thinking"))
+        var roles = ["system": 0, "developer": 0, "user": 0, "assistant": 0, "tool": 0, "unknown": 0], empty = 0, bytes = 0
+        for message in body["messages"] as? [[String: Any]] ?? [] {
+            let role = message["role"] as? String ?? "unknown"
+            roles[roles[role] == nil ? "unknown" : role, default: 0] += 1
+            if let text = message["content"] as? String { bytes += text.utf8.count; if text.isEmpty { empty += 1 } }
+            else if let parts = message["content"] as? [[String: Any]] {
+                var nonempty = false
+                for part in parts {
+                    if ["text", "input_text", "output_text"].contains(part["type"] as? String ?? ""), let text = part["text"] as? String {
+                        bytes += text.utf8.count; nonempty = nonempty || !text.isEmpty
+                    } else { nonempty = true }
+                }
+                if !nonempty { empty += 1 }
+            } else if message["content"] == nil || message["content"] is NSNull { empty += 1 }
+        }
+        let tools = body["tools"] as? [[String: Any]] ?? []
+        let keywords: Set<String> = ["type", "properties", "required", "additionalProperties", "items", "enum", "const", "anyOf", "oneOf", "allOf", "$ref", "$defs", "definitions", "pattern", "format", "minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems", "description"]
+        var counts: [String: Int] = [:], nodes = 0, complete = true
+        func visit(_ schema: [String: Any], depth: Int) {
+            guard depth <= 32, nodes < 4_096 else { complete = false; return }; nodes += 1
+            for key in schema.keys where keywords.contains(key) { counts[key, default: 0] += 1 }
+            for key in ["properties", "$defs", "definitions"] {
+                for child in (schema[key] as? [String: Any] ?? [:]).values { if let object = child as? [String: Any] { visit(object, depth: depth + 1) } }
+            }
+            for key in ["items", "additionalProperties"] { if let child = schema[key] as? [String: Any] { visit(child, depth: depth + 1) } }
+            for key in ["anyOf", "oneOf", "allOf"] { for child in schema[key] as? [[String: Any]] ?? [] { visit(child, depth: depth + 1) } }
+        }
+        for tool in tools { if let function = tool["function"] as? [String: Any], let schema = function["parameters"] as? [String: Any] { visit(schema, depth: 0) } }
+        return .init(options: options, messageRoleCounts: roles, emptyContentCount: empty, totalTextUTF8Bytes: bytes,
+                     toolCount: tools.count, schemaKeywordCounts: counts, schemaAnalysisComplete: complete)
     }
 
     func listModels(provider: APIProviderDefinition, key: String) async throws -> [APIModelDefinition] {

@@ -1314,9 +1314,13 @@ private extension CodexAppServerRuntime {
         ) {
             self.configuration = configuration
             #if DEBUG
-            self.apiModelServer = configuration.apiModelServerForTesting ?? APIModelServer()
+            self.apiModelServer = configuration.apiModelServerForTesting ?? APIModelServer(rejectionDiagnosticsDirectory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("APIRequestDiagnostics-v1", isDirectory: true))
             #else
-            self.apiModelServer = APIModelServer()
+            self.apiModelServer = APIModelServer(rejectionDiagnosticsDirectory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("APIRequestDiagnostics-v1", isDirectory: true))
             #endif
             self.events = events
             self.browserBroker = browserBroker

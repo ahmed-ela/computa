@@ -1,5 +1,6 @@
 import XCTest
 import Network
+import Darwin
 @testable import Computa
 
 private actor APIRequestRecorder {
@@ -323,6 +324,55 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         let (unchanged, _) = try await URLSession.shared.data(for: request)
         let unchangedCatalog = try JSONSerialization.jsonObject(with: unchanged) as? NSDictionary
         XCTAssertEqual(catalog as NSDictionary, unchangedCatalog)
+        await server.shutdown()
+    }
+
+    func testRejectionCaptureRequiresAuthenticatedExactNativeAdmissionAndIsOneShot() async throws {
+        guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        let root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true).appendingPathComponent("ComputaAPIAdmissionCapture-" + UUID().uuidString)
+        free(resolved)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString, preparation = UUID()
+        let arm = root.appendingPathComponent("arm.json"), output = root.appendingPathComponent("rejected-request.json")
+        XCTAssertTrue(FileManager.default.createFile(atPath: arm.path, contents: try JSONSerialization.data(withJSONObject: ["taskID": task, "threadID": thread]), attributes: [.posixPermissions: 0o600]))
+        let records = APIRequestRecorder()
+        let remote = try APILoopbackFixture { request in
+            await records.record(request)
+            return .init(status: "400 Bad Request", headers: ["Content-Type": "application/json"], body: Data(#"{"message":"Invalid tools: schema constraint; fixture-secret","param":"tools"}"#.utf8))
+        }; defer { remote.stop() }
+        let p = provider(try await remote.start())
+        let server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture-secret"), capsules: try .init(key: Data(repeating: 1, count: 32)), rejectionDiagnosticsDirectory: root)
+        try await server.updateProviders([p])
+        let url = try await server.start()
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation)
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+        var unauthorized = try localRequest(base: url, token: "wrong", task: task, thread: thread, turn: turn, provider: p)
+        let (_, authFailure) = try await URLSession.shared.data(for: unauthorized)
+        XCTAssertEqual((authFailure as? HTTPURLResponse)?.statusCode, 401)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: arm.path))
+        unauthorized = try localRequest(base: url, token: server.bearerToken, task: task, thread: thread, turn: UUID().uuidString, provider: p)
+        let (_, staleFailure) = try await URLSession.shared.data(for: unauthorized)
+        XCTAssertEqual((staleFailure as? HTTPURLResponse)?.statusCode, 400)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: arm.path))
+        let before = await records.count(); XCTAssertEqual(before, 0)
+        let admitted = try localRequest(base: url, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: p)
+        let (failure, result) = try await URLSession.shared.data(for: admitted)
+        XCTAssertEqual((result as? HTTPURLResponse)?.statusCode, 400)
+        XCTAssertFalse(String(decoding: failure, as: UTF8.self).contains("schema constraint"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: arm.path))
+        let data = try Data(contentsOf: output), text = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(text.contains("schema constraint")); XCTAssertFalse(text.contains("fixture-secret"))
+        XCTAssertFalse(text.contains("hello")); XCTAssertFalse(text.contains("Authorization"))
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(record["taskID"] as? String, task.lowercased())
+        XCTAssertEqual(record["threadID"] as? String, thread.lowercased())
+        XCTAssertEqual(record["turnID"] as? String, turn.lowercased())
+        let count = await records.count(); XCTAssertEqual(count, 1)
+        try FileManager.default.removeItem(at: output)
+        _ = try await URLSession.shared.data(for: admitted)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path), "Consumed arm must not authorize another explicit inference")
+        let finalCount = await records.count(); XCTAssertEqual(finalCount, 2, "Only the two explicit fixture requests may dispatch")
         await server.shutdown()
     }
 
