@@ -222,6 +222,85 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(models.map(\.id), ["qwen-3.8-27b"]); XCTAssertEqual(models.first?.contextWindow, 32_768); XCTAssertEqual(models.first?.supportsImages, false)
         let first = await records.first(); XCTAssertEqual(first?.method, "GET"); XCTAssertEqual(first?.path, "/v1/models")
     }
+    func testRejectedRequestClassifierAcceptsOnlyKnownBoundedParametersAndPrefixes() throws {
+        let parameters: [(String, APIProviderHTTPClient.Failure)] = [
+            ("messages[3].content", .invalidMessages), ("tools.0.function.parameters", .invalidTools),
+            ("tool_choice", .invalidToolChoice), ("parallel_tool_calls", .invalidParallelToolCalls),
+            ("reasoning_effort", .invalidReasoningEffort), ("clear_thinking", .invalidClearThinking),
+            ("max_completion_tokens", .invalidMaxCompletionTokens), ("max_tokens", .invalidMaxCompletionTokens),
+            ("stream_options.include_usage", .invalidStreamOptions), ("stream", .invalidStream),
+            ("n", .invalidChoiceCount), ("response_format", .invalidResponseFormat), ("model", .invalidModel),
+            ("temperature", .invalidTemperature), ("top_p", .invalidTopP)
+        ]
+        for (parameter, expected) in parameters {
+            let data = try JSONSerialization.data(withJSONObject: ["error": ["param": parameter, "message": "fixture-secret PRIVATE_USER_TEXT"]])
+            XCTAssertEqual(APIProviderHTTPClient.rejectedRequest(status: 400, body: data), expected)
+            XCTAssertEqual(APIProviderHTTPClient.rejectedRequest(status: 422, body: data), expected)
+            let projected = String(decoding: try APIModelServer.errorBody(expected), as: UTF8.self)
+            XCTAssertFalse(projected.contains("fixture-secret")); XCTAssertFalse(projected.contains("PRIVATE_USER_TEXT"))
+            XCTAssertTrue(expected.localizedDescription.contains(try XCTUnwrap(expected.rejectedParameter)))
+        }
+        let recognized: [([String: String], APIProviderHTTPClient.Failure)] = [
+            (["code": "invalid_reasoning_effort"], .invalidReasoningEffort),
+            (["type": "parallel_tool_calls_not_supported"], .invalidParallelToolCalls),
+            (["message": "Unsupported parameter: 'stream_options'. Value contained fixture-secret"], .invalidStreamOptions),
+            (["message": "Invalid value for `tools`: PRIVATE_USER_TEXT"], .invalidTools),
+            (["message": "n must be 1; received fixture-secret"], .invalidChoiceCount),
+            (["param": "tools", "code": "context_length_exceeded"], .contextLimit)
+        ]
+        for (error, expected) in recognized {
+            XCTAssertEqual(APIProviderHTTPClient.rejectedRequest(status: 400, body: try JSONSerialization.data(withJSONObject: ["error": error])), expected)
+        }
+        let rejected: [[String: Any]] = [
+            ["param": "fixture-secret", "message": "PRIVATE_USER_TEXT"],
+            ["param": "messages\nAuthorization: fixture-secret"], ["param": "messages_evil"],
+            ["param": "tools[fixture-secret]"], ["param": ["messages"]],
+            ["param": "messages." + String(repeating: "x", count: 256)],
+            ["code": "invalid_tools_fixture_secret"],
+            ["message": "User content says Unsupported parameter: 'tools'"],
+            ["message": "Unsupported parameter: 'tools_evil'"],
+            ["message": "Invalid messages:" + String(repeating: "x", count: 4_096)]
+        ]
+        for error in rejected {
+            XCTAssertEqual(APIProviderHTTPClient.rejectedRequest(status: 400, body: try JSONSerialization.data(withJSONObject: ["error": error])), .invalidRequest)
+        }
+        XCTAssertEqual(APIProviderHTTPClient.rejectedRequest(status: 400, body: Data("not JSON fixture-secret".utf8)), .invalidRequest)
+        XCTAssertEqual(APIProviderHTTPClient.rejectedRequest(status: 400, body: Data(repeating: 0x20, count: 16_385)), .invalidRequest)
+        XCTAssertEqual(APIProviderHTTPClient.rejectedRequest(status: 413, body: Data()), .contextLimit)
+    }
+    func testHTTPBadRequestDiagnosticsProjectFiniteCategoryWithoutReplayOrSecretText() async throws {
+        let cases: [([String: String], APIProviderHTTPClient.Failure, String)] = [
+            (["param": "messages[0].content", "message": "fixture-secret PRIVATE_USER_TEXT"], .invalidMessages, "invalid_messages"),
+            (["param": "tools.2.function.parameters", "message": "fixture-secret PRIVATE_USER_TEXT"], .invalidTools, "invalid_tools"),
+            (["code": "unsupported_reasoning_effort", "message": "fixture-secret PRIVATE_USER_TEXT"], .invalidReasoningEffort, "invalid_reasoning_effort"),
+            (["message": "Unsupported parameter: 'stream_options'. fixture-secret PRIVATE_USER_TEXT"], .invalidStreamOptions, "invalid_stream_options"),
+            (["param": "fixture-secret", "message": "PRIVATE_USER_TEXT"], .invalidRequest, "invalid_request")
+        ]
+        for (remoteError, expected, expectedCode) in cases {
+            let records = APIRequestRecorder(), body = try JSONSerialization.data(withJSONObject: ["error": remoteError])
+            let remote = try APILoopbackFixture { request in
+                await records.record(request)
+                return .init(status: "400 Bad Request", headers: ["Content-Type": "application/json"], body: body)
+            }
+            let p = provider(try await remote.start())
+            do {
+                _ = try await APIProviderHTTPClient().request(provider: p, key: "fixture-secret", path: "chat/completions", body: Data("{}".utf8))
+                XCTFail("provider validation must fail")
+            } catch {
+                XCTAssertEqual(error as? APIProviderHTTPClient.Failure, expected)
+                let projectedData = try APIModelServer.errorBody(error)
+                let projected = String(decoding: projectedData, as: UTF8.self)
+                XCTAssertFalse(projected.contains("fixture-secret")); XCTAssertFalse(projected.contains("PRIVATE_USER_TEXT"))
+                XCTAssertFalse(projected.contains("messages[0]")); XCTAssertFalse(projected.contains("tools.2"))
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: projectedData) as? [String: Any])
+                let result = try XCTUnwrap(object["error"] as? [String: Any])
+                XCTAssertEqual(result["code"] as? String, expectedCode)
+                XCTAssertEqual(result["x-computa-retryable"] as? Bool, false)
+                XCTAssertEqual(APIModelServer.errorStatus(error), "400 Bad Request")
+            }
+            let count = await records.count(); XCTAssertEqual(count, 1); remote.stop()
+        }
+    }
     func testAtomicConfigurationRejectsBusyBeforeCredentialMutationAndCommitsTogether() async throws {
         let credentials = APICredentialCounter()
         let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)))

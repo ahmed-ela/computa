@@ -6,8 +6,13 @@ final class APIProviderHTTPClient: @unchecked Sendable {
     enum Failure: String, Error, LocalizedError, Sendable {
         case invalidEndpoint, missingCredential, unauthorized, rateLimited, timeout, modelNotFound, contextLimit, invalidRequest
         case redirectRejected, unavailable, invalidResponse, responseTooLarge, cancelled
+        case invalidMessages, invalidTools, invalidToolChoice, invalidParallelToolCalls, invalidReasoningEffort, invalidClearThinking
+        case invalidMaxCompletionTokens, invalidStreamOptions, invalidStream, invalidChoiceCount, invalidResponseFormat, invalidModel, invalidTemperature, invalidTopP
         var errorDescription: String? {
-            switch self {
+            if let parameter = rejectedParameter {
+                return "The API provider rejected the \(parameter) parameter. No request was replayed."
+            }
+            return switch self {
             case .modelNotFound: "The API provider does not offer the selected model. Refresh its model list."
             case .contextLimit: "The API request exceeds this model's context limit."
             case .invalidRequest: "The API provider rejected the request format. No request was replayed."
@@ -21,6 +26,28 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             case .invalidResponse: "The API provider returned an invalid response."
             case .responseTooLarge: "The API provider response exceeded the local size limit."
             case .cancelled: "The API provider request was cancelled."
+            default: "The API provider rejected the request format. No request was replayed."
+            }
+        }
+
+        /// Only constants from the request contract reach error/UI projection.
+        var rejectedParameter: String? {
+            switch self {
+            case .invalidMessages: "messages"
+            case .invalidTools: "tools"
+            case .invalidToolChoice: "tool_choice"
+            case .invalidParallelToolCalls: "parallel_tool_calls"
+            case .invalidReasoningEffort: "reasoning_effort"
+            case .invalidClearThinking: "clear_thinking"
+            case .invalidMaxCompletionTokens: "max_completion_tokens"
+            case .invalidStreamOptions: "stream_options"
+            case .invalidStream: "stream"
+            case .invalidChoiceCount: "n"
+            case .invalidResponseFormat: "response_format"
+            case .invalidModel: "model"
+            case .invalidTemperature: "temperature"
+            case .invalidTopP: "top_p"
+            default: nil
             }
         }
     }
@@ -94,11 +121,7 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             }
             try Task.checkCancellation()
             if http.statusCode >= 400 {
-                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                let error = object?["error"] as? [String: Any]
-                let codes = [error?["code"] as? String, error?["type"] as? String].compactMap { $0 }
-                if http.statusCode == 413 || codes.contains(where: { ["context_length_exceeded", "context_window_exceeded", "context_limit_exceeded", "max_tokens_exceeded"].contains($0) }) { throw Failure.contextLimit }
-                throw Failure.invalidRequest
+                throw Self.rejectedRequest(status: http.statusCode, body: data)
             }
             return Result(body: data, contentType: http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? "")
         } catch let error as Failure { throw error }
@@ -110,6 +133,49 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             default: throw Failure.unavailable
             }
         } catch { throw Failure.unavailable }
+    }
+
+    /// Classify bounded, untrusted validation errors without retaining their text,
+    /// values, paths, credentials, or request data. Unknown formats stay generic.
+    static func rejectedRequest(status: Int, body: Data) -> Failure {
+        if status == 413 { return .contextLimit }
+        guard [400, 422].contains(status), body.count <= 16_384,
+              let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              let error = object["error"] as? [String: Any] else { return .invalidRequest }
+        let codes = [error["code"] as? String, error["type"] as? String].compactMap { $0 }.filter { $0.utf8.count <= 128 }
+        if codes.contains(where: { ["context_length_exceeded", "context_window_exceeded", "context_limit_exceeded", "max_tokens_exceeded"].contains($0) }) { return .contextLimit }
+        let parameters: [(String, Failure)] = [
+            ("messages", .invalidMessages), ("tools", .invalidTools), ("tool_choice", .invalidToolChoice),
+            ("parallel_tool_calls", .invalidParallelToolCalls), ("reasoning_effort", .invalidReasoningEffort),
+            ("clear_thinking", .invalidClearThinking), ("max_completion_tokens", .invalidMaxCompletionTokens),
+            ("max_tokens", .invalidMaxCompletionTokens), ("stream_options", .invalidStreamOptions),
+            ("stream", .invalidStream), ("n", .invalidChoiceCount), ("response_format", .invalidResponseFormat),
+            ("model", .invalidModel), ("temperature", .invalidTemperature), ("top_p", .invalidTopP)
+        ]
+        if let parameter = error["param"] as? String, parameter.utf8.count <= 256,
+           parameter.range(of: #"^[a-z_]+(?:(?:\.[A-Za-z_][A-Za-z_0-9]*|\.[0-9]+|\[[0-9]+\]))*$"#, options: .regularExpression) != nil {
+            let root = parameter.prefix { $0 != "." && $0 != "[" }
+            if let match = parameters.first(where: { $0.0 == root }) { return match.1 }
+        }
+        for (parameter, failure) in parameters {
+            if codes.contains(where: { ["invalid_" + parameter, "unsupported_" + parameter, parameter + "_invalid", parameter + "_not_supported"].contains($0) }) { return failure }
+        }
+        guard let message = error["message"] as? String, message.utf8.count <= 4_096 else { return .invalidRequest }
+        let prefix = message.lowercased()
+        for (parameter, failure) in parameters {
+            let quoted = ["'" + parameter + "'", "\"" + parameter + "\"", "`" + parameter + "`"]
+            var beginnings: [String] = []
+            for name in quoted {
+                beginnings.append("invalid value for \(name):")
+                beginnings.append("invalid parameter: \(name)")
+                beginnings.append("unsupported parameter: \(name)")
+                beginnings.append("unknown parameter: \(name)")
+                beginnings.append("unrecognized request argument supplied: \(name)")
+            }
+            beginnings += ["invalid \(parameter):", "unsupported \(parameter):", "\(parameter) is not supported", "\(parameter) must be "]
+            if beginnings.contains(where: prefix.hasPrefix) { return failure }
+        }
+        return .invalidRequest
     }
 
     func listModels(provider: APIProviderDefinition, key: String) async throws -> [APIModelDefinition] {
