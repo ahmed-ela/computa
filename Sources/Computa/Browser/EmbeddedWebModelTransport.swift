@@ -307,6 +307,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
     #endif
@@ -333,6 +334,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFirstUserDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
         firstUserDiagnosticsObserverForTesting = observer
+    }
+
+    func setModelDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        modelDiagnosticsObserverForTesting = observer
     }
 
     func setAdapterTimeoutObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -1118,6 +1123,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let failure = rawFailure as? String, failures.contains(failure) else { return nil }
             safe["expansionContextFailure"] = failure
         }
+        if let rawError = value["expansionModelError"] {
+            let errors: Set<String> = ["model_unverified", "model_unavailable", "model_mismatch", "document_changed",
+                "conversation_changed", "product_mode_unverified", "temporary_mode_unverified"]
+            guard let error = rawError as? String, errors.contains(error) else { return nil }
+            safe["expansionModelError"] = error
+        }
         if let rawFailure = value["productProofFailure"] {
             guard let failure = rawFailure as? String, productProofFailures.contains(failure) else { return nil }
             safe["productProofFailure"] = failure
@@ -1245,7 +1256,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             for key in ["action", "scope"] { productObservation[key] = summary[key] }
         }
         var bodyObservation: [String: Any] = [:]
-        for key in ["bodySelection", "expansionOutcome", "expansionContextFailure"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
+        for key in ["bodySelection", "expansionOutcome", "expansionContextFailure", "expansionModelError"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
             if let value = summary.removeValue(forKey: key) { bodyObservation[key] = value }
         }
         if !bodyObservation.isEmpty {
@@ -1984,6 +1995,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let line = String(decoding: bytes, as: UTF8.self)
         guard line != session.lastModelDiagnostic else { return }
         session.lastModelDiagnostic = line
+        #if DEBUG
+        modelDiagnosticsObserverForTesting?(line)
+        #endif
         // Unified Logging truncates long interpolated strings. Small numbered
         // byte chunks preserve the bounded sanitized JSON without publishing
         // page, prompt or response text.

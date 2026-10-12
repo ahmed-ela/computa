@@ -5222,3 +5222,82 @@ c29f0468f2fb036b67eda05372e64f86b388c93d7cf03fb5ccb25c0b199ae5b5.
 This current affected run is separate from build 68's complete native baseline.
 Signed packaging, actual catalog discovery and completed live responses remain
 unqualified at this source checkpoint.
+
+### Build 70 installed Chat catalog and Medium failure
+
+Source 5af1a085d1e80a8afa175a70f1659db676c305b7 was signed and installed as
+0.6.0 (70), with 98 staged and 98 installed bundle checks. Running PID 71015
+matched main SHA-256
+37ba7b7aff4611abfe085108a345426e45780eeb964828347cb4d4cf95b333f6
+and runtime generation c1fbf71b-5e33-46ff-b21a-39bac6b2250c. The capture receipt
+has SHA-256 b11ac37252490bf219ff7a33e381273a49f34d6ef8de7e835c8b680914703558.
+
+Prompt-free startup now populated exactly five Chat choices in the actual
+selector: Instant, Medium, High, Extra High and GPT-6 Pro. Work and Sol choices
+were absent. The selector closed without changing the human's paused Gemini
+task; the browser pane remained hidden. Root catalog observation receipt
+`installed70-chat-catalog-root-observation1.json` has SHA-256
+36da50f3135398e2aa0684b959a2523dd1440452a37c5e7760e696ff0f06a6b6.
+Its finite native discovery log had two complete diagnostic observations and
+zero rejected diagnostics. These establish catalog availability, not a live
+response or immutable backend model identity.
+
+A fresh Medium qualification used an explicitly selected disposable project
+and the natural file-read prompt. The app failed at first-user ownership
+verification, before any admitted native marker read or final answer. Its one
+acknowledged website lease had zero confirmed closures. The collector's overall
+result is incomplete_or_failed; checks over absent model-evidence records cannot
+establish website family/power provenance. No prompt was replayed, other presets
+were not dispatched, and cleanup remains unconfirmed.
+
+The exact turn's bounded diagnostic found one user body, a rendered prefix of
+10,240 characters from a 58,077-character private prompt, one scoped expansion
+control and no ownership marker or first-message pin. Expansion was permitted
+but no click occurred: its model-proof precheck returned an error that the
+adapter reduced to model_unverified. The underlying code and picker diagnostic
+were discarded. The native classifier had accepted root-to-local conversation
+creation 37 ms earlier. These observations do not establish picker disablement,
+model drift, network failure or a normalization error.
+
+- `runs/chatgpt-qualification-installed70-r2/collector-receipt.json`:
+  9e8931c4d86c05e0c3de45cd94e14a7e610117720609a903b45b17c773ed220a.
+- `runs/chatgpt-qualification-installed70-r2/first-user-diagnosis-build70-r2.json`:
+  0f2b2ee87e928d8ab5586af7e8dc839078d66fd9c5d85999e90dec135d3a3f0e.
+
+The next source preserves the existing finite inner model error and sanitized
+picker diagnostic on expansion failure. Its outer ownership rejection, consumed
+claim, model checks, clicks, Sends and cleanup rules remain unchanged. This is
+a diagnostic correction; a pending or retry policy is not justified by the
+current coalesced failure.
+
+### Build 71 expansion-precheck diagnostics
+
+The diagnostic correction retains one of seven fixed model/context error codes
+and the existing bounded picker structure when first-user expansion's model
+check rejects. Native projection keeps the code in its content-free body record
+under the existing 960-byte cap. The outer first-user ownership error and
+expansion outcome remain unchanged. The shared helper and all other-provider
+resources are unchanged; no verification, input, retry or cleanup gate changed.
+
+The focused adapter run passed 223 tests with zero failures and 4,570 assertions.
+The seven public cohorts passed 676 tests with zero failures or skips, including
+417 adapter/policy tests; frontend checking and production build passed. The
+three affected native methods passed with zero failures or skips in 0.778
+seconds. Real WebKit distinguishes an unavailable selector from actual power
+drift after Send, preserves the inner diagnostic through the logging path, and
+checks one Send, zero expansion clicks, no accepted first-message pin and no
+cleanup overclaim. Enum, privacy and log-size cases passed. All 14 watched
+native inputs held, and the compiled Chat script matched the source.
+
+- `public-validation-build71-final1.json`:
+  e0aa4bc1010a840f40ce12d524e2e2ec51d77ad613352ffd25e508011d36aa17.
+- `chat-expansion-model-diagnostic71-native-focus1-receipt-corrected-parse1.json`:
+  b8783a33c22e478daba1fc236a04a17770c35d3bb40a3834cfa4fee69f4de2f5.
+
+The original native parser omitted module-qualified suite names and recorded
+zero parsed methods despite the terminal three-pass log. Its failed receipt is
+preserved; the corrected immutable receipt reparses that same source-bound log,
+without a test rerun. Build 71 has a source-only 417-input freeze, a fresh public
+run and these three diagnostic methods; no complete native-71 run, signed
+installation or live-provider result is claimed. Installed build 70's selector
+pass and failed Medium qualification remain its current product evidence.

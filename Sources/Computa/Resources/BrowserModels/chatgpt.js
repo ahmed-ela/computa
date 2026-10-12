@@ -2272,6 +2272,19 @@ function chatGPTRejectFirstUserExpansion(candidate, outcome, contextFailure = nu
   candidate.outcome = outcome;
   return false;
 }
+const chatGPTExpansionModelErrors = Object.freeze(['model_unverified', 'model_unavailable', 'model_mismatch',
+  'document_changed', 'conversation_changed', 'product_mode_unverified', 'temporary_mode_unverified']);
+function chatGPTLatchExpansionModelFailure(candidate, model) {
+  // The helper already projects a bounded, content-free picker diagnostic.
+  // Retain its first finite cause without changing the expansion rejection.
+  try {
+    if (candidate.modelFailure || !chatGPTExpansionModelErrors.includes(model.error)) return;
+    candidate.modelFailure = { error: model.error };
+    if (model.modelDiagnostic?.kind === 'model_picker_structure' && model.modelDiagnostic.provider === 'chatgpt'
+      && JSON.stringify(model.modelDiagnostic).length <= 8_192)
+      candidate.modelFailure.modelDiagnostic = model.modelDiagnostic;
+  } catch { /* A diagnostic cannot change admission or the original error. */ }
+}
 function chatGPTRejectFirstUserExpansionContext(candidate) {
   const failure = chatGPTFirstUserExpansionContextFailure(candidate);
   return chatGPTRejectFirstUserExpansion(candidate,
@@ -2354,7 +2367,10 @@ async function chatGPTExpandFirstUser(candidate) {
     if (!available()) return reject('disabled');
     const model = await websiteModelReadEvidence('chatgpt', input.firstUserExpansionModelChoice, null,
       { scope: 'action_precheck', action: input.action });
-    if (model.error) return reject('model_unverified');
+    if (model.error) {
+      chatGPTLatchExpansionModelFailure(candidate, model);
+      return reject('model_unverified');
+    }
     if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!available()) return reject('unavailable');
     if (!chatGPTControlExposed(control)) {
@@ -2400,6 +2416,8 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
     if (['frame', 'provider', 'origin', 'owner', 'user_count', 'submission', 'submission_count', 'marker', 'prompt',
       'private_pin', 'product', 'temporary', 'root', 'body', 'conversation_route', 'conversation_identity', 'url',
       'continuation', 'deadline'].includes(contextFailure)) result.expansionContextFailure = contextFailure;
+    const modelError = globalThis.__computaModelFirstExpansion?.modelFailure?.error;
+    if (chatGPTExpansionModelErrors.includes(modelError)) result.expansionModelError = modelError;
     const length = (key, value) => { if (typeof value === 'string') result[key] = Math.min(value.length, limit + 1); };
     const normalized = value => value.replace(/\r\n?/g, '\n').normalize('NFC').trim();
     const alternate = (prefix, value, lengthKey = prefix + 'Length') => {
@@ -2487,7 +2505,9 @@ function chatGPTFirstUserFailure(reason, scope, captured = {}, allowSubmittedUse
   const debugStructure = firstUserRejectionDiagnostic
     || chatGPTFirstUserStructure(reason, scope, captured, allowSubmittedUser, fingerprint);
   if (debugStructure) firstUserRejectionDiagnostic = debugStructure;
-  return { error: 'conversation_changed', detail: 'first_user_message', ...(debugStructure ? { debugStructure } : {}) };
+  const modelDiagnostic = globalThis.__computaModelFirstExpansion?.modelFailure?.modelDiagnostic;
+  return { error: 'conversation_changed', detail: 'first_user_message', ...(debugStructure ? { debugStructure } : {}),
+    ...(modelDiagnostic ? { modelDiagnostic } : {}) };
 }
 const snapshotUnchanged = (allowSubmittedUser = false) => {
   const current = chatGPTMessageRoots('user');

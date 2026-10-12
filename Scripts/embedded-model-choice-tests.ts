@@ -1438,6 +1438,48 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         }
       });
 
+      test('rejected expansion preserves finite model and context causes without admitting clicks or another Send', async () => {
+        for (const condition of ['unavailable', 'mismatch', 'owner', 'route', 'product']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expect(f.world.__computaModelFirstSubmitted).toBe(true); expect(f.world.__computaModelLastSubmissionCount).toBe(0);
+          const owner = f.world.__computaModelOwner, url = f.document.URL;
+          if (condition === 'unavailable') picker.trigger.disabled = true;
+          else if (condition === 'mismatch') picker.selected('High');
+          else {
+            const open = picker.trigger.onClick;
+            picker.trigger.onClick = () => {
+              open();
+              if (condition === 'owner') f.world.__computaModelOwner = 'PRIVATE FOREIGN OWNER';
+              else if (condition === 'route') f.document.URL += '&PRIVATE_ROUTE=1';
+              else { f.workMode.values['aria-pressed'] = 'true'; f.chatMode.values['aria-pressed'] = 'false'; }
+            };
+          }
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          const diagnostic = JSON.parse(result.debugStructure);
+          expect(diagnostic).toMatchObject({ reason: 'marker_not_final', scope: 'marker_validation' });
+          if (condition === 'product') {
+            expect(diagnostic).toMatchObject({ expansionOutcome: 'context_changed', expansionContextFailure: 'product' });
+            expect(diagnostic.expansionModelError).toBeUndefined(); expect(result.modelDiagnostic).toBeUndefined();
+          } else {
+            expect(diagnostic).toMatchObject({ expansionOutcome: 'model_unverified', expansionModelError:
+              condition === 'unavailable' ? 'model_unverified' : condition === 'mismatch' ? 'model_mismatch' : 'document_changed' });
+            expect(result.modelDiagnostic).toMatchObject({ kind: 'model_picker_structure', provider: 'chatgpt',
+              readContext: { scope: 'action_precheck', action: 'inspect' } });
+            expect(JSON.stringify(result.modelDiagnostic).length).toBeLessThanOrEqual(8_192);
+          }
+          const serialized = JSON.stringify(result);
+          for (const value of ['PRIVATE', prompt, url, owner, firstMarker]) expect(serialized).not.toContain(value);
+          expect(expand.clicks).toBe(0); expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+          if (['unavailable', 'mismatch'].includes(condition)) {
+            picker.trigger.disabled = false; picker.selected('Medium');
+            const repeated = await f.run('inspect', expansionInput); rejected(repeated);
+            expect(JSON.parse(repeated.debugStructure).expansionModelError).toBe(diagnostic.expansionModelError);
+            expect(repeated.modelDiagnostic).toEqual(result.modelDiagnostic);
+            expect(expand.clicks).toBe(0); noSend(f, picker, send);
+          }
+        }
+      });
+
       test('context drift during the pre-expansion model await prevents even the display click', async () => {
         const { f, picker, expand, send } = await collapsed({ genericHeader: true });
         const click = picker.trigger.onClick; let changed = false;

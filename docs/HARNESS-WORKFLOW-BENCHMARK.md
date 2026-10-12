@@ -517,3 +517,13 @@ frontend checking/building. Source inputs and built script identities held.
 Build 68 remains the prior complete native-suite baseline; no full native-70
 run is claimed. Signed installed discovery and fresh provider responses require
 their own receipts. Earlier failed runs remain in the validation ledger.
+
+Signed installed build 70 passed 98 bundle checks and now discovers exactly the
+five Chat choices in the real selector, with no Work or Sol options. The fresh
+Medium file-read qualification failed before tools at first-message ownership;
+website cleanup remains unconfirmed. The body was a 10,240-character prefix of
+the 58,077-character harness message. One expansion control was present, but
+the model precheck rejected before clicking and discarded its detailed cause.
+The catalog result does not qualify a response. Further live tests stopped;
+the following diagnostic correction preserves that missing finite cause without
+weakening verification or replaying the prompt.

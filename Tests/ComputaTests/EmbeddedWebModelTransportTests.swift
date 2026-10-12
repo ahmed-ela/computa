@@ -1795,6 +1795,104 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testCollapsedFirstMessagePreservesModelPrecheckFailureWithoutExpansionOrReplay() async throws {
+        for condition in ["unavailable", "power_mismatch"] {
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage())
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            let ready = try await waitForState("ready", fixture.transport, token: token)
+            try assertChoiceEvidence(ready, choice: choice)
+            let generation = fixture.browser.documentGeneration(for: ownedID)
+            var mutationApplied = false
+            var firstUserDiagnostics: [String] = [], modelDiagnostics: [String] = []
+            fixture.transport.setFirstUserDiagnosticsObserverForTesting { firstUserDiagnostics += $0 }
+            fixture.transport.setModelDiagnosticsObserverForTesting { modelDiagnostics.append($0) }
+            fixture.transport.setBeforePageResultValidationDetailedForTesting { action, _ in
+                guard action == "submit", !mutationApplied else { return }
+                mutationApplied = true
+                let applied = try? await self.evaluate(view, """
+                    const trigger = document.getElementById('fixture-model-trigger');
+                    if (window.fixturePrompts.length !== 1 || !trigger) return false;
+                    if (\(String(reflecting: condition)) === 'unavailable') {
+                      trigger.disabled = true;
+                    } else {
+                      window.fixtureChatPowerThumb.setAttribute('aria-valuenow', '2');
+                      window.fixtureModelUpdateHeader();
+                    }
+                    return true;
+                    """) as? Bool
+                XCTAssertEqual(applied, true, "The selector changes only after the actual first Send")
+            }
+            defer {
+                fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
+                fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil)
+                fixture.transport.setModelDiagnosticsObserverForTesting(nil)
+            }
+            let prompt = String(repeating: "Owned private model-precheck fixture line.\n", count: 600)
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                XCTFail("The unverified expansion must not return a response or a tool instruction")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+            }
+            XCTAssertTrue(mutationApplied)
+            let observations = firstUserDiagnostics.compactMap {
+                try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+            }
+            let structure = try XCTUnwrap(observations.first { $0["kind"] as? String == "first_user_structure" })
+            XCTAssertEqual(structure["reason"] as? String, "marker_not_final")
+            XCTAssertEqual(structure["privatePinPresent"] as? Bool, false)
+            XCTAssertEqual(structure["expectedFingerprintPresent"] as? Bool, false)
+            let body = try XCTUnwrap(observations.first { $0["kind"] as? String == "first_user_body" })
+            XCTAssertEqual(body["expansionOutcome"] as? String, "model_unverified")
+            XCTAssertEqual(body["expansionModelError"] as? String,
+                           condition == "unavailable" ? "model_unverified" : "model_mismatch")
+            let pickerRows = modelDiagnostics.compactMap {
+                try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+            }
+            let picker = try XCTUnwrap(pickerRows.first {
+                ($0["readContext"] as? [String: Any])?["scope"] as? String == "action_precheck"
+                    && ($0["readContext"] as? [String: Any])?["action"] as? String == "inspect"
+            })
+            XCTAssertEqual(picker["readStage"] as? String, "initial_observation")
+            XCTAssertEqual((picker["trigger"] as? [String: Any])?["enabled"] as? Bool, condition != "unavailable")
+            let header = try XCTUnwrap(picker["chatHeader"] as? [String: Any])
+            XCTAssertEqual(header["canonicalRecognized"] as? Bool, condition != "unavailable")
+            if condition == "unavailable" { XCTAssertTrue(header["ordinal"] is NSNull) }
+            else { XCTAssertEqual(header["ordinal"] as? Int, 2) }
+            XCTAssertEqual(header["menuMode"] as? String, "closed")
+            let attempt = try XCTUnwrap(picker["readAttempt"] as? [String: Any])
+            XCTAssertEqual(attempt["primaryOpened"] as? Bool, false)
+            XCTAssertEqual(attempt["closeAttempted"] as? Bool, false)
+            XCTAssertTrue(firstUserDiagnostics.allSatisfy { $0.utf8.count <= 960 && !$0.contains("Owned private model-precheck") })
+            XCTAssertTrue(modelDiagnostics.allSatisfy { $0.utf8.count <= 16_384 && !$0.contains("Owned private model-precheck") })
+
+            // A later native read cannot convert the retained failed claim
+            // into another expansion, Send, or first-message authority.
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A rejected precheck must remain terminal")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            XCTAssertTrue((finished["text"] as? String ?? "").isEmpty)
+            let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+            XCTAssertEqual(clicks, 0)
+            let privatePin = try await evaluate(view, "return !!globalThis.__computaModelFirstProof;",
+                world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+            XCTAssertEqual(privatePin, false)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
+    }
+
     func testStringPunctuationEncodingSurvivesExtraEscapeRenderingWithoutRelaxingOwnership() async throws {
         // Control the observed +17 quote/markup, +5 markup and +2 underscore
         // differences. This simulates their transformation rather than
@@ -4431,6 +4529,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         withBody["bodySelection"] = "markdown_user_message"
         withBody["expansionOutcome"] = "model_unverified"
         withBody["expansionContextFailure"] = "owner"
+        withBody["expansionModelError"] = "temporary_mode_unverified"
         for key in ["bodyInnerTextLength", "bodyTextContentLength", "rootRenderedTextLength", "rootTextContentLength", "firstPromptLength"] {
             withBody[key] = 220_001
         }
@@ -4452,6 +4551,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(bodyValues[2]["bodyTextContentLength"] as? Int, 220_001)
         XCTAssertEqual(bodyValues[2]["expansionOutcome"] as? String, "model_unverified")
         XCTAssertEqual(bodyValues[2]["expansionContextFailure"] as? String, "owner")
+        XCTAssertEqual(bodyValues[2]["expansionModelError"] as? String, "temporary_mode_unverified")
         XCTAssertNil(bodyValues[0]["bodyTextContentLength"])
     }
 
@@ -4627,6 +4727,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
         for invalid in ["private_canary", 1, true, NSNull()] as [Any] {
             var forged = source; forged["expansionOutcome"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
+        for error in ["model_unverified", "model_unavailable", "model_mismatch", "document_changed",
+                      "conversation_changed", "product_mode_unverified", "temporary_mode_unverified"] {
+            var candidate = source; candidate["expansionModelError"] = error
+            let records = try projected(candidate)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[1].utf8)) as? [String: Any])
+            XCTAssertEqual(body["expansionModelError"] as? String, error)
+            XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+        }
+        for invalid in ["private_canary", "https://private_canary", "timeout", "", 1, true, NSNull(),
+                        ["error": "model_unverified"]] as [Any] {
+            var forged = source; forged["expansionModelError"] = invalid
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
         }
         for failure in ["frame", "provider", "origin", "owner", "user_count", "submission", "submission_count",
