@@ -2003,6 +2003,22 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
         }
       });
+      test('pin diagnostics preserve the first finite rejection cause without changing admission', async () => {
+        for (const reason of ['header_replaced', 'header_mutation', 'semantic_mutation', 'PRIVATE_PAGE_CANARY']) {
+          const { f, picker } = setup();
+          expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const pin = f.world.__computaChatPresetPin;
+          pin.invalidated = true; pin.invalidationReason = reason;
+          const opens = picker.trigger.clicks;
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelDiagnostic.chatPin).toEqual({ present: true, invalidated: true,
+            invalidationReason: reason === 'PRIVATE_PAGE_CANARY' ? null : reason,
+            sameHeader: true, headerConnected: true, semantic: null });
+          expect(JSON.stringify(result)).not.toContain('PRIVATE_PAGE_CANARY');
+          expect(picker.trigger.clicks).toBe(opens); noSelection(f, picker);
+        }
+      });
       test('closed header and active Power ordinal must agree before fresh input', async () => {
         const { f, picker } = setup(); picker.slider.values['aria-valuenow'] = '0';
         const result = await f.run('selectModel', { modelChoice: choice(target) });
@@ -2022,6 +2038,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         for (const observer of f.observers) observer.callback([{ type: 'characterData',
           target: { nodeType: 3, parentElement: picker.primary }, oldValue: ' High\n' }]);
         expect(f.world.__computaChatPresetPin.invalidated).toBe(true);
+        expect(f.world.__computaChatPresetPin.invalidationReason).toBe('header_mutation');
         const opens = picker.trigger.clicks;
         for (const action of ['verifyModel', 'prepare', 'inspect', 'submit']) {
           const result = await f.run(action, { expectedModelChoice: choice(initial), prompt: 'PRIVATE NEVER SEND' });

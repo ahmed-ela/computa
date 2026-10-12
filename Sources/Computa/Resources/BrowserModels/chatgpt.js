@@ -199,15 +199,24 @@ function websiteChatHeaderMutationMismatch(records, trigger, expected) {
   }
   return false;
 }
+function websiteChatInvalidatePin(pin, reason, facts = null) {
+  pin.invalidated = true;
+  // Preserve the first finite cause. This records negative evidence only;
+  // it cannot revive a selection or change any model/ownership guard.
+  if (!pin.invalidationReason && ['header_replaced', 'header_mutation', 'semantic_mutation'].includes(reason)) {
+    pin.invalidationReason = reason;
+    pin.invalidationFacts = facts;
+  }
+}
 function websiteChatTrackPinnedHeader(pin, trigger) {
   if (!pin || pin.owner !== globalThis.__computaModelOwner || pin.document !== document) return;
-  if (pin.headerTrigger && pin.headerTrigger !== trigger) { pin.invalidated = true; return; }
+  if (pin.headerTrigger && pin.headerTrigger !== trigger) { websiteChatInvalidatePin(pin, 'header_replaced'); return; }
   pin.headerTrigger = trigger;
   if (pin.headerObserver) return;
   pin.headerObserver = new MutationObserver(records => {
     if (globalThis.__computaChatPresetPin !== pin || pin.owner !== globalThis.__computaModelOwner
       || pin.document !== document || window !== window.top || location.origin !== 'https://chatgpt.com') return;
-    if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power)) pin.invalidated = true;
+    if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power)) websiteChatInvalidatePin(pin, 'header_mutation');
   });
   pin.headerObserver.observe(trigger, { subtree: true, childList: true, characterData: true,
     characterDataOldValue: true });
@@ -235,7 +244,11 @@ function websiteChatObservePinnedMutations(records) {
     if (!expected || record.attributeName !== expected.attribute) continue;
     const value = record.target.getAttribute(expected.attribute);
     if (value !== expected.value || record.oldValue != null && record.oldValue !== expected.value) {
-      pin.invalidated = true;
+      websiteChatInvalidatePin(pin, 'semantic_mutation', {
+        attribute: record.attributeName, nodeConnected: record.target.isConnected === true,
+        attributePresent: value !== null, currentMatches: value === expected.value,
+        oldMatches: record.oldValue === null || record.oldValue === expected.value,
+      });
       return;
     }
   }
@@ -884,6 +897,21 @@ function websiteModelDiagnostic(state, readObservation = null) {
   }
   if (state.provider === 'chatgpt') {
     diagnostic.chatPower = state.powerDiagnostic;
+    const pin = globalThis.__computaChatPresetPin;
+    diagnostic.chatPin = {
+      present: !!pin, invalidated: pin?.invalidated === true,
+      invalidationReason: ['header_replaced', 'header_mutation', 'semantic_mutation'].includes(pin?.invalidationReason)
+        ? pin.invalidationReason : null,
+      sameHeader: !!pin?.headerTrigger && pin.headerTrigger === state.trigger,
+      headerConnected: pin?.headerTrigger?.isConnected === true,
+      semantic: pin?.invalidationReason === 'semantic_mutation'
+        && ['aria-valuenow', 'aria-checked'].includes(pin?.invalidationFacts?.attribute)
+        && ['nodeConnected', 'attributePresent', 'currentMatches', 'oldMatches']
+          .every(key => typeof pin.invalidationFacts[key] === 'boolean')
+        ? { attribute: pin.invalidationFacts.attribute,
+          nodeConnected: pin.invalidationFacts.nodeConnected, attributePresent: pin.invalidationFacts.attributePresent,
+          currentMatches: pin.invalidationFacts.currentMatches, oldMatches: pin.invalidationFacts.oldMatches } : null,
+    };
     diagnostic.chatHeader = { canonicalRecognized: !!state.headerPower, closed: state.closedPresentation,
       openPresentationRecognized: state.headerPresentation,
       ordinal: state.headerPower ? websiteChatPowers.findIndex(power => power.key === state.headerPower.key) : null,
