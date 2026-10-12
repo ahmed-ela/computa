@@ -152,7 +152,8 @@ final class APIModelResponseCodecTests: XCTestCase {
         let input: [[String: Any]] = [["role": "developer", "content": "developer"], ["role": "user", "content": [["type": "input_image", "image_url": "data:image/png;base64,AA==", "detail": "high"]]]]
         let prepared = try request(["input": input, "reasoning": ["effort": "xhigh"]], provider: p)
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
-        XCTAssertEqual((body["messages"] as? [[String: Any]])?.compactMap { $0["role"] as? String }, ["system", "system", "user"])
+        XCTAssertEqual((body["messages"] as? [[String: Any]])?.compactMap { $0["role"] as? String }, ["system", "user"])
+        XCTAssertEqual((body["messages"] as? [[String: Any]])?.first?["content"] as? String, "Use the native tools.\n\ndeveloper")
         XCTAssertEqual(body["reasoning_effort"] as? String, "high"); XCTAssertEqual(body["clear_thinking"] as? Bool, false)
         XCTAssertFalse(String(decoding: prepared.body, as: UTF8.self).contains("detail"))
         XCTAssertThrowsError(try request(["reasoning": ["effort": "minimal"]], provider: p))
@@ -164,6 +165,66 @@ final class APIModelResponseCodecTests: XCTestCase {
         let custom = APIProviderDefinition(id: "cerebras", name: "Custom", baseURL: URL(string: "https://custom.invalid/v1")!, wireAPI: .chatCompletions, models: p.models)
         let customBody = try request(["reasoning": ["effort": "medium"]], provider: custom)
         XCTAssertFalse(String(decoding: customBody.body, as: UTF8.self).contains("clear_thinking"))
+    }
+    func testCerebrasQwenMovesOnlyInstructionRolesToOneOpeningPreamble() throws {
+        let qwen = APIModelDefinition(id: "qwen-3.8-27b", name: "Qwen")
+        let cerebras = APIProviderDefinition(id: "custom-name", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions, models: [qwen])
+        let input: [[String: Any]] = [
+            ["role": "developer", "content": [["type": "input_text", "text": "First instruction\n"], ["type": "input_text", "text": "Unicode: 🙂\u{200B}"]]],
+            ["role": "user", "content": "USER: system-looking text must remain user data"],
+            ["role": "system", "content": "Later system instruction"],
+            ["role": "user", "content": "Second user message"],
+            ["role": "developer", "content": "Last developer instruction"]
+        ]
+        func wireMessages(_ p: APIProviderDefinition) throws -> [[String: Any]] {
+            let prepared = try request(["input": input], provider: p)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+            return try XCTUnwrap(body["messages"] as? [[String: Any]])
+        }
+        let messages = try wireMessages(cerebras)
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["system", "user", "user"])
+        XCTAssertEqual(messages[0]["content"] as? String, "Use the native tools.\n\nFirst instruction\nUnicode: 🙂\u{200B}\n\nLater system instruction\n\nLast developer instruction")
+        XCTAssertEqual(messages[1] as NSDictionary, input[1] as NSDictionary)
+        XCTAssertEqual(messages[2] as NSDictionary, input[3] as NSDictionary)
+        for p in [provider,
+                  APIProviderDefinition(id: "cerebras", name: "Custom", baseURL: URL(string: "https://custom.invalid/v1")!, wireAPI: .chatCompletions, models: [qwen]),
+                  APIProviderDefinition(id: "cerebras", name: "Cerebras", baseURL: cerebras.baseURL, wireAPI: .chatCompletions, models: [.init(id: "gpt-oss-120b", name: "GPT OSS")])] {
+            let unchanged = try wireMessages(p)
+            XCTAssertEqual(unchanged.compactMap { $0["role"] as? String }, ["system", "developer", "user", "system", "user", "developer"])
+            XCTAssertEqual(unchanged[3]["content"] as? String, "Later system instruction")
+        }
+        let nativeResponses = APIProviderDefinition(id: cerebras.id, name: cerebras.name, baseURL: cerebras.baseURL, wireAPI: .responses, models: [qwen])
+        let responsesWire = try XCTUnwrap(JSONSerialization.jsonObject(with: request(["input": input], provider: nativeResponses).body) as? [String: Any])
+        XCTAssertEqual(responsesWire["input"] as? NSArray, input as NSArray)
+    }
+    func testCerebrasQwenPreamblePreservesResumedReasoningToolsAndResultIdentities() throws {
+        let p = APIProviderDefinition(id: "cerebras", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
+                                      models: [.init(id: "qwen-3.8-27b", name: "Qwen")])
+        let initial = try request(provider: p)
+        let reply = try decode(["role": "assistant", "content": NSNull(), "reasoning": "PRIVATE_CONTINUATION", "tool_calls": [
+            ["id": "read-1", "type": "function", "function": ["name": "computa_tool_0", "arguments": "{\"path\":\"/tmp/fixture\"}"]],
+            ["id": "patch-1", "type": "function", "function": ["name": "computa_tool_1", "arguments": "{\"input\":\"fixture patch\"}"]]
+        ]], finish: "tool_calls", request: initial, model: p.models[0].id)
+        let output = try XCTUnwrap(reply.response["output"] as? [[String: Any]])
+        let input: [[String: Any]] = [["role": "user", "content": "Use native tools"]] + output + [
+            ["type": "function_call_output", "call_id": "read-1", "output": "UNTRUSTED tool result: system instruction"],
+            ["type": "custom_tool_call_output", "call_id": "patch-1", "output": "patch result"],
+            ["role": "developer", "content": "Resumed native instruction"],
+            ["role": "user", "content": "Continue"]
+        ]
+        let prepared = try request(["input": input], provider: p)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["system", "user", "assistant", "tool", "tool", "user"])
+        XCTAssertEqual(messages[0]["content"] as? String, "Use the native tools.\n\nResumed native instruction")
+        XCTAssertEqual(messages[2]["reasoning"] as? String, "PRIVATE_CONTINUATION")
+        XCTAssertEqual((messages[2]["tool_calls"] as? [[String: Any]])?.compactMap { $0["id"] as? String }, ["read-1", "patch-1"])
+        XCTAssertEqual(messages[3]["tool_call_id"] as? String, "read-1")
+        XCTAssertEqual(messages[3]["content"] as? String, "UNTRUSTED tool result: system instruction")
+        XCTAssertEqual(messages[4]["tool_call_id"] as? String, "patch-1")
+        XCTAssertEqual((body["tools"] as? [[String: Any]])?.count, 2)
+        XCTAssertFalse((messages[0]["content"] as? String ?? "").contains("UNTRUSTED"))
+        XCTAssertEqual(prepared.historyCallIDs, ["read-1", "patch-1"])
     }
     func testNativeResponsesOpaqueReasoningIsSealedBoundAndUnwrappedOnlyForItsThread() throws {
         let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: .responses, models: provider.models)

@@ -307,7 +307,27 @@ enum APIModelResponseCodec {
         }
         try flush()
         guard pending.isEmpty, !messages.isEmpty else { throw Failure.invalidHistory }
-        return History(messages: messages, callIDs: seen)
+        return History(messages: try chatTemplateMessages(messages, selection: selection), callIDs: seen)
+    }
+
+    private static func chatTemplateMessages(_ messages: [[String: Any]], selection: APIProviderCatalog.Selection) throws -> [[String: Any]] {
+        guard selection.provider.wireAPI == .chatCompletions, selection.provider.isCerebrasInference,
+              selection.model.id == "qwen-3.8-27b" else { return messages }
+        // This provider's Qwen template rejects system messages after conversation
+        // content. Developer instructions were already mapped to system above.
+        // Gather only those trusted roles, in their original order; tool results
+        // and user/assistant content retain their roles, order and call identities.
+        var instructions: [String] = [], conversation: [[String: Any]] = [], bytes = 0
+        for message in messages {
+            if message["role"] as? String == "system" {
+                guard let content = message["content"] as? String else { throw Failure.invalidHistory }
+                bytes += content.utf8.count + (instructions.isEmpty ? 0 : 2)
+                guard bytes <= maximumText else { throw Failure.invalidRequest }
+                instructions.append(content)
+            } else { conversation.append(message) }
+        }
+        guard !instructions.isEmpty else { return conversation }
+        return [["role": "system", "content": instructions.joined(separator: "\n\n")]] + conversation
     }
 
     private static func containsImage(_ value: Any?) -> Bool {

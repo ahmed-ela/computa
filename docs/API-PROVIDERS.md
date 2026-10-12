@@ -16,7 +16,7 @@ Changing API model, endpoint or context capacity requires a new task while an in
 
 ## Cerebras compatibility
 
-Qwen 3.8 27B uses the exact catalog ID `qwen-3.8-27b`. The official Cerebras endpoint profile normalizes developer instructions to system instructions, preserves `reasoning` continuation with `clear_thinking:false`, and maps extra-high effort to the provider's high setting. Minimal effort is explicitly unsupported. User PNG/JPEG attachments are supported; this provider's assistant/tool messages accept text. Native screenshot capture is therefore omitted from its tool catalog, while accessibility and browser text tools remain available.
+Qwen 3.8 27B uses the exact catalog ID `qwen-3.8-27b`. The official Cerebras endpoint profile combines system/developer instructions, in their original order, into one opening system message while preserving user/assistant/tool history. It preserves `reasoning` continuation with `clear_thinking:false`, and maps extra-high effort to the provider's high setting. Minimal effort is explicitly unsupported. User PNG/JPEG attachments are supported; this provider's assistant/tool messages accept text. Native screenshot capture is therefore omitted from its tool catalog, while accessibility and browser text tools remain available.
 
 The adapter currently buffers a bounded provider response before forwarding Responses events. This allows complete tool-call validation before execution, but does not provide progressive first-token streaming. API support does not repair or qualify a blocked website provider session.
 
@@ -27,3 +27,5 @@ The API unit/contract suite covers both wire formats, actual pinned Open Respons
 The opt-in `APIProviderHarnessLiveTests` uses the pinned bundled native engine with a loopback synthetic API and in-memory credentials. It exercises a native patch, an actual command/file check, shutdown, and cold resume with the same encrypted continuation. Enable it with `TEST_RUNNER_COMPUTA_API_ENGINE_TEST=1` when running Swift tests. This fixture is distinct from a live Cerebras account test.
 
 Request rejections expose only fixed error categories by default. Local diagnosis can arm a single authenticated task/thread in a private `APIRequestDiagnostics-v1` directory; the consumed arm records a bounded, credential-redacted rejection description without headers, request prompts, or raw response bodies. It never sends another inference automatically.
+
+A controlled installed Cerebras request identified a concrete Qwen chat-template rejection: `wrong_api_format` on `messages`, with “System message must be at the beginning.” The shared Responses history had a later developer instruction that became a later system message. The correction is confined to the official Cerebras/Qwen Chat Completions profile; generic providers and Responses adapters retain their original roles. Tests cover interleaved instructions, resumed private reasoning, and native/custom tool result identities.
