@@ -156,7 +156,6 @@ function Sidebar({
             >
               <span className="task-row-title">{task.title}</span>
               <span className={`task-row-status ${toneClass(task.statusTone)} ${task.status === 'Running' ? 'is-running' : ''}`} title={task.status} aria-hidden="true" /><span className="sr-only">{task.status}</span>
-              <span className="task-row-time">{relativeTime(task.updatedAt)}</span>
             </Button>
           ))
         )}
