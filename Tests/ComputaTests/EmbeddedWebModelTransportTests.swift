@@ -1277,8 +1277,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             try assertChoiceEvidence(ready, choice: choice)
             let expectedPowerEvents = choice.chatGPTPower.flatMap { WebsiteModelChoice.ChatGPTPower.allCases.firstIndex(of: $0) }
             if let expectedPowerEvents {
-                let events = try await evaluate(view, "return window.fixturePowerKeyEvents;")
-                XCTAssertEqual(events as? Int, expectedPowerEvents, "The real SPAN slider must acknowledge exactly the selected zero-based preset")
+                try await assertChatPowerControl(view, index: expectedPowerEvents, events: expectedPowerEvents)
             }
             try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
             for sequence in 1...2 {
@@ -1291,8 +1290,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 try assertChoiceEvidence(complete, choice: choice)
                 try await assertChoiceLedger(view, insertions: sequence, sends: sequence, selections: 1)
                 if let expectedPowerEvents {
-                    let events = try await evaluate(view, "return window.fixturePowerKeyEvents;")
-                    XCTAssertEqual(events as? Int, expectedPowerEvents, "Read-only inference proof must not change the selected power")
+                    try await assertChatPowerControl(view, index: expectedPowerEvents, events: expectedPowerEvents)
                 }
             }
             XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
@@ -3076,6 +3074,33 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnavailable)
             }
             try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testChatGPTInertThumbDoesNotAuthorizeInertOrDisabledPowerControls() async throws {
+        let cases: [(String, String, EmbeddedWebModelTransport.Failure)] = [
+            ("inert_power", "power.inert = true;", .modelUnverified),
+            ("inert_ancestor", "power.parentElement.inert = true;", .modelUnverified),
+            ("disabled_power", "power.setAttribute('aria-disabled', 'true');", .modelUnavailable)
+        ]
+        for (name, mutation, expected) in cases {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            _ = try await evaluate(view, "const power = document.getElementById('fixture-chat-power-item'); \(mutation) return true;")
+            do {
+                _ = try await waitForState("ready", fixture.transport, token: token)
+                XCTFail("An inert metadata thumb cannot authorize \(name)")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expected, name) }
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+            let events = try await evaluate(view, "return {power: window.fixturePowerKeyEvents, thumb: window.fixturePowerThumbKeyEvents, wrongTarget: window.fixturePowerWrongTargetEvents};") as? [String: Int]
+            XCTAssertEqual(events, ["power": 0, "thumb": 0, "wrongTarget": 0], name)
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
             XCTAssertEqual(finished["cleanup"] as? String, "not_created")
             try await assertHumanTabIntact(fixture)
@@ -5242,6 +5267,27 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(ledger["selections"], selections, file: file, line: line)
     }
 
+    private func assertChatPowerControl(_ view: WKWebView, index: Int, events: Int,
+                                        file: StaticString = #filePath, line: UInt = #line) async throws {
+        let observed = try await evaluate(view, """
+            const thumb = document.getElementById('fixture-chat-power-slider');
+            const power = document.getElementById('fixture-chat-power-item');
+            return {thumbInert: thumb.inert, ancestorInert: thumb.parentElement.closest('[inert]') !== null,
+              value: Number(thumb.getAttribute('aria-valuenow')), powerEvents: window.fixturePowerKeyEvents,
+              thumbEvents: window.fixturePowerThumbKeyEvents, wrongTargetEvents: window.fixturePowerWrongTargetEvents,
+              powerIsLocalMenuItem: thumb.parentElement === power && power.getAttribute('role') === 'menuitem'
+                && power.getAttribute('aria-label') === 'Power'};
+            """)
+        let state = try XCTUnwrap(observed as? [String: Any], file: file, line: line)
+        XCTAssertEqual(state["thumbInert"] as? Bool, true, file: file, line: line)
+        XCTAssertEqual(state["ancestorInert"] as? Bool, false, file: file, line: line)
+        XCTAssertEqual(state["powerIsLocalMenuItem"] as? Bool, true, file: file, line: line)
+        XCTAssertEqual(state["value"] as? Int, index, file: file, line: line)
+        XCTAssertEqual(state["powerEvents"] as? Int, events, "Only the owned Power item may change the preset", file: file, line: line)
+        XCTAssertEqual(state["thumbEvents"] as? Int, 0, "The inert thumb is metadata, not a keyboard target", file: file, line: line)
+        XCTAssertEqual(state["wrongTargetEvents"] as? Int, 0, file: file, line: line)
+    }
+
     private func assertHumanTabIntact(_ fixture: Fixture, retaining retainedID: UUID? = nil,
                                      file: StaticString = #filePath, line: UInt = #line) async throws {
         XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID] + (retainedID.map { [$0] } ?? []), file: file, line: line)
@@ -5481,8 +5527,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         <div id="fixture-model-menu" role="menu" aria-labelledby="fixture-model-trigger" style="display:none">
         \(provider == .chatgpt ? """
         <div id="fixture-chat-power-view">
-          <div role="menuitem" aria-label="Power" tabindex="-1">
-            <span id="fixture-chat-power-slider" role="slider" aria-valuemin="0" aria-valuemax="4" aria-valuenow="\(initiallySelectTarget ? 1 : 0)" tabindex="-1" aria-orientation="horizontal" style="display:block;width:120px;height:20px" \(disableTarget ? "aria-disabled=\"true\"" : "")></span>
+          <div id="fixture-chat-power-item" role="menuitem" aria-label="Power" tabindex="-1">
+            <span id="fixture-chat-power-slider" role="slider" inert aria-valuemin="0" aria-valuemax="4" aria-valuenow="\(initiallySelectTarget ? 1 : 0)" tabindex="-1" aria-orientation="horizontal" style="display:block;width:120px;height:20px" \(disableTarget ? "aria-disabled=\"true\"" : "")></span>
           </div>
           <div id="fixture-select-family" role="menuitem" tabindex="-1">Select model</div>
         </div>
@@ -5504,7 +5550,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         const modelTrigger = document.getElementById('fixture-model-trigger');
         const modelMenu = document.getElementById('fixture-model-menu');
         \(provider == .chatgpt ? """
-        window.fixturePowerKeyEvents = 0;
+        window.fixturePowerKeyEvents = 0; window.fixturePowerThumbKeyEvents = 0; window.fixturePowerWrongTargetEvents = 0;
         window.fixtureShowPowerView = () => {
           document.getElementById('fixture-chat-power-view').hidden = false;
           document.getElementById('fixture-chat-family-view').hidden = true;
@@ -5513,12 +5559,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
           document.getElementById('fixture-chat-power-view').hidden = true;
           document.getElementById('fixture-chat-family-view').hidden = false;
         });
-        document.getElementById('fixture-chat-power-slider').addEventListener('keydown', event => {
-          if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || event.target.getAttribute('aria-disabled') === 'true') return;
+        const powerItem = document.getElementById('fixture-chat-power-item');
+        const powerThumb = document.getElementById('fixture-chat-power-slider');
+        powerThumb.addEventListener('keydown', () => window.fixturePowerThumbKeyEvents++);
+        powerItem.addEventListener('keydown', event => {
+          if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+          if (event.target !== powerItem) { window.fixturePowerWrongTargetEvents++; return; }
+          if (powerItem.closest('[inert]') || powerItem.getAttribute('aria-disabled') === 'true'
+            || powerThumb.getAttribute('aria-disabled') === 'true') return;
           event.preventDefault(); window.fixturePowerKeyEvents++;
           const direction = event.key === 'ArrowRight' ? 1 : -1;
-          const value = Number(event.target.getAttribute('aria-valuenow'));
-          event.target.setAttribute('aria-valuenow', String(Math.max(0, Math.min(4, value + direction))));
+          const value = Number(powerThumb.getAttribute('aria-valuenow'));
+          powerThumb.setAttribute('aria-valuenow', String(Math.max(0, Math.min(4, value + direction))));
         });
         """ : "")
         \(returnToParentAfterSelection ? """

@@ -1829,7 +1829,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         await microtasks(); await new Promise(resolve => setImmediate(resolve));
         await microtasks(); f.advanceTime(1_801); f.flush(); await microtasks(); f.flush(); return pending;
       };
-      const arrows = (picker: any) => picker.slider.events.filter((event: any) => event.type === 'keydown' && event.key.startsWith('Arrow'));
+      const arrows = (picker: any) => picker.powerItem.events.filter((event: any) => event.type === 'keydown' && event.key.startsWith('Arrow'));
       const noSelection = (f: any, picker: any) => {
         expect(arrows(picker)).toHaveLength(0);
         expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
@@ -1839,11 +1839,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const dismiss = picker.menu.onDispatch; let count = 0;
         picker.menu.onDispatch = (event: any) => { dismiss(event); if (event.key === 'Escape' && ++count === 3) callback(); };
       };
-      test('all five stable intents select the observed zero-based SPAN power and retain concrete family evidence', async () => {
+      test('all five stable intents use the enabled Power item and inert SPAN metadata with concrete family proof', async () => {
         for (const [index, label] of ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].entries()) {
           const { f, picker } = setup();
           expect(picker.slider.tagName).toBe('SPAN'); expect(picker.powerItem.values['aria-label']).toBe('Power');
           expect(picker.slider.values['aria-label']).toBeUndefined();
+          expect(picker.slider.values.inert).toBe('');
           const result = await f.run('selectModel', { modelChoice: choice(label) });
           expect(result).toMatchObject({ selected: true, modelEvidence: { selected: choice(label), source: selectionSource,
             verification: 'website_selection', chatSelection: { family: { key: 'GPT-6', label: 'GPT-6' },
@@ -1851,9 +1852,54 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
               automaticFamily: { policy: 'highest_offered_plain_gpt', offered: ['GPT-6', 'GPT-5.5'] } } } });
           expect(result.modelEvidence.response).toBeUndefined(); expect(picker.slider.values['aria-valuenow']).toBe(String(index));
           expect(arrows(picker)).toHaveLength(Math.abs(index - 1));
+          expect(picker.slider.events).toHaveLength(0);
           expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
           expect((await f.run('selectModel', { modelChoice: choice(label) })).selected).toBe(true);
           expect(arrows(picker)).toHaveLength(Math.abs(index - 1));
+        }
+      });
+      test('power diagnostics report finite physical metadata without attribute values or page content', async () => {
+        const { f, picker } = setup(); picker.showPower();
+        picker.slider.values.inert = 'PRIVATE_INERT_VALUE'; picker.slider.values['data-account-id'] = 'PRIVATE_ACCOUNT_VALUE';
+        picker.slider.text = 'PRIVATE_METADATA_TEXT';
+        const result = await f.run('modelDiagnostic');
+        expect(result.modelDiagnostic.chatPower).toEqual({ physicalItemCount: 1, physicalSliderCount: 1,
+          itemVisible: true, itemEnabled: true, sliderPhysical: true, sliderInertSelf: true,
+          sliderInertAncestor: false, sliderAriaHidden: false, sliderDisabled: false, shapeRecognized: true, ordinal: 1 });
+        expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
+        expect(JSON.stringify(result.modelDiagnostic).length).toBeLessThanOrEqual(8192); noSelection(f, picker);
+        picker.slider.values['aria-valuenow'] = 'PRIVATE_ORDINAL_VALUE';
+        expect((await f.run('modelDiagnostic')).modelDiagnostic.chatPower).toMatchObject({ shapeRecognized: false, ordinal: null });
+        expect(JSON.stringify((await f.run('modelDiagnostic')).modelDiagnostic)).not.toContain('PRIVATE');
+      });
+      test('self inert metadata never excuses inert ancestors or aria-hidden metadata', async () => {
+        for (const [flag, change] of [
+          ['sliderInertAncestor', (p: any) => { p.powerItem.values.inert = ''; }],
+          ['sliderInertAncestor', (p: any) => {
+            const wrapper = new Node('DIV', { inert: '' }); p.powerItem.children = []; wrapper.append(p.slider); p.powerItem.append(wrapper);
+          }],
+          ['sliderAriaHidden', (p: any) => { p.slider.values['aria-hidden'] = 'true'; }],
+          ['sliderAriaHidden', (p: any) => { p.powerItem.values['aria-hidden'] = 'true'; }],
+        ] as const) {
+          const { f, picker } = setup(); picker.showPower(); change(picker);
+          const diagnostic = (await f.run('modelDiagnostic')).modelDiagnostic.chatPower;
+          expect(diagnostic.sliderInertSelf).toBe(true); expect(diagnostic[flag]).toBe(true);
+          expect(diagnostic.sliderPhysical).toBe(true); expect(diagnostic.ordinal).toBeNull();
+          const result = await expire(f, f.run('selectModel', { modelChoice: choice(target) }));
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelChoices).toBeUndefined(); noSelection(f, picker); expect(picker.slider.events).toHaveLength(0);
+        }
+      });
+      test('Power focus cannot grant input after metadata replacement or power drift', async () => {
+        for (const change of [
+          (p: any) => { p.selected('Pro'); },
+          (p: any) => { p.powerItem.children = []; p.powerItem.append(new Node('SPAN', { ...p.slider.values })); },
+        ]) {
+          const { f, picker } = setup(); const focus = picker.powerItem.focus;
+          picker.powerItem.focus = () => { focus(); change(picker); };
+          const result = await f.run('selectModel', { modelChoice: choice(target) });
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          noSelection(f, picker); expect(picker.slider.events).toHaveLength(0);
         }
       });
       test('fresh selection moves from Sol to the highest plain family once before one independent power step', async () => {
@@ -2178,8 +2224,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(picker.trigger.clicks).toBe(1); noSelection(f, picker);
       });
       test('lost power-step acknowledgment never repeats an input already dispatched', async () => {
-        const { f, picker } = setup(); const step = picker.slider.onDispatch;
-        picker.slider.onDispatch = (event: any) => { step(event); throw new Error('PRIVATE lost power'); };
+        const { f, picker } = setup(); const step = picker.powerItem.onDispatch;
+        picker.powerItem.onDispatch = (event: any) => { step(event); throw new Error('PRIVATE lost power'); };
         expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
         for (let retry = 0; retry < 3; retry++) expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
         expect(arrows(picker)).toHaveLength(1); expect(picker.slider.values['aria-valuenow']).toBe('2'); expect(f.composer.textContent).toBe('');
@@ -2192,7 +2238,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(node.clicks).toBe(1); expect(arrows(picker)).toHaveLength(0);
       });
       test('an ignored power step expires once without retry or accepting the old value', async () => {
-        const { f, picker } = setup(); picker.slider.onDispatch = () => {};
+        const { f, picker } = setup(); picker.powerItem.onDispatch = () => {};
         expect((await expire(f, f.run('selectModel', { modelChoice: choice(target) }))).error).toBe('model_unverified');
         expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified'); expect(arrows(picker)).toHaveLength(1);
       });
@@ -2202,15 +2248,15 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified'); expect(node.clicks).toBe(1); expect(arrows(picker)).toHaveLength(0);
       });
       test('a delayed sequential power acknowledgment wakes through a DOM event without another input', async () => {
-        const { f, picker } = setup(); const step = picker.slider.onDispatch; let event: any;
-        picker.slider.onDispatch = (value: any) => { event = value; };
+        const { f, picker } = setup(); const step = picker.powerItem.onDispatch; let event: any;
+        picker.powerItem.onDispatch = (value: any) => { event = value; };
         const pending = f.run('selectModel', { modelChoice: choice(target) }); await microtasks();
         expect(event.key).toBe('ArrowRight'); expect(arrows(picker)).toHaveLength(1); step(event);
         for (const observer of f.observers) observer.callback([{ type: 'attributes', target: picker.slider, attributeName: 'aria-valuenow' }]);
         expect((await pending).selected).toBe(true); expect(arrows(picker)).toHaveLength(1);
       });
       test('a skipped power acknowledgment cannot be accepted as an observed sequential step', async () => {
-        const { f, picker } = setup(); picker.slider.onDispatch = () => picker.selected('Pro');
+        const { f, picker } = setup(); picker.powerItem.onDispatch = () => picker.selected('Pro');
         expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified'); expect(arrows(picker)).toHaveLength(1);
       });
       test('completed selection cannot silently repair subsequent family or power drift', async () => {

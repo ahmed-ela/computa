@@ -451,3 +451,28 @@ dispatch. The queued prompt remains saved, discovery can recover its model,
 and only explicit Resume sends it. Generic delivery failures remain uncertain.
 Signed packaging, installed selector observation and fresh live qualification
 are separate steps; the earlier direct website network failure remains open.
+
+## Build 68 inert Power metadata
+
+Signed installed build 67 passed bundle verification but failed prompt-free
+Chat discovery before producing choices. Its finite log identified
+`primary_open_requested`, one associated popup and no secondary action or
+selection proof. Inspection of an owned empty ordinary Chat popup then found
+the 0–4 SPAN slider marked inert on itself, under a non-inert Power menuitem.
+The adapter incorrectly applied interactive visibility to this metadata.
+Temporary Chat's native controls separately showed Pro 5 of 5 and the three
+family choices; the failed background thumb's attributes were not logged.
+This separates the measured mismatch from proof of its startup causality.
+
+The fix reads that narrowly scoped metadata and directs arrows to its enabled
+Power item. Actual WebKit fixtures now mirror the inert thumb and require
+Power-targeted input, including all five presets through two responses each.
+New cases reject inert/hidden ancestors, disabled controls and focus-time
+metadata replacement or drift. The focused native run passed 201 tests, and
+the adapter run passed 407 tests with 6,689 assertions.
+
+Final frozen build 68 passed 2,336 native tests, with 49 explicit opt-in skips
+and zero failures (2,385 executed, 615.177 seconds). Seven public cohorts passed
+666 tests with zero failures/skips. These remain source and controlled-runtime
+results; signed installed discovery and live model responses require fresh
+checks. No provider prompt was submitted during the build 67 diagnosis.

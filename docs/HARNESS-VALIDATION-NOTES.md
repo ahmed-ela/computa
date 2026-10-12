@@ -5031,3 +5031,45 @@ used a relative public-receipt path and was rejected before freezing or
 running tests; the successful invocation used the required absolute path.
 No failed or interrupted run is counted as a pass. Signed delivery and a
 fresh installed website response remain separate evidence.
+
+### Build 67 installed discovery and build 68 metadata fix
+
+Build 67 source commit 6725bcbd4d5bf409fbe4dd767cd043510b19f089 was signed,
+installed and verified by 98 bundle checks. Running PID 77671 had main SHA-256
+2922085aea90ebd7b6c8f1d931a63bf4f1ad4a390588c57ca5fbf02791fd4f49.
+Startup Chat discovery failed before catalog parsing at
+`primary_open_requested`. No five-choice catalog or live qualification was
+claimed. The native diagnostic lacked thumb attributes.
+
+Owned ordinary-page Inspector measurements showed one associated Power
+menuitem with a physical inert SPAN, ordinal 4, range 0–4 and horizontal
+orientation. The thumb's ancestor was not inert and the secondary DIV's label
+was exactly Select model. A separate temporary-page AX observation showed Pro
+5 of 5 and GPT-6 checked, with Sol and GPT-5.5 unchecked. The ordinary DOM
+measurement is consistent with the failed predicate; a fixed installed
+discovery is required to establish that it resolves startup.
+
+The owned tab closed without any prompt or Send. The browser pane was hidden,
+the original Gemini task and Safari Example Domain tab were preserved, and
+Safari's developer setting returned to 0 with its settings and Inspector
+closed. The corrected finite root receipt is
+`installed67-chat-inert-metadata-root-observation2.json`, SHA-256
+803193658c25499f6be4fb52ff452f82992fdddfbc7e0959e51c8f3fdf13ecc2.
+Its predecessor is retained but superseded because it did not clearly
+separate ordinary DOM evidence from temporary AX evidence.
+
+Build 68 now distinguishes the thumb's metadata from the Power item's input
+authority. All 201 focused native cases passed; the complete frozen run then
+passed 2,336 tests, skipped 49 opt-in cases and failed none in 615.177 seconds.
+All seven public cohorts passed 666 tests, including 407 adapters. The exact
+417 inputs and pinned engine remained unchanged during validation.
+
+- `public-validation-build68-final1.json`:
+  e448010720e2ce2e39eb287fbe6c6df9bafb9bfeb47bf8c864cf7424d6ca66ba.
+- `native-build68-final1-validation.json`:
+  c255b1b0bd9ee1c4c0e9a26f3103dff51dd4d2b190cb103d84786a468dc61bf8.
+- `native-source-freeze-build68-final1.json`:
+  4cff9e83e5329cc27926daf36047e0f6d7786dbc64b09ff1b9458eb0fac574a5.
+
+Fresh signed delivery, prompt-free catalog discovery and provider qualification
+remain separate from these automated results.

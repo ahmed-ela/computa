@@ -184,17 +184,28 @@ function websiteChatPickerState() {
   const checked = familyControls.filter(control => control.node.getAttribute('aria-checked') === 'true');
   const plain = familyChoices.filter(choice => websiteChatFamilyVersion(choice.label));
   const newest = websiteChatNewestFamily(plain.map(choice => choice.label));
-  const powerItems = topMenu ? [...topMenu.querySelectorAll('[role="menuitem"][aria-label="Power"]')].slice(0, 3)
-    .filter(node => visible(node) && outside(node) && node.closest('[role="menu"]') === topMenu) : [];
-  const sliders = powerItems.length === 1 ? [...powerItems[0].querySelectorAll('[role="slider"]')].slice(0, 3)
-    .filter(node => visible(node) && node.closest('[role="menu"]') === topMenu) : [];
+  const physicalPowerItems = topMenu ? [...topMenu.querySelectorAll('[role="menuitem"][aria-label="Power"]')].slice(0, 3)
+    .filter(node => physical(node) && outside(node) && node.closest('[role="menu"]') === topMenu) : [];
+  const powerItems = physicalPowerItems.filter(visible);
+  const powerItem = powerItems.length === 1 ? powerItems[0] : null;
+  const physicalSliders = physicalPowerItems.length === 1 ? [...physicalPowerItems[0].querySelectorAll('[role="slider"]')].slice(0, 3)
+    .filter(node => physical(node) && outside(node) && node.closest('[role="menu"]') === topMenu) : [];
+  const sliders = powerItem ? physicalSliders : [];
+  const physicalSlider = physicalSliders.length === 1 ? physicalSliders[0] : null;
   const slider = sliders.length === 1 ? sliders[0] : null;
-  const rawValue = slider?.getAttribute('aria-valuenow');
-  const recognizedPowerIndex = slider && slider.tagName.toLowerCase() === 'span'
-    && slider.getAttribute('aria-valuemin') === '0' && slider.getAttribute('aria-valuemax') === '4'
-    && slider.getAttribute('aria-orientation') === 'horizontal' && /^[0-4]$/.test(rawValue || '')
+  // The measured thumb is inert metadata. Its enabled Power menuitem owns
+  // input; self inert grants no authority and never excuses an inert ancestor.
+  const metadataVisible = node => physical(node) && !node.parentElement?.closest('[inert]')
+    && !node.closest('[aria-hidden="true"]');
+  const metadataDisabled = node => !!node && (node.disabled || node.getAttribute('disabled') !== null
+    || !!node.closest('[disabled], [aria-disabled="true"]'));
+  const rawValue = physicalSlider?.getAttribute('aria-valuenow');
+  const shapePowerIndex = physicalSlider && physicalSlider.tagName.toLowerCase() === 'span'
+    && physicalSlider.getAttribute('aria-valuemin') === '0' && physicalSlider.getAttribute('aria-valuemax') === '4'
+    && physicalSlider.getAttribute('aria-orientation') === 'horizontal' && /^[0-4]$/.test(rawValue || '')
     ? Number(rawValue) : null;
-  const powerUnavailable = recognizedPowerIndex !== null && (!enabled(powerItems[0]) || !enabled(slider));
+  const recognizedPowerIndex = metadataVisible(slider) ? shapePowerIndex : null;
+  const powerUnavailable = recognizedPowerIndex !== null && (!enabled(powerItem) || metadataDisabled(slider));
   const powerIndex = powerUnavailable ? null : recognizedPowerIndex;
   const secondaries = topMenu ? [...topMenu.querySelectorAll('button, [role="menuitem"]')].slice(0, 128)
     .filter(node => enabled(node) && outside(node) && node.closest('[role="menu"]') === topMenu
@@ -211,7 +222,14 @@ function websiteChatPickerState() {
     controls: familyControls.filter(control => control.choice), choices: [], selected: null, evidence: null,
     familyControls, offered: plain.map(choice => choice.label), newest,
     checkedFamily: checked.length === 1 && websiteChatFamilyValid(checked[0].choice) ? checked[0].choice : null,
-    slider, powerIndex, powerUnavailable, power: powerIndex === null ? null : websiteChatPowers[powerIndex],
+    powerItem, slider, powerIndex, powerUnavailable, power: powerIndex === null ? null : websiteChatPowers[powerIndex],
+    powerDiagnostic: {
+      physicalItemCount: physicalPowerItems.length, physicalSliderCount: physicalSliders.length,
+      itemVisible: !!powerItem, itemEnabled: enabled(powerItem), sliderPhysical: physical(physicalSlider),
+      sliderInertSelf: !!physicalSlider && physicalSlider.getAttribute('inert') !== null,
+      sliderInertAncestor: !!physicalSlider?.parentElement?.closest('[inert]'),
+      sliderAriaHidden: !!physicalSlider?.closest('[aria-hidden="true"]'), sliderDisabled: metadataDisabled(physicalSlider),
+      shapeRecognized: shapePowerIndex !== null, ordinal: recognizedPowerIndex },
     mode: familyRows.length ? 'family' : powerIndex !== null && secondary ? 'power' : topMenu ? 'unknown' : 'closed',
     duplicate, conflicting: familyRows.length > 0 && !!slider, indicatorInvalid, selectionAmbiguous: checked.length > 1,
     navigationAmbiguous: associated.length > 1 || secondaries.length > 1,
@@ -364,10 +382,14 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       if (!mutable || Date.now() >= until || typeof window.KeyboardEvent !== 'function') throw failure('model_mismatch');
       const before = current.powerIndex, direction = target > before ? 1 : -1;
       if (attempt.powerEvents >= 4) throw failure('model_unverified');
+      const powerItem = current.powerItem, slider = current.slider;
+      powerItem.focus?.({ preventScroll: true });
+      current = state();
+      if (current.powerItem !== powerItem || current.slider !== slider || current.powerIndex !== before
+        || !current.enabled(powerItem)) throw failure('model_unverified');
       attempt.powerEvents++;
-      current.slider.focus?.({ preventScroll: true });
       const key = direction === 1 ? 'ArrowRight' : 'ArrowLeft';
-      current.slider.dispatchEvent(new window.KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
+      powerItem.dispatchEvent(new window.KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
       current = await wait(() => websiteChatPickerState().powerIndex !== before);
       if (current.powerIndex !== before + direction) throw failure('model_unverified');
     }
@@ -715,6 +737,7 @@ function websiteModelDiagnostic(state, readObservation = null) {
     diagnostic.readAttempt = readObservation.readAttempt;
     diagnostic.readContext = readObservation.readContext;
   }
+  if (state.provider === 'chatgpt') diagnostic.chatPower = state.powerDiagnostic;
   const responseRoots = state.provider === 'chatgpt' ? chatGPTMessageRoots('assistant')
     : [...document.querySelectorAll(state.provider === 'claude' ? '[data-testid="assistant-message"]' : 'model-response')];
   const root = responseRoots.filter(node => state.physical(node)).at(-1);

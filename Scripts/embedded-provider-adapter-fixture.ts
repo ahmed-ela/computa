@@ -183,8 +183,8 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   let menu = new Node('DIV', { id: 'model-picker-menu', role: 'menu', 'aria-labelledby': 'model-picker-button', hidden: '' });
   const powerItem = new Node('DIV', { role: 'menuitem', 'aria-label': 'Power', tabindex: '-1' });
   const slider = new Node('SPAN', { role: 'slider', 'aria-valuemin': '0', 'aria-valuemax': '4', 'aria-valuenow': '1',
-    'aria-orientation': 'horizontal', tabindex: '-1' });
-  slider.focus = () => { f.document.activeElement = slider; };
+    'aria-orientation': 'horizontal', tabindex: '-1', inert: '' });
+  powerItem.focus = () => { f.document.activeElement = powerItem; };
   powerItem.append(slider);
   const secondary = new Node('DIV', { role: 'menuitem', 'aria-label': 'Select model', tabindex: '-1' }, 'Select model');
   const familyOptions = ['GPT-6', 'GPT-5.6 Sol', 'GPT-5.5'].map(label => {
@@ -226,7 +226,7 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   };
   secondary.onClick = () => mount(familyOptions);
   menu.onDispatch = (event: any) => { if (event.type === 'keydown' && event.key === 'Escape') close(); };
-  slider.onDispatch = (event: any) => {
+  powerItem.onDispatch = (event: any) => {
     if (event.type !== 'keydown' || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
     const next = Math.max(0, Math.min(4, powerIndex + (event.key === 'ArrowRight' ? 1 : -1)));
     if (next !== powerIndex) { powerIndex = next; slider.values['aria-valuenow'] = String(next); options[next].clicks++; }

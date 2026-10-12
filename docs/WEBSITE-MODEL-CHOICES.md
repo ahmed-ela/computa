@@ -22,6 +22,14 @@ Gemini and Claude retain **Website default** alongside their observed families. 
 
 Chat power and family are separate evidence dimensions. Native inspection saw power values 1–5 while the associated DOM slider used 0–4. The slider had no direct label; its owning Power menuitem belonged to the exact popup referenced by the expanded Select ChatGPT model button. Family radios appeared in that same popup. The fixed adapter must establish these structural relationships rather than identify an arbitrary slider by position or a numeric value alone. Claude and Gemini effort settings remain outside their family-choice contract; see [Claude's settings](https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings) and [Gemini's model and feature availability](https://support.google.com/gemini/answer/16275805?hl=en).
 
+The measured SPAN thumb is inert selection metadata. Its enabled Power
+menuitem owns keyboard input. The adapter permits inert on that thumb only;
+inert or hidden ancestors, disabled metadata or controls, duplicates and
+unsupported shapes remain rejected. After focusing the Power item, it checks
+the same item, thumb and ordinal again before one arrow event, then requires
+exactly one ordinal step. Bounded `chatPower` diagnostics distinguish metadata
+visibility from input authority without retaining page content.
+
 ## Stable local identity
 
 `WebsiteModelChoice` has three fields: `provider`, `key`, and `label`. Providers are exactly `chatgpt`, `gemini`, or `claude`. Keys and labels must each be 1–128 UTF-8 bytes, NFC normalized, without control characters or surrounding whitespace. Duplicate keys or duplicate labels invalidate a provider discovery result.
