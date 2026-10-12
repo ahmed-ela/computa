@@ -604,9 +604,14 @@ enum LocalThreadContext: Equatable, Sendable {
     case expanded
     case smallModelComputerUse
     case webBrowser
+    case remoteAPI(modelID: String, endpoint: String, contextWindow: Int)
 
-    static func forModel(_ modelID: String) -> Self {
+    static func forModel(_ modelID: String, apiModel: APIModelDefinition? = nil, apiProviderURL: URL? = nil) -> Self {
         if LocalModelCatalog.isWebBrowser(modelID) { return .webBrowser }
+        if APIProviderCatalog.identity(for: modelID) != nil {
+            return .remoteAPI(modelID: modelID, endpoint: apiProviderURL?.absoluteString ?? "",
+                              contextWindow: apiModel?.contextWindow ?? 65_536)
+        }
         return switch modelID {
         case "lmstudio-community/Qwen3.5-4B-MLX-4bit",
              "lmstudio-community/Qwen3.5-9B-MLX-4bit":
@@ -623,6 +628,7 @@ enum LocalThreadContext: Equatable, Sendable {
         case .expanded: 8192
         case .smallModelComputerUse: 16384
         case .webBrowser: 65536
+        case .remoteAPI(_, _, let window): window
         }
     }
 
@@ -637,11 +643,12 @@ enum LocalThreadContext: Equatable, Sendable {
         // The 27B/35B and unvalidated models keep the constrained profile.
         case .smallModelComputerUse: 12288
         case .webBrowser: 49152
+        case .remoteAPI(_, _, let window): max(1, window * 3 / 4)
         }
     }
 
-    func supportsModelSwitch(to modelID: String) -> Bool {
-        self == Self.forModel(modelID)
+    func supportsModelSwitch(to modelID: String, apiModel: APIModelDefinition? = nil, apiProviderURL: URL? = nil) -> Bool {
+        self == Self.forModel(modelID, apiModel: apiModel, apiProviderURL: apiProviderURL)
     }
 }
 
@@ -651,8 +658,9 @@ enum LocalThreadContext: Equatable, Sendable {
 /// tool execution. This adapter keeps JSON-RPC out of the SwiftUI layer and
 /// holds protected actions until the native approval controller resolves them.
 final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
-    static func localThreadConfig(for modelID: String, autoCompactLimitOverride: Int? = nil) -> [String: Any] {
-        let context = LocalThreadContext.forModel(modelID)
+    static func localThreadConfig(for modelID: String, autoCompactLimitOverride: Int? = nil,
+                                  apiModel: APIModelDefinition? = nil, apiProviderURL: URL? = nil) -> [String: Any] {
+        let context = LocalThreadContext.forModel(modelID, apiModel: apiModel, apiProviderURL: apiProviderURL)
         let compactLimit = autoCompactLimitOverride.flatMap {
             $0 > 0 && $0 < context.contextWindow ? $0 : nil
         } ?? context.autoCompactTokenLimit
@@ -740,6 +748,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         /// The production app leaves this nil so prompts and tool payloads are
         /// never copied into a second log by Computa.
         var protocolTracePath: String? = nil
+        #if DEBUG
+        /// Isolated integration fixtures supply a local gateway and in-memory credentials.
+        var apiModelServerForTesting: APIModelServer? = nil
+        #endif
         var isBundled: Bool {
             if case .bundled = executable { return true }
             return false
@@ -763,13 +775,20 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         func validateSelectedModel(_ modelID: String) throws {
             if WebsiteModelCatalog.inferenceSelection(for: modelID) != nil { return }
             if modelID.hasPrefix("browser/") { throw WebsiteModelCatalog.Failure.invalidModelID }
+            if modelID.hasPrefix("api/") {
+                guard APIProviderCatalog.identity(for: modelID) != nil else {
+                    throw APIProviderCatalog.Failure.invalidModel
+                }
+                return
+            }
             guard effectiveBackend == .headlessMLX,
                   !LocalModelCatalog.supportsHeadlessMLX(modelID) else { return }
             throw HeadlessMLXServer.Failure.unsupportedModel
         }
 
         func modelProvider(for modelID: String) -> String {
-            LocalModelCatalog.isWebBrowser(modelID) ? "web_browser" : modelProvider
+            if APIProviderCatalog.identity(for: modelID) != nil { return "computa_api" }
+            return LocalModelCatalog.isWebBrowser(modelID) ? "web_browser" : modelProvider
         }
 
         /// Explicit opt-in for existing externally managed inference gates and
@@ -858,6 +877,11 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
 
     func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws {
         try await core.configureWorkspace(path: path, taskID: taskID)
+    }
+
+    func configureAPIProviders(_ providers: [APIProviderDefinition],
+                               credentialMutation: @escaping @Sendable () throws -> Void) async throws {
+        try await core.configureAPIProviders(providers, credentialMutation: credentialMutation)
     }
 
     func steer(prompt: String, toTaskID taskID: AgentTask.ID) async throws {
@@ -1154,7 +1178,7 @@ private extension CodexAppServerRuntime {
         private var turnIdentity = AppServerTurnIdentityTracker()
         // A prepared website scope precedes the native RPC. Its nonce keeps a
         // delayed acknowledgement from registering under a newer local turn.
-        private var websiteInferencePreparations: [AgentTask.ID: UUID] = [:]
+        private var inferencePreparations: [AgentTask.ID: UUID] = [:]
         // IDs are scoped to one live turn. A completed item must never be
         // reopened by a delayed delta or rendered twice after a retry.
         private var assistantStreamTurns: [AgentTask.ID: String] = [:]
@@ -1240,10 +1264,15 @@ private extension CodexAppServerRuntime {
         private var localProviderLaunchEnvironment: [String: String] = [:]
         private var inferenceServer: HeadlessMLXServer?
         private let webModelServer: WebModelServer
+        private let apiModelServer: APIModelServer
+        private var apiProviders: [APIProviderDefinition] = []
+        private var apiProviderBaseURL: URL?
+        private var isConfiguringAPIProviders = false
         private var embeddedWebModelConfigured = false
         private var websiteEvidenceConfiguration: Task<Void, Never>?
         private var webProviderBaseURL: URL?
         private var webCleanupTasks: [AgentTask.ID: Task<[String], Never>] = [:]
+        private var apiCleanupTasks: [AgentTask.ID: Task<[String], Never>] = [:]
         private var manualWebCleanupTasks: [AgentTask.ID: Task<WebsiteSessionCleanupReceipt, Never>] = [:]
         #if DEBUG
         private var websiteCleanupShutdownWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1284,6 +1313,11 @@ private extension CodexAppServerRuntime {
             borrowedChromeConnector: @escaping @Sendable (ChromeConnectionRequest) async throws -> BorrowedChromeSessionOwner
         ) {
             self.configuration = configuration
+            #if DEBUG
+            self.apiModelServer = configuration.apiModelServerForTesting ?? APIModelServer()
+            #else
+            self.apiModelServer = APIModelServer()
+            #endif
             self.events = events
             self.browserBroker = browserBroker
             self.visualGrounder = visualGrounder
@@ -1749,6 +1783,9 @@ private extension CodexAppServerRuntime {
             browserCleanupTasks.removeAll()
             let embeddedBrowserIssues = await embeddedBrowserTools?.shutdown() ?? []
             let webIssues = await webModelServer.shutdown()
+            await apiModelServer.shutdown()
+            for cleanup in Array(apiCleanupTasks.values) { _ = await cleanup.value }
+            apiCleanupTasks.removeAll()
             for cleanup in Array(webCleanupTasks.values) { _ = await cleanup.value }
             webCleanupTasks.removeAll()
             let issues = Array(Set(
@@ -1834,7 +1871,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func requireHeadlessInferenceIdle(for modelID: String? = nil) throws {
-            if let modelID, LocalModelCatalog.isWebBrowser(modelID) { return }
+            if let modelID, isRemoteInference(modelID) { return }
             guard configuration.effectiveBackend == .headlessMLX else { return }
             // The owned server has one worker and no queue. Claim its inference
             // lane before any suspension, including same-model submissions.
@@ -1842,7 +1879,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func prepareInferenceModel(_ modelID: String, taskID: AgentTask.ID, claim: UUID) async throws {
-            if LocalModelCatalog.isWebBrowser(modelID) { return }
+            if isRemoteInference(modelID) { return }
             guard configuration.effectiveBackend == .headlessMLX else { return }
             try Task.checkCancellation()
             guard turnSubmissionClaims[taskID] == claim, !cancelledSubmissions.contains(claim),
@@ -1887,10 +1924,14 @@ private extension CodexAppServerRuntime {
         }
 
         func submit(prompt: String, taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
+            guard !isConfiguringAPIProviders else {
+                throw RuntimeError.serverError("Wait for API provider configuration to finish.")
+            }
             guard manualWebCleanupTasks.isEmpty else {
                 throw RuntimeError.serverError("Wait for this task's website session cleanup to finish.")
             }
             if let cleanup = webCleanupTasks[taskID] { _ = await cleanup.value }
+            if let cleanup = apiCleanupTasks[taskID] { _ = await cleanup.value }
             guard !isPreparingCommandShutdown, !commandCleanupTasks.contains(taskID) else {
                 throw RuntimeError.serverError("Wait for this task's command cleanup to finish.")
             }
@@ -1912,10 +1953,11 @@ private extension CodexAppServerRuntime {
             }
             try await start()
             if let existing = threadForTask[taskID], let loaded = contextForLoadedThread[existing],
-               !loaded.supportsModelSwitch(to: modelID) {
+               !loaded.supportsModelSwitch(to: modelID, apiModel: apiModel(for: modelID), apiProviderURL: apiProviderURL(for: modelID)) {
                 throw RuntimeError.contextChangeRequiresNewTask
             }
             if LocalModelCatalog.isWebBrowser(modelID) { try await ensureWebProvider(modelID: modelID) }
+            if modelID.hasPrefix("api/") { try await ensureAPIProvider(modelID: modelID) }
             let generation = serverGeneration
             // Loaded threads keep their current model for a pre-turn compact
             // RPC; turn/start is what applies the newly selected model. Cold
@@ -1924,7 +1966,7 @@ private extension CodexAppServerRuntime {
                 contextForLoadedThread[threadID] == nil ? nil : modelForTask[taskID]
             } ?? modelID
             try await prepareInferenceModel(maintenanceModelID, taskID: taskID, claim: claim)
-            if !LocalModelCatalog.isWebBrowser(modelID), configuration.requiresLocalModelPreflight {
+            if !isRemoteInference(modelID), configuration.requiresLocalModelPreflight {
                 let endpoint = try LocalModelServerPreflight.endpoint(launchEnvironment: localProviderLaunchEnvironment)
                 try await LocalModelServerPreflight.check(endpoint: endpoint, modelID: modelID, timeout: 2)
                 try Task.checkCancellation()
@@ -1932,7 +1974,7 @@ private extension CodexAppServerRuntime {
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
             }
             let supportsVisualGrounding = LocalModelCatalog.supportsResidentVisualGrounding(modelID)
-            guard LocalModelCatalog.isWebBrowser(modelID) || visualGroundingResidency.reserve(
+            guard isRemoteInference(modelID) || visualGroundingResidency.reserve(
                 taskID: taskID,
                 supportsSidecar: supportsVisualGrounding
             ) else {
@@ -1950,7 +1992,7 @@ private extension CodexAppServerRuntime {
                     modelForTask[taskID] = originalModel
                 }
             }
-            let requestedContext = LocalThreadContext.forModel(modelID)
+            let requestedContext = LocalThreadContext.forModel(modelID, apiModel: apiModel(for: modelID), apiProviderURL: apiProviderURL(for: modelID))
 
             let threadID: String
             var resumedWithoutUsage = false
@@ -1959,7 +2001,7 @@ private extension CodexAppServerRuntime {
                 if let loadedContext = contextForLoadedThread[threadID] {
                     // App Server ignores config overrides when thread/resume
                     // rejoins a loaded thread; turn/start has no config field.
-                    guard loadedContext.supportsModelSwitch(to: modelID) else {
+                    guard loadedContext.supportsModelSwitch(to: modelID, apiModel: apiModel(for: modelID), apiProviderURL: apiProviderURL(for: modelID)) else {
                         throw RuntimeError.contextChangeRequiresNewTask
                     }
                 } else {
@@ -2071,15 +2113,15 @@ private extension CodexAppServerRuntime {
 
             let turnResponse: Data
             let startToken = turnIdentity.beginStart(taskID: taskID)
-            var websitePreparation: UUID?
+            var inferencePreparation: UUID?
             do {
-                if !LocalModelCatalog.isWebBrowser(modelID), !supportsVisualGrounding {
+                if !isRemoteInference(modelID), !supportsVisualGrounding {
                     try await suspendVisualGrounderForHighMemoryModel()
                 }
                 try Task.checkCancellation()
                 guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
-                websitePreparation = try await prepareWebsiteInferenceTurn(
+                inferencePreparation = try await prepareInferenceTurn(
                     taskID: taskID, threadID: threadID, modelID: modelID)
                 guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
@@ -2115,9 +2157,9 @@ private extension CodexAppServerRuntime {
                let turn = result["turn"] as? [String: Any],
                let turnID = turn["id"] as? String {
                 let accepted = turnIdentity.acknowledgeStart(taskID: taskID, turnID: turnID, token: startToken)
-                if accepted, let websitePreparation {
-                    try await registerWebsiteInferenceTurn(taskID: taskID, threadID: threadID,
-                        turnID: turnID, preparationID: websitePreparation, generation: generation)
+                if accepted, let inferencePreparation {
+                    try await registerInferenceTurn(taskID: taskID, threadID: threadID,
+                        turnID: turnID, preparationID: inferencePreparation, generation: generation)
                 }
             }
             if cancelledSubmissions.contains(claim), turnIdentity.activeTurnID(for: taskID) != nil {
@@ -2148,7 +2190,7 @@ private extension CodexAppServerRuntime {
 
         private func threadConfig(for modelID: String, taskID: AgentTask.ID? = nil) -> [String: Any] {
             var result = CodexAppServerRuntime.localThreadConfig(for: modelID,
-                autoCompactLimitOverride: configuration.autoCompactLimitOverride)
+                autoCompactLimitOverride: configuration.autoCompactLimitOverride, apiModel: apiModel(for: modelID), apiProviderURL: apiProviderURL(for: modelID))
             result["model_catalog_json"] = ComputaModelToolCatalog.url(codexHomePath: configuration.codexHomePath).path
             if LocalModelCatalog.isWebBrowser(modelID), let webProviderBaseURL {
                 var headers = ["Authorization": "Bearer " + webModelServer.bearerToken]
@@ -2164,7 +2206,50 @@ private extension CodexAppServerRuntime {
                     "http_headers": headers,
                 ] as [String: Any]
             }
+            if APIProviderCatalog.identity(for: modelID) != nil, let apiProviderBaseURL {
+                var headers = ["Authorization": "Bearer " + apiModelServer.bearerToken]
+                if let taskID { headers["X-Computa-Task-ID"] = taskID }
+                result["model_providers.computa_api"] = [
+                    "name": "Computa API providers", "base_url": apiProviderBaseURL.absoluteString,
+                    "wire_api": "responses", "requires_openai_auth": false,
+                    "supports_websockets": false, "request_max_retries": 0,
+                    "stream_max_retries": 0, "http_headers": headers,
+                ] as [String: Any]
+            }
             return result
+        }
+
+        private func isRemoteInference(_ modelID: String) -> Bool {
+            LocalModelCatalog.isWebBrowser(modelID) || APIProviderCatalog.identity(for: modelID) != nil
+        }
+
+        private func apiProviderURL(for modelID: String) -> URL? {
+            APIProviderCatalog.selection(for: modelID, providers: apiProviders)?.provider.baseURL
+        }
+
+        private func apiModel(for modelID: String) -> APIModelDefinition? {
+            APIProviderCatalog.selection(for: modelID, providers: apiProviders)?.model
+        }
+
+        func configureAPIProviders(_ providers: [APIProviderDefinition],
+                                   credentialMutation: @escaping @Sendable () throws -> Void) async throws {
+            guard !isShuttingDown, !isPreparingCommandShutdown, headlessWorkState().isIdle,
+                  apiCleanupTasks.isEmpty, !isConfiguringAPIProviders else {
+                throw RuntimeError.serverError("Finish active turns before changing API providers.")
+            }
+            isConfiguringAPIProviders = true
+            defer { isConfiguringAPIProviders = false }
+            try await apiModelServer.applyProviderConfiguration(providers, credentialUpdate: credentialMutation)
+            apiProviders = providers
+        }
+
+        private func ensureAPIProvider(modelID: String) async throws {
+            guard APIProviderCatalog.selection(for: modelID, providers: apiProviders) != nil else {
+                throw RuntimeError.serverError("This API model is unavailable. Connect its provider and refresh the model catalog in Settings.")
+            }
+            if apiProviderBaseURL == nil { apiProviderBaseURL = try await apiModelServer.start() }
+            try Task.checkCancellation()
+            guard !isShuttingDown, !isPreparingCommandShutdown else { throw CancellationError() }
         }
 
         func configureWorkspace(path: String, taskID: AgentTask.ID) throws {
@@ -2234,48 +2319,75 @@ private extension CodexAppServerRuntime {
                 kind: .system, title: "Agent error", body: message, turnID: turnID)))
         }
 
-        private func prepareWebsiteInferenceTurn(taskID: AgentTask.ID, threadID: String,
+        private func prepareInferenceTurn(taskID: AgentTask.ID, threadID: String,
                                                  modelID: String) async throws -> UUID? {
-            guard LocalModelCatalog.isWebBrowser(modelID) else {
-                websiteInferencePreparations.removeValue(forKey: taskID)
+            guard isRemoteInference(modelID) else {
+                inferencePreparations.removeValue(forKey: taskID)
                 return nil
             }
             let preparationID = UUID()
-            websiteInferencePreparations[taskID] = preparationID
+            inferencePreparations[taskID] = preparationID
             do {
-                try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
-                    runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID)
+                if APIProviderCatalog.identity(for: modelID) != nil {
+                    try await apiModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID, preparationID: preparationID)
+                } else {
+                    try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
+                        runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID)
+                }
                 return preparationID
             } catch {
-                if websiteInferencePreparations[taskID] == preparationID {
-                    websiteInferencePreparations.removeValue(forKey: taskID)
+                if inferencePreparations[taskID] == preparationID {
+                    inferencePreparations.removeValue(forKey: taskID)
                 }
                 throw error
             }
         }
 
-        private func registerWebsiteInferenceTurn(taskID: AgentTask.ID, threadID: String, turnID: String,
+        private func registerInferenceTurn(taskID: AgentTask.ID, threadID: String, turnID: String,
                                                   preparationID: UUID, generation: UUID) async throws {
             guard !isShuttingDown, serverGeneration == generation,
-                  websiteInferencePreparations[taskID] == preparationID,
+                  inferencePreparations[taskID] == preparationID,
                   threadForTask[taskID] == threadID,
                   turnIdentity.activeTurnID(for: taskID) == turnID,
                   nativeStoppedTurns[taskID] != turnID,
                   contextStoppedTurns[taskID] != turnID else { return }
-            try await webModelServer.registerInferenceTurn(taskID: taskID, threadID: threadID,
-                turnID: turnID, runtimeGeneration: websiteSessionRuntimeGeneration,
-                preparationID: preparationID)
+            if APIProviderCatalog.identity(for: modelForTask[taskID] ?? "") != nil {
+                try await apiModelServer.registerInferenceTurn(taskID: taskID, threadID: threadID,
+                    turnID: turnID, preparationID: preparationID)
+            } else {
+                try await webModelServer.registerInferenceTurn(taskID: taskID, threadID: threadID,
+                    turnID: turnID, runtimeGeneration: websiteSessionRuntimeGeneration,
+                    preparationID: preparationID)
+            }
+        }
+
+        @discardableResult
+        private func scheduleInferenceCleanup(taskID: AgentTask.ID, cancelled: Bool) -> Task<[String], Never>? {
+            if APIProviderCatalog.identity(for: modelForTask[taskID] ?? "") != nil {
+                if let existing = apiCleanupTasks[taskID] { return existing }
+                let preparation = inferencePreparations[taskID]
+                let cleanup = Task<[String], Never> {
+                    if cancelled { await apiModelServer.cancel(taskID: taskID) }
+                    else { await apiModelServer.finish(taskID: taskID) }
+                    if inferencePreparations[taskID] == preparation { inferencePreparations.removeValue(forKey: taskID) }
+                    apiCleanupTasks.removeValue(forKey: taskID)
+                    return []
+                }
+                apiCleanupTasks[taskID] = cleanup
+                return cleanup
+            }
+            return scheduleWebCleanup(taskID: taskID, cancelled: cancelled)
         }
 
         @discardableResult
         private func scheduleWebCleanup(taskID: AgentTask.ID, cancelled: Bool) -> Task<[String], Never>? {
             guard LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "")
-                    || websiteInferencePreparations[taskID] != nil else { return nil }
+                    || inferencePreparations[taskID] != nil else { return nil }
             if let existing = webCleanupTasks[taskID] { return existing }
             let generation = websiteSessionRuntimeGeneration
             let threadID = threadForTask[taskID]
             let turnID = turnIdentity.latestTurnID(for: taskID)
-            let preparationID = websiteInferencePreparations[taskID]
+            let preparationID = inferencePreparations[taskID]
             let cleanup = Task<[String], Never> {
                 await webModelServer.registerCleanupTurn(taskID: taskID, threadID: threadID, turnID: turnID)
                 let issues = cancelled ? await webModelServer.cancel(taskID: taskID, runtimeGeneration: generation)
@@ -2287,8 +2399,8 @@ private extension CodexAppServerRuntime {
                         kind: .system, title: "Website session cleanup unconfirmed",
                         body: message)))
                 }
-                if websiteInferencePreparations[taskID] == preparationID {
-                    websiteInferencePreparations.removeValue(forKey: taskID)
+                if inferencePreparations[taskID] == preparationID {
+                    inferencePreparations.removeValue(forKey: taskID)
                 }
                 webCleanupTasks.removeValue(forKey: taskID)
                 return issues
@@ -2298,7 +2410,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func publishTerminalStatus(taskID: AgentTask.ID, status: TaskStatus, cancelled: Bool) {
-            guard let cleanup = scheduleWebCleanup(taskID: taskID, cancelled: cancelled) else {
+            guard let cleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: cancelled) else {
                 events.yield(.taskStatusChanged(taskID: taskID, status: status))
                 return
             }
@@ -2430,7 +2542,7 @@ private extension CodexAppServerRuntime {
                 }
             }
             do {
-                _ = try await prepareWebsiteInferenceTurn(taskID: taskID, threadID: threadID, modelID: modelID)
+                _ = try await prepareInferenceTurn(taskID: taskID, threadID: threadID, modelID: modelID)
                 try requireManagedCompaction(taskID: taskID, operationID: operationID, generation: generation)
                 let response = try await request(method: "thread/compact/start", params: ["threadId": threadID])
                 try requireResultObject(response)
@@ -2513,6 +2625,9 @@ private extension CodexAppServerRuntime {
         }
 
         func compact(taskID: AgentTask.ID) async throws {
+            guard !isConfiguringAPIProviders else {
+                throw RuntimeError.serverError("Wait for API provider configuration to finish.")
+            }
             try requireNoPendingChromeConnection()
             let accessMode = accessModeForTask[taskID] ?? .askEveryTime
             let modelID = modelForTask[taskID] ?? configuration.model
@@ -2525,7 +2640,7 @@ private extension CodexAppServerRuntime {
                 throw RuntimeError.serverError("Finish the current turn before compacting an existing task.")
             }
             try configuration.validateSelectedModel(modelID)
-            guard LocalModelCatalog.isWebBrowser(modelID) || visualGroundingResidency.reserve(taskID: taskID,
+            guard isRemoteInference(modelID) || visualGroundingResidency.reserve(taskID: taskID,
                 supportsSidecar: LocalModelCatalog.supportsResidentVisualGrounding(modelID)) else {
                 throw RuntimeError.serverError("Wait for the other local-model memory profile before compacting.")
             }
@@ -2541,6 +2656,7 @@ private extension CodexAppServerRuntime {
             do {
                 try await start()
                 if LocalModelCatalog.isWebBrowser(modelID) { try await ensureWebProvider(modelID: modelID) }
+                if modelID.hasPrefix("api/") { try await ensureAPIProvider(modelID: modelID) }
                 let generation = serverGeneration
                 try await prepareInferenceModel(modelID, taskID: taskID, claim: claim)
                 if contextForLoadedThread[threadID] == nil {
@@ -2558,9 +2674,9 @@ private extension CodexAppServerRuntime {
                         "initialTurnsPage": ["limit": 3, "sortDirection": "desc", "itemsView": "full"],
                     ])
                     hydrateAssistantEvidence(resumed, taskID: taskID)
-                    contextForLoadedThread[threadID] = LocalThreadContext.forModel(modelID)
+                    contextForLoadedThread[threadID] = LocalThreadContext.forModel(modelID, apiModel: apiModel(for: modelID), apiProviderURL: apiProviderURL(for: modelID))
                 }
-                if !LocalModelCatalog.isWebBrowser(modelID), !LocalModelCatalog.supportsResidentVisualGrounding(modelID) {
+                if !isRemoteInference(modelID), !LocalModelCatalog.supportsResidentVisualGrounding(modelID) {
                     try await suspendVisualGrounderForHighMemoryModel()
                 }
                 guard serverGeneration == generation, !cancelledSubmissions.contains(claim) else { throw CancellationError() }
@@ -2574,13 +2690,13 @@ private extension CodexAppServerRuntime {
                         state: .failed(message: error.localizedDescription)))
                     events.yield(.taskStatusChanged(taskID: taskID, status: .waiting))
                 }
-                if let cleanup = scheduleWebCleanup(taskID: taskID, cancelled: true) { _ = await cleanup.value }
+                if let cleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: true) { _ = await cleanup.value }
                 throw error
             }
         }
 
         func interrupt(taskID: AgentTask.ID) async throws {
-            let webCleanup = scheduleWebCleanup(taskID: taskID, cancelled: true)
+            let webCleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: true)
             if let claim = turnSubmissionClaims[taskID] { cancelledSubmissions.insert(claim) }
             if inferenceSelectionTaskID == taskID { inferenceSelectionTask?.cancel() }
             finishResumingContext(taskID: taskID, usage: nil)
@@ -2716,7 +2832,7 @@ private extension CodexAppServerRuntime {
                 method: "thread/list",
                 params: [
                     "limit": 100,
-                    "modelProviders": Array(Set([configuration.modelProvider, "web_browser"])).sorted(),
+                    "modelProviders": Array(Set([configuration.modelProvider, "web_browser", "computa_api"])).sorted(),
                     "archived": false,
                     "sortKey": "recency_at",
                     "sortDirection": "desc",
@@ -2757,7 +2873,7 @@ private extension CodexAppServerRuntime {
                 if persistedModel == nil { tasksWithUnknownPersistedModel.insert(id) }
                 else { tasksWithUnknownPersistedModel.remove(id) }
                 modelForTask[id] = modelID
-                if status == .running, !LocalModelCatalog.isWebBrowser(modelID) {
+                if status == .running, !isRemoteInference(modelID) {
                     visualGroundingResidency.restoreActive(
                         taskID: id,
                         supportsSidecar: LocalModelCatalog.supportsResidentVisualGrounding(modelID)
@@ -2982,15 +3098,15 @@ private extension CodexAppServerRuntime {
                         operationID: operation.barrier.id, generation: serverGeneration)
                     settleManagedCompaction(taskID: taskID)
                 }
-                if let preparationID = websiteInferencePreparations[taskID] {
+                if let preparationID = inferencePreparations[taskID] {
                     let generation = serverGeneration
                     Task {
                         do {
-                            try await registerWebsiteInferenceTurn(taskID: taskID, threadID: threadID,
+                            try await registerInferenceTurn(taskID: taskID, threadID: threadID,
                                 turnID: turnID, preparationID: preparationID, generation: generation)
                         } catch {
                             guard serverGeneration == generation,
-                                  websiteInferencePreparations[taskID] == preparationID,
+                                  inferencePreparations[taskID] == preparationID,
                                   turnIdentity.activeTurnID(for: taskID) == turnID,
                                   nativeStoppedTurns[taskID] != turnID,
                                   contextStoppedTurns[taskID] != turnID else { return }
@@ -3808,8 +3924,11 @@ private extension CodexAppServerRuntime {
             // safely fit beside.
             ComputerV2ToolContract.referenceSpecs(for: modelID, interactionPolicy: configuration.computerInteractionPolicy)
                 .filter { spec in
-                    spec["name"] as? String != ComputerV2ToolContract.Tool.createWorkspace.rawValue
+                    (apiModel(for: modelID)?.supportsToolImages != false
+                        || spec["name"] as? String != ComputerV2ToolContract.Tool.capture.rawValue)
+                    && (spec["name"] as? String != ComputerV2ToolContract.Tool.createWorkspace.rawValue
                         || chromeConnection?.request.consent.allowsTemporaryTabs == true
+                    )
                 }
                 + [ComputerOutcomeToolContract.spec]
                 + (embeddedBrowserTools == nil ? [] : EmbeddedBrowserTools.definitions())
@@ -4257,9 +4376,12 @@ private extension CodexAppServerRuntime {
         }
 
         private func baseInstructions(for modelID: String, referenceTools: Bool = true) -> String {
-            let observationInstructions = LocalModelCatalog.isWebBrowser(modelID)
-                ? "\nThis browser model transport supports text only. Use the offered native, Chrome or built-in browser text observations for the requested surface. Screenshot and image attachment transfer is unavailable; do not request captures or infer visual content from encoded image data. If the requested information requires viewing an image or an opaque UI, report that limitation."
+            var observationInstructions = LocalModelCatalog.isWebBrowser(modelID) || apiModel(for: modelID)?.supportsImages == false
+                ? "\nThis model transport supports text only. Use the offered native, Chrome or built-in browser text observations for the requested surface. Screenshot and image attachment transfer is unavailable; do not request captures or infer visual content from encoded image data. If the requested information requires viewing an image or an opaque UI, report that limitation."
                 : ""
+            if let model = apiModel(for: modelID), model.supportsImages, !model.supportsToolImages {
+                observationInstructions += "\nThis API accepts user image attachments, but image-bearing tool results are unavailable. For computer and browser tasks use the offered Accessibility and page-text tools; do not request screenshots or infer visual contents from encoded data."
+            }
             if referenceTools {
                 let background = configuration.computerInteractionPolicy == .backgroundOnly
                     ? "Background-only is enforced: no activation or global pointer/key input. Images grant no input authority."
@@ -8322,8 +8444,8 @@ private extension CodexAppServerRuntime {
         }
 
         private func serverFailed(_ error: Error) {
-            for taskID in threadForTask.keys where LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "") {
-                scheduleWebCleanup(taskID: taskID, cancelled: true)
+            for taskID in threadForTask.keys where isRemoteInference(modelForTask[taskID] ?? "") {
+                scheduleInferenceCleanup(taskID: taskID, cancelled: true)
             }
             // The browser belongs to its explicit native authorization, not to
             // an App Server process. Revoke action authority synchronously,
@@ -8448,7 +8570,7 @@ private extension CodexAppServerRuntime {
             fileChangeTranscripts.removeAll()
             initializedDiffTurns.removeAll()
             turnIdentity.removeAll()
-            websiteInferencePreparations.removeAll()
+            inferencePreparations.removeAll()
             assistantStreamTurns.removeAll()
             completedAssistantItems.removeAll()
             pendingAssistantItems.removeAll()

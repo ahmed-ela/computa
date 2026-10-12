@@ -190,6 +190,7 @@ export type NativeAction =
   | { action: 'setDefaultModel'; modelID: string }
   | { action: 'setTaskModel'; taskID: string; modelID: string }
   | { action: 'refreshWebsiteModels' }
+  | { action: 'showAPIProviders' }
   | { action: 'setShowToolPayloads'; value: boolean }
   | { action: 'refreshPermissions' }
   | { action: 'requestAccessibilityPermission' }

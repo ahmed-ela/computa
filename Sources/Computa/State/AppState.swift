@@ -60,6 +60,9 @@ final class AppState {
     var appearance: AppAppearance = .system
     var defaultModel: String
     private(set) var websiteModelChoices: [WebsiteModelChoice]
+    private(set) var apiProviders: [APIProviderDefinition] = []
+    @ObservationIgnored private(set) var apiProviderSettings: APIProviderSettings!
+    var isAPIProvidersPresented = false
     private(set) var websiteModelsRefreshing = false
     private(set) var websiteModelsError: String?
     var showToolPayloads = false
@@ -132,14 +135,28 @@ final class AppState {
         defaultModel = storedModel.flatMap { id in
             // Saved website choices remain selected if an account/menu changes.
             // Invalid ones are visible and rejected, never replaced with Qwen.
-            id.hasPrefix("browser/") ? id : LocalModelCatalog.option(for: id)?.id
+            id.hasPrefix("browser/") || id.hasPrefix("api/") ? id : LocalModelCatalog.option(for: id)?.id
         } ?? LocalModelCatalog.defaultModelID
         websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
+        apiProviders = APIProviderCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()
         self.tasks = tasks
         selectedTaskID = tasks.first?.id
         selectedEntryID = tasks.first?.entries.last?.id
         retireWebsiteModelSelections()
+        apiProviderSettings = APIProviderSettings(preferences: preferences,
+            listModels: { provider, key in
+                try await APIProviderHTTPClient().listModels(provider: provider, key: key)
+            }, canEdit: { [weak self] in self?.canEditAPIProviders == true },
+            onChanged: { [weak self] providers, credentialMutation in
+                guard let self, self.canEditAPIProviders else { throw APIProviderSettings.Failure.busy }
+                if let runtime = self.runtime {
+                    try await runtime.configureAPIProviders(providers, credentialMutation: credentialMutation)
+                } else {
+                    try credentialMutation()
+                }
+                self.apiProviders = providers
+            })
         if enableChromeExtensionBridge {
             extensionBridge = BrowserExtensionCoordinator(preferences: preferences, onAdmission: { [weak self] request in
                 guard let self, self.canConnectChrome else { request.consent.revoke(); return false }
@@ -162,6 +179,13 @@ final class AppState {
             let observed = websiteModelChoices.filter { $0.provider == provider && $0.isObservedChoice }.map { WebsiteModelCatalog.option(for: $0) }
             return provider == "chatgpt" ? observed : [option] + observed
         }
+        options += APIProviderCatalog.options(for: apiProviders)
+        for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
+            where id.hasPrefix("api/") && !options.contains(where: { $0.id == id }) {
+            options.append(LocalModelOption(id: id, label: "Unavailable API model",
+                detail: "Reconnect this model's API provider in Settings. The saved model has not been substituted.",
+                highMemory: false, available: false))
+        }
         for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
             where id.hasPrefix("browser/") && !options.contains(where: { $0.id == id }) {
             if id == "browser/chatgpt" {
@@ -178,6 +202,19 @@ final class AppState {
             }
         }
         return options
+    }
+
+    private var canEditAPIProviders: Bool {
+        !isShuttingDown && activeTurnTaskIDs.isEmpty && steeringTaskIDs.isEmpty
+            && !approvalGateBlocksInteraction
+            && dispatchingQueueTaskIDs.isEmpty
+            && !compactionStateByTask.values.contains(where: { $0 == .running })
+    }
+
+    func presentAPIProviders() {
+        guard !isShuttingDown, !approvalGateBlocksInteraction else { return }
+        presentedSheet = nil
+        isAPIProvidersPresented = true
     }
 
     /// Explicitly removed choices migrate only the next inference's selection.
@@ -549,6 +586,7 @@ final class AppState {
     private func dismissSettingsIfApprovalBlocksInteraction() {
         if approvalGateBlocksInteraction {
             presentedSheet = nil
+            isAPIProvidersPresented = false
         }
     }
 
@@ -1172,6 +1210,7 @@ final class AppState {
         connectionState = .connecting
 
         do {
+            try await runtime.configureAPIProviders(apiProviders)
             await runtime.configureEmbeddedWebModelTransport(websiteTransport())
             await runtime.configureEmbeddedBrowserTools(embeddedBrowserTools)
             guard !Task.isCancelled, !isShuttingDown else { return }

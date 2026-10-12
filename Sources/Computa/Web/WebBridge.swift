@@ -258,6 +258,10 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "refreshWebsiteModels":
             Task { @MainActor [weak state] in await state?.refreshWebsiteModels() }
 
+        case "showAPIProviders":
+            guard Set(body.keys) == ["action"] else { return }
+            state.presentAPIProviders()
+
         case "setTaskModel":
             guard let modelID = body["modelID"] as? String,
                   let taskID = body["taskID"] as? String

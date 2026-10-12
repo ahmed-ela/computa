@@ -11,6 +11,9 @@ import Foundation
 enum ComputaModelToolCatalog {
     static func catalogData(additionalModelID: String? = nil) throws -> Data {
         var ids = Set(LocalModelCatalog.options.map(\.id))
+        // The engine matches slug prefixes. Future configured API models use
+        // the same native patch executor without reloading its model catalog.
+        ids.insert("api/")
         if let additionalModelID, !additionalModelID.isEmpty { ids.insert(additionalModelID) }
         let models = ids.sorted().map { id -> [String: Any] in
             [
@@ -27,7 +30,7 @@ enum ComputaModelToolCatalog {
                 "include_skills_usage_instructions": false, "include_plugin_usage_instructions": false,
                 "include_apps_usage_instructions": false, "supports_reasoning_summary_parameter": true,
                 "default_reasoning_summary": "auto", "support_verbosity": false,
-                "default_verbosity": NSNull(), "apply_patch_tool_type": LocalModelCatalog.isWebBrowser(id) ? "freeform" : NSNull(),
+                "default_verbosity": NSNull(), "apply_patch_tool_type": LocalModelCatalog.isWebBrowser(id) || id.hasPrefix("api/") ? "freeform" : NSNull(),
                 "web_search_tool_type": "text", "truncation_policy": ["mode": "bytes", "limit": 10_000],
                 "supports_image_detail_original": false, "context_window": 272_000,
                 "effective_context_window_percent": 95, "experimental_supported_tools": [String](),

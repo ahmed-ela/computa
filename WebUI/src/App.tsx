@@ -902,6 +902,9 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
               <WebsiteModelsRefresh refreshing={snapshot.websiteModelsRefreshing} onRefresh={() => post({ action: 'refreshWebsiteModels' })} />
             </div>
             {snapshot.websiteModelsError && <p className="model-note" role="status">{snapshot.websiteModelsError}</p>}
+            <div className="setting-row"><span><strong>API providers</strong><small>Connect Cerebras or another provider and load its available models.</small></span>
+              <Button variant="outline" onClick={() => post({ action: 'showAPIProviders' })}>Manage providers</Button>
+            </div>
             <div className="setting-row"><span><strong>Connection</strong><small>{snapshot.connection.label}</small></span><span className={`setting-state ${toneClass(snapshot.connection.tone)}`}><span />{snapshot.connection.state}</span></div>
           </section>
           <section>

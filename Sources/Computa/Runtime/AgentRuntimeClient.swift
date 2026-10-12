@@ -20,6 +20,8 @@ protocol AgentRuntimeClient: Sendable {
     func disconnectChrome() async
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async
     func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async
+    func configureAPIProviders(_ providers: [APIProviderDefinition],
+                               credentialMutation: @escaping @Sendable () throws -> Void) async throws
     func shutdown() async -> RuntimeShutdownReport
 }
 
@@ -62,6 +64,16 @@ extension AgentRuntimeClient {
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {}
     func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async {}
 
+    func configureAPIProviders(_ providers: [APIProviderDefinition]) async throws {
+        try await configureAPIProviders(providers, credentialMutation: {})
+    }
+
+    func configureAPIProviders(_ providers: [APIProviderDefinition],
+                               credentialMutation: @escaping @Sendable () throws -> Void) async throws {
+        guard providers.isEmpty else { throw AgentRuntimeCapabilityError.apiProvidersUnsupported }
+        try credentialMutation()
+    }
+
     /// Resource-free adapters can keep the default; the production runtime
     /// explicitly implements shutdown for its owned processes and capabilities.
     func shutdown() async -> RuntimeShutdownReport {
@@ -75,6 +87,7 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
     case chromeConnectionUnsupported
     case workspaceSelectionUnsupported
     case accessModeUnsupported
+    case apiProvidersUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -88,6 +101,8 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
             "This runtime does not support choosing a project folder."
         case .accessModeUnsupported:
             "This runtime does not support Full access. Your message was not sent."
+        case .apiProvidersUnsupported:
+            "This runtime does not support API providers."
         }
     }
 }
