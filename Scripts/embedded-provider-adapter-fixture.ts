@@ -176,8 +176,8 @@ export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini
 function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   const labels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
   let powerIndex = 1, selectedFamily = 'GPT-6';
-  const primary = new Node('SPAN', {}, labels[powerIndex]);
-  const trigger = new Node('BUTTON', { id: 'model-picker-button', 'aria-label': 'Select ChatGPT model',
+  let primary = new Node('SPAN', {}, labels[powerIndex]);
+  let trigger = new Node('BUTTON', { id: 'model-picker-button', 'aria-label': 'Select ChatGPT model',
     'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'model-picker-menu' });
   trigger.append(primary);
   let menu = new Node('DIV', { id: 'model-picker-menu', role: 'menu', 'aria-labelledby': 'model-picker-button', hidden: '' });
@@ -269,9 +269,22 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
       seedPriorSelection(overrides.action || 'inspect', overrides); return inspect(overrides, adopt);
     };
   }
-  return { trigger, get menu() { return menu; }, get nested() { return menu; }, secondary, primary,
+  return { get trigger() { return trigger; }, get menu() { return menu; }, get nested() { return menu; }, secondary,
+    get primary() { return primary; },
     options, familyOptions, slider, powerItem, powerView, familyView, selected, open: showPower, showPower,
     showFamily: () => mount(true), close,
+    replaceTrigger: (disconnect = true) => {
+      const previous = trigger;
+      trigger = new Node('BUTTON', { ...previous.values });
+      trigger.onClick = previous.onClick;
+      primary = new Node('SPAN', {}, labels[powerIndex]); trigger.append(primary);
+      if (disconnect) {
+        f.body.children = f.body.children.filter((node: any) => node !== previous);
+        previous.parentElement = null; previous.connected = false;
+      }
+      f.body.append(trigger);
+      return previous;
+    },
     replaceMenu: (id: string) => {
       menu.connected = false; menu.values.hidden = '';
       menu = new Node('DIV', { id, role: 'menu', 'aria-labelledby': 'model-picker-button', hidden: '' });

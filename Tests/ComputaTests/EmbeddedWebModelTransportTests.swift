@@ -1795,6 +1795,82 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testCollapsedFirstMessageHeaderRemountRequiresFreshExactModelProof() async throws {
+        for condition in ["unchanged", "promoted_route", "connected_old", "wrong_power", "wrong_family", "prior_header_drift"] {
+            let page = Self.collapsedFirstUserPage().replacingOccurrences(
+                of: "const modelTrigger = document.getElementById('fixture-model-trigger');",
+                with: "let modelTrigger = document.getElementById('fixture-model-trigger');")
+            let fixture = try Fixture(page: page)
+            defer { fixture.shutdown() }
+            let choice = Self.fixtureChoice(.chatgpt)
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let generation = fixture.browser.documentGeneration(for: ownedID)
+            var applied = false
+            fixture.transport.setBeforePageResultValidationDetailedForTesting { action, _ in
+                guard action == "submit", !applied else { return }
+                applied = true
+                let observation = try? await self.evaluate(view, """
+                    const condition = \(String(reflecting: condition));
+                    const old = document.getElementById('fixture-model-trigger');
+                    if (window.fixturePrompts.length !== 1 || !old || old.getAttribute('aria-expanded') !== 'false') return null;
+                    if (condition === 'prior_header_drift') {
+                      old.querySelector('#fixture-model-header').firstChild.data = 'High';
+                      old.querySelector('#fixture-model-header').firstChild.data = 'Medium';
+                      await Promise.resolve();
+                    }
+                    const replacement = old.cloneNode(true);
+                    if (condition === 'connected_old') {
+                      old.id = 'fixture-connected-old-model-trigger'; old.hidden = true;
+                      old.after(replacement);
+                    } else old.replaceWith(replacement);
+                    // The provider remounts its click handler on the new physical
+                    // node; keep the same fixture behavior and observable ledger.
+                    modelTrigger = replacement;
+                    replacement.addEventListener('click', () => old.click());
+                    if (condition === 'wrong_power') replacement.querySelector('#fixture-model-header').textContent = 'High';
+                    if (condition === 'wrong_family') modelMenu.querySelectorAll('[data-fixture-model]').forEach(node =>
+                      node.setAttribute('aria-checked', String(node.dataset.fixtureModel === 'GPT-5.5')));
+                    if (condition === 'promoted_route') history.pushState({}, '', '/c/local-chatgpt%3Aremount-fixture?temporary-chat=true');
+                    window.fixtureRemountFamilyOpens = window.fixtureModelFamilyOpenCount;
+                    await Promise.resolve();
+                    return {oldConnected: old.isConnected, sameGeneration: true, power: replacement.innerText};
+                    """) as? [String: Any]
+                XCTAssertNotNil(observation, condition)
+                XCTAssertEqual(observation?["oldConnected"] as? Bool, condition == "connected_old")
+            }
+            let succeeds = ["unchanged", "promoted_route"].contains(condition)
+            do {
+                let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": String(repeating: "Owned header remount fixture line.\n", count: 600)])
+                XCTAssertTrue(succeeds, "A contradictory or connected header cannot acquire proof: \(condition)")
+                XCTAssertEqual(sent["state"] as? String, "running")
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                try assertChoiceEvidence(complete, choice: choice)
+                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+            } catch {
+                if succeeds { throw error }
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser), condition)
+            }
+            XCTAssertTrue(applied, condition)
+            let effects = try await evaluate(view, "return {expansions: window.fixtureExpansionClicks, freshFamilyReads: window.fixtureModelFamilyOpenCount - window.fixtureRemountFamilyOpens};") as? [String: Int]
+            XCTAssertEqual(effects?["expansions"], succeeds ? 1 : 0, condition)
+            if succeeds { XCTAssertGreaterThanOrEqual(effects?["freshFamilyReads"] ?? 0, 1, "The replacement's text alone cannot supply family proof") }
+            XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, succeeds ? "not_created" : "failed", condition)
+            try await assertHumanTabIntact(fixture, retaining: succeeds ? nil : ownedID)
+        }
+    }
+
     func testCollapsedFirstMessagePreservesModelPrecheckFailureWithoutExpansionOrReplay() async throws {
         for condition in ["unavailable", "power_mismatch"] {
             let fixture = try Fixture(page: Self.collapsedFirstUserPage())

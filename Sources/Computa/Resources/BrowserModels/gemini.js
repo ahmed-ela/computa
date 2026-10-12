@@ -213,28 +213,40 @@ function websiteChatTrackPinnedHeader(pin, trigger) {
   if (pin.headerTrigger && pin.headerTrigger !== trigger) { websiteChatInvalidatePin(pin, 'header_replaced'); return; }
   pin.headerTrigger = trigger;
   if (pin.headerObserver) return;
-  pin.headerObserver = new MutationObserver(records => {
-    if (globalThis.__computaChatPresetPin !== pin || pin.owner !== globalThis.__computaModelOwner
-      || pin.document !== document || window !== window.top || location.origin !== 'https://chatgpt.com') return;
-    if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power)) websiteChatInvalidatePin(pin, 'header_mutation');
-  });
+  pin.headerObserver = new MutationObserver(records => websiteChatObservePinnedHeader(pin, trigger, records));
   pin.headerObserver.observe(trigger, { subtree: true, childList: true, characterData: true,
     characterDataOldValue: true });
+}
+function websiteChatObservePinnedHeader(pin, trigger, records) {
+  if (globalThis.__computaChatPresetPin !== pin || pin.owner !== globalThis.__computaModelOwner
+    || pin.document !== document || window !== window.top || location.origin !== 'https://chatgpt.com') return;
+  if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power)) websiteChatInvalidatePin(pin, 'header_mutation');
+}
+function websiteChatDrainPinnedMutations(pin) {
+  // Only private model observers are drained. The shared notification observer
+  // also owns product-mode evidence and must retain all of its pending records.
+  if (pin?.headerTrigger) websiteChatObservePinnedHeader(pin, pin.headerTrigger, pin.headerObserver?.takeRecords?.() || []);
+  if (pin) websiteChatObservePinnedMutations(pin.semanticObserver?.takeRecords?.() || [], pin);
 }
 function websiteChatTrackPinnedControls(pin, state) {
   if (!pin || pin.owner !== globalThis.__computaModelOwner || pin.document !== document
     || !websiteChatFamilyValid(pin.selection?.family) || !websiteChatPowerValid(pin.selection?.power)) return;
   pin.controls = pin.controls || new WeakMap();
+  if (!pin.semanticObserver) {
+    pin.semanticObserver = new MutationObserver(records => websiteChatObservePinnedMutations(records, pin));
+    pin.semanticObserver.observe(document.documentElement || document, { subtree: true,
+      attributes: true, attributeOldValue: true, attributeFilter: ['aria-valuenow', 'aria-checked'] });
+  }
   const slider = state.slider || state.semanticSlider;
   if (slider) pin.controls.set(slider, { attribute: 'aria-valuenow',
     value: String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key)) });
   for (const control of state.familyControls) pin.controls.set(control.node,
     { attribute: 'aria-checked', value: String(control.choice?.key === pin.selection.family.key) });
 }
-function websiteChatObservePinnedMutations(records) {
-  const pin = globalThis.__computaChatPresetPin;
+function websiteChatObservePinnedMutations(records, pin = globalThis.__computaChatPresetPin) {
   if (!pin || pin.invalidated === true || !pin.controls || pin.owner !== globalThis.__computaModelOwner
-    || pin.document !== document || window !== window.top || location.origin !== 'https://chatgpt.com') return;
+    || globalThis.__computaChatPresetPin !== pin || pin.document !== document
+    || window !== window.top || location.origin !== 'https://chatgpt.com') return;
   // Track only previously observed semantic controls. Mounting a popup, updating
   // its visibility, or setting the same selected value cannot invalidate it.
   // Old values preserve an observable switch-and-restore in one mutation batch.
@@ -377,11 +389,16 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let trigger = null, selectionChanged = false, dismissedPopup = null, readStage = 'initial_observation';
   let primaryOpened = false, secondaryOpened = false, closeAttempted = false, observedProof = false;
   let headerExpected = null, proofLocked = false, headerObserved = false;
+  let remount = null, remountClaimed = false;
   const tracked = new Map();
-  const headerObserver = new MutationObserver(records => {
-    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) selectionChanged = true;
-  });
-  const observer = new MutationObserver(records => {
+  const observeHeader = records => {
+    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) {
+      selectionChanged = true;
+      if (remount && owned()) websiteChatInvalidatePin(remount.pin, 'header_mutation');
+    }
+  };
+  const headerObserver = new MutationObserver(observeHeader);
+  const observeControls = records => {
     if (mutable && !proofLocked) return;
     if (records.some(record => {
       if (record.type !== 'attributes' || !tracked.has(record.target)
@@ -390,7 +407,9 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       return record.target.getAttribute(record.attributeName) !== expected
         || record.oldValue != null && record.oldValue !== expected;
     })) selectionChanged = true;
-  });
+    if (remount) websiteChatObservePinnedMutations(records, remount.pin);
+  };
+  const observer = new MutationObserver(observeControls);
   observer.observe(document.documentElement || document, { subtree: true, attributes: true, attributeOldValue: true,
     attributeFilter: ['aria-valuenow', 'aria-checked', 'aria-selected'] });
   const failure = code => {
@@ -410,9 +429,16 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   const state = () => {
     if (!owned()) throw failure('document_changed');
     const pin = globalThis.__computaChatPresetPin;
+    if (remount && (pin !== remount.pin || pin.headerTrigger !== remount.previous
+      || !websiteChatResolvedSelectionEqual(pin.selection, remount.selection))) throw failure('model_mismatch');
+    if (remount) websiteChatDrainPinnedMutations(pin);
     if (selectionChanged || pin?.owner === owner && pin.document === document && pin.invalidated === true)
       throw failure('model_mismatch');
     const current = websiteChatPickerState();
+    if (remount && (remount.previous.isConnected !== false || current.trigger !== remount.replacement)) {
+      websiteChatInvalidatePin(pin, 'header_replaced');
+      throw failure('model_mismatch');
+    }
     if (current.triggerCount !== 1 || !current.trigger || trigger && current.trigger !== trigger
       || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous
       || current.navigationAmbiguous || current.allMenus.some(menu => menu !== current.topMenu)) throw failure('model_unverified');
@@ -426,7 +452,22 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (headerExpected && current.closedPresentation && !current.headerPower && !current.headerPresentation)
       throw failure('model_unverified');
     if (pin) {
-      websiteChatTrackPinnedHeader(pin, trigger);
+      if (!remount && pin.headerTrigger && pin.headerTrigger !== trigger) {
+        websiteChatDrainPinnedMutations(pin);
+        // SPA route creation can remount the header without changing the model.
+        // Only a fresh readonly proof may provisionally observe its replacement;
+        // the original selection and every negative observation remain pinned.
+        if (!mutable && !remountClaimed && pin.invalidated !== true && pin.owner === owner && pin.document === document
+          && pin.headerTrigger.isConnected === false && current.closedPresentation && current.enabled(trigger)
+          && websiteChatFamilyValid(pin.selection?.family) && websiteChatPowerValid(pin.selection?.power)
+          && current.headerPower?.key === pin.selection.power.key && websiteChatPresetIntentValid(expected)
+          && expected.key === 'chat/latest/' + pin.selection.power.key) {
+          remount = { pin, previous: pin.headerTrigger, replacement: trigger,
+            selection: { family: { ...pin.selection.family }, power: { ...pin.selection.power } } };
+          remountClaimed = true;
+          headerExpected = pin.selection.power;
+        } else websiteChatTrackPinnedHeader(pin, trigger);
+      } else if (!remount) websiteChatTrackPinnedHeader(pin, trigger);
       if (pin.invalidated === true) throw failure('model_mismatch');
       if (current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
         !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key))) throw failure('model_mismatch');
@@ -596,6 +637,22 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     const pin = globalThis.__computaChatPresetPin;
     if (pin && (pin.owner !== owner || pin.document !== document || pin.invalidated === true
       || !websiteChatResolvedSelectionEqual(pin.selection, evidence.chatSelection))) return failure('model_mismatch');
+    if (remount) {
+      // Drain undelivered negative evidence before the synchronous reference
+      // transfer. No await or website action may intervene in this commit.
+      observeHeader(headerObserver.takeRecords?.() || []);
+      observeControls(observer.takeRecords?.() || []);
+      websiteChatDrainPinnedMutations(pin);
+      const commit = state();
+      if (Date.now() >= until || !owned() || selectionChanged || pin.invalidated === true
+        || !pickerClosed(commit) || commit.headerPower.key !== remount.selection.power.key
+        || !websiteChatResolvedSelectionEqual(remount.selection, evidence.chatSelection)) return failure('model_mismatch');
+      pin.headerObserver?.disconnect?.();
+      pin.headerObserver = null;
+      pin.headerTrigger = trigger;
+      websiteChatTrackPinnedHeader(pin, trigger);
+      remount = null;
+    }
     if (expected && !pin) {
       if (!mutable) return failure('model_unverified');
       globalThis.__computaChatPresetPin = { owner, document, selection: evidence.chatSelection };

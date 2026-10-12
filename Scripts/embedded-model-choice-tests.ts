@@ -2003,6 +2003,127 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
         }
       });
+      test('a disconnected header remount rebinds only after fresh readonly family and power proof', async () => {
+        const { f, picker } = setup();
+        expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+        const pin = f.world.__computaChatPresetPin, selection = pin.selection, previous = picker.replaceTrigger();
+        const replacement = picker.trigger, open = replacement.onClick, close = picker.menu.onDispatch;
+        let provedFamily = false, closedAfterProof = false;
+        replacement.onClick = () => {
+          expect(pin.headerTrigger).toBe(previous); open();
+          provedFamily = picker.familyOptions[0].values['aria-checked'] === 'true' && !picker.familyView.values.hidden;
+        };
+        picker.menu.onDispatch = (event: any) => {
+          expect(pin.headerTrigger).toBe(previous); expect(provedFamily).toBe(true);
+          close(event); closedAfterProof = true;
+        };
+        const beforePower = arrows(picker).length, beforeFamily = picker.familyOptions.map((node: any) => node.clicks);
+        const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+        expect(result.modelEvidence.selected).toEqual(choice(initial)); expect(closedAfterProof).toBe(true);
+        expect(f.world.__computaChatPresetPin).toBe(pin); expect(pin.selection).toBe(selection);
+        expect(pin.headerTrigger).toBe(replacement); expect(pin.invalidated).toBeUndefined();
+        expect(replacement.clicks).toBe(1); expect(arrows(picker)).toHaveLength(beforePower);
+        expect(picker.familyOptions.map((node: any) => node.clicks)).toEqual(beforeFamily);
+        replacement.onClick = open; picker.menu.onDispatch = close;
+        expect((await f.run('verifyModel', { expectedModelChoice: choice(initial) })).modelEvidence.selected).toEqual(choice(initial));
+        expect(pin.headerTrigger).toBe(replacement); noSelection(f, picker);
+      });
+      test('header remount rejects a connected old header and different or unverifiable family and power', async () => {
+        for (const condition of ['connected', 'connected_hidden', 'wrong_power', 'unknown_power', 'wrong_family']) {
+          const { f, picker } = setup();
+          expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const pin = f.world.__computaChatPresetPin;
+          const old = picker.replaceTrigger(!condition.startsWith('connected'));
+          if (condition === 'connected_hidden') old.values.hidden = '';
+          if (condition === 'wrong_power') picker.selected('High');
+          if (condition === 'unknown_power') picker.primary.text = 'PRIVATE UNKNOWN';
+          if (condition === 'wrong_family') picker.selected('GPT-5.5');
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          expect(['model_mismatch', 'model_unverified']).toContain(result.error); expect(result.modelEvidence).toBeUndefined();
+          expect(pin.headerTrigger).toBe(old); expect(JSON.stringify(result)).not.toContain('PRIVATE UNKNOWN');
+          expect(picker.trigger.clicks).toBe(condition === 'wrong_family' ? 1 : 0); noSelection(f, picker);
+        }
+      });
+      test('a provisional remount cannot adopt another replacement or a reconnected old header during proof', async () => {
+        for (const condition of ['replace_again', 'reconnect_old', 'foreign_route', 'owner_changed']) {
+          const { f, picker } = setup();
+          expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const pin = f.world.__computaChatPresetPin, old = picker.replaceTrigger(), candidate = picker.trigger;
+          const open = candidate.onClick;
+          candidate.onClick = () => {
+            open();
+            if (condition === 'replace_again') picker.replaceTrigger();
+            if (condition === 'reconnect_old') { old.connected = true; old.values.hidden = ''; f.body.append(old); }
+            if (condition === 'foreign_route') f.document.URL = 'https://chatgpt.com/c/foreign';
+            if (condition === 'owner_changed') f.world.__computaModelOwner = 'PRIVATE_OTHER_OWNER';
+          };
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          expect(['model_mismatch', 'document_changed']).toContain(result.error); expect(result.modelEvidence).toBeUndefined();
+          expect(pin.headerTrigger).toBe(old); expect(candidate.clicks).toBe(1); noSelection(f, picker);
+          expect(JSON.stringify(result)).not.toContain('PRIVATE_OTHER_OWNER');
+        }
+      });
+      test('remount never clears previous header or semantic drift even after the visible selection is restored', async () => {
+        for (const reason of ['header_mutation', 'semantic_mutation', 'header_replaced']) {
+          const { f, picker } = setup();
+          expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const pin = f.world.__computaChatPresetPin;
+          if (reason === 'header_mutation') pin.headerObserver.callback([{ type: 'characterData',
+            target: { nodeType: 3, parentElement: picker.primary, textContent: 'Medium' }, oldValue: 'High' }]);
+          else if (reason === 'semantic_mutation') pin.semanticObserver.callback([{ type: 'attributes',
+            target: picker.familyOptions[0], attributeName: 'aria-checked', oldValue: 'false' }]);
+          else { pin.invalidated = true; pin.invalidationReason = reason; }
+          const old = picker.replaceTrigger();
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined();
+          expect(pin.headerTrigger).toBe(old); expect(result.modelDiagnostic.chatPin.invalidationReason).toBe(reason);
+          expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+        }
+      });
+      test('remount drains undelivered old header and semantic negatives without consuming shared notifications', async () => {
+        for (const kind of ['header', 'semantic']) {
+          const { f, picker } = setup();
+          expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const pin = f.world.__computaChatPresetPin, primary = picker.primary, old = picker.replaceTrigger();
+          let drained = false;
+          const pending = kind === 'header' ? pin.headerObserver : pin.semanticObserver;
+          pending.takeRecords = () => {
+            if (drained) return []; drained = true;
+            return kind === 'header' ? [{ type: 'characterData', target: { nodeType: 3, parentElement: primary,
+              textContent: 'Medium' }, oldValue: 'High' }] : [{ type: 'attributes', target: picker.familyOptions[0],
+              attributeName: 'aria-checked', oldValue: 'false' }];
+          };
+          f.world.__computaModelSignal.observer.takeRecords = () => { throw new Error('must not drain shared product or wake records'); };
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined(); expect(drained).toBe(true);
+          expect(pin.headerTrigger).toBe(old); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+        }
+      });
+      test('remount commit drains replacement header and semantic changes queued at close acknowledgment', async () => {
+        for (const kind of ['header', 'semantic']) {
+          const { f, picker } = setup();
+          expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const pin = f.world.__computaChatPresetPin, old = picker.replaceTrigger(), observersBefore = f.observers.length;
+          const close = picker.menu.onDispatch; let drained = false;
+          picker.menu.onDispatch = (event: any) => {
+            close(event);
+            const pending = kind === 'header'
+              ? f.observers.slice(observersBefore).find((observer: any) => observer.options?.characterDataOldValue)
+              : pin.semanticObserver;
+            pending.takeRecords = () => {
+              if (drained) return []; drained = true;
+              return kind === 'header' ? [{ type: 'characterData', target: { nodeType: 3, parentElement: picker.primary,
+                textContent: 'Medium' }, oldValue: 'High' }] : [{ type: 'attributes', target: picker.familyOptions[0],
+                attributeName: 'aria-checked', oldValue: 'false' }];
+            };
+          };
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined(); expect(drained).toBe(true);
+          expect(pin.headerTrigger).toBe(old); expect(picker.trigger.clicks).toBe(1);
+          expect(result.modelDiagnostic.chatPin.invalidationReason).toBe(kind === 'header' ? 'header_mutation' : 'semantic_mutation');
+          noSelection(f, picker);
+        }
+      });
       test('pin diagnostics preserve the first finite rejection cause without changing admission', async () => {
         for (const reason of ['header_replaced', 'header_mutation', 'semantic_mutation', 'PRIVATE_PAGE_CANARY']) {
           const { f, picker } = setup();
