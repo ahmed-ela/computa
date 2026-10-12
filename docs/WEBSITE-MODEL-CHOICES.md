@@ -22,10 +22,12 @@ Gemini and Claude retain **Website default** alongside their observed families. 
 
 Chat power and family are separate evidence dimensions. Native inspection saw power values 1–5 while the associated DOM slider used 0–4. The slider had no direct label; its owning Power menuitem belonged to the exact popup referenced by the expanded Select ChatGPT model button. Family radios appeared in that same popup. The fixed adapter must establish these structural relationships rather than identify an arbitrary slider by position or a numeric value alone. Claude and Gemini effort settings remain outside their family-choice contract; see [Claude's settings](https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings) and [Gemini's model and feature availability](https://support.google.com/gemini/answer/16275805?hl=en).
 
-The measured SPAN thumb is inert selection metadata. Its enabled Power
-menuitem owns keyboard input. The adapter permits inert on that thumb only;
-inert or hidden ancestors, disabled metadata or controls, duplicates and
-unsupported shapes remain rejected. After focusing the Power item, it checks
+The physically rendered SPAN thumb supplies selection metadata. Its visible,
+enabled Power menuitem owns keyboard input. Accessibility suppression on the
+thumb or a wrapper strictly inside that exact item does not hide the metadata
+from discovery. Inert or hidden state on the Power item or above it, disabled
+metadata or controls, foreign or CSS-hidden metadata, duplicates and unsupported
+shapes remain rejected. After focusing the Power item, it checks
 the same item, thumb and ordinal again before one arrow event, then requires
 exactly one ordinal step. Bounded `chatPower` diagnostics distinguish metadata
 visibility from input authority without retaining page content.

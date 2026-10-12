@@ -5043,7 +5043,8 @@ claimed. The native diagnostic lacked thumb attributes.
 
 Owned ordinary-page Inspector measurements showed one associated Power
 menuitem with a physical inert SPAN, ordinal 4, range 0–4 and horizontal
-orientation. The thumb's ancestor was not inert and the secondary DIV's label
+orientation. The Power item and its ancestors were not inert; intermediate
+wrappers below that item were not fully measured. The secondary DIV's label
 was exactly Select model. A separate temporary-page AX observation showed Pro
 5 of 5 and GPT-6 checked, with Sol and GPT-5.5 unchecked. The ordinary DOM
 measurement is consistent with the failed predicate; a fixed installed
@@ -5071,5 +5072,51 @@ All seven public cohorts passed 666 tests, including 407 adapters. The exact
 - `native-source-freeze-build68-final1.json`:
   4cff9e83e5329cc27926daf36047e0f6d7786dbc64b09ff1b9458eb0fac574a5.
 
-Fresh signed delivery, prompt-free catalog discovery and provider qualification
-remain separate from these automated results.
+Build 68 source 13306bfce62f4547d0629603c8906139be7a4e92 was then signed,
+installed and verified by 98 bundle checks. Its running main SHA-256 was
+8334bd46a0b815e123c25613d6eb116e1592e690753ec29550f3d6e168c4b546.
+Prompt-free startup discovery again stopped at `primary_open_requested`.
+Finite diagnostics proved one physically rendered Power item and thumb, a
+visible enabled item and recognized slider shape, but accessibility-hidden
+metadata and no accepted ordinal. This identifies a metadata predicate failure
+within the associated item, not a provider response failure. No prompt or Send
+was submitted and no live response was qualified.
+
+- `installed68-prompt-free-discovery-finite-log1.json`:
+  f0aa61800e1f1bf24ca848f32b5fc842d402e4adcae718d79ed8aa91789d649e.
+
+The next candidate permits presentation suppression strictly below the exact
+Power input item, while preserving the item's own and ancestor visibility,
+enabled state, metadata shape, association, focus identity and one-step input
+checks. Its focused JavaScript cohort passed 215 cases with 4,228 assertions.
+Installed catalog success and provider qualification remain unproven.
+
+### Build 69 focused source validation
+
+The affected native cohort passed 202 tests with zero failures or skips in
+265.340 seconds: transport 129, Chat selection 9, website state 17, queue 33,
+snapshot 9 and Chat admission 5. All thirteen watched inputs remained unchanged,
+and the built Chat adapter matched source. Four metadata suppression layouts,
+blocked input authority, all five presets through two fixture responses,
+prompt-free discovery, no replay and owned cleanup passed. These are local
+WebKit fixture results, not completed website responses.
+
+- `chat-power-metadata-scope-native-focus1-receipt.json`:
+  b379c90594d139ae0d72f1f73f7f67d6a22ecb367d6ffea1775ac8338485a9ed.
+- `chat-power-metadata-scope-native-focus1.log`:
+  762d733d355fddeac42bc41440bb6293e4a4d219e567431f6263fa24a698e325.
+
+The build 69 source-only freeze contains 417 inputs, including 313 native
+inputs. It establishes exact source identity; it does not imply a complete
+native-suite run. Build 68's complete native result remains the prior baseline.
+No bundled-engine rebuild was needed for this adapter and fixture change.
+
+The seven current public cohorts passed 668 tests with zero failures or skips:
+409 browser/policy adapter, 123 frontend, 112 MLX, 3 persistent-instruction and
+21 identity/version tests. Frontend checking and the production build also
+passed. All 417 frozen inputs matched before and after; engine artifact bytes
+remained unchanged. `public-validation-build69-final1.json` has SHA-256
+966c890e6a25cbf48363bb2865d4a38c4d8d0468925e6077543e8e22f5634c10.
+Current affected-cohort results and the prior full native baseline are reported
+separately. Signed packaging, running identity, actual catalog discovery and
+completed provider responses require their own checks.

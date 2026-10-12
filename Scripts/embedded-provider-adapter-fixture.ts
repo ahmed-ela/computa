@@ -183,7 +183,7 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   let menu = new Node('DIV', { id: 'model-picker-menu', role: 'menu', 'aria-labelledby': 'model-picker-button', hidden: '' });
   const powerItem = new Node('DIV', { role: 'menuitem', 'aria-label': 'Power', tabindex: '-1' });
   const slider = new Node('SPAN', { role: 'slider', 'aria-valuemin': '0', 'aria-valuemax': '4', 'aria-valuenow': '1',
-    'aria-orientation': 'horizontal', tabindex: '-1', inert: '' });
+    'aria-orientation': 'horizontal', tabindex: '-1', 'aria-hidden': 'true' });
   powerItem.focus = () => { f.document.activeElement = powerItem; };
   powerItem.append(slider);
   const secondary = new Node('DIV', { role: 'menuitem', 'aria-label': 'Select model', tabindex: '-1' }, 'Select model');

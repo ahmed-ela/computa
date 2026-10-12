@@ -3080,10 +3080,46 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testChatGPTPowerReadsRenderedMetadataInsideItsInputBoundary() async throws {
+        let cases: [(String, String, Bool, Bool, Bool)] = [
+            ("self_inert", "thumb.inert = true;", true, false, false),
+            ("self_aria_hidden", "thumb.setAttribute('aria-hidden', 'true');", false, false, true),
+            ("wrapper_inert", "wrapper.inert = true;", false, true, false),
+            ("wrapper_aria_hidden", "wrapper.setAttribute('aria-hidden', 'true');", false, false, true)
+        ]
+        for (name, mutation, thumbInert, metadataInert, metadataHidden) in cases {
+            let choice = Self.fixtureChoice(.chatgpt)
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            _ = try await evaluate(view, """
+                const thumb = document.getElementById('fixture-chat-power-slider');
+                const wrapper = document.getElementById('fixture-chat-power-visual');
+                thumb.inert = false; thumb.removeAttribute('aria-hidden');
+                wrapper.inert = false; wrapper.removeAttribute('aria-hidden');
+                \(mutation)
+                return true;
+                """)
+            let ready = try await waitForState("ready", fixture.transport, token: token)
+            try assertChoiceEvidence(ready, choice: choice)
+            try await assertChatPowerControl(view, index: 1, events: 1, thumbInert: thumbInert,
+                                             metadataInertAncestor: metadataInert, metadataAriaHidden: metadataHidden)
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created", name)
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testChatGPTInertThumbDoesNotAuthorizeInertOrDisabledPowerControls() async throws {
         let cases: [(String, String, EmbeddedWebModelTransport.Failure)] = [
             ("inert_power", "power.inert = true;", .modelUnverified),
             ("inert_ancestor", "power.parentElement.inert = true;", .modelUnverified),
+            ("aria_hidden_power", "power.setAttribute('aria-hidden', 'true');", .modelUnverified),
+            ("aria_hidden_ancestor", "power.parentElement.setAttribute('aria-hidden', 'true');", .modelUnverified),
             ("disabled_power", "power.setAttribute('aria-disabled', 'true');", .modelUnavailable)
         ]
         for (name, mutation, expected) in cases {
@@ -3096,7 +3132,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await evaluate(view, "const power = document.getElementById('fixture-chat-power-item'); \(mutation) return true;")
             do {
                 _ = try await waitForState("ready", fixture.transport, token: token)
-                XCTFail("An inert metadata thumb cannot authorize \(name)")
+                XCTFail("Rendered metadata cannot authorize \(name)")
             } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expected, name) }
             try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
             let events = try await evaluate(view, "return {power: window.fixturePowerKeyEvents, thumb: window.fixturePowerThumbKeyEvents, wrongTarget: window.fixturePowerWrongTargetEvents};") as? [String: Int]
@@ -5268,19 +5304,26 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     private func assertChatPowerControl(_ view: WKWebView, index: Int, events: Int,
+                                        thumbInert: Bool = true, metadataInertAncestor: Bool = false,
+                                        metadataAriaHidden: Bool = true,
                                         file: StaticString = #filePath, line: UInt = #line) async throws {
         let observed = try await evaluate(view, """
             const thumb = document.getElementById('fixture-chat-power-slider');
             const power = document.getElementById('fixture-chat-power-item');
             return {thumbInert: thumb.inert, ancestorInert: thumb.parentElement.closest('[inert]') !== null,
+              metadataAriaHidden: thumb.closest('[aria-hidden="true"]') !== null,
+              powerInert: power.closest('[inert]') !== null, powerAriaHidden: power.closest('[aria-hidden="true"]') !== null,
               value: Number(thumb.getAttribute('aria-valuenow')), powerEvents: window.fixturePowerKeyEvents,
               thumbEvents: window.fixturePowerThumbKeyEvents, wrongTargetEvents: window.fixturePowerWrongTargetEvents,
-              powerIsLocalMenuItem: thumb.parentElement === power && power.getAttribute('role') === 'menuitem'
+              powerIsLocalMenuItem: thumb.closest('[role="menuitem"]') === power && power.getAttribute('role') === 'menuitem'
                 && power.getAttribute('aria-label') === 'Power'};
             """)
         let state = try XCTUnwrap(observed as? [String: Any], file: file, line: line)
-        XCTAssertEqual(state["thumbInert"] as? Bool, true, file: file, line: line)
-        XCTAssertEqual(state["ancestorInert"] as? Bool, false, file: file, line: line)
+        XCTAssertEqual(state["thumbInert"] as? Bool, thumbInert, file: file, line: line)
+        XCTAssertEqual(state["ancestorInert"] as? Bool, metadataInertAncestor, file: file, line: line)
+        XCTAssertEqual(state["metadataAriaHidden"] as? Bool, metadataAriaHidden, file: file, line: line)
+        XCTAssertEqual(state["powerInert"] as? Bool, false, file: file, line: line)
+        XCTAssertEqual(state["powerAriaHidden"] as? Bool, false, file: file, line: line)
         XCTAssertEqual(state["powerIsLocalMenuItem"] as? Bool, true, file: file, line: line)
         XCTAssertEqual(state["value"] as? Int, index, file: file, line: line)
         XCTAssertEqual(state["powerEvents"] as? Int, events, "Only the owned Power item may change the preset", file: file, line: line)
@@ -5528,7 +5571,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         \(provider == .chatgpt ? """
         <div id="fixture-chat-power-view">
           <div id="fixture-chat-power-item" role="menuitem" aria-label="Power" tabindex="-1">
-            <span id="fixture-chat-power-slider" role="slider" inert aria-valuemin="0" aria-valuemax="4" aria-valuenow="\(initiallySelectTarget ? 1 : 0)" tabindex="-1" aria-orientation="horizontal" style="display:block;width:120px;height:20px" \(disableTarget ? "aria-disabled=\"true\"" : "")></span>
+            <div id="fixture-chat-power-visual" aria-hidden="true">
+              <span id="fixture-chat-power-slider" role="slider" inert aria-valuemin="0" aria-valuemax="4" aria-valuenow="\(initiallySelectTarget ? 1 : 0)" tabindex="-1" aria-orientation="horizontal" style="display:block;width:120px;height:20px" \(disableTarget ? "aria-disabled=\"true\"" : "")></span>
+            </div>
           </div>
           <div id="fixture-select-family" role="menuitem" tabindex="-1">Select model</div>
         </div>

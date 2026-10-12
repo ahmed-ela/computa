@@ -1839,12 +1839,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const dismiss = picker.menu.onDispatch; let count = 0;
         picker.menu.onDispatch = (event: any) => { dismiss(event); if (event.key === 'Escape' && ++count === 3) callback(); };
       };
-      test('all five stable intents use the enabled Power item and inert SPAN metadata with concrete family proof', async () => {
+      test('all five stable intents use the enabled Power item and AX-hidden SPAN metadata with concrete family proof', async () => {
         for (const [index, label] of ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].entries()) {
           const { f, picker } = setup();
           expect(picker.slider.tagName).toBe('SPAN'); expect(picker.powerItem.values['aria-label']).toBe('Power');
           expect(picker.slider.values['aria-label']).toBeUndefined();
-          expect(picker.slider.values.inert).toBe('');
+          expect(picker.slider.values['aria-hidden']).toBe('true');
           const result = await f.run('selectModel', { modelChoice: choice(label) });
           expect(result).toMatchObject({ selected: true, modelEvidence: { selected: choice(label), source: selectionSource,
             verification: 'website_selection', chatSelection: { family: { key: 'GPT-6', label: 'GPT-6' },
@@ -1858,6 +1858,29 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(arrows(picker)).toHaveLength(Math.abs(index - 1));
         }
       });
+      test('self and wrapper accessibility suppression below Power preserve all five presets without input on metadata', async () => {
+        for (const [attribute, wrapper] of [['inert', false], ['aria-hidden', false], ['inert', true], ['aria-hidden', true]] as const) {
+          for (const [index, label] of ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].entries()) {
+            const { f, picker } = setup(); delete picker.slider.values['aria-hidden'];
+            if (wrapper) {
+              const container = new Node('DIV', { [attribute]: attribute === 'inert' ? '' : 'true' });
+              picker.powerItem.children = []; container.append(picker.slider); picker.powerItem.append(container);
+            } else picker.slider.values[attribute] = attribute === 'inert' ? '' : 'true';
+            picker.showPower();
+            const diagnostic = (await f.run('modelDiagnostic')).modelDiagnostic.chatPower;
+            expect(diagnostic).toMatchObject({ itemEnabled: true, metadataWithinPower: true,
+              metadataInertWithinPower: attribute === 'inert', metadataAriaHiddenWithinPower: attribute === 'aria-hidden',
+              powerInertAtOrAbove: false, powerAriaHiddenAtOrAbove: false, ordinal: 1 });
+            const result = await f.run('selectModel', { modelChoice: choice(label) });
+            expect(result).toMatchObject({ selected: true, modelEvidence: { selected: choice(label),
+              chatSelection: { family: { key: 'GPT-6', label: 'GPT-6' },
+                power: { key: choice(label).key.slice('chat/latest/'.length), label } } } });
+            expect(arrows(picker)).toHaveLength(Math.abs(index - 1)); expect(picker.slider.events).toHaveLength(0);
+            expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
+            expect(f.composer.textContent).toBe(''); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+          }
+        }
+      });
       test('power diagnostics report finite physical metadata without attribute values or page content', async () => {
         const { f, picker } = setup(); picker.showPower();
         picker.slider.values.inert = 'PRIVATE_INERT_VALUE'; picker.slider.values['data-account-id'] = 'PRIVATE_ACCOUNT_VALUE';
@@ -1865,29 +1888,55 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const result = await f.run('modelDiagnostic');
         expect(result.modelDiagnostic.chatPower).toEqual({ physicalItemCount: 1, physicalSliderCount: 1,
           itemVisible: true, itemEnabled: true, sliderPhysical: true, sliderInertSelf: true,
-          sliderInertAncestor: false, sliderAriaHidden: false, sliderDisabled: false, shapeRecognized: true, ordinal: 1 });
+          sliderInertAncestor: false, sliderAriaHidden: true, sliderDisabled: false, metadataWithinPower: true,
+          metadataInertWithinPower: true, metadataAriaHiddenWithinPower: true,
+          powerInertAtOrAbove: false, powerAriaHiddenAtOrAbove: false, shapeRecognized: true, ordinal: 1 });
         expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
         expect(JSON.stringify(result.modelDiagnostic).length).toBeLessThanOrEqual(8192); noSelection(f, picker);
         picker.slider.values['aria-valuenow'] = 'PRIVATE_ORDINAL_VALUE';
         expect((await f.run('modelDiagnostic')).modelDiagnostic.chatPower).toMatchObject({ shapeRecognized: false, ordinal: null });
         expect(JSON.stringify((await f.run('modelDiagnostic')).modelDiagnostic)).not.toContain('PRIVATE');
       });
-      test('self inert metadata never excuses inert ancestors or aria-hidden metadata', async () => {
+      test('metadata suppression never excuses inert or aria-hidden Power authority at or above the item', async () => {
         for (const [flag, change] of [
-          ['sliderInertAncestor', (p: any) => { p.powerItem.values.inert = ''; }],
-          ['sliderInertAncestor', (p: any) => {
-            const wrapper = new Node('DIV', { inert: '' }); p.powerItem.children = []; wrapper.append(p.slider); p.powerItem.append(wrapper);
+          ['powerInertAtOrAbove', (p: any) => { p.powerItem.values.inert = ''; }],
+          ['powerAriaHiddenAtOrAbove', (p: any) => { p.powerItem.values['aria-hidden'] = 'true'; }],
+          ['powerInertAtOrAbove', (p: any) => {
+            const wrapper = new Node('DIV', { inert: '' }); p.menu.children = []; wrapper.append(p.powerItem); p.menu.append(wrapper, p.secondary);
           }],
-          ['sliderAriaHidden', (p: any) => { p.slider.values['aria-hidden'] = 'true'; }],
-          ['sliderAriaHidden', (p: any) => { p.powerItem.values['aria-hidden'] = 'true'; }],
+          ['powerAriaHiddenAtOrAbove', (p: any) => {
+            const wrapper = new Node('DIV', { 'aria-hidden': 'true' }); p.menu.children = []; wrapper.append(p.powerItem); p.menu.append(wrapper, p.secondary);
+          }],
         ] as const) {
           const { f, picker } = setup(); picker.showPower(); change(picker);
+          const open = picker.trigger.onClick;
+          picker.trigger.onClick = () => {
+            open();
+            // React-style popup remounts must retain this negative fixture's
+            // blocked authority instead of removing its ancestor wrapper.
+            if (picker.menu.children.includes(picker.powerItem)) change(picker);
+          };
           const diagnostic = (await f.run('modelDiagnostic')).modelDiagnostic.chatPower;
-          expect(diagnostic.sliderInertSelf).toBe(true); expect(diagnostic[flag]).toBe(true);
+          expect(diagnostic.metadataAriaHiddenWithinPower).toBe(true); expect(diagnostic[flag]).toBe(true);
           expect(diagnostic.sliderPhysical).toBe(true); expect(diagnostic.ordinal).toBeNull();
           const result = await expire(f, f.run('selectModel', { modelChoice: choice(target) }));
           expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
           expect(result.modelChoices).toBeUndefined(); noSelection(f, picker); expect(picker.slider.events).toHaveLength(0);
+        }
+      });
+      test('foreign-scope or CSS-hidden metadata cannot supply power proof or input authority', async () => {
+        for (const change of [
+          (p: any) => { p.powerItem.children = []; p.secondary.append(p.slider); },
+          (p: any) => { p.slider.values.hidden = ''; },
+          (p: any) => {
+            const wrapper = new Node('DIV', { hidden: '' }); p.powerItem.children = []; wrapper.append(p.slider); p.powerItem.append(wrapper);
+          },
+        ]) {
+          const { f, picker } = setup(); picker.showPower(); change(picker);
+          expect((await f.run('modelDiagnostic')).modelDiagnostic.chatPower).toMatchObject({ metadataWithinPower: false, ordinal: null });
+          const result = await expire(f, f.run('selectModel', { modelChoice: choice(target) }));
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined(); noSelection(f, picker);
+          expect(picker.slider.events).toHaveLength(0);
         }
       });
       test('Power focus cannot grant input after metadata replacement or power drift', async () => {
@@ -1952,6 +2001,10 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           (p: any) => { p.slider.disabled = true; },
           (p: any) => { p.slider.values['aria-disabled'] = 'true'; },
           (p: any) => { p.powerItem.values['aria-disabled'] = 'true'; },
+          (p: any) => {
+            const wrapper = new Node('DIV', { 'aria-disabled': 'true', 'aria-hidden': 'true' });
+            p.powerItem.children = []; wrapper.append(p.slider); p.powerItem.append(wrapper);
+          },
         ]) {
           const { f, picker } = setup(); disable(picker);
           const result = await f.run(action, action === 'selectModel' ? { modelChoice: choice(target) }

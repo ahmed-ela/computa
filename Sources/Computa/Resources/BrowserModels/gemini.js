@@ -188,15 +188,23 @@ function websiteChatPickerState() {
     .filter(node => physical(node) && outside(node) && node.closest('[role="menu"]') === topMenu) : [];
   const powerItems = physicalPowerItems.filter(visible);
   const powerItem = powerItems.length === 1 ? powerItems[0] : null;
+  const physicalPowerItem = physicalPowerItems.length === 1 ? physicalPowerItems[0] : null;
   const physicalSliders = physicalPowerItems.length === 1 ? [...physicalPowerItems[0].querySelectorAll('[role="slider"]')].slice(0, 3)
     .filter(node => physical(node) && outside(node) && node.closest('[role="menu"]') === topMenu) : [];
   const sliders = powerItem ? physicalSliders : [];
   const physicalSlider = physicalSliders.length === 1 ? physicalSliders[0] : null;
   const slider = sliders.length === 1 ? sliders[0] : null;
-  // The measured thumb is inert metadata. Its enabled Power menuitem owns
-  // input; self inert grants no authority and never excuses an inert ancestor.
-  const metadataVisible = node => physical(node) && !node.parentElement?.closest('[inert]')
-    && !node.closest('[aria-hidden="true"]');
+  // Physically rendered metadata can be accessibility-hidden anywhere below
+  // Power. Only its visible, enabled menuitem owns input; suppression at that
+  // item or above remains forbidden by visible(), independently of the thumb.
+  const metadataScoped = node => physical(node) && !!powerItem && powerItem.contains(node)
+    && node.closest('[role="menuitem"][aria-label="Power"]') === powerItem
+    && node.closest('[role="menu"]') === topMenu;
+  const metadataSuppressedWithinPower = selector => {
+    const suppressed = physicalSlider?.closest(selector);
+    return !!suppressed && !!physicalPowerItem && suppressed !== physicalPowerItem
+      && physicalPowerItem.contains(suppressed);
+  };
   const metadataDisabled = node => !!node && (node.disabled || node.getAttribute('disabled') !== null
     || !!node.closest('[disabled], [aria-disabled="true"]'));
   const rawValue = physicalSlider?.getAttribute('aria-valuenow');
@@ -204,7 +212,7 @@ function websiteChatPickerState() {
     && physicalSlider.getAttribute('aria-valuemin') === '0' && physicalSlider.getAttribute('aria-valuemax') === '4'
     && physicalSlider.getAttribute('aria-orientation') === 'horizontal' && /^[0-4]$/.test(rawValue || '')
     ? Number(rawValue) : null;
-  const recognizedPowerIndex = metadataVisible(slider) ? shapePowerIndex : null;
+  const recognizedPowerIndex = metadataScoped(slider) ? shapePowerIndex : null;
   const powerUnavailable = recognizedPowerIndex !== null && (!enabled(powerItem) || metadataDisabled(slider));
   const powerIndex = powerUnavailable ? null : recognizedPowerIndex;
   const secondaries = topMenu ? [...topMenu.querySelectorAll('button, [role="menuitem"]')].slice(0, 128)
@@ -229,6 +237,11 @@ function websiteChatPickerState() {
       sliderInertSelf: !!physicalSlider && physicalSlider.getAttribute('inert') !== null,
       sliderInertAncestor: !!physicalSlider?.parentElement?.closest('[inert]'),
       sliderAriaHidden: !!physicalSlider?.closest('[aria-hidden="true"]'), sliderDisabled: metadataDisabled(physicalSlider),
+      metadataWithinPower: metadataScoped(physicalSlider),
+      metadataInertWithinPower: metadataSuppressedWithinPower('[inert]'),
+      metadataAriaHiddenWithinPower: metadataSuppressedWithinPower('[aria-hidden="true"]'),
+      powerInertAtOrAbove: !!physicalPowerItem?.closest('[inert]'),
+      powerAriaHiddenAtOrAbove: !!physicalPowerItem?.closest('[aria-hidden="true"]'),
       shapeRecognized: shapePowerIndex !== null, ordinal: recognizedPowerIndex },
     mode: familyRows.length ? 'family' : powerIndex !== null && secondary ? 'power' : topMenu ? 'unknown' : 'closed',
     duplicate, conflicting: familyRows.length > 0 && !!slider, indicatorInvalid, selectionAmbiguous: checked.length > 1,

@@ -476,3 +476,11 @@ and zero failures (2,385 executed, 615.177 seconds). Seven public cohorts passed
 666 tests with zero failures/skips. These remain source and controlled-runtime
 results; signed installed discovery and live model responses require fresh
 checks. No provider prompt was submitted during the build 67 diagnosis.
+
+Installed build 68 also failed prompt-free discovery. Its new finite diagnostics
+showed physically rendered slider metadata hidden from Accessibility below a
+visible, enabled Power item. The following candidate treats this scoped data
+separately from input authority, including self and wrapper suppression. Inert
+or hidden state at or above the Power item still blocks input. No live prompt
+was sent during either discovery failure; the prior network failure remains
+unresolved.
