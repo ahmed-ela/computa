@@ -347,7 +347,7 @@ mutations and accepts protected requests without relaxing ownership. Signed
 packaging, installed checks and a fresh live browser task remain required.
 
 
-## Current installed validation: 0.6.0 (65)
+## Installed validation: 0.6.0 (65)
 
 Build 65 passed 2,314 native tests and 644 public tests, with zero failures;
 49 opt-in native cases were explicitly skipped. Frontend checking and the
@@ -484,3 +484,36 @@ separately from input authority, including self and wrapper suppression. Inert
 or hidden state at or above the Power item still blocks input. No live prompt
 was sent during either discovery failure; the prior network failure remains
 unresolved.
+
+## Build 69 closed-power observations
+
+Signed installed build 69 passed its 98 bundle checks, then failed prompt-free
+Chat discovery after the first Power read and family navigation. Reopening the
+picker showed the remembered Family panel rather than active Power controls.
+This is separate from the older network failure, and no prompt was sent.
+
+On one owned empty ordinary Chat tab, every closed button label matched its
+actual ordinal: Instant 0, Medium 1, High 2, Extra High 3 and Pro 4. The open
+button instead read Thinking effort. Pro was restored, the owned tab and
+Inspector closed, Safari's temporary developer setting restored, and the human
+task preserved. These observations support combining the active checked family
+with fresh closed selected-power labels. They are selector observations, not
+completed provider responses; current-source and installed validation remain
+separate.
+
+## Build 70 closed-power verification
+
+The adapter now combines an active checked latest plain GPT family with matching
+fresh closed-power labels. It accepts a remembered Family panel for reads and
+uses only the visible enabled Power control for changes. Header drift remains
+latched across replacement and same-batch detachment; unrelated page updates
+cannot consume the header observer's bounds.
+
+Current source passed 206 affected native tests and 675 public tests, all with
+zero failures or skips. The native cohort uses real WebKit for all five presets
+through two fixture responses, owned cleanup, input boundaries and restored
+header drift. The public run includes 416 adapter/policy tests and passed
+frontend checking/building. Source inputs and built script identities held.
+Build 68 remains the prior complete native-suite baseline; no full native-70
+run is claimed. Signed installed discovery and fresh provider responses require
+their own receipts. Earlier failed runs remain in the validation ledger.

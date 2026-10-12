@@ -125,7 +125,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(result.modelChoices.some((item: any) => /thinking|Upgrade|Leaving|answers|reasoning|help/.test(item.label))).toBe(false);
       expect(picker.options.reduce((sum: number, option: any) => sum + option.clicks, 0)).toBe(0);
       expect(picker.trigger.clicks).toBeLessThanOrEqual(provider === 'chatgpt' ? 3 : 2);
-      if (picker.secondary) expect(picker.secondary.clicks).toBe(provider === 'chatgpt' ? 2 : 1);
+      if (picker.secondary) expect(picker.secondary.clicks).toBe(1);
       expect((await f.run('discoverModels')).modelChoices).toEqual(result.modelChoices);
       expect(picker.trigger.clicks).toBeLessThanOrEqual(provider === 'chatgpt' ? 3 : 2);
     });
@@ -142,7 +142,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       const before = picker.trigger.clicks;
       expect((await f.run('discoverModels')).modelChoices).toEqual(result.modelChoices);
       expect(picker.trigger.clicks).toBe(before);
-      expect((await advance(f, 'selectModel', { modelChoice: choice('Pro') })).modelEvidence.selected).toEqual(choice('Pro'));
+      const fresh = setup(); fresh.picker.selected('GPT-5.6 Sol');
+      expect((await advance(fresh.f, 'selectModel', { modelChoice: choice('Pro') })).modelEvidence.selected).toEqual(choice('Pro'));
       expect(sol.clicks).toBe(0); expect(newest.clicks).toBe(1);
     });
 
@@ -510,7 +511,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       };
       const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
       expect(result.error).toBe('temporary_mode_unverified'); expect(result.modelEvidence).toBeUndefined();
-      expect(opens).toBe(provider === 'chatgpt' ? 3 : 2); expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      expect(opens).toBe(provider === 'chatgpt' ? 1 : 2); expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
       expect(f.composer.textContent).toBe(''); if (f.send) expect(f.send.clicks).toBe(0);
     });
 
@@ -533,7 +534,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
       const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
       expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(choice(initial));
-      expect(opens).toBe(provider === 'chatgpt' ? 3 : 2); expect(background.values['aria-hidden']).toBeUndefined();
+      expect(opens).toBe(provider === 'chatgpt' ? 1 : 2); expect(background.values['aria-hidden']).toBeUndefined();
       expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
       if (f.send) expect(f.send.clicks).toBe(0);
     });
@@ -1560,7 +1561,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             const click = picker.trigger.onClick; let opens = 0;
             picker.trigger.onClick = () => {
               const opening = picker.menu.values.hidden !== undefined; click();
-              if (opening && ++opens === (scope === 'model_precheck' ? 1 : 4)) f.userBody.text += ' PRIVATE MODEL DRIFT';
+              if (opening && ++opens === (scope === 'model_precheck' ? 1 : 2)) f.userBody.text += ' PRIVATE MODEL DRIFT';
             };
           }
           const result = await f.run('inspect', { expectedModelChoice: choice(initial) });
@@ -1837,7 +1838,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       };
       const closed = (picker: any, callback: () => void) => {
         const dismiss = picker.menu.onDispatch; let count = 0;
-        picker.menu.onDispatch = (event: any) => { dismiss(event); if (event.key === 'Escape' && ++count === 3) callback(); };
+        picker.menu.onDispatch = (event: any) => { dismiss(event); if (event.key === 'Escape' && ++count === 1) callback(); };
       };
       test('all five stable intents use the enabled Power item and AX-hidden SPAN metadata with concrete family proof', async () => {
         for (const [index, label] of ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].entries()) {
@@ -1914,7 +1915,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             open();
             // React-style popup remounts must retain this negative fixture's
             // blocked authority instead of removing its ancestor wrapper.
-            if (picker.menu.children.includes(picker.powerItem)) change(picker);
+            if (picker.menu.contains(picker.powerItem)) change(picker);
           };
           const diagnostic = (await f.run('modelDiagnostic')).modelDiagnostic.chatPower;
           expect(diagnostic.metadataAriaHiddenWithinPower).toBe(true); expect(diagnostic[flag]).toBe(true);
@@ -1951,7 +1952,140 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           noSelection(f, picker); expect(picker.slider.events).toHaveLength(0);
         }
       });
-      test('fresh selection moves from Sol to the highest plain family once before one independent power step', async () => {
+      test('unknown closed headers cannot bootstrap input or model selection', async () => {
+        for (const label of ['', 'Thinking effort', 'GPT-6', 'GPT-6 Pro', 'High Work', 'PRIVATE_HEADER']) {
+          const { f, picker } = setup(); picker.primary.text = label;
+          const result = await f.run('selectModel', { modelChoice: choice(target) });
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+          expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');
+        }
+      });
+      test('closed header and active Power ordinal must agree before fresh input', async () => {
+        const { f, picker } = setup(); picker.slider.values['aria-valuenow'] = '0';
+        const result = await f.run('selectModel', { modelChoice: choice(target) });
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined(); noSelection(f, picker);
+      });
+      test('a final closed canonical power change cannot repair or qualify fresh selection', async () => {
+        const { f, picker } = setup(); const close = picker.menu.onDispatch;
+        picker.menu.onDispatch = (event: any) => { close(event); picker.primary.text = 'Medium'; };
+        const result = await f.run('selectModel', { modelChoice: choice(target) });
+        expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined();
+        expect(arrows(picker)).toHaveLength(1); expect(picker.trigger.clicks).toBe(1);
+        expect(f.composer.textContent).toBe(''); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+      });
+      test('canonical closed header change and restoration latches across callbacks and rejects responses', async () => {
+        const { f, picker } = setup(); expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+        picker.primary.text = 'High\n'; picker.primary.text = ' Medium\n';
+        for (const observer of f.observers) observer.callback([{ type: 'characterData',
+          target: { nodeType: 3, parentElement: picker.primary }, oldValue: ' High\n' }]);
+        expect(f.world.__computaChatPresetPin.invalidated).toBe(true);
+        const opens = picker.trigger.clicks;
+        for (const action of ['verifyModel', 'prepare', 'inspect', 'submit']) {
+          const result = await f.run(action, { expectedModelChoice: choice(initial), prompt: 'PRIVATE NEVER SEND' });
+          expect(result.error).toBe('model_mismatch'); expect(result.text).toBeUndefined(); expect(result.submitted).toBeUndefined();
+        }
+        expect(picker.trigger.clicks).toBe(opens); noSelection(f, picker);
+      });
+      test('header child replacement latches wrong canonical power while foreign text never grants authority', async () => {
+        for (const foreign of [true, false]) {
+          const { f, picker } = setup(); expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const wrong = new Node('SPAN', {}, 'High');
+          for (const observer of f.observers) observer.callback([{ type: 'childList',
+            target: foreign ? f.answer : picker.trigger, addedNodes: [wrong], removedNodes: [] }]);
+          expect(f.world.__computaChatPresetPin.invalidated === true).toBe(!foreign);
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          if (foreign) expect(result.modelEvidence.selected).toEqual(choice(initial)); else expect(result.error).toBe('model_mismatch');
+          noSelection(f, picker);
+        }
+      });
+      test('nested header drift restored and detached in one batch retains its historical lineage', async () => {
+        for (const drift of [false, true]) {
+          const { f, picker } = setup(); expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          const original = picker.primary, wrapper = new Node('SPAN'), inner = new Node('SPAN', {}, 'Medium');
+          const value: any = { nodeType: 3, parentElement: inner, textContent: 'Medium' };
+          Object.defineProperty(inner, 'childNodes', { get: () => value.parentElement === inner ? [value] : [] });
+          const records: any[] = [];
+          const remove = (parent: any, child: any) => {
+            parent.children = parent.children.filter((node: any) => node !== child); child.parentElement = null;
+            records.push({ type: 'childList', target: parent, addedNodes: [], removedNodes: [child] });
+          };
+          remove(picker.trigger, original); picker.trigger.append(wrapper);
+          records.push({ type: 'childList', target: picker.trigger, addedNodes: [wrapper], removedNodes: [] });
+          wrapper.append(inner); records.push({ type: 'childList', target: wrapper, addedNodes: [inner], removedNodes: [] });
+          if (drift) {
+            inner.text = value.textContent = 'High'; records.push({ type: 'characterData', target: value, oldValue: 'Medium' });
+            inner.text = value.textContent = 'Medium'; records.push({ type: 'characterData', target: value, oldValue: 'High' });
+          }
+          inner.text = ''; value.parentElement = null;
+          records.push({ type: 'childList', target: inner, addedNodes: [], removedNodes: [value] });
+          remove(wrapper, inner); remove(picker.trigger, wrapper); picker.trigger.append(original);
+          records.push({ type: 'childList', target: picker.trigger, addedNodes: [original], removedNodes: [] });
+          for (const observer of f.observers) observer.callback(records);
+          expect(f.world.__computaChatPresetPin.invalidated === true).toBe(drift);
+          const opens = picker.trigger.clicks;
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          if (drift) { expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined(); expect(picker.trigger.clicks).toBe(opens); }
+          else expect(result.modelEvidence.selected).toEqual(choice(initial));
+          noSelection(f, picker);
+        }
+        const outside = setup(), show = outside.picker.secondary.onClick;
+        outside.picker.secondary.onClick = () => {
+          show();
+          const churn = Array.from({ length: 513 }, () => ({ type: 'childList', target: outside.f.answer,
+            addedNodes: [new Node('SPAN', {}, 'High')], removedNodes: [] }));
+          // Only document-wide observers receive unrelated response churn.
+          for (const observer of outside.f.observers) if (observer.options?.attributes === true) observer.callback(churn);
+        };
+        expect((await outside.f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+        noSelection(outside.f, outside.picker);
+
+        for (const overflow of ['records', 'children', 'text', 'ancestry']) {
+          const { f, picker } = setup(); expect((await f.run('selectModel', { modelChoice: choice(initial) })).selected).toBe(true);
+          let records: any[];
+          if (overflow === 'records') records = Array.from({ length: 513 }, () => ({ type: 'childList',
+            target: picker.trigger, addedNodes: [], removedNodes: [] }));
+          else if (overflow === 'children') records = [{ type: 'childList', target: picker.trigger,
+            addedNodes: Array.from({ length: 129 }, () => new Node('SPAN')), removedNodes: [] }];
+          else if (overflow === 'text') records = [{ type: 'childList', target: picker.trigger,
+            addedNodes: [new Node('SPAN', {}, 'x'.repeat(129))], removedNodes: [] }];
+          else {
+            const root = new Node('SPAN'); let deepest = root;
+            for (let depth = 0; depth < 65; depth++) { const child = new Node('SPAN'); deepest.append(child); deepest = child; }
+            const value = { nodeType: 3, parentElement: deepest, textContent: 'Medium' };
+            records = [{ type: 'childList', target: picker.trigger, addedNodes: [root], removedNodes: [] },
+              { type: 'characterData', target: value, oldValue: 'Medium' },
+              { type: 'childList', target: picker.trigger, addedNodes: [], removedNodes: [root] }];
+          }
+          f.world.__computaChatPresetPin.headerObserver.callback(records);
+          expect(f.world.__computaChatPresetPin.invalidated).toBe(true);
+          const opens = picker.trigger.clicks;
+          const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
+          expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined(); expect(picker.trigger.clicks).toBe(opens);
+          noSelection(f, picker);
+        }
+      });
+      test('all five owned response choices survive disconnected remembered-Family reopening without Power input', async () => {
+        for (const label of ['Instant', 'Medium', 'High', 'Extra High', 'Pro']) {
+          const { f, picker } = setup(true); picker.selected(label);
+          const first = await f.run('inspect', { expectedModelChoice: choice(label) });
+          expect(first.modelEvidence.selected).toEqual(choice(label)); expect(first.answerComplete).toBe(true);
+          expect(picker.menu.isConnected).toBe(false); expect(picker.primary.text).toBe(label);
+          const secondaryClicks = picker.secondary.clicks;
+          f.appendUser('Second owned fixture user');
+          const article = new Node('ARTICLE', { 'data-turn': 'assistant' });
+          const answer = new Node('DIV', { 'data-markdown-text-style': 'assistant-message' }, 'Second exact fixture response');
+          const controls = new Node('DIV'); controls.append(new Node('BUTTON', { 'aria-label': 'Copy' })); article.append(answer, controls);
+          f.body.querySelector('main').append(article);
+          const second = await f.run('inspect', { expectedModelChoice: choice(label), expectedUserCounts: [1, 2],
+            allowAcknowledgedUserAppend: true });
+          expect(second.modelEvidence.selected).toEqual(choice(label)); expect(second.answerComplete).toBe(true);
+          expect(second.text).toBe('Second exact fixture response'); expect(picker.secondary.clicks).toBe(secondaryClicks);
+          expect(picker.menu.isConnected).toBe(false); expect(picker.primary.text).toBe(label);
+          expect(arrows(picker)).toHaveLength(0); expect(picker.slider.events).toHaveLength(0);
+        }
+      });
+      test('fresh selection steps power before selecting the highest plain family once', async () => {
         const { f, picker } = setup(false, { parentReturnAfterSelection: true }); picker.selected('GPT-5.6 Sol');
         const result = await f.run('selectModel', { modelChoice: choice(target) });
         expect(result.selected).toBe(true); expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
@@ -1979,7 +2113,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const { f, picker } = setup(false, { genericHeader: true, unmountMenus: true });
         const result = await f.run('prepare', { expectedModelChoice: choice(initial) });
         expect(result).toMatchObject({ prepared: true, modelEvidence: { selected: choice(initial), source: selectionSource } });
-        expect(picker.trigger.clicks).toBe(3); expect(picker.secondary.clicks).toBe(2); expect(picker.menu.isConnected).toBe(false); noSelection(f, picker);
+        expect(picker.trigger.clicks).toBe(1); expect(picker.secondary.clicks).toBe(1); expect(picker.menu.isConnected).toBe(false); noSelection(f, picker);
       });
       test('no concrete preset produces no implicit model-selection evidence', async () => {
         const { f, picker } = setup(); const result = await f.run('verifyModel');
@@ -2022,7 +2156,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           (p: any) => { p.familyOptions[0].children[0].text = 'GPT-6\nPRIVATE NOTICE'; },
         ]) {
           const { f, picker } = setup(); change(picker);
-          expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified'); noSelection(f, picker);
+          expect((await f.run('discoverModels')).error).toBe('model_unverified'); noSelection(f, picker);
         }
       });
       test('an unrelated physical menu never grants picker authority or receives Escape', async () => {
@@ -2031,7 +2165,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(picker.trigger.clicks).toBe(0); expect(foreign.events).toHaveLength(0); noSelection(f, picker);
       });
       test('a checked family must come from the exact associated popup, not a matching header', async () => {
-        const { f, picker } = setup(); picker.primary.text = 'GPT-999';
+        const { f, picker } = setup(); picker.primary.values['data-model-id'] = 'GPT-999';
         expect((await f.run('selectModel', { modelChoice: choice(initial) })).modelEvidence.chatSelection.family.key).toBe('GPT-6');
         picker.showFamily(); delete picker.trigger.values['aria-controls'];
         expect((await f.run('verifyModel', { expectedModelChoice: choice(initial) })).error).toBe('model_unverified'); noSelection(f, picker);
@@ -2043,7 +2177,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect((await f.run('verifyModel', { expectedModelChoice: choice(initial) })).modelEvidence.selected).toEqual(choice(initial));
           expect(picker.menu.isConnected).toBe(false);
         }
-        expect(picker.trigger.clicks).toBe(9); expect(picker.secondary.clicks).toBe(6); noSelection(f, picker);
+        expect(picker.trigger.clicks).toBe(3); expect(picker.secondary.clicks).toBe(1); noSelection(f, picker);
       });
       test('one-proof preparation and verification reject owner, route, frame, count and mode drift after the final await', async () => {
         for (const action of ['prepare', 'verifyModel']) for (const owned of [false, true])
@@ -2064,26 +2198,26 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           }
       });
       test('fresh selection rejects newly introduced owner, message, association or trigger drift before power input', async () => {
-        for (const change of [
+        for (const [caseIndex, change] of [
           (f: any) => { f.world.__computaModelOwner = 'foreign-owner'; }, (f: any) => { f.document.URL += '&foreign=1'; },
-          (f: any) => { f.appendUser('Unclaimed user'); }, (f: any) => { f.body.append(new Node('ARTICLE', { 'data-turn': 'assistant' }, 'Unclaimed answer')); },
+          (f: any) => { f.appendUser('Unclaimed user'); }, (f: any) => { const reply = new Node('ARTICLE', { 'data-turn': 'assistant' }); reply.append(new Node('DIV', { 'data-markdown-text-style': 'assistant-message' }, 'Unclaimed answer')); f.body.querySelector('main').append(reply); },
           (f: any) => { f.world.__computaModelFirstSubmitted = true; }, (f: any) => { f.world.__computaModelFirstProof = {}; },
           (f: any, p: any) => { p.trigger.connected = false; }, (f: any, p: any) => { p.trigger.disabled = true; },
           (f: any, p: any) => { delete p.trigger.values['aria-controls']; },
           (f: any) => { f.body.append(new Node('DIV', { role: 'menu', id: 'foreign' })); },
-        ]) {
-          const { f, picker } = setup(); const show = picker.secondary.onClick;
-          picker.secondary.onClick = () => { show(); change(f, picker); };
+        ].entries()) {
+          const { f, picker } = setup(); const show = picker.trigger.onClick;
+          picker.trigger.onClick = () => { show(); change(f, picker); };
           const result = await expire(f, f.run('selectModel', { modelChoice: choice(target) }));
-          expect(result.error).toBeDefined(); expect(result.selected).toBeUndefined(); expect(arrows(picker)).toHaveLength(0);
+          expect(result.error).toBeDefined(); expect(result.selected).toBeUndefined(); expect({ caseIndex, inputs: arrows(picker).length }).toEqual({ caseIndex, inputs: 0 });
           expect(f.composer.textContent).toBe('');
         }
       });
-      test('deferred owned popup closure is acknowledged before a fresh opening', async () => {
+      test('deferred final popup closure is acknowledged before publishing selection', async () => {
         const { f, picker } = setup(false, { unmountMenus: true }); const dismiss = picker.menu.onDispatch; let deferred = false, released = false;
         picker.menu.onDispatch = (event: any) => { if (!deferred) { deferred = true; return; } dismiss(event); };
         const pending = f.run('selectModel', { modelChoice: choice(target) }); await microtasks();
-        expect(picker.trigger.clicks).toBe(1); expect(arrows(picker)).toHaveLength(0);
+        expect(picker.trigger.clicks).toBe(1); expect(arrows(picker)).toHaveLength(1);
         picker.close(); released = true;
         for (const observer of f.observers) observer.callback([{ type: 'attributes', target: picker.menu, attributeName: 'hidden' }]);
         expect((await pending).selected).toBe(true); expect(released).toBe(true); expect(arrows(picker)).toHaveLength(1);
@@ -2091,7 +2225,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       test('every closed-popup proof requires a visible enabled trigger with acknowledged closed state', async () => {
         for (const action of ['verifyModel', 'selectModel']) for (const drift of ['hidden', 'disabled', 'open_state']) {
           const { f, picker } = setup(); const dismiss = picker.menu.onDispatch;
-          const targetClose = action === 'selectModel' ? 3 : 1;
+          const targetClose = 1;
           let closes = 0, reached!: () => void;
           const changed = new Promise<void>(resolve => { reached = resolve; });
           picker.menu.onDispatch = (event: any) => {
@@ -2115,7 +2249,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       test('delayed full trigger closure acknowledgment wakes the same proof without another Escape', async () => {
         for (const action of ['verifyModel', 'selectModel']) {
           const { f, picker } = setup(); const dismiss = picker.menu.onDispatch;
-          const targetClose = action === 'selectModel' ? 3 : 1;
+          const targetClose = 1;
           let closes = 0, reached!: () => void, finished = false;
           const changed = new Promise<void>(resolve => { reached = resolve; });
           picker.menu.onDispatch = (event: any) => {
@@ -2134,8 +2268,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             { type: 'attributes', target: picker.trigger, attributeName: 'data-state', oldValue: 'open' }]);
           const result = await pending;
           expect(result.modelEvidence.selected).toEqual(choice(action === 'selectModel' ? target : initial));
-          expect(picker.trigger.clicks).toBe(3);
-          expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(3);
+          expect(picker.trigger.clicks).toBe(1);
+          expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
           expect(arrows(picker)).toHaveLength(action === 'selectModel' ? 1 : 0);
           expect(f.composer.textContent).toBe(''); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
         }
@@ -2151,7 +2285,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           picker.menu.onDispatch = (event: any) => {
             if (event.key === 'Escape' && parentActive) {
               expect(f.world.__computaModelSelection.selectionCloseAttempted).toBe(true);
-              expect(picker.menu.children).toContain(picker.powerItem); parentEscapes++; parentActive = false;
+              expect(picker.menu.contains(picker.powerItem)).toBe(true); parentEscapes++; parentActive = false;
               dismiss(event);
               if (retained !== 'disabled_trigger') picker.trigger.disabled = false;
               if (retained !== 'hidden_temporary') delete f.temporary.values['aria-hidden'];
@@ -2209,7 +2343,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             expect(picker.trigger.clicks).toBe(3);
           } else {
             expect(result.selected).toBe(true); expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
-            expect(picker.trigger.clicks).toBe(5);
+            expect(picker.trigger.clicks).toBe(3);
           }
         }
       });
@@ -2253,21 +2387,21 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const replacement = await replacementRead;
         expect(replacement).toMatchObject({ modelEvidence: { selected: choice(initial), source: selectionSource,
           chatSelection: { family: { key: 'GPT-6', label: 'GPT-6' }, power: { key: 'medium', label: 'Medium' } } } });
-        expect(effects()).toEqual({ opens: 3, panels: 2, dismissals: 3, powers: 0 });
+        expect(effects()).toEqual({ opens: 2, panels: 1, dismissals: 2, powers: 0 });
         expect(picker.menu.values.hidden).toBe(''); noSelection(f, picker);
       });
       test('ignored Escape is claimed once and its deadline cannot reopen or select', async () => {
         const { f, picker } = setup(); picker.menu.onDispatch = () => {};
-        const result = await expire(f, f.run('selectModel', { modelChoice: choice(target) }));
+        const result = await expire(f, f.run('selectModel', { modelChoice: choice(initial) }));
         expect(result.error).toBe('model_unverified'); expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1);
-        for (let retry = 0; retry < 3; retry++) expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
+        for (let retry = 0; retry < 3; retry++) expect((await f.run('selectModel', { modelChoice: choice(initial) })).error).toBe('model_unverified');
         expect(picker.trigger.clicks).toBe(1); noSelection(f, picker);
       });
       test('lost Escape acknowledgment cannot dispatch another dismissal in finally or a later selection call', async () => {
         const { f, picker } = setup(); const dismiss = picker.menu.onDispatch;
         picker.menu.onDispatch = (event: any) => { dismiss(event); throw new Error('PRIVATE lost Escape'); };
-        expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
-        expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
+        expect((await f.run('selectModel', { modelChoice: choice(initial) })).error).toBe('model_unverified');
+        expect((await f.run('selectModel', { modelChoice: choice(initial) })).error).toBe('model_unverified');
         expect(picker.menu.events.filter((event: any) => event.key === 'Escape')).toHaveLength(1); noSelection(f, picker);
       });
       test('lost primary opening acknowledgment cannot replay its click', async () => {
@@ -2286,8 +2420,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       test('lost family-change acknowledgment never repeats the clicked newest row', async () => {
         const { f, picker } = setup(); picker.selected('GPT-5.6 Sol'); const node = picker.familyOptions[0], click = node.onClick;
         node.onClick = () => { click(); throw new Error('PRIVATE lost family'); };
-        expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
-        expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified');
+        expect((await f.run('selectModel', { modelChoice: choice(initial) })).error).toBe('model_unverified');
+        expect((await f.run('selectModel', { modelChoice: choice(initial) })).error).toBe('model_unverified');
         expect(node.clicks).toBe(1); expect(arrows(picker)).toHaveLength(0);
       });
       test('an ignored power step expires once without retry or accepting the old value', async () => {
@@ -2297,8 +2431,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       });
       test('an ignored newest-family click expires once without input replay', async () => {
         const { f, picker } = setup(); picker.selected('GPT-5.6 Sol'); const node = picker.familyOptions[0]; node.onClick = () => {};
-        expect((await expire(f, f.run('selectModel', { modelChoice: choice(target) }))).error).toBe('model_unverified');
-        expect((await f.run('selectModel', { modelChoice: choice(target) })).error).toBe('model_unverified'); expect(node.clicks).toBe(1); expect(arrows(picker)).toHaveLength(0);
+        expect((await expire(f, f.run('selectModel', { modelChoice: choice(initial) }))).error).toBe('model_unverified');
+        expect((await f.run('selectModel', { modelChoice: choice(initial) })).error).toBe('model_unverified'); expect(node.clicks).toBe(1); expect(arrows(picker)).toHaveLength(0);
       });
       test('a delayed sequential power acknowledgment wakes through a DOM event without another input', async () => {
         const { f, picker } = setup(); const step = picker.powerItem.onDispatch; let event: any;
@@ -2324,7 +2458,6 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         for (const change of [
           (f: any, p: any) => { p.trigger.connected = false; f.body.append(new Node('BUTTON', { ...p.trigger.values })); },
           (f: any, p: any) => { p.trigger.disabled = true; },
-          (f: any, p: any) => { delete p.trigger.values['aria-controls']; },
           (f: any) => { f.body.append(new Node('DIV', { role: 'menu', id: 'foreign' })); },
         ]) {
           const { f, picker } = setup(); const dismiss = picker.menu.onDispatch;
@@ -2332,6 +2465,18 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           const result = await expire(f, f.run('verifyModel', { expectedModelChoice: choice(initial) }));
           expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined(); noSelection(f, picker);
         }
+        // Association is mandatory while the physical popup is visible.
+        const visible = setup(), showFamily = visible.picker.secondary.onClick;
+        visible.picker.secondary.onClick = () => { showFamily(); delete visible.picker.trigger.values['aria-controls']; };
+        const rejected = await expire(visible.f, visible.f.run('verifyModel', { expectedModelChoice: choice(initial) }));
+        expect(rejected.error).toBe('model_unverified'); expect(rejected.modelEvidence).toBeUndefined(); noSelection(visible.f, visible.picker);
+
+        // Actual closed chrome clears its IDREF after physically removing the popup.
+        const closed = setup(), dismiss = closed.picker.menu.onDispatch;
+        closed.picker.menu.onDispatch = (event: any) => { dismiss(event); delete closed.picker.trigger.values['aria-controls']; };
+        const accepted = await closed.f.run('verifyModel', { expectedModelChoice: choice(initial) });
+        expect(accepted.modelEvidence.selected).toEqual(choice(initial));
+        expect(closed.picker.menu.isConnected).toBe(false); expect(closed.picker.trigger.clicks).toBe(1); noSelection(closed.f, closed.picker);
       });
       test('temporary mode hidden only by the owned popup must return before final admission', async () => {
         for (const drift of [false, true]) {

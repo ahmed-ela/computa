@@ -22,15 +22,28 @@ Gemini and Claude retain **Website default** alongside their observed families. 
 
 Chat power and family are separate evidence dimensions. Native inspection saw power values 1–5 while the associated DOM slider used 0–4. The slider had no direct label; its owning Power menuitem belonged to the exact popup referenced by the expanded Select ChatGPT model button. Family radios appeared in that same popup. The fixed adapter must establish these structural relationships rather than identify an arbitrary slider by position or a numeric value alone. Claude and Gemini effort settings remain outside their family-choice contract; see [Claude's settings](https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings) and [Gemini's model and feature availability](https://support.google.com/gemini/answer/16275805?hl=en).
 
-The physically rendered SPAN thumb supplies selection metadata. Its visible,
-enabled Power menuitem owns keyboard input. Accessibility suppression on the
-thumb or a wrapper strictly inside that exact item does not hide the metadata
-from discovery. Inert or hidden state on the Power item or above it, disabled
-metadata or controls, foreign or CSS-hidden metadata, duplicates and unsupported
-shapes remain rejected. After focusing the Power item, it checks
-the same item, thumb and ordinal again before one arrow event, then requires
-exactly one ordinal step. Bounded `chatPower` diagnostics distinguish metadata
-visibility from input authority without retaining page content.
+The closed **Select ChatGPT model** button shows the selected power: Instant,
+Medium, High, Extra High or Pro. Opening that picker changes its caption to
+**Thinking effort**, so the open caption cannot establish the power. A read
+starts with a fresh canonical closed label, observes the checked highest plain
+GPT family in the active associated popup, closes its owned popup, and requires
+the same canonical power on the same restored enabled button. The popup may
+remember the Family panel on reopening; a read does not require reopening an
+inactive Power panel. Closed buttons may remove `aria-controls`; that alone
+does not invalidate acknowledged closure.
+
+Changing power requires the visible enabled Power menuitem and its physically
+rendered SPAN thumb with ordinal 0–4. Accessibility suppression on the thumb or
+a wrapper strictly inside that exact item does not hide its metadata. Inert or
+hidden state at or above the Power item, disabled controls, foreign or CSS-
+hidden metadata, duplicates and unsupported shapes block input. After focusing
+the Power item, the adapter checks the same enabled trigger, item, thumb and
+ordinal before one arrow event, then requires exactly one ordinal step. Power
+changes precede family selection; an unexpected reset by the family choice
+rejects the operation instead of repairing it. Scoped inactive slider metadata
+can detect contradictory or changed selection but cannot authorize a read or
+input. Bounded `chatPower` and `chatHeader` diagnostics contain only structural
+flags, recognized ordinals and fixed panel modes.
 
 ## Stable local identity
 
@@ -60,7 +73,17 @@ ChatGPT's focus-only preparation and read-only model verification each use one f
 
 During initial preparation, an already claimed concrete model-selection phase can advance while its owned popup hides the composer or temporary-mode control. Native inspection still requires zero users, zero responses, no conversation URL, the same document generation and route, and a previously verified temporary session. This branch cannot claim selection from an arbitrary hidden editor or bypass initial composer/mode preparation. It admits ready state only after the selection operation returns exact proof and a fresh native model verification succeeds. Ready confirms that proof and current temporary mode; the later prepare operation independently checks the actual composer before inserting any prompt.
 
-After clicking a different ChatGPT model family, the adapter observes closure of its owned picker and performs a fresh selection read within one shared 1,800 ms deadline. A family choice can return to its associated parent popup. Under the unchanged fresh-session identity and empty-message guards, the adapter may dismiss that exact associated popup once with Escape. The closure attempt is claimed before dispatch; an unrelated or ambiguous menu, trigger drift, lost acknowledgment, or repeated settlement fails. A hidden checked family radio remains diagnostic data, not selected-model proof.
+Chat verification shares one 1,800 ms deadline for the active family proof and
+fresh closed-power acknowledgment. After clicking a different family, it must
+observe that family as checked and still highest among the enabled plain GPT
+choices. A family choice can return to its associated parent popup. Under the
+unchanged fresh-session identity and empty-message guards, the adapter may
+dismiss that exact associated popup once with Escape. The closure attempt is
+claimed before dispatch; an unrelated or ambiguous menu, trigger drift, lost
+acknowledgment, or repeated settlement fails. A hidden checked family radio
+cannot supply positive family proof. Canonical header changes are latched,
+including a change followed by restoration before the next read. The open
+Thinking effort caption is a presentation state, not a selected power.
 
 An observation that opens a picker acknowledges its closure only after the same enabled trigger is visible, its `aria-expanded` and `data-state` attributes report closed (or are absent), and every visible menu is gone. Removing the popup alone is insufficient: a framework may update its trigger later. This wait uses the existing observation deadline and does not add another opening click. Content-free read diagnostics identify the fixed call scope, validated adapter action and selection-attempt state, without logging page, prompt or response text.
 
@@ -159,7 +182,7 @@ The general family-selection parser accepts this bounded evidence schema:
 }
 ```
 
-For Gemini and Claude family choices, `source` is optional and, when present, must be `model_picker_label`, `checked_model_option`, or `selected_model_indicator`. Chat presets require `selected_model_indicator` together with the family/power evidence above. This source represents explicit checked website controls; focus or active styling alone cannot establish selection. The selected key and label must exactly match the requested concrete choice. All three sources remain selection-only proof, supported explicitly as `website_selection`.
+For Gemini and Claude family choices, `source` is optional and, when present, must be `model_picker_label`, `checked_model_option`, or `selected_model_indicator`. Chat presets require `selected_model_indicator` together with the family/power evidence above. This source combines a fresh canonical closed-power label with the active checked family control; focus or active styling alone cannot establish selection. The selected key and label must exactly match the requested concrete choice. All three sources remain selection-only proof, supported explicitly as `website_selection`.
 
 When the website exposes response attribution, evidence can instead contain:
 

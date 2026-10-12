@@ -118,11 +118,106 @@ function websiteChatResolvedSelectionEqual(left, right) {
     && left.family.key === right.family.key && left.family.label === right.family.label
     && left.power.key === right.power.key && left.power.label === right.power.label;
 }
+function websiteChatHeaderPower(trigger) {
+  const value = trigger?.innerText;
+  return typeof value === 'string' && value.length <= 128
+    ? websiteChatPowers.find(power => power.label === websiteModelNormalize(value)) || null : null;
+}
+function websiteChatHeaderMutationMismatch(records, trigger, expected) {
+  if (!trigger || !expected) return false;
+  const different = value => typeof value === 'string' && value.length <= 128
+    && websiteChatPowers.some(power => power.label === websiteModelNormalize(value) && power.key !== expected.key);
+  if (different(trigger.innerText)) return true;
+  // Current ancestry loses an attached header child that changed and detached
+  // before delivery. Undo structural records, then replay their exact lineage.
+  // The bounded reconstruction supplies only negative drift evidence.
+  if (records.length > 512) return true;
+  const parents = new Map(), children = new Map(), text = new Map(), afterText = new Map();
+  const parent = node => parents.has(node) ? parents.get(node) : node?.parentNode || node?.parentElement || null;
+  const bounded = value => typeof value === 'string' && value.length <= 128 ? value : null;
+  for (const record of records) if (record.type === 'childList') {
+    const nodes = [...(record.addedNodes || []), ...(record.removedNodes || [])];
+    if (nodes.length > 128) return true;
+    const candidates = children.get(record.target) || new Set();
+    for (const node of nodes) candidates.add(node);
+    children.set(record.target, candidates);
+  }
+  for (let index = records.length - 1; index >= 0; index--) {
+    const record = records[index];
+    if (record.type === 'childList') {
+      for (const node of record.addedNodes || []) if (parent(node) === record.target) parents.set(node, null);
+      for (const node of record.removedNodes || []) parents.set(node, record.target);
+    } else if (record.type === 'characterData') {
+      afterText.set(record, text.has(record.target) ? text.get(record.target) : bounded(record.target?.textContent));
+      text.set(record.target, bounded(record.oldValue));
+    }
+    if (parents.size + text.size > 4_096) return true;
+  }
+  const headerTarget = node => {
+    for (let depth = 0; node && depth < 64; depth++, node = parent(node)) {
+      if (node.nodeType === 1 && (node.getAttribute('aria-hidden') === 'true' || node.getAttribute('inert') !== null)) return false;
+      if (node === trigger) return true;
+    }
+    return node ? null : false;
+  };
+  const textAt = (node, budget = { nodes: 128, depth: 0 }) => {
+    if (!node || --budget.nodes < 0 || budget.depth > 32) return null;
+    if (node.nodeType === 3) return text.has(node) ? text.get(node) : bounded(node.textContent);
+    if (node.nodeType !== 1 || node.getAttribute('aria-hidden') === 'true' || node.getAttribute('inert') !== null) return '';
+    const current = [...(node.childNodes || [])];
+    if (current.length > 128) return null;
+    const candidates = new Set([...current, ...(children.get(node) || [])]);
+    if (candidates.size > 128) return null;
+    let value = '';
+    budget.depth++;
+    for (const child of candidates) if (parent(child) === node) {
+      const part = textAt(child, budget);
+      if (part === null || value.length + part.length > 128) { budget.depth--; return null; }
+      value += part;
+    }
+    budget.depth--;
+    return value;
+  };
+  for (const record of records) {
+    if (record.type === 'characterData') {
+      const owned = headerTarget(record.target);
+      if (owned === null || owned && (bounded(record.oldValue) === null || afterText.get(record) === null
+        || different(record.oldValue) || different(afterText.get(record)))) return true;
+      text.set(record.target, afterText.get(record));
+    } else if (record.type === 'childList') {
+      for (const node of record.removedNodes || []) {
+        const owned = headerTarget(node), value = owned ? textAt(node) : '';
+        if (owned === null || owned && (value === null || different(value))) return true;
+        if (parent(node) === record.target) parents.set(node, null);
+      }
+      for (const node of record.addedNodes || []) {
+        parents.set(node, record.target);
+        const owned = headerTarget(node), value = owned ? textAt(node) : '';
+        if (owned === null || owned && (value === null || different(value))) return true;
+      }
+    }
+  }
+  return false;
+}
+function websiteChatTrackPinnedHeader(pin, trigger) {
+  if (!pin || pin.owner !== globalThis.__computaModelOwner || pin.document !== document) return;
+  if (pin.headerTrigger && pin.headerTrigger !== trigger) { pin.invalidated = true; return; }
+  pin.headerTrigger = trigger;
+  if (pin.headerObserver) return;
+  pin.headerObserver = new MutationObserver(records => {
+    if (globalThis.__computaChatPresetPin !== pin || pin.owner !== globalThis.__computaModelOwner
+      || pin.document !== document || window !== window.top || location.origin !== 'https://chatgpt.com') return;
+    if (websiteChatHeaderMutationMismatch(records, trigger, pin.selection.power)) pin.invalidated = true;
+  });
+  pin.headerObserver.observe(trigger, { subtree: true, childList: true, characterData: true,
+    characterDataOldValue: true });
+}
 function websiteChatTrackPinnedControls(pin, state) {
   if (!pin || pin.owner !== globalThis.__computaModelOwner || pin.document !== document
     || !websiteChatFamilyValid(pin.selection?.family) || !websiteChatPowerValid(pin.selection?.power)) return;
   pin.controls = pin.controls || new WeakMap();
-  if (state.slider) pin.controls.set(state.slider, { attribute: 'aria-valuenow',
+  const slider = state.slider || state.semanticSlider;
+  if (slider) pin.controls.set(slider, { attribute: 'aria-valuenow',
     value: String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key)) });
   for (const control of state.familyControls) pin.controls.set(control.node,
     { attribute: 'aria-checked', value: String(control.choice?.key === pin.selection.family.key) });
@@ -225,7 +320,16 @@ function websiteChatPickerState() {
     || !['true', 'false'].includes(control.node.getAttribute('aria-checked'))
     || /^GPT-[0-9]+(?:\.[0-9]+)*$/.test(control.choice.label) && !websiteChatFamilyVersion(control.choice.label))
     || sliders.length > 1 || powerItems.length > 1 || !!slider && recognizedPowerIndex === null;
+  const headerPower = enabled(trigger) ? websiteChatHeaderPower(trigger) : null;
+  const closedPresentation = enabled(trigger) && !topMenu && allMenus.length === 0
+    && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+    && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+  const headerPresentation = websiteModelNormalize(trigger?.innerText) === 'Thinking effort';
+  const semanticSlider = shapePowerIndex !== null && physicalPowerItem
+    && physicalSlider.closest('[role="menuitem"][aria-label="Power"]') === physicalPowerItem
+    && physicalSlider.closest('[role="menu"]') === topMenu ? physicalSlider : null;
   return { provider: 'chatgpt', trigger, triggerCount: triggers.length, triggerCandidates, topMenu, secondary,
+    headerPower, headerPresentation, closedPresentation, semanticSlider,
     nestedMenu: familyRows.length ? topMenu : null, menus: topMenu ? [topMenu] : [], allMenus, physicalMenus,
     controls: familyControls.filter(control => control.choice), choices: [], selected: null, evidence: null,
     familyControls, offered: plain.map(choice => choice.label), newest,
@@ -259,9 +363,13 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     && (!mutable || freshGuard(false) === true);
   let trigger = null, selectionChanged = false, dismissedPopup = null, readStage = 'initial_observation';
   let primaryOpened = false, secondaryOpened = false, closeAttempted = false, observedProof = false;
+  let headerExpected = null, proofLocked = false, headerObserved = false;
   const tracked = new Map();
+  const headerObserver = new MutationObserver(records => {
+    if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) selectionChanged = true;
+  });
   const observer = new MutationObserver(records => {
-    if (mutable) return;
+    if (mutable && !proofLocked) return;
     if (records.some(record => {
       if (record.type !== 'attributes' || !tracked.has(record.target)
         || !['aria-valuenow', 'aria-checked', 'aria-selected'].includes(record.attributeName)) return false;
@@ -297,8 +405,21 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       || current.navigationAmbiguous || current.allMenus.some(menu => menu !== current.topMenu)) throw failure('model_unverified');
     if (current.powerUnavailable) throw failure(mutable ? 'model_unavailable' : 'model_unverified');
     trigger = trigger || current.trigger;
+    if (!headerObserved) {
+      headerObserved = true;
+      headerObserver.observe(trigger, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
+    }
+    if (headerExpected && current.headerPower && current.headerPower.key !== headerExpected.key) throw failure('model_mismatch');
+    if (headerExpected && current.closedPresentation && !current.headerPower && !current.headerPresentation)
+      throw failure('model_unverified');
+    if (pin) {
+      websiteChatTrackPinnedHeader(pin, trigger);
+      if (pin.invalidated === true) throw failure('model_mismatch');
+      if (current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
+        !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key))) throw failure('model_mismatch');
+    }
     websiteModelTrackReadUI(current);
-    for (const node of [current.slider, ...current.familyControls.map(control => control.node)].filter(Boolean))
+    for (const node of [current.slider || current.semanticSlider, ...current.familyControls.map(control => control.node)].filter(Boolean))
       if (!tracked.has(node)) tracked.set(node, { 'aria-valuenow': node.getAttribute('aria-valuenow'),
         'aria-checked': node.getAttribute('aria-checked'), 'aria-selected': node.getAttribute('aria-selected') });
     websiteChatTrackPinnedControls(pin, current);
@@ -313,7 +434,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   const pickerClosed = current => current.trigger === trigger && current.enabled(trigger)
     && !current.topMenu && current.allMenus.length === 0
     && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
-    && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+    && [null, 'closed'].includes(trigger.getAttribute('data-state')) && !!current.headerPower;
   const acknowledgeFamilyClose = current => {
     if (!mutable || attempt.familyClicked !== true || attempt.familyCloseAcknowledged === true) return;
     if (!pickerClosed(current) || current.trigger !== attempt.selectionTrigger || freshGuard() !== true)
@@ -344,9 +465,9 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     acknowledgeFamilyClose(after);
     readStage = 'close_acknowledged';
   };
-  const powerView = async () => {
+  const openPicker = async () => {
     let current = state();
-    if (current.mode === 'power') return current;
+    if (current.mode === 'power' || current.mode === 'family') return current;
     if (current.topMenu) { await close(); current = state(); }
     if (!current.enabled(trigger)) throw failure('model_unverified');
     const recoveryEligible = mutable && attempt.familyCloseAcknowledged === true
@@ -356,7 +477,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     trigger.click();
     const powerAcknowledged = () => {
       const observed = websiteChatPickerState();
-      return observed.mode === 'power' || observed.powerUnavailable;
+      return observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
     };
     if (recoveryEligible) {
       // Preserve the existing fresh post-family allowance within the original
@@ -383,14 +504,16 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   const familyView = async () => {
     let current = state();
     if (current.mode === 'family') return current;
-    current = await powerView();
-    if (!current.secondary) throw failure('model_unverified');
+    current = await openPicker();
+    if (current.mode === 'family') return current;
+    if (!current.secondary || !current.enabled(trigger)) throw failure('model_unverified');
     secondaryOpened = true; readStage = 'secondary_open_requested';
     current.secondary.click();
     return wait(() => websiteChatPickerState().mode === 'family');
   };
   const changePower = async target => {
-    let current = await powerView();
+    let current = await openPicker();
+    if (current.mode !== 'power') throw failure('model_unverified');
     while (current.powerIndex !== target) {
       if (!mutable || Date.now() >= until || typeof window.KeyboardEvent !== 'function') throw failure('model_mismatch');
       const before = current.powerIndex, direction = target > before ? 1 : -1;
@@ -399,7 +522,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       powerItem.focus?.({ preventScroll: true });
       current = state();
       if (current.powerItem !== powerItem || current.slider !== slider || current.powerIndex !== before
-        || !current.enabled(powerItem)) throw failure('model_unverified');
+        || !current.enabled(trigger) || !current.enabled(powerItem)) throw failure('model_unverified');
       attempt.powerEvents++;
       const key = direction === 1 ? 'ArrowRight' : 'ArrowLeft';
       powerItem.dispatchEvent(new window.KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
@@ -409,15 +532,26 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return current;
   };
   try {
-    let powerState = await powerView();
-    const desiredPower = expected ? websiteChatPowers.findIndex(power => 'chat/latest/' + power.key === expected.key) : powerState.powerIndex;
+    let initial = state();
+    if (initial.topMenu) { await close(); initial = state(); }
+    if (!initial.closedPresentation || !initial.headerPower) return failure('model_unverified');
+    const startingPower = websiteChatPowers.findIndex(power => power.key === initial.headerPower.key);
+    const desiredPower = expected ? websiteChatPowers.findIndex(power => 'chat/latest/' + power.key === expected.key) : startingPower;
     if (desiredPower < 0 || desiredPower > 4) return failure('model_unverified');
-    if (!mutable && powerState.powerIndex !== desiredPower) return failure('model_mismatch');
+    if (!mutable && startingPower !== desiredPower) return failure('model_mismatch');
+    if (!mutable) headerExpected = websiteChatPowers[desiredPower];
+    let powerState = await openPicker();
+    if (powerState.mode === 'power' && powerState.powerIndex !== startingPower) return failure(mutable ? 'model_unverified' : 'model_mismatch');
+    if (mutable) {
+      if (powerState.mode !== 'power') return failure('model_unverified');
+      powerState = await changePower(desiredPower);
+      headerExpected = websiteChatPowers[desiredPower];
+    }
     let familyState = await familyView();
     if (!familyState.newest) return failure('model_unverified');
     if (mutable && familyState.checkedFamily?.key !== familyState.newest.key) {
       const candidates = familyState.familyControls.filter(control => control.choice?.key === familyState.newest.key);
-      if (candidates.length !== 1 || attempt.familyClicked) return failure('model_unverified');
+      if (candidates.length !== 1 || attempt.familyClicked || !familyState.enabled(trigger)) return failure('model_unverified');
       attempt.familyClicked = true;
       attempt.selectionTrigger = trigger;
       candidates[0].node.click();
@@ -426,28 +560,25 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         return now.mode !== 'family' || now.checkedFamily?.key === now.newest?.key;
       });
       const afterSelection = state();
-      if (afterSelection.topMenu && afterSelection.mode !== 'family') await close();
-      else if (!afterSelection.topMenu) await close();
+      if (afterSelection.mode !== 'family') await close();
       familyState = await familyView();
+      if (familyState.semanticSlider && familyState.semanticSlider.getAttribute('aria-valuenow') !== String(desiredPower))
+        return failure('model_mismatch');
     }
     if (!familyState.checkedFamily || familyState.checkedFamily.key !== familyState.newest.key) return failure('model_mismatch');
-    const family = familyState.checkedFamily;
+    const family = familyState.checkedFamily, offered = familyState.offered;
+    proofLocked = true;
+    for (const node of [familyState.semanticSlider, ...familyState.familyControls.map(control => control.node)].filter(Boolean))
+      tracked.set(node, { 'aria-valuenow': node.getAttribute('aria-valuenow'),
+        'aria-checked': node.getAttribute('aria-checked'), 'aria-selected': node.getAttribute('aria-selected') });
+    const modelDiagnostic = websiteModelDiagnostic(familyState);
+    observedProof = true; readStage = 'family_proof_observed';
     await close();
-    powerState = mutable ? await changePower(desiredPower) : await powerView();
-    if (powerState.powerIndex !== desiredPower) return failure('model_mismatch');
-    // Re-read the checked family under the final power. Availability and the
-    // automatic maximum must not be borrowed from another power setting.
-    familyState = await familyView();
-    if (!familyState.checkedFamily || familyState.checkedFamily.key !== family.key || familyState.newest?.key !== family.key)
-      return failure('model_mismatch');
-    const offered = familyState.offered, modelDiagnostic = websiteModelDiagnostic(familyState);
-    await close();
-    powerState = await powerView();
-    if (powerState.powerIndex !== desiredPower) return failure('model_mismatch');
-    const evidence = websiteChatSelectionEvidence(family, powerState.power, offered, expected);
+    const final = state();
+    if (!final.closedPresentation || !final.headerPower) return failure('model_unverified');
+    if (final.headerPower.key !== websiteChatPowers[desiredPower].key) return failure('model_mismatch');
+    const evidence = websiteChatSelectionEvidence(family, final.headerPower, offered, expected);
     if (!evidence || expected && !websiteModelChoiceEqual(expected, evidence.selected)) return failure('model_mismatch');
-    observedProof = true; readStage = 'proof_observed';
-    await close();
     if (!owned() || selectionChanged || mutable && freshGuard() !== true) return failure('model_unverified');
     const pin = globalThis.__computaChatPresetPin;
     if (pin && (pin.owner !== owner || pin.document !== document || pin.invalidated === true
@@ -455,15 +586,16 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (expected && !pin) {
       if (!mutable) return failure('model_unverified');
       globalThis.__computaChatPresetPin = { owner, document, selection: evidence.chatSelection };
-      websiteChatTrackPinnedControls(globalThis.__computaChatPresetPin, { slider: powerState.slider,
-        familyControls: familyState.familyControls });
+      websiteChatTrackPinnedControls(globalThis.__computaChatPresetPin, familyState);
+      websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
     return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
   } finally {
     observer.disconnect?.();
-    if (owned()) {
+    headerObserver.disconnect?.();
+    if (owned() && (primaryOpened || secondaryOpened || closeAttempted)) {
       try { await close(); } catch { }
     }
   }
@@ -750,7 +882,13 @@ function websiteModelDiagnostic(state, readObservation = null) {
     diagnostic.readAttempt = readObservation.readAttempt;
     diagnostic.readContext = readObservation.readContext;
   }
-  if (state.provider === 'chatgpt') diagnostic.chatPower = state.powerDiagnostic;
+  if (state.provider === 'chatgpt') {
+    diagnostic.chatPower = state.powerDiagnostic;
+    diagnostic.chatHeader = { canonicalRecognized: !!state.headerPower, closed: state.closedPresentation,
+      openPresentationRecognized: state.headerPresentation,
+      ordinal: state.headerPower ? websiteChatPowers.findIndex(power => power.key === state.headerPower.key) : null,
+      menuMode: ['power', 'family', 'unknown', 'closed'].includes(state.mode) ? state.mode : 'unknown' };
+  }
   const responseRoots = state.provider === 'chatgpt' ? chatGPTMessageRoots('assistant')
     : [...document.querySelectorAll(state.provider === 'claude' ? '[data-testid="assistant-message"]' : 'model-response')];
   const root = responseRoots.filter(node => state.physical(node)).at(-1);

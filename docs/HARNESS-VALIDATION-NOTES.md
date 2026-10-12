@@ -5120,3 +5120,105 @@ remained unchanged. `public-validation-build69-final1.json` has SHA-256
 Current affected-cohort results and the prior full native baseline are reported
 separately. Signed packaging, running identity, actual catalog discovery and
 completed provider responses require their own checks.
+
+### Build 69 installed navigation measurements
+
+The focused/public-qualified source d764529a1a2a12d941b3c742f38d12360deee29d
+was signed and installed as 0.6.0 (69). Staged and installed bundle checks passed
+98 checks each. Its verified running main hash was
+fc29ec1ec899edb5ef2ed1f6617767c7b796d91269226a488a59eb639b366dbf.
+The signed probe explicitly did not claim a complete native-69 suite run.
+
+Prompt-free startup discovery advanced past the first Power read and family
+navigation, then failed after closing and reopening the picker. The new open
+panel showed GPT-6 checked, GPT-5.6 Sol and GPT-5.5 unchecked, with inactive
+Power controls. The adapter expected an active Power panel. The finite receipt
+`installed69-prompt-free-discovery-finite-log1.json` has SHA-256
+5535ddc062aa5e44f9b91f0fe391ed7f51fe3e4ed3ec3a59b0998b9c28254f1c.
+No catalog pass, prompt or response was claimed.
+
+Root controlled one owned empty ordinary Chat tab through native AX and the
+approved temporary public Safari Inspector. Chat was selected and Work off.
+The same dismissed popup was already disconnected when its closed attributes
+were acknowledged; a physical exit portal did not explain that controlled
+sequence. Focus restoration, a 300 ms diagnostic delay, pointer/mouse events,
+legacy key fields and keyup did not change the synthetic reopening result.
+These observations do not establish an isTrusted or foreground-policy cause.
+
+The visible closed trigger independently displayed the selected power. Every
+ordinal was measured with one-step arrows and closed-label reads: Instant 0,
+Medium 1, High 2, Extra High 3 and Pro 4. All matched. When open, the same
+trigger's visible text became Thinking effort. An initial experiment incorrectly
+expected the open header to show the selected label; its one step from 4 to 3
+was corrected to 4 before the successful closed-label experiment. Pro was
+restored at the end, with zero prompt insertions, Sends or provider inferences.
+
+The finite root receipt is
+`installed69-chat-picker-navigation-root-observation1.json`, SHA-256
+8f1bf57c8ff5f85a3b6d42581e79e800991bb0a86dac5a29f82814051a29549e.
+The owned tab and Inspector closed, the browser pane was hidden, Safari's
+developer setting returned to 0 with Develop absent, and the original Example
+Domain tab and paused Gemini task were preserved. No raw Inspector DOM or
+network payload was retained.
+
+The next candidate brackets an active family read with fresh closed selected-
+power labels. This avoids relying on inactive Power metadata or repeated panel
+reopening. Input still requires the current visible enabled Power control.
+Current fixtures and fresh signed installed qualification must prove that
+candidate; the earlier native network failure remains unresolved.
+
+### Build 70 pre-repair checks
+
+The first closed-header adapter cohort passed 221 tests. Its independent review
+then found a same-batch change-and-restoration gap when a newly attached header
+child also detached before observer delivery. That source was not packaged.
+The pre-repair public run passed 415 adapter and 674 total tests with unchanged
+frozen inputs; it remains historical evidence rather than qualification of the
+subsequent repair. Receipt `public-validation-build70-final3.json` has SHA-256
+68a32c394ddc666265a22d6953a15ed955a2a984c48caaf1855c6c421f996aef.
+
+The first affected native run executed 205 methods: 202 passed, three failed,
+zero skipped, in 265.106 seconds. The failures were returned-parent fixtures
+that hid the trigger on the initial Power opening, before the strengthened
+enabled-input guard could reach the intended family-selection scenario. The
+fixture setup is being corrected; the production input guard remains strict.
+All watched inputs and the built Chat resource held during this failed run.
+Its receipt `chat-closed-header70-native-focus1-receipt.json` has SHA-256
+c301f16a7b7ed0f11f72716a7bdfd7b438aaede0e9db535b6d7b98f28d88b0ca.
+A fresh repaired-source run is required before signed packaging.
+
+The repaired header monitor reconstructs the mutation-time parent chain before
+checking changed text, so a newly attached, restored and detached child cannot
+hide a prior canonical power change. Both temporary and pinned header monitors
+observe only the exact model button. The separate document observer tracks
+semantic control attributes; unrelated page churn cannot exhaust header bounds.
+Unknown owned-header reconstruction rejects rather than supplying proof.
+
+The final focused adapter run passed 222 tests with zero failures and 4,445
+assertions. Its regression includes nested detachment, unchanged replacement,
+unrelated 513-record page churn and bounded header reconstruction failures.
+Log `chat-closed-header70-lineage-focus2.log` has SHA-256
+fd0655660f543508ed742ece46bbd5eb8a7d39da6721f8686e7d3443be2643fc.
+
+The seven fresh public cohorts passed 675 tests with zero failures or skips:
+416 adapter/policy, 123 frontend, 112 MLX, 3 instruction and 21 identity/version
+tests. Frontend checking and production build passed; all 417 frozen inputs
+matched before and after. Receipt `public-validation-build70-final4.json` has
+SHA-256 69fbeb1f397d91a1e0cb0fca6f6006484d39b43ea20402f0f3102dbd0f0e9694.
+The source-only freeze does not claim a full native-70 suite run. The corrected
+affected native cohort, signing, installed catalog and live responses remain
+separate checks.
+
+The corrected affected native run then passed all 206 methods with zero failures
+or skips in 270.905 seconds: 133 embedded transports, 9 Chat selections, 17
+website states, 33 queue cases, 9 snapshots and 5 admission methods. All 13
+watched sources held before and after, and the built Chat script matched the
+frozen source. The real-WebKit nested-header regression passed both unchanged
+replacement and rejected restored drift; all five presets passed two fixture
+responses each. Returned-parent and initial-hidden-trigger cases passed with
+the corrected fixture transition and unchanged production input guard.
+Receipt `chat-closed-header70-native-focus2-receipt.json` has SHA-256
+c29f0468f2fb036b67eda05372e64f86b388c93d7cf03fb5ccb25c0b199ae5b5.
+This current affected run is separate from build 68's complete native baseline.
+Signed packaging, actual catalog discovery and completed live responses remain
+unqualified at this source checkpoint.

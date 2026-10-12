@@ -176,7 +176,7 @@ export function installObservedModelPicker(f: any, provider: 'chatgpt' | 'gemini
 function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   const labels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
   let powerIndex = 1, selectedFamily = 'GPT-6';
-  const primary = new Node('SPAN', {}, behavior.genericHeader ? '' : selectedFamily);
+  const primary = new Node('SPAN', {}, labels[powerIndex]);
   const trigger = new Node('BUTTON', { id: 'model-picker-button', 'aria-label': 'Select ChatGPT model',
     'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'model-picker-menu' });
   trigger.append(primary);
@@ -191,7 +191,7 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
     const node = new Node('DIV', { role: 'menuitemradio', 'aria-checked': label === selectedFamily ? 'true' : 'false' });
     node.append(new Node('DIV', {}, label === 'GPT-5.5' ? label + '\nLeaving on October 14' : label));
     node.onClick = () => {
-      selectedFamily = label; if (!behavior.genericHeader) primary.text = label;
+      selectedFamily = label;
       familyOptions.forEach(other => { other.values['aria-checked'] = other === node ? 'true' : 'false'; });
       if (behavior.parentReturnAfterSelection) showPower(); else close();
     };
@@ -209,22 +209,30 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
     });
     return node;
   });
-  const mount = (children: any[]) => {
+  const powerView = new Node('DIV'); powerView.append(powerItem, secondary);
+  const familyView = new Node('DIV', { hidden: '' }); familyView.append(...familyOptions);
+  let rememberedFamily = false;
+  const mount = (family: boolean) => {
     menu.children.forEach((node: any) => { node.parentElement = null; });
-    menu.children = []; menu.append(...children);
+    menu.children = []; menu.append(powerView, familyView);
+    familyView.children.forEach((node: any) => { node.parentElement = null; }); familyView.children = []; familyView.append(...familyOptions);
+    rememberedFamily = family;
+    if (family) { powerView.values.inert = ''; powerView.values['aria-hidden'] = 'true'; powerView.values['aria-disabled'] = 'true'; delete familyView.values.hidden; }
+    else { delete powerView.values.inert; delete powerView.values['aria-hidden']; delete powerView.values['aria-disabled']; familyView.values.hidden = ''; }
+    primary.text = 'Thinking effort';
     menu.connected = true; delete menu.values.hidden; menu.values['data-state'] = 'open';
     trigger.values['aria-expanded'] = 'true';
   };
-  const showPower = () => mount([powerItem, secondary]);
+  const showPower = () => mount(false);
   const close = () => {
     menu.values.hidden = ''; menu.values['data-state'] = 'closed'; trigger.values['aria-expanded'] = 'false';
-    if (behavior.unmountMenus) menu.connected = false;
+    menu.connected = false; primary.text = labels[powerIndex];
   };
   trigger.onClick = () => {
     if (menu.values.hidden === undefined) { if (!behavior.escapeOnlyClose) close(); }
-    else showPower();
+    else mount(rememberedFamily);
   };
-  secondary.onClick = () => mount(familyOptions);
+  secondary.onClick = () => mount(true);
   menu.onDispatch = (event: any) => { if (event.type === 'keydown' && event.key === 'Escape') close(); };
   powerItem.onDispatch = (event: any) => {
     if (event.type !== 'keydown' || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
@@ -233,11 +241,11 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
   };
   function selected(label: string) {
     const index = labels.indexOf(label === 'GPT-6 Pro' ? 'Pro' : label);
-    if (index >= 0) { powerIndex = index; slider.values['aria-valuenow'] = String(index); }
+    if (index >= 0) { powerIndex = index; slider.values['aria-valuenow'] = String(index);
+      if (menu.values.hidden !== undefined) primary.text = labels[index]; }
     else {
       selectedFamily = label;
       familyOptions.forEach(node => { node.values['aria-checked'] = node.children[0].text.split('\n')[0] === label ? 'true' : 'false'; });
-      if (!behavior.genericHeader) primary.text = label;
     }
   }
   f.body.append(trigger, menu);
@@ -262,8 +270,8 @@ function installObservedChatPowerPicker(f: any, Node: any, behavior: any) {
     };
   }
   return { trigger, get menu() { return menu; }, get nested() { return menu; }, secondary, primary,
-    options, familyOptions, slider, powerItem, selected, open: showPower, showPower,
-    showFamily: () => mount(familyOptions), close,
+    options, familyOptions, slider, powerItem, powerView, familyView, selected, open: showPower, showPower,
+    showFamily: () => mount(true), close,
     replaceMenu: (id: string) => {
       menu.connected = false; menu.values.hidden = '';
       menu = new Node('DIV', { id, role: 'menu', 'aria-labelledby': 'model-picker-button', hidden: '' });
