@@ -34,7 +34,7 @@ enum EmbeddedBrowserTools {
         return [
             specification(
                 "browser_tabs",
-                "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Continue next_cursor with cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
+                "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
                 ["cursor": string]),
             specification(
                 "browser_open",
@@ -50,7 +50,7 @@ enum EmbeddedBrowserTools {
                 ["url": string], ["url"]),
             specification(
                 "browser_read",
-                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for document text, all for structure; continue next_cursor with cursor. Use browser_click for observed enabled links (including follow_link=true) and controls, browser_fill for fields. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",
+                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for document text, all for structure. Continue with browser_read(cursor=next_cursor) alone, never computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls, browser_fill for fields. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",
                 [
                     "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]],
                     "query": string, "cursor": string,

@@ -142,7 +142,7 @@ enum WebModelResponseCodec {
             throw Failure.promptTooLarge(actualBytes: data.count, maximumBytes: maximumPromptBytes)
         }
         guard let originalJSON = String(data: data, encoding: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw Failure.invalidRequest
         }
         guard let model = object["model"] as? String,
@@ -163,9 +163,20 @@ enum WebModelResponseCodec {
             throw Failure.invalidRequest
         }
         let schemas: [[String: Any]]
+        var toolDefinitionsChanged = false
         if let raw = object["tools"], !(raw is NSNull) {
             guard let values = raw as? [[String: Any]] else { throw Failure.invalidTools }
-            schemas = values
+            var historical: [String: OfferedTool] = [:]
+            for value in values {
+                if value["type"] as? String == "namespace" {
+                    guard let namespace = value["name"] as? String, !namespace.isEmpty,
+                          let children = value["tools"] as? [[String: Any]] else { throw Failure.invalidTools }
+                    for child in children { try insertTool(child, namespace: namespace, into: &historical) }
+                } else { try insertTool(value, namespace: nil, into: &historical) }
+            }
+            schemas = ComputaModelToolCatalog.visibleToolDefinitions(values, modelID: model)
+            toolDefinitionsChanged = !NSArray(array: values).isEqual(to: schemas)
+            object["tools"] = schemas
         } else {
             schemas = []
         }
@@ -191,7 +202,10 @@ enum WebModelResponseCodec {
         }
         let currentUserInstructions = ComputaAgentInstructions.webCurrentUserContract(
             latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
-        let displayJSON = displayStableJSON(originalJSON)
+        let displaySource = toolDefinitionsChanged
+            ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+            : originalJSON
+        let displayJSON = displayStableJSON(displaySource)
         let prompt = """
         \(runtimeInstructions)
 

@@ -87,6 +87,7 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         }
         let traceURL = home.appendingPathComponent("app-server-wire.jsonl")
         var config = CodexAppServerRuntime.Configuration.localQwen
+        config.externalChromeToolsEnabled = true // Explicit compatibility coverage for the hidden implementation.
         config.codexHomePath = home.path
         config.workspacePath = workspace.path
         config.protocolTracePath = traceURL.path
@@ -1768,6 +1769,7 @@ final class BorrowedChromeRuntimeRoutingTests: XCTestCase {
         try FileManager.default.copyItem(at: fixture, to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         var config = CodexAppServerRuntime.Configuration.localQwen
+        config.externalChromeToolsEnabled = true // Explicit compatibility coverage for the hidden implementation.
         config.executable = .fixture(path: executable.path)
         config.codexHomePath = root.path
         config.computerInteractionPolicy = interactionPolicy

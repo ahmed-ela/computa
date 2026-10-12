@@ -170,6 +170,7 @@ final class BorrowedChromeQwenConcurrentLiveTests: XCTestCase {
             owner = connectionOwner
             let request = ChromeConnectionRequest(application: identity, userDataDirectory: profile, consent: consent)
             var configuration = CodexAppServerRuntime.Configuration.localQwen
+        configuration.externalChromeToolsEnabled = true // Explicit compatibility coverage for the hidden implementation.
             configuration.codexHomePath = home.path
             configuration.workspacePath = home.path
             configuration.model = model

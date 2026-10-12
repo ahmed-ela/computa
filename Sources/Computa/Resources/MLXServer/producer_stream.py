@@ -26,6 +26,7 @@ class ProducerCapture:
         self.finalized = False
         self.fault = None
         self.sampling = None
+        self.allowed_tool_names = None
 
     def fail(self, reason):
         self.fault = ProtocolError(reason)
@@ -100,7 +101,8 @@ class ProducerCapture:
             if not match or "<function=" in match[2] or "</function>" in match[2]:
                 self.fail("Malformed generated tool call")
             name, parameters = match.groups()
-            if registry.get(name) != "function":
+            if (registry.get(name) != "function" or self.allowed_tool_names is not None
+                    and name not in self.allowed_tool_names):
                 self.fail("Unadvertised generated tool call")
             seen, cursor = set(), 0
             for parameter in re.finditer(r"<parameter=([^\s<>]+)>(.*?)</parameter>", parameters, re.S):
@@ -133,8 +135,9 @@ class ProducerCapture:
 
 
 @contextmanager
-def producer_scope():
+def producer_scope(*, allowed_tool_names=None):
     capture = ProducerCapture()
+    capture.allowed_tool_names = allowed_tool_names
     token = _current.set(capture)
     try:
         yield capture
@@ -152,6 +155,7 @@ def producer_scope():
             capture.thinking.delegate.buffer = ""
         capture.thinking = capture.tools = None
         capture.sampling = None
+        capture.allowed_tool_names = None
         if capture.fault is not None:
             capture.fault.__traceback__ = None
             capture.fault = None

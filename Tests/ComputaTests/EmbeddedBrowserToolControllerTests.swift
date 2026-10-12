@@ -4,6 +4,15 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserToolControllerTests: XCTestCase {
+    func testBuiltInContinuationSchemasNameTheirOwnCursorTools() throws {
+        for name in ["browser_read", "browser_tabs"] {
+            let spec = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            let description = try XCTUnwrap(spec["description"] as? String)
+            XCTAssertTrue(description.contains(name + "(cursor=next_cursor)"))
+            XCTAssertTrue(description.contains("computer_v2_continue"))
+            XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": UUID().uuidString]))
+        }
+    }
     private func call(_ controller: EmbeddedBrowserToolController, _ tool: String, _ arguments: [String: Any] = [:], key: String = "turn-a", scope: ComputerTaskScope? = nil) async throws -> String {
         try await controller.execute(taskKey: key, tool: tool, arguments: JSONSerialization.data(withJSONObject: arguments), scope: scope)
     }

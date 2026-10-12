@@ -17,6 +17,48 @@ final class APIModelResponseCodecTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: ["id": "remote1", "model": model, "choices": [["index": 0, "message": message, "finish_reason": finish]], "usage": ["prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20, "completion_tokens_details": ["reasoning_tokens": 3]]])
         return try APIModelResponseCodec.decode(.init(body: data, contentType: "application/json"), request: request ?? self.request())
     }
+    func testResumedChromeHistoryIsPreservedButNotOfferedOrCallable() throws {
+        let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        let builtin: [String: Any] = ["type": "function", "name": "browser_tabs", "parameters": ["type": "object", "properties": ["cursor": ["type": "string"]], "additionalProperties": false]]
+        let history: [[String: Any]] = [
+            ["type": "message", "role": "user", "content": "Previous synthetic browser request"],
+            ["type": "function_call", "call_id": "historical_chrome", "name": "computer_v2_tabs", "namespace": "functions", "arguments": "{}"],
+            ["type": "function_call_output", "call_id": "historical_chrome", "output": "Chrome was unavailable; no read dispatched"],
+            ["type": "function_call", "call_id": "historical_builtin", "name": "browser_tabs", "namespace": "functions", "arguments": "{}"],
+            ["type": "function_call_output", "call_id": "historical_builtin", "output": "Synthetic built-in inventory"],
+            ["type": "message", "role": "user", "content": "Use the built-in browser now"],
+        ]
+        let prepared = try request(["tools": [["type": "namespace", "name": "functions", "tools": [chrome, builtin]]], "input": history])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+        let active = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        XCTAssertEqual(active.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }.count, 1)
+        XCTAssertEqual(prepared.tools.map(\.name), ["browser_tabs"])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let old = try XCTUnwrap(messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
+        let oldName = try XCTUnwrap((old["function"] as? [String: Any])?["name"] as? String)
+        XCTAssertEqual(oldName, "computa_tool_0")
+        XCTAssertEqual(prepared.tools.first?.wireName, "computa_tool_1")
+        let builtinHistory = messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.flatMap { $0 }
+            .first { $0["id"] as? String == "historical_builtin" }
+        XCTAssertEqual((builtinHistory?["function"] as? [String: Any])?["name"] as? String, "computa_tool_1")
+        XCTAssertTrue(messages.contains { $0["content"] as? String == "Chrome was unavailable; no read dispatched" })
+        XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "new_chrome", "type": "function", "function": ["name": oldName, "arguments": "{}"]]]], finish: "tool_calls", request: prepared))
+        XCTAssertThrowsError(try request(["tools": [chrome], "tool_choice": ["type": "function", "name": "computer_v2_tabs"]]))
+    }
+
+    func testResponsesProviderAlsoHidesRetainedChromeDefinitionsWithoutRewritingHistory() throws {
+        let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+                                      wireAPI: .responses, models: provider.models)
+        let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        let builtin: [String: Any] = ["type": "function", "name": "browser_read", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        let history: [[String: Any]] = [["type": "function_call", "call_id": "historical", "name": "computer_v2_tabs", "arguments": "{}"], ["type": "function_call_output", "call_id": "historical", "output": "not connected"]]
+        let prepared = try request(["tools": [chrome, builtin], "input": history], provider: p)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+        XCTAssertEqual((body["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }, ["browser_read"])
+        XCTAssertEqual((body["input"] as? [[String: Any]])?.first?["name"] as? String, "computer_v2_tabs")
+        XCTAssertEqual(prepared.tools.map(\.name), ["browser_read"])
+    }
+
     func testStructuredRolesNamespacesAndCustomToolsRoundTripWithoutWebsiteEnvelope() throws {
         let prepared = try request(["input": [["role": "developer", "content": [["type": "input_text", "text": "Developer instructions"]]], ["role": "user", "content": "Use tools"]]])
         let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])

@@ -3,9 +3,29 @@ import XCTest
 @testable import Computa
 
 final class ComputaAgentInstructionsTests: XCTestCase {
+    func testDefaultGuidanceKeepsBuiltInBrowserCursorsOutOfNativeComputerTools() {
+        for references in [true, false] {
+            let instructions = ComputaAgentInstructions.developerInstructions(referenceTools: references, embeddedBrowserTools: true)
+            for tool in ["computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace", "computer_v2_follow_link", "computer_v2_follow("] {
+                XCTAssertFalse(instructions.contains(tool), tool)
+            }
+            XCTAssertFalse(instructions.contains("Chrome"))
+            XCTAssertTrue(instructions.contains("browser_read(cursor=next_cursor)"))
+            XCTAssertTrue(instructions.contains("browser_tabs(cursor=next_cursor)"))
+            XCTAssertTrue(instructions.contains("computer_v2_open"))
+            XCTAssertTrue(instructions.contains("exec_command and write_stdin"))
+        }
+        let contract = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [
+            "functions.browser_read": "browser_read", "functions.browser_tabs": "browser_tabs", "computer_v2_continue": "computer_v2_continue",
+        ])
+        XCTAssertFalse(contract.contains("Chrome"))
+        XCTAssertTrue(contract.contains("browser_read(cursor=next_cursor)"))
+        XCTAssertTrue(contract.contains("browser_tabs(cursor=next_cursor)"))
+        XCTAssertTrue(ComputaAgentInstructions.developerInstructions(externalChromeTools: true).contains("computer_v2_tabs"))
+    }
     func testAppOwnedInstructionsPreservePermissionsAndEvidenceWithoutForeignPolicy() {
         let instructions = ComputaAgentInstructions.developerInstructions()
-        XCTAssertTrue(instructions.hasPrefix(ComputaAgentInstructions.scope))
+        XCTAssertTrue(instructions.hasPrefix(ComputaAgentInstructions.nativeScope))
         XCTAssertTrue(instructions.contains("general-purpose local assistant"))
         XCTAssertTrue(instructions.contains("prior assistant refusal"))
         XCTAssertTrue(instructions.contains("Respect native permissions and access controls"))
@@ -24,7 +44,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     }
 
     func testInitialBrowserOverviewDoesNotReplaceContentEvidenceOrNativeReads() {
-        let instructions = ComputaAgentInstructions.developerInstructions()
+        let instructions = ComputaAgentInstructions.developerInstructions(externalChromeTools: true)
         XCTAssertTrue(instructions.contains("computer_v2_read_page for a fresh read"))
         XCTAssertTrue(instructions.contains("overview locates controls"))
         XCTAssertTrue(instructions.contains("content reads the body"))
@@ -36,7 +56,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     }
 
     func testPaginationRequiresAnObservedResultPlanWithoutFutureTextGuessing() {
-        let instructions = ComputaAgentInstructions.developerInstructions()
+        let instructions = ComputaAgentInstructions.developerInstructions(externalChromeTools: true)
         XCTAssertTrue(instructions.contains("A Chrome computer_v2_press"))
         XCTAssertTrue(instructions.contains("postcondition before input"))
         XCTAssertTrue(instructions.contains("region_changed"))
@@ -59,13 +79,13 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(instructions.contains("never construct or reuse stale references"))
         XCTAssertTrue(instructions.contains("do not ask whether to search or navigate"))
         XCTAssertTrue(instructions.contains("pending or the host budget is exhausted"))
-        let computerInstructions = ComputaAgentInstructions.scope + "\n\n" + ComputaAgentInstructions.capabilityEvidence
+        let computerInstructions = ComputaAgentInstructions.nativeScope + "\n\n" + ComputaAgentInstructions.capabilityEvidence
         XCTAssertLessThan(computerInstructions.utf8.count, 4_600, "The reference interface retains its existing instruction budget.")
         XCTAssertLessThan(ComputaAgentInstructions.commandLine.utf8.count, 1_200, "CLI guidance has a separate bounded instruction budget.")
     }
 
     func testLegacyInstructionsRemainAvailableForExistingToolDefinitions() {
-        let legacy = ComputaAgentInstructions.developerInstructions(referenceTools: false)
+        let legacy = ComputaAgentInstructions.developerInstructions(referenceTools: false, externalChromeTools: true)
         XCTAssertEqual(legacy, ComputaAgentInstructions.legacyScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
         XCTAssertTrue(legacy.contains("computer_v2_follow_link with only"))
         XCTAssertTrue(legacy.contains(ComputerV2ToolContract.regionChangedPressArgumentShape))
@@ -75,7 +95,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testInstructionsAreSelfContainedAndBasePromptHasNoForeignPolicy() {
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(),
-                       ComputaAgentInstructions.scope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
+                       ComputaAgentInstructions.nativeScope + "\n\n" + ComputaAgentInstructions.ordinaryRequests + "\n\n" + ComputaAgentInstructions.capabilityEvidence + "\n\n" + ComputaAgentInstructions.finalResponse + "\n\n" + ComputaAgentInstructions.taskCompletion + "\n\n" + ComputaAgentInstructions.codeEditing + "\n\n" + ComputaAgentInstructions.commandLine)
         let base = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
         XCTAssertFalse(base.localizedCaseInsensitiveContains("StudyLock"))
         XCTAssertTrue(base.contains("Respect approvals and access controls"))
@@ -110,7 +130,11 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("Historical session IDs"))
         }
         XCTAssertTrue(ComputaAgentInstructions.scope.contains("CLI commands require no app binding"))
-        XCTAssertTrue(CodexAppServerRuntime.Configuration.localQwen.baseInstructions.contains("For computer UI tasks, bind each turn"))
+        let base = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
+        XCTAssertTrue(base.contains("Native computer UI tasks bind each turn with computer_v2_open"))
+        XCTAssertTrue(base.contains("CLI commands need no app binding"))
+        XCTAssertTrue(base.contains("Webpages use the offered browser_* tools in Computa's built-in browser"))
+        XCTAssertFalse(base.contains("computer_v2_tabs"))
     }
 
     func testWebContractProjectsOnlyCurrentQualifiedToolIdentities() {
@@ -150,7 +174,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("browser_click activates enabled controls and links, including\nfollow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("unchanged reads"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 1_100)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 1_400)
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
     }
@@ -163,7 +187,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(contract.contains("Computa resolves requested URLs on the user's computer"))
         XCTAssertTrue(contract.contains("including localhost and loopback addresses"))
         XCTAssertTrue(contract.contains("The website need not connect to those URLs"))
-        XCTAssertTrue(contract.contains("Chrome connection is not required for these built-in operations"))
+        XCTAssertTrue(contract.contains("These built-in operations need no external-browser connection"))
         XCTAssertTrue(contract.contains("applies local permissions and\napprovals"))
         XCTAssertTrue(contract.contains("tool_choice"))
         let absent = ComputaAgentInstructions.webInferenceContract(offeredFunctions: ["functions.exec_command": "exec_command"])

@@ -37,6 +37,7 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 XCTAssertEqual(thread["approvalPolicy"] as? String, accessMode == .fullAccess ? "never" : "on-request")
                 XCTAssertEqual(thread["developerInstructions"] as? String, ComputaAgentInstructions.developerInstructions())
                 let base = try XCTUnwrap(thread["baseInstructions"] as? String)
+                XCTAssertFalse(base.contains("Chrome"))
                 if let baselineBaseInstructions { XCTAssertEqual(base, baselineBaseInstructions) }
                 else { baselineBaseInstructions = base }
                 let tools = try XCTUnwrap(thread["dynamicTools"] as? [[String: Any]])
@@ -44,6 +45,7 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 XCTAssertTrue(names.contains("computer_v2_read_page"))
                 XCTAssertTrue(names.contains("computer_v2_press"))
                 XCTAssertFalse(names.contains("computer_v2_capture"))
+                XCTAssertTrue(names.isDisjoint(with: ComputaModelToolCatalog.externalChromeToolNames))
                 let toolBytes = try JSONSerialization.data(withJSONObject: tools, options: [.sortedKeys])
                 if let baselineTools { XCTAssertEqual(toolBytes, baselineTools) }
                 else { baselineTools = toolBytes }

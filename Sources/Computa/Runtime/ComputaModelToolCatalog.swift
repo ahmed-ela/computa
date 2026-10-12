@@ -9,6 +9,63 @@ import Foundation
 /// inherits the already-admitted browser/<provider> freeform patch metadata even
 /// when discovered after launch. No cached catalog reload or restart is assumed.
 enum ComputaModelToolCatalog {
+    // Temporary product policy. Keep the Chrome implementation for a later
+    // opt-in, but expose only the app-owned browser route to models now.
+    static let enableExternalChromeTools = false
+    static let externalChromeToolNames: Set<String> = [
+        "computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace",
+        "computer_v2_follow_link", "computer_v2_follow",
+    ]
+    static let externalChromeUnavailableMessage = "External Chrome tools are hidden in this build. Use browser_tabs for Computa's built-in browser, browser_read(cursor=next_cursor) for its page continuation, and browser_tabs(cursor=next_cursor) for its tab inventory. No Chrome read, connection, or input was dispatched."
+
+    /// Also applies to schemas retained by old native threads. History stays
+    /// unchanged; only the current model's callable tool definitions change.
+    static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String) -> [[String: Any]] {
+        guard !enableExternalChromeTools else { return definitions }
+        let overrides = nativeToolDescriptions(modelID: modelID)
+        func visible(_ definition: [String: Any]) -> [String: Any]? {
+            var value = definition
+            if value["type"] as? String == "namespace", let children = value["tools"] as? [[String: Any]] {
+                let tools = children.compactMap(visible)
+                guard !tools.isEmpty else { return nil }
+                value["tools"] = tools
+                return value
+            }
+            guard let name = value["name"] as? String else { return value }
+            guard !externalChromeToolNames.contains(name) else { return nil }
+            if let description = overrides[name] { value["description"] = description }
+            if name == "computer_v2_open" {
+                for key in ["parameters", "inputSchema"] {
+                    guard var schema = value[key] as? [String: Any], var properties = schema["properties"] as? [String: Any] else { continue }
+                    properties.removeValue(forKey: "url"); properties.removeValue(forKey: "browser_mode")
+                    schema["properties"] = properties
+                    if let required = schema["required"] as? [String] {
+                        schema["required"] = required.filter { !["url", "browser_mode"].contains($0) }
+                    }
+                    value[key] = schema
+                }
+            }
+            return value
+        }
+        return definitions.compactMap(visible)
+    }
+
+    static func nativeToolDescriptions(modelID: String) -> [String: String] {
+        let specs = ComputerV2ToolContract.specs(for: modelID, externalChromeTools: false)
+            + ComputerV2ToolContract.referenceSpecs(for: modelID, externalChromeTools: false)
+        return specs.reduce(into: [:]) { result, spec in
+            if let name = spec["name"] as? String, let description = spec["description"] as? String { result[name] = description }
+        }
+    }
+
+    static func localToolVisibilityEnvironment(modelID: String) throws -> [String: String] {
+        let descriptions = nativeToolDescriptions(modelID: modelID).sorted { $0.key < $1.key }
+            .map { ["name": $0.key, "description": $0.value] }
+        let data = try JSONSerialization.data(withJSONObject: descriptions, options: [.sortedKeys])
+        return ["COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": enableExternalChromeTools ? "1" : "0",
+                "COMPUTA_NATIVE_TOOL_OVERRIDES": String(decoding: data, as: UTF8.self)]
+    }
+
     static func catalogData(additionalModelID: String? = nil) throws -> Data {
         var ids = Set(LocalModelCatalog.options.map(\.id))
         // The engine matches slug prefixes. Future configured API models use

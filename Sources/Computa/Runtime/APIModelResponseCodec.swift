@@ -59,7 +59,7 @@ enum APIModelResponseCodec {
 
     static func prepare(_ data: Data, selection: APIProviderCatalog.Selection, threadID: String,
                         capsules: APIReasoningCapsules) throws -> Request {
-        guard data.count <= maximumText, let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard data.count <= maximumText, var raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let localID = raw["model"] as? String,
               APIProviderCatalog.identity(for: localID) == APIProviderCatalog.Identity(providerID: selection.provider.id, modelID: selection.model.id),
               UUID(uuidString: threadID) != nil else { throw Failure.invalidRequest }
@@ -70,7 +70,20 @@ enum APIModelResponseCodec {
         let stream = try boolean(raw["stream"], default: false)
         guard !(try boolean(raw["store"], default: false)) else { throw Failure.unsupportedParameter }
         let parallel = try boolean(raw["parallel_tool_calls"], default: true)
-        let tools = try parseTools(raw["tools"])
+        // A resumed thread may retain old Chrome specs. Keep that catalog only
+        // to validate historical call/output pairs; never advertise it again.
+        let historyTools = try parseTools(raw["tools"])
+        if let definitions = raw["tools"] as? [[String: Any]] {
+            raw["tools"] = ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: localID)
+        }
+        // Removing an active tool must not renumber its neighbours: historical
+        // calls and current declarations share one stable provider identity.
+        let historyByIdentity = Dictionary(uniqueKeysWithValues: historyTools.map { ($0.identity, $0) })
+        let tools = try parseTools(raw["tools"]).map { visible -> Tool in
+            guard let original = historyByIdentity[visible.identity] else { throw Failure.invalidTool }
+            return Tool(name: visible.name, namespace: visible.namespace, wireName: original.wireName,
+                        custom: visible.custom, schema: visible.schema, description: visible.description)
+        }
         var allowed = Set(tools.map(\.wireName)), required = false
         var wireChoice: Any = "auto"
         if let choice = raw["tool_choice"] as? String {
@@ -87,7 +100,7 @@ enum APIModelResponseCodec {
         let limit = try integer(raw["max_tool_calls"], default: 64, range: 1...128)
         let maximumCalls = parallel ? limit : 1
         let configuration = try responseConfiguration(raw, parallel: parallel)
-        let history = try messages(raw, tools: tools, selection: selection, threadID: threadID, capsules: capsules)
+        let history = try messages(raw, tools: historyTools, selection: selection, threadID: threadID, capsules: capsules)
         var body: [String: Any]
         if selection.provider.wireAPI == .responses {
             body = raw

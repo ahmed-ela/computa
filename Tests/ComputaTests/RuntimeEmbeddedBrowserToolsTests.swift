@@ -28,6 +28,33 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    func testProductCatalogHidesChromeAndRejectsRetainedCallsBeforeAnyInput() async throws {
+        try await withHarness { harness in
+            try await harness.submit([
+                ["tool": "computer_v2_tabs", "arguments": [:]],
+                ["tool": "computer_v2_bind_tab", "arguments": ["candidate_token": UUID().uuidString]],
+                ["tool": "computer_v2_create_workspace", "arguments": ["candidate_token": UUID().uuidString]],
+                ["tool": "computer_v2_open", "arguments": ["bundle_id": "com.google.Chrome", "activation": "none"]],
+                ["tool": "browser_tabs", "arguments": [:]],
+            ])
+            try await self.waitFor { harness.rowCount == 5 }
+            let offered = try harness.offeredNames()
+            XCTAssertTrue(offered.isDisjoint(with: ComputaModelToolCatalog.externalChromeToolNames))
+            XCTAssertEqual(offered.intersection(EmbeddedBrowserTools.names), EmbeddedBrowserTools.names)
+            let rows = try harness.rows()
+            for row in rows.prefix(4) {
+                XCTAssertEqual(row["success"] as? Bool, false)
+                XCTAssertTrue((row["text"] as? String)?.contains("External Chrome tools are hidden") == true)
+            }
+            XCTAssertEqual(rows.last?["success"] as? Bool, true)
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.inventories, 1)
+            XCTAssertEqual(counts.activations, 0)
+            XCTAssertEqual(counts.mutations, 0)
+            XCTAssertTrue(harness.audit.approvals.isEmpty)
+        }
+    }
+
     func testNativeReferenceInterfaceDoesNotRewriteDedicatedBuiltInBrowserOutput() async throws {
         try await withHarness { harness in
             try await harness.submit([

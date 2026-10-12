@@ -3,6 +3,16 @@ import XCTest
 @testable import Computa
 
 final class WebModelResponseCodecTests: XCTestCase {
+    func testRetainedChromeSchemaIsHiddenWhileHistoryAndBuiltInToolsSurvive() throws {
+        let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        let builtin: [String: Any] = ["type": "function", "name": "browser_read", "parameters": ["type": "object", "properties": ["cursor": ["type": "string"]], "additionalProperties": false]]
+        let prepared = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": [["type": "function_call", "name": "computer_v2_tabs", "call_id": "old", "arguments": "{}"], ["type": "function_call_output", "call_id": "old", "output": "Previously unavailable"]], "tools": [["type": "namespace", "name": "functions", "tools": [chrome, builtin]]]]))
+        XCTAssertEqual(prepared.offeredToolNames, ["functions.browser_read"])
+        XCTAssertTrue(prepared.prompt.contains("Previously unavailable"))
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"functions.computer_v2_tabs","arguments":{}}]}"#, request: prepared, requireEnvelope: true))
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": "Fresh task", "tools": [chrome], "tool_choice": ["type": "function", "name": "computer_v2_tabs"]])))
+    }
+
     func testEmbeddedPlainFinalTextPreservesBytesWithoutInventingActions() throws {
         let prepared = try request()
         for text in ["marker-opaque-fixture", "42", "  Hello 🌍\n ", "I cannot assist with that request.",
@@ -204,8 +214,26 @@ final class WebModelResponseCodecTests: XCTestCase {
         let terminator = Data("\nEND_COMPLETE_RESPONSES_REQUEST_JSON.".utf8)
         let end = try XCTUnwrap(prompt.range(of: terminator, in: start..<prompt.count), file: file, line: line).lowerBound
         let displayed = prompt.subdata(in: start..<end)
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: displayed) as? NSDictionary,
-                       try JSONSerialization.jsonObject(with: original) as? NSDictionary, file: file, line: line)
+        // The inference boundary refreshes retained native tool descriptions.
+        // All user/history bytes and the remaining schema fields still survive.
+        func comparison(_ object: Any, displayed: Bool) -> Any {
+            if let array = object as? [Any] { return array.map { comparison($0, displayed: displayed) } }
+            guard var dictionary = object as? [String: Any] else { return object }
+            if dictionary["type"] as? String == "function", dictionary["name"] as? String == "computer_v2_snapshot",
+               dictionary["parameters"] != nil {
+                if displayed {
+                    let description = dictionary["description"] as? String ?? ""
+                    XCTAssertTrue(description.hasPrefix("Read the bound native app"), file: file, line: line)
+                    XCTAssertTrue(description.contains("Built-in webpages and their cursors belong to browser_read"), file: file, line: line)
+                    XCTAssertFalse(description.contains("Chrome"), file: file, line: line)
+                }
+                dictionary.removeValue(forKey: "description")
+            }
+            return dictionary.mapValues { comparison($0, displayed: displayed) }
+        }
+        let actual = comparison(try JSONSerialization.jsonObject(with: displayed), displayed: true)
+        let expected = comparison(try JSONSerialization.jsonObject(with: original), displayed: false)
+        XCTAssertEqual(actual as? NSDictionary, expected as? NSDictionary, file: file, line: line)
         XCTAssertEqual(prompt.range(of: displayed), start..<end, file: file, line: line)
         XCTAssertEqual(prompt.range(of: displayed, options: .backwards), start..<end, file: file, line: line)
         let suffix = String(decoding: prompt.suffix(from: end), as: UTF8.self)

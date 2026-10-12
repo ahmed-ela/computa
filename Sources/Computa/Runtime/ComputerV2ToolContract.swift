@@ -201,18 +201,27 @@ enum ComputerV2ToolContract {
 
     static func specs(
         for modelID: String,
-        interactionPolicy: ComputerInteractionPolicy = .backgroundOnly
+        interactionPolicy: ComputerInteractionPolicy = .backgroundOnly,
+        externalChromeTools: Bool = false
     ) -> [[String: Any]] {
         // Website prompts carry semantic text. Captures require an actual
         // image attachment transport, which browser models do not yet have.
-        let available = Tool.allCases.filter { $0 != .capture || !LocalModelCatalog.isWebBrowser(modelID) }
+        let available = Tool.allCases.filter {
+            ($0 != .capture || !LocalModelCatalog.isWebBrowser(modelID))
+                && (externalChromeTools || ![Tool.tabs, .bindTab, .createWorkspace, .followLink].contains($0))
+        }
+        func advertised(_ tool: Tool, background: Bool = false) -> [String: Any] {
+            let original = background ? backgroundSpec(tool) : spec(tool)
+            return externalChromeTools ? original : nativeOnlySpec(original, tool: tool)
+        }
         if interactionPolicy == .backgroundOnly {
-            return available.filter { !$0.requiresGlobalInput }.map(backgroundSpec)
+            return available.filter { !$0.requiresGlobalInput }.map { advertised($0, background: true) }
         }
         guard LocalModelCatalog.supportsResidentVisualGrounding(modelID) else {
-            return available.filter { $0 != .groundClick }.map(spec)
+            return available.filter { $0 != .groundClick }.map { advertised($0) }
         }
-        return specs.map { original in
+        return available.map { tool in
+            let original = advertised(tool)
             guard original["name"] as? String == Tool.click.rawValue else { return original }
             var result = original
             result["description"] = "Prefer computer_v2_ground_click with a target description for visual targets; do not guess coordinates. "
@@ -226,14 +235,15 @@ enum ComputerV2ToolContract {
     /// for restored threads and canonicalized calls.
     static func referenceSpecs(
         for modelID: String,
-        interactionPolicy: ComputerInteractionPolicy = .backgroundOnly
+        interactionPolicy: ComputerInteractionPolicy = .backgroundOnly,
+        externalChromeTools: Bool = false
     ) -> [[String: Any]] {
-        specs(for: modelID, interactionPolicy: interactionPolicy).flatMap { original -> [[String: Any]] in
+        specs(for: modelID, interactionPolicy: interactionPolicy, externalChromeTools: externalChromeTools).flatMap { original -> [[String: Any]] in
             switch original["name"] as? String {
-            case Tool.snapshot.rawValue: return [referenceSpec(.readPage), referenceSpec(.readRegion)]
-            case Tool.ax.rawValue: return [referenceSpec(.press)]
-            case Tool.followLink.rawValue: return [referenceSpec(.follow)]
-            case Tool.setText.rawValue: return [referenceSpec(.fill)]
+            case Tool.snapshot.rawValue: return [referenceSpec(.readPage, externalChromeTools: externalChromeTools), referenceSpec(.readRegion, externalChromeTools: externalChromeTools)]
+            case Tool.ax.rawValue: return [referenceSpec(.press, externalChromeTools: externalChromeTools)]
+            case Tool.followLink.rawValue: return [referenceSpec(.follow, externalChromeTools: externalChromeTools)]
+            case Tool.setText.rawValue: return [referenceSpec(.fill, externalChromeTools: externalChromeTools)]
             default:
                 var result = original
                 if original["name"] as? String == Tool.bindTab.rawValue {
@@ -250,8 +260,12 @@ enum ComputerV2ToolContract {
         }
     }
 
-    static func instructions(for interactionPolicy: ComputerInteractionPolicy) -> String {
-        interactionPolicy == .backgroundOnly ? backgroundInstructions : visualGroundingInstructions
+    static func instructions(for interactionPolicy: ComputerInteractionPolicy, externalChromeTools: Bool = false) -> String {
+        if externalChromeTools { return interactionPolicy == .backgroundOnly ? backgroundInstructions : visualGroundingInstructions }
+        let limits = interactionPolicy == .backgroundOnly
+            ? "Background-only computer use is enforced by the host. Bind an already-running native app with computer_v2_open(activation=none). Do not activate apps, raise windows or send global input. A background screenshot is observation only; it grants no click or keyboard authority. Full Access does not change this policy."
+            : "Bind the requested native app and use its supported Accessibility actions. For a visible native target without an available Accessibility action, use only the offered capture and input tools and verify the observed outcome."
+        return limits + " Computer tools operate native apps. For webpages use the offered browser_* tools in Computa's built-in browser. A computer_v2_continue cursor belongs only to a computer read; browser_read and browser_tabs continue their own cursors."
     }
 
     static let backgroundInstructions = """
@@ -737,7 +751,7 @@ enum ComputerV2ToolContract {
         else { throw ValidationError.invalid(key) }
     }
 
-    private static func referenceSpec(_ tool: Alias) -> [String: Any] {
+    private static func referenceSpec(_ tool: Alias, externalChromeTools: Bool) -> [String: Any] {
         let reference: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 256,
             "description": "Copy the exact typed reference from the current host action/region menu; never construct one. The host checks its type, target and snapshot."]
         let view: [String: Any] = ["type": "string", "enum": ["all", "overview", "content", "headings", "links"],
@@ -766,8 +780,58 @@ enum ComputerV2ToolContract {
             required = ["action_ref"]
             description = "Perform the exact supported action bound to a current action_ref; no action-name or element-index guessing. Browser non-link presses require an intended postcondition, including search/pagination buttons. Native selected controls may have an automatic plan. For browser links with link_ref use computer_v2_follow; for editable fields use computer_v2_fill. The host obtains required approval, dispatches at most once and checks bounded fresh observations. VERIFIED_PROPERTY proves only that property; ALREADY_SATISFIED sent no input. VERIFICATION_PENDING permits bounded read-only recovery, never replaying the action."
         }
-        return ["type": "function", "name": tool.rawValue, "description": description,
+        var result: [String: Any] = ["type": "function", "name": tool.rawValue, "description": description,
                 "inputSchema": ["type": "object", "properties": properties, "required": required, "additionalProperties": false]]
+        if !externalChromeTools {
+            switch tool {
+            case .readPage:
+                result["description"] = "Read the bound native app using all or content. Returns current host action/region references; readable structure is not an action target. Continue partial native text with computer_v2_continue(cursor=next_cursor). Built-in browser pages use browser_read, including browser_read(cursor=next_cursor) for their own continuations."
+            case .readRegion:
+                result["description"] = "Read below a currently published native region_ref. This is read-only context, not an action target. Refresh the native app with computer_v2_read_page; continue its partial text with computer_v2_continue. Built-in browser cursors belong to browser_read."
+            case .fill:
+                result["description"] = "Set the currently published editable native field_ref to text. Does not submit. The host checks its reference and permission, dispatches once and verifies the value. Use browser_fill for a built-in webpage field; its snapshot indices are a separate domain."
+            case .press:
+                result["description"] = "Perform the exact native action bound to a current action_ref. Declare any required native postcondition before input; the host checks permission and dispatches at most once. VERIFIED_PROPERTY proves only its declared property; VERIFICATION_PENDING allows read-only recovery, not replay. Built-in webpages use browser_click with their current snapshot_id and element_index."
+            case .follow: break // Not present in the disabled catalog.
+            }
+            var schema = result["inputSchema"] as! [String: Any]
+            var nativeProperties = schema["properties"] as! [String: Any]
+            if var nativeView = nativeProperties["view"] as? [String: Any] {
+                nativeView["enum"] = ["all", "content", "headings", "links"]
+                nativeView["description"] = "Native app text and structure. Built-in webpages use browser_read."
+                nativeProperties["view"] = nativeView
+            }
+            if var postcondition = nativeProperties["postcondition"] as? [String: Any] {
+                postcondition["description"] = "Declare the intended native result before input using current observed region references. A selected control proves only selection; a separate detail pane proves only its verified content. The host checks target eligibility and retains at-most-once input and bounded recovery."
+                nativeProperties["postcondition"] = postcondition
+            }
+            schema["properties"] = nativeProperties; result["inputSchema"] = schema
+        }
+        return result
+    }
+
+    private static func nativeOnlySpec(_ original: [String: Any], tool: Tool) -> [String: Any] {
+        var result = original
+        switch tool {
+        case .open:
+            var schema = result["inputSchema"] as! [String: Any]
+            var properties = schema["properties"] as! [String: Any]
+            properties.removeValue(forKey: "url"); properties.removeValue(forKey: "browser_mode")
+            schema["properties"] = properties; result["inputSchema"] = schema
+            result["description"] = "Bind the requested native app using the offered activation mode and host policy. This tool does not navigate webpages. Use browser_tabs/browser_bind for an existing built-in page or browser_open for a task-owned page."
+        case .continueRead:
+            result["description"] = "Continue only a current native computer read with its observed next_cursor. Send cursor alone. Built-in browser_read cursors must use browser_read(cursor=next_cursor); browser_tabs inventory cursors must use browser_tabs(cursor=next_cursor). Never cross sources or reuse previous-turn cursors. No input, navigation or reconnect occurs."
+        case .snapshot:
+            result["description"] = "Read the bound native app with all or content. Fresh reads omit snapshot_id and element_index; a subtree requires both from a current observation. Continue native text with computer_v2_continue. Use only observed supported actions and verify their results. Built-in webpages and their cursors belong to browser_read."
+        case .capture:
+            result["description"] = (result["description"] as? String ?? "")
+                .replacingOccurrences(of: "brokered Chrome tabs fail closed. ", with: "")
+        case .groundClick:
+            result["description"] = (result["description"] as? String ?? "")
+                .replacingOccurrences(of: "A navigation link's observed url is a Chrome fallback, not a replacement for supported AXPress or an in-page script action. ", with: "")
+        default: break
+        }
+        return result
     }
 
     private static func referencePostconditionSchema(reference: [String: Any]) -> [String: Any] {

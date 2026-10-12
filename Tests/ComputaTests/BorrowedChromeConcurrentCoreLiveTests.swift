@@ -88,6 +88,7 @@ final class BorrowedChromeConcurrentCoreLiveTests: XCTestCase {
             owner = connectionOwner
             let request = ChromeConnectionRequest(application: identity, userDataDirectory: profile, consent: consent)
             var config = CodexAppServerRuntime.Configuration.localQwen
+        config.externalChromeToolsEnabled = true // Explicit compatibility coverage for the hidden implementation.
             config.executable = .fixture(path: executable.path)
             config.codexHomePath = home.path
             let instance = CodexAppServerRuntime(configuration: config, visualGrounder: NoGrounder(), borrowedChromeConnector: {

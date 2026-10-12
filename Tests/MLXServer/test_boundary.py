@@ -1,12 +1,14 @@
 """Offline boundary tests: no MLX import, model load, HTTP listener, or UI."""
 import asyncio
 import base64
+import copy
 import importlib.util
 import io
 import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 path = Path(__file__).parents[2] / "Sources/Computa/Resources/MLXServer/server.py"
@@ -105,6 +107,52 @@ class RequestTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_app_policy_filters_resumed_tools_but_preserves_exact_history_and_request_ownership(self):
+        original = native_tool_request()
+        before = copy.deepcopy(original)
+        self.boundary.tool_visibility = native_tool_policy()
+        observed_names = []
+        async def upstream(scope, receive, send):
+            from producer_stream import _current
+            message = await receive()
+            self.calls.append((scope, message))
+            observed_names.append(_current.get().allowed_tool_names)
+            await send({"type": "http.response.start", "status": 503, "headers": []})
+            await send({"type": "http.response.body", "body": b"Unavailable"})
+        self.boundary.app = upstream
+        output = await self.invoke(raw=json.dumps(original).encode())
+        self.assertEqual(output[0]["status"], 503)
+        self.assertEqual(len(self.calls), 1)
+        scope, message = self.calls[0]
+        forwarded = json.loads(message["body"])
+        self.assertEqual(forwarded["input"], before["input"])
+        self.assertEqual(forwarded["instructions"], before["instructions"])
+        self.assertEqual(original, before)
+        self.assertEqual(forwarded["model"], MODEL)
+        self.assertEqual(dict(scope["headers"])[b"content-length"], str(len(message["body"])).encode())
+        self.assertEqual([tool["name"] for tool in forwarded["tools"]], ["computer_v2_open", "functions"])
+        self.assertEqual(observed_names, [frozenset(("computer_v2_open", "browser_tabs", "functions.browser_tabs"))])
+        opened = forwarded["tools"][0]
+        self.assertEqual(opened["description"], "Bind a native app. Use browser_* for webpages.")
+        self.assertEqual(opened["parameters"]["properties"]["activation"]["enum"], ["none"])
+        self.assertEqual(opened["parameters"]["required"], ["bundle_id", "activation"])
+        self.assertNotIn("url", opened["parameters"]["properties"])
+        self.assertNotIn("browser_mode", opened["parameters"]["properties"])
+
+    async def test_forced_hidden_tool_never_dispatches_or_pins_a_local_model(self):
+        self.boundary.tool_visibility = native_tool_policy()
+        for choice in ("required", {"type": "function", "name": "computer_v2_tabs"},
+                       {"type": "function", "name": "functions.computer_v2_follow"},
+                       {"type": "function", "function": {"name": "computer_v2_bind_tab"}}):
+            request = {"model": MODEL, "input": "Synthetic", "store": False, "stream": True,
+                       "tools": [{"type": "function", "name": "computer_v2_tabs", "parameters": {}}],
+                       "tool_choice": choice}
+            output = await self.invoke(raw=json.dumps(request).encode())
+            self.assertEqual(output[0]["status"], 400)
+            self.assertEqual(self.calls, [])
+            self.assertIsNone(self.boundary.selected_model)
+            self.assertFalse(self.boundary.busy)
+
     async def test_child_stream_fault_is_typed_and_scope_clears_before_next_request(self):
         from producer_stream import _current
         from sse_contract import ProtocolError
@@ -307,6 +355,82 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         other = json.dumps({"model": server.MODEL_IDS[1], "input": "Hello", "store": False, "stream": True}).encode()
         self.assertEqual((await self.invoke(raw=other))[0]["status"], 409)
         self.assertEqual(len(self.calls), 1)
+
+
+def native_tool_policy():
+    return server.NativeToolVisibility({"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "0",
+        "COMPUTA_NATIVE_TOOL_OVERRIDES": json.dumps([{"name": "computer_v2_open",
+            "description": "Bind a native app. Use browser_* for webpages.",
+            "inputSchema": {"activation": {"enum": ["foreground"]}}}])})
+
+
+def native_tool_request():
+    open_tool = {"type": "function", "name": "computer_v2_open", "description": "Old Chrome instructions",
+        "parameters": {"type": "object", "properties": {
+            "bundle_id": {"type": "string"}, "activation": {"type": "string", "enum": ["none"]},
+            "url": {"type": "string"}, "browser_mode": {"type": "string", "enum": ["chrome"]}},
+            "required": ["bundle_id", "activation", "url", "browser_mode"], "additionalProperties": False}}
+    return {"model": MODEL, "store": False, "stream": True, "instructions": "Synthetic trusted instructions",
+        "input": [{"type": "function_call", "name": "computer_v2_tabs", "call_id": "old-call", "arguments": "{}"},
+                  {"type": "function_call_output", "call_id": "old-call", "output": "Synthetic saved tab observation"},
+                  {"type": "message", "role": "user", "content": "Use the built-in browser now."}],
+        "tools": [open_tool, *[{"type": "function", "name": name, "parameters": {}}
+                               for name in sorted(server.CHROME_TOOL_NAMES)],
+                  {"type": "namespace", "name": "functions", "tools": [
+                      {"type": "function", "name": "computer_v2_follow", "parameters": {}},
+                      {"type": "function", "name": "browser_tabs", "parameters": {}}]}]}
+
+
+class NativeToolVisibilityTests(unittest.TestCase):
+    def test_generic_and_explicit_chrome_enabled_profiles_preserve_original_request(self):
+        request = native_tool_request()
+        for environment in ({}, {"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "1",
+                                  "COMPUTA_NATIVE_TOOL_OVERRIDES": "not-used"}):
+            result, allowed = server.NativeToolVisibility(environment).apply(request)
+            self.assertIs(result, request)
+            self.assertIsNone(allowed)
+
+    def test_empty_hidden_namespace_is_removed_and_unrelated_definitions_are_unchanged(self):
+        other = {"type": "function", "name": "synthetic_echo", "description": "Synthetic",
+                 "parameters": {"type": "object", "properties": {"text": {"type": "string"}}}}
+        request = {"tools": [{"type": "namespace", "name": "functions", "tools": [
+            {"type": "function", "name": "computer_v2_tabs", "parameters": {}}]}, other]}
+        before = copy.deepcopy(request)
+        result, names = native_tool_policy().apply(request)
+        self.assertEqual(result["tools"], [other])
+        self.assertEqual(names, frozenset(("synthetic_echo",)))
+        self.assertEqual(request, before)
+
+    def test_invalid_startup_policy_and_native_open_shape_fail_closed(self):
+        for overrides in ("not-json", "{}", '[{"name":"computer_v2_open","description":false}]',
+                          '[{"name":"computer_v2_open","description":"a"},{"name":"computer_v2_open","description":"b"}]'):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                server.NativeToolVisibility({"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "0",
+                                             "COMPUTA_NATIVE_TOOL_OVERRIDES": overrides})
+        with self.assertRaises(ValueError):
+            server.NativeToolVisibility({"COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "unexpected"})
+        with self.assertRaises(ValueError):
+            native_tool_policy().apply({"tools": [{"type": "function", "name": "computer_v2_open", "parameters": {}}]})
+
+    def test_decoder_rejects_hidden_generated_call_even_with_a_stale_registry_and_clears_scope(self):
+        from producer_stream import producer_scope
+        from sse_contract import ProtocolError
+        parsed = []
+        module = SimpleNamespace(__name__="mlx_vlm.tools.parsers.qwen3_coder",
+            parse_tool_call=lambda body, tools: parsed.append(body) or {"name": "computer_v2_tabs", "arguments": {}})
+        with producer_scope(allowed_tool_names=frozenset(("browser_tabs",))) as capture:
+            capture.content = ["<tool_call><function=computer_v2_tabs></function></tool_call>"]
+            state = SimpleNamespace(tc_start="<tool_call>", tc_end="</tool_call>", in_tool_call=False, buffer="")
+            capture.tools = SimpleNamespace(delegate=state, inputs=[])
+            with self.assertRaisesRegex(ProtocolError, "Unadvertised generated tool call"):
+                capture.parse_calls(module, [], {"computer_v2_tabs": "function"})
+            self.assertEqual(parsed, [])
+        self.assertIsNone(capture.allowed_tool_names)
+        with producer_scope() as generic:
+            generic.content = ["<tool_call><function=computer_v2_tabs></function></tool_call>"]
+            generic.tools = SimpleNamespace(delegate=state, inputs=[])
+            self.assertEqual(len(generic.parse_calls(module, [], {"computer_v2_tabs": "function"})), 1)
+        self.assertEqual(len(parsed), 1)
 
 
 if __name__ == "__main__":

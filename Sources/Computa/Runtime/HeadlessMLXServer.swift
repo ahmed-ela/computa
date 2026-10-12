@@ -63,11 +63,15 @@ struct HeadlessMLXConfiguration: Sendable {
 
     func environment(instance: String) -> [String: String] {
         // Do not forward API keys, proxy settings, or arbitrary Python startup hooks.
-        ["HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+        var values = ["HOME": FileManager.default.homeDirectoryForCurrentUser.path,
          "PATH": "\(python.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
          "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1",
          "HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1",
          "TOKENIZERS_PARALLELISM": "false", "HEYDASH_MLX_INSTANCE": instance]
+        let visibility = (try? ComputaModelToolCatalog.localToolVisibilityEnvironment(modelID: LocalModelCatalog.options.first?.id ?? "native"))
+            ?? ["COMPUTA_EXTERNAL_CHROME_TOOLS_ENABLED": "0"]
+        values.merge(visibility) { _, policy in policy }
+        return values
     }
 }
 
