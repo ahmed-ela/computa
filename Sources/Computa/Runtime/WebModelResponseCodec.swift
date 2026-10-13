@@ -195,7 +195,9 @@ enum WebModelResponseCodec {
         let policy = try toolPolicy(object["tool_choice"], tools: offered)
         let configuration = try responseConfiguration(object, schemas: schemas, parallel: parallel)
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
-        let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name), customToolNames: customNames)
+        let includedInstructionText = trustedInstructionText(in: object)
+        let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
+            customToolNames: customNames, includedInstructionText: includedInstructionText)
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
             return message["type"] == nil || message["type"] as? String == "message"
@@ -216,7 +218,8 @@ enum WebModelResponseCodec {
 
         \(currentUserInstructions)
 
-        \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames))
+        \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
+            includedInstructionText: includedInstructionText))
         """
         let bytes = prompt.utf8.count
         guard bytes <= maximumPromptBytes else {
@@ -230,9 +233,30 @@ enum WebModelResponseCodec {
                        responseConfiguration: configuration)
     }
 
-    /// Keep punctuation in JSON strings out of website Markdown/HTML escaping.
-    /// Structural JSON punctuation remains intact. Consume complete escape pairs
-    /// so quotes, slashes and literal backslashes retain their decoded values.
+    /// Only actual local instruction fields can establish an already-supplied
+    /// complete contract block. Never promote quoted user/history/tool data or
+    /// join separate parts into a match that no individual instruction contains.
+    private static func trustedInstructionText(in object: [String: Any]) -> [String] {
+        var texts = (object["instructions"] as? String).map { [$0] } ?? []
+        for message in object["input"] as? [[String: Any]] ?? [] {
+            guard message["type"] == nil || message["type"] as? String == "message",
+                  let role = message["role"] as? String, ["system", "developer"].contains(role) else { continue }
+            if let content = message["content"] as? String {
+                texts.append(content)
+            } else if let parts = message["content"] as? [[String: Any]] {
+                for part in parts {
+                    guard let type = part["type"] as? String, ["input_text", "text"].contains(type),
+                          let text = part["text"] as? String else { continue }
+                    texts.append(text)
+                }
+            }
+        }
+        return texts
+    }
+
+    /// Protect rendering-sensitive punctuation in JSON strings. URL punctuation
+    /// . : / - and structural JSON punctuation remain literal. Consume complete
+    /// escape pairs so quotes and literal backslashes retain their decoded values.
     private static func displayStableJSON(_ original: String) -> String {
         var bytes = original.utf8.makeIterator()
         var result: [UInt8] = []
@@ -254,9 +278,10 @@ enum WebModelResponseCodec {
                 continue
             }
             if byte == 92, let escaped = bytes.next() {
-                if escaped == 34 || escaped == 47 || escaped == 92 { appendUnicodeEscape(escaped) }
+                if escaped == 47 { result.append(escaped) }
+                else if escaped == 34 || escaped == 92 { appendUnicodeEscape(escaped) }
                 else { result.append(byte); result.append(escaped) }
-            } else if (33...47).contains(byte) || (58...64).contains(byte)
+            } else if (33...44).contains(byte) || (59...64).contains(byte)
                         || (91...96).contains(byte) || (123...126).contains(byte) {
                 appendUnicodeEscape(byte)
             } else {

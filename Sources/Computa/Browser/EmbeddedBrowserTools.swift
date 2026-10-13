@@ -78,7 +78,7 @@ enum EmbeddedBrowserTools {
             specification(
                 "browser_fill",
                 "Replace one observed field with enabled=true and settable=true and dispatch input/change events. Use that field's own snapshot_id and element_index, never a label or parent. Uses one fresh snapshot capability; password fields are unavailable. Read to verify the value before a later submit.",
-                mutation.merging(["text": string], uniquingKeysWith: { _, right in right }),
+                mutation.merging(["text": ["type": "string", "description": "Copy the requested field value verbatim, including prefixes, spaces and punctuation, unless the task explicitly requires a transformation."]], uniquingKeysWith: { _, right in right }),
                 ["snapshot_id", "element_index", "text"]),
             specification(
                 "browser_wait",
@@ -368,6 +368,10 @@ actor EmbeddedBrowserToolController {
                     target: target, lifetime: bindingLifetime)
                 try check(taskKey, contextID)
                 contexts[taskKey]?.binding = binding
+                // Creation and successful binding are a current observation of
+                // this exact instance. A redundant bind can reuse the existing
+                // no-op path, including its live target, lease and scope checks.
+                if owned { contexts[taskKey]?.observedTargets[target.targetID] = target }
                 return try bindingResponse(target: target, binding: binding, owned: owned)
             } catch {
                 if leases[target.targetID] == taskKey { leases.removeValue(forKey: target.targetID) }
@@ -479,6 +483,11 @@ actor EmbeddedBrowserToolController {
         if removeContext {
             contexts.removeValue(forKey: taskKey)
         } else {
+            // An owned target's open receipt cannot reauthorize it after this
+            // binding is retired, including when physical close is uncertain.
+            if let target = context.ownedTarget {
+                contexts[taskKey]?.observedTargets.removeValue(forKey: target.targetID)
+            }
             contexts[taskKey]?.binding = nil
             contexts[taskKey]?.snapshot = nil
             contexts[taskKey]?.ownedTarget = nil
@@ -593,6 +602,7 @@ actor EmbeddedBrowserToolController {
         try json([
             "browser": "computa_builtin", "tab_id": target.targetID,
             "tab_handle": binding.handle.uuidString,
+            "bound": true,
             "ownership": owned ? "task_created" : "user_existing", "already_bound": alreadyBound,
             "profile": "shared_human", "content_evidence": "metadata_only",
             "next": "Call browser_read before using page contents or taking actions.",

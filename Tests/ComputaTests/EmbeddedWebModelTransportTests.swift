@@ -6,6 +6,135 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testFailedPageDiagnosticProjectionAdmitsOnlyBoundedFiniteValues() throws {
+        let root: [String: Any] = ["connected": 1, "visible": 1]
+        let valid: [String: Any] = ["kind": "chatgpt_failed_page_v1", "route": "local_conversation", "errorCategory": "none",
+            "modernUsers": root, "legacyUsers": root, "modernAssistants": root, "legacyAssistants": root,
+            "stopPresent": false, "composerPresent": true, "composerEnabled": true, "copyPresent": false, "copyEnabled": false,
+            "retryPresent": false, "retryInsideUserMessage": false, "retryInsideAssistantMessage": false,
+            "retryInsideCodeOrEditor": false, "retryInsideMenuOrNavigation": false, "retryOutsideExcludedContent": false,
+            "temporaryRendered": true, "temporaryVerified": true, "alertCount": 0, "statusCount": 1,
+            "alertTextLengths": [], "statusTextLengths": [37], "noticesTruncated": false]
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(valid))
+        var withPrivateExtras = valid; withPrivateExtras["body"] = "PRIVATE_PAGE_CANARY"
+        withPrivateExtras["url"] = "https://private.example/?token=PRIVATE_URL_CANARY"
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(withPrivateExtras))
+        XCTAssertFalse(safe.contains("PRIVATE_")); XCTAssertFalse(safe.contains("https"))
+        for (key, value): (String, Any) in [("route", "PRIVATE_ROUTE"), ("errorCategory", "PRIVATE_ERROR"),
+            ("stopPresent", 0), ("alertCount", true), ("statusCount", 0.5), ("noticesTruncated", true),
+            ("statusTextLengths", [true]), ("statusTextLengths", [220_002]), ("statusTextLengths", []),
+            ("retryInsideUserMessage", true), ("retryPresent", 1)] {
+            var bad = valid; bad[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(bad), key)
+        }
+        for roots: [String: Any] in [["connected": true, "visible": 0], ["connected": 0, "visible": 1],
+                                     ["connected": 10_001, "visible": 0], ["connected": 1.5, "visible": 1]] {
+            var bad = valid; bad["modernUsers"] = roots
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(bad))
+        }
+        for (presence, enabled) in [("composerPresent", "composerEnabled"), ("copyPresent", "copyEnabled"),
+                                    ("temporaryRendered", "temporaryVerified")] {
+            var bad = valid; bad[presence] = false; bad[enabled] = true
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(bad))
+        }
+    }
+
+    func testResponseDeadlineGetsOneReadOnlyFinitePageDiagnosticWithoutResending() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "PRIVATE_DEADLINE_PROMPT", bindFirstRead: false)
+        defer { fixture.shutdown() }
+        var diagnostics: [String] = []
+        fixture.transport.setFailedPageDiagnosticObserverForTesting { diagnostics.append($0) }
+        // The first healthy read starts its completion candidate now, rather
+        // than depending on how long previous fixture setup was scheduled.
+        _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(diagnostics, [])
+        _ = try await evaluate(view, """
+            const main = document.createElement('main'), region = document.createElement('div');
+            const error = document.createElement('span'); error.textContent = 'Load failed';
+            const retry = document.createElement('button'); retry.textContent = 'Retry';
+            window.fixtureRetryClicks = 0; retry.addEventListener('click', () => window.fixtureRetryClicks++);
+            const status = document.createElement('div'); status.setAttribute('role', 'status');
+            status.textContent = 'PRIVATE_NOTICE_CANARY'; region.append(error, retry); main.append(region, status);
+            document.body.append(main); return true;
+            """)
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .milliseconds(1))
+        let began = ContinuousClock.now
+        for _ in 0..<2 {
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("The diagnostic must not admit a late response")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+        }
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(1))
+        XCTAssertEqual(diagnostics, [], "The abort diagnostic cannot delay the original deadline error")
+        let retryClicks = try await evaluate(view, "return window.fixtureRetryClicks;")
+        XCTAssertEqual(retryClicks as? Int, 0)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertEqual(diagnostics.count, 1)
+        let safe = try XCTUnwrap(diagnostics.first)
+        let observation = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
+        XCTAssertEqual(observation["errorCategory"] as? String, "load_failed")
+        XCTAssertEqual(observation["statusCount"] as? Int, 1)
+        XCTAssertFalse(safe.contains("PRIVATE_")); XCTAssertFalse(safe.contains(token)); XCTAssertFalse(safe.contains("chatgpt.com"))
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testDeadlineDiagnosticDiscardsAnOwnedViewRemovedBeforePublication() async throws {
+        let (fixture, token, _) = try await boundInspectionFixture(prompt: "Discard a crossed diagnostic")
+        defer { fixture.shutdown() }
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        var diagnostics: [String] = []
+        fixture.transport.setFailedPageDiagnosticObserverForTesting { diagnostics.append($0) }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "failedPageDiagnostic" { fixture.browser.closeTab(ownedID) }
+        }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .milliseconds(1))
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("The original response deadline remains the failure")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+        XCTAssertEqual(diagnostics, [])
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertEqual(diagnostics, ["stale"])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testQueuedDeadlineDiagnosticTimesOutOnceWithoutLatePublicationOrReplay() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "Bound the failure diagnostic")
+        defer { fixture.shutdown() }
+        var diagnostics: [String] = []
+        var diagnosticPublishedAt: ContinuousClock.Instant?
+        fixture.transport.setFailedPageDiagnosticObserverForTesting { diagnostics.append($0); diagnosticPublishedAt = .now }
+        let work = FixtureWebContentWork(view: view)
+        defer { work.detach() }
+        try await work.start(milliseconds: 1_600)
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .milliseconds(1))
+        let began = ContinuousClock.now
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A queued diagnostic cannot replace the original deadline failure")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+        XCTAssertLessThan(ContinuousClock.now - began, .milliseconds(500))
+        XCTAssertEqual(diagnostics, [])
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect" {
+                do { try await self.assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1) }
+                catch { XCTFail("The pre-close diagnostic fixture ledger must remain readable") }
+            }
+        }
+        let cleanupBegan = ContinuousClock.now
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        let publication = try XCTUnwrap(diagnosticPublishedAt)
+        XCTAssertLessThan(publication - cleanupBegan, .milliseconds(1_500))
+        try await work.waitForCompletion()
+        XCTAssertEqual(diagnostics, ["timed_out"], "Cleanup cannot retry an already claimed diagnostic")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testCodeStructureProjectionRejectsBridgedBooleanCountsAndNumericFlags() throws {
         let valid: [String: Any] = ["preCount": 1, "codeCount": 1, "codeTextLength": 129,
             "outsideTextLength": 4, "outsideTruncated": false, "preParentTags": ["div"],

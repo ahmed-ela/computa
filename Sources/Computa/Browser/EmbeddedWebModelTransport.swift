@@ -268,6 +268,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var lastProductModeDiagnostic: String?
         var observedResponseCount = 0
         var responseCodeStructure: [String: Any]?
+        var failedPageDiagnosticAttempted = false
 
         init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil,
              isDiscovery: Bool = false, isRecoveryProbe: Bool = false) {
@@ -309,6 +310,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
+    private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
     #endif
 
@@ -342,6 +344,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setAdapterTimeoutObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         adapterTimeoutObserverForTesting = observer
+    }
+
+    func setFailedPageDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        failedPageDiagnosticObserverForTesting = observer
     }
 
     func setFirstUserExpansionRouteCheckpointForTesting(_ hook: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?) {
@@ -418,6 +424,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.lastChanged = .now
                 session.turnStarted = .now
                 session.responseReadRetryUsed = false
+                session.failedPageDiagnosticAttempted = false
                 // Claim submission before clicking: even a lost reply must not replay Send.
                 session.submitted = true
                 session.sequence += 1
@@ -613,6 +620,126 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID)
         Self.inspectionLog.error("preparationTimeout provider=\(session.provider.rawValue, privacy: .public) \(diagnostic, privacy: .public)")
         return .preparationDeadline
+    }
+
+    /// An abort-only observation, separate from inference and cleanup proofs.
+    /// A queued WebContent operation cannot extend this one-second budget or
+    /// publish after the exact owned view/document/session has changed.
+    private func logFailedPageDiagnostic(_ session: Session) async {
+        guard session.provider == .chatgpt, session.state == "running", session.submitted,
+              !session.failedPageDiagnosticAttempted, !Task.isCancelled else { return }
+        session.failedPageDiagnosticAttempted = true
+        let sequence = session.sequence
+        let ownedGeneration = session.documentGeneration ?? session.initialDocumentGeneration
+        let url = session.view.url
+        func current() -> Bool {
+            sessions[session.token] === session && session.sequence == sequence && session.state == "running"
+                && browser.webView(for: session.tabID) === session.view
+                && browser.documentGeneration(for: session.tabID) == ownedGeneration
+                && session.view.url == url && url.map { session.provider.accepts($0.absoluteString) } == true
+        }
+        func unavailable(_ category: String) {
+            Self.inspectionLog.error("failedPageDiagnostic provider=chatgpt sequence=\(sequence) result=\(category, privacy: .public)")
+            #if DEBUG
+            failedPageDiagnosticObserverForTesting?(category)
+            #endif
+        }
+        guard current(), let url, let script = script(for: .chatgpt) else { unavailable("stale"); return }
+        let deadline = ContinuousClock.now + .seconds(1)
+        let result = EmbeddedScriptResult()
+        do {
+            let bytes = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+                    result.install(continuation)
+                    let timer = Task {
+                        do {
+                            try await Task.sleep(until: deadline, clock: .continuous)
+                            result.complete(.failure(Failure.pageUnavailable))
+                        } catch { }
+                    }
+                    result.setTimeout(timer)
+                    guard result.isPending else { return }
+                    // No model/menu reads, first-message expansion or owner
+                    // binding. The fixed adapter returns before any async work.
+                    let input: [String: Any] = ["provider": "chatgpt", "action": "failedPageDiagnostic",
+                        "expectedURL": url.absoluteString, "ownerToken": session.token, "bindOwner": false]
+                    session.view.callAsyncJavaScript(script, arguments: ["input": input], in: nil, in: world) { reply in
+                        switch reply {
+                        case .success(let value):
+                            do { result.complete(.success(try JSONSerialization.data(withJSONObject: value))) }
+                            catch { result.complete(.failure(Failure.pageUnavailable)) }
+                        case .failure:
+                            result.complete(.failure(Failure.pageUnavailable))
+                        }
+                    }
+                }
+            } onCancel: { result.complete(.failure(CancellationError())) }
+            #if DEBUG
+            await beforePageResultValidationForTesting?("failedPageDiagnostic")
+            #endif
+            guard !Task.isCancelled, ContinuousClock.now < deadline else { unavailable("timed_out"); return }
+            guard current() else { unavailable("stale"); return }
+            guard bytes.count <= 8_192,
+                  let observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any], observed["error"] == nil,
+                  let raw = observed["failureDiagnostic"] as? [String: Any],
+                  let safe = Self.sanitizedFailedPageDiagnostic(raw) else { unavailable("unavailable"); return }
+            #if DEBUG
+            failedPageDiagnosticObserverForTesting?(safe)
+            #endif
+            // Use bounded chunks to avoid Unified Logging truncating a finite
+            // structure; no page strings or identifiers enter this projection.
+            let data = Data(safe.utf8), identifier = UUID().uuidString
+            let chunks = stride(from: 0, to: data.count, by: 512).map { offset in
+                data.subdata(in: offset..<min(offset + 512, data.count)).base64EncodedString()
+            }
+            for (index, chunk) in chunks.enumerated() {
+                Self.inspectionLog.error("failedPageDiagnostic provider=chatgpt sequence=\(sequence) id=\(identifier, privacy: .public) part=\(index + 1)/\(chunks.count) base64=\(chunk, privacy: .public)")
+            }
+        } catch {
+            unavailable(ContinuousClock.now >= deadline ? "timed_out" : "unavailable")
+        }
+    }
+
+    static func sanitizedFailedPageDiagnostic(_ value: [String: Any]) -> String? {
+        guard value["kind"] as? String == "chatgpt_failed_page_v1",
+              let route = value["route"] as? String, ["root", "local_conversation", "server_conversation", "other"].contains(route),
+              let category = value["errorCategory"] as? String,
+              ["none", "load_failed", "sign_in_required", "unrecognized_notice"].contains(category) else { return nil }
+        func integer(_ raw: Any?, maximum: Int) -> Int? {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue.rounded(.towardZero) == number.doubleValue,
+                  (0...Double(maximum)).contains(number.doubleValue) else { return nil }
+            return number.intValue
+        }
+        var safe: [String: Any] = ["kind": "chatgpt_failed_page_v1", "route": route, "errorCategory": category]
+        for key in ["modernUsers", "legacyUsers", "modernAssistants", "legacyAssistants"] {
+            guard let roots = value[key] as? [String: Any], let connected = integer(roots["connected"], maximum: 10_000),
+                  let visible = integer(roots["visible"], maximum: connected) else { return nil }
+            safe[key] = ["connected": connected, "visible": visible]
+        }
+        for key in ["stopPresent", "composerPresent", "composerEnabled", "copyPresent", "copyEnabled",
+                    "retryPresent", "retryInsideUserMessage", "retryInsideAssistantMessage", "retryInsideCodeOrEditor",
+                    "retryInsideMenuOrNavigation", "retryOutsideExcludedContent",
+                    "temporaryRendered", "temporaryVerified", "noticesTruncated"] {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        guard !(safe["composerEnabled"] as? Bool == true && safe["composerPresent"] as? Bool != true),
+              !(safe["copyEnabled"] as? Bool == true && safe["copyPresent"] as? Bool != true),
+              !(safe["temporaryVerified"] as? Bool == true && safe["temporaryRendered"] as? Bool != true) else { return nil }
+        if safe["retryPresent"] as? Bool != true,
+           ["retryInsideUserMessage", "retryInsideAssistantMessage", "retryInsideCodeOrEditor",
+            "retryInsideMenuOrNavigation", "retryOutsideExcludedContent"].contains(where: { safe[$0] as? Bool == true }) { return nil }
+        for (countKey, lengthsKey) in [("alertCount", "alertTextLengths"), ("statusCount", "statusTextLengths")] {
+            guard let count = integer(value[countKey], maximum: 10_000), let raw = value[lengthsKey] as? [Any],
+                  raw.count == min(count, 8) else { return nil }
+            let lengths = raw.compactMap { integer($0, maximum: 220_001) }
+            guard lengths.count == raw.count else { return nil }
+            safe[countKey] = count; safe[lengthsKey] = lengths
+        }
+        guard safe["noticesTruncated"] as? Bool == ((safe["alertCount"] as? Int ?? 0) > 8 || (safe["statusCount"] as? Int ?? 0) > 8),
+              let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 2_048 else { return nil }
+        return String(data: bytes, encoding: .utf8)
     }
 
     private func poll(_ session: Session) async throws -> Data {
@@ -2019,6 +2146,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func finish(_ session: Session, cancel: Bool) async -> Data {
+        // The outer server can reach its deadline before another native poll
+        // is scheduled. Observe only an already-expired running response;
+        // successful, preparing and early-cancelled sessions are untouched.
+        if session.state == "running", ContinuousClock.now - session.turnStarted >= responseTimeout {
+            await logFailedPageDiagnostic(session)
+        }
         do {
             guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
             if !session.isDiscovery {

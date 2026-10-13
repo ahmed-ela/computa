@@ -1933,7 +1933,7 @@ function chatGPTResponseLoadFailed(visible) {
   // prompt, answer, editor, menu or sidebar cannot become transport failures.
   const users = chatGPTMessageRoots('user');
   const content = node => users.some(user => user === node || user.contains(node))
-    || !!node.closest('[data-markdown-text-style="assistant-message"], .markdown, #prompt-textarea, [contenteditable="true"], textarea, [role="menu"], [role="dialog"], nav, aside');
+    || !!node.closest('[data-message-author-role="assistant"], article[data-turn="assistant"], [data-markdown-text-style="assistant-message"], .markdown, pre, code, #prompt-textarea, [contenteditable="true"], textarea, [role="menu"], [role="dialog"], nav, aside');
   const retries = [...document.querySelectorAll('main button')].filter(node => visible(node) && !content(node)
     && (node.getAttribute('aria-label') || node.innerText || '').trim() === 'Retry');
   for (const retry of retries) {
@@ -1945,6 +1945,72 @@ function chatGPTResponseLoadFailed(visible) {
     }
   }
   return false;
+}
+function chatGPTFailedPageDiagnostic() {
+  // A deadline observation is deliberately independent of model menus,
+  // first-message hashing and response extraction. It reads only this owned
+  // document and never grants readiness, completion or cleanup authority.
+  const visible = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
+  const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+  const nodes = selector => [...document.querySelectorAll(selector)].slice(0, 10_001);
+  const roots = selector => {
+    const found = nodes(selector).filter(node => node.isConnected);
+    const physical = found.filter(node => !found.some(other => other !== node && other.contains(node)));
+    return { connected: Math.min(10_000, physical.length), visible: Math.min(10_000, physical.filter(visible).length) };
+  };
+  const content = node => !!node.closest('[data-message-author-role], [data-markdown-text-style], article[data-turn], [data-user-message-bubble], .markdown, pre, code, #prompt-textarea, [contenteditable="true"], textarea, [role="menu"], [role="dialog"], nav, aside');
+  const notices = role => nodes(`main [role="${role}"]`).filter(node => visible(node) && !content(node))
+    .filter((node, _, found) => !found.some(other => other !== node && other.contains(node)));
+  const alertNodes = notices('alert'), statusNodes = notices('status');
+  const lengths = found => found.slice(0, 8).map(node => Math.min(220_001, (node.textContent || '').length));
+  const composer = nodes('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, #prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]').find(visible);
+  const stop = nodes('button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]').find(visible);
+  const retries = nodes('main button').filter(node => visible(node)
+    && (node.getAttribute('aria-label') || node.innerText || '').trim() === 'Retry');
+  const answers = chatGPTMessageRoots('assistant').filter(visible);
+  const answer = answers.at(-1);
+  let copyPresent = false, copyEnabled = false;
+  for (let node = answer, depth = 0; node && depth < 10; node = node.parentElement, depth++) {
+    if (['MAIN', 'BODY', 'HTML'].includes(node.tagName)
+      || node !== answer && chatGPTMessageRoots('user').some(user => node === user || node.contains(user))) break;
+    if (answers.filter(other => node === other || node.contains(other)).length > 1) break;
+    const copies = [...node.querySelectorAll('.turn-action-controls button[aria-label="Copy"], button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]')].filter(visible);
+    copyPresent ||= copies.length > 0; copyEnabled ||= copies.some(enabled);
+    if (copyEnabled) break;
+  }
+  const signIn = !composer && nodes('a, button').some(node => visible(node) && !content(node)
+    && /^(?:Log in|Sign in)(?:\s|$)/i.test((node.getAttribute('aria-label') || node.innerText || '').trim()));
+  const loadFailed = chatGPTResponseLoadFailed(visible);
+  const path = new URL(document.URL).pathname;
+  const route = /^\/$/.test(path) ? 'root'
+    : /^\/c\/local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+\/?$/.test(path) ? 'local_conversation'
+    : /^\/c\/[A-Za-z0-9-]+\/?$/.test(path) ? 'server_conversation' : 'other';
+  const temporaryRendered = chatGPTRenderedTemporary(), productProof = globalThis.__computaChatProductMode;
+  // Project an already-acknowledged proof without acknowledging a transition
+  // or invalidating a latch. Ordinary inference/cleanup still validate it.
+  const temporaryVerified = temporaryRendered && route !== 'other'
+    && productProof?.owner === input.ownerToken && productProof?.document === document
+    && productProof.temporaryRequested === true && productProof.temporaryAcknowledged === true
+    && !productProof.invalidated && !chatGPTProductModeState().contradictory;
+  return { kind: 'chatgpt_failed_page_v1', route,
+    errorCategory: loadFailed ? 'load_failed' : signIn ? 'sign_in_required'
+      : alertNodes.length || statusNodes.length ? 'unrecognized_notice' : 'none',
+    modernUsers: roots('[data-markdown-text-style="user-message"]'),
+    legacyUsers: roots('[data-message-author-role="user"], article[data-turn="user"], [data-user-message-bubble]'),
+    modernAssistants: roots('[data-markdown-text-style="assistant-message"]'),
+    legacyAssistants: roots('[data-message-author-role="assistant"], article[data-turn="assistant"]'),
+    stopPresent: !!stop, composerPresent: !!composer, composerEnabled: enabled(composer), copyPresent, copyEnabled,
+    retryPresent: retries.length > 0,
+    retryInsideUserMessage: retries.some(node => !!node.closest('[data-message-author-role="user"], [data-markdown-text-style="user-message"], article[data-turn="user"], [data-user-message-bubble]')),
+    retryInsideAssistantMessage: retries.some(node => !!node.closest('[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"], article[data-turn="assistant"], .markdown')),
+    retryInsideCodeOrEditor: retries.some(node => !!node.closest('pre, code, #prompt-textarea, [contenteditable="true"], textarea')),
+    retryInsideMenuOrNavigation: retries.some(node => !!node.closest('[role="menu"], [role="dialog"], nav, aside')),
+    retryOutsideExcludedContent: retries.some(node => !content(node)),
+    temporaryRendered, temporaryVerified,
+    alertCount: Math.min(10_000, alertNodes.length), statusCount: Math.min(10_000, statusNodes.length),
+    alertTextLengths: lengths(alertNodes), statusTextLengths: lengths(statusNodes),
+    noticesTruncated: alertNodes.length > 8 || statusNodes.length > 8 };
 }
 async function providerPageAction(input, readLineageFingerprint = null) {
   websiteModelDiagnosticPhase('page_action');
@@ -2211,11 +2277,15 @@ async function providerPageAction(input, readLineageFingerprint = null) {
 
 if (window !== window.top || location.origin !== "https://chatgpt.com" || document.URL !== input.expectedURL)
   return { error: "document_changed", detail: "document_url" };
+if (input.action === 'failedPageDiagnostic' && (input.provider !== 'chatgpt' || input.bindOwner === true
+  || typeof input.ownerToken !== 'string' || !/^[a-f0-9-]{36}$/i.test(input.ownerToken)))
+  return { error: 'document_changed', detail: 'owner_token' };
 if (globalThis.__computaModelOwner !== input.ownerToken) {
   if (input.bindOwner && globalThis.__computaModelOwner === undefined)
     globalThis.__computaModelOwner = input.ownerToken;
   else return { error: "document_changed", detail: "owner_token" };
 }
+if (input.action === 'failedPageDiagnostic') return { failureDiagnostic: chatGPTFailedPageDiagnostic() };
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
   const signal = { ownerToken: input.ownerToken, observer: null };
   signal.observer = new MutationObserver(records => {

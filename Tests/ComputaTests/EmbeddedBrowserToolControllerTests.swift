@@ -248,15 +248,83 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let opened = try await call(controller,"browser_open",["url":"http://localhost:8123/flight"])
         let value = try XCTUnwrap(JSONSerialization.jsonObject(with:Data(opened.utf8)) as? [String:Any])
         let id = try XCTUnwrap(value["tab_id"] as? String)
-        _ = try await call(controller,"browser_tabs")
+        XCTAssertEqual(value["bound"] as? Bool, true)
+        XCTAssertEqual(value["already_bound"] as? Bool, false, "This reports no prior binding; the new page is now bound")
+        let read = try await call(controller,"browser_read")
+        let before = await backend.counts()
         let rebound = try await call(controller,"browser_bind",["tab_id":id])
-        XCTAssertTrue(rebound.contains("\"already_bound\":true"))
-        _ = try await call(controller,"browser_read")
+        let bound = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(rebound.utf8)) as? [String: Any])
+        XCTAssertEqual(bound["bound"] as? Bool, true)
+        XCTAssertEqual(bound["already_bound"] as? Bool, true)
+        XCTAssertEqual(bound["ownership"] as? String, "task_created")
+        XCTAssertEqual(bound["tab_handle"] as? String, value["tab_handle"] as? String)
         let counts = await backend.counts()
         XCTAssertEqual(counts.creates,1); XCTAssertEqual(counts.closes,0); XCTAssertEqual(counts.navigations,0)
+        XCTAssertEqual(counts.observes, before.observes, "Idempotent bind must not observe or replace the current snapshot")
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
+            arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": snapshotID(read), "element_index": 1]))
+        let after = await backend.counts()
+        XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
         _ = await controller.shutdown()
         let end = await backend.counts()
         XCTAssertEqual(end.closes,1)
+    }
+
+    func testOpenedTabReceiptCannotBindUnknownForeignRetiredReplacedOrOffScopeTarget() async throws {
+        for scenario in ["unknown", "foreign", "foreign_inventory", "retired", "released", "replaced", "redirected", "changed_scope"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            let scope = ComputerTaskScope(userPrompt: "Check http://localhost:8123/flight only.")
+            let opened = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(opened.utf8)) as? [String: Any])
+            let id = try XCTUnwrap(object["tab_id"] as? String)
+            if scenario == "foreign_inventory" { _ = try await call(controller, "browser_tabs", key: "turn-b", scope: scope) }
+            if scenario == "retired" {
+                await backend.failNextClose()
+                do { _ = try await call(controller, "browser_close", scope: scope); XCTFail("Fixture close must be unconfirmed") }
+                catch { XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("Task-tab cleanup could not be confirmed.")) }
+            }
+            if scenario == "released" { _ = await controller.release(taskKey: "turn-a") }
+            if scenario == "replaced" { await backend.replaceOwnedTarget() }
+            if scenario == "redirected" { await backend.redirectOwnedTarget(to: URL(string: "https://unrelated.example/")!) }
+            let before = await backend.counts()
+            let key = scenario.hasPrefix("foreign") ? "turn-b" : "turn-a"
+            let suppliedScope = scenario == "changed_scope" ? nil : scope
+            do {
+                _ = try await call(controller, "browser_bind", ["tab_id": scenario == "unknown" ? UUID().uuidString : id], key: key, scope: suppliedScope)
+                XCTFail("The open receipt must not authorize \(scenario)")
+            } catch {
+                if scenario == "foreign_inventory" { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
+                else if scenario == "replaced" { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
+                else if let failure = error as? BrowserTabBrokerError, case .invalidRead = failure { /* Exact observed target or scope denied. */ }
+                else { XCTFail("Unexpected error for \(scenario): \(error)") }
+            }
+            let after = await backend.counts()
+            XCTAssertEqual(after.creates, 1); XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            XCTAssertEqual(after.observes, before.observes); XCTAssertEqual(after.navigations, 0)
+            XCTAssertEqual(after.closes, before.closes, "A denied bind cannot retire any current page")
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testFieldValueContractAndTransportPreservePrefixesSpacesAndPunctuation() async throws {
+        let specification = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_fill" })
+        let schema = try XCTUnwrap(specification["inputSchema"] as? [String: Any])
+        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        let text = try XCTUnwrap(properties["text"] as? [String: Any])
+        XCTAssertEqual(text["type"] as? String, "string")
+        XCTAssertTrue((text["description"] as? String)?.contains("including prefixes, spaces and punctuation") == true)
+        XCTAssertTrue((text["description"] as? String)?.contains("unless the task explicitly requires a transformation") == true)
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let read = try await call(controller, "browser_read")
+        let value = "UA 4629-A_1 / return"
+        _ = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(read), "element_index": 0, "text": value])
+        let actualValue = await backend.fieldValue()
+        XCTAssertEqual(actualValue, value)
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 0)
+        _ = await controller.shutdown()
     }
 
     func testReleaseDuringOpeningClosesLateTargetWithoutPublishingBinding() async throws {
@@ -465,10 +533,13 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var link: String?
     private var holdCreate=false, createHeld=false, createContinuation: CheckedContinuation<Void,Never>?
     private var holdMutation=false, mutationHeld=false, mutationContinuation: CheckedContinuation<Void,Never>?
+    private var shouldFailClose = false
     private var createWaiters=[CheckedContinuation<Void,Never>](), mutationWaiters=[CheckedContinuation<Void,Never>]()
 
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!,webSocketURL:nil) }
     func counts() -> Counts { stats }
+    func fieldValue() -> String { field }
+    func failNextClose() { shouldFailClose = true }
     func addInventoryTarget(title:String,url:URL) -> String {
         let id=UUID().uuidString
         targets[id]=BrowserTarget(targetID:id,instanceToken:id,title:title,url:url,webSocketURL:nil)
@@ -499,6 +570,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func activateTarget(id:String) async throws { }
     func closeTarget(target:BrowserTarget) async throws {
         guard targets[target.targetID]?.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetClosed }
+        if shouldFailClose { shouldFailClose = false; throw BrowserTabBrokerError.browserUnavailable("Synthetic close failure") }
         guard owned.remove(target.targetID) != nil else { throw BrowserTabBrokerError.ownershipMismatch }
         targets.removeValue(forKey:target.targetID); stats.closes += 1
     }
@@ -550,6 +622,13 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             guard let target = targets[id] else { continue }
             targets[id] = BrowserTarget(targetID:id,instanceToken:UUID().uuidString,title:target.title,
                                         url:target.url,webSocketURL:nil)
+        }
+    }
+    func redirectOwnedTarget(to url: URL) {
+        for id in owned {
+            guard let target = targets[id] else { continue }
+            targets[id] = BrowserTarget(targetID: id, instanceToken: target.instanceToken, title: target.title,
+                                        url: url, webSocketURL: nil)
         }
     }
 }

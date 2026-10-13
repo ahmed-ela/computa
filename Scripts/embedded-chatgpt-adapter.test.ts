@@ -180,6 +180,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
       root.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, prompt)); messages.append(root);
     },
     onDigest: (hook: () => void) => { digestHook = hook; },
+    diagnose: (overrides: Record<string, unknown> = {}) => invoke({ action: 'failedPageDiagnostic', bindOwner: false, ...overrides }),
     inspect: async (overrides: Record<string, unknown> = {}, adopt = true) => {
       if (!productBootstrapped && !options.normalRoot && !options.unprovenProduct) {
         // Existing response/lineage fixtures begin after a real empty-root
@@ -240,6 +241,99 @@ defineWebsiteModelChoiceTests('chatgpt', (owned = false) => {
   return { ...f, run: (action: string, overrides: Record<string, unknown> = {}) => f.inspect({ ...overrides, action }) };
 }, Element);
 
+describe('ChatGPT failed-page finite diagnostic', () => {
+  test('reads owned root counts and controls without rehashing, menus or page actions', async () => {
+    const f = fixture({ userPrompt: 'PRIVATE_PROMPT_CANARY' });
+    await f.inspect();
+    f.onDigest(() => { throw new Error('A diagnostic cannot hash a message'); });
+    f.workMode.values['aria-pressed'] = 'true'; f.chatMode.values['aria-pressed'] = 'false';
+    f.userBody!.text = 'REPLACED_PRIVATE_PROMPT';
+    const buttons = f.body.querySelectorAll('button');
+    const productProofBefore = { ...(f.world.__computaChatProductMode as any) };
+    const clicks = buttons.map(button => button.clicks), events = buttons.map(button => button.events.length);
+    const timers = f.scheduledDelays.length, observerCount = f.observers.length;
+    const result = await f.diagnose({ expectedModelChoice: { key: 'chat/latest/high', label: 'High' }, expectedFirstUserFingerprint: 'invalid' });
+    expect(result.error).toBeUndefined();
+    expect(result.failureDiagnostic).toEqual({ kind: 'chatgpt_failed_page_v1', route: 'root', errorCategory: 'none',
+      modernUsers: { connected: 0, visible: 0 }, legacyUsers: { connected: 1, visible: 1 },
+      modernAssistants: { connected: 1, visible: 1 }, legacyAssistants: { connected: 1, visible: 1 },
+      stopPresent: false, composerPresent: true, composerEnabled: true, copyPresent: true, copyEnabled: true,
+      retryPresent: false, retryInsideUserMessage: false, retryInsideAssistantMessage: false,
+      retryInsideCodeOrEditor: false, retryInsideMenuOrNavigation: false, retryOutsideExcludedContent: false,
+      temporaryRendered: true, temporaryVerified: false, alertCount: 0, statusCount: 0,
+      alertTextLengths: [], statusTextLengths: [], noticesTruncated: false });
+    expect(buttons.map(button => button.clicks)).toEqual(clicks); expect(buttons.map(button => button.events.length)).toEqual(events);
+    expect(f.scheduledDelays.length).toBe(timers); expect(f.observers.length).toBe(observerCount);
+    expect(f.world.__computaChatProductMode).toEqual(productProofBefore);
+    const serialized = JSON.stringify(result);
+    for (const secret of ['PRIVATE_PROMPT', 'REPLACED_PRIVATE_PROMPT', 'OK', 'https', 'temporary-chat', 'invalid']) expect(serialized.includes(secret)).toBe(false);
+  });
+  test('reports only scoped Load failed or unknown notice lengths, never notice text', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    const main = f.body.querySelector('main')!, error = new Element('DIV', { role: 'alert' });
+    const retry = new Element('BUTTON', {}, 'Retry'); error.append(new Element('SPAN', {}, 'Load failed'), retry); main.append(error);
+    const status = new Element('DIV', { role: 'status' }, 'PRIVATE_STATUS_URL_https://private.example/token'); main.append(status);
+    let observed = (await f.diagnose()).failureDiagnostic;
+    expect(observed.errorCategory).toBe('load_failed'); expect(observed.alertCount).toBe(1); expect(observed.statusCount).toBe(1);
+    expect(observed.alertTextLengths).toEqual([16]); expect(observed.statusTextLengths).toEqual([status.textContent.length]);
+    expect(observed.retryPresent).toBe(true); expect(observed.retryOutsideExcludedContent).toBe(true);
+    expect(retry.clicks).toBe(0); expect(JSON.stringify(observed).includes('PRIVATE_STATUS')).toBe(false);
+    retry.text = 'Not Retry'; observed = (await f.diagnose()).failureDiagnostic;
+    expect(observed.errorCategory).toBe('unrecognized_notice'); expect(retry.clicks).toBe(0);
+    for (let index = 0; index < 9; index++) main.append(new Element('DIV', { role: 'status' }, 'PRIVATE_' + index));
+    observed = (await f.diagnose()).failureDiagnostic;
+    expect(observed.statusCount).toBe(10); expect(observed.statusTextLengths.length).toBe(8); expect(observed.noticesTruncated).toBe(true);
+  });
+  test('excludes quoted errors, hidden roots and foreign controls from error and completion evidence', async () => {
+    const f = fixture({ userPrompt: 'PRIVATE_USER_CONTENT' }); await f.inspect();
+    const quote = () => { const node = new Element('DIV', { role: 'alert' }); node.append(new Element('SPAN', {}, 'Load failed'), new Element('BUTTON', {}, 'Retry')); return node; };
+    f.userBody!.append(quote()); f.answer.append(quote()); f.composer.append(quote());
+    const codeQuote = new Element('PRE'); codeQuote.append(quote()); f.body.querySelector('main')!.append(codeQuote);
+    const menu = new Element('DIV', { role: 'menu' }); menu.append(quote()); f.body.querySelector('main')!.append(menu);
+    const sidebar = new Element('ASIDE'); sidebar.append(quote()); f.body.append(sidebar);
+    const hidden = new Element('ARTICLE', { 'data-turn': 'assistant', hidden: '' });
+    hidden.append(new Element('DIV', { 'data-markdown-text-style': 'assistant-message' }, 'PRIVATE_HIDDEN_REPLY'));
+    f.body.querySelector('main')!.append(hidden);
+    const detached = new Element('ARTICLE', { 'data-turn': 'assistant' }); detached.connected = false; f.body.querySelector('main')!.append(detached);
+    f.body.querySelector('.turn-action-controls button[aria-label="Copy"]')!.disabled = true;
+    f.body.append(new Element('BUTTON', { 'aria-label': 'Copy' }));
+    const observed = (await f.diagnose()).failureDiagnostic;
+    expect(observed.errorCategory).toBe('none'); expect(observed.alertCount).toBe(0);
+    expect(observed.retryPresent).toBe(true); expect(observed.retryInsideUserMessage).toBe(true);
+    expect(observed.retryInsideAssistantMessage).toBe(true); expect(observed.retryInsideCodeOrEditor).toBe(true);
+    expect(observed.retryInsideMenuOrNavigation).toBe(true); expect(observed.retryOutsideExcludedContent).toBe(false);
+    expect(observed.modernAssistants).toEqual({ connected: 2, visible: 1 });
+    expect(observed.legacyAssistants).toEqual({ connected: 2, visible: 1 });
+    expect(observed.copyPresent).toBe(true); expect(observed.copyEnabled).toBe(false);
+    expect(JSON.stringify(observed).includes('PRIVATE_')).toBe(false);
+  });
+  test('classifies routes and sign-in without emitting identifiers, queries or body text', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    for (const [path, route] of [['/', 'root'], ['/c/local-chatgpt%3APRIVATE-ID', 'local_conversation'],
+      ['/c/PRIVATE-ID', 'server_conversation'], ['/other/PRIVATE-ID', 'other']]) {
+      f.document.URL = 'https://chatgpt.com' + path + '?private=SECRET_QUERY';
+      const observed = (await f.diagnose()).failureDiagnostic;
+      expect(observed.route).toBe(route); expect(JSON.stringify(observed).includes('PRIVATE-ID')).toBe(false);
+      expect(JSON.stringify(observed).includes('SECRET_QUERY')).toBe(false);
+    }
+    f.composer.values.hidden = ''; f.body.append(new Element('BUTTON', {}, 'Sign in'));
+    const observed = (await f.diagnose()).failureDiagnostic;
+    expect(observed.composerPresent).toBe(false); expect(observed.composerEnabled).toBe(false); expect(observed.errorCategory).toBe('sign_in_required');
+  });
+  test('fails closed for unowned, crossed-document, wrong-origin and child-frame contexts', async () => {
+    const f = fixture({ response: false });
+    expect((await f.diagnose()).error).toBe('document_changed');
+    await f.inspect();
+    for (const overrides of [{ ownerToken: 'FOREIGN' }, { ownerToken: undefined }, { expectedURL: 'https://chatgpt.com/c/FOREIGN' }, { bindOwner: true }, { provider: 'gemini' }]) {
+      const observed = await f.diagnose(overrides); expect(observed.error).toBe('document_changed'); expect(observed.failureDiagnostic).toBeUndefined();
+    }
+    delete f.world.__computaModelOwner;
+    expect((await f.diagnose({ ownerToken: undefined })).failureDiagnostic).toBeUndefined();
+    f.location.origin = 'https://foreign.example'; expect((await f.diagnose()).failureDiagnostic).toBeUndefined();
+    f.location.origin = 'https://chatgpt.com'; f.window.top = {}; expect((await f.diagnose()).failureDiagnostic).toBeUndefined();
+  });
+});
+
 describe('ChatGPT response load failure', () => {
   const errorRegion = () => {
     const region = new Element('DIV'), error = new Element('SPAN', {}, 'Load failed');
@@ -265,7 +359,7 @@ describe('ChatGPT response load failure', () => {
     }
   });
   test('hidden, detached, unpaired and non-conversation errors cannot stop a response', async () => {
-    for (const variant of ['hidden-error', 'hidden-retry', 'detached', 'no-retry', 'sidebar', 'editor', 'menu']) {
+    for (const variant of ['hidden-error', 'hidden-retry', 'detached', 'no-retry', 'sidebar', 'editor', 'menu', 'pre', 'code', 'legacy-assistant']) {
       const f = fixture({ response: false, userPrompt: 'Read the fixture marker' }), e = errorRegion();
       if (variant === 'hidden-error') e.error.values.hidden = '';
       if (variant === 'hidden-retry') e.retry.values['aria-hidden'] = 'true';
@@ -274,6 +368,11 @@ describe('ChatGPT response load failure', () => {
       if (variant === 'menu') e.region.values.role = 'menu';
       if (variant === 'sidebar') { const sidebar = new Element('ASIDE'); sidebar.append(e.region); f.body.append(sidebar); }
       else if (variant === 'editor') f.composer.append(e.region);
+      else if (['pre', 'code', 'legacy-assistant'].includes(variant)) {
+        const wrapper = new Element(variant === 'pre' ? 'PRE' : variant === 'code' ? 'CODE' : 'DIV',
+          variant === 'legacy-assistant' ? { 'data-message-author-role': 'assistant' } : {});
+        wrapper.append(e.region); f.body.querySelector('main')!.append(wrapper);
+      }
       else f.body.querySelector('main')!.append(e.region);
       const observed = await f.inspect();
       expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false); expect(e.retry.clicks).toBe(0);
