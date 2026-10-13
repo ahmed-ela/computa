@@ -772,7 +772,7 @@ function websiteModelFamilyLabel(provider, value) {
   const label = websiteModelNormalize(value);
   if (!label || label.length > 120 || /[\u0000-\u001F\u007F]/.test(label)) return null;
   const pattern = provider === 'chatgpt' ? /^(?:Latest|GPT-[0-9]+(?:\.[0-9]+)?(?: [A-Za-z][A-Za-z0-9-]*)?)$/
-    : provider === 'gemini' ? /^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro)$/
+    : provider === 'gemini' ? /^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon)$/
       : /^(?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?$/;
   return pattern.test(label) ? label : null;
 }
@@ -780,7 +780,7 @@ function websiteModelSafeTriggerLabel(value) {
   const label = websiteModelNormalize(value);
   if (!label || label.length > 160 || /[\u0000-\u001F\u007F]/.test(label)) return null;
   if (label === 'Select ChatGPT model') return label;
-  if (/^Open mode picker, currently (?:Gemini )?(?:(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite))$/.test(label)) return label;
+  if (/^Open mode picker, currently (?:Gemini )?(?:(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon))$/.test(label)) return label;
   if (/^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label)) return label;
   return null;
 }
@@ -796,7 +796,7 @@ function websiteModelPickerState(provider) {
   const isTrigger = node => {
     const label = websiteModelSafeTriggerLabel(node.getAttribute('aria-label')) || '';
     return provider === 'chatgpt' ? label === 'Select ChatGPT model'
-      : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite)$/.test(label)
+      : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon)$/.test(label)
         : /^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label);
   };
   const triggers = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node) && isTrigger(node));
@@ -1457,25 +1457,33 @@ async function websiteModelFinalGuard(provider, request, observed, currentTempor
 
 // A fenced envelope keeps JSON escapes out of the website's Markdown parser.
 // Admit only one literal code body with no author prose elsewhere in this answer.
-function modelResponseText(answer) {
-  if (!answer) return '';
-  const rendered = (answer.innerText || answer.textContent || '').trim();
-  const blocks = [...answer.querySelectorAll('pre')];
+function modelResponseExtraction(answer) {
+  const flags = { literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null,
+    selectedExtraction: 'rendered_fallback', extractionReason: 'absent_answer' };
+  let rendered = '', blocks = [], code = null;
+  const fallback = reason => ({ text: rendered, blocks, code, flags: { ...flags, extractionReason: reason } });
+  if (!answer) return fallback('absent_answer');
+  rendered = (answer.innerText || answer.textContent || '').trim();
+  blocks = [...answer.querySelectorAll('pre')];
   const codes = [...answer.querySelectorAll('code')];
-  if (blocks.length > 1) return rendered;
-  if (codes.length !== 1) return rendered;
-  const code = codes[0], raw = code.textContent || '';
-  if (blocks.length === 1 && !blocks[0].contains(code)) return rendered;
+  if (codes.length === 1) code = codes[0];
+  if (blocks.length > 1) return fallback('multiple_pre');
+  if (codes.length !== 1) return fallback(codes.length ? 'multiple_code' : 'missing_code');
+  const raw = code.textContent || '';
+  if (blocks.length === 1 && !blocks[0].contains(code)) return fallback('outside_content');
   const noPre = blocks.length === 0;
   // Current ChatGPT also renders short code bodies in this exact DIV/CODE
   // structure. A generic CODE element without PRE is never admitted.
   const divCode = noPre && code.closest('code.block.text-size-code') === code
     && code.parentElement?.closest('div.text-size-chat.overflow-auto.outline-none.px-4.pt-0.pb-3') === code.parentElement;
-  if (noPre && !divCode) return rendered;
-  if (raw.length > 220_000) return rendered;
+  if (noPre && !divCode) return fallback('missing_pre');
+  if (raw.length > 220_000) return fallback('oversized_code');
   let envelope;
-  try { envelope = JSON.parse(raw); } catch { return rendered; }
-  if (!envelope || Array.isArray(envelope) || !['message', 'tool_calls'].includes(envelope.type)) return rendered;
+  try { envelope = JSON.parse(raw); flags.literalCodeValidJSON = true; }
+  catch { flags.literalCodeValidJSON = false; return fallback('invalid_json'); }
+  const knownType = envelope && !Array.isArray(envelope) && ['message', 'tool_calls'].includes(envelope.type);
+  flags.literalCodeKnownEnvelopeType = knownType ? envelope.type : 'unknown';
+  if (!knownType) return fallback('unknown_envelope_type');
   // Observed ChatGPT code widget. Utility classes bound the actual header;
   // the generated outer CodeBlock class does not carry stable identity.
   const wrapper = (noPre ? code : blocks[0]).closest('div.relative.w-full.min-w-0.overflow-clip.contain-inline-size.border');
@@ -1494,10 +1502,10 @@ function modelResponseText(answer) {
       if (labels.length === 1 && copies.length === 1) { chrome.add(labels[0]); chrome.add(copies[0]); }
     }
   }
-  if (noPre && chrome.size !== 2) return rendered;
-  let visited = 0;
+  if (noPre && chrome.size !== 2) return fallback('outside_content');
+  let visited = 0, scanLimit = false;
   const onlyCodeAndWhitespace = node => {
-    if (++visited > 10_000) return false;
+    if (++visited > 10_000) { scanLimit = true; return false; }
     if (node === code || chrome.has(node)) return true;
     if (node.nodeType === 3) return /^\s*$/.test(node.textContent || '');
     if (node.nodeType !== 1) return true;
@@ -1505,14 +1513,18 @@ function modelResponseText(answer) {
     if (node.tagName.toLowerCase() === 'button' && blocks.length === 1 && blocks[0].contains(node)) return true;
     return [...node.childNodes].every(onlyCodeAndWhitespace);
   };
-  return onlyCodeAndWhitespace(answer) ? raw : rendered;
+  if (!onlyCodeAndWhitespace(answer)) return fallback(scanLimit ? 'outside_scan_limit' : 'outside_content');
+  return { text: raw, blocks, code, flags: { ...flags, selectedExtraction: 'raw_code', extractionReason: 'accepted_literal_code' } };
+}
+
+function modelResponseText(answer, extraction = modelResponseExtraction(answer)) {
+  return extraction.text;
 }
 
 // Diagnostic counts describe only this scoped answer; no response bytes leave this function.
-function modelResponseStructure(answer) {
-  const blocks = answer ? [...answer.querySelectorAll('pre')] : [];
+function modelResponseStructure(answer, extraction = modelResponseExtraction(answer)) {
+  const { blocks, code } = extraction;
   const allCodes = answer ? [...answer.querySelectorAll('code')] : [];
-  const code = allCodes.length === 1 ? allCodes[0] : null;
   let visited = 0, outsideTextLength = 0, outsideTruncated = false;
   const outsideNodes = [];
   const nodeShape = node => ({ tag: /^[a-zA-Z][a-zA-Z0-9-]{0,31}$/.test(node.tagName) ? node.tagName.toLowerCase() : 'other',
@@ -1546,7 +1558,8 @@ function modelResponseStructure(answer) {
     if (node === answer) break;
   }
   const result = { preCount: Math.min(blocks.length, 1_000), codeCount: Math.min(allCodes.length, 1_000),
-    codeTextLength: Math.min((code?.textContent || '').length, 220_001), outsideTextLength, outsideTruncated, preParentTags, outsideNodes };
+    codeTextLength: Math.min((code?.textContent || '').length, 220_001), outsideTextLength, outsideTruncated, preParentTags, outsideNodes,
+    ...extraction.flags };
   while (JSON.stringify(result).length > 8_192 && result.outsideNodes.length) result.outsideNodes.pop();
   return result;
 }
@@ -2022,9 +2035,10 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   const interrupted = !!claudeStatus && (claudeStatus.textContent || "").trim().replace(/’/g, "'") === "Claude's response was interrupted.";
   const claudeStreaming = provider === "claude" && [...document.querySelectorAll('[data-testid="assistant-message"][data-is-streaming="true"]')].some(visible);
   const answer = answers.at(-1);
-  const answerText = modelResponseText(answer);
+  const responseExtraction = modelResponseExtraction(answer);
+  const answerText = modelResponseText(answer, responseExtraction);
   let answerComplete = false;
-  const completionEvidence = { codeStructure: modelResponseStructure(answer), modernMarkers: modernChatGPTAnswers.length, logicalAnswers: answers.length,
+  const completionEvidence = { codeStructure: modelResponseStructure(answer, responseExtraction), modernMarkers: modernChatGPTAnswers.length, logicalAnswers: answers.length,
     scopedCopies: 0, enabledCopies: 0, depth: -1 };
   if (provider === "chatgpt" && answer) {
     // The current Copy footer is a sibling of the selection wrapper. Keep the

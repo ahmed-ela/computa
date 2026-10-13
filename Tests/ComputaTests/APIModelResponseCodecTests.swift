@@ -415,6 +415,52 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(semanticOutput["namespace"] as? String, "editing")
         XCTAssertEqual(semanticOutput["input"] as? String, payload)
     }
+    func testCustomInputArgumentGuidancePreservesRawStringsAndNativeFunctionSchemas() throws {
+        let ordinaryParameters: [String: Any] = ["type": "object", "properties": ["input": ["type": "string", "description": "Native function's own input contract"]], "required": ["input"], "additionalProperties": false]
+        let custom: [String: Any] = ["type": "custom", "name": "literal_document", "format": ["type": "text"]]
+        let ordinary: [String: Any] = ["type": "function", "name": "inspect_document", "parameters": ordinaryParameters]
+        let definitions = [custom, ordinary]
+        // Even JSON-shaped and patch-shaped strings stay literal; this descriptive
+        // metadata does not parse, fix, double-encode or loosen custom input.
+        let payloads = ["line one\nquote: \"hello\"; slash: \\; 🌍\n", "{\"native_text\":true}", "*** Begin Patch: wrong.txt\n*** End Patch\n*** End Patch"]
+        for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic] {
+            let prepared = try request(["tools": definitions], toolNaming: naming)
+            let functions = try wireFunctions(prepared)
+            let parameters = try XCTUnwrap(functions[0]["parameters"] as? [String: Any])
+            let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+            let input = try XCTUnwrap(properties["input"] as? [String: Any])
+            XCTAssertEqual(Set(parameters.keys), ["type", "properties", "required", "additionalProperties"])
+            XCTAssertEqual(Set(properties.keys), ["input"])
+            XCTAssertEqual(input["type"] as? String, "string")
+            XCTAssertEqual(parameters["required"] as? [String], ["input"])
+            XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
+            let description = try XCTUnwrap(input["description"] as? String)
+            XCTAssertTrue(description.contains("exact text or grammar contract"))
+            XCTAssertTrue(description.contains("delimiters and newlines"))
+            XCTAssertTrue(description.contains("Encode the contents once as this JSON string"))
+            XCTAssertFalse(description.contains("apply_patch"), "This is the generic custom-tool transport, not a patch-only schema.")
+            XCTAssertLessThan(description.utf8.count, 320)
+            XCTAssertEqual(functions[1]["parameters"] as? NSDictionary, ordinaryParameters as NSDictionary)
+            let alias = try XCTUnwrap(functions[0]["name"] as? String)
+            for (index, payload) in payloads.enumerated() {
+                let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": payload]), as: UTF8.self)
+                let reply = try decode(["role": "assistant", "tool_calls": [["id": "literal-\(index)", "type": "function", "function": ["name": alias, "arguments": arguments]]]], finish: "tool_calls", request: prepared)
+                let output = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+                XCTAssertEqual(output["type"] as? String, "custom_tool_call")
+                XCTAssertEqual(output["name"] as? String, "literal_document")
+                XCTAssertEqual(output["input"] as? String, payload)
+            }
+            for invalid: [String: Any] in [["input": ["nested": "object"]], ["input": "literal", "extra": true]] {
+                let arguments = String(decoding: try JSONSerialization.data(withJSONObject: invalid), as: UTF8.self)
+                XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "invalid", "type": "function", "function": ["name": alias, "arguments": arguments]]]], finish: "tool_calls", request: prepared)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                }
+            }
+        }
+        let responses = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: .responses, models: provider.models)
+        let nativeBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request(["tools": definitions], provider: responses).body) as? [String: Any])
+        XCTAssertEqual(nativeBody["tools"] as? NSArray, definitions as NSArray)
+    }
     func testCustomFormatValidationRejectsUnknownMalformedAndOversizedContracts() throws {
         func tool(_ format: Any?) -> [String: Any] {
             var value: [String: Any] = ["type": "custom", "name": "text_tool"]

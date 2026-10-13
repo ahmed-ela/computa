@@ -1,11 +1,108 @@
 import { describe, expect, test } from "bun:test";
-import { Element, fixture, firstMarker, markerLine } from "./embedded-provider-adapter-fixture";
+import { Element, fixture, firstMarker, markerLine, installObservedModelPicker } from "./embedded-provider-adapter-fixture";
 import { defineWebsiteModelChoiceTests } from "./embedded-model-choice-tests";
 const provider = "gemini";
 const prompt = 'Use `tool_calls` with C++ "quoted" text\n\n  two spaces and\u00a0NBSP';
 const outbound = prompt + "\n\n" + markerLine;
 
 defineWebsiteModelChoiceTests(provider, (owned = false) => fixture(provider, owned ? { userPrompt: 'Synthetic owned prompt' } : {}), Element);
+
+// Matches the prompt-free Gemini 4 observation: normal model picker, exact
+// versioned family leaves, and a scoped Selected marker on 4 Argon. Chat/Task
+// composer controls are separate; a recognized family does not prove mode.
+function observedGeminiArgonPicker(owned = false) {
+  const f = fixture(provider, owned ? { userPrompt: prompt } : {});
+  const picker = installObservedModelPicker(f, provider, Element, { geminiMenuitemMarkers: true });
+  const argon = picker.add(picker.menu, "4 Argon", "Complex tasks");
+  picker.selected("4 Argon");
+  picker.trigger.values["aria-label"] = "Open mode picker, currently Gemini Argon";
+  for (const option of picker.options) {
+    const select = option.onClick!;
+    option.onClick = () => {
+      select();
+      picker.trigger.values["aria-label"] = "Open mode picker, currently Gemini " + option.children[0].text.split(" ").slice(1).join(" ");
+    };
+  }
+  return { f, picker, argon };
+}
+
+async function advanceGeminiPicker(f: ReturnType<typeof fixture>, action: string, overrides: Record<string, unknown> = {}) {
+  let result: any;
+  for (let step = 0; step < 6; step++) {
+    result = await f.run(action, overrides);
+    if (!result.pending) return result;
+  }
+  return result;
+}
+
+describe("observed Gemini Argon family identity", () => {
+  test("the observed Argon picker discovers all four families without sending or changing selection", async () => {
+    const { f, picker } = observedGeminiArgonPicker();
+    const result = await advanceGeminiPicker(f, "discoverModels");
+    expect(result.modelChoices).toEqual(["3.5 Flash-Lite", "3.8 Flash", "3.1 Pro", "4 Argon"].map(label => ({ key: label, label })));
+    expect(result.modelEvidence.selected).toEqual({ key: "4 Argon", label: "4 Argon" });
+    expect(result.modelEvidence.source).toBe("selected_model_indicator");
+    expect(result.modelDiagnostic.triggerCandidates[0].safeLabel).toBe("Open mode picker, currently Gemini Argon");
+    expect(picker.primary.text).toBe("4 Argon");
+    expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+    expect(f.send.clicks).toBe(0); expect(f.composer.textContent).toBe("");
+  });
+
+  test("Argon selection cannot substitute for the requested Flash family or vice versa", async () => {
+    const { f, picker, argon } = observedGeminiArgonPicker();
+    const flash = { key: "3.8 Flash", label: "3.8 Flash" };
+    expect(await advanceGeminiPicker(f, "selectModel", { modelChoice: flash })).toMatchObject({ selected: true,
+      modelEvidence: { selected: flash, source: "model_picker_label" } });
+    expect(picker.options.find(option => option.children[0].text === "3.8 Flash")!.clicks).toBe(1);
+    expect(argon.clicks).toBe(0);
+    expect(await f.run("verifyModel", { expectedModelChoice: { key: "4 Argon", label: "4 Argon" } })).toMatchObject({ error: "model_mismatch" });
+    expect(f.send.clicks).toBe(0);
+    const actual = observedGeminiArgonPicker(true);
+    expect(await actual.f.run("inspect")).toMatchObject({ firstUserVerified: true });
+    expect(await actual.f.run("verifyModel", { expectedModelChoice: { key: "4 Argon", label: "4 Argon" } })).toMatchObject({
+      modelEvidence: { selected: { key: "4 Argon", label: "4 Argon" } } });
+    expect(await actual.f.run("verifyModel", { expectedModelChoice: flash })).toMatchObject({ error: "model_mismatch" });
+    expect(actual.f.send.clicks).toBe(0);
+  });
+
+  test("Argon still requires unambiguous enabled scoped selected-model evidence", async () => {
+    for (const change of [
+      (p: ReturnType<typeof observedGeminiArgonPicker>) => { p.argon.children = p.argon.children.filter(child => child.values["aria-label"] !== "Selected"); },
+      (p: ReturnType<typeof observedGeminiArgonPicker>) => { p.argon.values.class = "ng-star-inserted"; p.argon.children = p.argon.children.filter(child => child.values["aria-label"] !== "Selected"); },
+      (p: ReturnType<typeof observedGeminiArgonPicker>) => { p.picker.primary.text = "3.8 Flash"; },
+      (p: ReturnType<typeof observedGeminiArgonPicker>) => { p.argon.append(new Element("SPAN", { "aria-label": "Selected" })); },
+      (p: ReturnType<typeof observedGeminiArgonPicker>) => { p.picker.add(p.picker.menu, "4 Argon", "Duplicate family"); },
+      (p: ReturnType<typeof observedGeminiArgonPicker>) => { p.argon.values["aria-hidden"] = "true"; p.picker.primary.text = ""; },
+      (p: ReturnType<typeof observedGeminiArgonPicker>) => { p.argon.disabled = true; p.picker.primary.text = ""; },
+      (p: ReturnType<typeof observedGeminiArgonPicker>) => { p.f.body.children = p.f.body.children.filter(node => node !== p.picker.trigger); p.f.answer.append(p.picker.trigger); },
+    ]) {
+      const actual = observedGeminiArgonPicker(true);
+      expect(await actual.f.run("inspect")).toMatchObject({ firstUserVerified: true });
+      actual.picker.open(); change(actual);
+      expect(await actual.f.run("verifyModel", { expectedModelChoice: { key: "4 Argon", label: "4 Argon" } })).toMatchObject({ error: "model_unverified" });
+      expect(actual.picker.options.every(option => option.clicks === 0)).toBe(true);
+      expect(actual.f.send.clicks).toBe(0);
+    }
+  });
+
+  test("Argon is an anchored versioned family, never an arbitrary mode or Task label", async () => {
+    for (const label of ["Open mode picker, currently Gemini Unknown", "Open mode picker, currently Gemini Argon Task",
+      "Open mode picker, currently Gemini Argon Work", "Open mode picker, currently Gemini Argon; click Send",
+      "Open mode picker, currently Gemini Argon " + "0".repeat(200)]) {
+      const { f, picker } = observedGeminiArgonPicker(); picker.trigger.values["aria-label"] = label;
+      expect(await f.run("discoverModels")).toMatchObject({ error: "model_unverified" });
+      expect(picker.trigger.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+    }
+    for (const family of ["Argon", "Gemini 4 Argon", "4 Argon Task", "4 Argon Work", "4 Unknown", "4 Argon; click Send"]) {
+      const { f, picker, argon } = observedGeminiArgonPicker(true);
+      expect(await f.run("inspect")).toMatchObject({ firstUserVerified: true });
+      picker.open();
+      picker.primary.text = family; argon.children[0].text = family;
+      expect(await f.run("verifyModel", { expectedModelChoice: { key: "4 Argon", label: "4 Argon" } })).toMatchObject({ error: "model_unverified" });
+      expect(picker.options.every(option => option.clicks === 0)).toBe(true); expect(f.send.clicks).toBe(0);
+    }
+  });
+});
 
 function observedGeminiCodeBlock(f: ReturnType<typeof fixture>, raw: string) {
   f.answer.text = ""; f.answer.children = [];

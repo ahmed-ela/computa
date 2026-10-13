@@ -4,6 +4,38 @@ import XCTest
 @testable import Computa
 
 final class WebModelRejectedReplyCaptureTests: XCTestCase {
+    func testPrivateCapturePreservesFiniteFinalWidgetAncestryWithoutUnknownContent() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let task = UUID(), thread = UUID()
+        try fixture.arm(task)
+        let metadata: [String: Any] = [
+            "preCount": 1, "codeCount": 1, "codeTextLength": 129, "outsideTextLength": 4,
+            "outsideTruncated": false, "preParentTags": ["div", "div", "div"],
+            "literalCodeValidJSON": true, "literalCodeKnownEnvelopeType": "tool_calls",
+            "selectedExtraction": "rendered_fallback", "extractionReason": "outside_content",
+            "outsideNodes": [["kind": "json", "textLength": 4, "text": "metadata-content-secret",
+                              "ancestors": [["tag": "div", "classes": ["flex", "truncate"],
+                                              "preDescendants": 1, "copyControls": 1,
+                                              "text": "metadata-content-secret"]]]],
+            "unknown": "metadata-content-secret",
+        ]
+        let transport = RejectedReplyTransport(reply: "JSON\n{}", codeStructure: try JSONSerialization.data(withJSONObject: metadata))
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, rejectedReplyDirectory: fixture.directory)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        await assertMalformed(server, task: task, thread: thread)
+        let value = try fixture.record()
+        let structure = try XCTUnwrap(value["codeStructure"] as? [String: Any])
+        let nodes = try XCTUnwrap(structure["outsideNodes"] as? [[String: Any]])
+        XCTAssertEqual(nodes.count, 1)
+        XCTAssertEqual(nodes[0]["kind"] as? String, "json")
+        XCTAssertEqual(structure["literalCodeValidJSON"] as? Bool, true)
+        XCTAssertFalse(String(decoding: try Data(contentsOf: fixture.output), as: UTF8.self).contains("metadata-content-secret"))
+        XCTAssertFalse(fixture.exists(fixture.armFile))
+        let operations = await transport.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+        _ = await server.shutdown()
+    }
+
     func testEmbeddedPlainFinalTextUsesMessageOutputWithoutReplayOrDiagnosticCapture() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let task = UUID(), reply = "marker-plain-final-fixture"
@@ -322,9 +354,10 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
 
 private actor RejectedReplyTransport: WebModelTransport {
     let reply: String
+    let codeStructure: Data?
     private var token = UUID().uuidString
     private var calls: [String] = []
-    init(reply: String) { self.reply = reply }
+    init(reply: String, codeStructure: Data? = nil) { self.reply = reply; self.codeStructure = codeStructure }
     func operations() -> [String] { calls }
     func request(operation: String, params: Data) async throws -> Data {
         calls.append(operation)
@@ -334,6 +367,10 @@ private actor RejectedReplyTransport: WebModelTransport {
         case "webProviderSend": value["state"] = "running"
         case "webProviderPoll":
             value["state"] = "complete"; value["text"] = reply; value["sequence"] = 1
+            if let codeStructure {
+                value["completionEvidence"] = ["codeStructure": try JSONSerialization.jsonObject(with: codeStructure)]
+                break
+            }
             value["completionEvidence"] = ["codeStructure": ["preCount": 0, "codeCount": 0, "outsideTruncated": false,
                 "literalCodeValidJSON": NSNull(), "literalCodeKnownEnvelopeType": NSNull(), "selectedExtraction": "rendered_fallback",
                 "extractionReason": "missing_pre", "codeTextLength": -1, "outsideTextLength": 220_002,

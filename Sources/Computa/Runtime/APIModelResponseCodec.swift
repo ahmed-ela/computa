@@ -248,7 +248,10 @@ enum APIModelResponseCodec {
             let custom = type == "custom"
             let schema: [String: Any]
             if custom {
-                schema = ["type": "object", "properties": ["input": ["type": "string"]], "required": ["input"], "additionalProperties": false]
+                // Put the literal-input contract on the argument the provider fills,
+                // while preserving the complete native grammar in the description.
+                let inputDescription = "Literal native tool input. Follow the exact text or grammar contract in this function's description, including delimiters and newlines. Encode the contents once as this JSON string; do not add quoting, JSON, shell syntax or Markdown fences unless the native contract requires them."
+                schema = ["type": "object", "properties": ["input": ["type": "string", "description": inputDescription]], "required": ["input"], "additionalProperties": false]
             } else {
                 guard var parameters = definition["parameters"] as? [String: Any], parameters["type"] as? String == "object" else { throw Failure.invalidTool }
                 try checkSchema(parameters)

@@ -614,7 +614,9 @@ describe("embedded ChatGPT fixed adapter", () => {
       expect(JSON.parse(result.text)).toEqual(envelope);
       expect(result.text).not.toContain("Copy code");
       expect(result.completionEvidence.codeStructure).toMatchObject({ preCount: 1, codeCount: 1,
-        codeTextLength: raw.length, outsideTextLength: 0, outsideTruncated: false });
+        codeTextLength: raw.length, outsideTextLength: 0, outsideTruncated: false,
+        literalCodeValidJSON: true, literalCodeKnownEnvelopeType: envelope.type,
+        selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
       expect(JSON.stringify(result.completionEvidence.codeStructure)).not.toContain('quoted');
     }
   });
@@ -629,6 +631,8 @@ describe("embedded ChatGPT fixed adapter", () => {
       const result = await f.inspect();
       expect(result.text).toBe(raw); expect(JSON.parse(result.text)).toEqual(envelope);
       expect(result.text).not.toContain("JSON\n"); expect(result.text).not.toContain("Enable word wrap");
+      expect(result.completionEvidence.codeStructure).toMatchObject({ literalCodeValidJSON: true,
+        literalCodeKnownEnvelopeType: envelope.type, selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
     }
   });
 
@@ -645,6 +649,56 @@ describe("embedded ChatGPT fixed adapter", () => {
       expect(result.completionEvidence.codeStructure).toMatchObject({ preCount: 0, codeCount: 1,
         codeTextLength: raw.length, outsideTextLength: 4, outsideTruncated: false });
     }
+  });
+
+  test("extraction diagnostics identify the unchanged strict fallback without exposing response content", async () => {
+    const raw = JSON.stringify({ type: "tool_calls", calls: [{ name: "private_tool_name", arguments: { cmd: "private command" } }] });
+    type Change = (f: ReturnType<typeof fixture>, pre: Element, code: Element) => void;
+    const cases: { change: Change; reason: string; valid: boolean | null; type: string | null }[] = [
+      { change: (f) => { f.answer.children = []; }, reason: "missing_code", valid: null, type: null },
+      { change: (f) => { const extra = new Element("PRE"); extra.append(new Element("CODE", {}, raw)); f.answer.append(extra); },
+        reason: "multiple_pre", valid: null, type: null },
+      { change: (_f, pre) => pre.append(new Element("CODE", {}, raw)), reason: "multiple_code", valid: null, type: null },
+      { change: (f, _pre, code) => { f.answer.children = []; f.answer.append(code); }, reason: "missing_pre", valid: null, type: null },
+      { change: (_f, _pre, code) => { code.text = '{"type":"tool_calls","calls":[{"name":"private_tool_name"'; },
+        reason: "invalid_json", valid: false, type: null },
+      { change: (_f, _pre, code) => { code.text = '{"type":"private_unknown_type","private_key":"private value"}'; },
+        reason: "unknown_envelope_type", valid: true, type: "unknown" },
+      { change: (f) => f.answer.append(new Element("P", {}, "private authored prose")),
+        reason: "outside_content", valid: true, type: "tool_calls" },
+      { change: (f) => { for (let i = 0; i < 10_001; i++) f.answer.append(new Element("SPAN")); },
+        reason: "outside_scan_limit", valid: true, type: "tool_calls" },
+      { change: (_f, _pre, code) => { code.text = 'private oversized content'.repeat(10_001); },
+        reason: "oversized_code", valid: null, type: null },
+    ];
+    for (const { change, reason, valid, type } of cases) {
+      const f = fixture(); f.answer.text = ""; f.answer.children = [];
+      const pre = new Element("PRE"), code = new Element("CODE", {}, raw); pre.append(code); f.answer.append(pre);
+      Object.defineProperty(f.answer, "innerText", { get: () => "private rendered fallback" });
+      change(f, pre, code);
+      const result = await f.inspect();
+      expect(result.text).toBe("private rendered fallback");
+      expect(result.completionEvidence.codeStructure).toMatchObject({ literalCodeValidJSON: valid,
+        literalCodeKnownEnvelopeType: type, selectedExtraction: "rendered_fallback", extractionReason: reason });
+      expect(JSON.stringify(result.completionEvidence.codeStructure)).not.toContain("private");
+      expect(JSON.stringify(result.completionEvidence.codeStructure).length).toBeLessThanOrEqual(8192);
+    }
+    const f = fixture(), block = observedChatGPTCodeBlock(f, raw, { noPre: true });
+    block.label.text = "private unrecognized header";
+    const result = await f.inspect();
+    expect(result.text).toBe("JSON\n" + raw);
+    expect(result.completionEvidence.codeStructure).toMatchObject({ literalCodeValidJSON: true,
+      literalCodeKnownEnvelopeType: "tool_calls", selectedExtraction: "rendered_fallback", extractionReason: "outside_content" });
+    expect(JSON.stringify(result.completionEvidence.codeStructure)).not.toContain("private");
+  });
+
+  test("an absent answer has finite extraction diagnostics and cannot look like admitted code", async () => {
+    const result = await fixture({ response: false }).inspect();
+    expect(result.text).toBe("");
+    expect(result.answerComplete).toBe(false);
+    expect(result.completionEvidence.codeStructure).toMatchObject({ preCount: 0, codeCount: 0,
+      codeTextLength: 0, outsideTextLength: 0, literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null,
+      selectedExtraction: "rendered_fallback", extractionReason: "absent_answer" });
   });
 
   test("a generic CODE without PRE cannot bypass exact ChatGPT widget identity", async () => {

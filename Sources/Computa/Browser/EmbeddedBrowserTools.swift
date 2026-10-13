@@ -387,7 +387,7 @@ actor EmbeddedBrowserToolController {
             try requireScope(scope, url: observation.snapshot.documentURL)
             contexts[taskKey]?.binding = observation.binding
             contexts[taskKey]?.snapshot = observation.snapshot
-            return observation.snapshot.formattedText
+            return try readResponse(observation.snapshot)
         case "browser_click", "browser_fill":
             let (binding, snapshot, index) = try await capturedMutation(
                 taskKey: taskKey, contextID: contextID, tool: tool, object: object, scope: scope)
@@ -406,6 +406,7 @@ actor EmbeddedBrowserToolController {
             try check(taskKey, contextID)
             return try json([
                 "dispatched": true, "no_replay": true, "result_verified": false,
+                "action_references": ["consumed": true, "next": "browser_read"],
                 "next": "Read or wait for the resulting page before reporting success.",
             ])
         case "browser_navigate":
@@ -550,6 +551,23 @@ actor EmbeddedBrowserToolController {
         String(
             decoding: try JSONSerialization.data(
                 withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+    }
+
+    /// Guidance names only controls actually exposed by this read. It does not
+    /// create another capability or change current-snapshot/physical preflight.
+    private func readResponse(_ snapshot: BrowserTabSnapshot) throws -> String {
+        let state = try json([
+            "snapshot_id": snapshot.id.uuidString,
+            "supersedes_previous": true,
+            "consumed_by_admitted_input": true,
+            "clickable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsPress }.map(\.index),
+            "fillable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsSetText }.map(\.index),
+            "next_after_input": "browser_read",
+        ])
+        let result = snapshot.formattedText + "\nBROWSER_ACTION_REFERENCES " + state
+        // Preserve the read's existing byte budget; instructions still explain
+        // reference lifetime when unusually large metadata leaves no room.
+        return result.utf8.count <= 16_384 ? result : snapshot.formattedText
     }
 
     /// A single Character can contain arbitrarily many combining scalars.

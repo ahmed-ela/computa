@@ -4,6 +4,34 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserToolControllerTests: XCTestCase {
+    func testReadPublishesOnlyCurrentEligibleActionReferencesAndInputConsumesThem() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let read = try await call(controller, "browser_read", ["view": "all"])
+        let line = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("BROWSER_ACTION_REFERENCES ") })
+        let state = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.dropFirst("BROWSER_ACTION_REFERENCES ".count).utf8)) as? [String: Any])
+        XCTAssertEqual(state["snapshot_id"] as? String, try snapshotID(read))
+        XCTAssertEqual(state["supersedes_previous"] as? Bool, true)
+        XCTAssertEqual(state["consumed_by_admitted_input"] as? Bool, true)
+        XCTAssertEqual(state["clickable_element_indices"] as? [Int], [1])
+        XCTAssertEqual(state["fillable_element_indices"] as? [Int], [0])
+        XCTAssertLessThanOrEqual(read.utf8.count, 16_384)
+        let output = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(read), "element_index": 0, "text": "UA 1842"])
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        let next = try XCTUnwrap(result["action_references"] as? [String: Any])
+        XCTAssertEqual(next["consumed"] as? Bool, true)
+        XCTAssertEqual(next["next"] as? String, "browser_read")
+        do {
+            _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(read), "element_index": 1])
+            XCTFail("Guidance must not retain input authority after admitted fill")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let fresh = try await call(controller, "browser_read", ["view": "all"])
+        XCTAssertNotEqual(try snapshotID(fresh), try snapshotID(read))
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 0)
+        _ = await controller.shutdown()
+    }
+
     func testCapturedMutationPreflightRejectsUnsupportedTargetsWithoutConsumingSnapshot() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])

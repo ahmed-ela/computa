@@ -808,6 +808,13 @@ actor WebModelServer {
     }
 
     private static func rejectedReplyCodeStructure(_ raw: [String: Any]) -> [String: Any] {
+        // The transport's shared finite projection includes bounded widget
+        // ancestry. Preserve it in an explicitly armed private capture, so a
+        // final header mismatch can be diagnosed after its owned tab closes.
+        if let encoded = EmbeddedWebModelTransport.sanitizedCodeStructure(raw),
+           let projected = try? JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any] {
+            return projected
+        }
         var safe: [String: Any] = [:]
         for key in ["preCount", "codeCount"] {
             if let number = receiptInteger(raw[key], range: 0...1_000) { safe[key] = number }

@@ -6,6 +6,30 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testCodeStructureProjectionRejectsBridgedBooleanCountsAndNumericFlags() throws {
+        let valid: [String: Any] = ["preCount": 1, "codeCount": 1, "codeTextLength": 129,
+            "outsideTextLength": 4, "outsideTruncated": false, "preParentTags": ["div"],
+            "outsideNodes": [["kind": "other", "textLength": 4, "ancestors": [[
+                "tag": "div", "classes": ["flex"], "preDescendants": 1, "copyControls": 1]]]]]
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(valid))
+        for key in ["preCount", "codeCount", "codeTextLength", "outsideTextLength"] {
+            var altered = valid; altered[key] = true
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(altered), key)
+            altered[key] = 1.5
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(altered), key)
+        }
+        var altered = valid; altered["outsideTruncated"] = 0
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(altered))
+        for key in ["preDescendants", "copyControls"] {
+            var parent: [String: Any] = ["tag": "div", "classes": [], "preDescendants": 1, "copyControls": 1]
+            parent[key] = false
+            altered = valid; altered["outsideNodes"] = [["kind": "other", "textLength": 4, "ancestors": [parent]]]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(altered), key)
+        }
+        altered = valid; altered["outsideNodes"] = [["kind": "other", "textLength": true, "ancestors": []]]
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(altered))
+    }
+
     func testChatGPTLoadFailureIsTypedTerminalAndDoesNotReplayOrBlockOtherSessions() async throws {
         for alreadyBound in [false, true] {
             let (fixture, token, view) = try await boundInspectionFixture(prompt: "Detect the website's actual load failure", bindFirstRead: alreadyBound)

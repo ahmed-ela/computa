@@ -787,6 +787,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let evidence = observed["completionEvidence"] as? [String: Any] ?? [:]
         let responseCount = count(observed, "responseCount")
         if observed["answerComplete"] as? Bool == true,
+           !(observed["text"] as? String ?? "").isEmpty,
            session.loggedCodeSequence != session.sequence || session.loggedCodeResponseCount != responseCount,
            let structure = evidence["codeStructure"] as? [String: Any],
            let safe = Self.sanitizedCodeStructure(structure) {
@@ -973,17 +974,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return String(data: bytes, encoding: .utf8)
     }
 
-    static func sanitizedCodeStructure(_ source: [String: Any]) -> String? {
+    nonisolated static func sanitizedCodeStructure(_ source: [String: Any]) -> String? {
+        func integer(_ value: Any?, limit: Int) -> Int? {
+            guard let number = value as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  let exact = Int(exactly: number.doubleValue), (0...limit).contains(exact) else { return nil }
+            return exact
+        }
         var safe: [String: Any] = [:]
         for key in ["preCount", "codeCount", "codeTextLength", "outsideTextLength"] {
             let limit = key.hasSuffix("Length") ? 220_001 : 1_000
-            guard let count = source[key] as? Int, (0...limit).contains(count) else { return nil }
+            guard let count = integer(source[key], limit: limit) else { return nil }
             safe[key] = count
         }
-        guard let truncated = source["outsideTruncated"] as? Bool,
+        guard let truncated = source["outsideTruncated"] as? NSNumber,
+              CFGetTypeID(truncated) == CFBooleanGetTypeID(),
               let tags = source["preParentTags"] as? [String], tags.count <= 3,
               tags.allSatisfy({ $0.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) != nil }) else { return nil }
-        safe["outsideTruncated"] = truncated
+        safe["outsideTruncated"] = truncated.boolValue
         safe["preParentTags"] = tags
         if let valid = source["literalCodeValidJSON"] {
             guard valid is NSNull || CFGetTypeID(valid as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
@@ -1008,7 +1016,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             var projected: [[String: Any]] = []
             for node in nodes {
                 guard let kind = node["kind"] as? String, ["json", "private_use", "other"].contains(kind),
-                      let length = node["textLength"] as? Int, (0...220_001).contains(length),
+                      let length = integer(node["textLength"], limit: 220_001),
                       let ancestors = node["ancestors"] as? [[String: Any]], ancestors.count <= 4 else { return nil }
                 var parents: [[String: Any]] = []
                 for parent in ancestors {
@@ -1016,8 +1024,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                           tag.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) != nil,
                           let classes = parent["classes"] as? [String], classes.count <= 6,
                           classes.allSatisfy({ $0.range(of: #"^[A-Za-z0-9_-]{1,48}$"#, options: .regularExpression) != nil }),
-                          let pres = parent["preDescendants"] as? Int, (0...1_000).contains(pres),
-                          let copies = parent["copyControls"] as? Int, (0...1_000).contains(copies) else { return nil }
+                          let pres = integer(parent["preDescendants"], limit: 1_000),
+                          let copies = integer(parent["copyControls"], limit: 1_000) else { return nil }
                     parents.append(["tag": tag, "classes": classes, "preDescendants": pres, "copyControls": copies])
                 }
                 projected.append(["kind": kind, "textLength": length, "ancestors": parents])

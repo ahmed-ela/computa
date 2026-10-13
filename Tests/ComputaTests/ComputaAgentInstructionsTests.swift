@@ -172,25 +172,78 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains(ComputaAgentInstructions.builtInBrowser))
         XCTAssertTrue(browser.contains("functions.browser_open"))
         XCTAssertFalse(browser.contains("No dedicated driver"))
-        XCTAssertTrue(browser.contains("Never\nrepeat uncertain input"))
+        XCTAssertTrue(browser.contains("Never repeat\nuncertain input"))
         XCTAssertTrue(browser.contains("snapshot_id/element_index"))
         XCTAssertTrue(browser.contains("Model inference pages are separate"))
-        XCTAssertTrue(browser.contains("browser_click activates enabled controls and links, including\nfollow_link=true"))
+        XCTAssertTrue(browser.contains("browser_click activates\nenabled controls and links, including follow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("unchanged reads"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 1_800)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 2_000, "Binding, snapshot consumption and close evidence share one bounded browser contract.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
     }
 
     func testBuiltInActionGuidanceRequiresPublishedCapabilitiesInsteadOfReadableIndices() {
-        let text = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let text = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true).replacingOccurrences(of: "\n", with: " ")
         XCTAssertTrue(text.contains("browser_click requires enabled=true and actions=[\"AXPress\"]"))
         XCTAssertTrue(text.contains("click an actions=[] text/heading row or infer a clickable parent"))
         XCTAssertTrue(text.contains("browser_fill requires enabled=true and settable=true"))
         XCTAssertTrue(text.contains("An index is readable context unless its row explicitly offers an"))
         XCTAssertTrue(text.contains("A click is not outcome proof"))
         XCTAssertTrue(text.contains("browser_read(cursor=next_cursor)"))
+    }
+
+    func testBrowserLifecycleContractSurvivesNativeAndFreshWebsiteHandoffs() {
+        // Prompt-contract coverage, not a claim that a model will obey it live.
+        let browser = ComputaAgentInstructions.builtInBrowser
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let website = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [
+            "relay.browser_open": "browser_open", "relay.browser_read": "browser_read",
+            "relay.browser_fill": "browser_fill", "relay.browser_close": "browser_close",
+        ])
+        for instructions in [native, website] {
+            XCTAssertTrue(instructions.contains(browser))
+            let text = instructions.replacingOccurrences(of: "\n", with: " ")
+            XCTAssertTrue(text.contains("creates AND binds a task-owned page; read it directly, without another bind"))
+            XCTAssertTrue(text.contains("including a view change or cursor page, supersedes ALL earlier action targets"))
+            XCTAssertTrue(text.contains("An admitted click or fill consumes that snapshot"))
+            XCTAssertTrue(text.contains("read again before another action, even on the same page"))
+            XCTAssertTrue(text.contains("After a no-input stale-target rejection, read once"))
+            XCTAssertTrue(text.contains("Never repeat uncertain input"))
+            XCTAssertTrue(text.contains("browser_close and verify released=true and existing_user_tab_preserved=true"))
+            XCTAssertTrue(text.contains("Automatic cleanup is not proof that your requested close occurred"))
+        }
+        XCTAssertFalse(ComputaAgentInstructions.webInferenceContract(offeredFunctions: [:]).contains(browser))
+    }
+
+    func testPatchGuidanceSeparatesCommandDirectoryAndPreservesOneExactEnvelope() throws {
+        let guidance = ComputaAgentInstructions.codeEditing
+        let text = guidance.replacingOccurrences(of: "\n", with: " ")
+        XCTAssertTrue(text.contains("Copy observed paths exactly, preserving spaces without adding leading whitespace"))
+        XCTAssertTrue(text.contains("Use observed absolute paths in patch file headers"))
+        XCTAssertTrue(text.contains("Relative patch paths resolve from the native thread's working directory"))
+        XCTAssertTrue(text.contains("an exec_command workdir or shell cd changes only that command, not apply_patch's directory"))
+        XCTAssertTrue(text.contains("inspect its actual result before retrying"))
+        let lines = guidance.components(separatedBy: "\n")
+        let first = try XCTUnwrap(lines.firstIndex(of: "*** Begin Patch"))
+        let last = try XCTUnwrap(lines.firstIndex(of: "*** End Patch"))
+        XCTAssertLessThan(first, last)
+        XCTAssertEqual(lines.filter { $0 == "*** Begin Patch" }.count, 1)
+        XCTAssertEqual(lines.filter { $0 == "*** End Patch" }.count, 1)
+        XCTAssertEqual(Array(lines[first...last]), ["*** Begin Patch", "*** Update File: /absolute/observed/file.py", "@@", "-old line", "+new line", "*** End Patch"])
+        let example = lines[first...last].joined(separator: "\n")
+        let original = try JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": "Edit the authorized file.",
+            "tools": [["type": "namespace", "name": "relay", "tools": [["type": "custom", "name": "apply_patch"]]]],
+        ])
+        let request = try WebModelResponseCodec.prepareRequest(original)
+        let contract = ComputaAgentInstructions.webInferenceContract(offeredFunctions: ["relay.apply_patch": "apply_patch"], customToolNames: ["relay.apply_patch"])
+        XCTAssertTrue(contract.contains(guidance))
+        XCTAssertTrue(ComputaAgentInstructions.developerInstructions().contains(guidance))
+        let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "relay.apply_patch", "input": example]]])
+        XCTAssertEqual(try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: request, requireEnvelope: true),
+                       .toolCalls([.init(name: "apply_patch", argumentsJSON: "", namespace: "relay", customInput: example)]))
+        XCTAssertLessThan(guidance.utf8.count, 1_600)
     }
 
     func testBuiltInBrowserContractLocatesURLExecutionOnTheHost() {
