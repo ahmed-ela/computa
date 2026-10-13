@@ -1,11 +1,13 @@
 import Foundation
 import Network
+import Darwin
+import CoreFoundation
 
 /// The engine speaks Responses on loopback; only this actor handles provider credentials.
 /// It never runs tools, changes permissions, or replays a failed inference.
 actor APIModelServer {
     enum Failure: String, Error, LocalizedError, Sendable {
-        case invalidRequest, unauthorized, modelUnavailable, busy, cancelled, stopped, credentialUnavailable, inferenceContextRequired
+        case invalidRequest, unauthorized, modelUnavailable, busy, cancelled, stopped, credentialUnavailable, inferenceContextRequired, toolNamingUnavailable
         var errorDescription: String? {
             switch self {
             case .invalidRequest: "The local API model request is invalid."
@@ -16,6 +18,7 @@ actor APIModelServer {
             case .stopped: "The local API model service is stopped."
             case .credentialUnavailable: "The API credential could not be read from secure storage."
             case .inferenceContextRequired: "The API inference does not belong to the current native turn."
+            case .toolNamingUnavailable: "This chat's API tool naming could not be verified. No provider request was sent."
             }
         }
     }
@@ -24,6 +27,7 @@ actor APIModelServer {
     private let client: APIProviderHTTPClient
     private let suppliedCapsules: APIReasoningCapsules?
     private let rejectionDiagnosticsDirectory: URL?
+    private let toolNamingDirectory: URL?
     private var capsules: APIReasoningCapsules?
     private var providers: [APIProviderDefinition] = []
     private var listener: NWListener?
@@ -35,9 +39,9 @@ actor APIModelServer {
     private var connections: [UUID: Connection] = [:]
     private struct Lane { let id: UUID; let request: Task<APIModelResponseCodec.Reply, Error> }
     private var lanes: [String: Lane] = [:]
-    private struct Prepared: Equatable { let threadID: String; let preparationID: UUID }
+    private struct Prepared: Equatable { let threadID: String; let preparationID: UUID; let isNewThread: Bool }
     private struct Identity: Equatable, Sendable { let threadID: String; let turnID: String }
-    private struct Context: Equatable { let identity: Identity; let preparationID: UUID }
+    private struct Context: Equatable { let identity: Identity; let preparationID: UUID; let isNewThread: Bool }
     private struct Waiter { let id: UUID; let continuation: CheckedContinuation<Context, Error> }
     private var prepared: [String: Prepared] = [:]
     private var contexts: [String: Context] = [:]
@@ -48,9 +52,10 @@ actor APIModelServer {
 
     init(credentials: any APIProviderCredentials = APIProviderCredentialStore(),
          client: APIProviderHTTPClient = APIProviderHTTPClient(), capsules: APIReasoningCapsules? = nil,
-         rejectionDiagnosticsDirectory: URL? = nil) {
+         rejectionDiagnosticsDirectory: URL? = nil, toolNamingDirectory: URL? = nil) {
         self.credentials = credentials; self.client = client; suppliedCapsules = capsules
         self.rejectionDiagnosticsDirectory = rejectionDiagnosticsDirectory
+        self.toolNamingDirectory = toolNamingDirectory
     }
     func updateProviders(_ values: [APIProviderDefinition]) throws {
         try APIProviderCatalog.validate(values)
@@ -99,10 +104,10 @@ actor APIModelServer {
         try Task.checkCancellation(); guard !stopped else { throw Failure.stopped }
         let url = URL(string: "http://127.0.0.1:\(port)/v1")!; baseURL = url; return url
     }
-    func prepareInferenceTurn(taskID: String, threadID: String, preparationID: UUID) throws {
+    func prepareInferenceTurn(taskID: String, threadID: String, preparationID: UUID, isNewThread: Bool = false) throws {
         let task = try Self.canonicalID(taskID), thread = try Self.canonicalID(threadID)
         guard !stopped, !retiring.contains(task), lanes[task] == nil, admissions[task] == nil else { throw Failure.busy }
-        let value = Prepared(threadID: thread, preparationID: preparationID)
+        let value = Prepared(threadID: thread, preparationID: preparationID, isNewThread: isNewThread)
         if prepared[task] == value { return }
         guard prepared[task] == nil, contexts[task] == nil else { throw Failure.inferenceContextRequired }
         prepared[task] = value
@@ -110,10 +115,12 @@ actor APIModelServer {
     func registerInferenceTurn(taskID: String, threadID: String, turnID: String, preparationID: UUID) throws {
         let task = try Self.canonicalID(taskID)
         let identity = Identity(threadID: try Self.canonicalID(threadID), turnID: try Self.canonicalID(turnID))
-        let value = Context(identity: identity, preparationID: preparationID)
+        guard let preparation = prepared[task], preparation.threadID == identity.threadID,
+              preparation.preparationID == preparationID else { throw Failure.inferenceContextRequired }
+        let value = Context(identity: identity, preparationID: preparationID, isNewThread: preparation.isNewThread)
         if contexts[task] == value { return }
         guard !stopped, !retiring.contains(task), contexts[task] == nil,
-              prepared[task] == Prepared(threadID: identity.threadID, preparationID: preparationID) else { throw Failure.inferenceContextRequired }
+              prepared[task] == preparation else { throw Failure.inferenceContextRequired }
         contexts[task] = value
         waiters.removeValue(forKey: task)?.continuation.resume(returning: value)
     }
@@ -230,13 +237,30 @@ actor APIModelServer {
             let context = try await context(taskID: taskID)
             guard !stopped, contexts[taskID] == context, identity == context.identity else { throw Failure.inferenceContextRequired }
             guard let selection = APIProviderCatalog.selection(for: modelID, providers: providers) else { throw Failure.modelUnavailable }
+            if capsules == nil { capsules = try suppliedCapsules ?? APIReasoningCapsules.persistent() }
+            guard let capsules else { throw Failure.credentialUnavailable }
+            try Task.checkCancellation()
+            guard !stopped, !retiring.contains(taskID), contexts[taskID] == context,
+                  admissions[taskID] == admissionID else { throw Failure.inferenceContextRequired }
+            let proposedNaming: APIModelResponseCodec.ToolNaming = context.isNewThread && Self.hasOnlyUnmodeledInput(object) ? .semantic : .legacy
+            let prepared: APIModelResponseCodec.Request
+            if let toolNamingDirectory {
+                // Synchronous ownership-checked pin publication cannot yield to
+                // a later turn between validation and the durable write. The
+                // store validates the request before admitting a new pin.
+                prepared = try APIThreadToolNamingStore(directory: toolNamingDirectory).withPinnedStyle(
+                    threadID: context.identity.threadID, proposed: proposedNaming) { style in
+                        try APIModelResponseCodec.prepare(request.body, selection: selection,
+                            threadID: context.identity.threadID, capsules: capsules, toolNaming: style)
+                    }
+            } else {
+                prepared = try APIModelResponseCodec.prepare(request.body, selection: selection,
+                    threadID: context.identity.threadID, capsules: capsules, toolNaming: .legacy)
+            }
             let key: String
             do { guard let value = try credentials.key(for: selection.provider.id) else { throw APIProviderHTTPClient.Failure.missingCredential }; key = value }
             catch let failure as APIProviderHTTPClient.Failure { throw failure }
             catch { throw Failure.credentialUnavailable }
-            if capsules == nil { capsules = try suppliedCapsules ?? APIReasoningCapsules.persistent() }
-            guard let capsules else { throw Failure.credentialUnavailable }
-            let prepared = try APIModelResponseCodec.prepare(request.body, selection: selection, threadID: context.identity.threadID, capsules: capsules)
             let client = self.client
             let capture = APIRejectedRequestCapture.consume(directory: rejectionDiagnosticsDirectory, taskID: UUID(uuidString: taskID)!,
                 threadID: UUID(uuidString: context.identity.threadID)!, turnID: UUID(uuidString: context.identity.turnID)!)
@@ -272,6 +296,18 @@ actor APIModelServer {
         } catch {
             deadline.cancel()
             try? await Self.send(connection, status: Self.errorStatus(error), type: "application/json", body: Self.errorBody(error))
+        }
+    }
+    /// This is a conservative migration check, never freshness authority. Only
+    /// Core's actual thread/start flag can opt a missing pin into semantic names.
+    /// Unknown item types or model-generated history keep the legacy mapping.
+    private static func hasOnlyUnmodeledInput(_ object: [String: Any]) -> Bool {
+        if object["input"] is String { return true }
+        guard let input = object["input"] as? [[String: Any]], !input.isEmpty else { return false }
+        return input.allSatisfy { item in
+            guard item["type"] == nil || item["type"] as? String == "message",
+                  let role = item["role"] as? String else { return false }
+            return ["system", "developer", "user"].contains(role)
         }
     }
     static func errorStatus(_ error: any Error) -> String {
@@ -344,6 +380,181 @@ actor APIModelServer {
                 if error != nil { continuation.resume(throwing: Failure.cancelled) } else { continuation.resume() }
             })
         }
+    }
+}
+
+/// Immutable per-native-thread protocol metadata. No input, output, reasoning,
+/// endpoint, model, credential or tool arguments are stored here.
+private struct APIThreadToolNamingStore {
+    private static let maximumBytes = 512
+    let directory: URL
+
+    func withPinnedStyle<T>(threadID: String, proposed: APIModelResponseCodec.ToolNaming,
+                            validate: (APIModelResponseCodec.ToolNaming) throws -> T) throws -> T {
+        guard let id = UUID(uuidString: threadID), id.uuidString.lowercased() == threadID else {
+            throw APIModelServer.Failure.toolNamingUnavailable
+        }
+        try Task.checkCancellation()
+        let handles = try openDirectory()
+        defer { close(handles.directory); close(handles.parent) }
+        guard flock(handles.directory, LOCK_EX | LOCK_NB) == 0 else { throw APIModelServer.Failure.toolNamingUnavailable }
+        defer { _ = flock(handles.directory, LOCK_UN) }
+        let filename = threadID + ".json"
+        try requireDirectory(handles)
+        if let existing = try load(filename, threadID: threadID, handles: handles) {
+            return try validate(existing)
+        }
+        // Invalid request/history cannot create a naming pin. Validation is
+        // completed against the candidate style before the atomic publication.
+        let result = try validate(proposed)
+        try Task.checkCancellation()
+        try requireDirectory(handles)
+        let bytes = try JSONSerialization.data(withJSONObject: ["version": 1, "threadID": threadID,
+            "style": proposed.rawValue], options: [.sortedKeys, .withoutEscapingSlashes])
+        guard bytes.count <= Self.maximumBytes else { throw APIModelServer.Failure.toolNamingUnavailable }
+        try publish(bytes, named: filename, handles: handles)
+        guard try load(filename, threadID: threadID, handles: handles) == proposed else {
+            throw APIModelServer.Failure.toolNamingUnavailable
+        }
+        return result
+    }
+
+    private struct Handles {
+        let parent: Int32, directory: Int32
+        let name: String
+        let identity: stat
+    }
+
+    private func openDirectory() throws -> Handles {
+        guard directory.isFileURL, directory.path.hasPrefix("/") else { throw APIModelServer.Failure.toolNamingUnavailable }
+        let components = directory.path.split(separator: "/").map(String.init)
+        guard !components.isEmpty, components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\0") }) else {
+            throw APIModelServer.Failure.toolNamingUnavailable
+        }
+        var parent = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard parent >= 0 else { throw APIModelServer.Failure.toolNamingUnavailable }
+        do {
+            // Resolve each ancestor through an owned descriptor. An ancestor
+            // symlink cannot redirect this store into an unrelated location.
+            for component in components.dropLast() {
+                let next = openat(parent, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard next >= 0 else { throw APIModelServer.Failure.toolNamingUnavailable }
+                close(parent); parent = next
+            }
+            let name = components.last!
+            var descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            if descriptor < 0, errno == ENOENT {
+                try Task.checkCancellation()
+                if mkdirat(parent, name, 0o700) == 0 {
+                    guard fsync(parent) == 0 else { throw APIModelServer.Failure.toolNamingUnavailable }
+                } else if errno != EEXIST { throw APIModelServer.Failure.toolNamingUnavailable }
+                descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            }
+            guard descriptor >= 0 else { throw APIModelServer.Failure.toolNamingUnavailable }
+            var metadata = stat()
+            guard fstat(descriptor, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR,
+                  metadata.st_uid == geteuid(), metadata.st_mode & 0o777 == 0o700 else {
+                close(descriptor); throw APIModelServer.Failure.toolNamingUnavailable
+            }
+            let result = Handles(parent: parent, directory: descriptor, name: name, identity: metadata)
+            do { try requireDirectory(result) }
+            catch { close(descriptor); throw error }
+            return result
+        } catch { close(parent); throw error }
+    }
+
+    private func requireDirectory(_ handles: Handles) throws {
+        var held = stat(), named = stat()
+        guard fstat(handles.directory, &held) == 0,
+              fstatat(handles.parent, handles.name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+              sameInode(held, handles.identity), sameInode(held, named),
+              held.st_mode & S_IFMT == S_IFDIR, named.st_mode & S_IFMT == S_IFDIR,
+              held.st_uid == geteuid(), held.st_mode & 0o777 == 0o700 else {
+            throw APIModelServer.Failure.toolNamingUnavailable
+        }
+    }
+
+    private func load(_ name: String, threadID: String, handles: Handles) throws -> APIModelResponseCodec.ToolNaming? {
+        try requireDirectory(handles)
+        let descriptor = openat(handles.directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return nil }
+            throw APIModelServer.Failure.toolNamingUnavailable
+        }
+        defer { close(descriptor) }
+        var before = stat(), named = stat()
+        guard fstat(descriptor, &before) == 0,
+              fstatat(handles.directory, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+              sameInode(before, named), privateFile(before),
+              before.st_size > 0, before.st_size <= Self.maximumBytes else { throw APIModelServer.Failure.toolNamingUnavailable }
+        var bytes = Data(count: Self.maximumBytes + 1)
+        let count = try bytes.withUnsafeMutableBytes { buffer -> Int in
+            var offset = 0
+            while offset < buffer.count {
+                let count = Darwin.read(descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+                if count < 0 { if errno == EINTR { continue }; throw APIModelServer.Failure.toolNamingUnavailable }
+                if count == 0 { return offset }
+                offset += count
+            }
+            return offset
+        }
+        var after = stat(), current = stat()
+        guard count == before.st_size, count <= Self.maximumBytes,
+              fstat(descriptor, &after) == 0,
+              fstatat(handles.directory, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+              unchangedFile(before, after), unchangedFile(after, current), privateFile(after) else {
+            throw APIModelServer.Failure.toolNamingUnavailable
+        }
+        bytes.count = count
+        guard let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              Set(object.keys) == ["version", "threadID", "style"],
+              let version = object["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
+              version.doubleValue == 1,
+              object["threadID"] as? String == threadID,
+              let raw = object["style"] as? String,
+              let style = APIModelResponseCodec.ToolNaming(rawValue: raw) else {
+            throw APIModelServer.Failure.toolNamingUnavailable
+        }
+        try requireDirectory(handles)
+        return style
+    }
+
+    private func publish(_ bytes: Data, named name: String, handles: Handles) throws {
+        let temporary = ".tool-naming-" + UUID().uuidString.lowercased() + ".tmp"
+        let descriptor = openat(handles.directory, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw APIModelServer.Failure.toolNamingUnavailable }
+        defer { close(descriptor); _ = unlinkat(handles.directory, temporary, 0) }
+        try bytes.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let count = Darwin.write(descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+                if count < 0 { if errno == EINTR { continue }; throw APIModelServer.Failure.toolNamingUnavailable }
+                guard count > 0 else { throw APIModelServer.Failure.toolNamingUnavailable }
+                offset += count
+            }
+        }
+        guard fchmod(descriptor, 0o400) == 0, fsync(descriptor) == 0 else { throw APIModelServer.Failure.toolNamingUnavailable }
+        try Task.checkCancellation()
+        try requireDirectory(handles)
+        // Publication is exclusive across processes. An existing pin is never
+        // rewritten; even a contradictory racing writer cannot change its style.
+        guard renameatx_np(handles.directory, temporary, handles.directory, name, UInt32(RENAME_EXCL)) == 0 else {
+            throw APIModelServer.Failure.toolNamingUnavailable
+        }
+        guard fsync(handles.directory) == 0 else { throw APIModelServer.Failure.toolNamingUnavailable }
+        try requireDirectory(handles)
+    }
+
+    private func privateFile(_ value: stat) -> Bool {
+        value.st_mode & S_IFMT == S_IFREG && value.st_nlink == 1
+            && value.st_uid == geteuid() && value.st_mode & 0o777 == 0o400
+    }
+    private func sameInode(_ lhs: stat, _ rhs: stat) -> Bool { lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino }
+    private func unchangedFile(_ lhs: stat, _ rhs: stat) -> Bool {
+        sameInode(lhs, rhs) && lhs.st_size == rhs.st_size && lhs.st_mode == rhs.st_mode
+            && lhs.st_uid == rhs.st_uid && lhs.st_nlink == rhs.st_nlink
+            && lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec
+            && lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
     }
 }
 

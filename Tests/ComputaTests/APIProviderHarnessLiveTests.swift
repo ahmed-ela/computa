@@ -24,7 +24,9 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         XCTAssertFalse(artifact.executableURL.path.contains("ChatGPT.app"))
 
         let failuresBefore = testRun?.failureCount ?? 0
-        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+        guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        defer { free(resolved) }
+        let root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
             .appendingPathComponent("ComputaAPIHarness-\(UUID().uuidString)", isDirectory: true)
         let home = root.appendingPathComponent("PrivateCodexHome", isDirectory: true)
         let project = root.appendingPathComponent("Project", isDirectory: true)
@@ -55,7 +57,8 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let firstTrace = root.appendingPathComponent("first-native-protocol.jsonl")
             let reopenedTrace = root.appendingPathComponent("resumed-native-protocol.jsonl")
             let firstServer = APIModelServer(credentials: credentials,
-                                            capsules: try APIReasoningCapsules(key: capsuleKey))
+                                            capsules: try APIReasoningCapsules(key: capsuleKey),
+                                            toolNamingDirectory: home.appendingPathComponent("APIToolNaming-v1", isDirectory: true))
             var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
             configuration.executable = .bundled
             configuration.model = modelID
@@ -86,7 +89,8 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertEqual(patch.fileChanges?.count, 1)
             let change = try XCTUnwrap(patch.fileChanges?.first)
             XCTAssertEqual(change.kind, "update")
-            XCTAssertEqual(change.path, project.appendingPathComponent("fixture.txt").path)
+            XCTAssertEqual(URL(fileURLWithPath: change.path).resolvingSymlinksInPath().path,
+                           project.appendingPathComponent("fixture.txt").resolvingSymlinksInPath().path)
             XCTAssertTrue(change.diff.contains("-old"))
             XCTAssertTrue(change.diff.contains("+fixed"))
             let diff = try XCTUnwrap(audit.diffs.last)
@@ -106,6 +110,8 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertTrue(firstReceipt.patchOutputMatched)
             XCTAssertTrue(firstReceipt.commandOutputMatched)
             XCTAssertTrue(firstReceipt.reasoningRoundtripped)
+            XCTAssertTrue(firstReceipt.semanticNamingStable,
+                          "Actual Core thread/start must opt the fresh chat into semantic naming before the provider receives its tools")
             XCTAssertEqual(firstReceipt.failures, [])
             let firstShutdown = await runtime.shutdown()
             XCTAssertTrue(firstShutdown.succeeded, firstShutdown.issues.joined(separator: "; "))
@@ -114,6 +120,12 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let firstWire = try AppServerWireTrace.load(firstTrace)
             XCTAssertEqual(firstWire.parseFailures, [])
             let threadID = try threadStarted(in: firstWire)
+            let namingPin = home.appendingPathComponent("APIToolNaming-v1", isDirectory: true)
+                .appendingPathComponent(threadID.lowercased() + ".json")
+            let pinBytes = try Data(contentsOf: namingPin)
+            let pin = try XCTUnwrap(JSONSerialization.jsonObject(with: pinBytes) as? [String: Any])
+            XCTAssertEqual(pin["threadID"] as? String, threadID.lowercased())
+            XCTAssertEqual(pin["style"] as? String, APIModelResponseCodec.ToolNaming.semantic.rawValue)
             XCTAssertNotEqual(threadID, taskID)
             XCTAssertEqual(firstWire.messages.filter { $0.direction == .clientToServer && $0.method == "turn/start" }.count, 1)
             assertNoPrivateState(in: firstWire, fakeKey: fakeKey, reasoning: privateReasoning)
@@ -123,7 +135,8 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             // native history. The same upstream endpoint and capsule key are
             // retained; no live authority or in-memory history is transferred.
             let secondServer = APIModelServer(credentials: credentials,
-                                             capsules: try APIReasoningCapsules(key: capsuleKey))
+                                             capsules: try APIReasoningCapsules(key: capsuleKey),
+                                             toolNamingDirectory: home.appendingPathComponent("APIToolNaming-v1", isDirectory: true))
             configuration.apiModelServerForTesting = secondServer
             configuration.protocolTracePath = reopenedTrace.path
             let resumed = CodexAppServerRuntime(configuration: configuration, visualGrounder: APIHarnessNoVisualGrounder())
@@ -153,6 +166,8 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             XCTAssertEqual(finalReceipt.requestCount, 4, "No inference, edit, or command may be replayed during cold resume.")
             XCTAssertTrue(finalReceipt.reasoningSurvivedColdResume)
             XCTAssertTrue(finalReceipt.originalToolResultsSurvivedColdResume)
+            XCTAssertTrue(finalReceipt.semanticNamingStable)
+            XCTAssertEqual(try Data(contentsOf: namingPin), pinBytes)
             XCTAssertEqual(finalReceipt.failures, [])
             XCTAssertEqual(credentials.counts().reads, 4)
             XCTAssertEqual(credentials.counts().mutations, 0)
@@ -457,6 +472,7 @@ private actor APIHarnessInference {
         var reasoningRoundtripped = false
         var reasoningSurvivedColdResume = false
         var originalToolResultsSurvivedColdResume = false
+        var semanticNamingStable = true
         var failures = [String]()
     }
     private let projectPath: String
@@ -466,6 +482,7 @@ private actor APIHarnessInference {
     private let patchCallID = "fixture-native-patch-call"
     private let commandCallID = "fixture-native-command-call"
     private var observations = Receipt()
+    private var firstToolNames: Set<String>?
     init(projectPath: String, marker: String, privateReasoning: [String], expectedKey: String) {
         self.projectPath = projectPath; self.marker = marker; self.privateReasoning = privateReasoning; self.expectedKey = expectedKey
     }
@@ -480,6 +497,13 @@ private actor APIHarnessInference {
                   let tools = body["tools"] as? [[String: Any]] else { throw APIHarnessFailure("request_contract") }
             observations.requestCount += 1
             observations.requestsWereStreaming = observations.requestsWereStreaming && body["stream"] as? Bool == true
+            let currentNames = Set(tools.compactMap { ($0["function"] as? [String: Any])?["name"] as? String })
+            let semantic = !currentNames.isEmpty && currentNames.allSatisfy {
+                !$0.hasPrefix("computa_tool_") && $0.range(of: #"^[A-Za-z0-9_-]+__[a-f0-9]{24}$"#, options: .regularExpression) != nil
+            }
+            if let firstToolNames { observations.semanticNamingStable = observations.semanticNamingStable && firstToolNames == currentNames }
+            else { firstToolNames = currentNames }
+            observations.semanticNamingStable = observations.semanticNamingStable && semantic
             let count = observations.requestCount
             let message: [String: Any], finish: String
             if count == 1 {

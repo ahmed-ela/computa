@@ -6,6 +6,10 @@ import Security
 /// Stateless protocol translation. Tool execution remains entirely in the native engine.
 /// A reply is completely validated before an output_item.done can authorize a tool.
 enum APIModelResponseCodec {
+    enum ToolNaming: String, Codable, Sendable {
+        case legacy = "legacy_index_v1"
+        case semantic = "semantic_v2"
+    }
     enum Failure: String, Error, LocalizedError, Sendable {
         case invalidRequest, unsupportedParameter, unsupportedModality, invalidTool, invalidArguments
         case invalidHistory, invalidResponse, incompleteResponse, modelMismatch, invalidReasoning
@@ -41,6 +45,7 @@ enum APIModelResponseCodec {
         let stream: Bool
         let body: Data
         let tools: [Tool]
+        let toolNaming: ToolNaming
         let allowedTools: Set<String>
         let requiredTool: Bool
         let maximumCalls: Int
@@ -58,7 +63,7 @@ enum APIModelResponseCodec {
     private static let maximumText = 2_000_000
 
     static func prepare(_ data: Data, selection: APIProviderCatalog.Selection, threadID: String,
-                        capsules: APIReasoningCapsules) throws -> Request {
+                        capsules: APIReasoningCapsules, toolNaming: ToolNaming = .legacy) throws -> Request {
         guard data.count <= maximumText, var raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let localID = raw["model"] as? String,
               APIProviderCatalog.identity(for: localID) == APIProviderCatalog.Identity(providerID: selection.provider.id, modelID: selection.model.id),
@@ -72,14 +77,14 @@ enum APIModelResponseCodec {
         let parallel = try boolean(raw["parallel_tool_calls"], default: true)
         // A resumed thread may retain old Chrome specs. Keep that catalog only
         // to validate historical call/output pairs; never advertise it again.
-        let historyTools = try parseTools(raw["tools"])
+        let historyTools = try parseTools(raw["tools"], naming: toolNaming)
         if let definitions = raw["tools"] as? [[String: Any]] {
             raw["tools"] = ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: localID)
         }
         // Removing an active tool must not renumber its neighbours: historical
         // calls and current declarations share one stable provider identity.
         let historyByIdentity = Dictionary(uniqueKeysWithValues: historyTools.map { ($0.identity, $0) })
-        let tools = try parseTools(raw["tools"]).map { visible -> Tool in
+        let tools = try parseTools(raw["tools"], naming: toolNaming).map { visible -> Tool in
             guard let original = historyByIdentity[visible.identity] else { throw Failure.invalidTool }
             return Tool(name: visible.name, namespace: visible.namespace, wireName: original.wireName,
                         custom: visible.custom, schema: visible.schema, description: visible.description)
@@ -100,7 +105,7 @@ enum APIModelResponseCodec {
         let limit = try integer(raw["max_tool_calls"], default: 64, range: 1...128)
         let maximumCalls = parallel ? limit : 1
         let configuration = try responseConfiguration(raw, parallel: parallel)
-        let history = try messages(raw, tools: historyTools, selection: selection, threadID: threadID, capsules: capsules)
+        let history = try messages(raw, tools: historyTools, selection: selection, threadID: threadID, capsules: capsules, toolNaming: toolNaming)
         var body: [String: Any]
         if selection.provider.wireAPI == .responses {
             body = raw
@@ -145,7 +150,7 @@ enum APIModelResponseCodec {
             }
         }
         return Request(localModelID: localID, provider: selection.provider, model: selection.model, threadID: threadID,
-                       stream: stream, body: try json(body), tools: tools, allowedTools: allowed, requiredTool: required,
+                       stream: stream, body: try json(body), tools: tools, toolNaming: toolNaming, allowedTools: allowed, requiredTool: required,
                        maximumCalls: maximumCalls, historyCallIDs: history.callIDs, capsules: capsules, responseConfiguration: configuration)
     }
 
@@ -221,10 +226,20 @@ enum APIModelResponseCodec {
         return identity + tool.description
     }
 
-    private static func parseTools(_ value: Any?) throws -> [Tool] {
+    private static func semanticToolName(name: String, namespace: String?) -> String {
+        // Native names are validated ASCII. Dots are legal natively but not in
+        // Chat Completions; the digest retains their exact qualified identity.
+        let stem = String(name.replacingOccurrences(of: ".", with: "_").prefix(38))
+        let identity = (namespace ?? "") + "\u{0}" + name
+        let suffix = SHA256.hash(data: Data(identity.utf8)).prefix(12)
+            .map { String(format: "%02x", $0) }.joined()
+        return stem + "__" + suffix
+    }
+
+    private static func parseTools(_ value: Any?, naming: ToolNaming) throws -> [Tool] {
         if absent(value) { return [] }
         guard let definitions = value as? [[String: Any]], definitions.count <= 256 else { throw Failure.invalidTool }
-        var result: [Tool] = [], identities = Set<String>()
+        var result: [Tool] = [], identities = Set<String>(), wireNames = Set<String>()
         func add(_ definition: [String: Any], namespace: String?) throws {
             guard let type = definition["type"] as? String, ["function", "custom"].contains(type),
                   let name = definition["name"] as? String, validName(name), result.count < 256 else { throw Failure.invalidTool }
@@ -244,9 +259,14 @@ enum APIModelResponseCodec {
                 schema = parameters
             }
             let description = custom ? try customToolDescription(definition) : (definition["description"] as? String ?? "")
-            let tool = Tool(name: name, namespace: namespace, wireName: "computa_tool_\(result.count)", custom: custom,
+            let wireName = naming == .legacy ? "computa_tool_\(result.count)" : semanticToolName(name: name, namespace: namespace)
+            let tool = Tool(name: name, namespace: namespace, wireName: wireName, custom: custom,
                             schema: schema, description: description)
-            guard identities.insert(tool.identity).inserted, tool.description.utf8.count <= 64_000 else { throw Failure.invalidTool }
+            // Validate the complete catalog before filtering, so a collision
+            // cannot be hidden or resolved by changing declaration order.
+            guard identities.insert(tool.identity).inserted, wireNames.insert(wireName).inserted,
+                  wireName.utf8.count <= 64, wireName.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil,
+                  tool.description.utf8.count <= 64_000 else { throw Failure.invalidTool }
             result.append(tool)
         }
         for definition in definitions {
@@ -288,7 +308,7 @@ enum APIModelResponseCodec {
 
     private struct History { let messages: [[String: Any]]; let callIDs: Set<String> }
     private static func messages(_ raw: [String: Any], tools: [Tool], selection: APIProviderCatalog.Selection,
-                                 threadID: String, capsules: APIReasoningCapsules) throws -> History {
+                                 threadID: String, capsules: APIReasoningCapsules, toolNaming: ToolNaming) throws -> History {
         var messages: [[String: Any]] = [], seen = Set<String>(), pending = Set<String>(), pendingCustom = Set<String>()
         var reasoning: APIReasoningCapsules.Payload?, assistant: [String: Any]?, calls: [[String: Any]] = []
         func flush() throws {
@@ -299,6 +319,7 @@ enum APIModelResponseCodec {
             if let value = reasoning {
                 guard Set(value.callIDs) == Set(calls.compactMap { $0["id"] as? String }) else { throw Failure.invalidReasoning }
                 guard let text = value.reasoning, value.remoteEncryptedContent == nil else { throw Failure.invalidReasoning }
+                guard (value.toolNaming ?? ToolNaming.legacy.rawValue) == toolNaming.rawValue else { throw Failure.invalidReasoning }
                 message["reasoning"] = text
             }
             messages.append(message); assistant = nil; calls = []; reasoning = nil
@@ -478,7 +499,7 @@ enum APIModelResponseCodec {
         }
         if let reasoning = message["reasoning"] as? String, !reasoning.isEmpty {
             let id = "rs_" + responseID
-            let capsule = try request.capsules.seal(.init(reasoning: reasoning, callIDs: actualIDs, responseID: responseID), itemID: id,
+            let capsule = try request.capsules.seal(.init(reasoning: reasoning, callIDs: actualIDs, responseID: responseID, toolNaming: request.toolNaming.rawValue), itemID: id,
                                                    providerID: request.provider.id, modelID: request.model.id, baseURL: request.provider.baseURL, threadID: request.threadID)
             output.insert(["id": id, "type": "reasoning", "status": "completed", "summary": [], "encrypted_content": capsule], at: 0)
         } else if !absent(message["reasoning"]) && !(message["reasoning"] is String) { throw Failure.invalidResponse }
@@ -809,6 +830,7 @@ struct APIReasoningCapsules: Sendable {
         let responseID: String
         var remoteEncryptedContent: String? = nil
         var remoteItemID: String? = nil
+        var toolNaming: String? = nil
     }
     let key: Data
     init(key: Data) throws { guard key.count == 32 else { throw APIModelResponseCodec.Failure.invalidReasoning }; self.key = key }

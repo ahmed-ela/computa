@@ -1338,11 +1338,15 @@ private extension CodexAppServerRuntime {
             #if DEBUG
             self.apiModelServer = configuration.apiModelServerForTesting ?? APIModelServer(rejectionDiagnosticsDirectory:
                 URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
-                    .appendingPathComponent("APIRequestDiagnostics-v1", isDirectory: true))
+                    .appendingPathComponent("APIRequestDiagnostics-v1", isDirectory: true), toolNamingDirectory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("APIToolNaming-v1", isDirectory: true))
             #else
             self.apiModelServer = APIModelServer(rejectionDiagnosticsDirectory:
                 URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
-                    .appendingPathComponent("APIRequestDiagnostics-v1", isDirectory: true))
+                    .appendingPathComponent("APIRequestDiagnostics-v1", isDirectory: true), toolNamingDirectory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("APIToolNaming-v1", isDirectory: true))
             #endif
             self.events = events
             self.browserBroker = browserBroker
@@ -2021,6 +2025,7 @@ private extension CodexAppServerRuntime {
             let requestedContext = LocalThreadContext.forModel(modelID, apiModel: apiModel(for: modelID), apiProviderURL: apiProviderURL(for: modelID))
 
             let threadID: String
+            var isNewThread = false
             var resumedWithoutUsage = false
             if let existing = threadForTask[taskID] {
                 threadID = existing
@@ -2088,6 +2093,7 @@ private extension CodexAppServerRuntime {
                     ]
                 )
                 threadID = try parseThreadID(from: response)
+                isNewThread = true
                 rememberReferenceToolThread(threadID)
                 threadForTask[taskID] = threadID
                 taskForThread[threadID] = taskID
@@ -2148,7 +2154,7 @@ private extension CodexAppServerRuntime {
                 guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
                 inferencePreparation = try await prepareInferenceTurn(
-                    taskID: taskID, threadID: threadID, modelID: modelID)
+                    taskID: taskID, threadID: threadID, modelID: modelID, isNewThread: isNewThread)
                 guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
                 turnResponse = try await request(
@@ -2346,7 +2352,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func prepareInferenceTurn(taskID: AgentTask.ID, threadID: String,
-                                                 modelID: String) async throws -> UUID? {
+                                                 modelID: String, isNewThread: Bool = false) async throws -> UUID? {
             guard isRemoteInference(modelID) else {
                 inferencePreparations.removeValue(forKey: taskID)
                 return nil
@@ -2355,7 +2361,8 @@ private extension CodexAppServerRuntime {
             inferencePreparations[taskID] = preparationID
             do {
                 if APIProviderCatalog.identity(for: modelID) != nil {
-                    try await apiModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID, preparationID: preparationID)
+                    try await apiModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
+                        preparationID: preparationID, isNewThread: isNewThread)
                 } else {
                     try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
                         runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID)

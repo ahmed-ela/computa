@@ -107,6 +107,184 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
     private func server() throws -> APIModelServer {
         APIModelServer(credentials: APIFixtureCredentials(value: "fixture-secret"), capsules: try .init(key: Data(repeating: 1, count: 32)))
     }
+    private func namingRoot() throws -> URL {
+        guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        defer { free(resolved) }
+        let root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+            .appendingPathComponent("ComputaAPIToolNaming-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        return root
+    }
+    private func namingRequest(base: URL, server: APIModelServer, task: String, thread: String, turn: String,
+                               provider: APIProviderDefinition, input: [[String: Any]]? = nil) throws -> URLRequest {
+        var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: provider)
+        var body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+        body["tools"] = [["type": "function", "name": "browser_read", "description": "Observe a built-in page.",
+            "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]]
+        if let input { body["input"] = input }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
+    }
+    private func offeredName(_ request: APIModelServer.HTTPRequest?) throws -> String {
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request?.body)) as? [String: Any])
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        return try XCTUnwrap((tools.first?["function"] as? [String: Any])?["name"] as? String)
+    }
+
+    func testFreshNativeThreadNamingPinSurvivesGatewayRestartAndCompactedInput() async throws {
+        let root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("APIToolNaming-v1", isDirectory: true)
+        let records = APIRequestRecorder(), reply = response(), credentials = APICredentialCounter()
+        let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+        let p = provider(try await remote.start()), thread = UUID().uuidString.lowercased()
+        let first = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)), toolNamingDirectory: directory)
+        try await first.updateProviders([p])
+        let base = try await first.start(), task = UUID().uuidString, turn = UUID().uuidString, prep = UUID()
+        try await first.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep, isNewThread: true)
+        try await first.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+        let (_, response1) = try await URLSession.shared.data(for: namingRequest(base: base, server: first, task: task, thread: thread, turn: turn, provider: p))
+        XCTAssertEqual((response1 as? HTTPURLResponse)?.statusCode, 200)
+        let firstName = try offeredName(await records.first())
+        XCTAssertTrue(firstName.hasPrefix("browser_read__"))
+        XCTAssertFalse(firstName.hasPrefix("computa_tool_"))
+        let file = directory.appendingPathComponent(thread + ".json")
+        let pin = try Data(contentsOf: file)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: pin) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["version", "threadID", "style"])
+        XCTAssertEqual(object["threadID"] as? String, thread)
+        XCTAssertEqual(object["style"] as? String, APIModelResponseCodec.ToolNaming.semantic.rawValue)
+        XCTAssertLessThanOrEqual(pin.count, 512)
+        XCTAssertFalse(String(decoding: pin, as: UTF8.self).contains("fixture-secret"))
+        let mode = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(mode.intValue, 0o400)
+        await first.shutdown()
+
+        let second = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)), toolNamingDirectory: directory)
+        try await second.updateProviders([p])
+        let base2 = try await second.start(), task2 = UUID().uuidString, turn2 = UUID().uuidString, prep2 = UUID()
+        // New local task, same durable native thread. The compacted request no
+        // longer contains the first assistant history, and is not fresh.
+        try await second.prepareInferenceTurn(taskID: task2, threadID: thread, preparationID: prep2)
+        try await second.registerInferenceTurn(taskID: task2, threadID: thread, turnID: turn2, preparationID: prep2)
+        let (_, response2) = try await URLSession.shared.data(for: namingRequest(base: base2, server: second, task: task2, thread: thread, turn: turn2, provider: p))
+        XCTAssertEqual((response2 as? HTTPURLResponse)?.statusCode, 200)
+        let requests = await records.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(try offeredName(requests.last), firstName)
+        XCTAssertEqual(try Data(contentsOf: file), pin, "Compaction/restart cannot rewrite a naming choice")
+        XCTAssertEqual(credentials.counts().reads, 2)
+        await second.shutdown()
+    }
+
+    func testUnpinnedEstablishedOrModelGeneratedHistoryKeepsLegacyNames() async throws {
+        for history in ["unknown_compacted", "assistant", "call_output", "reasoning"] {
+            let root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appendingPathComponent("APIToolNaming-v1", isDirectory: true)
+            let records = APIRequestRecorder(), reply = response()
+            let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+            let p = provider(try await remote.start()), thread = UUID().uuidString.lowercased()
+            let capsules = try APIReasoningCapsules(key: Data(repeating: 1, count: 32))
+            let server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture-secret"), capsules: capsules, toolNamingDirectory: directory)
+            try await server.updateProviders([p])
+            let base = try await server.start(), task = UUID().uuidString, turn = UUID().uuidString, prep = UUID()
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep,
+                isNewThread: history != "unknown_compacted")
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+            var input: [[String: Any]] = [["role": "user", "content": "Earlier request."]]
+            if history == "assistant" { input.append(["role": "assistant", "content": "Earlier result."]) }
+            if history == "call_output" {
+                input.append(["type": "function_call", "call_id": "old-read", "name": "browser_read", "arguments": "{}"])
+                input.append(["type": "function_call_output", "call_id": "old-read", "output": "Earlier tool observation."])
+            }
+            if history == "reasoning" {
+                let encrypted = try capsules.seal(.init(reasoning: "SYNTHETIC_REASONING_ONLY", callIDs: [], responseID: "old-response"),
+                    itemID: "old-reasoning", providerID: p.id, modelID: p.models[0].id, baseURL: p.baseURL, threadID: thread)
+                input.append(["type": "reasoning", "id": "old-reasoning", "encrypted_content": encrypted])
+                input.append(["role": "assistant", "content": "Earlier result."])
+            }
+            input.append(["role": "user", "content": "Continue."])
+            let (_, response) = try await URLSession.shared.data(for: namingRequest(base: base, server: server,
+                task: task, thread: thread, turn: turn, provider: p, input: input))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, history)
+            let recordedRequest = await records.first()
+            XCTAssertEqual(try offeredName(recordedRequest), "computa_tool_0", history)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent(thread + ".json"))) as? [String: Any])
+            XCTAssertEqual(object["style"] as? String, APIModelResponseCodec.ToolNaming.legacy.rawValue, history)
+            await server.shutdown()
+        }
+    }
+
+    func testCorruptUnsafeAndWrongIdentityNamingPinsRejectBeforeCredentialOrProvider() async throws {
+        for scenario in ["malformed", "wrong_thread", "unknown_style", "unknown_version", "boolean_version", "oversize", "symlink_file", "directory_file", "writable_file", "symlink_directory"] {
+            let root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appendingPathComponent("APIToolNaming-v1", isDirectory: true)
+            let thread = UUID().uuidString.lowercased()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let file = directory.appendingPathComponent(thread + ".json")
+            var envelope: [String: Any] = ["version": 1, "threadID": thread, "style": APIModelResponseCodec.ToolNaming.semantic.rawValue]
+            if scenario == "wrong_thread" { envelope["threadID"] = UUID().uuidString.lowercased() }
+            if scenario == "unknown_style" { envelope["style"] = "unrecognized" }
+            if scenario == "unknown_version" { envelope["version"] = 2 }
+            if scenario == "boolean_version" { envelope["version"] = true }
+            let bytes = scenario == "malformed" ? Data("not-json".utf8)
+                : scenario == "oversize" ? Data(repeating: 0x20, count: 513) : try JSONSerialization.data(withJSONObject: envelope)
+            if scenario == "directory_file" {
+                try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            } else if scenario == "symlink_file" {
+                let target = root.appendingPathComponent("unrelated.json")
+                XCTAssertTrue(FileManager.default.createFile(atPath: target.path, contents: bytes, attributes: [.posixPermissions: 0o400]))
+                try FileManager.default.createSymbolicLink(at: file, withDestinationURL: target)
+            } else {
+                XCTAssertTrue(FileManager.default.createFile(atPath: file.path, contents: bytes,
+                    attributes: [.posixPermissions: scenario == "writable_file" ? 0o600 : 0o400]))
+            }
+            if scenario == "symlink_directory" {
+                let target = root.appendingPathComponent("actual-naming", isDirectory: true)
+                try FileManager.default.moveItem(at: directory, to: target)
+                try FileManager.default.createSymbolicLink(at: directory, withDestinationURL: target)
+            }
+            let records = APIRequestRecorder(), reply = response(), credentials = APICredentialCounter()
+            let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+            let p = provider(try await remote.start()), server = APIModelServer(credentials: credentials,
+                capsules: try .init(key: Data(repeating: 1, count: 32)), toolNamingDirectory: directory)
+            try await server.updateProviders([p])
+            let base = try await server.start(), task = UUID().uuidString, turn = UUID().uuidString, prep = UUID()
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep, isNewThread: true)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+            let (data, result) = try await URLSession.shared.data(for: namingRequest(base: base, server: server,
+                task: task, thread: thread, turn: turn, provider: p))
+            XCTAssertEqual((result as? HTTPURLResponse)?.statusCode, 400, scenario)
+            XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("tool_naming_unavailable"), scenario)
+            XCTAssertEqual(credentials.counts().reads, 0, scenario)
+            let count = await records.count(); XCTAssertEqual(count, 0, scenario)
+            await server.shutdown()
+        }
+    }
+
+    func testStaleAndCancelledOwnershipCannotCreateAPIToolNamingPin() async throws {
+        let root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("APIToolNaming-v1", isDirectory: true)
+        let records = APIRequestRecorder(), reply = response(), credentials = APICredentialCounter()
+        let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }
+        let p = provider(try await remote.start()), server = APIModelServer(credentials: credentials,
+            capsules: try .init(key: Data(repeating: 1, count: 32)), toolNamingDirectory: directory)
+        try await server.updateProviders([p])
+        let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString, prep = UUID()
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep, isNewThread: true)
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+        let stale = try namingRequest(base: base, server: server, task: task, thread: thread,
+            turn: UUID().uuidString, provider: p)
+        let (_, staleResponse) = try await URLSession.shared.data(for: stale)
+        XCTAssertEqual((staleResponse as? HTTPURLResponse)?.statusCode, 400)
+        await server.cancel(taskID: task)
+        let cancelled = try namingRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p)
+        let (_, cancelledResponse) = try await URLSession.shared.data(for: cancelled)
+        XCTAssertEqual((cancelledResponse as? HTTPURLResponse)?.statusCode, 400)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "Unowned requests cannot create metadata directories or pins")
+        XCTAssertEqual(credentials.counts().reads, 0)
+        let count = await records.count(); XCTAssertEqual(count, 0)
+        await server.shutdown()
+    }
     func testAuthenticatedGatewayPreservesNativeTurnAndOneDispatch() async throws {
         let records = APIRequestRecorder(), reply = response()
         let remote = try APILoopbackFixture { request in await records.record(request); return reply }; defer { remote.stop() }

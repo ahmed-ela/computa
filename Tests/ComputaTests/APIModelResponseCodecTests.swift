@@ -7,11 +7,12 @@ final class APIModelResponseCodecTests: XCTestCase {
     private var capsules: APIReasoningCapsules { try! .init(key: Data(repeating: 7, count: 32)) }
     private var function: [String: Any] { ["type": "function", "name": "read", "description": "Read a file", "parameters": ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"], "additionalProperties": false]] }
     private var tools: [[String: Any]] { [["type": "namespace", "name": "files", "tools": [function]], ["type": "custom", "name": "apply_patch", "description": "Apply patch", "format": ["type": "grammar", "syntax": "lark", "definition": "start: /.+/"]]] }
-    private func request(_ changes: [String: Any] = [:], provider customProvider: APIProviderDefinition? = nil) throws -> APIModelResponseCodec.Request {
+    private func request(_ changes: [String: Any] = [:], provider customProvider: APIProviderDefinition? = nil,
+                         toolNaming: APIModelResponseCodec.ToolNaming = .legacy) throws -> APIModelResponseCodec.Request {
         let p = customProvider ?? provider
         var object: [String: Any] = ["model": APIProviderCatalog.appModelID(providerID: p.id, modelID: p.models[0].id), "input": [["role": "user", "content": "read it"]], "instructions": "Use the native tools.", "tools": tools, "store": false, "stream": true]
         object.merge(changes) { _, new in new }
-        return try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: object), selection: .init(provider: p, model: p.models[0]), threadID: taskID, capsules: capsules)
+        return try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: object), selection: .init(provider: p, model: p.models[0]), threadID: taskID, capsules: capsules, toolNaming: toolNaming)
     }
     private func decode(_ message: [String: Any], finish: String = "stop", request: APIModelResponseCodec.Request? = nil, model: String = "fixture-model") throws -> APIModelResponseCodec.Reply {
         let data = try JSONSerialization.data(withJSONObject: ["id": "remote1", "model": model, "choices": [["index": 0, "message": message, "finish_reason": finish]], "usage": ["prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20, "completion_tokens_details": ["reasoning_tokens": 3]]])
@@ -21,6 +22,158 @@ final class APIModelResponseCodecTests: XCTestCase {
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
         let definitions = try XCTUnwrap(body["tools"] as? [[String: Any]])
         return try definitions.map { try XCTUnwrap($0["function"] as? [String: Any]) }
+    }
+    func testSemanticToolNamesStayStableAcrossFilteringReorderingAndNamedChoice() throws {
+        let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        let browser: [String: Any] = ["type": "function", "name": "browser_open", "description": "Open the requested built-in page.",
+            "parameters": ["type": "object", "properties": ["url": ["type": "string"]], "required": ["url"], "additionalProperties": false]]
+        var aliases: [String] = []
+        for definitions in [[browser], [chrome, browser], [browser, chrome]] {
+            let prepared = try request(["tools": [["type": "namespace", "name": "functions", "tools": definitions]],
+                                        "tool_choice": ["type": "function", "name": "browser_open", "namespace": "functions"]], toolNaming: .semantic)
+            XCTAssertEqual(prepared.toolNaming, .semantic)
+            let declared = try wireFunctions(prepared)
+            XCTAssertEqual(declared.count, 1)
+            let function = try XCTUnwrap(declared.first), alias = try XCTUnwrap(function["name"] as? String)
+            aliases.append(alias)
+            XCTAssertNotNil(alias.range(of: #"^browser_open__[0-9a-f]{24}$"#, options: .regularExpression))
+            XCTAssertTrue((function["description"] as? String ?? "").contains("Callable API function: \(alias)."))
+            XCTAssertEqual(function["parameters"] as? NSDictionary, browser["parameters"] as? NSDictionary)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+            XCTAssertEqual(((body["tool_choice"] as? [String: Any])?["function"] as? [String: Any])?["name"] as? String, alias)
+            XCTAssertEqual(prepared.allowedTools, [alias])
+            let reply = try decode(["role": "assistant", "tool_calls": [["id": "open", "type": "function", "function": ["name": alias, "arguments": "{\"url\":\"http://127.0.0.1/inbox\"}"]]]], finish: "tool_calls", request: prepared)
+            let result = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(result["name"] as? String, "browser_open")
+            XCTAssertEqual(result["namespace"] as? String, "functions")
+            for unoffered in ["browser_open", "functions.browser_open", "computa_tool_0", "computa_tool_1"] {
+                XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "bad", "type": "function", "function": ["name": unoffered, "arguments": "{\"url\":\"http://127.0.0.1/inbox\"}"]]]], finish: "tool_calls", request: prepared)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+                }
+            }
+            XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "bad-args", "type": "function", "function": ["name": alias, "arguments": "{\"url\":false}"]]]], finish: "tool_calls", request: prepared)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+        }
+        XCTAssertEqual(Set(aliases).count, 1)
+        let completedHistory: [[String: Any]] = [
+            ["type": "function_call", "call_id": "old-chrome", "name": "computer_v2_tabs", "namespace": "functions", "arguments": "{}"],
+            ["type": "function_call_output", "call_id": "old-chrome", "output": "Old result retained"],
+            ["type": "function_call", "call_id": "old-browser", "name": "browser_open", "namespace": "functions", "arguments": "{\"url\":\"http://127.0.0.1/inbox\"}"],
+            ["type": "function_call_output", "call_id": "old-browser", "output": "Fixture opened"],
+        ]
+        let resumed = try request(["tools": [["type": "namespace", "name": "functions", "tools": [browser, chrome]]], "input": completedHistory], toolNaming: .semantic)
+        let resumedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: resumed.body) as? [String: Any])
+        let resumedMessages = try XCTUnwrap(resumedBody["messages"] as? [[String: Any]])
+        let oldCalls = resumedMessages.compactMap { $0["tool_calls"] as? [[String: Any]] }.flatMap { $0 }
+        let hiddenAlias = try XCTUnwrap((oldCalls[0]["function"] as? [String: Any])?["name"] as? String)
+        XCTAssertTrue(hiddenAlias.hasPrefix("computer_v2_tabs__"))
+        XCTAssertEqual((oldCalls[1]["function"] as? [String: Any])?["name"] as? String, aliases[0])
+        XCTAssertEqual(resumed.allowedTools, [aliases[0]])
+        XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "hidden", "type": "function", "function": ["name": hiddenAlias, "arguments": "{}"]]]], finish: "tool_calls", request: resumed)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+        let legacy = try request(["tools": [browser]])
+        XCTAssertEqual(legacy.toolNaming, .legacy)
+        XCTAssertEqual(legacy.tools.first?.wireName, "computa_tool_0")
+    }
+    func testSemanticToolNamesPreserveQualifiedIdentityAndBoundsWithoutOrderFallback() throws {
+        func named(_ name: String) -> [String: Any] { function.merging(["name": name]) { _, new in new } }
+        let long = String(repeating: "a", count: 127)
+        let definitions: [[String: Any]] = [
+            ["type": "namespace", "name": "files", "tools": [named("read")]],
+            ["type": "namespace", "name": "records", "tools": [named("read")]],
+            named("read"), named("read.file"), named("read_file"), named("read-file"), named(long + "x"), named(long + "y"),
+        ]
+        let prepared = try request(["tools": definitions], toolNaming: .semantic)
+        let aliases = prepared.tools.map(\.wireName)
+        XCTAssertEqual(Set(aliases).count, definitions.count)
+        XCTAssertEqual(aliases[6].utf8.count, 64)
+        XCTAssertEqual(aliases[7].utf8.count, 64)
+        XCTAssertTrue(aliases.allSatisfy { $0.utf8.count <= 64 && $0.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil })
+        XCTAssertTrue(aliases[3].hasPrefix("read_file__"))
+        XCTAssertTrue(aliases[4].hasPrefix("read_file__"))
+        XCTAssertNotEqual(aliases[3], aliases[4])
+        XCTAssertTrue(aliases[5].hasPrefix("read-file__"))
+        let reversed = try request(["tools": Array(definitions.reversed())], toolNaming: .semantic)
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: prepared.tools.map { ($0.identity, $0.wireName) }),
+                       Dictionary(uniqueKeysWithValues: reversed.tools.map { ($0.identity, $0.wireName) }))
+        for (index, tool) in prepared.tools.enumerated() {
+            let reply = try decode(["role": "assistant", "tool_calls": [["id": "call-\(index)", "type": "function", "function": ["name": tool.wireName, "arguments": "{\"path\":\"fixture\"}"]]]], finish: "tool_calls", request: prepared)
+            let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(item["name"] as? String, tool.name)
+            XCTAssertEqual(item["namespace"] as? String, tool.namespace)
+        }
+        XCTAssertThrowsError(try request(["tools": definitions + [definitions[0]]], toolNaming: .semantic)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+    }
+    func testSemanticNamingColdReasoningAndCompletedHistoryRejectDifferentOrLegacyStyles() throws {
+        let initial = try request(toolNaming: .semantic)
+        let readAlias = try XCTUnwrap(initial.tools.first?.wireName)
+        let reply = try decode(["role": "assistant", "reasoning": "Private continuation keeps " + readAlias, "tool_calls": [
+            ["id": "read-semantically", "type": "function", "function": ["name": readAlias, "arguments": "{\"path\":\"fixture\"}"]]
+        ]], finish: "tool_calls", request: initial)
+        let encoded = try JSONSerialization.data(withJSONObject: XCTUnwrap(reply.response["output"] as? [[String: Any]]))
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("Private continuation"))
+        let restored = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [[String: Any]])
+        let history: [[String: Any]] = [["role": "user", "content": "Read fixture"]] + restored + [
+            ["type": "function_call_output", "call_id": "read-semantically", "output": "Fixture contents"],
+            ["role": "user", "content": "Continue"],
+        ]
+        let raw: [String: Any] = ["model": initial.localModelID, "input": history, "tools": Array(tools.reversed()), "store": false]
+        let coldCapsules = try APIReasoningCapsules(key: Data(repeating: 7, count: 32))
+        let cold = try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: raw), selection: .init(provider: provider, model: provider.models[0]), threadID: taskID, capsules: coldCapsules, toolNaming: .semantic)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: cold.body) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["reasoning"] as? String }, ["Private continuation keeps " + readAlias])
+        let call = try XCTUnwrap(messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
+        XCTAssertEqual((call["function"] as? [String: Any])?["name"] as? String, readAlias)
+        XCTAssertEqual(call["id"] as? String, "read-semantically")
+        XCTAssertEqual(messages.compactMap { $0["tool_call_id"] as? String }, ["read-semantically"])
+        let id = try XCTUnwrap(restored.first?["id"] as? String)
+        let encrypted = try XCTUnwrap(restored.first?["encrypted_content"] as? String)
+        let payload = try coldCapsules.open(encrypted, itemID: id, providerID: provider.id, modelID: provider.models[0].id, baseURL: provider.baseURL, threadID: taskID)
+        XCTAssertEqual(payload.toolNaming, APIModelResponseCodec.ToolNaming.semantic.rawValue)
+        XCTAssertThrowsError(try request(["input": history])) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidReasoning) }
+        for style in [nil, APIModelResponseCodec.ToolNaming.legacy.rawValue, "unknown_style"] {
+            let oldCapsule = try coldCapsules.seal(.init(reasoning: "Original thinking retains computa_tool_0", callIDs: ["read-semantically"], responseID: "old-response", toolNaming: style), itemID: id,
+                                                  providerID: provider.id, modelID: provider.models[0].id, baseURL: provider.baseURL, threadID: taskID)
+            var changed = history
+            changed[1]["encrypted_content"] = oldCapsule
+            XCTAssertThrowsError(try request(["input": changed], toolNaming: .semantic)) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidReasoning) }
+            if style == "unknown_style" {
+                XCTAssertThrowsError(try request(["input": changed])) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidReasoning) }
+            } else {
+                let legacy = try request(["input": changed])
+                let legacyBody = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy.body) as? [String: Any])
+                let legacyMessages = try XCTUnwrap(legacyBody["messages"] as? [[String: Any]])
+                XCTAssertEqual(legacyMessages.compactMap { $0["reasoning"] as? String }, ["Original thinking retains computa_tool_0"])
+                XCTAssertEqual((legacyMessages.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first?["function"] as? [String: Any])?["name"] as? String, "computa_tool_0")
+            }
+        }
+        let legacyReply = try decode(["role": "assistant", "reasoning": "Legacy new capsule", "content": "done"])
+        let legacyItem = try XCTUnwrap((legacyReply.response["output"] as? [[String: Any]])?.first)
+        let legacyPayload = try coldCapsules.open(XCTUnwrap(legacyItem["encrypted_content"] as? String), itemID: XCTUnwrap(legacyItem["id"] as? String), providerID: provider.id, modelID: provider.models[0].id, baseURL: provider.baseURL, threadID: taskID)
+        XCTAssertEqual(legacyPayload.toolNaming, APIModelResponseCodec.ToolNaming.legacy.rawValue)
+    }
+    func testSemanticStyleLeavesNativeResponsesNamesDescriptionsAndOpaqueContinuationUnchanged() throws {
+        let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: .responses, models: provider.models)
+        let prepared = try request(provider: p, toolNaming: .semantic)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+        XCTAssertEqual(body["tools"] as? NSArray, tools as NSArray)
+        let remote: [[String: Any]] = [["id": "opaque", "type": "reasoning", "summary": [], "encrypted_content": "OPAQUE_NATIVE"],
+            ["id": "call-item", "type": "function_call", "status": "completed", "call_id": "read", "namespace": "files", "name": "read", "arguments": "{\"path\":\"fixture\"}"]]
+        let data = try JSONSerialization.data(withJSONObject: ["id": "response", "object": "response", "status": "completed", "model": "fixture-model", "output": remote])
+        let reply = try APIModelResponseCodec.decode(.init(body: data, contentType: "application/json"), request: prepared)
+        let items = try XCTUnwrap(reply.response["output"] as? [[String: Any]])
+        let next = try request(["input": items + [["type": "function_call_output", "call_id": "read", "output": "fixture"]]], provider: p, toolNaming: .semantic)
+        let nextBody = try XCTUnwrap(JSONSerialization.jsonObject(with: next.body) as? [String: Any])
+        XCTAssertEqual(nextBody["tools"] as? NSArray, tools as NSArray)
+        let nextInput = try XCTUnwrap(nextBody["input"] as? [[String: Any]])
+        XCTAssertEqual(nextInput.first?["encrypted_content"] as? String, "OPAQUE_NATIVE")
+        XCTAssertEqual(nextInput[1]["name"] as? String, "read")
+        XCTAssertEqual(nextInput[1]["namespace"] as? String, "files")
     }
     func testChatToolDescriptionsIdentifyCurrentAndFilteredBrowserAliasesWithoutChangingSchemas() throws {
         let browser: [String: Any] = ["type": "function", "name": "browser_open", "description": "Create one task-owned browser tab.",
@@ -249,6 +402,18 @@ final class APIModelResponseCodecTests: XCTestCase {
         let responses = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: .responses, models: provider.models)
         let nativeBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request(["tools": nativeTools], provider: responses).body) as? [String: Any])
         XCTAssertEqual(nativeBody["tools"] as? NSArray, nativeTools as NSArray)
+        let semantic = try request(["tools": nativeTools], toolNaming: .semantic)
+        let semanticFunction = try XCTUnwrap(wireFunctions(semantic).first)
+        let semanticDescription = try XCTUnwrap(semanticFunction["description"] as? String)
+        let semanticAlias = try XCTUnwrap(semanticFunction["name"] as? String)
+        XCTAssertTrue(semanticAlias.hasPrefix("apply_patch__"))
+        XCTAssertTrue(semanticDescription.hasSuffix(prepared.tools[0].description))
+        XCTAssertTrue(semanticDescription.hasSuffix(grammar))
+        XCTAssertEqual(semanticFunction["parameters"] as? NSDictionary, wrapped["parameters"] as? NSDictionary)
+        let semanticReply = try decode(["role": "assistant", "tool_calls": [["id": "semantic-patch", "type": "function", "function": ["name": semanticAlias, "arguments": arguments]]]], finish: "tool_calls", request: semantic)
+        let semanticOutput = try XCTUnwrap((semanticReply.response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(semanticOutput["namespace"] as? String, "editing")
+        XCTAssertEqual(semanticOutput["input"] as? String, payload)
     }
     func testCustomFormatValidationRejectsUnknownMalformedAndOversizedContracts() throws {
         func tool(_ format: Any?) -> [String: Any] {
