@@ -223,9 +223,12 @@ final class WebModelResponseCodecTests: XCTestCase {
                dictionary["parameters"] != nil {
                 if displayed {
                     let description = dictionary["description"] as? String ?? ""
-                    XCTAssertTrue(description.hasPrefix("Read the bound native app"), file: file, line: line)
-                    XCTAssertTrue(description.contains("Built-in webpages and their cursors belong to browser_read"), file: file, line: line)
-                    XCTAssertFalse(description.contains("Chrome"), file: file, line: line)
+                    XCTAssertTrue(description.contains("native app already bound with computer_v2_open"), file: file, line: line)
+                    XCTAssertTrue(description.contains("computer_v2_status does not bind or read a page"), file: file, line: line)
+                    XCTAssertTrue(description.contains("unbound read requires computer_v2_open first"), file: file, line: line)
+                    XCTAssertTrue(description.contains("Webpage tasks use browser_* directly without native app discovery/status"), file: file, line: line)
+                    XCTAssertTrue(description.contains("pages and cursors belong to browser_read"), file: file, line: line)
+                    XCTAssertFalse(description.lowercased().contains("chrome"), file: file, line: line)
                 }
                 dictionary.removeValue(forKey: "description")
             }
@@ -441,12 +444,20 @@ final class WebModelResponseCodecTests: XCTestCase {
 
     func testDisplayRequestProtectsAllStringPunctuationAndPreservesJSONStructure() throws {
         let punctuation = ##"!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##
+        let opaqueURL = "http://127.0.0.1:52060/cases/gemini-browser_lookup?flight_ref=UA_1001-x"
+        let opaquePath = "/tmp/fixture_case-1/flight_helper.py"
+        let literalEscape = #"literal \u005f must remain literal"#
         let values = [punctuation, "exec_command apply_patch browser.open_tab", "\\_ \\\" \\u005f",
                       "\u{0}\t\n\r café 🌍", "</script> [label](https://example.com/a_b?q=x&y=2)"]
         for provider in ["chatgpt", "claude", "gemini"] {
             let original = try JSONSerialization.data(withJSONObject: [
                 "model": "browser/\(provider)", "input": values.joined(separator: "\n"),
-                "metadata": [punctuation: values.joined(separator: "\n")],
+                "metadata": [punctuation: values.joined(separator: "\n"), "opaque_url": opaqueURL,
+                             "opaque_path": opaquePath, "literal_escape": literalEscape],
+                "tools": [["type": "function", "name": "browser_open", "parameters": [
+                    "type": "object", "properties": ["url": ["type": "string"]],
+                    "required": ["url"], "additionalProperties": false,
+                ]]],
                 "max_output_tokens": 64, "parallel_tool_calls": false,
             ], options: [.sortedKeys])
             let prepared = try WebModelResponseCodec.prepareRequest(original)
@@ -459,6 +470,24 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(displayed.contains(#""parallel\u005ftool\u005fcalls":false"#))
             XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? NSDictionary,
                            try JSONSerialization.jsonObject(with: original) as? NSDictionary)
+            XCTAssertTrue(prepared.prompt.contains("Parse the JSON once before using its string values."))
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? [String: Any])
+            let metadata = try XCTUnwrap(decoded["metadata"] as? [String: String])
+            XCTAssertEqual(metadata["opaque_url"], opaqueURL)
+            XCTAssertEqual(metadata["opaque_path"], opaquePath)
+            XCTAssertEqual(metadata["literal_escape"], literalEscape, "A second escape decode would change this value")
+            let copiedURL = try XCTUnwrap(metadata["opaque_url"])
+            let envelope = try JSONSerialization.data(withJSONObject: [
+                "type": "tool_calls", "calls": [["name": "browser_open", "arguments": ["url": copiedURL]]],
+            ])
+            let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: prepared,
+                                                            requireEnvelope: true)
+            guard case let .toolCalls(calls) = reply else { return XCTFail("Expected the offered browser tool call") }
+            XCTAssertEqual(calls.count, 1)
+            let call = try XCTUnwrap(calls.first)
+            XCTAssertEqual(call.name, "browser_open")
+            let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8)) as? [String: String])
+            XCTAssertEqual(arguments["url"], opaqueURL, "The reply boundary must not normalize an opaque URL")
         }
     }
 

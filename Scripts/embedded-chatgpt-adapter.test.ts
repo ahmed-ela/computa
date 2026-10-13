@@ -214,11 +214,15 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     flush: () => { const queued = timers.splice(0); queued.forEach(callback => callback()); } };
 }
 
-function observedChatGPTCodeBlock(f: ReturnType<typeof fixture>, raw: string, options: { noPre?: boolean } = {}) {
+function observedChatGPTCodeBlock(f: ReturnType<typeof fixture>, raw: string, options: { noPre?: boolean; measuredPRE?: boolean } = {}) {
   f.answer.text = ""; f.answer.children = [];
-  const outer = new Element("DIV", { class: "CodeBlock-generated-class" });
-  const wrapper = new Element("DIV", { class: "relative w-full min-w-0 overflow-clip contain-inline-size border" });
-  const header = new Element("DIV", { class: "flex items-center font-sans text-sm select-none min-h-12" });
+  const outer = new Element("DIV", { class: options.measuredPRE ? "CodeBlock-zu1QM3" : "CodeBlock-generated-class" });
+  const wrapper = new Element("DIV", { class: options.measuredPRE
+    ? "relative Root-iW7ipz w-full min-w-0 contain-inline-size overflow-clip"
+    : "relative w-full min-w-0 overflow-clip contain-inline-size border" });
+  const header = new Element("DIV", { class: options.measuredPRE
+    ? "flex items-center font-sans text-sm select-none ActionBar-KWWAct"
+    : "flex items-center font-sans text-sm select-none min-h-12" });
   const label = new Element("DIV", { class: "min-w-0 flex-1 truncate" }, "JSON");
   const copy = new Element("BUTTON", { "aria-label": "Copy" });
   const wrap = new Element("BUTTON", { "aria-label": "Enable word wrap" });
@@ -227,7 +231,7 @@ function observedChatGPTCodeBlock(f: ReturnType<typeof fixture>, raw: string, op
   const content = new Element("DIV", { class: "text-size-chat overflow-auto outline-none px-4 pt-0 pb-3" });
   if (options.noPre) content.append(code); else pre.append(code);
   wrapper.append(header, options.noPre ? content : pre); outer.append(wrapper); f.answer.append(outer);
-  Object.defineProperty(f.answer, "innerText", { get: () => "JSON\n" + raw });
+  Object.defineProperty(f.answer, "innerText", { get: () => (options.measuredPRE ? "JSON\n\n\n" : "JSON\n") + raw });
   return { outer, wrapper, header, label, copy, wrap, pre, code, content };
 }
 
@@ -651,6 +655,56 @@ describe("embedded ChatGPT fixed adapter", () => {
     }
   });
 
+  test("the measured PRE header preserves literal envelopes across generated-class and layout changes", async () => {
+    for (const envelope of [
+      { type: "message", text: 'Literal "quoted" C:\\tmp\\path\nnext line' },
+      { type: "tool_calls", calls: [{ name: "browser_open", arguments: { url: "http://127.0.0.1:12345/fixture" } }] },
+    ]) for (const copyLabel of ["Copy", "Copy code"]) {
+      const f = fixture({ userPrompt: "Synthetic owned response" }), raw = JSON.stringify(envelope);
+      const block = observedChatGPTCodeBlock(f, raw, { measuredPRE: true });
+      block.copy.values["aria-label"] = copyLabel;
+      const result = await f.inspect();
+      expect(result.text).toBe(raw); expect(JSON.parse(result.text)).toEqual(envelope);
+      expect(result.firstUserVerified).toBe(true); expect(result.firstUserMarkerVerified).toBe(true);
+      expect(result.completionEvidence.codeStructure).toMatchObject({ preCount: 1, codeCount: 1,
+        codeTextLength: raw.length, outsideTextLength: 4, literalCodeValidJSON: true,
+        literalCodeKnownEnvelopeType: envelope.type, selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
+      block.outer.values.class = "CodeBlock-fresh-generated-hash";
+      block.wrapper.values.class = "overflow-clip contain-inline-size min-w-0 w-full Root-newhash relative border";
+      block.header.values.class = "ActionBar-newhash select-none text-sm font-sans items-center flex min-h-12";
+      expect((await f.inspect()).text).toBe(raw);
+    }
+  });
+
+  test("the measured PRE header cannot borrow controls, reverse branches or hide authored output", async () => {
+    for (const change of [
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.wrapper.values.class = "Root-iW7ipz w-full min-w-0 contain-inline-size overflow-clip"; },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.header.values.class = "flex items-center font-sans text-sm ActionBar-KWWAct"; },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.copy.disabled = true; },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.copy.values["aria-disabled"] = "true"; },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.copy.values["aria-label"] = "Copy unrelated text"; },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.copy.text = "Authored control text"; },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.label.text = "json"; },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.label.append(new Element("SPAN")); },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.header.append(new Element("DIV", { class: "min-w-0 flex-1 truncate" }, "JSON")); },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { const copy = new Element("BUTTON", { "aria-label": "Copy code" }); copy.disabled = true; b.header.append(copy); },
+      (f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.header.children = b.header.children.filter(n => n !== b.copy); f.answer.append(b.copy); },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.wrapper.children = [b.pre, b.header]; },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.wrapper.children = b.wrapper.children.filter(n => n !== b.header); b.outer.append(b.header); },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.header.children = b.header.children.filter(n => n !== b.label); const extra = new Element("DIV"); extra.append(b.label); b.header.append(extra); },
+      (f: ReturnType<typeof fixture>, _b: ReturnType<typeof observedChatGPTCodeBlock>) => { f.answer.append(new Element("P", {}, "JSON")); },
+      (f: ReturnType<typeof fixture>, _b: ReturnType<typeof observedChatGPTCodeBlock>) => { f.answer.append(new Element("P", {}, "Authored prose")); },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { const extra = new Element("PRE"); extra.append(new Element("CODE", {}, '{}')); b.wrapper.append(extra); },
+      (_f: ReturnType<typeof fixture>, b: ReturnType<typeof observedChatGPTCodeBlock>) => { b.code.text = '{"type":"message","text":"invalid "quote""}'; },
+    ]) {
+      const f = fixture(), raw = '{"type":"tool_calls","calls":[{"name":"browser_read","arguments":{}}]}';
+      const block = observedChatGPTCodeBlock(f, raw, { measuredPRE: true }); change(f, block);
+      const result = await f.inspect();
+      expect(result.text).toBe("JSON\n\n\n" + raw);
+      expect(result.completionEvidence.codeStructure.selectedExtraction).toBe("rendered_fallback");
+    }
+  });
+
   test("extraction diagnostics identify the unchanged strict fallback without exposing response content", async () => {
     const raw = JSON.stringify({ type: "tool_calls", calls: [{ name: "private_tool_name", arguments: { cmd: "private command" } }] });
     type Change = (f: ReturnType<typeof fixture>, pre: Element, code: Element) => void;
@@ -728,13 +782,13 @@ describe("embedded ChatGPT fixed adapter", () => {
 
   test("ChatGPT header cannot use an unrelated Copy footer or excuse authored prose", async () => {
     for (const change of [
-      (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.wrapper.values.class = "relative w-full min-w-0 overflow-clip border"; },
-      (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.header.values.class = "flex items-center font-sans text-sm select-none"; },
+      (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.wrapper.values.class = "w-full min-w-0 overflow-clip contain-inline-size border"; },
+      (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.header.values.class = "flex items-center font-sans text-sm min-h-12"; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.label.values.class = "min-w-0 flex-1"; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.label.text = "json"; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.label.text = "Json"; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.label.append(new Element("EM", {}, "")); },
-      (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.copy.values["aria-label"] = "Copy code"; },
+      (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.copy.values["aria-label"] = "Copy unrelated text"; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.copy.disabled = true; },
       (_f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.copy.text = "Author button text"; },
       (f: ReturnType<typeof fixture>, block: ReturnType<typeof observedChatGPTCodeBlock>) => { block.header.children = block.header.children.filter(node => node !== block.copy); f.answer.append(block.copy); },

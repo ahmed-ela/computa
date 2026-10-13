@@ -42,8 +42,10 @@ enum EmbeddedBrowserTools {
             ]
         }
         let string: [String: Any] = ["type": "string"]
+        let url: [String: Any] = ["type": "string", "description": "Copy the requested or observed URL exactly, preserving punctuation. Do not guess address variants."]
         let mutation: [String: Any] = [
-            "snapshot_id": string, "element_index": ["type": "integer", "minimum": 0],
+            "snapshot_id": ["type": "string", "description": "Use the ID from the latest browser_read. Input consumes it: never batch another input; await the result and browser_read before another input."],
+            "element_index": ["type": "integer", "minimum": 0],
         ]
         return [
             specification(
@@ -53,7 +55,7 @@ enum EmbeddedBrowserTools {
             specification(
                 "browser_open",
                 "Create and bind one background task-owned tab in Computa's built-in browser, sharing its signed-in profile. Only this created tab is cleaned up at turn end.",
-                ["url": string], ["url"]),
+                ["url": url], ["url"]),
             specification(
                 "browser_bind",
                 "Bind the exact observed available human built-in tab without activating or navigating it. Existing user tabs are preserved at cleanup.",
@@ -61,7 +63,7 @@ enum EmbeddedBrowserTools {
             specification(
                 "browser_navigate",
                 "Navigate the currently bound built-in tab once. A timeout never replays navigation. Read its new document before acting.",
-                ["url": string], ["url"]),
+                ["url": url], ["url"]),
             specification(
                 "browser_read",
                 "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for document text, all for structure. Continue with browser_read(cursor=next_cursor) alone, never computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only, even when enabled=true; content containers do not inherit a child link's action. Use view=links or all with observed text to find the actual control. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",

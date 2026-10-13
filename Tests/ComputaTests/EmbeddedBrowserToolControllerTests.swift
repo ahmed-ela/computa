@@ -164,6 +164,14 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
     }
 
     func testFlightReadFillClickAndResultRequireFreshSnapshotAndNeverReplay() async throws {
+        for name in ["browser_fill", "browser_click"] {
+            let definition = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            let schema = try XCTUnwrap(definition["inputSchema"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            let snapshot = try XCTUnwrap(properties["snapshot_id"] as? [String: Any])
+            XCTAssertEqual(snapshot["type"] as? String, "string")
+            XCTAssertTrue((snapshot["description"] as? String)?.contains("never batch another input") == true)
+        }
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller,"browser_open",["url":"http://localhost:8123/flight"])
         let first = try await call(controller,"browser_read")
