@@ -15,10 +15,10 @@ enum APIModelResponseCodec {
             case .unsupportedParameter: "The API adapter does not support a requested parameter."
             case .unsupportedModality: "The selected API model does not support this input attachment."
             case .invalidTool: "The API response used an unknown or unavailable tool."
-            case .invalidArguments: "The API response contained invalid tool arguments. No tool was executed."
+            case .invalidArguments: "The API response contained invalid tool arguments. No tool from this response was executed."
             case .invalidHistory: "The API tool history is incomplete or inconsistent."
-            case .invalidResponse: "The API provider returned an invalid response. No tool was executed."
-            case .incompleteResponse: "The API provider response was incomplete. No tool was executed."
+            case .invalidResponse: "The API provider returned an invalid response. No tool from this response was executed."
+            case .incompleteResponse: "The API provider response was incomplete. No tool from this response was executed."
             case .modelMismatch: "The API response did not identify the requested model."
             case .invalidReasoning: "The saved API reasoning continuation could not be verified."
             }
@@ -114,7 +114,7 @@ enum APIModelResponseCodec {
         } else {
             body = ["model": selection.model.id, "messages": history.messages, "stream": stream, "n": 1]
             if !tools.isEmpty {
-                body["tools"] = tools.map { ["type": "function", "function": ["name": $0.wireName, "description": $0.description, "parameters": $0.schema]] as [String: Any] }
+                body["tools"] = try tools.map { ["type": "function", "function": ["name": $0.wireName, "description": try chatCompletionToolDescription($0), "parameters": $0.schema]] as [String: Any] }
                 body["tool_choice"] = wireChoice
                 body["parallel_tool_calls"] = parallel
             } else if required { throw Failure.invalidTool }
@@ -208,6 +208,17 @@ enum APIModelResponseCodec {
                 "presence_penalty": 0, "frequency_penalty": 0, "top_logprobs": 0, "reasoning": reasoning,
                 "max_output_tokens": raw["max_output_tokens"] ?? NSNull(), "max_tool_calls": raw["max_tool_calls"] ?? NSNull(), "store": false, "background": false,
                 "service_tier": "default", "metadata": metadata, "safety_identifier": NSNull(), "prompt_cache_key": NSNull()]
+    }
+
+    private static func chatCompletionToolDescription(_ tool: Tool) throws -> String {
+        // Describe the final alias only after active tools have been rebound to
+        // their original history indices. Native Responses keeps its own names.
+        let qualified = tool.namespace.map { $0 + "." + tool.name } ?? tool.name
+        let identity = "Native tool: \(qualified).\nNative namespace: \(tool.namespace ?? "(none)"); native name: \(tool.name).\nCallable API function: \(tool.wireName).\nWhen instructions refer to this native tool, call this API function with its declared arguments.\n\n"
+        // Existing tool descriptions (including custom grammars) remain intact
+        // at their existing limit; the separately bounded identity is additive.
+        guard identity.utf8.count <= 1_024, tool.description.utf8.count <= 64_000 else { throw Failure.invalidTool }
+        return identity + tool.description
     }
 
     private static func parseTools(_ value: Any?) throws -> [Tool] {

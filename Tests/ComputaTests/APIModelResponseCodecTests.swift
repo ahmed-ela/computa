@@ -17,6 +17,119 @@ final class APIModelResponseCodecTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: ["id": "remote1", "model": model, "choices": [["index": 0, "message": message, "finish_reason": finish]], "usage": ["prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20, "completion_tokens_details": ["reasoning_tokens": 3]]])
         return try APIModelResponseCodec.decode(.init(body: data, contentType: "application/json"), request: request ?? self.request())
     }
+    private func wireFunctions(_ request: APIModelResponseCodec.Request) throws -> [[String: Any]] {
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
+        let definitions = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        return try definitions.map { try XCTUnwrap($0["function"] as? [String: Any]) }
+    }
+    func testChatToolDescriptionsIdentifyCurrentAndFilteredBrowserAliasesWithoutChangingSchemas() throws {
+        let browser: [String: Any] = ["type": "function", "name": "browser_open", "description": "Create one task-owned browser tab.",
+            "parameters": ["type": "object", "properties": ["url": ["type": "string"]], "required": ["url"], "additionalProperties": false]]
+        let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        for (definitions, alias) in [([browser], "computa_tool_0"), ([chrome, browser], "computa_tool_1")] {
+            let prepared = try request(["instructions": "Use browser_open for the requested page.",
+                                        "tools": [["type": "namespace", "name": "functions", "tools": definitions]]])
+            let emitted = try wireFunctions(prepared)
+            XCTAssertEqual(emitted.count, 1)
+            let tool = try XCTUnwrap(emitted.first)
+            XCTAssertEqual(tool["name"] as? String, alias)
+            let description = try XCTUnwrap(tool["description"] as? String)
+            XCTAssertTrue(description.hasPrefix("Native tool: functions.browser_open.\n"))
+            XCTAssertTrue(description.contains("Native namespace: functions; native name: browser_open."))
+            XCTAssertTrue(description.contains("Callable API function: \(alias).\n"))
+            XCTAssertTrue(description.hasSuffix("Create one task-owned browser tab."))
+            XCTAssertFalse(description.contains("computer_v2_tabs"))
+            XCTAssertEqual(tool["parameters"] as? NSDictionary, browser["parameters"] as? NSDictionary)
+            XCTAssertEqual(prepared.tools.first?.description, browser["description"] as? String)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+            XCTAssertEqual((body["messages"] as? [[String: Any]])?.first?["content"] as? String,
+                           "Use browser_open for the requested page.")
+            for returnedName in ["browser_open", "functions.browser_open", "computa_tool_2"] {
+                XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "unoffered", "type": "function", "function": ["name": returnedName, "arguments": "{\"url\":\"http://127.0.0.1/inbox\"}"]]]], finish: "tool_calls", request: prepared)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+                }
+            }
+            let result = try decode(["role": "assistant", "tool_calls": [["id": "open", "type": "function", "function": ["name": alias, "arguments": "{\"url\":\"http://127.0.0.1/inbox\"}"]]]], finish: "tool_calls", request: prepared)
+            let output = try XCTUnwrap((result.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(output["name"] as? String, "browser_open")
+            XCTAssertEqual(output["namespace"] as? String, "functions")
+            XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "bad", "type": "function", "function": ["name": alias, "arguments": "{\"url\":false}"]]]], finish: "tool_calls", request: prepared)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+        }
+    }
+    func testChatToolDescriptionsDisambiguateSameLeafNamespacesAndBoundOnlyAddedIdentity() throws {
+        let definitions: [[String: Any]] = [
+            ["type": "namespace", "name": "files", "tools": [function]],
+            ["type": "namespace", "name": "records", "tools": [function]],
+        ]
+        let prepared = try request(["tools": definitions])
+        let emitted = try wireFunctions(prepared)
+        XCTAssertEqual(emitted.count, 2)
+        for (index, namespace) in ["files", "records"].enumerated() {
+            let description = try XCTUnwrap(emitted[index]["description"] as? String)
+            XCTAssertTrue(description.hasPrefix("Native tool: \(namespace).read.\n"))
+            XCTAssertTrue(description.contains("Native namespace: \(namespace); native name: read."))
+            XCTAssertTrue(description.contains("Callable API function: computa_tool_\(index).\n"))
+            XCTAssertTrue(description.hasSuffix("Read a file"))
+            let reply = try decode(["role": "assistant", "tool_calls": [["id": "read-\(index)", "type": "function", "function": ["name": "computa_tool_\(index)", "arguments": "{\"path\":\"fixture\"}"]]]], finish: "tool_calls", request: prepared)
+            XCTAssertEqual((reply.response["output"] as? [[String: Any]])?.first?["namespace"] as? String, namespace)
+        }
+        var boundary = function
+        boundary["name"] = String(repeating: "n", count: 128)
+        boundary["description"] = String(repeating: "d", count: 64_000)
+        let bounded = try request(["tools": [["type": "namespace", "name": String(repeating: "s", count: 128), "tools": [boundary]]]])
+        let description = try XCTUnwrap(wireFunctions(bounded).first?["description"] as? String)
+        XCTAssertTrue(description.hasSuffix(String(repeating: "d", count: 64_000)))
+        XCTAssertLessThanOrEqual(description.utf8.count, 65_024)
+        boundary["description"] = String(repeating: "d", count: 64_001)
+        XCTAssertThrowsError(try request(["tools": [boundary]])) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool) }
+        let responses = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: .responses, models: provider.models)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request(["tools": definitions], provider: responses).body) as? [String: Any])
+        XCTAssertEqual(body["tools"] as? NSArray, definitions as NSArray)
+    }
+    func testChatToolIdentityDescriptionsPreserveColdReasoningAndFilteredCompletedHistory() throws {
+        let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        let browser: [String: Any] = ["type": "function", "name": "browser_tabs", "description": "List built-in tabs.", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        let definitions: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [chrome, browser]]]
+        let oldHistory: [[String: Any]] = [
+            ["role": "user", "content": "Previous controlled request"],
+            ["type": "function_call", "call_id": "old_chrome", "name": "computer_v2_tabs", "namespace": "functions", "arguments": "{}"],
+            ["type": "function_call_output", "call_id": "old_chrome", "output": "Old completion retained"],
+            ["role": "user", "content": "Use browser_tabs now"],
+        ]
+        let initial = try request(["tools": definitions, "input": oldHistory])
+        let thinking = "Private fixture continuation names computa_tool_1."
+        let reply = try decode(["role": "assistant", "reasoning": thinking, "tool_calls": [["id": "built_in", "type": "function", "function": ["name": "computa_tool_1", "arguments": "{}"]]]], finish: "tool_calls", request: initial)
+        let items = try XCTUnwrap(reply.response["output"] as? [[String: Any]])
+        let retainedData = try JSONSerialization.data(withJSONObject: items)
+        XCTAssertFalse(String(decoding: retainedData, as: UTF8.self).contains(thinking))
+        let restoredItems = try XCTUnwrap(JSONSerialization.jsonObject(with: retainedData) as? [[String: Any]])
+        let input = oldHistory + restoredItems + [["type": "function_call_output", "call_id": "built_in", "output": "Fixture tabs"], ["role": "user", "content": "Continue"]]
+        let raw: [String: Any] = ["model": initial.localModelID, "instructions": "Use browser_tabs.", "input": input, "tools": definitions, "stream": true, "store": false]
+        let cold = try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: raw), selection: .init(provider: provider, model: provider.models[0]), threadID: taskID,
+                                                    capsules: APIReasoningCapsules(key: Data(repeating: 7, count: 32)))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: cold.body) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let calls = messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.flatMap { $0 }
+        XCTAssertEqual(calls.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }, ["computa_tool_0", "computa_tool_1"])
+        XCTAssertEqual(calls.compactMap { $0["id"] as? String }, ["old_chrome", "built_in"])
+        XCTAssertEqual(messages.compactMap { $0["tool_call_id"] as? String }, ["old_chrome", "built_in"])
+        XCTAssertEqual(messages.compactMap { $0["reasoning"] as? String }, [thinking])
+        XCTAssertEqual(cold.allowedTools, ["computa_tool_1"])
+        let emitted = try wireFunctions(cold)
+        XCTAssertEqual(emitted.count, 1)
+        let description = try XCTUnwrap(emitted.first?["description"] as? String)
+        XCTAssertTrue(description.hasPrefix("Native tool: functions.browser_tabs.\n"))
+        XCTAssertTrue(description.contains("Callable API function: computa_tool_1."))
+        XCTAssertFalse(description.contains("computa_tool_0"))
+        XCTAssertEqual(emitted as NSArray, try wireFunctions(initial) as NSArray)
+        for alias in ["computa_tool_0", "browser_tabs", "functions.browser_tabs"] {
+            XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "new_call", "type": "function", "function": ["name": alias, "arguments": "{}"]]]], finish: "tool_calls", request: cold)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+    }
     func testResumedChromeHistoryIsPreservedButNotOfferedOrCallable() throws {
         let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
         let builtin: [String: Any] = ["type": "function", "name": "browser_tabs", "parameters": ["type": "object", "properties": ["cursor": ["type": "string"]], "additionalProperties": false]]
@@ -119,7 +232,11 @@ final class APIModelResponseCodecTests: XCTestCase {
         let wireTools = try XCTUnwrap(body["tools"] as? [[String: Any]])
         let wrapped = try XCTUnwrap(wireTools[0]["function"] as? [String: Any])
         let description = try XCTUnwrap(wrapped["description"] as? String)
-        XCTAssertTrue(description.hasPrefix(original)); XCTAssertTrue(description.contains(grammar))
+        XCTAssertTrue(description.hasPrefix("Native tool: editing.apply_patch.\n"))
+        XCTAssertTrue(description.contains("Callable API function: computa_tool_0.\n"))
+        XCTAssertTrue(description.hasSuffix(prepared.tools[0].description))
+        XCTAssertTrue(prepared.tools[0].description.hasPrefix(original))
+        XCTAssertTrue(description.hasSuffix(grammar))
         XCTAssertTrue(description.contains("decoded input string is passed unchanged"))
         XCTAssertTrue(description.contains("transport wrapper")); XCTAssertTrue(description.contains("native lark grammar"))
         XCTAssertTrue(((wireTools[1]["function"] as? [String: Any])?["description"] as? String ?? "").contains(#"v[0-9]+\.[0-9]+"#))
