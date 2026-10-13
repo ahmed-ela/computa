@@ -8,6 +8,85 @@ import XCTest
 /// or native global-input permission is involved in these backend checks.
 @MainActor
 final class EmbeddedBrowserTabTransportTests: XCTestCase {
+    func testRealWebKitReadOnlyGridcellCannotSubstituteForItsSameLabelLink() async throws {
+        let html = """
+        <!doctype html><html><body><main>
+        <div role="gridcell"><span role="link" tabindex="0" id="link"
+          onclick="window.clicks=(window.clicks||0)+1;document.getElementById('result').textContent='Opened fixture';">Shared fixture title</span></div>
+        <p id="result">Unopened fixture</p></main></body></html>
+        """
+        func reference(_ read: String, role: String) throws -> [String: Any] {
+            let header = try XCTUnwrap(read.split(separator: "\n").first)
+            let id = try XCTUnwrap(header.split(separator: " ").first { $0.hasPrefix("id=") })
+            let row = try XCTUnwrap(read.split(separator: "\n").first {
+                $0.hasPrefix("#") && $0.contains("semantic_role=\"\(role)\"")
+            })
+            let index = try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber }))
+            return ["snapshot_id": String(id.dropFirst(3)), "element_index": index]
+        }
+        for change in ["unchanged", "disabled", "replaced"] {
+            let session = EmbeddedBrowserSession(persistent: false)
+            let transport = EmbeddedBrowserTabTransport(session: session)
+            let controller = EmbeddedBrowserToolController(transport: transport)
+            defer { session.shutdown() }
+            let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+            view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+            view.loadHTMLString(html, baseURL: URL(string: "http://localhost:8123/grid-fixture"))
+            try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+            _ = try await controller.execute(taskKey: "grid", tool: "browser_tabs", arguments: Data("{}".utf8))
+            _ = try await controller.execute(taskKey: "grid", tool: "browser_bind",
+                arguments: JSONSerialization.data(withJSONObject: ["tab_id": id.uuidString]))
+            let content = try await controller.execute(taskKey: "grid", tool: "browser_read",
+                arguments: Data(#"{"view":"content"}"#.utf8))
+            let container = try reference(content, role: "gridcell")
+            let row = try XCTUnwrap(content.split(separator: "\n").first { $0.contains("semantic_role=\"gridcell\"") })
+            XCTAssertTrue(row.contains("actions=[]")); XCTAssertTrue(row.contains("enabled=true"))
+            XCTAssertFalse(content.contains("semantic_role=\"link\""), "Content and action views are distinct")
+            let containerData = try JSONSerialization.data(withJSONObject: container)
+            do {
+                try await controller.preflightMutation(taskKey: "grid", tool: "browser_click", arguments: containerData)
+                XCTFail("An enabled content wrapper has no inherited press capability")
+            } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .pressUnavailable) }
+            do {
+                _ = try await controller.execute(taskKey: "grid", tool: "browser_click", arguments: containerData)
+                XCTFail("Direct execution must not retarget to the child")
+            } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .pressUnavailable) }
+            let deniedClicks = try await script(view, "return window.clicks || 0;")
+            XCTAssertEqual(deniedClicks, Data("0".utf8))
+            let links = try await controller.execute(taskKey: "grid", tool: "browser_read",
+                arguments: Data(#"{"view":"links","query":"Shared fixture title"}"#.utf8))
+            XCTAssertTrue(links.contains("actions=[\"AXPress\"]"))
+            let linkData = try JSONSerialization.data(withJSONObject: reference(links, role: "link"))
+            try await controller.preflightMutation(taskKey: "grid", tool: "browser_click", arguments: linkData)
+            if change == "disabled" {
+                _ = try await script(view, "document.getElementById('link').setAttribute('aria-disabled','true'); return true;")
+            } else if change == "replaced" {
+                _ = try await script(view, "let old=document.getElementById('link'); old.replaceWith(old.cloneNode(true)); return true;")
+            }
+            do {
+                _ = try await controller.execute(taskKey: "grid", tool: "browser_click", arguments: linkData)
+                XCTAssertEqual(change, "unchanged", "Approval cannot preserve changed physical semantics")
+            } catch {
+                XCTAssertNotEqual(change, "unchanged", "The actual same-label link should dispatch once")
+                XCTAssertEqual(error as? BrowserTabBrokerError, change == "disabled" ? .elementChanged : .elementNotFound)
+            }
+            do {
+                _ = try await controller.execute(taskKey: "grid", tool: "browser_click", arguments: linkData)
+                XCTFail("An admitted mutation, including a rejected revalidation, cannot replay")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+            let clicks = try await script(view, "return window.clicks || 0;")
+            XCTAssertEqual(clicks, Data((change == "unchanged" ? "1" : "0").utf8))
+            if change == "unchanged" {
+                let result = try await controller.execute(taskKey: "grid", tool: "browser_read",
+                    arguments: Data(#"{"view":"content"}"#.utf8))
+                XCTAssertTrue(result.contains("Opened fixture"))
+            }
+            let cleanup = await controller.shutdown()
+            XCTAssertTrue(cleanup.isEmpty)
+            XCTAssertNotNil(session.webView(for: id), "The borrowed human fixture is preserved")
+        }
+    }
+
     private let fixture = """
     <!doctype html><html><head><title>Flight fixture</title></head><body><main>
     <h1>Flight status</h1><label>Flight number <input id="flight" placeholder="Flight number"></label>

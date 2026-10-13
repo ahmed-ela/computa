@@ -13,18 +13,24 @@ enum ComputerV2ToolContract {
     static let regionChangedIndexGuidance = "Top-level element_index is the button to press; postcondition.element_index is the separate observed result container. Complete region_changed argument shape (replace placeholders with observed values from the same snapshot): " + regionChangedPressArgumentShape
     static let maximumAppInventoryBytes = 3_500
     static let unboundApplicationMessage = "No application is bound in this turn. Call computer_v2_open, or use computer_v2_tabs then computer_v2_bind_tab for an existing Chrome tab through a native-user-approved connection."
+    static func unboundApplicationMessage(externalChromeTools: Bool) -> String {
+        if externalChromeTools { return unboundApplicationMessage }
+        return "No native application is bound in this turn. Use computer_v2_open for the requested native app. Built-in webpages have a separate binding: use browser_tabs and browser_bind for an observed existing page, or browser_open for an authorized task-owned page, then browser_read. A built-in browser binding never authorizes a native computer read. No read or input was dispatched."
+    }
     static let existingBrowserSessionNote = browserSessionNote(activationMode: .none)
     static func browserSessionNote(activationMode: ActivationMode) -> String {
         "\nBROWSER_SESSION profile=existing ordinary_profile_access=true tab_broker=false open_activation=\(activationMode.rawValue). Existing tabs and logins are preserved. For webpage content prefer computer_v2_tabs then computer_v2_bind_tab with an observed candidate_token; that reads the page directly without native window wrappers. If browser connection is unavailable, use snapshot view=content. Native AX may work in background. With activation=none, capture is an observation-only image and grants no input authority. Actionable capture and global key/pointer input still require foreground and are unavailable in a non-activating binding. This is not a task-isolated browser tab."
     }
 
     /// Keep discovery proportional to a small local model's context. The default
-    /// lists user-facing apps, not every system helper. A query searches all
-    /// running apps without any name-specific exclusions.
-    static func appInventory(_ applications: [RunningApplicationInfo], query: String?) -> String {
+    /// lists supported user-facing apps, not every system helper. A query searches
+    /// all matching running apps allowed by the same target policy as dispatch.
+    static func appInventory(_ applications: [RunningApplicationInfo], query: String?,
+                             externalChromeTools: Bool = false) -> String {
         let query = query?.trimmingCharacters(in: .whitespacesAndNewlines)
         let matches = applications.filter { app in
             guard app.processIdentifier > 0, !app.isTerminated else { return false }
+            guard externalChromeTools || !ComputaModelToolCatalog.isExternalChromeTarget(bundleID: app.bundleIdentifier) else { return false }
             if let query, !query.isEmpty {
                 return [app.localizedName, app.bundleIdentifier].compactMap { $0 }
                     .contains { $0.localizedCaseInsensitiveContains(query) }
@@ -50,13 +56,17 @@ enum ComputerV2ToolContract {
             if let bundle = app.bundleIdentifier { row["bundle_id"] = bundle }
             guard let data = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys, .withoutEscapingSlashes]),
                   let text = String(data: data, encoding: .utf8),
-                  bytes + data.count + 1 <= maximumAppInventoryBytes - 400 else { continue }
+                  bytes + data.count + 1 <= maximumAppInventoryBytes - (externalChromeTools ? 400 : 600) else { continue }
             rows.append(text)
             bytes += data.count + 1
         }
-        let scope = query == nil ? "user_facing" : "all_matching_running_apps"
+        let scope = externalChromeTools ? (query == nil ? "user_facing" : "all_matching_running_apps")
+            : (query == nil ? "supported_user_facing_native_apps" : "supported_matching_running_native_apps")
+        let guidance = externalChromeTools
+            ? "Use query with a name or bundle_id to find helpers or omitted apps. Known bundle_id: open directly; no listing needed."
+            : "Only currently supported native app targets are listed; omission does not prove an app is not running. Use query for matching supported helpers or omitted apps. Bind the requested native app with computer_v2_open; webpages use browser_tabs/browser_bind or browser_open in the built-in browser."
         return "APPS scope=\(scope) matched=\(matches.count) returned=\(rows.count) omitted=\(matches.count - rows.count). "
-            + "Use query with a name or bundle_id to find helpers or omitted apps. Known bundle_id: open directly; no listing needed.\n"
+            + guidance + "\n"
             + rows.joined(separator: "\n")
     }
 
@@ -785,7 +795,7 @@ enum ComputerV2ToolContract {
         if !externalChromeTools {
             switch tool {
             case .readPage:
-                result["description"] = "Read the bound native app using all or content. Returns current host action/region references; readable structure is not an action target. Continue partial native text with computer_v2_continue(cursor=next_cursor). Built-in browser pages use browser_read, including browser_read(cursor=next_cursor) for their own continuations."
+                result["description"] = "Read the native app already bound this turn with computer_v2_open, using all or content. An unbound read requires computer_v2_open first; computer_v2_status does not bind or read a page. Returns current host action/region references; readable structure is not an action target. Continue partial native text with computer_v2_continue(cursor=next_cursor). Webpage tasks use browser_* directly without native app discovery/status; browser_read(cursor=next_cursor) continues their own page text."
             case .readRegion:
                 result["description"] = "Read below a currently published native region_ref. This is read-only context, not an action target. Refresh the native app with computer_v2_read_page; continue its partial text with computer_v2_continue. Built-in browser cursors belong to browser_read."
             case .fill:
@@ -813,6 +823,8 @@ enum ComputerV2ToolContract {
     private static func nativeOnlySpec(_ original: [String: Any], tool: Tool) -> [String: Any] {
         var result = original
         switch tool {
+        case .status:
+            result["description"] = "Report permissions and route/binding metadata only. computer_v2_status does not bind an app, read a page, or issue observation references. An unbound native read requires computer_v2_open first. Webpage tasks use browser_* directly without native app discovery or status. This tool cannot grant permissions or change the requested target."
         case .open:
             var schema = result["inputSchema"] as! [String: Any]
             var properties = schema["properties"] as! [String: Any]
@@ -822,7 +834,7 @@ enum ComputerV2ToolContract {
         case .continueRead:
             result["description"] = "Continue only a current native computer read with its observed next_cursor. Send cursor alone. Built-in browser_read cursors must use browser_read(cursor=next_cursor); browser_tabs inventory cursors must use browser_tabs(cursor=next_cursor). Never cross sources or reuse previous-turn cursors. No input, navigation or reconnect occurs."
         case .snapshot:
-            result["description"] = "Read the bound native app with all or content. Fresh reads omit snapshot_id and element_index; a subtree requires both from a current observation. Continue native text with computer_v2_continue. Use only observed supported actions and verify their results. Built-in webpages and their cursors belong to browser_read."
+            result["description"] = "Read the native app already bound with computer_v2_open, using all or content. computer_v2_status does not bind or read a page; an unbound read requires computer_v2_open first. Fresh reads omit snapshot_id and element_index; a subtree requires both from a current observation. Continue native text with computer_v2_continue. Use only observed supported actions and verify their results. Webpage tasks use browser_* directly without native app discovery/status; their pages and cursors belong to browser_read."
         case .capture:
             result["description"] = (result["description"] as? String ?? "")
                 .replacingOccurrences(of: "brokered Chrome tabs fail closed. ", with: "")

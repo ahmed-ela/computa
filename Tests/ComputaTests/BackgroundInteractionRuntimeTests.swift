@@ -38,7 +38,7 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
         func beginTurn() { status = nil }
     }
 
-    func testDefaultRuntimeRejectsForegroundV2RoutesBeforeApprovalOrGrounder() async throws {
+    func testBackgroundPolicyRejectsForegroundV2RoutesWithChromeCompatibilityEnabled() async throws {
         let points: [String: Any] = ["capture_id": staleID, "x": 1, "y": 1]
         let cases: [(String, [String: Any])] = [
             ("computer_v2_open", ["bundle_id": absentApp, "activation": "foreground"]),
@@ -54,7 +54,9 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
             ("computer_v2_type", ["text": "MUST_NOT_TYPE"]),
             ("computer_v2_ground_click", ["capture_id": staleID, "target": "Synthetic control"]),
         ]
-        try await withHarness { runtime, root, audit, grounder in
+        // Isolate the background capability ceiling from the stricter default
+        // Chrome route admission; even compatibility cannot grant foreground.
+        try await withHarness(externalChromeTools: true) { runtime, root, audit, grounder in
             for (index, item) in cases.enumerated() {
                 try await self.submit(["tool": item.0, "arguments": item.1], runtime: runtime, audit: audit)
                 try await self.waitFor { audit.status == .waiting && self.rowCount(root) == index + 1 }
@@ -203,7 +205,8 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
 
     private func rowCount(_ root: URL) -> Int { (try? rows(root).count) ?? 0 }
 
-    private func withHarness(_ body: (CodexAppServerRuntime, URL, Audit, GrounderAudit) async throws -> Void) async throws {
+    private func withHarness(externalChromeTools: Bool = false,
+                             _ body: (CodexAppServerRuntime, URL, Audit, GrounderAudit) async throws -> Void) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaBackgroundPolicy-\(UUID().uuidString)")
         let workspace = root.appendingPathComponent("workspace")
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -215,6 +218,7 @@ final class BackgroundInteractionRuntimeTests: XCTestCase {
         var configuration = CodexAppServerRuntime.Configuration.localQwen
         XCTAssertEqual(configuration.computerInteractionPolicy, .backgroundOnly)
         configuration.executable = .fixture(path: executable.path)
+        configuration.externalChromeToolsEnabled = externalChromeTools
         configuration.codexHomePath = root.path
         configuration.workspacePath = workspace.path
         configuration.model = modelID

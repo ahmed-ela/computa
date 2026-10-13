@@ -4,6 +4,103 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserToolControllerTests: XCTestCase {
+    func testCapturedMutationPreflightRejectsUnsupportedTargetsWithoutConsumingSnapshot() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let read = try await call(controller, "browser_read", ["view": "all"])
+        let id = try snapshotID(read)
+        let before = await backend.counts()
+        for (tool, index, failure) in [
+            ("browser_click", 0, EmbeddedBrowserTools.MutationEligibilityFailure.pressUnavailable),
+            ("browser_fill", 1, EmbeddedBrowserTools.MutationEligibilityFailure.fillUnavailable),
+        ] {
+            var arguments: [String: Any] = ["snapshot_id": id, "element_index": index]
+            if tool == "browser_fill" { arguments["text"] = "MUST_NOT_APPEAR" }
+            let data = try JSONSerialization.data(withJSONObject: arguments)
+            do {
+                try await controller.preflightMutation(taskKey: "turn-a", tool: tool, arguments: data)
+                XCTFail("Unsupported captured intent must be rejected before an approval is requested")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, failure)
+                XCTAssertTrue(error.localizedDescription.contains("No input was dispatched."))
+                XCTAssertTrue(error.localizedDescription.contains("browser_read"))
+                XCTAssertFalse(error.localizedDescription.contains("Chrome"))
+            }
+            do {
+                _ = try await call(controller, tool, arguments)
+                XCTFail("Direct execution must enforce the same captured eligibility")
+            } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, failure) }
+        }
+        let denied = await backend.counts()
+        XCTAssertEqual(denied.presses, 0); XCTAssertEqual(denied.fills, 0)
+        XCTAssertEqual(denied.observes, before.observes, "Unsupported intent must not reach backend preflight")
+        let valid: [String: Any] = ["snapshot_id": id, "element_index": 1]
+        let validData = try JSONSerialization.data(withJSONObject: valid)
+        try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click", arguments: validData)
+        try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click", arguments: validData)
+        _ = try await call(controller, "browser_click", valid)
+        do {
+            try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click", arguments: validData)
+            XCTFail("An admitted mutation must consume its snapshot")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        do { _ = try await call(controller, "browser_click", valid); XCTFail("Replay must not dispatch") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let after = await backend.counts()
+        XCTAssertEqual(after.presses, 1); XCTAssertEqual(after.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testMutationPreflightRetainsDisabledStaleAndTargetIdentityGuards() async throws {
+        for condition in ["disabled", "stale", "replaced_target", "released"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            if condition == "disabled" { await backend.disableButton() }
+            let read = try await call(controller, "browser_read", ["view": "all"])
+            let arguments = try JSONSerialization.data(withJSONObject: ["snapshot_id": snapshotID(read), "element_index": 1])
+            if condition == "stale" { _ = try await call(controller, "browser_read", ["view": "all"]) }
+            if condition == "replaced_target" { await backend.replaceOwnedTarget() }
+            if condition == "released" { _ = await controller.release(taskKey: "turn-a") }
+            do {
+                try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click", arguments: arguments)
+                XCTFail("Preflight must reject \(condition)")
+            } catch {
+                if condition == "disabled" {
+                    XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .disabledTarget)
+                } else {
+                    let expected: BrowserTabBrokerError = condition == "stale" ? .staleSnapshot
+                        : condition == "replaced_target" ? .targetClosed : .handleMissing
+                    XCTAssertEqual(error as? BrowserTabBrokerError, expected)
+                }
+            }
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testMutationAfterApprovalStillRevalidatesReplacedOrDisabledPhysicalTarget() async throws {
+        for change in ["replacement", "disabled", "released"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let read = try await call(controller, "browser_read", ["view": "all"])
+            let arguments: [String: Any] = ["snapshot_id": try snapshotID(read), "element_index": 1]
+            try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
+                                                   arguments: JSONSerialization.data(withJSONObject: arguments))
+            if change == "replacement" { await backend.replaceButton() }
+            if change == "disabled" { await backend.disableButton() }
+            if change == "released" { _ = await controller.release(taskKey: "turn-a") }
+            do { _ = try await call(controller, "browser_click", arguments); XCTFail("Approval cannot authorize \(change)") }
+            catch {
+                let expected: BrowserTabBrokerError = change == "replacement" ? .elementNotFound
+                    : change == "disabled" ? .elementChanged : .handleMissing
+                XCTAssertEqual(error as? BrowserTabBrokerError, expected)
+            }
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
     func testBuiltInContinuationSchemasNameTheirOwnCursorTools() throws {
         for name in ["browser_read", "browser_tabs"] {
             let spec = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
@@ -30,12 +127,20 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(Set(EmbeddedBrowserTools.definitions().compactMap { $0["name"] as? String }), EmbeddedBrowserTools.names)
         XCTAssertFalse(EmbeddedBrowserTools.requiresApproval(tool: "browser_read"))
         XCTAssertTrue(EmbeddedBrowserTools.requiresApproval(tool: "browser_fill"))
+        let descriptions = Dictionary(uniqueKeysWithValues: EmbeddedBrowserTools.definitions().map {
+            ($0["name"] as! String, $0["description"] as! String)
+        })
+        XCTAssertTrue(descriptions["browser_click"]?.contains("actions=[\"AXPress\"]") == true)
+        XCTAssertTrue(descriptions["browser_read"]?.contains("actions=[] is read-only") == true)
+        XCTAssertTrue(descriptions["browser_fill"]?.contains("enabled=true and settable=true") == true)
     }
 
     func testFlightReadFillClickAndResultRequireFreshSnapshotAndNeverReplay() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller,"browser_open",["url":"http://localhost:8123/flight"])
         let first = try await call(controller,"browser_read")
+        try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_fill",
+            arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": snapshotID(first), "element_index": 0, "text": "UA 123"]))
         XCTAssertTrue(first.contains("Flight number"))
         let firstID = try snapshotID(first)
         _ = try await call(controller,"browser_fill",["snapshot_id":firstID,"element_index":0,"text":"UA 123"])
@@ -138,6 +243,11 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let id = try snapshotID(read)
         let operation = Task { try await self.call(controller,"browser_click",["snapshot_id":id,"element_index":1]) }
         await backend.waitUntilMutationHeld()
+        do {
+            try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
+                arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": id, "element_index": 1]))
+            XCTFail("Preflight cannot overlap an admitted mutation")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
         _ = await controller.release(taskKey:"turn-a")
         await backend.resumeMutation()
         do { _ = try await operation.value; XCTFail("Revoked mutation must not dispatch") } catch { }
@@ -288,6 +398,12 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = try await call(controller,"browser_open",["url":"http://localhost:8123/flight"],scope:scope)
         await backend.setLink("https://unrelated.example/other")
         let read = try await call(controller,"browser_read",["view":"links"],scope:scope)
+        do {
+            try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
+                arguments: JSONSerialization.data(withJSONObject: ["snapshot_id": snapshotID(read), "element_index": 0]),
+                scope: scope)
+            XCTFail("Known offsite destination must fail before approval")
+        } catch { XCTAssertTrue(error is BrowserTabBrokerError) }
         do { _ = try await call(controller,"browser_click",["snapshot_id":try snapshotID(read),"element_index":0],scope:scope); XCTFail("Known offsite destination must fail before press") } catch { }
         let counts = await backend.counts()
         XCTAssertEqual(counts.presses,0)
@@ -308,6 +424,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     let humanID = UUID().uuidString
     private var targets = [String: BrowserTarget](), owned = Set<String>(), stats = Counts()
     private var generation = UUID().uuidString, field = "", result = ""
+    private var buttonID: Int64 = 2, buttonDisabled = false
     private var pendingRedirect: URL?
     private var link: String?
     private var holdCreate=false, createHeld=false, createContinuation: CheckedContinuation<Void,Never>?
@@ -360,7 +477,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         }
         var nodes = [
             BrowserDocumentNode(backendNodeID:1,role:"textbox",name:"Flight number",value:field,isDisabled:false,isReadOnly:false,isIgnored:false,nodeID:"1",isEditable:true),
-            BrowserDocumentNode(backendNodeID:2,role:"button",name:"Check flight",value:nil,isDisabled:false,isReadOnly:false,isIgnored:false,nodeID:"2",isDOMClickable:true),
+            BrowserDocumentNode(backendNodeID:buttonID,role:"button",name:"Check flight",value:nil,isDisabled:buttonDisabled,isReadOnly:false,isIgnored:false,nodeID:String(buttonID),isDOMClickable:true),
             BrowserDocumentNode(backendNodeID:3,role:"statictext",name:result,value:nil,isDisabled:true,isReadOnly:true,isIgnored:false,nodeID:"3")
         ]
         if let link {
@@ -390,4 +507,13 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func resumeMutation() { mutationContinuation?.resume(); mutationContinuation=nil; holdMutation=false }
     func redirectOnNextObserve(to url: URL) { pendingRedirect = url }
     func setLink(_ url: String) { link = url }
+    func disableButton() { buttonDisabled = true }
+    func replaceButton() { buttonID = 99 }
+    func replaceOwnedTarget() {
+        for id in owned {
+            guard let target = targets[id] else { continue }
+            targets[id] = BrowserTarget(targetID:id,instanceToken:UUID().uuidString,title:target.title,
+                                        url:target.url,webSocketURL:nil)
+        }
+    }
 }

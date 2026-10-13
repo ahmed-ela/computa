@@ -4,6 +4,33 @@ import XCTest
 @testable import Computa
 
 final class ComputerToolFailureEvidenceTests: XCTestCase {
+    func testRecoveryProjectionUsesCurrentSurfaceWithoutChangingTheFailure() {
+        let failures: [Error] = [ComputerReadContinuation.Failure.unknownCursor,
+            ComputerReadContinuation.Failure.invalidScope,
+            ComputerInteractionPolicy.Violation.foregroundUnavailable,
+            ComputerInteractionPolicy.Violation.legacyMutationUnavailable]
+        for error in failures {
+            let message = ComputerToolFailureEvidence.text(for: error, externalChromeTools: false)
+            XCTAssertFalse(message.contains("computer_v2_tabs"))
+            XCTAssertFalse(message.contains("computer_v2_bind_tab"))
+            XCTAssertFalse(message.contains("authorized Chrome"))
+            XCTAssertTrue(message.contains("browser_"))
+            XCTAssertEqual(ComputerToolFailureEvidence.text(for: error, externalChromeTools: true), error.localizedDescription)
+            XCTAssertNil(ComputerToolFailureEvidence.terminalMessage(for: error))
+        }
+        let permission = AutomationError.permissionNotGranted(.accessibility)
+        XCTAssertEqual(ComputerToolFailureEvidence.text(for: permission, externalChromeTools: false), permission.localizedDescription)
+    }
+
+    func testChromeTargetPolicyMatchesBundleVariantsAndPreservesNativeApps() {
+        for bundle in ["com.google.Chrome", "com.google.Chrome.canary", "COM.GOOGLE.CHROME"] {
+            XCTAssertTrue(ComputaModelToolCatalog.isExternalChromeTarget(bundleID: bundle))
+        }
+        for bundle in [nil, "com.apple.finder", "com.ahmedelamin.ComputaFixture", "com.example.chromebook"] {
+            XCTAssertFalse(ComputaModelToolCatalog.isExternalChromeTarget(bundleID: bundle))
+        }
+    }
+
     func testMissingPointerFieldsExplainTheWholeContractWithoutInventingCoordinates() {
         for field in ["x", "y", "capture_id", "delta_x", "delta_y"] {
             let error = ComputerV2ToolContract.ValidationError.missing(field)

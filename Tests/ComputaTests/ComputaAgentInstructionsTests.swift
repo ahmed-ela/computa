@@ -13,6 +13,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(instructions.contains("browser_read(cursor=next_cursor)"))
             XCTAssertTrue(instructions.contains("browser_tabs(cursor=next_cursor)"))
             XCTAssertTrue(instructions.contains("computer_v2_open"))
+            XCTAssertTrue(instructions.contains("computer_v2_status does not bind an app or read a page"))
+            XCTAssertTrue(instructions.contains("computer_v2_open first"))
+            XCTAssertTrue(instructions.contains("Webpage tasks use browser_* directly without native"))
+            XCTAssertTrue(instructions.contains("Do not substitute another surface after a denial"))
             XCTAssertTrue(instructions.contains("exec_command and write_stdin"))
         }
         let contract = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [
@@ -174,9 +178,19 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("browser_click activates enabled controls and links, including\nfollow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("unchanged reads"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 1_400)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 1_800)
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
+    }
+
+    func testBuiltInActionGuidanceRequiresPublishedCapabilitiesInsteadOfReadableIndices() {
+        let text = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        XCTAssertTrue(text.contains("browser_click requires enabled=true and actions=[\"AXPress\"]"))
+        XCTAssertTrue(text.contains("click an actions=[] text/heading row or infer a clickable parent"))
+        XCTAssertTrue(text.contains("browser_fill requires enabled=true and settable=true"))
+        XCTAssertTrue(text.contains("An index is readable context unless its row explicitly offers an"))
+        XCTAssertTrue(text.contains("A click is not outcome proof"))
+        XCTAssertTrue(text.contains("browser_read(cursor=next_cursor)"))
     }
 
     func testBuiltInBrowserContractLocatesURLExecutionOnTheHost() {

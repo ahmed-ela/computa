@@ -2,6 +2,22 @@ import XCTest
 @testable import Computa
 
 final class ComputerInteractionPolicyTests: XCTestCase {
+    func testDefaultViolationGuidanceRoutesWebpagesWithoutRelaxingNativePolicy() throws {
+        for violation: ComputerInteractionPolicy.Violation in [.foregroundUnavailable, .legacyMutationUnavailable] {
+            let message = violation.message(externalChromeTools: false)
+            XCTAssertFalse(message.contains("Chrome")); XCTAssertFalse(message.contains("computer_v2_tabs"))
+            XCTAssertTrue(message.contains("native app")); XCTAssertTrue(message.contains("browser_*"))
+            XCTAssertEqual(violation.message(externalChromeTools: true), violation.localizedDescription)
+        }
+        XCTAssertThrowsError(try ComputerInteractionPolicy.backgroundOnly.requireForeground()) {
+            XCTAssertEqual($0 as? ComputerInteractionPolicy.Violation, .foregroundUnavailable)
+        }
+        XCTAssertThrowsError(try ComputerInteractionPolicy.backgroundOnly.requireLegacy(tool: "desktop_open_application", arguments: [:])) {
+            XCTAssertEqual($0 as? ComputerInteractionPolicy.Violation, .legacyMutationUnavailable)
+        }
+        let native = try ComputerV2ToolContract.validate(tool: "computer_v2_open", arguments: ["bundle_id": "com.example.fixture"])
+        XCTAssertNoThrow(try ComputerInteractionPolicy.backgroundOnly.requireV2(native))
+    }
     private let snapshotID = "ABCDEF12-3456-4789-ABCD-0123456789AB"
 
     func testDefaultIsBackgroundOnlyAndCanRoundTripAsHostState() throws {

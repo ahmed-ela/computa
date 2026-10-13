@@ -5,6 +5,20 @@ import Foundation
 /// Strict model-facing contract for Computa's own browser, independent of
 /// Chrome attachment and native computer/window input.
 enum EmbeddedBrowserTools {
+    enum MutationEligibilityFailure: Error, LocalizedError, Equatable {
+        case disabledTarget, pressUnavailable, fillUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .disabledTarget:
+                "No input was dispatched. This browser target has enabled=false. Use browser_read to observe an enabled target; do not retry this target or substitute its parent or child."
+            case .pressUnavailable:
+                "No input was dispatched. This browser target has no advertised AXPress action. actions=[] is read-only, even when enabled=true. Use browser_read with view=links or view=all and an observed text query, then choose an enabled row with actions=[\"AXPress\"]. Do not substitute a parent or child without observing its own reference."
+            case .fillUnavailable:
+                "No input was dispatched. This browser target has settable=false. Use browser_read to observe an enabled field with settable=true, then browser_fill with that field's own snapshot_id and element_index. Clicking a label or parent does not grant field authority."
+            }
+        }
+    }
     static let names: Set<String> = [
         "browser_tabs", "browser_open", "browser_bind", "browser_navigate", "browser_read",
         "browser_click", "browser_fill", "browser_wait", "browser_close",
@@ -50,18 +64,18 @@ enum EmbeddedBrowserTools {
                 ["url": string], ["url"]),
             specification(
                 "browser_read",
-                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for document text, all for structure. Continue with browser_read(cursor=next_cursor) alone, never computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls, browser_fill for fields. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",
+                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for document text, all for structure. Continue with browser_read(cursor=next_cursor) alone, never computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only, even when enabled=true; content containers do not inherit a child link's action. Use view=links or all with observed text to find the actual control. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",
                 [
                     "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]],
                     "query": string, "cursor": string,
                 ]),
             specification(
                 "browser_click",
-                "Press exactly one enabled observed control/link using the latest snapshot_id and element_index. Semantic DOM activation, with stale-node and obstruction checks; not native global input. Reports dispatch, not success. Read or wait to verify the result. Never retry a timed-out mutation.",
+                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). Semantic DOM activation, with stale-node and obstruction checks; not native global input. Reports dispatch, not success. Read or wait to verify the result. Never retry a timed-out mutation.",
                 mutation, ["snapshot_id", "element_index"]),
             specification(
                 "browser_fill",
-                "Replace one observed editable field and dispatch input/change events. Uses one fresh snapshot capability; password fields are unavailable. Read to verify the value before a later submit.",
+                "Replace one observed field with enabled=true and settable=true and dispatch input/change events. Use that field's own snapshot_id and element_index, never a label or parent. Uses one fresh snapshot capability; password fields are unavailable. Read to verify the value before a later submit.",
                 mutation.merging(["text": string], uniquingKeysWith: { _, right in right }),
                 ["snapshot_id", "element_index", "text"]),
             specification(
@@ -192,6 +206,33 @@ actor EmbeddedBrowserToolController {
         self.transport = transport
         broker = BrowserTabSessionBroker(
             transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+    }
+
+    /// Read-only admission before host approval. This does not reserve an input
+    /// or consume its snapshot. Execute repeats these checks after approval;
+    /// the broker/backend still revalidate the physical element before input.
+    func preflightMutation(
+        taskKey: String, tool: String, arguments: Data, scope: ComputerTaskScope? = nil
+    ) async throws {
+        guard !closed else { throw BrowserTabBrokerError.handleMissing }
+        guard let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any] else {
+            throw BrowserTabBrokerError.invalidRead("Browser arguments must be a JSON object.")
+        }
+        try EmbeddedBrowserTools.validate(tool: tool, arguments: object)
+        guard ["browser_click", "browser_fill"].contains(tool) else {
+            throw BrowserTabBrokerError.invalidRead("Captured-target preflight requires browser_click or browser_fill.")
+        }
+        if let violation = scope?.embeddedBrowserToolViolation() {
+            throw BrowserTabBrokerError.invalidRead(violation)
+        }
+        guard inFlight.insert(taskKey).inserted else { throw BrowserTabBrokerError.operationInProgress }
+        defer { inFlight.remove(taskKey) }
+        guard let context = contexts[taskKey] else { throw BrowserTabBrokerError.handleMissing }
+        guard context.scope == scope else {
+            throw BrowserTabBrokerError.invalidRead("The host browser scope changed within this turn; start a new turn.")
+        }
+        _ = try await capturedMutation(taskKey: taskKey, contextID: context.id,
+                                       tool: tool, object: object, scope: scope)
     }
 
     func execute(taskKey: String, tool: String, arguments: Data, scope: ComputerTaskScope? = nil)
@@ -348,23 +389,10 @@ actor EmbeddedBrowserToolController {
             contexts[taskKey]?.snapshot = observation.snapshot
             return observation.snapshot.formattedText
         case "browser_click", "browser_fill":
-            let binding = try bound(taskKey, contextID)
-            _ = try await currentTarget(binding: binding, scope: scope)
-            try check(taskKey, contextID)
-            guard let snapshot = contexts[taskKey]?.snapshot,
-                snapshot.id == UUID(uuidString: object["snapshot_id"] as! String)
-            else { throw BrowserTabBrokerError.staleSnapshot }
-            let index = (object["element_index"] as! NSNumber).intValue
-            try requireScope(scope, url: snapshot.documentURL)
-            if tool == "browser_click", let link = snapshot.element(at: index)?.linkURL, !link.isEmpty {
-                guard let destination = URL(string: link, relativeTo: snapshot.documentURL)?.absoluteURL
-                else {
-                    throw BrowserTabBrokerError.invalidRead(
-                        "The observed browser link has an invalid destination.")
-                }
-                try EmbeddedBrowserURLPolicy.validate(destination)
-                try requireScope(scope, url: destination)
-            }
+            let (binding, snapshot, index) = try await capturedMutation(
+                taskKey: taskKey, contextID: contextID, tool: tool, object: object, scope: scope)
+            // Unsupported captured intent retains the observation. An admitted
+            // mutation consumes it synchronously before the first input await.
             contexts[taskKey]?.snapshot = nil
             if tool == "browser_click" {
                 try await broker.perform(
@@ -485,6 +513,37 @@ actor EmbeddedBrowserToolController {
         }
         try binding.lifetime.check()
         return binding
+    }
+
+    private func capturedMutation(
+        taskKey: String, contextID: UUID, tool: String, object: [String: Any], scope: ComputerTaskScope?
+    ) async throws -> (BrowserTabBinding, BrowserTabSnapshot, Int) {
+        let binding = try bound(taskKey, contextID)
+        guard let snapshot = contexts[taskKey]?.snapshot,
+            snapshot.id == UUID(uuidString: object["snapshot_id"] as! String)
+        else { throw BrowserTabBrokerError.staleSnapshot }
+        let index = (object["element_index"] as! NSNumber).intValue
+        guard let element = snapshot.element(at: index) else { throw BrowserTabBrokerError.elementNotFound }
+        guard element.isEnabled else { throw EmbeddedBrowserTools.MutationEligibilityFailure.disabledTarget }
+        if tool == "browser_click" {
+            guard element.supportsPress else { throw EmbeddedBrowserTools.MutationEligibilityFailure.pressUnavailable }
+        } else {
+            guard element.supportsSetText else { throw EmbeddedBrowserTools.MutationEligibilityFailure.fillUnavailable }
+        }
+        try requireScope(scope, url: snapshot.documentURL)
+        if tool == "browser_click", let link = element.linkURL, !link.isEmpty {
+            guard let destination = URL(string: link, relativeTo: snapshot.documentURL)?.absoluteURL else {
+                throw BrowserTabBrokerError.invalidRead("The observed browser link has an invalid destination.")
+            }
+            try EmbeddedBrowserURLPolicy.validate(destination)
+            try requireScope(scope, url: destination)
+        }
+        let target = try await currentTarget(binding: binding, scope: scope)
+        try check(taskKey, contextID)
+        try binding.lifetime.check()
+        guard contexts[taskKey]?.snapshot == snapshot else { throw BrowserTabBrokerError.staleSnapshot }
+        guard target.url == snapshot.documentURL else { throw BrowserTabBrokerError.staleDocument }
+        return (binding, snapshot, index)
     }
 
     private func json(_ value: [String: Any]) throws -> String {

@@ -4,6 +4,33 @@ import XCTest
 @testable import Computa
 
 final class ComputerV2ToolContractTests: XCTestCase {
+    func testDefaultInventoryListsOnlyPolicySupportedNativeTargetsWithoutFalseAbsenceClaims() {
+        func app(_ pid: Int32, _ id: String, _ name: String, _ policy: ApplicationActivationPolicy = .regular) -> RunningApplicationInfo {
+            .init(processIdentifier: pid, bundleIdentifier: id, localizedName: name, activationPolicy: policy,
+                  isActive: true, isHidden: false, isTerminated: false)
+        }
+        let apps = [app(1, "com.google.Chrome", "Chrome"), app(2, "com.google.Chrome.canary", "Chrome Canary"),
+                    app(3, "com.example.fixture", "Fixture"), app(4, "com.example.helper", "Helper", .accessory)]
+        let defaultInventory = ComputerV2ToolContract.appInventory(apps, query: nil)
+        XCTAssertTrue(defaultInventory.contains("scope=supported_user_facing_native_apps matched=2"))
+        XCTAssertFalse(defaultInventory.contains("com.google.Chrome"))
+        XCTAssertTrue(defaultInventory.contains("com.example.fixture"))
+        XCTAssertTrue(defaultInventory.contains("omission does not prove an app is not running"))
+        XCTAssertTrue(defaultInventory.contains("browser_tabs/browser_bind or browser_open"))
+        let queried = ComputerV2ToolContract.appInventory(apps, query: "Chrome")
+        XCTAssertTrue(queried.contains("scope=supported_matching_running_native_apps matched=0"))
+        XCTAssertFalse(queried.contains("computer_v2_tabs"))
+        XCTAssertTrue(ComputerV2ToolContract.appInventory(apps, query: "Helper").contains("com.example.helper"))
+        let enabled = ComputerV2ToolContract.appInventory(apps, query: "Chrome", externalChromeTools: true)
+        XCTAssertTrue(enabled.contains("scope=all_matching_running_apps matched=2"))
+        XCTAssertTrue(enabled.contains("com.google.Chrome.canary"))
+        let many = (1...300).map { app(Int32($0), "com.example.fixture.\($0)", String(repeating: "Name", count: 20)) }
+        XCTAssertLessThanOrEqual(ComputerV2ToolContract.appInventory(many, query: nil).utf8.count, ComputerV2ToolContract.maximumAppInventoryBytes)
+        let unbound = ComputerV2ToolContract.unboundApplicationMessage(externalChromeTools: false)
+        XCTAssertFalse(unbound.contains("Chrome")); XCTAssertFalse(unbound.contains("computer_v2_tabs"))
+        XCTAssertTrue(unbound.contains("No native application is bound")); XCTAssertTrue(unbound.contains("browser_read"))
+        XCTAssertEqual(ComputerV2ToolContract.unboundApplicationMessage(externalChromeTools: true), ComputerV2ToolContract.unboundApplicationMessage)
+    }
     func testDefaultCatalogHidesExternalBrowserToolsButKeepsNativeComputerTools() throws {
         let externalNames: Set<String> = ["computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace", "computer_v2_follow", "computer_v2_follow_link"]
         for policy: ComputerInteractionPolicy in [.backgroundOnly, .foregroundAllowed] {
@@ -20,6 +47,11 @@ final class ComputerV2ToolContractTests: XCTestCase {
                 let continuation = try XCTUnwrap(specs.first { $0["name"] as? String == "computer_v2_continue" })
                 XCTAssertTrue((continuation["description"] as? String)?.contains("browser_read(cursor=next_cursor)") == true)
                 XCTAssertTrue((continuation["description"] as? String)?.contains("browser_tabs(cursor=next_cursor)") == true)
+                let status = try XCTUnwrap(specs.first { $0["name"] as? String == "computer_v2_status" })
+                XCTAssertTrue((status["description"] as? String)?.contains("computer_v2_status does not bind an app, read a page") == true)
+                let read = try XCTUnwrap(specs.first { $0["name"] as? String == "computer_v2_read_page" })
+                XCTAssertTrue((read["description"] as? String)?.contains("An unbound read requires computer_v2_open first") == true)
+                XCTAssertTrue((read["description"] as? String)?.contains("Webpage tasks use browser_* directly without native app discovery/status") == true)
                 XCTAssertFalse(ComputerV2ToolContract.instructions(for: policy).contains("Chrome"))
             }
         }
@@ -453,13 +485,13 @@ final class ComputerV2ToolContractTests: XCTestCase {
         }
         let apps = (1...300).map { app(Int32($0), "Application \($0)") }
             + [app(999, "Background Helper", .accessory), app(1_000, "StudyLock")]
-        let compact = ComputerV2ToolContract.appInventory(apps, query: nil)
+        let compact = ComputerV2ToolContract.appInventory(apps, query: nil, externalChromeTools: true)
         XCTAssertLessThanOrEqual(compact.utf8.count, ComputerV2ToolContract.maximumAppInventoryBytes)
         XCTAssertTrue(compact.contains("scope=user_facing matched=301"))
         XCTAssertFalse(compact.contains("Background Helper"))
         XCTAssertTrue(compact.contains("query with a name or bundle_id"))
         for query in ["Background Helper", "EXAMPLE.APP.999", "StudyLock"] {
-            let result = ComputerV2ToolContract.appInventory(apps, query: query)
+            let result = ComputerV2ToolContract.appInventory(apps, query: query, externalChromeTools: true)
             XCTAssertTrue(result.contains("matched=1 returned=1 omitted=0"))
             XCTAssertTrue(result.contains(query == "StudyLock" ? "\"pid\":1000" : "\"pid\":999"))
         }

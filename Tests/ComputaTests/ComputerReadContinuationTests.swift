@@ -3,6 +3,28 @@ import XCTest
 @testable import Computa
 
 final class ComputerReadContinuationTests: XCTestCase {
+    func testPolicyAwareFailuresKeepCursorSourcesSeparateAndNeverInventARoute() throws {
+        let failures: [ComputerReadContinuation.Failure] = [.unknownCursor, .inventoryScopeChanged, .pageScopeChanged,
+                                                            .invalidPageSize, .invalidScope, .conflictingCursor]
+        for failure in failures {
+            let message = failure.message(externalChromeTools: false)
+            XCTAssertFalse(message.contains("Chrome")); XCTAssertFalse(message.contains("computer_v2_tabs"))
+            XCTAssertTrue(message.contains("browser_read(cursor=next_cursor)"))
+            XCTAssertTrue(message.contains("browser_tabs(cursor=next_cursor)"))
+            XCTAssertTrue(message.contains("cursors are never converted between sources"))
+            XCTAssertTrue(message.contains("No read, binding, navigation or input was dispatched"))
+            XCTAssertEqual(failure.message(externalChromeTools: true), failure.localizedDescription)
+        }
+        var registry = ComputerReadContinuation()
+        let native = UUID(), foreignBuiltin = UUID()
+        try registry.recordPage(nextCursor: native, scope: "native-current", replacing: true)
+        XCTAssertThrowsError(try registry.resolve(cursor: foreignBuiltin, inventoryScope: nil, pageScope: "native-current")) {
+            XCTAssertEqual($0 as? ComputerReadContinuation.Failure, .unknownCursor)
+        }
+        XCTAssertEqual(registry.count, 1)
+        XCTAssertEqual(try registry.resolve(cursor: native, inventoryScope: nil, pageScope: "native-current"), .page(cursor: native))
+        XCTAssertThrowsError(try ComputerReadContinuation().resolve(cursor: native, inventoryScope: nil, pageScope: "native-current"))
+    }
     private let inventoryScope = "connection:001/owner-turn:002"
     private let pageScope = "binding:003/document:004"
 

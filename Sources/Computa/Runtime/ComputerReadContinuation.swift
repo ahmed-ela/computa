@@ -57,6 +57,26 @@ struct ComputerReadContinuation: Sendable {
                 "The cursor has conflicting host read routes. Start a fresh computer_v2_tabs or computer_v2_snapshot read; no continuation was dispatched."
             }
         }
+
+        func message(externalChromeTools: Bool) -> String {
+            if externalChromeTools { return errorDescription! }
+            let reason: String
+            switch self {
+            case .unknownCursor:
+                reason = "This cursor is not a current native computer continuation, or its retained route expired."
+            case .inventoryScopeChanged:
+                reason = "The inventory source changed or is not offered under the current routing policy."
+            case .pageScopeChanged:
+                reason = "The observed native app scope changed."
+            case .invalidPageSize:
+                reason = "The continuation does not retain a valid inventory page size."
+            case .invalidScope:
+                reason = "The host read scope is unavailable; no continuation was registered."
+            case .conflictingCursor:
+                reason = "The cursor has conflicting host read routes."
+            }
+            return reason + " For a native app, bind with computer_v2_open and make a fresh computer_v2_read_page (or computer_v2_snapshot if offered), then use its own returned cursor. Built-in page cursors continue with browser_read(cursor=next_cursor); tab inventory uses browser_tabs(cursor=next_cursor). Use only a cursor returned by that same tool; cursors are never converted between sources. No read, binding, navigation or input was dispatched."
+        }
     }
 
     fileprivate enum Source: Equatable, Sendable { case inventory, page }

@@ -128,6 +128,10 @@ final class NativeFailureRuntimeTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         var config = CodexAppServerRuntime.Configuration.localQwen
         config.executable = .fixture(path: executable.path)
+        // This retained compatibility fixture must admit its Chrome route to
+        // reach the injected typed failure. Default-off admission is tested
+        // separately; no Chrome connection or OS input is used here.
+        config.externalChromeToolsEnabled = true
         config.fixtureActivationFailurePID = 1234
         config.fixtureChromeNavigationRecoveryFailure = chromeRecoveryFailure
         config.model = modelID

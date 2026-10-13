@@ -151,7 +151,10 @@ enum ComputaAgentInstructions {
 
     For native computer UI tasks, bind each turn with computer_v2_open. CLI commands
     require no app binding. Preserve the requested target and the user's work.
-    Webpages use the offered browser_* tools in Computa's built-in browser.
+    computer_v2_status does not bind an app or read a page: it reports permissions
+    and route/binding metadata only. An unbound native read requires
+    computer_v2_open first. Webpage tasks use browser_* directly without native
+    app discovery or status. Do not substitute another surface after a denial.
 
     Use computer_v2_read_page for a fresh read of the bound native app; all preserves
     structure and content reads text. Native apps use all or content. Use
@@ -202,6 +205,10 @@ enum ComputaAgentInstructions {
     page text, browser_tabs(cursor=next_cursor) for inventory. Their cursors and
     snapshot indices never grant computer_v2 authority. Partial or unknown coverage
     leaves unread material. Preserve the requested target and the user's work.
+    computer_v2_status does not bind an app or read a page; it reports permissions
+    and route/binding metadata only. An unbound native read requires
+    computer_v2_open first. Webpage tasks use browser_* directly without native
+    app discovery or status. Do not substitute another surface after a denial.
     """
 
     /// Shared by native instructions and each fresh website response handoff.
@@ -266,9 +273,13 @@ enum ComputaAgentInstructions {
     page, or browser_open for a task-owned page at an authorized URL. Each turn
     binds explicitly. Model inference pages are separate and cannot be targeted.
     browser_read returns current snapshot_id/element_index targets; copy them
-    exactly. browser_click activates enabled controls and links, including
-    follow_link=true; browser_fill sets fields. These are browser_* targets,
-    not computer_v2 references. Act on observed navigation without repeating
+    exactly. An index is readable context unless its row explicitly offers an
+    action. browser_click requires enabled=true and actions=["AXPress"]; never
+    click an actions=[] text/heading row or infer a clickable parent.
+    browser_click activates enabled controls and links, including
+    follow_link=true; browser_fill requires enabled=true and settable=true on
+    its exact row. These are browser_* targets, not computer_v2 references.
+    Act on observed navigation without repeating
     unchanged reads. Read after input before another action. Never invent an
     index or reuse a stale snapshot. A click is not outcome proof: read the
     resulting page or use bounded browser_wait for an observed state. Never

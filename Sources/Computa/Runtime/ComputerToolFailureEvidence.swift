@@ -32,7 +32,15 @@ enum ComputerToolFailureEvidence {
             + "Bring the intended app to the foreground, then try again."
     }
 
-    static func text(for error: Error, tool: String? = nil) -> String {
+    static func text(for error: Error, tool: String? = nil, externalChromeTools: Bool = true) -> String {
+        // Recovery guidance must describe the active tool surface. This does
+        // not reinterpret permission denials or change backend admission.
+        if let continuation = error as? ComputerReadContinuation.Failure {
+            return continuation.message(externalChromeTools: externalChromeTools)
+        }
+        if let policy = error as? ComputerInteractionPolicy.Violation {
+            return policy.message(externalChromeTools: externalChromeTools)
+        }
         if let chrome = error as? ExistingChromeError, chrome == .navigationRecoveryRequired {
             let evidence: [String: Any] = [
                 "type": "native_tool_failure",

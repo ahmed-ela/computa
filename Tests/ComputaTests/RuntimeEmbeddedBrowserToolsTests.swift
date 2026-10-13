@@ -1,3 +1,4 @@
+@testable import AutomationCore
 import Foundation
 import XCTest
 @testable import Computa
@@ -37,7 +38,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
                 ["tool": "computer_v2_open", "arguments": ["bundle_id": "com.google.Chrome", "activation": "none"]],
                 ["tool": "browser_tabs", "arguments": [:]],
             ])
-            try await self.waitFor { harness.rowCount == 5 }
+            try await self.waitFor { harness.rowCount == 5 && harness.audit.status == .completed }
             let offered = try harness.offeredNames()
             XCTAssertTrue(offered.isDisjoint(with: ComputaModelToolCatalog.externalChromeToolNames))
             XCTAssertEqual(offered.intersection(EmbeddedBrowserTools.names), EmbeddedBrowserTools.names)
@@ -52,6 +53,234 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             XCTAssertEqual(counts.activations, 0)
             XCTAssertEqual(counts.mutations, 0)
             XCTAssertTrue(harness.audit.approvals.isEmpty)
+            XCTAssertFalse(harness.audit.entries.contains { $0.title == "Outcome not verified" })
+            XCTAssertTrue(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." },
+                          "Known hidden routes must not suppress a later supported result with fabricated action debt")
+        }
+    }
+
+    func testDeniedChromeOpenDoesNotSuppressSuccessfulBuiltInReadAndFinal() async throws {
+        for call in [
+            ["tool": "computer_v2_open", "arguments": ["bundle_id": "COM.GOOGLE.CHROME.canary", "activation": "none"]],
+            ["tool": "desktop_open_application", "arguments": ["bundle_id": "com.google.Chrome"]],
+            ["tool": "computer", "arguments": ["action": "open", "parameters": ["bundle_id": "com.google.Chrome"]]],
+        ] as [[String: Any]] {
+            try await withHarness(approval: true) { harness in
+                try await harness.submit([
+                    call,
+                    ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                    ["tool": "browser_read", "arguments": ["view": "all"]],
+                    ["tool": "browser_close", "arguments": [:]],
+                ])
+                try await self.waitFor { harness.rowCount == 4 && harness.audit.status == .completed }
+                let rows = try harness.rows()
+                XCTAssertEqual(rows.first?["success"] as? Bool, false)
+                let denial = try XCTUnwrap(rows.first?["text"] as? String)
+                XCTAssertTrue(denial.contains("External Chrome tools are hidden"))
+                XCTAssertFalse(denial.contains("ACTION_EVIDENCE"))
+                XCTAssertFalse(denial.contains("operation="))
+                XCTAssertTrue(rows.dropFirst().allSatisfy { $0["success"] as? Bool == true })
+                XCTAssertTrue((rows[2]["text"] as? String)?.contains("United flight fixture") == true)
+                XCTAssertFalse(harness.audit.entries.contains { $0.title == "Outcome not verified" })
+                XCTAssertTrue(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." })
+                XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_close"])
+                let counts = await harness.backend.counts()
+                XCTAssertEqual(counts.created, 1)
+                XCTAssertEqual(counts.ownedClosed, 1)
+                XCTAssertEqual(counts.activations, 0)
+                XCTAssertEqual(counts.mutations, 0)
+                XCTAssertTrue(counts.humanIntact)
+            }
+        }
+    }
+
+    func testNativeStatusUnboundReadAndTurnGuidanceUseOnlyCurrentRoutes() async throws {
+        try await withHarness { harness in
+            try await harness.submit([
+                ["tool": "computer_v2_status", "arguments": [:]],
+                ["tool": "computer_v2_read_page", "arguments": [:]],
+            ])
+            try await self.waitFor { harness.rowCount == 2 && harness.audit.status == .waiting }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.first?["success"] as? Bool, true)
+            XCTAssertEqual(rows.last?["success"] as? Bool, false)
+            for row in rows {
+                let text = try XCTUnwrap(row["text"] as? String)
+                XCTAssertTrue(text.contains("computer_v2_open"))
+                XCTAssertTrue(text.contains("browser_read"))
+                XCTAssertFalse(text.contains("computer_v2_tabs"))
+                XCTAssertFalse(text.contains("computer_v2_bind_tab"))
+            }
+            let input = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: harness.root.appendingPathComponent("turn-input.json"))) as? [[String: Any]])
+            let policy = try XCTUnwrap(input.compactMap { $0["text"] as? String }.first { $0.hasPrefix("APP_RUNTIME_INTERACTION_POLICY:") })
+            XCTAssertTrue(policy.contains("native background AX"))
+            XCTAssertTrue(policy.contains("built-in browser"))
+            XCTAssertFalse(policy.contains("authorized Chrome"))
+        }
+    }
+
+    func testInvalidBuiltInMutationFailsBeforeApprovalAndPreservesValidTarget() async throws {
+        try await withHarness(approval: true) { harness in
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_click", "arguments": ["snapshot_id": "@snapshot", "element_index": "@heading"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@button", "text": "MUST_NOT_FILL"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "UA 123"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+            ])
+            try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, false, false, true, true])
+            XCTAssertTrue((rows[2]["text"] as? String)?.contains("No input was dispatched") == true)
+            XCTAssertTrue((rows[3]["text"] as? String)?.contains("No input was dispatched") == true)
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_fill"],
+                           "Passive/non-settable targets must fail before any approval request")
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.fills, 1)
+            XCTAssertEqual(counts.presses, 0)
+            XCTAssertEqual(counts.navigations, 0)
+            XCTAssertTrue((rows.last?["text"] as? String)?.contains("UA 123") == true)
+        }
+    }
+
+    func testDeniedChromeRouteAndBuiltInSuccessCannotEraseDispatchedNativeDebt() async throws {
+        try await withHarness(approval: true) { harness in
+            let native = PendingNativeSelectionBackend()
+            let background = NativeBackgroundAccessibility(backend: native, foregroundProcessIdentifier: { 999 })
+            try await harness.submit([
+                ["tool": "computer_v2_snapshot", "arguments": [:]],
+                ["tool": "computer_v2_ax", "arguments": ["snapshot_id": "@snapshot", "element_index": "@nativeRow", "ax_action": "AXPress"]],
+                ["tool": "computer_v2_open", "arguments": ["bundle_id": "com.google.Chrome", "activation": "none"]],
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_close", "arguments": [:]],
+            ], pauseForNativeBinding: true)
+            try await self.waitFor { FileManager.default.fileExists(atPath: harness.root.appendingPathComponent("native-binding-ready").path) }
+            try await harness.runtime.installNativeBackgroundBindingForFixture(taskID: Harness.taskID,
+                application: .init(processIdentifier: 123, bundleIdentifier: "com.example.pending-native-selection", localizedName: "Pending fixture"),
+                background: background)
+            try Data("continue".utf8).write(to: harness.root.appendingPathComponent("native-binding-continue"))
+            try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .waiting }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows[1]["success"] as? Bool, true)
+            XCTAssertTrue((rows[1]["text"] as? String)?.contains("VERIFICATION_PENDING") == true)
+            XCTAssertEqual(native.actions, 1)
+            XCTAssertEqual(native.postInputReads, 3)
+            XCTAssertEqual(rows[2]["success"] as? Bool, false)
+            let denied = try XCTUnwrap(rows[2]["text"] as? String)
+            XCTAssertTrue(denied.contains("External Chrome tools are hidden"))
+            XCTAssertTrue(denied.contains("operation=call-1-1 tool=computer_v2_ax dispatch=dispatched"))
+            XCTAssertFalse(denied.contains("operation=call-1-2"), "The new rejected route is not another admitted action")
+            XCTAssertTrue(rows.suffix(3).allSatisfy { $0["success"] as? Bool == true })
+            XCTAssertEqual(harness.audit.entries.filter { $0.title == "Outcome not verified" }.count, 1)
+            XCTAssertFalse(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." })
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.created, 1)
+            XCTAssertEqual(counts.ownedClosed, 1)
+            XCTAssertEqual(counts.mutations, 0)
+            XCTAssertTrue(counts.humanIntact)
+        }
+    }
+
+    func testLegacyChromePIDRoutesAreDeniedBeforeReadApprovalAndEvidenceAdmission() async throws {
+        let process = LegacyPIDFixture(bundleID: "com.google.Chrome", replacement: nil)
+        try await withHarness(legacyPIDFixture: process) { harness in
+            try await harness.submit([
+                ["tool": "desktop_snapshot_app", "arguments": ["process_id": LegacyPIDFixture.processID]],
+                ["tool": "computer", "arguments": ["action": "snapshot", "parameters": ["process_id": LegacyPIDFixture.processID]]],
+                ["tool": "browser_tabs", "arguments": [:]],
+            ])
+            try await self.waitFor { harness.rowCount == 3 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            for row in rows.prefix(2) {
+                XCTAssertEqual(row["success"] as? Bool, false)
+                let text = try XCTUnwrap(row["text"] as? String)
+                XCTAssertTrue(text.contains("External Chrome tools are hidden"))
+                XCTAssertFalse(text.contains("operation="))
+                XCTAssertFalse(text.contains("ACTION_EVIDENCE"))
+            }
+            XCTAssertEqual(rows.last?["success"] as? Bool, true)
+            let counts = await process.counts()
+            XCTAssertEqual(counts.lookups, 2)
+            XCTAssertEqual(counts.reads, 0)
+            XCTAssertTrue(harness.audit.approvals.isEmpty)
+            XCTAssertFalse(harness.audit.entries.contains { $0.title == "Outcome not verified" })
+            XCTAssertTrue(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." })
+        }
+    }
+
+    func testLegacyPIDReadsPreserveNativeAndEnabledChromeCompatibility() async throws {
+        for (bundleID, enabled) in [("com.example.native-pid-fixture", false), ("com.google.Chrome", true)] {
+            let process = LegacyPIDFixture(bundleID: bundleID, replacement: nil)
+            try await withHarness(externalChromeTools: enabled, legacyPIDFixture: process) { harness in
+                try await harness.submit([
+                    ["tool": "desktop_snapshot_app", "arguments": ["pid": LegacyPIDFixture.processID]],
+                    ["tool": "computer", "arguments": ["action": "snapshot", "parameters": ["process_id": LegacyPIDFixture.processID]]],
+                ])
+                try await self.waitFor { harness.rowCount == 2 && harness.audit.status == .completed }
+                let rows = try harness.rows()
+                XCTAssertTrue(rows.allSatisfy { $0["success"] as? Bool == true })
+                XCTAssertTrue(rows.allSatisfy { ($0["text"] as? String)?.contains("OWNED_NATIVE_PID_OBSERVATION") == true })
+                let counts = await process.counts()
+                XCTAssertEqual(counts.reads, 2)
+                XCTAssertGreaterThanOrEqual(counts.lookups, 8, "Each read must revalidate its exact process generation before and after observation")
+                XCTAssertTrue(harness.audit.approvals.isEmpty)
+                XCTAssertFalse(harness.audit.entries.contains { $0.title == "Outcome not verified" })
+            }
+        }
+    }
+
+    func testLegacyPIDReuseAndNewLaunchAreRejectedBeforeNativeRead() async throws {
+        for replacement in [LegacyPIDFixture.Replacement.chrome, .sameBundleNewLaunch, .unavailable] {
+            for call in [
+                ["tool": "desktop_snapshot_app", "arguments": ["process_id": LegacyPIDFixture.processID]],
+                ["tool": "computer", "arguments": ["action": "snapshot", "parameters": ["process_id": LegacyPIDFixture.processID]]],
+            ] as [[String: Any]] {
+                let process = LegacyPIDFixture(bundleID: "com.example.native-pid-fixture", replacement: replacement)
+                try await withHarness(legacyPIDFixture: process) { harness in
+                    try await harness.submit([call])
+                    try await self.waitFor { harness.rowCount == 1 && harness.audit.status == .waiting }
+                    let row = try XCTUnwrap(harness.rows().first)
+                    XCTAssertEqual(row["success"] as? Bool, false)
+                    let text = try XCTUnwrap(row["text"] as? String)
+                    XCTAssertTrue(text.contains(replacement == .unavailable ? "could not be verified" : "identity changed"))
+                    XCTAssertFalse(text.contains("OWNED_NATIVE_PID_OBSERVATION"))
+                    let counts = await process.counts()
+                    XCTAssertEqual(counts.lookups, 2)
+                    XCTAssertEqual(counts.reads, 0)
+                    XCTAssertTrue(harness.audit.approvals.isEmpty)
+                    XCTAssertFalse(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." })
+                }
+            }
+        }
+    }
+
+    func testLegacyIdentityLossAfterReadDiscardsObservationWithoutClaimingNoRead() async throws {
+        for replacement in [LegacyPIDFixture.Replacement.sameBundleNewLaunch, .unavailable] {
+            for call in [
+                ["tool": "desktop_snapshot_app", "arguments": ["process_id": LegacyPIDFixture.processID]],
+                ["tool": "computer", "arguments": ["action": "snapshot", "parameters": ["process_id": LegacyPIDFixture.processID]]],
+            ] as [[String: Any]] {
+                let process = LegacyPIDFixture(bundleID: "com.example.native-pid-fixture",
+                    replacement: replacement, replaceAfterRead: true)
+                try await withHarness(legacyPIDFixture: process) { harness in
+                    try await harness.submit([call])
+                    try await self.waitFor { harness.rowCount == 1 && harness.audit.status == .waiting }
+                    let row = try XCTUnwrap(harness.rows().first)
+                    XCTAssertEqual(row["success"] as? Bool, false)
+                    let text = try XCTUnwrap(row["text"] as? String)
+                    XCTAssertTrue(text.contains("after the read"))
+                    XCTAssertTrue(text.contains("observation was discarded and not published"))
+                    XCTAssertTrue(text.contains(replacement == .unavailable ? "could not be verified" : "identity changed"))
+                    XCTAssertFalse(text.contains("No native read"))
+                    XCTAssertFalse(text.contains("OWNED_NATIVE_PID_OBSERVATION"))
+                    let counts = await process.counts()
+                    XCTAssertEqual(counts.reads, 1, "The actual owned fixture read occurred; only its publication was denied")
+                    XCTAssertTrue(harness.audit.approvals.isEmpty)
+                    XCTAssertFalse(harness.audit.entries.contains { $0.kind == .assistant && $0.body == "Fixture workflow finished." })
+                }
+            }
         }
     }
 
@@ -262,6 +491,86 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    /// One admitted native press whose observed selection deliberately never
+    /// changes. It exercises real dispatch/verification accounting, without AX
+    /// access to a system app or a fabricated ledger insertion.
+    private final class PendingNativeSelectionBackend: NativeBackgroundAccessibilityBackend {
+        private let windowIdentity = UUID(), rowIdentity = UUID()
+        private var capabilityValid = false
+        private(set) var actions = 0, postInputReads = 0
+
+        func isStillSelected() throws -> Bool { true }
+        func snapshot(limits: AccessibilityTreeLimits) throws -> AccessibilityTreeSnapshot {
+            if actions > 0 { postInputReads += 1 }
+            capabilityValid = true
+            let window = AccessibilityTreeElement(index: 0, parentIndex: nil, childIndices: [1], depth: 0,
+                role: "AXWindow", subrole: nil, title: "Pending fixture", elementDescription: nil, help: nil,
+                identifier: nil, domIdentifier: nil, value: nil, frame: nil, isEnabled: true, isFocused: false,
+                supportedActions: [], isValueSettable: false, evidenceIdentity: windowIdentity)
+            let row = AccessibilityTreeElement(index: 1, parentIndex: 0, childIndices: [], depth: 1,
+                role: "AXRow", subrole: nil, title: "Pending native selection", elementDescription: nil, help: nil,
+                identifier: nil, domIdentifier: nil, value: nil, frame: nil, isEnabled: true, isFocused: false,
+                supportedActions: ["AXPress"], isValueSettable: false, isSelected: false, evidenceIdentity: rowIdentity)
+            return AccessibilityTreeSnapshot(id: UUID(), application: .init(processIdentifier: 123,
+                bundleIdentifier: "com.example.pending-native-selection", applicationName: "Pending fixture"),
+                limits: limits, rootIndex: 0, elements: [window, row], wasTruncated: false)
+        }
+        func semanticRead(_ request: SemanticReadRequest, outputCharacterLimit: Int) throws -> AccessibilitySemanticReadResult {
+            let captured = try snapshot(limits: .agentDefault)
+            let observation = AccessibilitySnapshotTextFormatter(outputCharacterLimit: outputCharacterLimit,
+                usesCompactElementLines: true, allowsRaise: false).formatObservation(captured)
+            return AccessibilitySemanticReadResult(snapshot: captured, observation: observation)
+        }
+        func invalidateObservation() { capabilityValid = false }
+        func perform(action: SemanticAXAction, index: Int, snapshot: AccessibilityTreeSnapshot,
+                     beforeDispatch: () throws -> Void) throws {
+            guard capabilityValid, action == .press, snapshot.element(at: index)?.evidenceIdentity == rowIdentity else {
+                throw NativeBackgroundAccessibility.Failure.staleObservation
+            }
+            try beforeDispatch()
+            actions += 1
+        }
+        func setValue(text: String, index: Int, snapshot: AccessibilityTreeSnapshot,
+                      beforeDispatch: () throws -> Void) throws {
+            throw NativeBackgroundAccessibility.Failure.staleObservation
+        }
+    }
+
+    private actor LegacyPIDFixture {
+        static let processID: Int32 = 42_424
+        enum Replacement: Equatable, Sendable { case chrome, sameBundleNewLaunch, unavailable }
+        struct Counts: Sendable { let lookups: Int; let reads: Int }
+        private let identity: NativeToolProcessIdentity
+        private let replacement: Replacement?
+        private let replaceAfterRead: Bool
+        private var lookups = 0, reads = 0
+
+        init(bundleID: String, replacement: Replacement?, replaceAfterRead: Bool = false) {
+            identity = NativeToolProcessIdentity(processIdentifier: Self.processID, bundleIdentifier: bundleID,
+                launchDate: Date(timeIntervalSince1970: 1_700_000_000))
+            self.replacement = replacement
+            self.replaceAfterRead = replaceAfterRead
+        }
+        func resolve(_ processID: Int32) -> NativeToolProcessIdentity? {
+            lookups += 1
+            guard processID == Self.processID else { return nil }
+            guard let replacement, (replaceAfterRead ? reads > 0 : lookups > 1) else { return identity }
+            switch replacement {
+            case .unavailable: return nil
+            case .chrome, .sameBundleNewLaunch:
+                return NativeToolProcessIdentity(processIdentifier: processID,
+                    bundleIdentifier: replacement == .chrome ? "com.google.Chrome" : identity.bundleIdentifier,
+                    launchDate: identity.launchDate.addingTimeInterval(1))
+            }
+        }
+        func read(_ admitted: NativeToolProcessIdentity) throws -> String {
+            guard admitted == identity else { throw NativeBackgroundAccessibility.Failure.targetChanged }
+            reads += 1
+            return "OWNED_NATIVE_PID_OBSERVATION"
+        }
+        func counts() -> Counts { Counts(lookups: lookups, reads: reads) }
+    }
+
     @MainActor
     private final class Audit {
         var status: TaskStatus?
@@ -279,7 +588,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         let audit = Audit()
         var events: Task<Void, Never>?
 
-        init(configured: Bool, approval: Bool?) async throws {
+        init(configured: Bool, approval: Bool?, externalChromeTools: Bool, legacyPIDFixture: LegacyPIDFixture?) async throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaBrowserRuntime-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let fixture = root.appendingPathComponent("fixture.ts")
@@ -291,6 +600,11 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             configuration.workspacePath = root.path
             configuration.model = Self.modelID
             configuration.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
+            configuration.externalChromeToolsEnabled = externalChromeTools
+            if let legacyPIDFixture {
+                configuration.fixtureNativeProcessIdentity = { await legacyPIDFixture.resolve($0) }
+                configuration.fixtureLegacyNativeSnapshot = { try await legacyPIDFixture.read($0) }
+            }
             runtime = CodexAppServerRuntime(configuration: configuration)
             if configured { await runtime.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: backend)) }
             events = Task { @MainActor [runtime, audit] in
@@ -308,8 +622,10 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             _ = try await runtime.loadTasks()
         }
 
-        func submit(_ calls: [[String: Any]], hold: Bool = false, interruptProbe: Bool = false) async throws {
-            let data = try JSONSerialization.data(withJSONObject: ["calls": calls, "hold": hold, "interruptProbe": interruptProbe], options: [.sortedKeys])
+        func submit(_ calls: [[String: Any]], hold: Bool = false, interruptProbe: Bool = false,
+                    pauseForNativeBinding: Bool = false) async throws {
+            let data = try JSONSerialization.data(withJSONObject: ["calls": calls, "hold": hold,
+                "interruptProbe": interruptProbe, "pauseForNativeBinding": pauseForNativeBinding], options: [.sortedKeys])
             try await runtime.submit(prompt: String(decoding: data, as: UTF8.self), toTaskID: Self.taskID, modelID: Self.modelID)
         }
         func rows() throws -> [[String: Any]] {
@@ -328,8 +644,11 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
-    private func withHarness(configured: Bool = true, approval: Bool? = nil, _ body: @MainActor (Harness) async throws -> Void) async throws {
-        let harness = try await Harness(configured: configured, approval: approval)
+    private func withHarness(configured: Bool = true, approval: Bool? = nil,
+                             externalChromeTools: Bool = false, legacyPIDFixture: LegacyPIDFixture? = nil,
+                             _ body: @MainActor (Harness) async throws -> Void) async throws {
+        let harness = try await Harness(configured: configured, approval: approval,
+            externalChromeTools: externalChromeTools, legacyPIDFixture: legacyPIDFixture)
         defer { try? FileManager.default.removeItem(at: harness.root) }
         do {
             try await body(harness)
@@ -357,7 +676,7 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
 
     nonisolated private static let fixture = #"""
     #!/usr/bin/env bun
-    import { writeFileSync } from 'node:fs';
+    import { existsSync, writeFileSync } from 'node:fs';
     import { join } from 'node:path';
     import { createInterface } from 'node:readline';
     const root = process.env.CODEX_HOME;
@@ -432,8 +751,12 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
           if (plan.calls[step].saveSnapshot) refs[plan.calls[step].saveSnapshot] = snapshot[1];
           const field = text.split('\n').find(line => line.startsWith('#') && line.includes('label="Search flights"'));
           const button = text.split('\n').find(line => line.startsWith('#') && line.includes('label="Find flight"'));
+          const heading = text.split('\n').find(line => line.startsWith('#') && line.includes('label="United flight fixture"'));
+          const nativeRow = text.split('\n').find(line => line.startsWith('#') && line.includes('label="Pending native selection"'));
           if (field) refs.field = Number(field.match(/^#(\d+)/)[1]);
           if (button) refs.button = Number(button.match(/^#(\d+)/)[1]);
+          if (heading) refs.heading = Number(heading.match(/^#(\d+)/)[1]);
+          if (nativeRow) refs.nativeRow = Number(nativeRow.match(/^#(\d+)/)[1]);
         }
       }
       step++; setTimeout(next, 0);
@@ -457,8 +780,16 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         case 'turn/start':
           turnCount++; turnId = `embedded-turn-${turnCount}`; step = 0; finished = false;
           plan = JSON.parse(message.params.input[0].text);
+          save('turn-input.json', message.params.input);
           result(message.id, {turn:{id:turnId, status:'inProgress', items:[]}});
-          notify('turn/started', {turn:{id:turnId, status:'inProgress', items:[]}}); setTimeout(next, 10); break;
+          notify('turn/started', {turn:{id:turnId, status:'inProgress', items:[]}});
+          if (plan.pauseForNativeBinding) {
+            save('native-binding-ready', true);
+            const admission = setInterval(() => {
+              if (existsSync(join(root, 'native-binding-continue'))) { clearInterval(admission); next(); }
+            }, 10);
+          } else setTimeout(next, 10);
+          break;
         case 'turn/interrupt':
           if (plan.interruptProbe) {
             interruptRequest = message.id;

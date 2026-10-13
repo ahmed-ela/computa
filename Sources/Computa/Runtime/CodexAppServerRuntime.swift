@@ -5,6 +5,23 @@ import CryptoKit
 @preconcurrency import Foundation
 import OSLog
 
+/// A read-only process-generation pin for legacy PID-addressed native tools.
+/// The PID alone is insufficient: it may have been reused since admission.
+struct NativeToolProcessIdentity: Equatable, Sendable {
+    let processIdentifier: Int32
+    let bundleIdentifier: String
+    let launchDate: Date
+
+    @MainActor
+    static func current(processIdentifier: Int32) -> Self? {
+        guard let app = NSRunningApplication(processIdentifier: processIdentifier), !app.isTerminated,
+              app.processIdentifier == processIdentifier,
+              let bundle = app.bundleIdentifier, !bundle.isEmpty,
+              let launchDate = app.launchDate, launchDate.timeIntervalSince1970.isFinite else { return nil }
+        return Self(processIdentifier: processIdentifier, bundleIdentifier: bundle, launchDate: launchDate)
+    }
+}
+
 /// Native snapshots retain more AX handles than fit in the model observation. A retained
 /// handle is not permission to guess its index: only fully emitted element lines are targets.
 struct NativeAccessibilityActionScope: Equatable, Sendable {
@@ -805,6 +822,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         var fixtureActivationFailurePID: Int32? = nil
         var fixtureChromeNavigationRecoveryFailure = false
         var fixtureBeforeNativeVerificationRead: (@Sendable () async throws -> Void)? = nil
+        /// Metadata/read substitutes only for owned JSON-RPC fixtures. Neither
+        /// is consulted by a bundled production runtime.
+        var fixtureNativeProcessIdentity: (@Sendable (Int32) async throws -> NativeToolProcessIdentity?)? = nil
+        var fixtureLegacyNativeSnapshot: (@Sendable (NativeToolProcessIdentity) async throws -> String)? = nil
         #endif
 
         static var localQwen: Configuration {
@@ -2442,9 +2463,12 @@ private extension CodexAppServerRuntime {
         private func computerTurnInput(prompt: String, threadID: String, taskID: AgentTask.ID) throws -> [[String: String]] {
             var input = [["type": "text", "text": prompt]]
             if configuration.computerInteractionPolicy == .backgroundOnly {
-                input.append(["type": "text", "text": "APP_RUNTIME_INTERACTION_POLICY: background_only. No activation or global input, including recovery. Use only offered background AX, authorized Chrome, or built-in browser UI operations. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."])
+                let surfaces = configuration.externalChromeToolsEnabled
+                    ? "offered background AX, authorized Chrome, or built-in browser UI operations"
+                    : "offered native background AX or built-in browser UI operations"
+                input.append(["type": "text", "text": "APP_RUNTIME_INTERACTION_POLICY: background_only. No activation or global input, including recovery. Use only \(surfaces). Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."])
             }
-            if browserContinuationTargets[taskID] != nil {
+            if configuration.externalChromeToolsEnabled, browserContinuationTargets[taskID] != nil {
                 input.append(["type": "text", "text": "APP_RUNTIME_CONTINUATION: Previous turn's element references and cursors have expired. If continuing with the same browser tab, first call \(usesReferenceGuidance(taskID: taskID) ? "computer_v2_read_page(view=overview)" : "computer_v2_snapshot(view=overview)") without old IDs. The runtime can reacquire that exact tab through the existing authorized connection and return fresh elements; it never replays an action or substitutes another tab. For a different target, inventory and bind explicitly."])
             }
             guard let failures = try? nativeFailureStore().load(threadID: threadID) else {
@@ -4439,10 +4463,25 @@ private extension CodexAppServerRuntime {
             let generation = serverGeneration
             var tool = params["tool"] as? String ?? "unknown"
             var arguments = params["arguments"] as? [String: Any] ?? [:]
+            // Capability admission precedes reference/target resolution and the
+            // action ledger. A host-denied route never acquired action authority
+            // and must not become an invented uncertain outcome obligation.
+            var policyAdmissionError: Error? = externalChromeAdmissionError(tool: tool, arguments: arguments, taskID: taskID)
+            var legacyProcessIdentity: NativeToolProcessIdentity?
+            if policyAdmissionError == nil, let processID = legacyNativeProcessID(tool: tool, arguments: arguments) {
+                do {
+                    legacyProcessIdentity = try await nativeToolProcessIdentity(processID: processID)
+                    if !configuration.externalChromeToolsEnabled,
+                       ComputaModelToolCatalog.isExternalChromeTarget(bundleID: legacyProcessIdentity?.bundleIdentifier) {
+                        policyAdmissionError = RuntimeError.serverError(ComputaModelToolCatalog.externalChromeUnavailableMessage)
+                    }
+                } catch { policyAdmissionError = error }
+            }
+            guard generation == serverGeneration, !Task.isCancelled, !isShuttingDown else { return }
             let requestedAlias = ComputerV2ToolContract.Alias(rawValue: tool)
             var referenceRoutingError: Error?
             var referenceFailureScope: String?
-            if let alias = requestedAlias, let taskID {
+            if policyAdmissionError == nil, let alias = requestedAlias, let taskID {
                 referenceInterfaceTasks.insert(taskID)
                 do {
                     _ = try ComputerV2ToolContract.validateAlias(tool: tool, arguments: arguments)
@@ -4474,7 +4513,7 @@ private extension CodexAppServerRuntime {
                 }
             }
             var continuationError: Error?
-            if tool == "computer_v2_continue", let taskID {
+            if policyAdmissionError == nil, tool == "computer_v2_continue", let taskID {
                 do {
                     _ = try ComputerV2ToolContract.validate(tool: tool, arguments: arguments)
                     guard let cursor = (arguments["cursor"] as? String).flatMap(UUID.init(uuidString:)),
@@ -4493,31 +4532,32 @@ private extension CodexAppServerRuntime {
                     // never an uncertain click or a reason to reconnect.
                     continuationError = ComputerPreflightFailure(
                         kind: inventory ? .freshInventoryRequired : .freshObservationRequired,
-                        message: error.localizedDescription)
+                        message: (error as? ComputerReadContinuation.Failure)?.message(externalChromeTools: configuration.externalChromeToolsEnabled)
+                            ?? error.localizedDescription)
                 }
             }
             let callID = params["callId"] as? String ?? UUID().uuidString
             let isComputer = tool.hasPrefix("computer_v2_") || tool == "computer" || tool.hasPrefix("desktop_")
             // Routing rejection occurs before a backend read is admitted.
             // Keep the tool error/retry budget, not a fictitious action debt.
-            let tracked = isComputer && tool != ComputerOutcomeToolContract.name && continuationError == nil
-            let bindIdentity = (tool == "computer_v2_bind_tab" || tool == "computer_v2_create_workspace")
+            let tracked = isComputer && tool != ComputerOutcomeToolContract.name && continuationError == nil && policyAdmissionError == nil
+            let bindIdentity = policyAdmissionError == nil && (tool == "computer_v2_bind_tab" || tool == "computer_v2_create_workspace")
                 ? await observedBrowserBindIdentity(taskID: taskID, arguments: arguments) : nil
             guard generation == serverGeneration, !Task.isCancelled, !isShuttingDown else { return }
             var identityArguments = arguments
             if let bindIdentity { identityArguments["observed_target_identity"] = bindIdentity }
-            let observedElement = ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool)
+            let observedElement = policyAdmissionError == nil && ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool)
                 ? observedBrowserActionElement(taskID: taskID, arguments: arguments) : nil
-            let nativeActionIdentity = ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool)
+            let nativeActionIdentity = policyAdmissionError == nil && ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool)
                 ? await observedNativeActionIdentity(taskID: taskID, arguments: arguments) : nil
             guard generation == serverGeneration, !Task.isCancelled, !isShuttingDown else { return }
             let stableActionIdentity = observedElement.map { "node:\($0.backendNodeID)" }
-                ?? (["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool)
+                ?? (policyAdmissionError == nil && ["computer_v2_ax", "computer_v2_follow_link", "computer_v2_set_text"].contains(tool)
                     ? retainedBrowserActionIdentity(taskID: taskID, arguments: arguments) : nil)
                 ?? nativeActionIdentity
             let needsProof = ["computer_v2_follow_link", "computer_v2_ax", "computer_v2_set_text", "computer_v2_click", "computer_v2_pointer", "computer_v2_ground_click", "computer_v2_keypress", "computer_v2_type", "desktop_input", "desktop_perform_action", "desktop_set_text"].contains(tool)
                 || requestedAlias == .press || requestedAlias == .follow || requestedAlias == .fill
-            let browserMutation = needsProof && taskID.flatMap { computerV2Sessions[$0]?.browserTab } != nil
+            let browserMutation = policyAdmissionError == nil && needsProof && taskID.flatMap { computerV2Sessions[$0]?.browserTab } != nil
             let recoveryScope: String? = taskID.flatMap { id in
                 guard browserMutation, let session = computerV2Sessions[id],
                       let binding = session.browserTab, let snapshot = session.browserSnapshot else { return nil }
@@ -4543,6 +4583,7 @@ private extension CodexAppServerRuntime {
             }
 
             do {
+                if let policyAdmissionError { throw policyAdmissionError }
                 if tracked, let taskID {
                     guard computerEvidence[taskID] != nil else { throw ComputerExecutionFailure(message: "No active computer-use evidence context exists.", stop: true) }
                     try computerEvidence[taskID]?.begin(operationID: callID, tool: tool,
@@ -4571,7 +4612,8 @@ private extension CodexAppServerRuntime {
                 var contentItems = try await executeDynamicTool(
                     tool,
                     arguments: arguments,
-                    taskID: taskID
+                    taskID: taskID,
+                    legacyProcessIdentity: legacyProcessIdentity
                 )
                 guard !Task.isCancelled,
                       !isShuttingDown,
@@ -4653,7 +4695,8 @@ private extension CodexAppServerRuntime {
                 guard !Task.isCancelled,
                       !isShuttingDown,
                       generation == serverGeneration else { return }
-                var message = ComputerToolFailureEvidence.text(for: error, tool: tool)
+                var message = ComputerToolFailureEvidence.text(for: error, tool: tool,
+                    externalChromeTools: configuration.externalChromeToolsEnabled)
                 let failureDescription = message
                 var exhausted = false
                 if isComputer, let taskID {
@@ -4938,6 +4981,17 @@ private extension CodexAppServerRuntime {
             let generation = serverGeneration
             let key = embeddedBrowserTurnKeys[taskID] ?? "\(generation):\(taskID):\(turnID)"
             embeddedBrowserTurnKeys[taskID] = key
+            let input = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
+            if ["browser_click", "browser_fill"].contains(tool) {
+                // Validate the currently published target's eligibility before
+                // asking the user. This read-only check does not consume it;
+                // execute and the backend revalidate after approval as well.
+                try await controller.preflightMutation(taskKey: key, tool: tool, arguments: input, scope: scope)
+            }
+            guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
+                  generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
+                  computerV2Sessions[taskID]?.epoch == epoch,
+                  embeddedBrowserTurnKeys[taskID] == key else { throw CancellationError() }
             if EmbeddedBrowserTools.requiresApproval(tool: tool) {
                 guard await requestComputerUseApproval(taskID: taskID,
                     title: "Allow built-in browser action?", summary: tool,
@@ -4949,7 +5003,6 @@ private extension CodexAppServerRuntime {
                   generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
                   computerV2Sessions[taskID]?.epoch == epoch,
                   embeddedBrowserTurnKeys[taskID] == key else { throw CancellationError() }
-            let input = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
             let result = try await controller.execute(taskKey: key, tool: tool, arguments: input, scope: scope)
             guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
                   generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
@@ -4961,8 +5014,13 @@ private extension CodexAppServerRuntime {
         private func executeDynamicTool(
             _ tool: String,
             arguments: [String: Any],
-            taskID: AgentTask.ID?
+            taskID: AgentTask.ID?,
+            legacyProcessIdentity: NativeToolProcessIdentity? = nil
         ) async throws -> [[String: Any]] {
+            if let error = externalChromeAdmissionError(tool: tool, arguments: arguments, taskID: taskID) {
+                throw error
+            }
+            if let legacyProcessIdentity { try await requireNativeToolProcessIdentity(legacyProcessIdentity) }
             if tool.hasPrefix("browser_") {
                 return try await executeEmbeddedBrowserTool(tool, arguments: arguments, taskID: taskID)
             }
@@ -5022,7 +5080,8 @@ private extension CodexAppServerRuntime {
                 return try await executeDynamicTool(
                     mappedTool,
                     arguments: parameters,
-                    taskID: taskID
+                    taskID: taskID,
+                    legacyProcessIdentity: legacyProcessIdentity
                 )
 
             case "desktop_permission_status":
@@ -5072,7 +5131,9 @@ private extension CodexAppServerRuntime {
                 let applications = await MainActor.run {
                     RunningApplicationCatalog().applications()
                 }
-                return [textContent(try encodeJSON(applications))]
+                let visibleApplications = configuration.externalChromeToolsEnabled ? applications
+                    : applications.filter { !ComputaModelToolCatalog.isExternalChromeTarget(bundleID: $0.bundleIdentifier) }
+                return [textContent(try encodeJSON(visibleApplications))]
 
             case "desktop_focused_window":
                 let window = try await MainActor.run {
@@ -5082,9 +5143,21 @@ private extension CodexAppServerRuntime {
 
             case "desktop_snapshot_app":
                 let processID = try requiredProcessID(arguments)
+                let identity: NativeToolProcessIdentity
+                if let legacyProcessIdentity { identity = legacyProcessIdentity }
+                else { identity = try await nativeToolProcessIdentity(processID: processID) }
+                try await requireNativeToolProcessIdentity(identity)
+                #if DEBUG
+                if case .fixture = configuration.executable, let read = configuration.fixtureLegacyNativeSnapshot {
+                    let text = try await read(identity)
+                    try await requireNativeToolProcessIdentity(identity, readCompleted: true)
+                    return [textContent(text)]
+                }
+                #endif
                 let result = try await makeAccessibilitySnapshot(
                     processID: processID,
-                    arguments: arguments
+                    arguments: arguments,
+                    expectedProcessIdentity: identity
                 )
                 accessibilitySessions[processID] = result.active
                 return [textContent(result.text)]
@@ -5118,8 +5191,12 @@ private extension CodexAppServerRuntime {
                 defer { accessibilitySessions.removeValue(forKey: processID) }
                 try await prepareAccessibilityMutation(
                     active,
-                    processIdentifier: processID, taskID: taskID
+                    processIdentifier: processID, taskID: taskID,
+                    beforeMutation: { [self, legacyProcessIdentity] in
+                        if let legacyProcessIdentity { try await self.requireNativeToolProcessIdentity(legacyProcessIdentity) }
+                    }
                 )
+                if let legacyProcessIdentity { try await requireNativeToolProcessIdentity(legacyProcessIdentity) }
                 try active.session.refreshAndPerform(
                     action,
                     at: index,
@@ -5158,8 +5235,12 @@ private extension CodexAppServerRuntime {
                 defer { accessibilitySessions.removeValue(forKey: processID) }
                 try await prepareAccessibilityMutation(
                     active,
-                    processIdentifier: processID, taskID: taskID
+                    processIdentifier: processID, taskID: taskID,
+                    beforeMutation: { [self, legacyProcessIdentity] in
+                        if let legacyProcessIdentity { try await self.requireNativeToolProcessIdentity(legacyProcessIdentity) }
+                    }
                 )
+                if let legacyProcessIdentity { try await requireNativeToolProcessIdentity(legacyProcessIdentity) }
                 try active.session.refreshAndSetValue(
                     .text(value),
                     at: index,
@@ -5277,6 +5358,7 @@ private extension CodexAppServerRuntime {
         private func makeAccessibilitySnapshot(
             processID: Int32,
             arguments: [String: Any],
+            expectedProcessIdentity: NativeToolProcessIdentity? = nil,
             outputCharacterLimit: Int? = nil,
             prioritizesFocusedDocument: Bool = false,
             progressive: Bool = false,
@@ -5320,16 +5402,25 @@ private extension CodexAppServerRuntime {
                     "The selected application process is no longer available. Call desktop_list_apps again."
                 )
             }
+            if let expectedProcessIdentity {
+                guard target.processIdentifier == expectedProcessIdentity.processIdentifier,
+                      target.bundleIdentifier == expectedProcessIdentity.bundleIdentifier else {
+                    throw RuntimeError.serverError("The admitted native application changed. No native read or input was dispatched.")
+                }
+                try await requireNativeToolProcessIdentity(expectedProcessIdentity)
+            }
             let session = AccessibilitySession(target: target)
             if progressive {
                 let result = try session.read(read: SemanticReadRequest(query: preferredText, view: .content),
                                               outputCharacterLimit: outputCharacterLimit ?? 6_000,
                                               presentationRowByteReserve: presentationRowByteReserve)
+                if let expectedProcessIdentity { try await requireNativeToolProcessIdentity(expectedProcessIdentity, readCompleted: true) }
                 return (ActiveAccessibilitySession(session: session, snapshot: result.snapshot,
                     actionScope: NativeAccessibilityActionScope(observation: result.observation)), result.observation.text,
                     result.observation.readReceipt, result.observation.presentation)
             }
             let snapshot = try session.snapshot(limits: limits)
+            if let expectedProcessIdentity { try await requireNativeToolProcessIdentity(expectedProcessIdentity, readCompleted: true) }
             let formatter = AccessibilitySnapshotTextFormatter(
                 elementLimit: limits.maxElements,
                 fieldCharacterLimit: 72,
@@ -5378,7 +5469,7 @@ private extension CodexAppServerRuntime {
                 epoch: epoch
             ).application else {
                 throw ComputerPreflightFailure(kind: .bindingRequired,
-                    message: ComputerV2ToolContract.unboundApplicationMessage)
+                    message: ComputerV2ToolContract.unboundApplicationMessage(externalChromeTools: configuration.externalChromeToolsEnabled))
             }
             let boundSession = try computerV2Session(taskID: taskID, epoch: epoch)
             #if DEBUG
@@ -5502,6 +5593,92 @@ private extension CodexAppServerRuntime {
             return nil
         }
 
+        /// Resolve only the explicit PID-addressed legacy routes, never a
+        /// guessed process or a PID smuggled into an unrelated tool shape.
+        private func legacyNativeProcessID(tool: String, arguments: [String: Any]) -> Int32? {
+            // A foreground-only legacy route has no PID-read authority under
+            // the background ceiling. Preserve that policy's existing refusal
+            // and retry accounting before considering its proposed process.
+            do { try configuration.computerInteractionPolicy.requireLegacy(tool: tool, arguments: arguments) }
+            catch { return nil }
+            let parameters: [String: Any]
+            if tool == "computer" {
+                guard ["snapshot", "ax", "set_text"].contains(arguments["action"] as? String ?? ""),
+                      let parsed = try? ComputerToolArgumentContract.parameters(in: arguments) else { return nil }
+                parameters = parsed
+            } else {
+                guard ["desktop_snapshot_app", "desktop_perform_action", "desktop_set_text"].contains(tool) else { return nil }
+                parameters = arguments
+            }
+            // Preserve the existing schema/argument rejection path for an
+            // invalid or missing PID; no process is guessed from malformed IDs.
+            return try? ComputerToolArgumentContract.requiredProcessID(parameters)
+        }
+
+        private func nativeToolProcessIdentity(processID: Int32) async throws -> NativeToolProcessIdentity {
+            try Task.checkCancellation()
+            let identity: NativeToolProcessIdentity?
+            #if DEBUG
+            if case .fixture = configuration.executable, let resolver = configuration.fixtureNativeProcessIdentity {
+                identity = try await resolver(processID)
+            } else {
+                identity = await NativeToolProcessIdentity.current(processIdentifier: processID)
+            }
+            #else
+            identity = await NativeToolProcessIdentity.current(processIdentifier: processID)
+            #endif
+            try Task.checkCancellation()
+            guard let identity, identity.processIdentifier == processID, processID > 0,
+                  !identity.bundleIdentifier.isEmpty, identity.bundleIdentifier.utf8.count <= 255,
+                  identity.launchDate.timeIntervalSince1970.isFinite else {
+                throw RuntimeError.serverError("The native application's exact process and launch identity could not be verified. No native read or input was dispatched.")
+            }
+            return identity
+        }
+
+        private func requireNativeToolProcessIdentity(_ expected: NativeToolProcessIdentity,
+                                                     readCompleted: Bool = false) async throws {
+            let current: NativeToolProcessIdentity
+            do { current = try await nativeToolProcessIdentity(processID: expected.processIdentifier) }
+            catch is CancellationError { throw CancellationError() }
+            catch {
+                throw RuntimeError.serverError(readCompleted
+                    ? "The native application's process identity could not be verified after the read. The observation was discarded and not published."
+                    : "The admitted native application's process identity could not be verified. No new native observation was published.")
+            }
+            guard current == expected else {
+                throw RuntimeError.serverError(readCompleted
+                    ? "The native application's process or launch identity changed after the read. The observation was discarded and not published."
+                    : "The admitted native application's process or launch identity changed. No new native observation was published.")
+            }
+            if !configuration.externalChromeToolsEnabled,
+               ComputaModelToolCatalog.isExternalChromeTarget(bundleID: current.bundleIdentifier) {
+                throw RuntimeError.serverError(readCompleted
+                    ? "The native observation is unavailable under the current browser policy after the read. The observation was discarded and not published."
+                    : ComputaModelToolCatalog.externalChromeUnavailableMessage)
+            }
+        }
+
+        /// The same native-only ceiling applies to retained tool schemas and
+        /// legacy native calls. It never clears admitted action evidence.
+        private func externalChromeAdmissionError(tool: String, arguments: [String: Any],
+                                                   taskID: AgentTask.ID?) -> RuntimeError? {
+            guard !configuration.externalChromeToolsEnabled,
+                  tool.hasPrefix("computer_v2_") || tool == "computer" || tool.hasPrefix("desktop_") else { return nil }
+            let parameters = tool == "computer"
+                ? (try? ComputerToolArgumentContract.parameters(in: arguments)) ?? arguments : arguments
+            let nativeChromeTarget = ComputaModelToolCatalog.isExternalChromeTarget(bundleID: parameters["bundle_id"] as? String)
+            let retainedChromeBinding = tool.hasPrefix("computer_v2_")
+                && taskID.flatMap { computerV2Sessions[$0]?.browserTab } != nil
+                && !["computer_v2_open", "computer_v2_status", "computer_v2_apps"].contains(tool)
+            guard ComputaModelToolCatalog.externalChromeToolNames.contains(tool)
+                    || parameters["browser_mode"] != nil
+                    || nativeChromeTarget
+                    || tool == "computer_v2_open" && parameters["url"] != nil
+                    || retainedChromeBinding else { return nil }
+            return .serverError(ComputaModelToolCatalog.externalChromeUnavailableMessage)
+        }
+
         private func executeComputerV2(
             _ tool: String,
             arguments: [String: Any],
@@ -5513,15 +5690,10 @@ private extension CodexAppServerRuntime {
             // LM Studio currently accepts strict JSON schemas but can still
             // emit missing fields. Validation here, before approval, is the
             // actual enforcement boundary.
-            if !configuration.externalChromeToolsEnabled,
-               ComputaModelToolCatalog.externalChromeToolNames.contains(tool)
-                || arguments["browser_mode"] != nil
-                || tool == "computer_v2_open" && (arguments["url"] != nil
-                    || (arguments["bundle_id"] as? String)?.hasPrefix("com.google.Chrome") == true)
-                || computerV2Sessions[taskID]?.browserTab != nil && !["computer_v2_open", "computer_v2_status", "computer_v2_apps"].contains(tool) {
+            if let error = externalChromeAdmissionError(tool: tool, arguments: arguments, taskID: taskID) {
                 // Old native threads retain schemas. Reject before permissions,
                 // connection restoration, approvals, or any Chrome operation.
-                throw RuntimeError.serverError(ComputaModelToolCatalog.externalChromeUnavailableMessage)
+                throw error
             }
             let call = try ComputerV2ToolContract.validate(
                 tool: tool,
@@ -5618,8 +5790,10 @@ private extension CodexAppServerRuntime {
             switch call.tool {
             case .status:
                 return [textContent(try encodeJSON(PermissionInspector().current())
-                    + (configuration.externalChromeToolsEnabled ? "\nchrome_connection=" + (chromeConnection?.owner == nil ? "unavailable" : "connected") : "\nbrowser_route=computa_builtin external_chrome_tools=hidden")
-                    + "; only a native user-approved connection enables computer_v2_tabs and computer_v2_bind_tab.")]
+                    + (configuration.externalChromeToolsEnabled
+                        ? "\nchrome_connection=" + (chromeConnection?.owner == nil ? "unavailable" : "connected")
+                            + "; only a native user-approved connection enables computer_v2_tabs and computer_v2_bind_tab."
+                        : "\nbrowser_route=computa_builtin external_chrome_tools=hidden. Native app reads require computer_v2_open with a supported bundle_id first; webpages use browser_tabs, browser_open and browser_read."))]
 
             case .apps:
                 let applications = await MainActor.run {
@@ -5627,7 +5801,8 @@ private extension CodexAppServerRuntime {
                 }
                 _ = try computerV2Session(taskID: taskID, epoch: epoch)
                 return [textContent(ComputerV2ToolContract.appInventory(
-                    applications, query: arguments["query"] as? String
+                    applications, query: arguments["query"] as? String,
+                    externalChromeTools: configuration.externalChromeToolsEnabled
                 ))]
 
             case .tabs:
@@ -8241,6 +8416,8 @@ private extension CodexAppServerRuntime {
                 return activated
             }
             let controller = await MainActor.run { ComputerInputController() }
+            try Task.checkCancellation()
+            try await beforeMutation()
             let activated = try await controller.activateApplication(processIdentifier: processIdentifier)
             try markForegroundEffect(taskID: taskID, effect: .activationCompleted)
             try Task.checkCancellation()

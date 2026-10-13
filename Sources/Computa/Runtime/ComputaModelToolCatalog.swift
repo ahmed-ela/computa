@@ -18,6 +18,12 @@ enum ComputaModelToolCatalog {
     ]
     static let externalChromeUnavailableMessage = "External Chrome tools are hidden in this build. Use browser_tabs for Computa's built-in browser, browser_read(cursor=next_cursor) for its page continuation, and browser_tabs(cursor=next_cursor) for its tab inventory. No Chrome read, connection, or input was dispatched."
 
+    /// Inventory and execution must use the same target policy. Otherwise a
+    /// model can discover a native target that this build cannot admit.
+    static func isExternalChromeTarget(bundleID: String?) -> Bool {
+        bundleID?.lowercased().hasPrefix("com.google.chrome") == true
+    }
+
     /// Also applies to schemas retained by old native threads. History stays
     /// unchanged; only the current model's callable tool definitions change.
     static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String) -> [[String: Any]] {
