@@ -20,10 +20,21 @@ describe('Gemini per-submission ownership', () => {
     expect(await f.run('sendReady', { ...fields(sequence), expectedUserCounts: [sequence - 1], prompt: text })).toMatchObject({ sendReady: true });
     return text;
   };
+  const submitPending = async (f: ReturnType<typeof fixture>, sequence: number, text: string) => {
+    const value = await f.run('submit', { ...fields(sequence), expectedUserCounts: [sequence - 1], prompt: text });
+    expect(value).toMatchObject({ submitted: true, submissionOwnershipCapability: 'per_submission_ownership_v1',
+      submissionPending: true, text: '', answerComplete: false });
+    expect(value.submissionProof).toBeUndefined(); expect(value.firstUserVerified).not.toBe(true);
+    expect(f.world.__computaGeminiSubmissionState.pending).toMatchObject({ sequence, phase: 'send_claimed' });
+    return value;
+  };
+  const submitThenInspect = async (f: ReturnType<typeof fixture>, sequence: number, text: string) => {
+    await submitPending(f, sequence, text);
+    return f.run('inspect', { ...fields(sequence), expectedUserCounts: [sequence] });
+  };
   const finishRound = async (f: ReturnType<typeof fixture>, sequence: number, text = roundPrompt(sequence)) => {
     await stage(f, sequence, text);
-    expect(await f.run('submit', { ...fields(sequence), expectedUserCounts: [sequence - 1], prompt: text })).toMatchObject({
-      submitted: true, submissionOwnershipCapability: 'per_submission_ownership_v1' });
+    await submitPending(f, sequence, text);
     const value = await f.run('inspect', { ...fields(sequence), expectedUserCounts: [sequence] });
     expect(value).toMatchObject({ firstUserVerified: true, submissionOwnershipCapability: 'per_submission_ownership_v1',
       submissionProof: { sequence, fingerprint: await fingerprint(text) } });
@@ -61,7 +72,7 @@ describe('Gemini per-submission ownership', () => {
     const f = fixture(provider, { response: false }); await finishRound(f, 1);
     const text = await stage(f, 2), send = f.send.onClick!;
     f.send.onClick = () => { send(); f.userBody!.text = f.userBody!.text.replace('[literal]', '{altered}'); };
-    expect(await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text })).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(await submitThenInspect(f, 2, text)).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
     f.userBody!.text = text;
     const repeated = await f.run('inspect', { ...fields(2), expectedUserCounts: [2] });
     expect(repeated).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
@@ -75,7 +86,8 @@ describe('Gemini per-submission ownership', () => {
     const sent = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
     expect(sent).toMatchObject({ submitted: true, submissionOwnershipCapability: 'per_submission_ownership_v1' });
     const previousProof = { sequence: 1, fingerprint: await fingerprint(roundPrompt(1)) };
-    expect(sent).toMatchObject({ submissionPending: true, submissionProof: previousProof });
+    expect(sent).toMatchObject({ submissionPending: true, text: '', answerComplete: false });
+    expect(sent.submissionProof).toBeUndefined();
     // Native rechecks the pinned model after the Send acknowledgment, before
     // the new user body exists. Only the previous round may supply its proof.
     const rechecked = await f.run('verifyModel', { ...fields(2), expectedUserCounts: [1, 2] });
@@ -88,6 +100,45 @@ describe('Gemini per-submission ownership', () => {
     expect(await f.run('inspect', { ...fields(2), expectedUserCounts: [2] })).toMatchObject({
       submissionProof: { sequence: 2, fingerprint: await fingerprint(text) } });
     expect(f.send.clicks).toBe(2);
+  });
+
+  test('third Send acknowledges once without hashing bodies and a racing append is proved only by fresh reads', async () => {
+    const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
+    const previous = f.world.__computaGeminiSubmissionState.lastVerified;
+    const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+    const expectedModelChoice = { key: '3.1 Pro', label: '3.1 Pro' };
+    const text = await stage(f, 3);
+    f.send.onClick = () => { f.composer.replaceChildren(); };
+    const subtle: any = crypto.subtle, original = subtle.digest;
+    let postSendHashes = 0, appended = false;
+    subtle.digest = async (algorithm: any, data: any) => {
+      const value = await original.call(subtle, algorithm, data);
+      if (f.send.clicks === 3) {
+        postSendHashes++;
+        if (!appended && new TextDecoder().decode(data) === normalized(roundPrompt(2))) {
+          appended = true; f.appendUser(text);
+        }
+      }
+      return value;
+    };
+    try {
+      await submitPending(f, 3, text);
+      expect(postSendHashes).toBe(0); expect(appended).toBe(false);
+      expect(f.world.__computaGeminiSubmissionState.lastVerified).toBe(previous);
+      expect(f.world.__computaGeminiSubmissionState.revoked).toBe(false);
+      const args = { ...fields(3), expectedUserCounts: [2, 3], expectedModelChoice };
+      const crossed = await f.run('inspect', args);
+      expect(crossed).toEqual({ error: 'acknowledged_user_append', detail: 'readonly_model_observation' });
+      expect(appended).toBe(true); expect(postSendHashes).toBeGreaterThan(0);
+      expect(f.world.__computaGeminiSubmissionState.revoked).toBe(false);
+      expect(f.world.__computaGeminiSubmissionState.lastVerified).toBe(previous);
+      expect(f.world.__computaGeminiSubmissionState.pending.phase).toBe('send_claimed');
+      const fresh = await f.run('inspect', args);
+      expect(fresh).toMatchObject({ submissionProof: { sequence: 3, fingerprint: await fingerprint(text) } });
+      expect(f.world.__computaGeminiSubmissionState.pending).toBeNull(); expect(f.send.clicks).toBe(3);
+      expect(await f.run('submit', { ...fields(3), expectedUserCounts: [3], prompt: text })).toHaveProperty('error');
+      expect(f.send.clicks).toBe(3);
+    } finally { subtle.digest = original; }
   });
 
   test('an acknowledged second body arriving during the first hash discards the read and cannot excuse first-body corruption', async () => {
@@ -149,8 +200,15 @@ describe('Gemini per-submission ownership', () => {
           if (change === 'ambiguous') parent.append(replacement);
           else { parent.children[parent.children.indexOf(body)] = replacement; replacement.parentElement = parent; body.connected = false; body.parentElement = null; }
         }
-      }, () => f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text }));
-      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      }, () => submitThenInspect(f, 2, text));
+      if (change === 'temporary') expect(rejected).toEqual({ error: 'temporary_mode_unverified' });
+      else expect(rejected).toMatchObject({ error: 'conversation_changed',
+        detail: ['owner', 'route'].includes(change) ? 'first_user_message' : 'submission_message' });
+      if (['owner', 'route'].includes(change)) {
+        const diagnostic = JSON.parse(rejected.debugStructure);
+        expect(diagnostic.reason).toBe('snapshot_after_action');
+        expect(diagnostic.snapshot[change === 'owner' ? 'ownerSame' : 'urlSame']).toBe(false);
+      }
       expect(rejected.submissionProof).toBeUndefined(); expect(JSON.stringify(rejected)).not.toContain('PRIVATE'); expect(f.send.clicks).toBe(2);
     }
   });
@@ -220,8 +278,8 @@ describe('Gemini per-submission ownership', () => {
     const altered = fixture(provider, { response: false }); await finishRound(altered, 1);
     const text = await stage(altered, 2), send = altered.send.onClick!;
     altered.send.onClick = () => { send(); altered.userBody!.text = altered.userBody!.text.replace('[literal]', '{altered}'); };
-    const rejected = await altered.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
-    expect(check(rejected, 'observe_text')).toMatchObject({ action: 'submit', phase: 'send_claimed', requestedSequence: 2,
+    const rejected = await submitThenInspect(altered, 2, text);
+    expect(check(rejected, 'observe_text')).toMatchObject({ action: 'inspect', phase: 'send_claimed', requestedSequence: 2,
       recordSequence: 2, userCount: 2, stateRevoked: true, canonicalMatches: false, suffixMatches: true });
     expect(altered.send.clicks).toBe(2);
   });
@@ -264,7 +322,7 @@ describe('Gemini per-submission ownership', () => {
         (node as any).data = node.text; literal.append(node); body.replaceChildren(literal);
         Object.defineProperty(body, 'innerText', { get: () => visible });
       };
-      const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+      const rejected = await submitThenInspect(f, 2, text);
       expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
         submissionDiagnostic: { stage: 'observe_text' } });
       const value = rejected.submissionBodyDiagnostic;
@@ -303,7 +361,7 @@ describe('Gemini per-submission ownership', () => {
         Object.defineProperty(body, 'innerText', { get: () => text.replace('\n', ' ') });
         Object.defineProperty(body, 'textContent', { get: () => parts.join('') });
       };
-      const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+      const rejected = await submitThenInspect(f, 2, text);
       expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
         submissionBodyDiagnostic: { innerTextMatches: false, textContentMatches: false, literalDOMAvailable: true,
           literalDOMMatches: true, literalDOMUnavailableReason: 'none', actualCategory: 'space', expectedCategory: 'linefeed',
@@ -332,7 +390,7 @@ describe('Gemini per-submission ownership', () => {
         Object.defineProperty(body, 'innerText', { get: () => text.replace('[literal]', '{altered}') });
         if (shape === 'getter') Object.defineProperty(body, 'textContent', { get() { throw new Error('PRIVATE_BODY_GETTER'); } });
       };
-      const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+      const rejected = await submitThenInspect(f, 2, text);
       const reason = ({ control: 'control', markup: 'unsupported_markup', depth: 'depth_budget', nodes: 'node_budget',
         length: 'length_budget', getter: 'read_failure', hidden: 'hidden', inert: 'inert' } as any)[shape];
       expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
@@ -353,7 +411,7 @@ describe('Gemini per-submission ownership', () => {
       const node = new Element('#text', {}, text); (node as any).data = text;
       payload.append(node); wrapper.append(label, payload); body.replaceChildren(wrapper);
     };
-    const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+    const rejected = await submitThenInspect(f, 2, text);
     expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
       submissionBodyDiagnostic: { innerTextMatches: false, textContentMatches: false, innerTextContainsExpected: true,
         textContentContainsExpected: true, innerTextExpectedOffset: prefix.length, textContentExpectedOffset: prefix.length,
@@ -387,7 +445,7 @@ describe('Gemini per-submission ownership', () => {
           Object.defineProperty(body, 'textContent', { get: () => value });
         }
       };
-      const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+      const rejected = await submitThenInspect(f, 2, text);
       expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
         submissionBodyDiagnostic: { innerTextContainsExpected: false, textContentContainsExpected: false,
           innerTextExpectedOffset: 180201, textContentExpectedOffset: 180201 } });
@@ -479,11 +537,11 @@ describe('Gemini per-submission ownership', () => {
           ...(fault === 'overflow' ? { overflow: 'visible' } : {}), ...(fault === 'clip' ? { clip: 'auto', clipPath: 'none' } : {}) });
         expect(rows.length).toBeGreaterThan(0);
       };
-      const result = await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text });
-      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      const result = await submitThenInspect(f, 1, text);
+      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
       expect(result.firstUserVerified).not.toBe(true); expect(result.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(1);
       if (fault === 'role') {
-        const structure = JSON.parse(result.debugSubmissionStructure);
+        const structure = JSON.parse(result.debugStructure);
         expect(structure.descendants.find((node: any) => node.classes.includes('cdk-visually-hidden')))
           .toMatchObject({ headingSemantic: false, rectClipped: true, insetClipped: true });
       }
@@ -518,7 +576,7 @@ describe('Gemini per-submission ownership', () => {
         // A superficially matching rendered getter must not authorize a malformed rich subtree.
         Object.defineProperty(f.userBody!, 'innerText', { configurable: true, get: () => text });
       };
-      const result = await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text });
+      const result = await submitThenInspect(f, 1, text);
       if (!result.error) {
         const inspected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1] });
         expect(inspected).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
@@ -537,7 +595,7 @@ describe('Gemini per-submission ownership', () => {
         if (fault === 'css') styles.set(heading, { ...clippedStyle, width: '2px' });
         else if (fault === 'replace') { const span = rows[0].children[0]; span.replaceChildren(textNode('ALTERED')); }
         else { const node = rows[0].children[0].children[0]; (node as any).data += fault === 'space' ? '\u00a0' : fault === 'format' ? '\u200b' : 'X'; node.text = (node as any).data; }
-      }, () => f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text }));
+      }, () => submitThenInspect(f, 2, text));
       expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
       expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
       expect(await f.run('inspect', { ...fields(2), expectedUserCounts: [2] })).toMatchObject({ error: 'conversation_changed' });
@@ -561,8 +619,8 @@ describe('Gemini per-submission ownership', () => {
         else if (fault === 'depth') { let parent = rows[0]; parent.replaceChildren(); for (let i = 0; i < 65; i++) { const child = new Element('SPAN'); parent.append(child); parent = child; } parent.append(textNode(text.split('\n')[0])); }
         else f.userBody!.append(query.cloneNode(true));
       };
-      const result = await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text });
-      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      const result = await submitThenInspect(f, 1, text);
+      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
       expect(result.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(1);
     }
     const { f, shapes, textNode } = queryFixture(), send = f.send.onClick!;
@@ -625,15 +683,15 @@ describe('Gemini per-submission ownership', () => {
           if (fault === 'trimUser') rows[1].replaceChildren(textNode(' ' + rows[1].textContent.trim() + ' '));
         }
       };
-      const rejected = await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text });
-      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      const rejected = await submitThenInspect(f, 1, text);
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
       expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(1);
     }
     const { f, shapes } = queryFixture(true); await finishRound(f, 1);
     const text2 = await stage(f, 2);
     const crossed = await withDigestMutation(f, 2, 'send_claimed', () => {
       const node = shapes[1].rows[0].children[0].children[0]; (node as any).data += 'X'; node.text = (node as any).data;
-    }, () => f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text2 }));
+    }, () => submitThenInspect(f, 2, text2));
     expect(crossed).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
     expect(crossed.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
   });

@@ -111,3 +111,10 @@ Installed build 79 is compiled from `427cd8c`. All 54 installed bundle files mat
 The identical read task with actual Cerebras Qwen on that installed build completed in 22.747 seconds, with two observed open/read/close sequences, correct 13:42/C19 details, no terminal calls, and every created tab released. The earlier three-case baseline remains build 77; the slower final read made six calls instead of three. These single runs cannot establish a general speed ranking, and no Qwen/Instant ratio is calculated from a failed Instant task. Further Instant cases were not dispatched. Its remaining zero-answer state needs separate DOM/transport measurement; external service demand is unproven.
 
 The owned localhost server and Cerebras diagnostic tab were closed; Safari's temporary developer setting was restored to its original disabled value. Fixture files and immutable receipts remain private for review. No real email or flight information was read, no release was published, and the PR remains draft.
+
+
+## Final-text boundary diagnosis
+
+A retained GPT-OSS browser task completed six tool calls and closed its tab, but its final receipt substituted five non-breaking hyphens (U+2011) for the required ASCII hyphens (U+002D). Those characters already appear in the native response item, before UI rendering. Source inspection found no codec typography conversion; the prior artifact alone does not establish whether the provider or adapter introduced them.
+
+The next build records bounded final-message shape facts at the API boundary: UTF-8 length, Unicode scalar count, counts of those two hyphen characters, and exact byte-equality booleans between decoded provider content, serialized message, stream deltas and terminal response. The record uses the existing local response/model/provider identifiers. It records no message text, prompt, reasoning, content hash or credentials, and omits itself if parsing or size bounds fail. It never changes an inference, retries a request, repairs output text or qualifies a task. The three new JSON/SSE/privacy methods passed as part of the 73-test native cohort. Installed boundary verification is pending.

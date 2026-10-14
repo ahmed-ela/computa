@@ -529,6 +529,90 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertFalse(encoded.contains("private thinking"))
         XCTAssertThrowsError(try APIModelResponseCodec.decode(.init(body: incomplete, contentType: "text/event-stream"), request: request()))
     }
+    func testFinalTextBoundaryPreservesJSONEscapesAndEmitsOnlyFiniteMetadata() throws {
+        let expected = "RAW-RESPONSE\u{2011}SENTINEL e\u{301}\n"
+        let prepared = try request(["input": [["role": "user", "content": "PRIVATE_REQUEST_SENTINEL"]]])
+        let envelope: [String: Any] = ["model": "fixture-model", "choices": [["index": 0,
+            "message": ["role": "assistant", "content": expected, "reasoning": "PRIVATE_REASONING_SENTINEL"], "finish_reason": "stop"]]]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: envelope), as: UTF8.self)
+            .replacingOccurrences(of: "\u{2011}", with: "\\u2011")
+        let reply = try APIModelResponseCodec.decode(.init(body: Data(json.utf8), contentType: "application/json"), request: prepared)
+        for stream in [false, true] {
+            let encoded = try APIModelResponseCodec.encode(reply, stream: stream)
+            let facts = try XCTUnwrap(APIModelResponseCodec.finalTextDiagnostic(reply, encoded: encoded, stream: stream))
+            XCTAssertEqual(facts.kind, "api_final_text_v1")
+            XCTAssertEqual(facts.responseID, reply.response["id"] as? String)
+            XCTAssertEqual(facts.modelID, prepared.localModelID); XCTAssertEqual(facts.providerID, "fixture")
+            XCTAssertEqual(facts.upstream, facts.decoded); XCTAssertEqual(facts.decoded, facts.serialized)
+            XCTAssertEqual(facts.upstream.utf8Bytes, expected.utf8.count)
+            XCTAssertEqual(facts.upstream.unicodeScalars, expected.unicodeScalars.count)
+            XCTAssertEqual(facts.upstream.hyphenMinusCount, 1); XCTAssertEqual(facts.upstream.nonBreakingHyphenCount, 1)
+            XCTAssertTrue(facts.upstreamMatchesDecoded); XCTAssertTrue(facts.decodedMatchesSerialized)
+            XCTAssertEqual(facts.streamDeltasMatchSerialized, stream ? true : nil)
+            XCTAssertEqual(facts.completedMatchesSerialized, stream ? true : nil)
+            let data = try JSONEncoder().encode(facts), log = String(decoding: data, as: UTF8.self)
+            XCTAssertLessThanOrEqual(data.count, 2_048)
+            for forbidden in ["RAW-RESPONSE", "SENTINEL", "PRIVATE_REQUEST", "PRIVATE_REASONING", "encrypted_content", "textDeltas", "reasoning", "remote1"] {
+                XCTAssertFalse(log.contains(forbidden))
+            }
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual(Set(object.keys), Set(["kind", "responseID", "modelID", "providerID", "upstream", "decoded", "serialized",
+                "upstreamMatchesDecoded", "decodedMatchesSerialized"] + (stream ? ["streamDeltasMatchSerialized", "completedMatchesSerialized"] : [])))
+            for field in ["upstream", "decoded", "serialized"] {
+                let shape = try XCTUnwrap(object[field] as? [String: Any])
+                XCTAssertEqual(Set(shape.keys), ["utf8Bytes", "unicodeScalars", "hyphenMinusCount", "nonBreakingHyphenCount"])
+            }
+        }
+    }
+    func testFinalTextBoundaryChecksActualSSEMessageBytesAgainstSourceAndDeltas() throws {
+        let fragments = ["RAW-", "RESPONSE\u{2011}", "SENTINEL e\u{301}\n"]
+        var wire = Data()
+        for (index, text) in fragments.enumerated() {
+            var delta: [String: Any] = ["content": text]
+            if index == 0 { delta["role"] = "assistant"; delta["reasoning"] = "PRIVATE_REASONING_SENTINEL" }
+            let row: [String: Any] = ["id": "remote-final", "model": "fixture-model", "choices": [["index": 0, "delta": delta, "finish_reason": NSNull()]]]
+            wire.append(Data("data: ".utf8)); wire.append(try JSONSerialization.data(withJSONObject: row)); wire.append(Data("\n\n".utf8))
+        }
+        let terminal: [String: Any] = ["id": "remote-final", "model": "fixture-model", "choices": [["index": 0, "delta": [:], "finish_reason": "stop"]]]
+        wire.append(Data("data: ".utf8)); wire.append(try JSONSerialization.data(withJSONObject: terminal)); wire.append(Data("\n\ndata: [DONE]\n\n".utf8))
+        let reply = try APIModelResponseCodec.decode(.init(body: wire, contentType: "text/event-stream"), request: request())
+        XCTAssertEqual(reply.textDeltas, fragments)
+        let encoded = try APIModelResponseCodec.encode(reply, stream: true)
+        let facts = try XCTUnwrap(APIModelResponseCodec.finalTextDiagnostic(reply, encoded: encoded, stream: true))
+        XCTAssertEqual(facts.upstream.hyphenMinusCount, 1); XCTAssertEqual(facts.upstream.nonBreakingHyphenCount, 1)
+        XCTAssertTrue(facts.decodedMatchesSerialized); XCTAssertEqual(facts.streamDeltasMatchSerialized, true)
+        var changed = String(decoding: encoded, as: UTF8.self).components(separatedBy: "\n\n"), edits = 0
+        for index in changed.indices where changed[index].hasPrefix("event: response.output_item.done\n") {
+            let lines = changed[index].components(separatedBy: "\n")
+            var row = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(lines[1].dropFirst(6).utf8)) as? [String: Any])
+            var item = try XCTUnwrap(row["item"] as? [String: Any])
+            guard item["type"] as? String == "message" else { continue }
+            var content = try XCTUnwrap(item["content"] as? [[String: Any]])
+            content[0]["text"] = fragments.joined().replacingOccurrences(of: "-", with: "\u{2011}")
+            item["content"] = content; row["item"] = item
+            changed[index] = lines[0] + "\ndata: " + String(decoding: try JSONSerialization.data(withJSONObject: row), as: UTF8.self); edits += 1
+        }
+        XCTAssertEqual(edits, 1)
+        let mismatch = try XCTUnwrap(APIModelResponseCodec.finalTextDiagnostic(reply, encoded: Data(changed.joined(separator: "\n\n").utf8), stream: true))
+        XCTAssertEqual(mismatch.serialized.hyphenMinusCount, 0); XCTAssertEqual(mismatch.serialized.nonBreakingHyphenCount, 2)
+        XCTAssertTrue(mismatch.upstreamMatchesDecoded); XCTAssertFalse(mismatch.decodedMatchesSerialized)
+        XCTAssertEqual(mismatch.streamDeltasMatchSerialized, false); XCTAssertEqual(mismatch.completedMatchesSerialized, false)
+        XCTAssertEqual(reply.textDeltas, fragments)
+    }
+    func testFinalTextBoundaryOmitsToolsMalformedAndOverBudgetDiagnostics() throws {
+        let tool = try decode(["role": "assistant", "content": "COMMENTARY_SENTINEL", "tool_calls": [["id": "read", "type": "function",
+            "function": ["name": "computa_tool_0", "arguments": "{\"path\":\"fixture\"}"]]]], finish: "tool_calls")
+        XCTAssertNil(APIModelResponseCodec.finalTextDiagnostic(tool, encoded: try APIModelResponseCodec.encode(tool, stream: true), stream: true))
+        let final = try decode(["role": "assistant", "content": "exact-final"])
+        for stream in [false, true] {
+            XCTAssertNil(APIModelResponseCodec.finalTextDiagnostic(final, encoded: Data("invalid".utf8), stream: stream))
+            XCTAssertNil(APIModelResponseCodec.finalTextDiagnostic(final, encoded: Data(repeating: 0, count: APIProviderHTTPClient.maximumResponseBytes + 1), stream: stream))
+        }
+        let largeText = String(repeating: "a", count: 2_000_001)
+        let large = try decode(["role": "assistant", "content": largeText])
+        XCTAssertEqual(large.response["output_text"] as? String, largeText)
+        XCTAssertNil(APIModelResponseCodec.finalTextDiagnostic(large, encoded: try APIModelResponseCodec.encode(large, stream: false), stream: false))
+    }
     func testImageContentAndUnsupportedModalityAreExplicit() throws {
         let input: [[String: Any]] = [["role": "user", "content": [["type": "input_text", "text": "inspect"], ["type": "input_image", "image_url": "data:image/png;base64,AA==", "detail": "original"]]]]
         let prepared = try request(["input": input])

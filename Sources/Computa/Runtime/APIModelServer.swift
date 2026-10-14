@@ -2,6 +2,7 @@ import Foundation
 import Network
 import Darwin
 import CoreFoundation
+import OSLog
 
 /// The engine speaks Responses on loopback; only this actor handles provider credentials.
 /// It never runs tools, changes permissions, or replays a failed inference.
@@ -35,6 +36,7 @@ actor APIModelServer {
     private var starting: Task<URL, Error>?
     private var stopped = false
     private let queue = DispatchQueue(label: "com.ahmedelamin.Computa.api-model-http")
+    private static let responseLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "APIModelResponse")
     private struct Connection { let socket: NWConnection; let task: Task<Void, Never> }
     private var connections: [UUID: Connection] = [:]
     private struct Lane { let id: UUID; let request: Task<APIModelResponseCodec.Reply, Error> }
@@ -291,8 +293,15 @@ actor APIModelServer {
             }
             try Task.checkCancellation()
             guard !stopped, contexts[taskID] == context, lanes[taskID]?.id == lane.id else { throw Failure.cancelled }
-            try await Self.send(connection, status: "200 OK", type: prepared.stream ? "text/event-stream" : "application/json",
-                                body: APIModelResponseCodec.encode(reply, stream: prepared.stream))
+            let encoded = try APIModelResponseCodec.encode(reply, stream: prepared.stream)
+            // Only finite final-message metadata, correlated by the response ID
+            // already retained in native usage records. Never capture the text.
+            if let diagnostic = APIModelResponseCodec.finalTextDiagnostic(reply, encoded: encoded, stream: prepared.stream),
+               let data = try? JSONEncoder().encode(diagnostic), data.count <= 2_048,
+               let record = String(data: data, encoding: .utf8) {
+                Self.responseLog.notice("finalTextBoundary \(record, privacy: .public)")
+            }
+            try await Self.send(connection, status: "200 OK", type: prepared.stream ? "text/event-stream" : "application/json", body: encoded)
         } catch {
             deadline.cancel()
             try? await Self.send(connection, status: Self.errorStatus(error), type: "application/json", body: Self.errorBody(error))

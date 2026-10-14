@@ -59,6 +59,32 @@ enum APIModelResponseCodec {
         /// These are real provider fragment boundaries, not synthetic tokenization.
         let textDeltas: [String]
         let argumentDeltas: [[String]]
+        /// Finite source facts only; no additional text or reasoning is retained.
+        let finalTextSource: FinalTextSource?
+    }
+    struct TextShape: Codable, Equatable, Sendable {
+        let utf8Bytes: Int
+        let unicodeScalars: Int
+        let hyphenMinusCount: Int
+        let nonBreakingHyphenCount: Int
+    }
+    struct FinalTextSource: Sendable {
+        let upstream: TextShape
+        let decoded: TextShape
+        let upstreamMatchesDecoded: Bool
+    }
+    struct FinalTextDiagnostic: Codable, Sendable {
+        let kind: String
+        let responseID: String
+        let modelID: String
+        let providerID: String
+        let upstream: TextShape
+        let decoded: TextShape
+        let serialized: TextShape
+        let upstreamMatchesDecoded: Bool
+        let decodedMatchesSerialized: Bool
+        let streamDeltasMatchSerialized: Bool?
+        let completedMatchesSerialized: Bool?
     }
     private static let maximumText = 2_000_000
 
@@ -508,8 +534,10 @@ enum APIModelResponseCodec {
         } else if !absent(message["reasoning"]) && !(message["reasoning"] is String) { throw Failure.invalidResponse }
         guard !output.isEmpty else { throw Failure.invalidResponse }
         let usage = try usage(envelope["usage"], responses: false)
-        return Reply(response: response(id: responseID, request: request, output: output, text: text, usage: usage),
-                     textDeltas: textDeltas.isEmpty && !text.isEmpty ? [text] : textDeltas, argumentDeltas: argumentDeltas)
+        let resource = response(id: responseID, request: request, output: output, text: text, usage: usage)
+        return Reply(response: resource,
+                     textDeltas: textDeltas.isEmpty && !text.isEmpty ? [text] : textDeltas, argumentDeltas: argumentDeltas,
+                     finalTextSource: calls.isEmpty ? finalTextSource(text, response: resource) : nil)
     }
 
     private static func decodeResponses(_ data: Data, request: Request) throws -> Reply {
@@ -556,8 +584,10 @@ enum APIModelResponseCodec {
             }
         }
         guard count <= request.maximumCalls, !request.requiredTool || count > 0 else { throw Failure.invalidTool }
-        return Reply(response: response(id: "resp_" + UUID().uuidString, request: request, output: output, text: text,
-                                        usage: try usage(raw["usage"], responses: true)), textDeltas: text.isEmpty ? [] : [text], argumentDeltas: [])
+        let resource = response(id: "resp_" + UUID().uuidString, request: request, output: output, text: text,
+                                usage: try usage(raw["usage"], responses: true))
+        return Reply(response: resource, textDeltas: text.isEmpty ? [] : [text], argumentDeltas: [],
+                     finalTextSource: count == 0 ? finalTextSource(text, response: resource) : nil)
     }
 
     private struct ChatStream { let object: [String: Any]; let text: [String]; let arguments: [[String]] }
@@ -677,6 +707,98 @@ enum APIModelResponseCodec {
         try emit("response.completed", ["response": reply.response])
         result.append(Data("data: [DONE]\n\n".utf8))
         return result
+    }
+
+    /// Observational only: compare decoded provider text with the exact bytes emitted
+    /// to the native Responses client. Failure or a budget miss omits the diagnostic.
+    /// No string, hash, reasoning, request content or upstream identifier is emitted.
+    static func finalTextDiagnostic(_ reply: Reply, encoded: Data, stream: Bool) -> FinalTextDiagnostic? {
+        guard let source = reply.finalTextSource,
+              let decoded = finalMessageText(reply.response), textShape(decoded) == source.decoded,
+              let responseID = reply.response["id"] as? String,
+              responseID.range(of: #"^resp_[A-Fa-f0-9-]{32,36}$"#, options: .regularExpression) != nil,
+              let modelID = reply.response["model"] as? String,
+              let identity = APIProviderCatalog.identity(for: modelID),
+              encoded.count <= APIProviderHTTPClient.maximumResponseBytes else { return nil }
+        let serialized: String, deltas: String?, completed: String?
+        if stream {
+            guard let wire = String(data: encoded, encoding: .utf8) else { return nil }
+            let events = wire.components(separatedBy: "\n\n")
+            guard events.count <= 4_096,
+                  let output = reply.response["output"] as? [[String: Any]],
+                  let messageID = output.first(where: { $0["type"] as? String == "message" })?["id"] as? String else { return nil }
+            var message: String?, terminal: String?, fragments = "", fragmentBytes = 0
+            for event in events {
+                let lines = event.components(separatedBy: "\n")
+                guard let header = lines.first, header.hasPrefix("event: ") else { continue }
+                let type = String(header.dropFirst(7))
+                guard ["response.output_text.delta", "response.output_item.done", "response.completed"].contains(type) else { continue }
+                guard lines.count == 2, lines[1].hasPrefix("data: "),
+                      let row = (try? JSONSerialization.jsonObject(with: Data(lines[1].dropFirst(6).utf8))) as? [String: Any],
+                      row["type"] as? String == type else { return nil }
+                switch type {
+                case "response.output_text.delta":
+                    guard row["item_id"] as? String == messageID, let delta = row["delta"] as? String else { return nil }
+                    fragmentBytes += delta.utf8.count
+                    guard fragmentBytes <= maximumText else { return nil }; fragments += delta
+                case "response.output_item.done":
+                    guard let item = row["item"] as? [String: Any] else { return nil }
+                    if item["type"] as? String == "message" {
+                        guard message == nil, item["id"] as? String == messageID,
+                              let value = assistantMessageText(item) else { return nil }; message = value
+                    } else if item["type"] as? String != "reasoning" { return nil }
+                default:
+                    guard terminal == nil, let resource = row["response"] as? [String: Any],
+                          resource["id"] as? String == responseID, resource["model"] as? String == modelID,
+                          let value = finalMessageText(resource) else { return nil }; terminal = value
+                }
+            }
+            guard let message, let terminal else { return nil }
+            serialized = message; deltas = fragments; completed = terminal
+        } else {
+            guard let resource = (try? JSONSerialization.jsonObject(with: encoded)) as? [String: Any],
+                  resource["id"] as? String == responseID, resource["model"] as? String == modelID,
+                  let value = finalMessageText(resource) else { return nil }
+            serialized = value; deltas = nil; completed = nil
+        }
+        guard let serializedShape = textShape(serialized) else { return nil }
+        return FinalTextDiagnostic(kind: "api_final_text_v1", responseID: responseID, modelID: modelID,
+            providerID: identity.providerID, upstream: source.upstream, decoded: source.decoded, serialized: serializedShape,
+            upstreamMatchesDecoded: source.upstreamMatchesDecoded,
+            decodedMatchesSerialized: decoded.utf8.elementsEqual(serialized.utf8),
+            streamDeltasMatchSerialized: deltas.map { $0.utf8.elementsEqual(serialized.utf8) },
+            completedMatchesSerialized: completed.map { $0.utf8.elementsEqual(serialized.utf8) })
+    }
+    private static func finalTextSource(_ upstream: String, response: [String: Any]) -> FinalTextSource? {
+        guard !upstream.isEmpty, let decoded = finalMessageText(response),
+              let sourceShape = textShape(upstream), let decodedShape = textShape(decoded) else { return nil }
+        return FinalTextSource(upstream: sourceShape, decoded: decodedShape,
+                               upstreamMatchesDecoded: upstream.utf8.elementsEqual(decoded.utf8))
+    }
+    private static func textShape(_ text: String) -> TextShape? {
+        let bytes = text.utf8.count
+        guard bytes <= maximumText else { return nil }
+        var count = 0, minus = 0, nonBreaking = 0
+        for scalar in text.unicodeScalars {
+            count += 1
+            if scalar.value == 0x2D { minus += 1 }
+            if scalar.value == 0x2011 { nonBreaking += 1 }
+        }
+        return TextShape(utf8Bytes: bytes, unicodeScalars: count, hyphenMinusCount: minus, nonBreakingHyphenCount: nonBreaking)
+    }
+    private static func finalMessageText(_ resource: [String: Any]) -> String? {
+        guard resource["status"] as? String == "completed", strictBool(resource["end_turn"]) == true,
+              let output = resource["output"] as? [[String: Any]],
+              output.allSatisfy({ ["message", "reasoning"].contains($0["type"] as? String ?? "") }) else { return nil }
+        let messages = output.filter { $0["type"] as? String == "message" }
+        guard messages.count == 1 else { return nil }
+        return assistantMessageText(messages[0])
+    }
+    private static func assistantMessageText(_ item: [String: Any]) -> String? {
+        guard item["type"] as? String == "message", item["role"] as? String == "assistant",
+              item["status"] as? String == "completed", let parts = item["content"] as? [[String: Any]],
+              !parts.isEmpty, parts.allSatisfy({ $0["type"] as? String == "output_text" && $0["text"] is String }) else { return nil }
+        return parts.compactMap { $0["text"] as? String }.joined()
     }
 
     private static func response(id: String, request: Request, output: [[String: Any]], text: String, usage: Any) -> [String: Any] {

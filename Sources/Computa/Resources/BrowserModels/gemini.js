@@ -2228,9 +2228,11 @@ async function modelSubmissionResult(observed) {
   if (!submissionOwnershipEnabled || observed.error) return observed;
   const capability = { submissionOwnershipCapability: 'per_submission_ownership_v1' };
   if (!['inspect', 'prepare', 'verifyModel', ...submissionEditorActions].includes(input.action)) return { ...observed, ...capability };
-  // Native alone classifies a synchronous first SPA promotion after Send. Do
-  // not bind from the crossed invocation; inspect its newly admitted route.
-  if (input.action === 'submit' && document.URL !== input.expectedURL) return { ...observed, ...capability };
+  // The claimed click acknowledges dispatch only. Rendering can append or
+  // remount messages after it; a fresh read must prove every submitted body.
+  // Never hash, rebind or revoke a body from the post-Send mutation result.
+  if (input.action === 'submit' && observed.submitted === true)
+    return { ...observed, ...capability, submissionPending: true, text: '', answerComplete: false };
   const sequence = input.submissionSequence - (['insert', 'sendReady'].includes(input.action) ? 1 : 0);
   const proof = await modelObserveSubmission(sequence, ['inspect', 'verifyModel', 'submit'].includes(input.action));
   if (proof.error) return proof;
