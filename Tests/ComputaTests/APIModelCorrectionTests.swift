@@ -17,6 +17,63 @@ final class APIModelCorrectionTests: XCTestCase {
         try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: Data(contentsOf: $0)) }
     }
+    func testJSONCorrectionEligibilityScopesCreatedLexemesToEnvelopeAndPreservesNestedDuplicateAndCounterGuards() throws {
+        // Matches the documented response shape without requiring a provider ID.
+        let documented = Data(#"{"created":1775679664,"time_info":{"queue_time":0.000630072,"prompt_time":0.006339716,"completion_time":0.01440533,"total_time":0.022999626968,"created":1775679664.285658}}"#.utf8)
+        XCTAssertTrue(APIModelCorrectionJSON.isUnambiguous(documented))
+        XCTAssertNil(APIModelCorrectionJSON.rejectionDiagnostic(documented))
+        for raw in [#"{"created":1775679664.0,"time_info":{"created":1775679664.285658}}"#,
+                    #"{"created":1e0}"#, #"{"created":-0}"#,
+                    #"{"created":1775679664,"time_info":{"created":1.5,"created":2.5}}"#,
+                    #"{"created":1775679664,"metadata":{"prompt_tokens":1.5}}"#,
+                    #"{"created":1775679664,"metadata":{"index":0.0}}"#] {
+            XCTAssertFalse(APIModelCorrectionJSON.isUnambiguous(Data(raw.utf8)))
+            XCTAssertNotNil(APIModelCorrectionJSON.rejectionDiagnostic(Data(raw.utf8)))
+        }
+        let escaped = Data(#"{"\u0063reated":1775679664,"time_info":{"\u0063reated":1775679664.285658}}"#.utf8)
+        XCTAssertTrue(APIModelCorrectionJSON.isUnambiguous(escaped))
+    }
+    func testJSONRejectionDiagnosticsDistinguishDuplicateKeysAndIntegerLexemesWithoutValues() throws {
+        let cases: [(String, APIModelCorrectionJSON.RejectionDiagnostic.Reason, APIModelCorrectionJSON.RejectionDiagnostic.KeyCategory)] = [
+            (#"{"created":1.0}"#, .integerLexeme, .createdTimestamp),
+            (#"{"created":1e0}"#, .integerLexeme, .createdTimestamp),
+            (#"{"index":-0}"#, .integerLexeme, .choiceIndex),
+            (#"{"total_tokens":1.5}"#, .integerLexeme, .usageCounter),
+            (#"{"created":12345678901234567}"#, .integerLength, .createdTimestamp),
+            (#"{"created":1,"\u0063reated":1}"#, .duplicateKey, .createdTimestamp),
+            (#"{"PRIVATE_KEY_URL_SECRET":1,"PRIVATE_KEY_URL_SECRET":2}"#, .duplicateKey, .other)]
+        for (raw, reason, keyCategory) in cases {
+            let data = Data(raw.utf8)
+            XCTAssertFalse(APIModelCorrectionJSON.isUnambiguous(data))
+            let diagnostic = try XCTUnwrap(APIModelCorrectionJSON.rejectionDiagnostic(data))
+            XCTAssertEqual(diagnostic.reason, reason); XCTAssertEqual(diagnostic.keyCategory, keyCategory)
+            XCTAssertFalse(APIModelCorrectionJSON.isUnambiguous(data), "Observation cannot change admission")
+            let encoded = try JSONEncoder().encode(diagnostic), text = String(decoding: encoded, as: UTF8.self)
+            XCTAssertLessThanOrEqual(encoded.count, 128)
+            XCTAssertEqual(Set((try JSONSerialization.jsonObject(with: encoded) as! [String: Any]).keys), ["reason", "keyCategory"])
+            for privateValue in ["PRIVATE", "12345678901234567", "1.00000000000000001", "URL", "SECRET", "http"] { XCTAssertFalse(text.contains(privateValue)) }
+        }
+        // Strings containing tool arguments remain opaque, including inner
+        // duplicate keys and decimals that would fail the outer scanner.
+        let opaque = Data(#"{"created":1,"index":0,"arguments":"{\"PRIVATE_KEY\":1,\"PRIVATE_KEY\":2,\"created\":1.0}"}"#.utf8)
+        XCTAssertTrue(APIModelCorrectionJSON.isUnambiguous(opaque)); XCTAssertNil(APIModelCorrectionJSON.rejectionDiagnostic(opaque))
+    }
+    func testJSONRejectionDiagnosticsPreserveDepthNodeSizeAndFoundationBounds() throws {
+        let maximumNodes = Data(("[" + Array(repeating: "0", count: 16_383).joined(separator: ",") + "]").utf8)
+        XCTAssertTrue(APIModelCorrectionJSON.isUnambiguous(maximumNodes)); XCTAssertNil(APIModelCorrectionJSON.rejectionDiagnostic(maximumNodes))
+        let tooManyNodes = Data(("[" + Array(repeating: "0", count: 16_384).joined(separator: ",") + "]").utf8)
+        let depth64 = Data((String(repeating: "[", count: 64) + "0" + String(repeating: "]", count: 64)).utf8)
+        XCTAssertTrue(APIModelCorrectionJSON.isUnambiguous(depth64)); XCTAssertNil(APIModelCorrectionJSON.rejectionDiagnostic(depth64))
+        let depth65 = Data((String(repeating: "[", count: 65) + "0" + String(repeating: "]", count: 65)).utf8)
+        let oversized = Data(repeating: 32, count: APIProviderHTTPClient.maximumResponseBytes + 1)
+        for (data, reason) in [(tooManyNodes, APIModelCorrectionJSON.RejectionDiagnostic.Reason.nodeLimit),
+                               (depth65, .depthLimit), (oversized, .dataLimit), (Data("PRIVATE_INVALID_JSON".utf8), .foundationJSON)] {
+            XCTAssertFalse(APIModelCorrectionJSON.isUnambiguous(data))
+            let diagnostic = try XCTUnwrap(APIModelCorrectionJSON.rejectionDiagnostic(data))
+            XCTAssertEqual(diagnostic.reason, reason); XCTAssertEqual(diagnostic.keyCategory, .none)
+            XCTAssertFalse(APIModelCorrectionJSON.isUnambiguous(data))
+        }
+    }
     func testFirstKnownUsageIsDurableAndSecondAbsentIsUnknownAfterCancellation() throws {
         let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
         let directory = root.appendingPathComponent("APIModelCorrectionUsage-v1"), store = APIModelCorrectionAccounting(directory: directory)

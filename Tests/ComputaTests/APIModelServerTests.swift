@@ -138,7 +138,8 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         return try XCTUnwrap((tools.first?["function"] as? [String: Any])?["name"] as? String)
     }
 
-    private func correctionResponse(_ request: APIModelServer.HTTPRequest, invalid: Bool, usage: Bool = true) -> APILoopbackFixture.Response {
+    private func correctionResponse(_ request: APIModelServer.HTTPRequest, invalid: Bool, usage: Bool = true,
+                                    timingMetadata: Bool = false) -> APILoopbackFixture.Response {
         let body = try! JSONSerialization.jsonObject(with: request.body) as! [String: Any]
         let tools = body["tools"] as! [[String: Any]], name = (tools[0]["function"] as! [String: Any])["name"] as! String
         let calls: [[String: Any]] = invalid
@@ -147,6 +148,11 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             : [["id": "corrected-call", "type": "function", "function": ["name": name, "arguments": "{\"cmd\":\"echo fixture\"}"]]]
         var envelope: [String: Any] = ["id": "remote-fixture", "object": "chat.completion", "model": "fixture-model",
             "choices": [["index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant", "tool_calls": calls]]]]
+        if timingMetadata {
+            envelope["created"] = 1775679664
+            envelope["time_info"] = ["created": 1775679664.285658, "queue_time": 0.000630072,
+                "prompt_time": 0.006339716, "completion_time": 0.01440533, "total_time": 0.022999626968]
+        }
         if usage { envelope["usage"] = ["prompt_tokens": invalid ? 10 : 20, "completion_tokens": invalid ? 4 : 8, "total_tokens": invalid ? 14 : 28] }
         return .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: try! JSONSerialization.data(withJSONObject: envelope))
     }
@@ -174,11 +180,17 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: Data(contentsOf: $0)) }
     }
     func testActualLoopbackCorrectsOneFullyReceivedBadBatchWithoutPublishingItsValidHalf() async throws {
+        try await assertOneAtomicCorrection(timingMetadata: false)
+    }
+    func testActualLoopbackDocumentedTimingMetadataPreservesOneAtomicCorrectionAndExactAccounting() async throws {
+        try await assertOneAtomicCorrection(timingMetadata: true)
+    }
+    private func assertOneAtomicCorrection(timingMetadata: Bool) async throws {
         let recorder = APIRequestRecorder(), credentials = APICredentialCounter(), root = try namingRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let accounting = root.appendingPathComponent("accounting")
         let remote = try APILoopbackFixture { request in
-            await recorder.record(request); return self.correctionResponse(request, invalid: await recorder.count() == 1)
+            await recorder.record(request); return self.correctionResponse(request, invalid: await recorder.count() == 1, timingMetadata: timingMetadata)
         }
         defer { remote.stop() }
         let endpoint = try await remote.start(), p = provider(endpoint)

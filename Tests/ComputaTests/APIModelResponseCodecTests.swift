@@ -33,6 +33,93 @@ final class APIModelResponseCodecTests: XCTestCase {
         envelope.merge(changes) { _, value in value }
         return .init(body: try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]), contentType: "application/json")
     }
+    func testDocumentedNestedTimingMetadataAllowsOnlyOtherwiseEligibleArgumentCorrection() throws {
+        let prepared = try request()
+        let timing: [String: Any] = ["created": 1775679664.285658, "queue_time": 0.000630072,
+            "prompt_time": 0.006339716, "completion_time": 0.01440533, "total_time": 0.022999626968]
+        let changes: [String: Any] = ["created": 1775679664, "time_info": timing]
+        var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+        guard case .argumentsRejected(let usage) = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, changes: changes), request: prepared, onArgumentRejection: { observed.append($0) }) else {
+            return XCTFail("Unrelated timing metadata must not poison a fully validated argument-only rejection")
+        }
+        XCTAssertEqual(usage, .init(inputTokens: 10, outputTokens: 4, totalTokens: 14, cachedInputTokens: 3, reasoningOutputTokens: 2))
+        let diagnostic = try XCTUnwrap(observed.count == 1 ? observed.first : nil)
+        XCTAssertEqual(diagnostic.reason, .schemaMismatch); XCTAssertTrue(diagnostic.knownUsage)
+        XCTAssertTrue(diagnostic.unambiguousJSON); XCTAssertTrue(diagnostic.correctionEligible); XCTAssertNil(diagnostic.jsonRejection)
+        XCTAssertTrue(diagnostic.envelopeShapeValid); XCTAssertTrue(diagnostic.streamShapeAndUsageValid)
+        for rootCreated: Any in [1775679664.5, -1, true, "PRIVATE_INVALID_CREATED"] {
+            let bad = changes.merging(["created": rootCreated]) { _, new in new }
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, changes: bad), request: prepared))
+        }
+        for nonArgumentChange: [String: Any] in [["model": "PRIVATE_WRONG_MODEL"], ["usage": NSNull()],
+                ["usage": ["prompt_tokens": true, "completion_tokens": 4]],
+                ["usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 99]]] {
+            let bad = changes.merging(nonArgumentChange) { _, new in new }
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, changes: bad), request: prepared))
+        }
+        let unknown: [String: Any] = ["id": "PRIVATE_UNKNOWN", "type": "function", "function": ["name": "PRIVATE_UNOFFERED", "arguments": "{}"]]
+        let duplicate: [String: Any] = ["id": "rejected-call", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": "{\"path\":\"safe\"}"]]
+        for call in [unknown, duplicate] {
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, changes: changes, additionalCalls: [call]), request: prepared)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+        let wire = try correctionResult(prepared, changes: changes).body
+        let duplicateMetadata = String(decoding: wire, as: UTF8.self).replacingOccurrences(of: "\"time_info\":{", with: "\"time_info\":{\"PRIVATE_DUPLICATE_METADATA\":1,\"PRIVATE_DUPLICATE_METADATA\":2,")
+        XCTAssertNotEqual(duplicateMetadata, String(decoding: wire, as: UTF8.self))
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: Data(duplicateMetadata.utf8), contentType: "application/json"), request: prepared)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+        }
+        let json = String(decoding: try JSONEncoder().encode(diagnostic), as: UTF8.self)
+        XCTAssertFalse(json.contains("1775679664")); XCTAssertFalse(json.contains("time_info")); XCTAssertFalse(json.contains("PRIVATE"))
+    }
+    func testArgumentDecodeJSONScannerDiagnosticsDoNotAuthorizeCorrectionOrCapturePayload() throws {
+        let prepared = try request(), normal = try correctionResult(prepared)
+        let text = String(decoding: normal.body, as: UTF8.self)
+        let cases: [(String, APIModelCorrectionJSON.RejectionDiagnostic.Reason, APIModelCorrectionJSON.RejectionDiagnostic.KeyCategory)] = [
+            (text.replacingOccurrences(of: "\"index\":0", with: "\"index\":0.0"), .integerLexeme, .choiceIndex),
+            (text.replacingOccurrences(of: "\"total_tokens\":14", with: "\"total_tokens\":14.0"), .integerLexeme, .usageCounter),
+            (text.replacingOccurrences(of: "\"total_tokens\":14", with: "\"total_tokens\":14,\"total_tokens\":14"), .duplicateKey, .usageCounter)]
+        for (raw, reason, category) in cases {
+            XCTAssertNotEqual(text, raw)
+            let result = APIProviderHTTPClient.Result(body: Data(raw.utf8), contentType: "application/json")
+            var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared, onArgumentRejection: { observed.append($0) })) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+            let diagnostic = try XCTUnwrap(observed.count == 1 ? observed.first : nil)
+            XCTAssertTrue(diagnostic.envelopeShapeValid); XCTAssertTrue(diagnostic.knownUsage); XCTAssertTrue(diagnostic.streamShapeAndUsageValid)
+            XCTAssertFalse(diagnostic.unambiguousJSON); XCTAssertFalse(diagnostic.correctionEligible)
+            XCTAssertEqual(diagnostic.jsonRejection, .init(reason: reason, keyCategory: category))
+            let encoded = String(decoding: try JSONEncoder().encode(diagnostic), as: UTF8.self)
+            for privateValue in ["remote-rejected", "rejected-call", prepared.tools[0].wireName, "path", "arguments", "14.0"] { XCTAssertFalse(encoded.contains(privateValue)) }
+        }
+        let usage: [String: Any] = ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14]
+        let chunks: [[String: Any]] = [
+            ["id": "PRIVATE_STREAM", "object": "chat.completion.chunk", "model": prepared.model.id,
+             "choices": [["index": 0, "delta": ["role": "assistant", "tool_calls": [["index": 0, "id": "PRIVATE_CALL", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": "{\"path\":false}"]]]], "finish_reason": NSNull()]]],
+            ["id": "PRIVATE_STREAM", "object": "chat.completion.chunk", "model": prepared.model.id,
+             "choices": [["index": 0, "delta": [:], "finish_reason": "tool_calls"]]],
+            ["id": "PRIVATE_STREAM", "object": "chat.completion.chunk", "model": prepared.model.id, "choices": [], "usage": usage]]
+        var bytes = Data()
+        for (index, chunk) in chunks.enumerated() {
+            var json = String(decoding: try JSONSerialization.data(withJSONObject: chunk, options: [.sortedKeys]), as: UTF8.self)
+            if index == 0 { json = json.replacingOccurrences(of: "\"index\":0", with: "\"index\":0.0") }
+            bytes.append(Data(("data: " + json + "\n\n").utf8))
+        }
+        bytes.append(Data("data: [DONE]\n\n".utf8))
+        var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: bytes, contentType: "text/event-stream"), request: prepared, onArgumentRejection: { observed.append($0) })) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+        }
+        let diagnostic = try XCTUnwrap(observed.count == 1 ? observed.first : nil)
+        XCTAssertEqual(diagnostic.jsonRejection, .init(reason: .integerLexeme, keyCategory: .choiceIndex))
+        XCTAssertFalse(diagnostic.correctionEligible); XCTAssertFalse(diagnostic.unambiguousJSON)
+        XCTAssertTrue(diagnostic.envelopeShapeValid); XCTAssertTrue(diagnostic.streamShapeAndUsageValid); XCTAssertTrue(diagnostic.knownUsage)
+    }
     func testArgumentDecodeDiagnosticsDistinguishJSONSchemaAndSizeWithoutGrantingCorrection() throws {
         let prepared = try request()
         let cases: [(String, APIModelResponseCodec.ArgumentValidationDiagnostic.Reason)] = [

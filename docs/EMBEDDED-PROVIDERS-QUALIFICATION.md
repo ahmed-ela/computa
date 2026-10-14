@@ -1,5 +1,37 @@
 # Embedded website provider qualification
 
+## Build112 installed outcomes
+
+The fresh matrix attempted four tasks: GPT-OSS's first code/terminal/browser
+task passed in 7.149 seconds with fourteen successful tools; Gemini's first
+browser task passed in 55.812 seconds with six tools, seven verified website
+inferences and confirmed final closure. Both results passed the strict task and
+cleanup checks. Their independent fresh repeats failed: Gemini reached a
+committed Google checkpoint before any adapter or Send in 0.552 seconds;
+GPT-OSS rejected tool arguments before publishing any tool in 2.629 seconds.
+Eight remaining cases were held. The test server was stopped separately.
+
+The exact Gemini view recorded a native server redirect and no previously
+observed allowed Gemini document commit. A subsequent ordinary visible tab also
+showed Google's actual reCAPTCHA while the saved checkpoint was still present.
+That tab is retained pending action-time confirmation. This establishes a
+current ordinary-navigation block; it does not identify Google's trigger or
+establish an old WebKit cause. CAPTCHA prevention remains unresolved.
+
+GPT-OSS's finite diagnostics established a schema mismatch with known usage and
+valid envelope shape, but the whole-envelope JSON scanner refused corrective
+eligibility. A separate reproducible incompatibility was found in the
+[official Cerebras response example](https://inference-docs.cerebras.ai/api-reference/chat-completions):
+the top-level `created` is integral, while `time_info.created` is fractional.
+The scanner applied the root timestamp's integer rule to every nested property
+with the same name. The build113 candidate limits that rule to the root field;
+duplicate-key, counter, size, ownership and correction-budget checks remain.
+All 76 final native checks passed on unchanged Swift source, including the
+documented metadata, the one-correction loopback variants and three bundled-engine
+checks. Installed qualification is pending; build112 remains open for the
+visible CAPTCHA. The preceding diagnostic-only run passed 72 of 73 tests; its
+new fixture's mistaken rejection category is retained and corrected separately.
+
 ## Build111 installed outcomes
 
 Installed build110's Gemini 3.8 Flash browser task passed in 55.475 seconds:

@@ -226,12 +226,17 @@ private struct APICorrectionJSONScanner {
     let bytes: [UInt8]
     var index = 0
     var nodes = 0
+    var rejection: APIModelCorrectionJSON.RejectionDiagnostic?
+    mutating func rejected(_ reason: APIModelCorrectionJSON.RejectionDiagnostic.Reason, key: Data? = nil) -> Invalid {
+        if rejection == nil { rejection = .init(reason: reason, keyCategory: APIModelCorrectionJSON.keyCategory(key)) }
+        return .shape
+    }
     static let integerKeys = Set(["prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens",
         "reasoning_tokens", "input_tokens", "output_tokens", "index", "created"].map { Data($0.utf8) })
     mutating func parse() throws {
-        guard bytes.count <= APIProviderHTTPClient.maximumResponseBytes else { throw Invalid.shape }
+        guard bytes.count <= APIProviderHTTPClient.maximumResponseBytes else { throw rejected(.dataLimit) }
         try value(depth: 0, key: nil); whitespace()
-        guard index == bytes.count else { throw Invalid.shape }
+        guard index == bytes.count else { throw rejected(.trailingContent) }
     }
     mutating func whitespace() {
         while index < bytes.count, [9, 10, 13, 32].contains(bytes[index]) { index += 1 }
@@ -241,39 +246,41 @@ private struct APICorrectionJSONScanner {
     }
     mutating func string(decoded: Bool) throws -> Data {
         let start = index
-        guard consume(34) else { throw Invalid.shape }
+        guard consume(34) else { throw rejected(.stringSyntax) }
         while index < bytes.count {
             let byte = bytes[index]; index += 1
-            if byte == 92 { guard index < bytes.count else { throw Invalid.shape }; index += 1 }
+            if byte == 92 { guard index < bytes.count else { throw rejected(.stringSyntax) }; index += 1 }
             else if byte == 34 {
                 guard decoded else { return Data() }
                 let token = Data(bytes[start..<index])
-                guard let text = try JSONSerialization.jsonObject(with: token, options: [.fragmentsAllowed]) as? String else { throw Invalid.shape }
+                guard let text = try JSONSerialization.jsonObject(with: token, options: [.fragmentsAllowed]) as? String else { throw rejected(.stringSyntax) }
                 return Data(text.utf8)
             }
         }
-        throw Invalid.shape
+        throw rejected(.stringSyntax)
     }
     mutating func value(depth: Int, key: Data?) throws {
         nodes += 1; whitespace()
-        guard depth <= 64, nodes <= 16_384, index < bytes.count else { throw Invalid.shape }
+        guard depth <= 64, nodes <= 16_384, index < bytes.count else {
+            throw rejected(depth > 64 ? .depthLimit : nodes > 16_384 ? .nodeLimit : .unexpectedEnd, key: key)
+        }
         if consume(123) {
             var keys = Set<Data>(); whitespace()
             if consume(125) { return }
             repeat {
                 whitespace(); let name = try string(decoded: true)
-                guard keys.insert(name).inserted else { throw Invalid.shape }; whitespace()
-                guard consume(58) else { throw Invalid.shape }
+                guard keys.insert(name).inserted else { throw rejected(.duplicateKey, key: name) }; whitespace()
+                guard consume(58) else { throw rejected(.objectSeparator, key: name) }
                 try value(depth: depth + 1, key: name); whitespace()
                 if consume(125) { return }
-                guard consume(44) else { throw Invalid.shape }
+                guard consume(44) else { throw rejected(.objectSeparator, key: name) }
             } while true
         }
         if consume(91) {
             whitespace(); if consume(93) { return }
             repeat {
                 try value(depth: depth + 1, key: nil); whitespace()
-                if consume(93) { return }; guard consume(44) else { throw Invalid.shape }
+                if consume(93) { return }; guard consume(44) else { throw rejected(.arraySeparator, key: key) }
             } while true
         }
         if bytes[index] == 34 { _ = try string(decoded: false); return }
@@ -282,14 +289,50 @@ private struct APICorrectionJSONScanner {
         }
         let start = index
         while index < bytes.count, [45, 43, 46, 69, 101].contains(bytes[index]) || (48...57).contains(bytes[index]) { index += 1 }
-        guard start < index else { throw Invalid.shape }
-        if let key, Self.integerKeys.contains(key) {
+        guard start < index else { throw rejected(.valueSyntax, key: key) }
+        // Only the envelope's created field is an integer timestamp. Provider
+        // extensions can contain unrelated fractional created timing metadata.
+        if let key, Self.integerKeys.contains(key), key != Data("created".utf8) || depth == 1 {
             let raw = bytes[start..<index]
-            guard raw.count <= 16, raw.allSatisfy({ (48...57).contains($0) }) else { throw Invalid.shape }
+            guard raw.count <= 16, raw.allSatisfy({ (48...57).contains($0) }) else {
+                throw rejected(raw.count > 16 ? .integerLength : .integerLexeme, key: key)
+            }
         }
     }
 }
 enum APIModelCorrectionJSON {
+    struct RejectionDiagnostic: Codable, Equatable, Sendable {
+        enum Reason: String, Codable, Equatable, Sendable {
+            case dataLimit = "data_limit", foundationJSON = "foundation_json"
+            case depthLimit = "depth_limit", nodeLimit = "node_limit", unexpectedEnd = "unexpected_end"
+            case trailingContent = "trailing_content", duplicateKey = "duplicate_key"
+            case integerLength = "integer_length", integerLexeme = "integer_lexeme", stringSyntax = "string_syntax"
+            case objectSeparator = "object_separator", arraySeparator = "array_separator", valueSyntax = "value_syntax"
+            case unknown
+        }
+        enum KeyCategory: String, Codable, Equatable, Sendable {
+            case none, usageCounter = "usage_counter", choiceIndex = "choice_index", createdTimestamp = "created_timestamp", other
+        }
+        let reason: Reason
+        let keyCategory: KeyCategory
+    }
+    fileprivate static func keyCategory(_ key: Data?) -> RejectionDiagnostic.KeyCategory {
+        guard let key else { return .none }
+        if key == Data("created".utf8) { return .createdTimestamp }
+        if key == Data("index".utf8) { return .choiceIndex }
+        if APICorrectionJSONScanner.integerKeys.contains(key) { return .usageCounter }
+        return .other
+    }
+    /// A second diagnostic pass after the authoritative Boolean has rejected the
+    /// data. This returns enums only and cannot admit a response or spend a retry.
+    static func rejectionDiagnostic(_ data: Data) -> RejectionDiagnostic? {
+        guard data.count <= APIProviderHTTPClient.maximumResponseBytes else { return .init(reason: .dataLimit, keyCategory: .none) }
+        do { _ = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) }
+        catch { return .init(reason: .foundationJSON, keyCategory: .none) }
+        var scanner = APICorrectionJSONScanner(bytes: Array(data))
+        do { try scanner.parse(); return nil }
+        catch { return scanner.rejection ?? .init(reason: .unknown, keyCategory: .none) }
+    }
     static func isUnambiguous(_ data: Data) -> Bool {
         do {
             guard data.count <= APIProviderHTTPClient.maximumResponseBytes else { return false }

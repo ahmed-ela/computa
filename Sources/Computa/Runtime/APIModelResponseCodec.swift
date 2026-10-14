@@ -83,6 +83,7 @@ enum APIModelResponseCodec {
         }
         let reason: Reason
         var envelopeRejection: EnvelopeRejection? = nil
+        var jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic? = nil
         let callCount: Int
         let rejectedCount: Int
         let envelopeShapeValid: Bool
@@ -546,12 +547,13 @@ enum APIModelResponseCodec {
         let envelope: [String: Any], textDeltas: [String], argumentDeltas: [[String]]
         let rawCorrectionEligible: Bool, envelopeShapeValid: Bool, unambiguousJSON: Bool, streamShapeAndUsageValid: Bool
         let envelopeRejection: ArgumentValidationDiagnostic.EnvelopeRejection?
+        let jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic?
         if result.contentType.contains("text/event-stream") {
-            let assembled = try assembleChatStream(result.body)
+            let assembled = try assembleChatStream(result.body, diagnostics: onArgumentRejection != nil)
             envelope = assembled.object; textDeltas = assembled.text; argumentDeltas = assembled.arguments
             rawCorrectionEligible = assembled.correctionEligible
             envelopeShapeValid = assembled.envelopeShapeValid; unambiguousJSON = assembled.unambiguousJSON
-            envelopeRejection = assembled.envelopeRejection
+            envelopeRejection = assembled.envelopeRejection; jsonRejection = assembled.jsonRejection
             streamShapeAndUsageValid = assembled.streamShapeAndUsageValid
         } else {
             guard let object = try JSONSerialization.jsonObject(with: result.body) as? [String: Any] else { throw Failure.invalidResponse }
@@ -559,6 +561,7 @@ enum APIModelResponseCodec {
             envelopeShapeValid = correctionEnvelopeShape(object, streaming: false)
             envelopeRejection = envelopeShapeValid ? nil : correctionEnvelopeRejection(object, streaming: false)
             unambiguousJSON = APIModelCorrectionJSON.isUnambiguous(result.body)
+            jsonRejection = unambiguousJSON || onArgumentRejection == nil ? nil : APIModelCorrectionJSON.rejectionDiagnostic(result.body)
             streamShapeAndUsageValid = true
             rawCorrectionEligible = envelopeShapeValid && unambiguousJSON
         }
@@ -602,7 +605,7 @@ enum APIModelResponseCodec {
         }
         func emitArgumentRejection(oversized: Bool = false) {
             guard let reason = rejectionReason else { return }
-            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, callCount: validatedCalls.count, rejectedCount: rejectedCount,
+            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, jsonRejection: jsonRejection, callCount: validatedCalls.count, rejectedCount: rejectedCount,
                 envelopeShapeValid: envelopeShapeValid, unambiguousJSON: unambiguousJSON,
                 streamShapeAndUsageValid: streamShapeAndUsageValid, knownUsage: correctionUsage(normalizedUsage) != nil,
                 correctionEligible: rawCorrectionEligible && correctionUsage(normalizedUsage) != nil && !oversized))
@@ -708,6 +711,7 @@ enum APIModelResponseCodec {
         let object: [String: Any]; let text: [String]; let arguments: [[String]]; let correctionEligible: Bool
         let envelopeShapeValid: Bool; let unambiguousJSON: Bool; let streamShapeAndUsageValid: Bool
         let envelopeRejection: ArgumentValidationDiagnostic.EnvelopeRejection?
+        let jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic?
     }
     private static func correctionEnvelopeShape(_ value: [String: Any], streaming: Bool) -> Bool {
         guard absent(value["error"]), let id = value["id"] as? String, !id.isEmpty, id.utf8.count <= 256,
@@ -751,13 +755,14 @@ enum APIModelResponseCodec {
         } else if !absent(delta["tool_calls"]) { return false }
         return true
     }
-    private static func assembleChatStream(_ data: Data) throws -> ChatStream {
+    private static func assembleChatStream(_ data: Data, diagnostics: Bool = false) throws -> ChatStream {
         guard let string = String(data: data, encoding: .utf8) else { throw Failure.invalidResponse }
         var done = false, model: String?, id: String?, role: String?, finish: String?, usage: Any?
         var text: [String] = [], reasoning = "", calls: [Int: (id: String, name: String, arguments: [String])] = [:]
         var correctionEligible = true, previousUsage: Data?
         var envelopeShapeValid = true, unambiguousJSON = true, streamShapeAndUsageValid = true
         var envelopeRejection: ArgumentValidationDiagnostic.EnvelopeRejection?
+        var jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic?
         for event in string.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n\n") {
             let payload = event.components(separatedBy: "\n").filter { $0.hasPrefix("data:") }.map { String($0.dropFirst(5)).trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
             if payload.isEmpty { continue }
@@ -769,6 +774,7 @@ enum APIModelResponseCodec {
             let shapeValid = correctionEnvelopeShape(chunk, streaming: true), unambiguous = APIModelCorrectionJSON.isUnambiguous(chunkData)
             envelopeShapeValid = envelopeShapeValid && shapeValid; unambiguousJSON = unambiguousJSON && unambiguous
             if !shapeValid, envelopeRejection == nil { envelopeRejection = correctionEnvelopeRejection(chunk, streaming: true) }
+            if diagnostics, !unambiguous, jsonRejection == nil { jsonRejection = APIModelCorrectionJSON.rejectionDiagnostic(chunkData) }
             correctionEligible = correctionEligible && shapeValid && unambiguous
             if !absent(chunk["usage"]) {
                 if let normalized = try? Self.usage(chunk["usage"], responses: false), let bytes = try? json(normalized) {
@@ -813,7 +819,7 @@ enum APIModelResponseCodec {
         return ChatStream(object: ["id": id, "model": model, "choices": [["index": 0, "message": message, "finish_reason": finish]], "usage": usage ?? NSNull()],
                           text: text, arguments: (0..<calls.count).map { calls[$0]!.arguments }, correctionEligible: correctionEligible,
                           envelopeShapeValid: envelopeShapeValid, unambiguousJSON: unambiguousJSON, streamShapeAndUsageValid: streamShapeAndUsageValid,
-                          envelopeRejection: envelopeRejection)
+                          envelopeRejection: envelopeRejection, jsonRejection: jsonRejection)
     }
 
     /// An admitted streaming request that received an upstream 429 terminates with
