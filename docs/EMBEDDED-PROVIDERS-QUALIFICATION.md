@@ -1,5 +1,42 @@
 # Embedded website provider qualification
 
+## Build117 V32 installed outcomes
+
+Signed Computa 0.7.0 (117), source `95587e82`, is installed and running.
+All 54 bundle files and 50 resources match the retained signed build.
+The Cerebras selector still offers only GPT-OSS; the Qwen3.8 27B source flag
+remains disabled with higher token usage documented as its temporary rationale.
+
+V32 prepared twelve fresh cases and attempted two Gemini 3.8 Flash browser
+tasks: one strict clean pass, one verification block and ten held cases.
+The first task completed six successful native calls, one accepted form
+submission and the exact final result in 52.585 seconds. Seven verified
+website inferences shared one temporary conversation; both the explicit
+task-tab close and final website closure were confirmed.
+
+The fresh repeat stopped after 0.764 seconds, with zero tools and no verified
+website submission or completed inference. Its canonical native failure is
+`website_verification_required`, `retryable=false`, with the required action
+`complete_website_verification`. A separate fresh ordinary navigation to the
+same Gemini home route also showed Google's unusual-traffic CAPTCHA. The
+untouched private view's later `closed/not_created` disposal is recorded
+separately; it does not qualify the failed task. No challenge was completed.
+The trigger and permanent CAPTCHA prevention remain unresolved.
+
+A separate unarmed ChatGPT Instant marker health check failed message ownership
+in 12.356 seconds, before any tool or completed inference. Its website cleanup
+remains unconfirmed, and the check is outside the twelve-case matrix. The
+aggregate context diagnostic cannot identify the original failed conjunct;
+unbound first-message pointers do not establish a physical remount. No ChatGPT
+retry, inspection arm or Safari setting change followed.
+
+The fixture server stopped with terminal exit zero, a final stop event and its
+process and listener gone. Both Root-created ordinary control tabs were closed
+and the browser pane restored to its prior hidden state. A duplicate install
+backup was removed only after all 54 files matched the retained signed original.
+These cleanup actions do not upgrade failed model-conversation cleanup.
+The broader reliability goal remains open; no merge or release was performed.
+
 ## Build116 V31 Gemini diagnosis and build117 preparation
 
 The fresh V31 Gemini 3.8 Flash browser task reached four successful browser
