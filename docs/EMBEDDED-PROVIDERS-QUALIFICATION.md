@@ -1,5 +1,47 @@
 # Embedded website provider qualification
 
+## Build115 installed outcomes and build116 preparation
+
+The fresh matrix attempted two tasks: zero clean passes, two failures and ten
+held without dispatch. GPT-OSS rejected the tools parameter in 0.307 seconds,
+before publishing any tool. The strict-decoding candidate is therefore being
+removed; the next build restores the previously accepted wire format while
+retaining bounded schema feedback and authoritative native validation. The
+specific vendor constraint is unresolved: the primary schema and migration
+documentation disagree about optional fields, and no detailed rejection was
+retained. Static schema eligibility did not establish compatibility.
+
+ChatGPT Instant in normal Chat completed browser open and read, then timed out
+on its third website response after 330.024 seconds overall. The terminal
+progress record had three verified user submissions, verified model evidence,
+current owned view and document, and no pending submission. Its last inspect
+still showed busy, two assistants, zero current response text and no recognized
+load failure. Native hosting was attached, nonhidden, visible and nonoccluded;
+adapter phases and DOM notifications were still arriving near the deadline.
+This localizes the observed stall after local admission, without establishing
+frontend transport versus model generation. One prior completed conversation
+fetch was observed; the third had no ended timing entry, which is inconclusive
+for an unfinished stream.
+
+A separate marker-only GPT-OSS diagnostic message also received invalid tools
+with zero native calls. It did not replay or qualify the original task. The
+exact-task private arm was consumed but no rejection record was saved. Existing
+projection and record bounds are already 7 KiB and 8 KiB; an oversized record is
+not an established cause. The build116 candidate records finite disposition
+only after a validated private arm and at its existing capture/publication
+guards. It exposes no paths, identities, provider text or values and changes
+neither record bytes, limits, filesystem guards nor replay authority. All 89
+selected API, private-capture and bundled-engine tests passed on unchanged
+source. This does not establish a build116 live provider result.
+
+The owned fixture process and listener were stopped. Neither failed task gains
+model conversation or task-tab closure proof. Build114, which includes the
+requested Cerebras selector filter, was restored for availability; all 54
+installed files match the retained signed bundle. The next candidate is still
+being prepared. Gemini remains held; no CAPTCHA was completed
+and no permanent prevention or old-WebKit cause has been established. The
+build115 strict candidate has not been pushed.
+
 ## Build114 installed outcomes and build115 preparation
 
 Five fresh tasks were attempted; two passed cleanly and three failed. Seven

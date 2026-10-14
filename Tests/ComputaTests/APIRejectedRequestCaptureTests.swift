@@ -4,6 +4,110 @@ import XCTest
 @testable import Computa
 
 final class APIRejectedRequestCaptureTests: XCTestCase {
+    func testManuallyArmedDispositionPreservesFullRecordAndEscapedDiagnosticBounds() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let task = UUID(), thread = UUID(), turn = UUID(), observations = DispositionRecorder()
+        try fixture.arm(task: task, thread: thread)
+        let ticket = try XCTUnwrap(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread, turnID: turn,
+            onDisposition: { observations.append($0) }))
+        let escaped = "PRIVATE_PRIMARY_REASON " + String(repeating: "\u{0}🙂", count: 400)
+        let body = try JSONSerialization.data(withJSONObject: ["error": ["message": escaped, "type": escaped]])
+        let diagnostic = APIProviderHTTPClient.rejectionDiagnostic(status: 400, body: body, modelID: "fixture-model", key: "fixture-secret")
+        XCTAssertEqual(diagnostic.envelope, "wrapped_object")
+        XCTAssertTrue(diagnostic.error?.message?.hasPrefix("PRIVATE_PRIMARY_REASON ") == true)
+        XCTAssertLessThanOrEqual(try JSONEncoder().encode(diagnostic).count, 7_168)
+        ticket.capture(diagnostic)
+        let bytes = try Data(contentsOf: fixture.output)
+        XCTAssertLessThanOrEqual(bytes.count, APIRejectedRequestCapture.maximumRecordBytes)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        let original = try JSONSerialization.jsonObject(with: JSONEncoder().encode(diagnostic)) as? NSDictionary
+        XCTAssertEqual(record["diagnostic"] as? NSDictionary, original, "Observability must not change the private wire record")
+        XCTAssertEqual(record["taskID"] as? String, task.uuidString.lowercased())
+        XCTAssertEqual(record["threadID"] as? String, thread.uuidString.lowercased())
+        XCTAssertEqual(record["turnID"] as? String, turn.uuidString.lowercased())
+        XCTAssertEqual(observations.values.map(\.disposition), [.armConsumed, .captureStarted, .published])
+        XCTAssertNil(observations.values[1].byteCount)
+        XCTAssertEqual(observations.values.last?.byteCount, bytes.count)
+        let finite = String(decoding: try JSONEncoder().encode(observations.values), as: UTF8.self)
+        for privateValue in ["PRIVATE", "fixture-secret", task.uuidString.lowercased(), thread.uuidString.lowercased(), turn.uuidString.lowercased(), fixture.directory.path] {
+            XCTAssertFalse(finite.contains(privateValue))
+        }
+        ticket.capture(diagnostic)
+        XCTAssertEqual(observations.values.last?.disposition, .alreadyUsed)
+        XCTAssertEqual(try Data(contentsOf: fixture.output), bytes)
+    }
+
+    func testArmedCaptureObservesDirectoryReplacementWithoutPublishingIntoEitherDirectory() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let task = UUID(), thread = UUID(), turn = UUID(), observations = DispositionRecorder()
+        try fixture.arm(task: task, thread: thread)
+        let ticket = try XCTUnwrap(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread, turnID: turn,
+            onDisposition: { observations.append($0) }))
+        let moved = fixture.root.appendingPathComponent("replaced-private-directory")
+        try FileManager.default.moveItem(at: fixture.directory, to: moved)
+        try FileManager.default.createDirectory(at: fixture.directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let diagnostic = APIProviderHTTPClient.rejectionDiagnostic(status: 400, body: Data(#"{"message":"PRIVATE_REASON"}"#.utf8), modelID: "fixture-model", key: "fixture-secret")
+        ticket.capture(diagnostic)
+        XCTAssertEqual(observations.values.map(\.disposition), [.armConsumed, .captureStarted, .directoryChanged])
+        XCTAssertGreaterThan(try XCTUnwrap(observations.values.last?.byteCount), 0)
+        XCTAssertFalse(fixture.exists(fixture.output))
+        XCTAssertFalse(fixture.exists(moved.appendingPathComponent("rejected-request.json")))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: moved.path).isEmpty)
+    }
+
+    func testArmedCaptureObservesExclusivePublicationFailureAndPreservesExistingOutput() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let task = UUID(), thread = UUID(), turn = UUID(), observations = DispositionRecorder()
+        try fixture.arm(task: task, thread: thread)
+        let ticket = try XCTUnwrap(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread, turnID: turn,
+            onDisposition: { observations.append($0) }))
+        let preserved = Data("PRIVATE_EXISTING_OUTPUT".utf8)
+        try fixture.write(preserved, to: fixture.output)
+        let diagnostic = APIProviderHTTPClient.rejectionDiagnostic(status: 400, body: Data(#"{"message":"PRIVATE_REASON"}"#.utf8), modelID: "fixture-model", key: "fixture-secret")
+        ticket.capture(diagnostic)
+        XCTAssertEqual(observations.values.map(\.disposition), [.armConsumed, .captureStarted, .renameFailed])
+        XCTAssertEqual(try Data(contentsOf: fixture.output), preserved)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path), ["rejected-request.json"], "The temporary output must still be cleaned up")
+    }
+
+    func testCaptureOversizeDispositionKeepsExistingLimitAndPublishesNothing() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let task = UUID(), thread = UUID(), turn = UUID(), observations = DispositionRecorder()
+        try fixture.arm(task: task, thread: thread)
+        let ticket = try XCTUnwrap(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread, turnID: turn,
+            onDisposition: { observations.append($0) }))
+        // Directly construct an over-limit fixture. Production HTTP diagnostics
+        // already have their independent 7168-byte guard; it is unchanged.
+        let diagnostic = APIProviderHTTPClient.RejectionDiagnostic(httpStatus: 400, modelID: "fixture-model", envelope: "bare_object",
+            error: .init(message: String(repeating: "\u{0}", count: 4_000), type: nil, code: nil, param: nil), details: [], requestSummary: nil)
+        ticket.capture(diagnostic)
+        XCTAssertEqual(observations.values.map(\.disposition), [.armConsumed, .captureStarted, .recordTooLarge])
+        XCTAssertEqual(observations.values.last?.byteCount, APIRejectedRequestCapture.maximumRecordBytes + 1, "8193 is only a bounded over-limit sentinel")
+        XCTAssertFalse(fixture.exists(fixture.output))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).isEmpty)
+    }
+
+    func testUnarmedMalformedAndForeignAdmissionCannotEmitCaptureDispositions() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let task = UUID(), thread = UUID(), turn = UUID(), observations = DispositionRecorder()
+        let observer: APIRejectedRequestCapture.DispositionObserver = { observations.append($0) }
+        XCTAssertNil(APIRejectedRequestCapture.consume(directory: nil, taskID: task, threadID: thread, turnID: turn, onDisposition: observer))
+        XCTAssertNil(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread, turnID: turn, onDisposition: observer))
+        try fixture.arm(task: task, thread: thread)
+        XCTAssertNil(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: UUID(), threadID: thread, turnID: turn, onDisposition: observer))
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.armFile.path)
+        XCTAssertNil(APIRejectedRequestCapture.consume(directory: fixture.directory, taskID: task, threadID: thread, turnID: turn, onDisposition: observer))
+        XCTAssertTrue(observations.values.isEmpty)
+        XCTAssertTrue(fixture.exists(fixture.armFile)); XCTAssertFalse(fixture.exists(fixture.output))
+    }
+
+    private final class DispositionRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var retained: [APIRejectedRequestCapture.Observation] = []
+        func append(_ value: APIRejectedRequestCapture.Observation) { lock.withLock { retained.append(value) } }
+        var values: [APIRejectedRequestCapture.Observation] { lock.withLock { retained } }
+    }
+
     func testBareWrappedAndStringErrorsHaveSameFiniteClassification() throws {
         let fields = ["param": "messages[0].content", "message": "fixture-secret"]
         let envelopes: [[String: Any]] = [fields, ["error": fields]]

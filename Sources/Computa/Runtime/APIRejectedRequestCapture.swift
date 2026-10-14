@@ -1,11 +1,33 @@
 import Darwin
 import Foundation
+import OSLog
 
 /// Private, manually armed diagnostics. No directory creation, permission repair,
 /// default telemetry, request-body capture, or retry authority lives here.
 enum APIRejectedRequestCapture {
     static let maximumRecordBytes = 8_192
     private static let maximumArmBytes = 512
+    enum Disposition: String, Codable, Equatable, Sendable {
+        case armUnlinkFailed = "arm_unlink_failed", armDirectorySyncFailed = "arm_directory_sync_failed", armConsumed = "arm_consumed"
+        case captureStarted = "capture_started", alreadyUsed = "already_used", encodeFailed = "encode_failed", recordTooLarge = "record_too_large"
+        case directoryChanged = "directory_changed", openFailed = "open_failed", chmodFailed = "chmod_failed", writeFailed = "write_failed"
+        case fileSyncFailed = "file_sync_failed", fileMetadataInvalid = "file_metadata_invalid", renameFailed = "rename_failed"
+        case published = "published", publishedDirectorySyncFailed = "published_directory_sync_failed"
+    }
+    struct Observation: Codable, Equatable, Sendable {
+        let disposition: Disposition
+        /// nil means not encoded/unknown; 8193 is an over-limit sentinel.
+        let byteCount: Int?
+    }
+    typealias DispositionObserver = @Sendable (Observation) -> Void
+    private static let dispositionLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "APIRequestCapture")
+    private static func observe(_ disposition: Disposition, byteCount: Int? = nil, observer: DispositionObserver?) {
+        let boundedCount = byteCount.map { min(max(0, $0), maximumRecordBytes + 1) }
+        observer?(.init(disposition: disposition, byteCount: boundedCount))
+        // Only a valid private arm or its resulting ticket reaches this logger.
+        // -1 denotes unknown; no file paths, native IDs or provider fields enter it.
+        dispositionLog.notice("captureDisposition disposition=\(disposition.rawValue, privacy: .public) byteCount=\(boundedCount ?? -1)")
+    }
 
     final class Ticket: @unchecked Sendable {
         private let lock = NSLock()
@@ -14,14 +36,18 @@ enum APIRejectedRequestCapture {
         private let descriptor: Int32
         private let initial: stat
         private let taskID: UUID, threadID: UUID, turnID: UUID
-        fileprivate init(directory: URL, descriptor: Int32, initial: stat, taskID: UUID, threadID: UUID, turnID: UUID) {
+        private let dispositionObserver: DispositionObserver?
+        fileprivate init(directory: URL, descriptor: Int32, initial: stat, taskID: UUID, threadID: UUID, turnID: UUID,
+                         dispositionObserver: DispositionObserver?) {
             self.directory = directory; self.descriptor = descriptor; self.initial = initial
             self.taskID = taskID; self.threadID = threadID; self.turnID = turnID
+            self.dispositionObserver = dispositionObserver
         }
         deinit { close(descriptor) }
         func capture(_ diagnostic: APIProviderHTTPClient.RejectionDiagnostic) {
             lock.lock(); defer { lock.unlock() }
-            guard !used else { return }; used = true
+            guard !used else { observe(.alreadyUsed, observer: dispositionObserver); return }; used = true
+            observe(.captureStarted, observer: dispositionObserver)
             struct Record: Encodable {
                 let version = 1
                 let taskID: String, threadID: String, turnID: String
@@ -30,31 +56,44 @@ enum APIRejectedRequestCapture {
             }
             let record = Record(taskID: taskID.uuidString.lowercased(), threadID: threadID.uuidString.lowercased(),
                                 turnID: turnID.uuidString.lowercased(), diagnostic: diagnostic)
-            guard let bytes = try? JSONEncoder().encode(record), bytes.count <= maximumRecordBytes,
-                  directoryStillMatches(directory, descriptor: descriptor, initial: initial) else { return }
+            guard let bytes = try? JSONEncoder().encode(record) else { observe(.encodeFailed, observer: dispositionObserver); return }
+            guard bytes.count <= maximumRecordBytes else { observe(.recordTooLarge, byteCount: bytes.count, observer: dispositionObserver); return }
+            guard directoryStillMatches(directory, descriptor: descriptor, initial: initial) else {
+                observe(.directoryChanged, byteCount: bytes.count, observer: dispositionObserver); return
+            }
             let temporary = ".rejected-request-" + UUID().uuidString.lowercased() + ".tmp"
             let output = openat(descriptor, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard output >= 0 else { return }
+            guard output >= 0 else { observe(.openFailed, byteCount: bytes.count, observer: dispositionObserver); return }
             defer {
                 var held = stat(), named = stat()
                 if fstat(output, &held) == 0, fstatat(descriptor, temporary, &named, AT_SYMLINK_NOFOLLOW) == 0,
                    sameUnchangedFile(held, named) { _ = unlinkat(descriptor, temporary, 0) }
                 close(output)
             }
-            guard fchmod(output, 0o600) == 0, writeAll(bytes, descriptor: output), fsync(output) == 0,
-                  directoryStillMatches(directory, descriptor: descriptor, initial: initial) else { return }
+            guard fchmod(output, 0o600) == 0 else { observe(.chmodFailed, byteCount: bytes.count, observer: dispositionObserver); return }
+            guard writeAll(bytes, descriptor: output) else { observe(.writeFailed, byteCount: bytes.count, observer: dispositionObserver); return }
+            guard fsync(output) == 0 else { observe(.fileSyncFailed, byteCount: bytes.count, observer: dispositionObserver); return }
+            guard directoryStillMatches(directory, descriptor: descriptor, initial: initial) else {
+                observe(.directoryChanged, byteCount: bytes.count, observer: dispositionObserver); return
+            }
             var written = stat(), named = stat()
             guard fstat(output, &written) == 0, privateFile(written), written.st_size == bytes.count,
-                  fstatat(descriptor, temporary, &named, AT_SYMLINK_NOFOLLOW) == 0, sameUnchangedFile(written, named),
-                  renameatx_np(descriptor, temporary, descriptor, "rejected-request.json", UInt32(RENAME_EXCL)) == 0 else { return }
-            _ = fsync(descriptor)
+                  fstatat(descriptor, temporary, &named, AT_SYMLINK_NOFOLLOW) == 0, sameUnchangedFile(written, named) else {
+                observe(.fileMetadataInvalid, byteCount: bytes.count, observer: dispositionObserver); return
+            }
+            guard renameatx_np(descriptor, temporary, descriptor, "rejected-request.json", UInt32(RENAME_EXCL)) == 0 else {
+                observe(.renameFailed, byteCount: bytes.count, observer: dispositionObserver); return
+            }
+            let synced = fsync(descriptor) == 0 // Preserve the existing non-fatal final directory sync.
+            observe(synced ? .published : .publishedDirectorySyncFailed, byteCount: bytes.count, observer: dispositionObserver)
         }
     }
 
     /// Called only after authenticated native turn admission and request validation,
     /// immediately before its sole upstream dispatch. A successful request also
     /// consumes the arm, so it cannot authorize another turn accidentally.
-    static func consume(directory: URL?, taskID: UUID, threadID: UUID, turnID: UUID) -> Ticket? {
+    static func consume(directory: URL?, taskID: UUID, threadID: UUID, turnID: UUID,
+                        onDisposition: DispositionObserver? = nil) -> Ticket? {
         guard let directory else { return nil }
         let descriptor = openDirectoryWithoutSymlinks(directory)
         guard descriptor >= 0 else { return nil }
@@ -94,10 +133,12 @@ enum APIRejectedRequestCapture {
               fstatat(descriptor, claimed, &named, AT_SYMLINK_NOFOLLOW) == 0, sameUnchangedFile(after, named) else {
             _ = renameatx_np(descriptor, claimed, descriptor, "arm.json", UInt32(RENAME_EXCL)); return nil
         }
-        guard unlinkat(descriptor, claimed, 0) == 0 else { return nil }
-        _ = fsync(descriptor)
+        guard unlinkat(descriptor, claimed, 0) == 0 else { observe(.armUnlinkFailed, byteCount: bytes.count, observer: onDisposition); return nil }
+        if fsync(descriptor) != 0 { observe(.armDirectorySyncFailed, byteCount: bytes.count, observer: onDisposition) }
+        observe(.armConsumed, byteCount: bytes.count, observer: onDisposition)
         transferred = true
-        return Ticket(directory: directory, descriptor: descriptor, initial: directoryInfo, taskID: taskID, threadID: threadID, turnID: turnID)
+        return Ticket(directory: directory, descriptor: descriptor, initial: directoryInfo, taskID: taskID, threadID: threadID, turnID: turnID,
+                      dispositionObserver: onDisposition)
     }
     private static func openDirectoryWithoutSymlinks(_ url: URL) -> Int32 {
         guard url.isFileURL, url.path.hasPrefix("/") else { return -1 }

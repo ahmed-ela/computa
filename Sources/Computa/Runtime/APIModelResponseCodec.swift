@@ -259,14 +259,7 @@ enum APIModelResponseCodec {
         } else {
             body = ["model": selection.model.id, "messages": history.messages, "stream": stream, "n": 1]
             if !tools.isEmpty {
-                let formatType = ((raw["text"] as? [String: Any])?["format"] as? [String: Any])?["type"] as? String ?? "text"
-                // The harness's generic Responses strict flag is not a vendor decoding opt-out; native argument validation still owns acceptance.
-                let strictRoute = selection.provider.isCerebrasInference && selection.model.id == "gpt-oss-120b" && formatType == "text"
-                body["tools"] = try tools.map { tool in
-                    var function: [String: Any] = ["name": tool.wireName, "description": try chatCompletionToolDescription(tool), "parameters": tool.schema]
-                    if strictRoute && cerebrasStrictParametersCompatible(tool.schema) { function["strict"] = true }
-                    return ["type": "function", "function": function] as [String: Any]
-                }
+                body["tools"] = try tools.map { ["type": "function", "function": ["name": $0.wireName, "description": try chatCompletionToolDescription($0), "parameters": $0.schema]] as [String: Any] }
                 body["tool_choice"] = wireChoice
                 body["parallel_tool_calls"] = parallel
             } else if required { throw Failure.invalidTool }
@@ -360,56 +353,6 @@ enum APIModelResponseCodec {
                 "presence_penalty": 0, "frequency_penalty": 0, "top_logprobs": 0, "reasoning": reasoning,
                 "max_output_tokens": raw["max_output_tokens"] ?? NSNull(), "max_tool_calls": raw["max_tool_calls"] ?? NSNull(), "store": false, "background": false,
                 "service_tier": "default", "metadata": metadata, "safety_identifier": NSNull(), "prompt_cache_key": NSNull()]
-    }
-
-    /// Conservative intersection of native validation and Cerebras' documented
-    /// strict subset. Never rewrite a parameter, add a required field or drop a
-    /// tool. Unsupported/uncertain contracts simply omit the strict flag.
-    /// Sources: capabilities/tool-use and capabilities/structured-outputs.
-    private static func cerebrasStrictParametersCompatible(_ root: [String: Any]) -> Bool {
-        var textCharacters = 0, propertyCount = 0, enumCount = 0, nodes = 0
-        let annotations: Set<String> = ["description", "title", "default"]
-        let supported: Set<String> = ["type", "properties", "required", "additionalProperties", "items", "enum", "const", "anyOf",
-            "description", "title", "default", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]
-        func count(_ string: String) -> Bool { textCharacters += string.unicodeScalars.count; return textCharacters <= 5_000 }
-        func primitive(_ value: Any) -> Bool {
-            if value is NSNull || value is String { return true }
-            return (value as? NSNumber)?.doubleValue.isFinite == true
-        }
-        func visit(_ schema: [String: Any], depth: Int) -> Bool {
-            nodes += 1
-            guard depth <= 10, nodes <= 2_048, Set(schema.keys).isSubset(of: supported) else { return false }
-            if let branches = schema["anyOf"] as? [[String: Any]] {
-                guard depth > 1, !branches.isEmpty, branches.count <= 32,
-                      Set(schema.keys).isSubset(of: annotations.union(["anyOf"])) else { return false }
-                return branches.allSatisfy { visit($0, depth: depth + 1) }
-            }
-            guard let type = schema["type"] as? String, ["object","array","string","number","integer","boolean","null"].contains(type) else { return false }
-            if let values = schema["enum"] as? [Any] {
-                enumCount += values.count
-                guard !values.isEmpty, enumCount <= 500, values.allSatisfy({ primitive($0) && typeMatches($0, type: type) }) else { return false }
-                var enumCharacters = 0
-                for value in values { if let string = value as? String { enumCharacters += string.unicodeScalars.count; if !count(string) { return false } } }
-                if values.count > 250 && enumCharacters > 7_500 { return false }
-            }
-            if let value = schema["const"] {
-                guard primitive(value), typeMatches(value, type: type) else { return false }
-                if let string = value as? String, !count(string) { return false }
-            }
-            if ["minimum","maximum","exclusiveMinimum","exclusiveMaximum"].contains(where: { schema[$0] != nil }), !["number","integer"].contains(type) { return false }
-            if type == "object" {
-                guard strictBool(schema["additionalProperties"]) == false, let properties = schema["properties"] as? [String: [String: Any]] else { return false }
-                propertyCount += properties.count; guard propertyCount <= 500 else { return false }
-                if let required = schema["required"] as? [String], !Set(required).isSubset(of: Set(properties.keys)) { return false }
-                for name in properties.keys.sorted() { if !count(name) || !visit(properties[name]!, depth: depth + 1) { return false } }
-            } else if schema["properties"] != nil || schema["required"] != nil || schema["additionalProperties"] != nil { return false }
-            if type == "array" {
-                guard let item = schema["items"] as? [String: Any], visit(item, depth: depth + 1) else { return false }
-            } else if schema["items"] != nil { return false }
-            return true
-        }
-        guard root["type"] as? String == "object", root["anyOf"] == nil else { return false }
-        return visit(root, depth: 1)
     }
 
     private static func chatCompletionToolDescription(_ tool: Tool) throws -> String {
