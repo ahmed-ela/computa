@@ -66,6 +66,8 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var resolvedProfileID: UUID?
     @ObservationIgnored private var transientHumanVerificationCheckpoints: [String: UUID] = [:]
+    @ObservationIgnored private var transientRecoveryReports: [String: EmbeddedHumanVerificationStore.RecoveryReport] = [:]
+    @ObservationIgnored var onHumanVerificationRecoveryCandidate: (@MainActor (HumanVerificationRecoveryCandidate) -> Void)?
     @ObservationIgnored private var entries: [UUID: Entry] = [:]
     @ObservationIgnored private weak var modelRenderHost: NSView?
     @ObservationIgnored private var modelRenderHosts: [ModelRenderHostReference] = []
@@ -114,6 +116,11 @@ final class EmbeddedBrowserSession {
         // checkpoint observations advance only for a committed document.
         var humanCommittedDocumentID = UUID()
         var humanCommittedNavigation: WKNavigation?
+        var recoveryCommittedGeneration: UUID?
+        var recoverySettledGeneration: UUID?
+        var recoveryToolUsed = false
+        var recoveryAttemptedCheckpointID: UUID?
+        var recoveryAttemptedDocumentID: UUID?
         // The callback that requests a popup carries no public tool-origin
         // token. Retain the guard until a replacement document commits so
         // delayed page callbacks cannot become human-owned after tool cleanup.
@@ -166,6 +173,61 @@ final class EmbeddedBrowserSession {
     }
 
     var savedHumanVerificationProviders: Set<String> { Set(savedHumanVerificationCheckpointIDs.keys) }
+
+    struct HumanVerificationRecoveryCandidate: Equatable, Sendable {
+        let id = UUID()
+        let provider: String
+        let checkpointID: UUID
+        let tabID: UUID
+        let committedDocumentID: UUID
+        let documentID: UUID
+        let documentGeneration: UUID
+    }
+
+    var humanVerificationRecoveryReports: [String: EmbeddedHumanVerificationStore.RecoveryReport] {
+        guard persistent else { return transientRecoveryReports }
+        return EmbeddedHumanVerificationStore(defaults: defaults, profileID: persistentProfileIdentifier()).loadRecoveryReports()
+    }
+
+    func recordHumanVerificationRecovery(_ candidate: HumanVerificationRecoveryCandidate,
+        phase: EmbeddedHumanVerificationStore.RecoveryReport.Phase,
+        reason: EmbeddedHumanVerificationStore.RecoveryReport.Reason) {
+        var reports = humanVerificationRecoveryReports
+        // A late completion must not replace a newer candidate's diagnostic.
+        guard phase == .requested || reports[candidate.provider]?.recoveryID == candidate.id else { return }
+        reports[candidate.provider] = .init(checkpointID: candidate.checkpointID, recoveryID: candidate.id, phase: phase, reason: reason)
+        if persistent {
+            EmbeddedHumanVerificationStore(defaults: defaults, profileID: persistentProfileIdentifier()).saveRecoveryReports(reports)
+        } else { transientRecoveryReports = reports }
+    }
+
+    func isHumanVerificationRecoveryCandidateCurrent(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
+        guard !isShutdown, let entry = entries[candidate.tabID], !entry.isModelOwned, !entry.isToolOwned,
+              !entry.recoveryToolUsed, entry.toolPopupContext == nil,
+              entry.humanCommittedDocumentID == candidate.committedDocumentID,
+              entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
+              entry.recoveryCommittedGeneration == candidate.documentGeneration,
+              entry.recoverySettledGeneration == candidate.documentGeneration,
+              entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
+              EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url) == candidate.provider,
+              savedHumanVerificationCheckpointIDs[candidate.provider] == candidate.checkpointID else { return false }
+        return true
+    }
+
+    private func observeHumanVerificationRecovery(_ entry: Entry) {
+        guard let callback = onHumanVerificationRecoveryCandidate,
+              let provider = EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url),
+              let checkpointID = savedHumanVerificationCheckpointIDs[provider] else { return }
+        let candidate = HumanVerificationRecoveryCandidate(provider: provider, checkpointID: checkpointID,
+            tabID: entry.tab.id, committedDocumentID: entry.humanCommittedDocumentID,
+            documentID: entry.tab.documentID, documentGeneration: entry.tab.documentGeneration)
+        guard isHumanVerificationRecoveryCandidateCurrent(candidate),
+              entry.recoveryAttemptedCheckpointID != checkpointID || entry.recoveryAttemptedDocumentID != entry.humanCommittedDocumentID else { return }
+        entry.recoveryAttemptedCheckpointID = checkpointID
+        entry.recoveryAttemptedDocumentID = entry.humanCommittedDocumentID
+        recordHumanVerificationRecovery(candidate, phase: .requested, reason: .healthyHumanDocument)
+        callback(candidate)
+    }
 
     /// Re-observing a saved gate in the model transport does not make it newer.
     func recordHumanVerificationRequired(provider: String) {
@@ -398,6 +460,15 @@ final class EmbeddedBrowserSession {
         entry.tab.isWebInspectorEnabled = enabled
     }
 
+    /// Binding a human page always performs a native backend observation before
+    /// publishing its broker lease. Keep this document ineligible even after
+    /// release; a new committed human document can offer a new recovery intent.
+    func markHumanDocumentUsedByTool(tabID: UUID, generation: UUID) throws {
+        let entry = try entry(tabID)
+        guard !entry.isModelOwned, entry.tab.documentGeneration == generation else { throw BrowserTabBrokerError.staleDocument }
+        entry.recoveryToolUsed = true
+    }
+
     /// Called only inside the one-use mutation permit's successful enqueue.
     /// A provisional/failed load or Stop does not replace the retained document.
     func prepareToolMutation(tabID: UUID, generation: UUID) throws -> UUID {
@@ -410,6 +481,7 @@ final class EmbeddedBrowserSession {
         entry.tab.isWebInspectorAvailable = false
         let context = ToolMutationPopupContext(documentID: entry.humanCommittedDocumentID)
         entry.toolPopupContext = context
+        entry.recoveryToolUsed = true
         return context.operationID
     }
 
@@ -738,6 +810,7 @@ final class EmbeddedBrowserSession {
     func shutdown() {
         guard !isShutdown else { return }
         isShutdown = true
+        onHumanVerificationRecoveryCandidate = nil
         for id in tabs.map(\.id) { closeTab(id) }
         modelRenderHost = nil
         modelRenderHosts.removeAll()
@@ -751,6 +824,7 @@ final class EmbeddedBrowserSession {
     }
 
     private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
+        entry.recoverySettledGeneration = nil
         entry.tab.documentID = UUID()
         entry.preparedDocumentNavigation = replacesDocument
         if replacesDocument { entry.tab.documentGeneration = UUID() }
@@ -792,6 +866,7 @@ final class EmbeddedBrowserSession {
         // committed document or settled native URL without inspecting its DOM.
         if !entry.isModelOwned, committedNavigation || !view.isLoading {
             observeHumanVerificationCheckpoint(entry)
+            if entry.recoverySettledGeneration == entry.tab.documentGeneration { observeHumanVerificationRecovery(entry) }
         }
         signalModelChange(entry)
     }
@@ -837,6 +912,11 @@ final class EmbeddedBrowserSession {
         if let error, (error as NSError).code != NSURLErrorCancelled {
             report("The page could not load. \(error.localizedDescription)", tabID: tabID)
         }
+        if error == nil, let navigation, entry.humanCommittedNavigation === navigation,
+           entry.recoveryCommittedGeneration == entry.tab.documentGeneration {
+            entry.recoverySettledGeneration = entry.tab.documentGeneration
+            observeHumanVerificationRecovery(entry)
+        }
     }
 
     fileprivate func committed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
@@ -844,6 +924,8 @@ final class EmbeddedBrowserSession {
         if !entry.isModelOwned, let navigation, entry.humanCommittedNavigation !== navigation {
             entry.humanCommittedNavigation = navigation
             entry.humanCommittedDocumentID = UUID()
+            entry.recoveryCommittedGeneration = entry.tab.documentGeneration
+            entry.recoveryToolUsed = entry.toolPopupContext != nil
             entry.toolPopupContext = nil
             entry.tab.isWebInspectorAvailable = !entry.isToolOwned
         }

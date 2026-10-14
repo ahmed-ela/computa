@@ -1158,6 +1158,55 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(next)
     }
 
+    func testAutomaticRecoveryValidatorRejectsBeforeCreatingAProbe() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini))
+        defer { fixture.shutdown() }
+        fixture.browser.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = fixture.browser.savedHumanVerificationCheckpointIDs["gemini"]
+        do {
+            _ = try await fixture.transport.discoverModels(provider: "gemini", retryBlocked: true,
+                recoveryCandidateIsCurrent: { false })
+            XCTFail("A revoked human candidate cannot create a provider page")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(fixture.createdTabs.isEmpty)
+        XCTAssertEqual(fixture.browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testAutomaticRecoveryValidatorRunsAfterConfirmedDisposalAndCannotClearOnRevocationOrCancellation() async throws {
+        for cancelled in [false, true] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.gemini))
+            defer { fixture.shutdown() }
+            fixture.browser.recordHumanVerificationRequired(provider: "gemini")
+            let checkpoint = fixture.browser.savedHumanVerificationCheckpointIDs["gemini"]
+            var checks = 0
+            var probeView: WKWebView?
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "discoverModels" { probeView = fixture.createdTabs.last.flatMap { fixture.browser.webView(for: $0) } }
+            }
+            var task: Task<[WebsiteModelChoice], Error>!
+            task = Task { @MainActor in
+                try await fixture.transport.discoverModels(provider: "gemini", retryBlocked: true,
+                    recoveryCandidateIsCurrent: {
+                        checks += 1
+                        if checks == 1 { return true }
+                        XCTAssertNil(fixture.browser.webView(for: fixture.createdTabs.last!), "The final validator must run after owned probe disposal")
+                        if cancelled { task.cancel(); return true }
+                        return false
+                    })
+            }
+            do { _ = try await task.value; XCTFail("Late revocation/cancellation must retain the checkpoint") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertEqual(checks, 2)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            XCTAssertEqual(fixture.browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+            try await assertChoiceLedger(XCTUnwrap(probeView), insertions: 0, sends: 0, selections: 0)
+            do { _ = try await fixture.transport.discoverModels(provider: "gemini"); XCTFail("Ordinary discovery remains blocked") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini)) }
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+        }
+    }
+
     func testHumanCheckpointWakesActiveInferenceAndPreventsSend() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.gemini))
         defer { fixture.shutdown() }

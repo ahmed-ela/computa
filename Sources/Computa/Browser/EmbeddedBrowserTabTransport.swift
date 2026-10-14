@@ -87,8 +87,10 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
 
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
         let id = try exactID(target)
+        try session.markHumanDocumentUsedByTool(tabID: id, generation: generation(for: id))
         try await session.waitForHumanTabReady(id: id, until: .now + .seconds(12))
         let generation = try generation(for: id)
+        try session.markHumanDocumentUsedByTool(tabID: id, generation: generation)
         let data = try await run(
             id: id, generation: generation, input: ["operation": "observe"], timeoutMS: 12_000)
         guard data.count <= 1_000_000,

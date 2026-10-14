@@ -26,8 +26,22 @@ final class AppState {
     @ObservationIgnored private let websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])?
     @ObservationIgnored private var websiteModelRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var websiteModelRefreshGeneration: UUID?
-    @ObservationIgnored private var websiteModelRefreshProviders: [String] = []
-    @ObservationIgnored private var websiteModelRefreshRetriesBlocked = false
+    private struct WebsiteModelRefreshIntent {
+        let provider: String
+        let retryBlocked: Bool
+        let candidate: EmbeddedBrowserSession.HumanVerificationRecoveryCandidate?
+    }
+    @ObservationIgnored private var websiteModelRefreshIntents: [WebsiteModelRefreshIntent] = []
+    @ObservationIgnored private var websiteModelRefreshCurrentIntent: WebsiteModelRefreshIntent?
+    #if DEBUG
+    @ObservationIgnored private var websiteModelRefreshObserverForTesting: (@MainActor (String, Bool) -> Void)?
+    func setWebsiteModelRefreshObserverForTesting(_ observer: (@MainActor (String, Bool) -> Void)?) {
+        websiteModelRefreshObserverForTesting = observer
+    }
+    var websiteModelRefreshIntentsForTesting: [(provider: String, retryBlocked: Bool)] {
+        websiteModelRefreshIntents.map { ($0.provider, $0.retryBlocked) }
+    }
+    #endif
     @ObservationIgnored private var didStartWebsiteModelDiscovery = false
     // Keep the persisted key across the Computa rename.
     private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
@@ -166,6 +180,9 @@ final class AppState {
                 self.endChromeConnection(state: .disconnected)
             })
         }
+        self.browserSession.onHumanVerificationRecoveryCandidate = { [weak self] candidate in
+            Task { @MainActor [weak self] in await self?.recoverWebsiteModels(candidate) }
+        }
     }
 
     var selectedTask: AgentTask? {
@@ -268,50 +285,141 @@ final class AppState {
         await refreshWebsiteModels(providers: WebsiteModelCatalog.providers, retryBlocked: true)
     }
 
+    private var humanWebsiteRecoveryIsIdle: Bool {
+        !isShuttingDown && !approvalGateBlocksInteraction && activeTurnTaskIDs.isEmpty
+            && !tasks.contains(where: { $0.status == .running })
+            && steeringTaskIDs.isEmpty && dispatchingQueueTaskIDs.isEmpty
+            && !compactionStateByTask.values.contains(where: { $0 == .running })
+    }
+
+    private func recoveryCandidateIsCurrent(_ candidate: EmbeddedBrowserSession.HumanVerificationRecoveryCandidate) -> Bool {
+        humanWebsiteRecoveryIsIdle && browserSession.isHumanVerificationRecoveryCandidateCurrent(candidate)
+    }
+
+    private func recoverWebsiteModels(_ candidate: EmbeddedBrowserSession.HumanVerificationRecoveryCandidate) async {
+        guard didStartWebsiteModelDiscovery, runtime != nil || websiteModelDiscovery != nil,
+              recoveryCandidateIsCurrent(candidate) else {
+            browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded,
+                reason: humanWebsiteRecoveryIsIdle ? .candidateRevoked : .taskActive)
+            return
+        }
+        await refreshWebsiteModels(intents: [.init(provider: candidate.provider, retryBlocked: true, candidate: candidate)])
+    }
+
     private func refreshWebsiteModels(providers: [String], retryBlocked: Bool) async {
-        guard !isShuttingDown, !approvalGateBlocksInteraction else { return }
-        if let websiteModelRefreshTask {
-            // Extend an in-flight partial startup refresh rather than dropping
-            // an explicit full refresh or loading a provider twice.
-            for provider in providers where !websiteModelRefreshProviders.contains(provider) {
-                websiteModelRefreshProviders.append(provider)
+        await refreshWebsiteModels(intents: providers.map { .init(provider: $0, retryBlocked: retryBlocked, candidate: nil) })
+    }
+
+    private func enqueueWebsiteModelRefresh(_ intent: WebsiteModelRefreshIntent) {
+        // Only this provider's intent can bypass its saved gate. A manual
+        // request remains queued behind an automatic probe that may be revoked.
+        if let current = websiteModelRefreshCurrentIntent, current.provider == intent.provider, current.retryBlocked {
+            if let candidate = intent.candidate {
+                browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded,
+                    reason: current.candidate == nil ? .manualRefresh : .recoveryInProgress)
+                return
             }
-            websiteModelRefreshRetriesBlocked = websiteModelRefreshRetriesBlocked || retryBlocked
+            if !intent.retryBlocked || current.candidate == nil { return }
+        }
+        if let index = websiteModelRefreshIntents.firstIndex(where: { $0.provider == intent.provider }) {
+            let previous = websiteModelRefreshIntents[index]
+            if previous.retryBlocked {
+                if let candidate = intent.candidate {
+                    browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded,
+                        reason: previous.candidate == nil ? .manualRefresh : .recoveryInProgress)
+                    return
+                }
+                if !intent.retryBlocked || previous.candidate == nil { return }
+            }
+            guard intent.retryBlocked else { return }
+            if let candidate = previous.candidate {
+                browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded, reason: .manualRefresh)
+            }
+            websiteModelRefreshIntents[index] = intent
+        } else { websiteModelRefreshIntents.append(intent) }
+    }
+
+    private func humanVerificationRecoveryFailureReason(_ error: Error) -> EmbeddedHumanVerificationStore.RecoveryReport.Reason {
+        guard let failure = error as? EmbeddedWebModelTransport.Failure else { return .discoveryFailed }
+        switch failure {
+        case .discoveryCleanupFailed: return .cleanupUnconfirmed
+        case .humanVerificationRequired(.gemini): return .verificationRequired
+        default: return .discoveryFailed
+        }
+    }
+
+    private func refreshWebsiteModels(intents: [WebsiteModelRefreshIntent]) async {
+        guard !isShuttingDown, !approvalGateBlocksInteraction else { return }
+        for intent in intents { enqueueWebsiteModelRefresh(intent) }
+        if let websiteModelRefreshTask {
             await websiteModelRefreshTask.value
             return
         }
         let generation = UUID()
         websiteModelRefreshGeneration = generation
-        websiteModelRefreshProviders = providers
-        websiteModelRefreshRetriesBlocked = retryBlocked
         websiteModelsRefreshing = true
         websiteModelsError = nil
-        let refresh = Task { @MainActor [weak self] in
+        let refresh = Task<Void, Never> { @MainActor [weak self] in
             guard let self else { return }
             var errors: [String] = []
-            var providerIndex = 0
-            while providerIndex < self.websiteModelRefreshProviders.count {
+            while !self.websiteModelRefreshIntents.isEmpty {
                 guard !Task.isCancelled, !self.isShuttingDown else { break }
-                let provider = self.websiteModelRefreshProviders[providerIndex]
-                providerIndex += 1
+                let intent = self.websiteModelRefreshIntents.removeFirst()
+                self.websiteModelRefreshCurrentIntent = intent
+                defer { self.websiteModelRefreshCurrentIntent = nil }
+                let provider = intent.provider
+                if let candidate = intent.candidate {
+                    guard self.recoveryCandidateIsCurrent(candidate) else {
+                        self.browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded,
+                            reason: self.humanWebsiteRecoveryIsIdle ? .candidateRevoked : .taskActive)
+                        continue
+                    }
+                    self.browserSession.recordHumanVerificationRecovery(candidate, phase: .probing, reason: .healthyHumanDocument)
+                }
                 do {
+                    #if DEBUG
+                    self.websiteModelRefreshObserverForTesting?(provider, intent.retryBlocked)
+                    #endif
                     let choices: [WebsiteModelChoice]
                     if let discovery = self.websiteModelDiscovery { choices = try await discovery(provider) }
                     else {
+                        var validator: (@MainActor () -> Bool)?
+                        if let candidate = intent.candidate {
+                            validator = { [weak self] in self?.recoveryCandidateIsCurrent(candidate) == true }
+                        }
                         choices = try await self.websiteTransport().discoverModels(provider: provider,
-                            retryBlocked: self.websiteModelRefreshRetriesBlocked)
+                            retryBlocked: intent.retryBlocked, recoveryCandidateIsCurrent: validator)
                     }
                     guard !Task.isCancelled, !self.isShuttingDown,
                           self.websiteModelRefreshGeneration == generation else { break }
+                    // Injection is not checkpoint-clearance authority. Production
+                    // discovery clears only behind its cleanup/identity validator.
+                    if let candidate = intent.candidate,
+                       self.browserSession.savedHumanVerificationCheckpointIDs[provider] != nil {
+                        self.browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded, reason: .candidateRevoked)
+                        continue
+                    }
                     try WebsiteModelCatalog.validateObserved(choices, provider: provider)
                     self.websiteModelChoices.removeAll { $0.provider == provider }
                     self.websiteModelChoices.append(contentsOf: choices)
                     WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
                     self.retireWebsiteModelSelections()
+                    if let candidate = intent.candidate {
+                        self.browserSession.recordHumanVerificationRecovery(candidate, phase: .verified, reason: .healthyHumanDocument)
+                    }
                 } catch is CancellationError {
-                    break
+                    if let candidate = intent.candidate {
+                        self.browserSession.recordHumanVerificationRecovery(candidate,
+                            phase: Task.isCancelled ? .cancelled : .superseded,
+                            reason: Task.isCancelled ? .cancelled : .candidateRevoked)
+                    }
+                    if Task.isCancelled { break }
                 } catch {
                     guard !self.isShuttingDown, self.websiteModelRefreshGeneration == generation else { break }
+                    if let candidate = intent.candidate {
+                        self.browserSession.recordHumanVerificationRecovery(candidate, phase: .blocked,
+                            reason: self.humanVerificationRecoveryFailureReason(error))
+                    }
                     errors.append("\(WebsiteModelCatalog.providerLabel(provider)): \(error.localizedDescription)")
                 }
             }
@@ -320,8 +428,8 @@ final class AppState {
             self.websiteModelsRefreshing = false
             self.websiteModelRefreshTask = nil
             self.websiteModelRefreshGeneration = nil
-            self.websiteModelRefreshProviders = []
-            self.websiteModelRefreshRetriesBlocked = false
+            self.websiteModelRefreshIntents = []
+            self.websiteModelRefreshCurrentIntent = nil
         }
         websiteModelRefreshTask = refresh
         await refresh.value
@@ -1267,8 +1375,8 @@ final class AppState {
         runtimeShutdown = task
         let report = await task.value
         websiteModelRefreshTask = nil
-        websiteModelRefreshProviders = []
-        websiteModelRefreshRetriesBlocked = false
+        websiteModelRefreshIntents = []
+        websiteModelRefreshCurrentIntent = nil
         pendingApprovals.removeAll()
         resolvingApprovalIDs.removeAll()
         approvalAttemptTaskIDs.removeAll()

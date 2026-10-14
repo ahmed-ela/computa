@@ -247,10 +247,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains(ComputaAgentInstructions.builtInBrowser))
         XCTAssertTrue(browser.contains("functions.browser_open"))
         XCTAssertFalse(browser.contains("No dedicated driver"))
-        XCTAssertTrue(browser.contains("Never repeat\nuncertain input"))
+        XCTAssertTrue(browser.contains("Never repeat uncertain input"))
         XCTAssertTrue(browser.contains("snapshot_id/element_index"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("Model inference pages are separate"))
-        XCTAssertTrue(browser.contains("browser_click activates\nenabled controls and links, including follow_link=true"))
+        XCTAssertTrue(browser.contains("It activates enabled\ncontrols/links, including follow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("unchanged reads"))
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 2_000, "Binding, snapshot consumption and close evidence share one bounded browser contract.")
@@ -264,7 +264,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("click an actions=[] text/heading row or infer a clickable parent"))
         XCTAssertTrue(text.contains("browser_fill requires enabled=true and settable=true"))
         XCTAssertTrue(text.contains("An index is readable context unless its row explicitly offers an"))
-        XCTAssertTrue(text.contains("A click is not outcome proof"))
+        XCTAssertTrue(text.contains("Input is not outcome proof"))
         XCTAssertTrue(text.contains("browser_read(cursor=next_cursor)"))
     }
 
@@ -280,21 +280,53 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(instructions.contains(browser))
             let text = instructions.replacingOccurrences(of: "\n", with: " ")
             XCTAssertTrue(text.contains("creates AND binds a task-owned page; read directly without another bind"))
-            XCTAssertTrue(text.contains("including a view change or cursor page, supersedes ALL earlier action targets"))
-            XCTAssertTrue(text.contains("An admitted click or fill consumes that snapshot"))
-            XCTAssertTrue(text.contains("browser_read before another action, even on the same page"))
+            XCTAssertTrue(text.contains("Every new read, view change or cursor page supersedes ALL earlier action targets"))
+            XCTAssertTrue(text.contains("An admitted click or fill consumes its snapshot"))
+            XCTAssertTrue(text.contains("Use fresh references returned in current_observation when status=available; if absent/unavailable, browser_read"))
             XCTAssertTrue(text.contains("After a no-input stale-target rejection, read once"))
             XCTAssertTrue(text.contains("Never repeat uncertain input"))
             XCTAssertTrue(text.contains("Copy requested URLs exactly, including punctuation"))
-            XCTAssertTrue(text.contains("compare the address with the task; do not guess variants or a homepage"))
+            XCTAssertTrue(text.contains("compare with the task; never guess variants or a homepage"))
             XCTAssertTrue(text.contains("At most one input action per tool-call batch"))
-            XCTAssertTrue(text.contains("Never batch fill and click: wait for the input result, then browser_read"))
-            XCTAssertTrue(text.contains("Copy field values and result identifiers verbatim, including prefixes, spaces and punctuation"))
+            XCTAssertTrue(text.contains("Never batch fill and click"))
+            XCTAssertTrue(text.contains("Copy field values and identifiers verbatim"))
             XCTAssertTrue(text.contains("transform only when the task requires it"))
             XCTAssertTrue(text.contains("browser_close and verify released=true and existing_user_tab_preserved=true"))
             XCTAssertTrue(text.contains("Automatic cleanup is not proof that your requested close occurred"))
         }
         XCTAssertFalse(ComputaAgentInstructions.webInferenceContract(offeredFunctions: [:]).contains(browser))
+    }
+
+    func testBuiltInBrowserUsesOnlyReturnedFreshInputReferencesOrAReadFallback() {
+        let text = ComputaAgentInstructions.builtInBrowser.replacingOccurrences(of: "\n", with: " ")
+        XCTAssertTrue(text.contains("Use fresh references returned in current_observation when status=available"))
+        XCTAssertTrue(text.contains("if absent/unavailable, browser_read"))
+        XCTAssertTrue(text.contains("Never reuse consumed targets"))
+        XCTAssertTrue(text.contains("At most one input action per tool-call batch"))
+        XCTAssertTrue(text.contains("Never batch fill and click"))
+        XCTAssertTrue(text.contains("Input is not outcome proof"))
+        XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
+        XCTAssertTrue(text.contains("stale-target rejection, read once and choose an eligible target"))
+        XCTAssertTrue(text.contains("Never repeat uncertain input"))
+        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 2_000)
+    }
+
+    func testLiteralIdentifierGuidanceIsSharedWithoutChangingExactUserOutputConstraints() {
+        let literal = ComputaAgentInstructions.literalIdentifiers
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let website = ComputaAgentInstructions.webResponseContract(offeredToolNames: ["functions.browser_read"])
+        for text in [native, website, ComputaAgentInstructions.finalResponse] {
+            XCTAssertTrue(text.contains(literal))
+            let normalized = text.replacingOccurrences(of: "\n", with: " ")
+            XCTAssertTrue(normalized.contains("identifiers, receipts, URLs and paths verbatim in inline code"))
+            XCTAssertTrue(normalized.contains("unless the user requires exact unformatted output"))
+            XCTAssertTrue(normalized.contains("Preserve original Unicode characters"))
+            XCTAssertTrue(normalized.contains("never change hyphens or apply typographic substitutions"))
+        }
+        XCTAssertFalse(literal.contains("GPT"))
+        XCTAssertFalse(literal.contains("expected_marker"))
+        XCTAssertFalse(literal.contains("SYNTHETIC-FLIGHT"))
+        XCTAssertLessThan(ComputaAgentInstructions.finalResponse.utf8.count, 900)
     }
 
     func testPatchGuidanceSeparatesCommandDirectoryAndPreservesOneExactEnvelope() throws {
@@ -434,9 +466,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(handoff.contains("The website does not\nexecute these calls"))
             XCTAssertTrue(handoff.contains("A tool_calls object is an action request, not a claim\nof execution or direct access"))
             XCTAssertTrue(handoff.contains("necessary work allowed by tool_choice"))
-            XCTAssertTrue(handoff.contains("your governing rules and the\nuser's scope"))
-            XCTAssertTrue(handoff.contains("return tool_calls using the offered exact current name and\nschema"))
-            XCTAssertTrue(handoff.contains("The website need not access the file itself"))
+            XCTAssertTrue(handoff.replacingOccurrences(of: "\n", with: " ").contains("your governing rules and the user's scope"))
+            XCTAssertTrue(handoff.contains("return tool_calls with offered exact current names and schemas"))
+            XCTAssertTrue(handoff.contains("The website does not\nexecute these calls"))
             XCTAssertTrue(handoff.contains("validates names, arguments, local permissions and\napprovals before execution"))
             XCTAssertTrue(handoff.contains("real matching function_call_output\nor custom_tool_call_output"))
             XCTAssertTrue(handoff.contains("Use only matching outputs as execution proof, never invented results or\nhistorical receipts"))
@@ -556,7 +588,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         ])
         let request = try WebModelResponseCodec.prepareRequest(original)
         let handoff = try assertRequestValuesAndHandoff(original, request: request)
-        let rule = try XCTUnwrap(handoff.range(of: "\"Return only the file contents\" constrains message.text after matching\noutput; put truthful limitations or refusals there too."))
+        let rule = try XCTUnwrap(handoff.range(of: "For file-only results, use message.text; put truthful limitations or refusals there too."))
         let format = try XCTUnwrap(handoff.range(of: "Return exactly one fenced JSON code block"))
         XCTAssertLessThan(rule.upperBound, format.lowerBound, "The return-only decision belongs immediately before the required envelope format")
         XCTAssertTrue(handoff.contains("put truthful limitations or refusals there too"))

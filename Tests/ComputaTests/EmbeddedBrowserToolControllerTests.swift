@@ -20,7 +20,11 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
         let next = try XCTUnwrap(result["action_references"] as? [String: Any])
         XCTAssertEqual(next["consumed"] as? Bool, true)
-        XCTAssertEqual(next["next"] as? String, "browser_read")
+        XCTAssertEqual(next["next"] as? String, "current_observation")
+        let observed = try XCTUnwrap(result["current_observation"] as? [String: Any])
+        XCTAssertEqual(observed["status"] as? String, "available")
+        let returned = try XCTUnwrap(observed["text"] as? String)
+        XCTAssertNotEqual(try snapshotID(returned), try snapshotID(read))
         do {
             _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(read), "element_index": 1])
             XCTFail("Guidance must not retain input authority after admitted fill")
@@ -30,6 +34,132 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let counts = await backend.counts()
         XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 0)
         _ = await controller.shutdown()
+    }
+
+    func testPostInputObservationSuppliesFreshFillThenClickReferencesWithoutAnotherRead() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let original = try await call(controller, "browser_read")
+        let fill = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(original), "element_index": 0, "text": "UA 4629"])
+        let fresh = try availableObservation(fill)
+        XCTAssertTrue(fresh.contains("UA 4629"))
+        XCTAssertNotEqual(try snapshotID(fresh), try snapshotID(original))
+        do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(original), "element_index": 1]); XCTFail("Old action cannot be replayed") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let click = try await call(controller, "browser_click", ["snapshot_id": snapshotID(fresh), "element_index": 1])
+        let final = try availableObservation(click)
+        XCTAssertTrue(final.contains("UA 4629"))
+        XCTAssertFalse(final.contains("UA 4629 departs at 18:45"), "Overview does not invent unexposed body evidence")
+        XCTAssertNotEqual(try snapshotID(final), try snapshotID(fresh))
+        do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(fresh), "element_index": 1]); XCTFail("Click capability is consumed too") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let body = try await call(controller, "browser_read", ["view": "content"])
+        XCTAssertTrue(body.contains("UA 4629 departs at 18:45"))
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 1)
+        XCTAssertEqual(counts.creates, 1); XCTAssertEqual(counts.navigations, 0)
+        XCTAssertLessThanOrEqual(fill.utf8.count, 20_480); XCTAssertLessThanOrEqual(click.utf8.count, 20_480)
+        _ = await controller.shutdown()
+    }
+
+    func testPostInputObservationFailuresPreserveDispatchAndExposeNoCapabilityOrPrivateError() async throws {
+        for scenario in ["read_failed", "no_read_authority", "generation_drift", "redirect", "replaced", "protected", "drift_after_capture"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            let scope = ComputerTaskScope(userPrompt: "Check http://localhost:8123/flight only.")
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            let original = try await call(controller, "browser_read", scope: scope)
+            await backend.configureAfterInput(scenario)
+            let fill = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(original), "element_index": 0, "text": "UA 4629"], scope: scope)
+            let result = try jsonObject(fill)
+            XCTAssertEqual(result["dispatched"] as? Bool, true, scenario)
+            XCTAssertEqual(result["no_replay"] as? Bool, true)
+            XCTAssertEqual(result["result_verified"] as? Bool, false)
+            let observation = try XCTUnwrap(result["current_observation"] as? [String: Any])
+            XCTAssertEqual(observation["status"] as? String, "unavailable", scenario)
+            XCTAssertNil(observation["snapshot_id"]); XCTAssertNil(observation["text"])
+            XCTAssertFalse(fill.contains("PRIVATE_READ_ERROR")); XCTAssertFalse(fill.contains("AXSNAPSHOT"))
+            do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(original), "element_index": 1], scope: scope); XCTFail("Failed observation must not resurrect consumed input") }
+            catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 0)
+            if ["redirect", "replaced", "protected"].contains(scenario) {
+                XCTAssertEqual(counts.observes, 3, "After-input target denial must precede another observation")
+            }
+            if scenario == "read_failed" {
+                let fresh = try await call(controller, "browser_read", scope: scope)
+                XCTAssertTrue(fresh.contains("UA 4629"), "Explicit later read can recover without refilling")
+                let finalCounts = await backend.counts(); XCTAssertEqual(finalCounts.fills, 1)
+            }
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testReleaseDuringPostInputReadRetainsDispatchWithoutPublishingLateReferences() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let read = try await call(controller, "browser_read")
+        await backend.configureAfterInput("hold_observation")
+        let operation = Task { try await self.call(controller, "browser_fill", ["snapshot_id": self.snapshotID(read), "element_index": 0, "text": "UA 4629"]) }
+        await backend.waitUntilObservationHeld()
+        _ = await controller.release(taskKey: "turn-a")
+        await backend.resumeObservation()
+        let result = try jsonObject(await operation.value)
+        XCTAssertEqual(result["dispatched"] as? Bool, true)
+        let observation = try XCTUnwrap(result["current_observation"] as? [String: Any])
+        XCTAssertEqual(observation["status"] as? String, "unavailable")
+        XCTAssertNil(observation["text"]); XCTAssertNil(observation["snapshot_id"])
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.closes, 1)
+        _ = await controller.shutdown()
+    }
+
+    func testPostInputObservationRetainsDocumentAndPaginationAuthority() async throws {
+        for scenario in ["new_document", "same_url_reload", "pagination"] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let first = try await call(controller, "browser_read")
+            await backend.configureAfterInput(scenario)
+            let filled = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(first), "element_index": 0, "text": "UA 4629"])
+            let fresh = try availableObservation(filled)
+            XCTAssertTrue(fresh.contains("UA 4629"))
+            XCTAssertNotEqual(try snapshotID(first), try snapshotID(fresh))
+            if scenario == "new_document" { XCTAssertTrue(fresh.contains("/result")) }
+            if scenario == "pagination" {
+                let cursor = try field("next_cursor", in: fresh)
+                let source = try field("source_observation", in: fresh)
+                let next = try await call(controller, "browser_read", ["cursor": cursor])
+                XCTAssertEqual(try field("source_observation", in: next), source)
+                XCTAssertNotEqual(try snapshotID(next), try snapshotID(fresh))
+                do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(fresh), "element_index": 1]); XCTFail("Continuing the returned observation supersedes its first page") }
+                catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+            } else {
+                _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(fresh), "element_index": 1])
+            }
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, scenario == "pagination" ? 0 : 1)
+            _ = await controller.shutdown()
+        }
+    }
+
+    private func jsonObject(_ output: String) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+    }
+
+    private func availableObservation(_ output: String) throws -> String {
+        let result = try jsonObject(output)
+        XCTAssertEqual(result["dispatched"] as? Bool, true)
+        XCTAssertEqual(result["result_verified"] as? Bool, false)
+        let current = try XCTUnwrap(result["current_observation"] as? [String: Any])
+        XCTAssertEqual(current["status"] as? String, "available")
+        XCTAssertEqual(current["view"] as? String, "overview")
+        let text = try XCTUnwrap(current["text"] as? String)
+        XCTAssertEqual(current["snapshot_id"] as? String, try snapshotID(text))
+        return text
+    }
+
+    private func field(_ name: String, in text: String) throws -> String {
+        let range = try XCTUnwrap(text.range(of: name + "="))
+        return try XCTUnwrap(text[range.upperBound...].split(whereSeparator: { $0.isWhitespace }).first.map(String.init))
     }
 
     func testCapturedMutationPreflightRejectsUnsupportedTargetsWithoutConsumingSnapshot() async throws {
@@ -535,6 +665,10 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var holdMutation=false, mutationHeld=false, mutationContinuation: CheckedContinuation<Void,Never>?
     private var shouldFailClose = false
     private var createWaiters=[CheckedContinuation<Void,Never>](), mutationWaiters=[CheckedContinuation<Void,Never>]()
+    private var afterInputScenario: String?, postInputPending = false, manyControls = false
+    private var protectedTargets = Set<String>()
+    private var observationHeld = false, observationContinuation: CheckedContinuation<Void, Never>?
+    private var observationWaiters = [CheckedContinuation<Void, Never>]()
 
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!,webSocketURL:nil) }
     func counts() -> Counts { stats }
@@ -566,7 +700,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         }
         return target
     }
-    func target(id:String) async throws -> BrowserTarget? { targets[id] }
+    func target(id:String) async throws -> BrowserTarget? { protectedTargets.contains(id) ? nil : targets[id] }
     func activateTarget(id:String) async throws { }
     func closeTarget(target:BrowserTarget) async throws {
         guard targets[target.targetID]?.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetClosed }
@@ -579,6 +713,23 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     }
     func observe(target:BrowserTarget) async throws -> BrowserDocumentObservation {
         stats.observes += 1
+        var driftAfterCapture = false
+        if postInputPending {
+            postInputPending = false
+            let scenario = afterInputScenario
+            afterInputScenario = nil
+            if scenario == "read_failed" { throw BrowserTabBrokerError.browserUnavailable("PRIVATE_READ_ERROR") }
+            if scenario == "no_read_authority" { throw BrowserTabBrokerError.invalidRead("PRIVATE_READ_ERROR") }
+            // Native WebKit rejects an observation that spans its document
+            // generation changing; this fixture models that backend contract.
+            if scenario == "generation_drift" { throw BrowserTabBrokerError.staleDocument }
+            driftAfterCapture = scenario == "drift_after_capture"
+            if scenario == "hold_observation" {
+                observationHeld = true
+                observationWaiters.forEach { $0.resume() }; observationWaiters.removeAll()
+                await withCheckedContinuation { observationContinuation = $0 }
+            }
+        }
         if let redirect = pendingRedirect {
             targets[target.targetID] = BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:redirect,webSocketURL:nil)
             pendingRedirect = nil
@@ -591,8 +742,19 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         if let link {
             nodes.append(BrowserDocumentNode(backendNodeID:4,role:"link",name:"Destination",value:nil,isDisabled:false,isReadOnly:false,isIgnored:false,nodeID:"4",linkURL:link,isDOMClickable:true))
         }
+        if manyControls {
+            for index in 10..<110 {
+                nodes.append(BrowserDocumentNode(backendNodeID: Int64(index), role: "button", name: "Extra control \(index)",
+                    value: nil, isDisabled: false, isReadOnly: false, isIgnored: false,
+                    nodeID: String(index), isDOMClickable: true))
+            }
+        }
         var observation=BrowserDocumentObservation(loaderID:generation,title:target.title,url:targets[target.targetID]?.url ?? target.url,nodes:nodes)
         observation.sourceName="computa_webkit_dom"
+        if driftAfterCapture {
+            targets[target.targetID] = BrowserTarget(targetID: target.targetID, instanceToken: target.instanceToken,
+                title: target.title, url: URL(string: "http://localhost:8123/changed-after-capture")!, webSocketURL: nil)
+        }
         return observation
     }
     func press(target:BrowserTarget,backendNodeID:Int64,document:BrowserDocumentObservation,permit:BrowserMutationPermit) async throws {
@@ -600,9 +762,9 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             mutationHeld=true; mutationWaiters.forEach { $0.resume() }; mutationWaiters.removeAll()
             await withCheckedContinuation { mutationContinuation=$0 }
         }
-        try permit.commit { stats.presses += 1; result="\(field) departs at 18:45" }
+        try permit.commit { stats.presses += 1; result="\(field) departs at 18:45"; didInput(target) }
     }
-    func setText(target:BrowserTarget,backendNodeID:Int64,text:String,document:BrowserDocumentObservation,permit:BrowserMutationPermit) async throws { try permit.commit { stats.fills += 1; field=text } }
+    func setText(target:BrowserTarget,backendNodeID:Int64,text:String,document:BrowserDocumentObservation,permit:BrowserMutationPermit) async throws { try permit.commit { stats.fills += 1; field=text; didInput(target) } }
     func navigate(target:BrowserTarget,url:URL,permit:BrowserMutationPermit) async throws {
         try permit.commit { stats.navigations += 1; generation=UUID().uuidString; targets[target.targetID]=BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:url,webSocketURL:nil) }
     }
@@ -614,6 +776,26 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func waitUntilMutationHeld() async { if !mutationHeld { await withCheckedContinuation { mutationWaiters.append($0) } } }
     func resumeMutation() { mutationContinuation?.resume(); mutationContinuation=nil; holdMutation=false }
     func redirectOnNextObserve(to url: URL) { pendingRedirect = url }
+    func configureAfterInput(_ scenario: String) { afterInputScenario = scenario }
+    func waitUntilObservationHeld() async {
+        if !observationHeld { await withCheckedContinuation { observationWaiters.append($0) } }
+    }
+    func resumeObservation() { observationContinuation?.resume(); observationContinuation = nil }
+    private func didInput(_ target: BrowserTarget) {
+        guard let scenario = afterInputScenario else { return }
+        switch scenario {
+        case "redirect": redirectOwnedTarget(to: URL(string: "https://unrelated.example/PRIVATE_READ_ERROR")!)
+        case "replaced": replaceOwnedTarget()
+        case "protected": protectedTargets.insert(target.targetID)
+        case "new_document":
+            generation = UUID().uuidString
+            redirectOwnedTarget(to: URL(string: "http://localhost:8123/result")!)
+        case "same_url_reload": generation = UUID().uuidString
+        case "pagination": manyControls = true
+        default: postInputPending = true; return
+        }
+        afterInputScenario = nil
+    }
     func setLink(_ url: String) { link = url }
     func disableButton() { buttonDisabled = true }
     func replaceButton() { buttonID = 99 }

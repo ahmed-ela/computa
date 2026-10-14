@@ -509,11 +509,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     /// Read available choices on an empty owned page, without sending a prompt.
-    func discoverModels(provider rawProvider: String, retryBlocked: Bool = false) async throws -> [WebsiteModelChoice] {
+    func discoverModels(provider rawProvider: String, retryBlocked: Bool = false,
+                        recoveryCandidateIsCurrent: (@MainActor () -> Bool)? = nil) async throws -> [WebsiteModelChoice] {
         try Task.checkCancellation()
         guard let provider = Provider(rawValue: rawProvider) else { throw Failure.unsupportedProvider }
-        // Only an explicit refresh may probe a blocked provider. Keep its gate
-        // in place for other tasks until this prompt-free check succeeds.
+        guard recoveryCandidateIsCurrent?() != false else { throw CancellationError() }
+        // An explicit refresh or validated human recovery can probe a blocked
+        // provider. Keep its gate in place until this prompt-free check succeeds.
         synchronizeProviderGate(provider)
         let previousGateID = providerGates[provider]?.id
         let previousVerificationID = browser.savedHumanVerificationCheckpointIDs[provider.rawValue]
@@ -557,6 +559,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         // read-only recovery awaits. Never erase that observation.
                         throw Failure.humanVerificationRequired(provider)
                     }
+                    try Task.checkCancellation()
+                    guard recoveryCandidateIsCurrent?() != false else { throw CancellationError() }
+                    try Task.checkCancellation()
                     if retryBlocked {
                         browser.clearHumanVerificationRequired(provider: provider.rawValue)
                         providerGates.removeValue(forKey: provider)

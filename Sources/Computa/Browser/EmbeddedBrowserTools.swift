@@ -44,7 +44,7 @@ enum EmbeddedBrowserTools {
         let string: [String: Any] = ["type": "string"]
         let url: [String: Any] = ["type": "string", "description": "Copy the requested or observed URL exactly, preserving punctuation. Do not guess address variants."]
         let mutation: [String: Any] = [
-            "snapshot_id": ["type": "string", "description": "Use the ID from the latest browser_read. Input consumes it: never batch another input; await the result and browser_read before another input."],
+            "snapshot_id": ["type": "string", "description": "Use the ID from the latest browser_read or available current_observation returned by an input. Input consumes it: never batch another input; await the result and use its new references, or browser_read if unavailable."],
             "element_index": ["type": "integer", "minimum": 0],
         ]
         return [
@@ -73,11 +73,11 @@ enum EmbeddedBrowserTools {
                 ]),
             specification(
                 "browser_click",
-                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). Semantic DOM activation, with stale-node and obstruction checks; not native global input. Reports dispatch, not success. Read or wait to verify the result. Never retry a timed-out mutation.",
+                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If unavailable, browser_read; never repeat an input because its following observation failed. Never retry a timed-out mutation.",
                 mutation, ["snapshot_id", "element_index"]),
             specification(
                 "browser_fill",
-                "Replace one observed field with enabled=true and settable=true and dispatch input/change events. Use that field's own snapshot_id and element_index, never a label or parent. Uses one fresh snapshot capability; password fields are unavailable. Read to verify the value before a later submit.",
+                "Replace one observed field with enabled=true and settable=true and dispatch input/change events. Use that field's own snapshot_id and element_index, never a label or parent. Uses one fresh snapshot capability; password fields are unavailable. Returns a fresh current_observation when available: verify the value and use its new references for a later submit. If unavailable, browser_read; the fill was still dispatched and must not be repeated.",
                 mutation.merging(["text": ["type": "string", "description": "Copy the requested field value verbatim, including prefixes, spaces and punctuation, unless the task explicitly requires a transformation."]], uniquingKeysWith: { _, right in right }),
                 ["snapshot_id", "element_index", "text"]),
             specification(
@@ -379,21 +379,14 @@ actor EmbeddedBrowserToolController {
                 throw error
             }
         case "browser_read":
-            let binding = try bound(taskKey, contextID)
-            _ = try await currentTarget(binding: binding, scope: scope)
-            try check(taskKey, contextID)
             let view = (object["view"] as? String).flatMap(SemanticReadView.init(rawValue:))
             let read = SemanticReadRequest(
                 query: object["query"] as? String,
                 view: view ?? (object["cursor"] == nil ? .overview : nil),
                 cursor: object["cursor"] as? String)
-            let observation = try await broker.snapshot(
-                taskKey: taskKey, binding: binding, bundleIdentifier: "com.ahmedelamin.computa", read: read)
-            try check(taskKey, contextID)
-            try requireScope(scope, url: observation.snapshot.documentURL)
-            contexts[taskKey]?.binding = observation.binding
-            contexts[taskKey]?.snapshot = observation.snapshot
-            return try readResponse(observation.snapshot)
+            let snapshot = try await currentObservation(
+                taskKey: taskKey, contextID: contextID, scope: scope, read: read)
+            return try readResponse(snapshot)
         case "browser_click", "browser_fill":
             let (binding, snapshot, index) = try await capturedMutation(
                 taskKey: taskKey, contextID: contextID, tool: tool, object: object, scope: scope)
@@ -409,12 +402,9 @@ actor EmbeddedBrowserToolController {
                     taskKey: taskKey, binding: binding, snapshot: snapshot, elementIndex: index,
                     text: object["text"] as! String)
             }
-            try check(taskKey, contextID)
-            return try json([
-                "dispatched": true, "no_replay": true, "result_verified": false,
-                "action_references": ["consumed": true, "next": "browser_read"],
-                "next": "Read or wait for the resulting page before reporting success.",
-            ])
+            // Input has already completed. Observation failure must not turn
+            // that dispatch into an apparent input failure that invites replay.
+            return try await postInputResponse(taskKey: taskKey, contextID: contextID, scope: scope)
         case "browser_navigate":
             let binding = try bound(taskKey, contextID)
             let destination = URL(string: object["url"] as! String)!
@@ -564,6 +554,69 @@ actor EmbeddedBrowserToolController {
                 withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
     }
 
+    /// Ordinary and post-input reads share the broker's exact document,
+    /// pagination and physical-target checks. This grants no input or new tab.
+    private func currentObservation(
+        taskKey: String, contextID: UUID, scope: ComputerTaskScope?, read: SemanticReadRequest
+    ) async throws -> BrowserTabSnapshot {
+        let binding = try bound(taskKey, contextID)
+        _ = try await currentTarget(binding: binding, scope: scope)
+        try check(taskKey, contextID)
+        try binding.lifetime.check()
+        // A failed read cannot leave an older controller capability current.
+        contexts[taskKey]?.snapshot = nil
+        let observation = try await broker.snapshot(
+            taskKey: taskKey, binding: binding, bundleIdentifier: "com.ahmedelamin.computa", read: read)
+        try check(taskKey, contextID)
+        try observation.binding.lifetime.check()
+        try requireScope(scope, url: observation.snapshot.documentURL)
+        let target = try await currentTarget(binding: observation.binding, scope: scope)
+        try check(taskKey, contextID)
+        try observation.binding.lifetime.check()
+        guard contexts[taskKey]?.binding?.handle == binding.handle,
+              target.url == observation.snapshot.documentURL else { throw BrowserTabBrokerError.staleDocument }
+        contexts[taskKey]?.binding = observation.binding
+        contexts[taskKey]?.snapshot = observation.snapshot
+        return observation.snapshot
+    }
+
+    private func postInputResponse(taskKey: String, contextID: UUID, scope: ComputerTaskScope?) async throws -> String {
+        var result: [String: Any] = ["dispatched": true, "no_replay": true, "result_verified": false]
+        do {
+            let snapshot = try await currentObservation(taskKey: taskKey, contextID: contextID,
+                scope: scope, read: SemanticReadRequest(view: .overview))
+            result["current_observation"] = ["status": "available", "view": "overview",
+                "snapshot_id": snapshot.id.uuidString, "text": try readResponse(snapshot)]
+            result["action_references"] = ["consumed": true, "next": "current_observation"]
+            result["next"] = "Inspect the returned observation. Use only its new references; prior references remain consumed."
+            let encoded = try json(result)
+            // JSON quoting can expand an already bounded read. Never truncate
+            // a capability-bearing snapshot or publish a partial observation.
+            guard encoded.utf8.count <= 20_480 else { throw PostInputObservationFailure.outputLimit }
+            return encoded
+        } catch {
+            if contexts[taskKey]?.id == contextID { contexts[taskKey]?.snapshot = nil }
+            result["current_observation"] = ["status": "unavailable", "reason": Self.observationFailureReason(error)]
+            result["action_references"] = ["consumed": true, "next": "browser_read"]
+            result["next"] = "Input was dispatched. Do not repeat it. Use browser_read for current evidence and new references if the bound tab is still available."
+            return try json(result)
+        }
+    }
+
+    private enum PostInputObservationFailure: Error { case outputLimit }
+
+    private static func observationFailureReason(_ error: Error) -> String {
+        if error is CancellationError { return "cancelled" }
+        if error is PostInputObservationFailure { return "output_limit" }
+        switch error as? BrowserTabBrokerError {
+        case .handleMissing, .crossTaskHandle, .browserGenerationChanged, .ownershipMismatch: return "binding_unavailable"
+        case .targetClosed, .targetReplaced: return "target_unavailable"
+        case .staleDocument, .staleSnapshot: return "document_changed"
+        case .invalidRead: return "read_not_authorized"
+        default: return "read_failed"
+        }
+    }
+
     /// Guidance names only controls actually exposed by this read. It does not
     /// create another capability or change current-snapshot/physical preflight.
     private func readResponse(_ snapshot: BrowserTabSnapshot) throws -> String {
@@ -573,7 +626,7 @@ actor EmbeddedBrowserToolController {
             "consumed_by_admitted_input": true,
             "clickable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsPress }.map(\.index),
             "fillable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsSetText }.map(\.index),
-            "next_after_input": "browser_read",
+            "next_after_input": "Use the input result's available current_observation; otherwise browser_read.",
         ])
         let result = snapshot.formattedText + "\nBROWSER_ACTION_REFERENCES " + state
         // Preserve the read's existing byte budget; instructions still explain
