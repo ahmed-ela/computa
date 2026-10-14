@@ -466,7 +466,9 @@ final class WebModelResponseCodecTests: XCTestCase {
             let start = try XCTUnwrap(prepared.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n")).upperBound
             let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
             let displayed = String(prepared.prompt[start..<end])
-            XCTAssertTrue(displayed.contains(#"exec\u005fcommand apply\u005fpatch browser.open\u005ftab"#))
+            XCTAssertTrue(displayed.contains(provider == "chatgpt"
+                ? #"exec\u005fcommand apply\u005fpatch browser\u002eopen\u005ftab"#
+                : #"exec\u005fcommand apply\u005fpatch browser.open\u005ftab"#))
             XCTAssertTrue(displayed.contains(#"\u005c\u005f \u005c\u0022 \u005cu005f"#))
             XCTAssertTrue(displayed.contains(#""max\u005foutput\u005ftokens":64"#))
             XCTAssertTrue(displayed.contains(#""parallel\u005ftool\u005fcalls":false"#))
@@ -504,7 +506,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
-    func testDisplayURLPunctuationStaysLiteralWithoutChangingHistorySchemasOrEscapes() throws {
+    func testDisplayURLPunctuationShieldsOnlyChatWithoutChangingHistorySchemasOrEscapes() throws {
         let url = "https://example.com:443/a-b.v1/flight_lookup?q=résumé-1#result"
         let literal = #"literal \u002f and \/; quotes "stay"; `code` <tag> & _value_ café 🌍"#
         let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["url": url], options: [.withoutEscapingSlashes]), as: UTF8.self)
@@ -526,15 +528,22 @@ final class WebModelResponseCodecTests: XCTestCase {
                 let prepared = try WebModelResponseCodec.prepareRequest(data)
                 try assertContiguousRequestValues(data, in: prepared)
                 let displayed = String(prepared.prompt[try requestRange(in: prepared.prompt)])
-                XCTAssertTrue(displayed.contains("https://example.com:443/a-b.v1/flight"))
-                XCTAssertTrue(displayed.contains("https://json-schema.org/draft/2020-12/schema"))
-                XCTAssertTrue(displayed.contains(#"literal \u005cu002f and \u005c/"#))
+                if provider == "chatgpt" {
+                    XCTAssertTrue(displayed.contains(#"https\u003a\u002f\u002fexample\u002ecom\u003a443\u002fa-b\u002ev1\u002fflight"#))
+                    XCTAssertTrue(displayed.contains(#"https\u003a\u002f\u002fjson-schema\u002eorg\u002fdraft\u002f2020-12\u002fschema"#))
+                    XCTAssertTrue(displayed.contains(#"literal \u005cu002f and \u005c\u002f"#))
+                    XCTAssertFalse(displayed.contains("https://"))
+                } else {
+                    XCTAssertTrue(displayed.contains("https://example.com:443/a-b.v1/flight"))
+                    XCTAssertTrue(displayed.contains("https://json-schema.org/draft/2020-12/schema"))
+                    XCTAssertTrue(displayed.contains(#"literal \u005cu002f and \u005c/"#))
+                    XCTAssertFalse(displayed.contains(#"\u002e"#)); XCTAssertFalse(displayed.contains(#"\u003a"#))
+                }
                 for protected in [#"\u0022"#, #"\u005c"#, #"\u005f"#, #"\u0060"#, #"\u003c"#, #"\u003e"#, #"\u0026"#] {
                     XCTAssertTrue(displayed.contains(protected), "Rendering protection must remain for \(protected)")
                 }
                 XCTAssertFalse(displayed.contains(#"\/"#), "An escaped JSON slash has the same value as a literal slash")
-                XCTAssertFalse(displayed.contains(#"\u002d"#)); XCTAssertFalse(displayed.contains(#"\u002e"#))
-                XCTAssertFalse(displayed.contains(#"\u003a"#))
+                XCTAssertFalse(displayed.contains(#"\u002d"#))
                 XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? NSDictionary,
                                try JSONSerialization.jsonObject(with: original) as? NSDictionary)
                 let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? [String: Any])
@@ -542,6 +551,81 @@ final class WebModelResponseCodecTests: XCTestCase {
                 XCTAssertEqual(metadata["literal_escape"], literal, "Do not reinterpret a surviving literal Unicode escape")
                 XCTAssertEqual(metadata["opaque_url"], url)
             }
+        }
+    }
+
+    func testChatURLShieldPreservesCompleteRequestAndUsesOnlyValidatedProviderIdentity() throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let url = "https://fixture.example:443/a-b.v1/path?q=x#fragment"
+        let host = "www.fixture.example"
+        let path = "/private/synthetic/fixture.py"
+        let literal = #"Keep literal \u003a and \/ with "quotes", [] {}, café 🌍 and tabs."#
+        let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["url": url, "steps": [["path": path]]],
+            options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        for (model, shielded) in [("browser/chatgpt", true), (choice.modelID, true),
+                                  ("browser/claude", false), ("browser/gemini", false),
+                                  ("browser/chatgpt-lookalike", false), ("web-chatgpt", false)] {
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": model, "instructions": "Keep every constraint: \(literal)",
+                "input": [["role": "developer", "content": literal],
+                          ["role": "user", "content": "Open \(url)\n\(literal)"],
+                          ["role": "assistant", "content": "Preserve \(host) and \(path) exactly."],
+                          ["type": "function_call", "name": "fixture_lookup", "namespace": "fixture",
+                           "call_id": "call-1.25", "arguments": arguments],
+                          ["type": "function_call_output", "call_id": "call-1.25", "output": arguments]],
+                "tools": [["type": "namespace", "name": "fixture", "tools": [[
+                    "type": "function", "name": "fixture_lookup", "description": literal,
+                    "parameters": ["type": "object", "properties": ["url": ["type": "string", "description": url],
+                                                                      "weight": ["type": "number", "minimum": 1.25]],
+                                   "required": ["url"], "additionalProperties": false],
+                ]]]],
+                "metadata": ["url": url, "bare_host": host, "path": path, "literal": literal],
+                "parallel_tool_calls": false,
+            ], options: [.sortedKeys, .withoutEscapingSlashes])
+            let prepared = try WebModelResponseCodec.prepareRequest(original)
+            try assertContiguousRequestValues(original, in: prepared)
+            let displayed = String(prepared.prompt[try requestRange(in: prepared.prompt)])
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? [String: Any])
+            XCTAssertEqual(decoded as NSDictionary, try JSONSerialization.jsonObject(with: original) as? NSDictionary)
+            XCTAssertTrue(displayed.contains(#""input":[{"content":"#), "Structural array/object punctuation remains literal")
+            XCTAssertTrue(displayed.contains(#""minimum":1.25"#), "A decimal point outside a string is unchanged")
+            if shielded {
+                XCTAssertFalse(displayed.contains("https://")); XCTAssertFalse(displayed.contains(host)); XCTAssertFalse(displayed.contains(path))
+                XCTAssertTrue(displayed.contains(#"https\u003a\u002f\u002ffixture\u002eexample"#))
+                XCTAssertTrue(displayed.contains(#"www\u002efixture\u002eexample"#))
+                XCTAssertTrue(displayed.contains(#"\u002fprivate\u002fsynthetic\u002ffixture\u002epy"#))
+            } else {
+                XCTAssertTrue(displayed.contains("https://fixture.example:443/a-b.v1/path")); XCTAssertTrue(displayed.contains(host)); XCTAssertTrue(displayed.contains(path))
+                XCTAssertFalse(displayed.contains(#"\u002e"#)); XCTAssertFalse(displayed.contains(#"\u003a"#)); XCTAssertFalse(displayed.contains(#"\u002f"#))
+            }
+            let metadata = try XCTUnwrap(decoded["metadata"] as? [String: Any])
+            XCTAssertEqual(metadata["url"] as? String, url); XCTAssertEqual(metadata["path"] as? String, path)
+            XCTAssertEqual(metadata["literal"] as? String, literal, "A surviving literal escape is not decoded a second time")
+            let history = try XCTUnwrap(decoded["input"] as? [[String: Any]])
+            XCTAssertEqual(history[3]["arguments"] as? String, arguments); XCTAssertEqual(history[4]["output"] as? String, arguments)
+            XCTAssertEqual(prepared.model, model)
+        }
+    }
+
+    func testChatURLShieldExpansionCountsTowardCompletePromptLimitWithoutTruncation() throws {
+        let payload = String(repeating: ".:/", count: 10_000)
+        let original = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": payload],
+            options: [.withoutEscapingSlashes])
+        XCTAssertLessThan(original.count, WebModelResponseCodec.maximumPromptBytes)
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(original)) { error in
+            guard case let .promptTooLarge(actual, maximum) = error as? WebModelResponseCodec.Failure else {
+                return XCTFail("Chat shielding must be counted before submission")
+            }
+            XCTAssertGreaterThan(actual, maximum); XCTAssertEqual(maximum, WebModelResponseCodec.maximumPromptBytes)
+            XCTAssertTrue(error.localizedDescription.contains("No context was truncated or submitted"))
+        }
+        for model in ["browser/gemini", "browser/claude"] {
+            let body = try JSONSerialization.data(withJSONObject: ["model": model, "input": payload], options: [.withoutEscapingSlashes])
+            let prepared = try WebModelResponseCodec.prepareRequest(body)
+            try assertContiguousRequestValues(body, in: prepared)
+            let displayed = String(prepared.prompt[try requestRange(in: prepared.prompt)])
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? [String: Any])
+            XCTAssertEqual(decoded["input"] as? String, payload)
         }
     }
 

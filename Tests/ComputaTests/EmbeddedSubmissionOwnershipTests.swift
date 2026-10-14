@@ -86,6 +86,60 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testSubmissionDigestDiagnosticsPreserveFailureFactsWithoutProofOrPrivateData() throws {
+        let flags = ["stateSame", "stateRevoked", "recordRetained", "parentRequired", "parentIntact",
+                     "remountRequired", "remountIntact", "contextMatches", "rootCountMatches", "rootsSame",
+                     "firstRootSame", "currentRootSame", "rootConnected", "bodyConnected", "bodySame",
+                     "payloadAvailable", "payloadWithinLimit", "bodyTextUnchanged", "bodyCanonicalMatches",
+                     "priorIntact", "digestMatches"]
+        var valid: [String: Any] = Dictionary(uniqueKeysWithValues: flags.map { ($0, true as Any) })
+        valid["kind"] = "gemini_submission_digest_v1"; valid["projectedLength"] = 57_495
+        valid["stateRevoked"] = false; valid["parentRequired"] = false; valid["remountRequired"] = false
+        valid["bodyTextUnchanged"] = false; valid["bodyCanonicalMatches"] = false
+        let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(valid))
+        let projected = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        XCTAssertEqual(projected["stateRevoked"] as? Bool, false, "The diagnostic precedes the failure latch")
+        XCTAssertEqual(projected["bodyTextUnchanged"] as? Bool, false)
+        XCTAssertEqual(projected["rootConnected"] as? Bool, true)
+        XCTAssertLessThanOrEqual(encoded.utf8.count, 960)
+        XCTAssertFalse(EmbeddedWebModelTransport.validSubmissionProof(projected, sequence: 3, fingerprint: String(repeating: "a", count: 64)))
+        let invalidFlags: [Any] = [1, "true", NSNull(), "PRIVATE CANARY"]
+        for key in flags {
+            for bad in invalidFlags {
+                var changed = valid; changed[key] = bad
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(changed), key)
+            }
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(missing), key)
+        }
+        let invalidLengths: [Any] = [true, -1, 180_202, 1.5, "1", NSNull()]
+        for bad in invalidLengths {
+            var changed = valid; changed["projectedLength"] = bad
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(changed))
+        }
+        for key in ["prompt", "nonce", "fingerprint", "url", "text"] {
+            var changed = valid; changed[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(changed))
+        }
+        var wrongKind = valid; wrongKind["kind"] = "PRIVATE CANARY"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(wrongKind))
+        for key in ["parentIntact", "remountIntact"] {
+            var changed = valid; changed[key] = false
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(changed))
+        }
+        var unavailable = valid
+        unavailable["payloadAvailable"] = false; unavailable["payloadWithinLimit"] = false; unavailable["projectedLength"] = 0
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(unavailable))
+        unavailable["bodyCanonicalMatches"] = true
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(unavailable))
+        var oversized = valid; oversized["payloadWithinLimit"] = false; oversized["projectedLength"] = 180_201
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(oversized))
+        oversized["payloadWithinLimit"] = true
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(oversized))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDigestDiagnostic(NSNull()))
+    }
+
+    @MainActor
     func testSubmissionBodyMeasurementsCannotPublishTextOrGainProofAuthority() throws {
         let valid: [String: Any] = ["kind": "gemini_submission_body_v1", "expectedLength": 67, "innerTextLength": 68,
             "textContentLength": 67, "expectedLines": 2, "innerTextLines": 3, "textContentLines": 2,

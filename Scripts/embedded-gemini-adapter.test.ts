@@ -295,6 +295,87 @@ describe('Gemini per-submission ownership', () => {
     expect(f.send.clicks).toBe(1); expect(JSON.stringify(rejected)).not.toContain('PRIVATE');
   });
 
+  test('post-digest diagnostics distinguish connected body changes root replacements and private state failures', async () => {
+    const flags = ['stateSame', 'stateRevoked', 'recordRetained', 'parentRequired', 'parentIntact', 'remountRequired',
+      'remountIntact', 'contextMatches', 'rootCountMatches', 'rootsSame', 'firstRootSame', 'currentRootSame',
+      'rootConnected', 'bodyConnected', 'bodySame', 'payloadAvailable', 'payloadWithinLimit',
+      'bodyTextUnchanged', 'bodyCanonicalMatches', 'priorIntact', 'digestMatches'];
+    for (const fault of ['text', 'currentRoot', 'olderRoot', 'bodyOnly', 'state', 'digest']) {
+      const f = fixture(provider, { response: false });
+      await finishRound(f, 1); await finishRound(f, 2); const healthy = await finishRound(f, 3);
+      expect(healthy.submissionDigestDiagnostic).toBeUndefined();
+      const state = f.world.__computaGeminiSubmissionState, record = state.lastVerified;
+      const replace = (old: Element) => {
+        const parent = old.parentElement!, fresh = old.cloneNode(true);
+        parent.children[parent.children.indexOf(old)] = fresh; fresh.parentElement = parent; old.connected = false;
+      };
+      const subtle: any = crypto.subtle, original = subtle.digest; let changed = false;
+      subtle.digest = async (algorithm: any, data: any) => {
+        const digest = await original.call(subtle, algorithm, data);
+        if (!changed && new TextDecoder().decode(data) === normalized(roundPrompt(3))) {
+          changed = true;
+          if (fault === 'text') record.body.text = record.body.text.replace('[literal]', '{altered}');
+          else if (fault === 'currentRoot') replace(record.root);
+          else if (fault === 'olderRoot') replace(f.messages.querySelectorAll('user-query')[1]);
+          else if (fault === 'bodyOnly') replace(record.body);
+          else if (fault === 'state') f.world.__computaGeminiSubmissionState = { ...state };
+          else record.fingerprint = '0'.repeat(64);
+        }
+        return digest;
+      };
+      let rejected: any;
+      try { rejected = await f.run('verifyModel', { ...fields(3), expectedUserCounts: [3] }); }
+      finally { subtle.digest = original; }
+      expect(changed).toBe(true);
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+        submissionDiagnostic: { stage: 'observe_digest', stateRevoked: true } });
+      const diagnostic = rejected.submissionDigestDiagnostic;
+      expect(Object.keys(diagnostic).sort()).toEqual([...flags, 'kind', 'projectedLength'].sort());
+      expect(diagnostic.kind).toBe('gemini_submission_digest_v1');
+      for (const flag of flags) expect(typeof diagnostic[flag]).toBe('boolean');
+      expect(Number.isInteger(diagnostic.projectedLength) && diagnostic.projectedLength >= 0 && diagnostic.projectedLength <= 180201).toBe(true);
+      expect(diagnostic).toMatchObject({ stateRevoked: false, parentRequired: false, parentIntact: true,
+        remountRequired: false, remountIntact: true, rootCountMatches: true, firstRootSame: true });
+      if (fault === 'text') expect(diagnostic).toMatchObject({ rootsSame: true, bodySame: true, rootConnected: true,
+        bodyConnected: true, bodyTextUnchanged: false, bodyCanonicalMatches: false, digestMatches: true });
+      if (fault === 'currentRoot') expect(diagnostic).toMatchObject({ rootsSame: false, currentRootSame: false,
+        rootConnected: false, bodyConnected: false });
+      if (fault === 'olderRoot') expect(diagnostic).toMatchObject({ rootsSame: false, currentRootSame: true,
+        rootConnected: true, bodyConnected: true, bodyTextUnchanged: true });
+      if (fault === 'bodyOnly') expect(diagnostic).toMatchObject({ rootsSame: true, currentRootSame: true,
+        rootConnected: true, bodyConnected: false, bodySame: false });
+      if (fault === 'state') expect(diagnostic.stateSame).toBe(false);
+      if (fault === 'digest') expect(diagnostic).toMatchObject({ digestMatches: false, bodyTextUnchanged: true });
+      const encoded = JSON.stringify(diagnostic);
+      expect(encoded.length).toBeLessThanOrEqual(960);
+      for (const privateValue of ['PRIVATE', marker(3), record.canonical, 'https:']) expect(encoded).not.toContain(privateValue);
+      expect(rejected.submissionProof).toBeUndefined(); expect(rejected.replacementSubmissionProof).toBeUndefined();
+      expect(f.world.__computaGeminiSubmissionState.revoked).toBe(true); expect(f.send.clicks).toBe(3);
+      expect(await f.run('inspect', { ...fields(3), expectedUserCounts: [3] })).toHaveProperty('error');
+      expect(await f.run('submit', { ...fields(3), expectedUserCounts: [3], prompt: roundPrompt(3) })).toHaveProperty('error');
+      expect(f.send.clicks).toBe(3);
+    }
+  });
+
+  test('post-digest prior-body corruption remains rejected and missing diagnostics cannot turn a refusal into proof', async () => {
+    for (const diagnosticThrows of [false, true]) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
+      const prior = f.world.__computaGeminiSubmissionState.lastVerified;
+      const text = await stage(f, 3); await submitPending(f, 3, text);
+      const record = f.world.__computaGeminiSubmissionState.pending;
+      const rejected = await withDigestMutation(f, 3, 'send_claimed', () => {
+        prior.body.text = prior.body.text.replace('[literal]', '{altered}');
+        if (diagnosticThrows) Object.defineProperty(record, 'sequence', { get() { throw new Error('PRIVATE_DIAGNOSTIC_GETTER'); } });
+      }, () => f.run('inspect', { ...fields(3), expectedUserCounts: [3] }));
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      if (diagnosticThrows) expect(rejected.submissionDigestDiagnostic).toBeUndefined();
+      else expect(rejected.submissionDigestDiagnostic).toMatchObject({ priorIntact: false, bodyTextUnchanged: true,
+        bodyCanonicalMatches: true, rootsSame: true, digestMatches: true });
+      expect(rejected.submissionProof).toBeUndefined(); expect(JSON.stringify(rejected)).not.toContain('PRIVATE');
+      expect(f.world.__computaGeminiSubmissionState.revoked).toBe(true); expect(f.send.clicks).toBe(3);
+    }
+  });
+
   test('submission diagnostics retain sequence bounds and never accompany healthy proof', async () => {
     for (const sequence of [-1, 10001, true, 'PRIVATE', Infinity]) {
       const f = fixture(provider, { response: false });

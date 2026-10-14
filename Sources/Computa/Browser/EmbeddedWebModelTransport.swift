@@ -2759,6 +2759,31 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return String(decoding: data, as: UTF8.self)
     }
 
+    static func sanitizedSubmissionDigestDiagnostic(_ raw: Any?) -> String? {
+        let flags = ["stateSame", "stateRevoked", "recordRetained", "parentRequired", "parentIntact",
+                     "remountRequired", "remountIntact", "contextMatches", "rootCountMatches", "rootsSame",
+                     "firstRootSame", "currentRootSame", "rootConnected", "bodyConnected", "bodySame",
+                     "payloadAvailable", "payloadWithinLimit", "bodyTextUnchanged", "bodyCanonicalMatches",
+                     "priorIntact", "digestMatches"]
+        guard let value = raw as? [String: Any], Set(value.keys) == Set(flags + ["kind", "projectedLength"]),
+              value["kind"] as? String == "gemini_submission_digest_v1",
+              let length = ComputerToolArgumentContract.exactInt64(value["projectedLength"]),
+              (0...180_201).contains(length) else { return nil }
+        var safe: [String: Any] = ["kind": "gemini_submission_digest_v1", "projectedLength": length]
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }; safe[key] = flag
+        }
+        let available = safe["payloadAvailable"] as? Bool == true
+        let withinLimit = safe["payloadWithinLimit"] as? Bool == true
+        guard available || length == 0,
+              withinLimit == (available && length <= 180_200),
+              withinLimit || (safe["bodyTextUnchanged"] as? Bool == false && safe["bodyCanonicalMatches"] as? Bool == false),
+              safe["parentRequired"] as? Bool == true || safe["parentIntact"] as? Bool == true,
+              safe["remountRequired"] as? Bool == true || safe["remountIntact"] as? Bool == true,
+              let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 960 else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     static func sanitizedSubmissionBodyDiagnostic(_ raw: Any?) -> String? {
         let measurements = ["expectedLength", "innerTextLength", "textContentLength", "expectedLines", "innerTextLines",
                             "textContentLines", "firstMismatchIndex", "literalDOMLength", "innerTextExpectedOffset", "textContentExpectedOffset"]
@@ -2818,6 +2843,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if (observed["submissionDiagnostic"] as? [String: Any])?["stage"] as? String == "observe_body",
                let nodes = Self.sanitizedSubmissionNodeDiagnostic(observed["submissionNodesDiagnostic"]) {
                 Self.inspectionLog.error("submissionNodes \(nodes, privacy: .public)")
+            }
+            if (observed["submissionDiagnostic"] as? [String: Any])?["stage"] as? String == "observe_digest",
+               let digest = Self.sanitizedSubmissionDigestDiagnostic(observed["submissionDigestDiagnostic"]) {
+                Self.inspectionLog.error("submissionDigest \(digest, privacy: .public)")
             }
         }
         if let raw = observed["debugSubmissionStructure"] as? String,

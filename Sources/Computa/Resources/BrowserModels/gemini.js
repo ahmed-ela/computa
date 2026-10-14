@@ -2033,6 +2033,34 @@ function modelSubmissionNodesDiagnostic(record, root, body, raw, cause) {
         && normalizedBody(body) === record.canonical };
   } catch { return null; }
 }
+function modelSubmissionDigestDiagnostic(state, record, pendingParent, parentValid, remount, remountAllowed,
+  roots, current, root, body, text, fingerprint, priorIntact) {
+  // Capture only finite post-decision facts, before failure revokes the record.
+  // These reads cannot replace the authoritative predicate or grant a proof.
+  try {
+    const raw = modelUserPayloadText(body);
+    const withinLimit = typeof raw === 'string' && raw.length <= 180_200;
+    const canonical = withinLimit ? raw.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
+    return { kind: 'gemini_submission_digest_v1',
+      stateSame: globalThis.__computaGeminiSubmissionState === state, stateRevoked: state.revoked === true,
+      recordRetained: state.pending === record || state.lastVerified === record,
+      parentRequired: parentValid, parentIntact: !parentValid || state.pending === pendingParent
+        && pendingParent.phase === 'send_claimed' && pendingParent.sequence === input.submissionSequence
+        && pendingParent.marker === input.submissionMarker,
+      remountRequired: remountAllowed, remountIntact: !remountAllowed || record.remount === remount,
+      contextMatches: modelSubmissionContext(record, input.action === 'submit') === true,
+      rootCountMatches: current.length === record.sequence,
+      rootsSame: current.length === roots.length && current.every((node, index) => node === roots[index]),
+      firstRootSame: current[0] === roots[0], currentRootSame: current[record.sequence - 1] === root,
+      rootConnected: root.isConnected === true, bodyConnected: body.isConnected === true,
+      bodySame: modelUserBody(root) === body,
+      payloadAvailable: typeof raw === 'string', payloadWithinLimit: withinLimit,
+      projectedLength: typeof raw === 'string' ? Math.min(raw.length, 180_201) : 0,
+      bodyTextUnchanged: canonical !== null && canonical === text,
+      bodyCanonicalMatches: canonical !== null && canonical === record.canonical,
+      priorIntact: priorIntact() === true, digestMatches: fingerprint === record.fingerprint };
+  } catch { return null; }
+}
 async function modelRecoverVerifiedSubmission(record) {
   // Only one persisted verified record participates. The native pair is an
   // expected-byte pin, never a source of message text or an unsent draft.
@@ -2182,7 +2210,12 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     || !modelSubmissionContext(record, input.action === 'submit')
     || current.length !== sequence || current.some((node, index) => node !== roots[index])
     || !root.isConnected || !body.isConnected || modelUserBody(root) !== body || normalizedBody(body) !== text
-    || !priorIntact() || fingerprint !== record.fingerprint) return modelSubmissionFailure(record, 'observe_digest');
+    || !priorIntact() || fingerprint !== record.fingerprint) {
+    const diagnostic = modelSubmissionDigestDiagnostic(state, record, pendingParent, parentValid, remount, remountAllowed,
+      roots, current, root, body, text, fingerprint, priorIntact);
+    return { ...modelSubmissionFailure(record, 'observe_digest'),
+      ...(diagnostic ? { submissionDigestDiagnostic: diagnostic } : {}) };
+  }
   record.root = root; record.body = body; record.phase = 'verified'; record.remount = null;
   state.lastVerified = record; if (state.pending === record) state.pending = null;
   return { submissionProof: { sequence, fingerprint } };

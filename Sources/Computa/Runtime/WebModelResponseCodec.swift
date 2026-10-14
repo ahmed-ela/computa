@@ -210,7 +210,8 @@ enum WebModelResponseCodec {
         let displaySource = toolDefinitionsChanged
             ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             : originalJSON
-        let displayJSON = displayStableJSON(displaySource)
+        let displayJSON = displayStableJSON(displaySource,
+            shieldURLPunctuation: LocalModelCatalog.webProvider(for: model) == "chatgpt")
         let prompt = """
         \(runtimeInstructions)
 
@@ -257,10 +258,13 @@ enum WebModelResponseCodec {
         return texts
     }
 
-    /// Protect rendering-sensitive punctuation in JSON strings. URL punctuation
-    /// . : / - and structural JSON punctuation remain literal. Consume complete
-    /// escape pairs so quotes and literal backslashes retain their decoded values.
-    private static func displayStableJSON(_ original: String) -> String {
+    /// Protect rendering-sensitive punctuation in JSON strings. ChatGPT's
+    /// selected message DOM was observed changing the literal request after
+    /// Send; shielding . : / is a mitigation hypothesis, not a parser diagnosis.
+    /// Structural JSON punctuation and decoded values remain unchanged. Other
+    /// providers retain literal URL punctuation. Consume complete escape pairs
+    /// so quotes and literal backslashes retain their decoded values.
+    private static func displayStableJSON(_ original: String, shieldURLPunctuation: Bool = false) -> String {
         var bytes = original.utf8.makeIterator()
         var result: [UInt8] = []
         result.reserveCapacity(original.utf8.count)
@@ -281,10 +285,14 @@ enum WebModelResponseCodec {
                 continue
             }
             if byte == 92, let escaped = bytes.next() {
-                if escaped == 47 { result.append(escaped) }
+                if escaped == 47 {
+                    if shieldURLPunctuation { appendUnicodeEscape(escaped) }
+                    else { result.append(escaped) }
+                }
                 else if escaped == 34 || escaped == 92 { appendUnicodeEscape(escaped) }
                 else { result.append(byte); result.append(escaped) }
-            } else if (33...44).contains(byte) || (59...64).contains(byte)
+            } else if shieldURLPunctuation && [46, 47, 58].contains(byte)
+                        || (33...44).contains(byte) || (59...64).contains(byte)
                         || (91...96).contains(byte) || (123...126).contains(byte) {
                 appendUnicodeEscape(byte)
             } else {
