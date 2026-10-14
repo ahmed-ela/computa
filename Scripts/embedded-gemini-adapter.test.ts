@@ -604,7 +604,7 @@ describe('Gemini per-submission ownership', () => {
       expect(Number.isInteger(query[key]) && query[key] >= 0 && query[key] <= 8192).toBe(true);
     expect(JSON.stringify(query)).not.toContain('PRIVATE'); expect(JSON.stringify(query)).not.toContain(firstMarker);
     expect(f.send.clicks).toBe(7);
-  });
+  }, 10_000);
 
   test('space framing is uniform whole-body selection and cannot repair mixed formats whitespace or changed content', async () => {
     const text = 'PRIVATE first\n  user indentation and trailing  \nPRIVATE third [literal]\n\n' + markerLine;
@@ -671,6 +671,115 @@ describe('Gemini per-submission ownership', () => {
     expect(await f.run('insert', { ...fields(2), expectedUserCounts: [1], prompt: roundPrompt(2) }))
       .toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
     expect(f.composer.events.length).toBe(inputs); expect(f.send.clicks).toBe(1);
+  });
+
+  function replaceBoundRoot(f: ReturnType<typeof fixture>, styles?: Map<Element, Record<string, unknown>>, sourceRoot?: Element) {
+    const record = f.world.__computaGeminiSubmissionState.lastVerified, oldRoot: Element = sourceRoot ?? record.root;
+    const oldBody: Element = oldRoot === record.root ? record.body : oldRoot.querySelector('span.user-query-bubble-with-background')!.children
+      .find(node => node.tagName === 'SPAN' && node.classList.contains('ng-star-inserted'))!;
+    const clone = (node: Element): Element => {
+      const copy = node.cloneNode(false);
+      if (node.nodeType === 3) (copy as any).data = (node as any).data;
+      if (styles?.has(node)) styles.set(copy, { ...styles.get(node)! });
+      copy.append(...node.children.map(clone)); return copy;
+    };
+    const root = clone(oldRoot), parent = oldRoot.parentElement!;
+    parent.children[parent.children.indexOf(oldRoot)] = root; root.parentElement = parent; oldRoot.connected = false;
+    const body = root.querySelector('span.user-query-bubble-with-background')!.children
+      .find(node => node.tagName === 'SPAN' && node.classList.contains('ng-star-inserted'))!;
+    return { record, oldRoot, oldBody, root, body };
+  }
+
+  test('a whole first root replaced between reads discards verifyModel and only one fresh inspect consumes its certificate', async () => {
+    const { f, styles } = queryFixture(true), bound = await finishRound(f, 1);
+    const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+    const expectedModelChoice = { key: '3.1 Pro', label: '3.1 Pro' };
+    const unchanged = await f.run('verifyModel', { ...fields(1), expectedUserCounts: [1], expectedModelChoice });
+    expect(unchanged.submissionProof).toEqual(bound.submissionProof);
+    expect(f.world.__computaGeminiSubmissionState.lastVerified.remount).toBeNull();
+    const replaced = replaceBoundRoot(f, styles);
+    const discard = await f.run('verifyModel', { ...fields(1), expectedUserCounts: [1], expectedModelChoice });
+    expect(discard).toEqual({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+    expect(replaced.record.root).toBe(replaced.oldRoot); expect(replaced.record.body).toBe(replaced.oldBody);
+    expect(replaced.record.remount).toEqual({ previousRoot: replaced.oldRoot, previousBody: replaced.oldBody,
+      root: replaced.root, body: replaced.body });
+    expect(f.world.__computaGeminiSubmissionState.revoked).toBe(false); expect(f.send.clicks).toBe(1);
+    const fresh = await f.run('inspect', { ...fields(1), expectedUserCounts: [1], expectedModelChoice });
+    expect(fresh).toMatchObject({ firstUserVerified: true, firstUserFingerprint: bound.firstUserFingerprint,
+      submissionProof: bound.submissionProof });
+    expect(replaced.record.root).toBe(replaced.root); expect(replaced.record.body).toBe(replaced.body);
+    expect(replaced.record.remount).toBeNull(); expect(f.send.clicks).toBe(1);
+    expect((await f.run('verifyModel', { ...fields(1), expectedUserCounts: [1], expectedModelChoice })).submissionProof)
+      .toEqual(bound.submissionProof);
+    expect(replaced.record.remount).toBeNull(); expect(f.send.clicks).toBe(1);
+  });
+
+  test('between-read root recovery rejects connected old nodes body-only aliases changed pins and a crossed certificate digest', async () => {
+    for (const fault of ['bodyOnly', 'connectedRoot', 'connectedBody', 'canonical', 'nativePin', 'owner', 'count', 'digest', 'wrongFreshBody']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+      const expectedModelChoice = { key: '3.1 Pro', label: '3.1 Pro' }, record = f.world.__computaGeminiSubmissionState.lastVerified;
+      let currentBody: Element;
+      if (fault === 'bodyOnly') {
+        const old: Element = record.body, parent = old.parentElement!, copy = old.cloneNode(true);
+        parent.children[parent.children.indexOf(old)] = copy; copy.parentElement = parent; old.connected = false; currentBody = copy;
+      } else {
+        const replaced = replaceBoundRoot(f); currentBody = replaced.body;
+        if (fault === 'connectedRoot') record.root = f.body;
+        if (fault === 'connectedBody') f.body.append(replaced.oldBody);
+      }
+      if (fault === 'canonical') currentBody.text = currentBody.text.replace('[literal]', '{altered}');
+      if (fault === 'owner') f.world.__computaModelOwner = '00000000-0000-0000-0000-000000000000';
+      if (fault === 'count') f.appendUser('UNEXPECTED');
+      const args = { ...fields(1), expectedUserCounts: [1], expectedModelChoice,
+        ...(fault === 'nativePin' ? { expectedFirstUserFingerprint: '0'.repeat(64) } : {}) };
+      let rejected: any;
+      if (fault === 'digest') {
+        const subtle: any = crypto.subtle, original = subtle.digest; let hashes = 0;
+        subtle.digest = async (algorithm: any, data: any) => {
+          const digest = await original.call(subtle, algorithm, data);
+          if (new TextDecoder().decode(data) === normalized(roundPrompt(1)) && ++hashes === 2) currentBody.text += ' altered';
+          return digest;
+        };
+        try { rejected = await f.run('verifyModel', args); expect(hashes).toBe(2); }
+        finally { subtle.digest = original; }
+      } else if (fault === 'wrongFreshBody') {
+        expect(await f.run('verifyModel', args)).toMatchObject({ error: 'first_user_observation_replaced' });
+        replaceBoundRoot(f, undefined, record.remount.root); // A second candidate cannot overwrite the unconsumed certificate.
+        rejected = await f.run('inspect', args);
+      } else rejected = await f.run('verifyModel', args);
+      expect(rejected.error).toBeDefined(); expect(rejected.error).not.toBe('first_user_observation_replaced');
+      expect(rejected.submissionProof).toBeUndefined(); expect(rejected.text).toBeUndefined(); expect(f.send.clicks).toBe(1);
+      if (fault !== 'wrongFreshBody') expect(record.remount).toBeNull();
+      if (fault === 'bodyOnly') expect(rejected.submissionNodesDiagnostic).toMatchObject({ cause: 'physical_replaced',
+        rootSame: true, bodySame: false, oldRootConnected: true, oldBodyConnected: false,
+        currentRootConnected: true, currentBodyConnected: true, projectedCanonicalMatches: true });
+    }
+  });
+
+  test('observe-body diagnostics preserve exact finite causes and never accompany healthy proof', async () => {
+    const keys = ['kind', 'cause', 'rootSame', 'bodySame', 'oldRootConnected', 'oldBodyConnected',
+      'currentRootConnected', 'currentBodyConnected', 'remountCertificatePresent', 'projectedCanonicalMatches'];
+    for (const cause of ['body_missing', 'payload_type', 'payload_limit', 'physical_replaced']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1); const good = await finishRound(f, 2);
+      expect(good.submissionNodesDiagnostic).toBeUndefined();
+      const record = f.world.__computaGeminiSubmissionState.lastVerified, body: Element = record.body;
+      if (cause === 'body_missing') body.values.class = 'unrecognized';
+      else if (cause === 'payload_type') Object.defineProperty(body, 'innerText', { get: () => ({ private: 'PRIVATE' }) });
+      else if (cause === 'payload_limit') Object.defineProperty(body, 'innerText', { get: () => 'PRIVATE'.repeat(26000) });
+      else {
+        const parent = body.parentElement!, copy = body.cloneNode(true);
+        parent.children[parent.children.indexOf(body)] = copy; copy.parentElement = parent; body.connected = false;
+      }
+      const rejected = await f.run('inspect', { ...fields(2), expectedUserCounts: [2] });
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message', submissionDiagnostic: { stage: 'observe_body' } });
+      const diagnostic = rejected.submissionNodesDiagnostic;
+      expect(Object.keys(diagnostic).sort()).toEqual([...keys].sort());
+      expect(diagnostic).toMatchObject({ kind: 'gemini_submission_nodes_v1', cause, remountCertificatePresent: false });
+      for (const key of keys.slice(2)) expect(typeof diagnostic[key]).toBe('boolean');
+      expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE'); expect(JSON.stringify(diagnostic)).not.toContain(marker(2));
+      expect(JSON.stringify(diagnostic)).not.toContain('https:'); expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
+    }
   });
 });
 

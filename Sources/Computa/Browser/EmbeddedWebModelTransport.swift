@@ -2619,6 +2619,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return String(decoding: data, as: UTF8.self)
     }
 
+    static func sanitizedSubmissionNodeDiagnostic(_ raw: Any?) -> String? {
+        let flags = ["rootSame", "bodySame", "oldRootConnected", "oldBodyConnected", "currentRootConnected",
+                     "currentBodyConnected", "remountCertificatePresent", "projectedCanonicalMatches"]
+        guard let value = raw as? [String: Any], Set(value.keys) == Set(flags + ["kind", "cause"]),
+              value["kind"] as? String == "gemini_submission_nodes_v1",
+              let cause = value["cause"] as? String,
+              ["body_missing", "payload_type", "payload_limit", "physical_replaced"].contains(cause) else { return nil }
+        var safe: [String: Any] = ["kind": "gemini_submission_nodes_v1", "cause": cause]
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }; safe[key] = flag
+        }
+        if cause == "body_missing" {
+            guard safe["currentBodyConnected"] as? Bool == false, safe["projectedCanonicalMatches"] as? Bool == false else { return nil }
+        }
+        if cause == "physical_replaced" {
+            guard safe["rootSame"] as? Bool != true || safe["bodySame"] as? Bool != true else { return nil }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 960 else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     static func sanitizedSubmissionBodyDiagnostic(_ raw: Any?) -> String? {
         let measurements = ["expectedLength", "innerTextLength", "textContentLength", "expectedLines", "innerTextLines",
                             "textContentLines", "firstMismatchIndex", "literalDOMLength", "innerTextExpectedOffset", "textContentExpectedOffset"]
@@ -2675,6 +2696,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         if let safe = Self.sanitizedSubmissionDiagnostic(observed["submissionDiagnostic"]) {
             Self.inspectionLog.error("submissionAdapter \(safe, privacy: .public)")
+            if (observed["submissionDiagnostic"] as? [String: Any])?["stage"] as? String == "observe_body",
+               let nodes = Self.sanitizedSubmissionNodeDiagnostic(observed["submissionNodesDiagnostic"]) {
+                Self.inspectionLog.error("submissionNodes \(nodes, privacy: .public)")
+            }
         }
         if let raw = observed["debugSubmissionStructure"] as? String,
            let records = Self.firstUserStructureDiagnosticRecords(raw, provider: .gemini, expectedReason: "submission_text") {

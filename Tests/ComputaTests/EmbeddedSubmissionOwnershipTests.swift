@@ -230,4 +230,37 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
         structure["descendantScope"] = "selected_body"; structure["provider"] = "chatgpt"
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(), provider: .chatgpt))
     }
+
+    @MainActor
+    func testSubmissionNodeDiagnosticsDistinguishReplacedPointersWithoutPublishingIdentity() throws {
+        let valid: [String: Any] = ["kind": "gemini_submission_nodes_v1", "cause": "physical_replaced",
+            "rootSame": false, "bodySame": false, "oldRootConnected": false, "oldBodyConnected": false,
+            "currentRootConnected": true, "currentBodyConnected": true, "remountCertificatePresent": false,
+            "projectedCanonicalMatches": true]
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedSubmissionNodeDiagnostic(valid))
+        XCTAssertLessThanOrEqual(safe.utf8.count, 960)
+        XCTAssertFalse(EmbeddedWebModelTransport.validSubmissionProof(valid, sequence: 1, fingerprint: String(repeating: "a", count: 64)))
+        for key in valid.keys {
+            var missing = valid; missing[key] = nil
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionNodeDiagnostic(missing))
+            var arbitrary = valid; arbitrary[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionNodeDiagnostic(arbitrary))
+            if !["kind", "cause"].contains(key) {
+                arbitrary = valid; arbitrary[key] = 1
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionNodeDiagnostic(arbitrary))
+            }
+        }
+        for key in ["root", "body", "text", "prompt", "marker", "fingerprint", "url"] {
+            var privateValue = valid; privateValue[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionNodeDiagnostic(privateValue))
+        }
+        var unchanged = valid; unchanged["rootSame"] = true; unchanged["bodySame"] = true
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionNodeDiagnostic(unchanged))
+        var absent = valid; absent["cause"] = "body_missing"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionNodeDiagnostic(absent))
+        absent["currentBodyConnected"] = false; absent["projectedCanonicalMatches"] = false
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedSubmissionNodeDiagnostic(absent))
+        var bodyOnly = valid; bodyOnly["rootSame"] = true; bodyOnly["oldRootConnected"] = true
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedSubmissionNodeDiagnostic(bodyOnly), "Measurements do not authorize recovery")
+    }
 }

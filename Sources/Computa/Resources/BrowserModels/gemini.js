@@ -2006,6 +2006,17 @@ function modelPreviousSubmissionIntact(sequence) {
     && modelSubmissionContext(record) && roots.length === sequence && roots[sequence - 1] === record.root
     && record.body.isConnected && modelUserBody(record.root) === record.body && normalizedBody(record.body) === record.canonical;
 }
+function modelSubmissionNodesDiagnostic(record, root, body, raw, cause) {
+  try {
+    return { kind: 'gemini_submission_nodes_v1', cause,
+      rootSame: !!root && record.root === root, bodySame: !!body && record.body === body,
+      oldRootConnected: !!record.root?.isConnected, oldBodyConnected: !!record.body?.isConnected,
+      currentRootConnected: !!root?.isConnected, currentBodyConnected: !!body?.isConnected,
+      remountCertificatePresent: !!record.remount,
+      projectedCanonicalMatches: !!body && typeof raw === 'string' && raw.length <= 180_200
+        && normalizedBody(body) === record.canonical };
+  } catch { return null; }
+}
 async function modelObserveSubmission(sequence, allowPending = false, pendingParent = null) {
   const state = globalThis.__computaGeminiSubmissionState;
   if (sequence === 0) return modelUserRoots().length === 0 ? {} : modelSubmissionFailure(null, 'observe_count');
@@ -2036,9 +2047,28 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     && input.expectedFirstUserFingerprint === record.fingerprint
     && globalThis.__computaModelFirstProof?.fingerprint === record.fingerprint
     && globalThis.__computaModelFirstProof?.marker === record.marker;
-  if (!body || typeof raw !== 'string' || raw.length > 180_200
-    || record.root && (record.root !== root || record.body !== body) && !remountAllowed
-    || sequence > 1 && (root === roots[0] || body === modelUserBody(roots[0]))) return modelSubmissionFailure(record, 'observe_body');
+  const bodyCause = !body ? 'body_missing' : typeof raw !== 'string' ? 'payload_type' : raw.length > 180_200 ? 'payload_limit'
+    : record.root && (record.root !== root || record.body !== body) && !remountAllowed
+      || sequence > 1 && (root === roots[0] || body === modelUserBody(roots[0])) ? 'physical_replaced' : null;
+  if (bodyCause) {
+    // A first root can be replaced after the preceding invocation returned.
+    // Use its persisted OLD physical snapshot to obtain the existing discard
+    // receipt; only the next fresh inspect may consume that certificate.
+    if (bodyCause === 'physical_replaced' && sequence === 1 && ['inspect', 'verifyModel'].includes(input.action)
+      && state.lastVerified === record && state.pending === null && record.phase === 'verified' && !record.remount
+      && record.root && record.body && !record.root.isConnected && !record.body.isConnected
+      && firstSnapshot?.root === root && firstSnapshot.body === body && snapshotUnchanged()
+      && firstUserFingerprint === record.fingerprint && input.expectedFirstUserFingerprint === record.fingerprint
+      && globalThis.__computaModelFirstProof?.fingerprint === record.fingerprint
+      && globalThis.__computaModelFirstProof?.marker === record.marker) {
+      const discarded = await modelFirstUserReplacementObservation({ root: record.root, body: record.body,
+        text: record.canonical, identity: firstUserIdentity });
+      if (discarded) return discarded;
+    }
+    const submissionNodesDiagnostic = modelSubmissionNodesDiagnostic(record, root, body, raw, bodyCause);
+    return { ...modelSubmissionFailure(record, 'observe_body'),
+      ...(submissionNodesDiagnostic ? { submissionNodesDiagnostic } : {}) };
+  }
   const text = normalizedBody(body), markerLine = `Computa session marker: ${record.marker}`;
   if (text !== record.canonical || text.split('\n').at(-1) !== markerLine || text.split(markerLine).length !== 2)
     return modelSubmissionFailure(record, 'observe_text', body);
