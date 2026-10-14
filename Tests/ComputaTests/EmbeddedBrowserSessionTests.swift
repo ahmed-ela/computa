@@ -578,9 +578,9 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertNil(session.modelNavigationDiagnostic(tabID: humanID, view: human))
         XCTAssertNil(session.modelNavigationDiagnostic(tabID: UUID(), view: view))
         let facts = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
-        XCTAssertEqual(facts.logDescription, "known=true viewLoading=false tabLoading=false navigationPending=false generationCommitted=false generationFinished=false navigationError=false settled=false")
+        XCTAssertEqual(facts.logDescription, "known=true viewLoading=false tabLoading=false navigationPending=false generationCommitted=false generationFinished=false navigationError=false settled=false geminiDocumentCommitObserved=false serverRedirectObservedInCurrentNavigation=false")
         XCTAssertEqual(EmbeddedBrowserSession.ModelNavigationDiagnostic.unknownLogDescription,
-                       "known=false viewLoading=unknown tabLoading=unknown navigationPending=unknown generationCommitted=unknown generationFinished=unknown navigationError=unknown settled=unknown")
+                       "known=false viewLoading=unknown tabLoading=unknown navigationPending=unknown generationCommitted=unknown generationFinished=unknown navigationError=unknown settled=unknown geminiDocumentCommitObserved=unknown serverRedirectObservedInCurrentNavigation=unknown")
         session.closeTab(id)
         XCTAssertNil(session.modelNavigationDiagnostic(tabID: id, view: view))
         XCTAssertNotNil(session.modelNavigationDiagnostic(tabID: otherID, view: other))

@@ -33,6 +33,111 @@ final class APIModelResponseCodecTests: XCTestCase {
         envelope.merge(changes) { _, value in value }
         return .init(body: try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]), contentType: "application/json")
     }
+    func testArgumentDecodeDiagnosticsDistinguishJSONSchemaAndSizeWithoutGrantingCorrection() throws {
+        let prepared = try request()
+        let cases: [(String, APIModelResponseCodec.ArgumentValidationDiagnostic.Reason)] = [
+            ("{PRIVATE_ARGUMENT_SECRET_URL", .invalidJSON), ("[\"PRIVATE_ARGUMENT_SECRET_URL\"]", .nonObject),
+            ("{\"path\":false,\"PRIVATE_ARGUMENT_SECRET_URL\":42}", .schemaMismatch),
+            (String(repeating: "x", count: 2_000_001), .oversized)]
+        for (arguments, reason) in cases {
+            var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+            let result = try correctionResult(prepared, arguments: arguments)
+            if reason == .oversized {
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared, onArgumentRejection: { observed.append($0) })) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                }
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared))
+            } else {
+                guard case .argumentsRejected(let usage) = try APIModelResponseCodec.decodeForCorrection(result, request: prepared, onArgumentRejection: { observed.append($0) }),
+                      case .argumentsRejected(let unchangedUsage) = try APIModelResponseCodec.decodeForCorrection(result, request: prepared) else { return XCTFail("No rejected call may become a reply") }
+                XCTAssertEqual(usage, unchangedUsage)
+            }
+            let diagnostic = try XCTUnwrap(observed.count == 1 ? observed.first : nil)
+            XCTAssertEqual(diagnostic.reason, reason); XCTAssertEqual(diagnostic.callCount, 1); XCTAssertEqual(diagnostic.rejectedCount, 1)
+            XCTAssertTrue(diagnostic.envelopeShapeValid); XCTAssertTrue(diagnostic.unambiguousJSON)
+            XCTAssertTrue(diagnostic.streamShapeAndUsageValid); XCTAssertTrue(diagnostic.knownUsage)
+            XCTAssertEqual(diagnostic.correctionEligible, reason != .oversized)
+            let data = try JSONEncoder().encode(diagnostic), text = String(decoding: data, as: UTF8.self)
+            XCTAssertLessThanOrEqual(data.count, 512)
+            for privateValue in ["PRIVATE", "remote-rejected", "rejected-call", prepared.tools[0].wireName, "path", "http"] { XCTAssertFalse(text.contains(privateValue)) }
+        }
+    }
+    func testArgumentDecodeDiagnosticsExposeMissingUsageAndUnsafeEnvelopeWithoutCorrection() throws {
+        let prepared = try request(), normal = try correctionResult(prepared)
+        let text = String(decoding: normal.body, as: UTF8.self)
+        let ambiguous = text.replacingOccurrences(of: "\"total_tokens\":14", with: "\"total_tokens\":14,\"total_tokens\":14")
+        XCTAssertNotEqual(text, ambiguous)
+        let cases: [(APIProviderHTTPClient.Result, Bool, Bool, Bool, APIModelResponseCodec.ArgumentValidationDiagnostic.EnvelopeRejection?)] = [
+            (try correctionResult(prepared, changes: ["usage": NSNull()]), true, true, false, nil),
+            (try correctionResult(prepared, changes: ["id": ""]), false, true, true, .invalidID),
+            (try correctionResult(prepared, changes: ["id": NSNull()]), false, true, true, .missingID),
+            (try correctionResult(prepared, changes: ["error": "PRIVATE_PROVIDER_ERROR"]), false, true, true, .errorPresent),
+            (try correctionResult(prepared, changes: ["object": "PRIVATE_WRONG_OBJECT"]), false, true, true, .objectKind),
+            (try correctionResult(prepared, changes: ["system_fingerprint": 42]), false, true, true, .systemFingerprintType),
+            (try correctionResult(prepared, changes: ["created": 0.5]), false, false, true, .createdNoninteger),
+            (try correctionResult(prepared, changes: ["created": true]), false, true, true, .createdNoninteger),
+            (try correctionResult(prepared, changes: ["created": "PRIVATE_TIMESTAMP"]), false, true, true, .createdNoninteger),
+            (try correctionResult(prepared, changes: ["created": -1]), false, false, true, .createdOutOfRange),
+            (try correctionResult(prepared, changes: ["created": 4_102_444_801]), false, true, true, .createdOutOfRange),
+            (.init(body: Data(ambiguous.utf8), contentType: "application/json"), true, false, true, nil)]
+        for (result, shape, unambiguous, usage, envelopeReason) in cases {
+            var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared, onArgumentRejection: { observed.append($0) })) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+            let diagnostic = try XCTUnwrap(observed.count == 1 ? observed.first : nil)
+            XCTAssertEqual(diagnostic.reason, .schemaMismatch); XCTAssertEqual(diagnostic.envelopeShapeValid, shape)
+            XCTAssertEqual(diagnostic.unambiguousJSON, unambiguous); XCTAssertEqual(diagnostic.knownUsage, usage)
+            XCTAssertEqual(diagnostic.envelopeRejection, envelopeReason); XCTAssertFalse(diagnostic.correctionEligible)
+            XCTAssertFalse(String(decoding: try JSONEncoder().encode(diagnostic), as: UTF8.self).contains("PRIVATE"))
+        }
+    }
+    func testArgumentDecodeDiagnosticsNeverMaskLaterIdentityUsageReasoningOrModelFailures() throws {
+        let prepared = try request()
+        let unknown: [String: Any] = ["id": "PRIVATE_UNKNOWN_CALL", "type": "function", "function": ["name": "PRIVATE_UNKNOWN_TOOL", "arguments": "{}"]]
+        let duplicate: [String: Any] = ["id": "rejected-call", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": "{\"path\":\"safe\"}"]]
+        let cases: [(APIProviderHTTPClient.Result, APIModelResponseCodec.Failure)] = [
+            (try correctionResult(prepared, additionalCalls: [unknown]), .invalidTool),
+            (try correctionResult(prepared, additionalCalls: [duplicate]), .invalidTool),
+            (try correctionResult(prepared, changes: ["model": "PRIVATE_WRONG_MODEL"]), .modelMismatch),
+            (try correctionResult(prepared, changes: ["usage": ["prompt_tokens": true, "completion_tokens": 4]]), .invalidResponse)]
+        for (result, expected) in cases {
+            var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared, onArgumentRejection: { observed.append($0) })) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, expected)
+            }
+            XCTAssertTrue(observed.isEmpty, "An argument diagnostic is not a complete-envelope validation bypass")
+        }
+        var envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: correctionResult(prepared).body) as? [String: Any])
+        var choices = envelope["choices"] as! [[String: Any]], message = choices[0]["message"] as! [String: Any]
+        message["reasoning"] = String(repeating: "x", count: 2_000_001); choices[0]["message"] = message; envelope["choices"] = choices
+        var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: JSONSerialization.data(withJSONObject: envelope), contentType: "application/json"), request: prepared, onArgumentRejection: { observed.append($0) })) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidReasoning)
+        }
+        XCTAssertTrue(observed.isEmpty)
+    }
+    func testArgumentDecodeDiagnosticsDistinguishConflictingStreamUsageFromEnvelopeAmbiguity() throws {
+        let prepared = try request()
+        let chunks: [[String: Any]] = [
+            ["id": "PRIVATE_STREAM_ID", "object": "chat.completion.chunk", "model": prepared.model.id,
+             "choices": [["index": 0, "delta": ["role": "assistant", "tool_calls": [["index": 0, "id": "PRIVATE_CALL_ID", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": "{\"path\":false}"]]]], "finish_reason": NSNull()]],
+             "usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14]],
+            ["id": "PRIVATE_STREAM_ID", "object": "chat.completion.chunk", "model": prepared.model.id,
+             "choices": [["index": 0, "delta": [:], "finish_reason": "tool_calls"]]],
+            ["id": "PRIVATE_STREAM_ID", "object": "chat.completion.chunk", "model": prepared.model.id, "choices": [],
+             "usage": ["prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15]]]
+        var data = Data()
+        for chunk in chunks { data.append(Data("data: ".utf8)); data.append(try JSONSerialization.data(withJSONObject: chunk)); data.append(Data("\n\n".utf8)) }
+        data.append(Data("data: [DONE]\n\n".utf8))
+        var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: data, contentType: "text/event-stream"), request: prepared, onArgumentRejection: { observed.append($0) })) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+        }
+        let diagnostic = try XCTUnwrap(observed.count == 1 ? observed.first : nil)
+        XCTAssertTrue(diagnostic.envelopeShapeValid); XCTAssertTrue(diagnostic.unambiguousJSON); XCTAssertTrue(diagnostic.knownUsage)
+        XCTAssertFalse(diagnostic.streamShapeAndUsageValid); XCTAssertFalse(diagnostic.correctionEligible)
+    }
     func testArgumentCorrectionRequiresCompleteBatchAndPresentExactUsageBeforeClassification() throws {
         let prepared = try request()
         for bad in ["{", "{\"path\":false}"] {

@@ -327,6 +327,83 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testArgumentDecodeFailureProjectionIsBoundedTypedAndRestrictedToDecodeErrors() throws {
+        let validation = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch, callCount: 2, rejectedCount: 1,
+            envelopeShapeValid: true, unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: false, correctionEligible: false)
+        let diagnostic = APIModelServer.ArgumentFailureDiagnostic(validation: validation, gate: .decoderExcluded, attempt: 1)
+        let context = APIModelServer.FailureDiagnosticContext(taskID: UUID(), threadID: UUID(), turnID: UUID())
+        for stage in APIModelServer.FailureStage.allCases {
+            let text = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: stage, argumentDiagnostic: diagnostic, context: context))
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+            if stage == .decode {
+                XCTAssertEqual(Set(value.keys), ["kind", "stage", "code", "retryable", "argument_validation", "native_context"])
+                XCTAssertLessThanOrEqual(text.utf8.count, 1_024)
+            } else { XCTAssertEqual(Set(value.keys), ["kind", "stage", "code", "retryable"]); XCTAssertLessThanOrEqual(text.utf8.count, 256) }
+        }
+        let errors: [any Error] = [APIModelResponseCodec.Failure.invalidTool, APIModelResponseCodec.Failure.modelMismatch,
+                                  APIModelResponseCodec.Failure.invalidResponse, APIProviderHTTPClient.Failure.rateLimited]
+        for error in errors {
+            let text = try XCTUnwrap(APIModelServer.failureDiagnostic(error, stage: .decode, argumentDiagnostic: diagnostic, context: context))
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+            XCTAssertNil(value["argument_validation"]); XCTAssertNil(value["native_context"])
+        }
+        let invalid = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch, callCount: 1_000_000,
+            rejectedCount: 1_000_000, envelopeShapeValid: true, unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        let text = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: .decode,
+            argumentDiagnostic: .init(validation: invalid, gate: .accountingDisabled, attempt: 3), context: context))
+        XCTAssertFalse(text.contains("argument_validation")); XCTAssertFalse(text.contains("native_context"))
+    }
+    func testActualArgumentDecodeDiagnosticsSeparateUsageEnvelopeAndAccountingWithoutExtraRequests() async throws {
+        for mode in ["missing_usage", "envelope_shape", "accounting_disabled", "accounting_unavailable", "second_rejected"] {
+            let recorder = APIRequestRecorder(), diagnostics = APIFailureDiagnosticRecorder(), credentials = APICredentialCounter()
+            let root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appendingPathComponent("accounting")
+            if mode == "accounting_unavailable" { try Data("PRIVATE_EXISTING_FILE".utf8).write(to: directory) }
+            let remote = try APILoopbackFixture { request in
+                await recorder.record(request)
+                let response = self.correctionResponse(request, invalid: true, usage: mode != "missing_usage")
+                if mode == "envelope_shape" {
+                    var body = try! JSONSerialization.jsonObject(with: response.body) as! [String: Any]; body["id"] = ""
+                    return .init(status: response.status, headers: response.headers, body: try! JSONSerialization.data(withJSONObject: body))
+                }
+                return response
+            }
+            defer { remote.stop() }
+            let p = provider(try await remote.start())
+            let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)),
+                correctionAccountingDirectory: mode == "accounting_disabled" ? nil : directory)
+            await server.setFailureDiagnosticsObserverForTesting { diagnostics.record($0) }
+            let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+            try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+            let (bytes, response) = try await URLSession.shared.data(for: correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("output_item.done"))
+            let count = await recorder.count(); XCTAssertEqual(count, mode == "second_rejected" ? 2 : 1)
+            XCTAssertEqual(credentials.counts().reads, 1); XCTAssertEqual(credentials.counts().writes, 0)
+            let emitted = diagnostics.snapshot(); XCTAssertEqual(emitted.count, 1)
+            let text = try XCTUnwrap(emitted.first), value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+            XCTAssertLessThanOrEqual(text.utf8.count, 1_024); XCTAssertEqual(value["stage"] as? String, "decode"); XCTAssertEqual(value["code"] as? String, "invalid_arguments")
+            let argument = try XCTUnwrap(value["argument_validation"] as? [String: Any]), validation = try XCTUnwrap(argument["validation"] as? [String: Any])
+            let expectedGate = mode == "missing_usage" || mode == "envelope_shape" ? "decoder_excluded" : mode == "second_rejected" ? "correction_rejected" : mode
+            XCTAssertEqual(argument["gate"] as? String, expectedGate); XCTAssertEqual(argument["attempt"] as? Int, mode == "second_rejected" ? 2 : 1)
+            XCTAssertEqual(validation["reason"] as? String, "schema_mismatch"); XCTAssertEqual(validation["callCount"] as? Int, 2); XCTAssertEqual(validation["rejectedCount"] as? Int, 1)
+            XCTAssertEqual(validation["knownUsage"] as? Bool, mode != "missing_usage"); XCTAssertEqual(validation["envelopeShapeValid"] as? Bool, mode != "envelope_shape")
+            XCTAssertEqual(validation["correctionEligible"] as? Bool, mode != "missing_usage" && mode != "envelope_shape")
+            let ids = try XCTUnwrap(value["native_context"] as? [String: String])
+            XCTAssertEqual(ids["taskID"]?.lowercased(), task); XCTAssertEqual(ids["threadID"]?.lowercased(), thread); XCTAssertEqual(ids["turnID"]?.lowercased(), turn)
+            for privateValue in ["PRIVATE", "fixture-secret", "exec_fixture", "cmd", "remote-fixture", "rejected-valid-mutating", "rejected-invalid", "NEVER_EXECUTED", "http"] {
+                XCTAssertFalse(text.contains(privateValue)); XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(privateValue))
+            }
+            if mode == "missing_usage" || mode == "envelope_shape" { XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path)) }
+            if mode == "accounting_unavailable" { XCTAssertEqual(try Data(contentsOf: directory), Data("PRIVATE_EXISTING_FILE".utf8)) }
+            if mode == "second_rejected" {
+                let records = try correctionRecords(directory); XCTAssertEqual(records.count, 3)
+                XCTAssertEqual(records.first { $0.phase == "finished" }?.outcome, .argumentsRejected)
+            }
+            await server.shutdown()
+        }
+    }
     func testFailureStageProjectionPreservesCodesWithoutPrivatePayloadOrHistoryClaims() throws {
         for stage in APIModelServer.FailureStage.allCases {
             let record = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: stage))
@@ -402,10 +479,16 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             let finite = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
             XCTAssertEqual(finite["stage"] as? String, stage.rawValue)
             XCTAssertEqual(finite["code"] as? String, "invalid_arguments")
-            XCTAssertLessThanOrEqual(record.utf8.count, 256)
-            for privateValue in ["PRIVATE", "fixture-secret", thread, turn, task, "browser_read", "unexpected", "http"] {
+            XCTAssertLessThanOrEqual(record.utf8.count, stage == .decode ? 1_024 : 256)
+            if stage == .decode {
+                let argument = try XCTUnwrap(finite["argument_validation"] as? [String: Any])
+                XCTAssertEqual(argument["gate"] as? String, "decoder_excluded")
+                XCTAssertEqual((argument["validation"] as? [String: Any])?["knownUsage"] as? Bool, false)
+            } else { XCTAssertNil(finite["argument_validation"]); XCTAssertNil(finite["native_context"]) }
+            for privateValue in ["PRIVATE", "fixture-secret", "browser_read", "unexpected", "http"] {
                 XCTAssertFalse(record.contains(privateValue)); XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(privateValue))
             }
+            for nativeID in [thread, turn, task] { XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(nativeID)) }
             await server.shutdown()
         }
     }

@@ -46,6 +46,22 @@ actor APIModelServer {
     private struct StagedFailure: Error {
         let stage: FailureStage
         let cause: any Error
+        var argumentDiagnostic: ArgumentFailureDiagnostic? = nil
+    }
+    struct ArgumentFailureDiagnostic: Codable, Sendable {
+        enum Gate: String, Codable, Sendable {
+            case decoderExcluded = "decoder_excluded", accountingDisabled = "accounting_disabled"
+            case accountingUnavailable = "accounting_unavailable", budgetExhausted = "budget_exhausted"
+            case correctionRejected = "correction_rejected"
+        }
+        let validation: APIModelResponseCodec.ArgumentValidationDiagnostic?
+        let gate: Gate
+        let attempt: Int
+    }
+    struct FailureDiagnosticContext: Codable, Sendable {
+        let taskID: UUID
+        let threadID: UUID
+        let turnID: UUID
     }
 #if DEBUG
     private var failureDiagnosticsObserverForTesting: (@Sendable (String) -> Void)?
@@ -233,6 +249,7 @@ actor APIModelServer {
         // A cancelled slow header read is also interrupted at the socket boundary.
         let deadline = Task { try? await Task.sleep(for: .seconds(15)); if !Task.isCancelled { connection.cancel() } }
         var failureStage: FailureStage?
+        var failureContext: FailureDiagnosticContext?
         do {
             let request = try await Self.readRequest(connection); deadline.cancel()
             guard !stopped else { throw Failure.stopped }
@@ -260,6 +277,10 @@ actor APIModelServer {
             }
             let context = try await context(taskID: taskID)
             guard !stopped, contexts[taskID] == context, identity == context.identity else { throw Failure.inferenceContextRequired }
+            if let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.identity.threadID),
+               let turn = UUID(uuidString: context.identity.turnID) {
+                failureContext = .init(taskID: task, threadID: thread, turnID: turn)
+            }
             guard let selection = APIProviderCatalog.selection(for: modelID, providers: providers) else { throw Failure.modelUnavailable }
             if capsules == nil { capsules = try suppliedCapsules ?? APIReasoningCapsules.persistent() }
             guard let capsules else { throw Failure.credentialUnavailable }
@@ -349,7 +370,8 @@ actor APIModelServer {
             deadline.cancel()
             let cause = (error as? StagedFailure)?.cause ?? error
             let stage = (error as? StagedFailure)?.stage ?? failureStage
-            if let stage, let record = Self.failureDiagnostic(cause, stage: stage) {
+            if let stage, let record = Self.failureDiagnostic(cause, stage: stage,
+                argumentDiagnostic: (error as? StagedFailure)?.argumentDiagnostic, context: failureContext) {
                 Self.responseLog.error("failureStage \(record, privacy: .public)")
 #if DEBUG
                 failureDiagnosticsObserverForTesting?(record)
@@ -374,13 +396,16 @@ actor APIModelServer {
             body: original.body, modelID: original.model.id, onRejection: onRejection) }
         catch { throw StagedFailure(stage: .requestTransport, cause: error) }
         let outcome: APIModelResponseCodec.DecodeOutcome
-        do { outcome = try APIModelResponseCodec.decodeForCorrection(first, request: original) }
-        catch { throw StagedFailure(stage: .decode, cause: error) }
+        var firstDiagnostic: APIModelResponseCodec.ArgumentValidationDiagnostic?
+        do { outcome = try APIModelResponseCodec.decodeForCorrection(first, request: original, onArgumentRejection: { firstDiagnostic = $0 }) }
+        catch { throw StagedFailure(stage: .decode, cause: error,
+            argumentDiagnostic: firstDiagnostic.map { .init(validation: $0, gate: .decoderExcluded, attempt: 1) }) }
         switch outcome {
         case .reply(let reply): return reply
         case .argumentsRejected(let firstUsage):
             guard let directory = correctionAccountingDirectory else {
-                throw StagedFailure(stage: .decode, cause: APIModelResponseCodec.Failure.invalidArguments)
+                throw StagedFailure(stage: .decode, cause: APIModelResponseCodec.Failure.invalidArguments,
+                    argumentDiagnostic: .init(validation: firstDiagnostic, gate: .accountingDisabled, attempt: 1))
             }
             let accounting = APIModelCorrectionAccounting(directory: directory)
             let ticket: APIModelCorrectionAccounting.Ticket
@@ -388,12 +413,14 @@ actor APIModelServer {
                 turnID: context.identity.turnID, firstUsage: firstUsage) }
             catch {
                 Self.responseLog.error("argumentCorrection accounting_unavailable; no corrective request claimed")
-                throw StagedFailure(stage: .decode, cause: APIModelResponseCodec.Failure.invalidArguments)
+                throw StagedFailure(stage: .decode, cause: APIModelResponseCodec.Failure.invalidArguments,
+                    argumentDiagnostic: .init(validation: firstDiagnostic, gate: .accountingUnavailable, attempt: 1))
             }
             var secondClaimed = false, finished = false
             var secondUsage: APIModelCorrectionUsage?
             var secondStage = FailureStage.decode
             var terminal = APIModelCorrectionAccounting.Outcome.decodeFailed
+            var secondDiagnostic: APIModelResponseCodec.ArgumentValidationDiagnostic?
             do {
                 guard correctionsUsed[taskID] != context else {
                     terminal = .budgetExhausted; throw APIModelResponseCodec.Failure.invalidArguments
@@ -415,7 +442,7 @@ actor APIModelServer {
                 let second = try await client.request(provider: correction.provider, key: key, path: correction.path,
                     body: correction.body, modelID: correction.model.id, onRejection: onRejection)
                 secondStage = .decode; terminal = .decodeFailed
-                switch try APIModelResponseCodec.decodeForCorrection(second, request: correction) {
+                switch try APIModelResponseCodec.decodeForCorrection(second, request: correction, onArgumentRejection: { secondDiagnostic = $0 }) {
                 case .argumentsRejected(let usage):
                     secondUsage = usage; terminal = .argumentsRejected
                     throw APIModelResponseCodec.Failure.invalidArguments
@@ -436,7 +463,9 @@ actor APIModelServer {
                     catch { Self.responseLog.error("argumentCorrection terminal_accounting_unavailable; first usage remains durable") }
                 }
                 logCorrection(ticket, outcome: terminal)
-                throw StagedFailure(stage: secondStage, cause: error)
+                throw StagedFailure(stage: secondStage, cause: error, argumentDiagnostic: .init(
+                    validation: secondClaimed ? secondDiagnostic : firstDiagnostic,
+                    gate: terminal == .budgetExhausted ? .budgetExhausted : .correctionRejected, attempt: secondClaimed ? 2 : 1))
             }
         }
     }
@@ -494,12 +523,26 @@ actor APIModelServer {
         } else { scopedMessage = message }
         return try JSONSerialization.data(withJSONObject: ["error": ["type": "api_model_error", "code": code, "message": scopedMessage, "x-computa-retryable": false]])
     }
-    static func failureDiagnostic(_ error: any Error, stage: FailureStage) -> String? {
+    static func failureDiagnostic(_ error: any Error, stage: FailureStage,
+                                  argumentDiagnostic: ArgumentFailureDiagnostic? = nil,
+                                  context: FailureDiagnosticContext? = nil) -> String? {
         guard let body = try? errorBody(error, stage: stage),
               let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let envelope = object["error"] as? [String: Any], let code = envelope["code"] as? String,
-              let data = try? JSONSerialization.data(withJSONObject: ["kind": "api_failure_stage_v1",
-                  "stage": stage.rawValue, "code": code, "retryable": false], options: .sortedKeys), data.count <= 256 else { return nil }
+              let envelope = object["error"] as? [String: Any], let code = envelope["code"] as? String else { return nil }
+        var record: [String: Any] = ["kind": "api_failure_stage_v1", "stage": stage.rawValue, "code": code, "retryable": false]
+        // Only this typed projection can enrich argument decode failures. Generic
+        // prepare/transport failures and the public error schema remain unchanged.
+        if stage == .decode, error as? APIModelResponseCodec.Failure == .invalidArguments, let argumentDiagnostic,
+           (1...2).contains(argumentDiagnostic.attempt),
+           argumentDiagnostic.validation.map({ (0...128).contains($0.callCount) && (1...128).contains($0.rejectedCount) && $0.rejectedCount <= $0.callCount }) ?? true,
+           let bytes = try? JSONEncoder().encode(argumentDiagnostic),
+           let finite = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
+            record["argument_validation"] = finite
+            if let context, let bytes = try? JSONEncoder().encode(context),
+               let ids = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] { record["native_context"] = ids }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
+              data.count <= (record["argument_validation"] == nil ? 256 : 1_024) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
     struct HTTPRequest: Sendable { let method: String; let path: String; let headers: [String: String]; let body: Data }

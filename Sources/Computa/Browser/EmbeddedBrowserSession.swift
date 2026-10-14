@@ -102,6 +102,11 @@ final class EmbeddedBrowserSession {
         var modelCommittedGeneration: UUID?
         var modelFinishedGeneration: UUID?
         var modelFailedGeneration: UUID?
+        // Observation only: these never participate in readiness or quarantine.
+        // A false flag means not observed, not proof that no redirect occurred.
+        var modelNavigationGeneration: UUID?
+        var geminiDocumentCommitObserved = false
+        var serverRedirectObservedInCurrentNavigation = false
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
@@ -574,6 +579,8 @@ final class EmbeddedBrowserSession {
         let generationCommitted: Bool
         let generationFinished: Bool
         let navigationError: Bool
+        let geminiDocumentCommitObserved: Bool
+        let serverRedirectObservedInCurrentNavigation: Bool
 
         var settled: Bool {
             generationCommitted && generationFinished && !viewLoading && !tabLoading
@@ -581,10 +588,10 @@ final class EmbeddedBrowserSession {
         }
 
         var logDescription: String {
-            "known=true viewLoading=\(viewLoading) tabLoading=\(tabLoading) navigationPending=\(navigationPending) generationCommitted=\(generationCommitted) generationFinished=\(generationFinished) navigationError=\(navigationError) settled=\(settled)"
+            "known=true viewLoading=\(viewLoading) tabLoading=\(tabLoading) navigationPending=\(navigationPending) generationCommitted=\(generationCommitted) generationFinished=\(generationFinished) navigationError=\(navigationError) settled=\(settled) geminiDocumentCommitObserved=\(geminiDocumentCommitObserved) serverRedirectObservedInCurrentNavigation=\(serverRedirectObservedInCurrentNavigation)"
         }
 
-        static let unknownLogDescription = "known=false viewLoading=unknown tabLoading=unknown navigationPending=unknown generationCommitted=unknown generationFinished=unknown navigationError=unknown settled=unknown"
+        static let unknownLogDescription = "known=false viewLoading=unknown tabLoading=unknown navigationPending=unknown generationCommitted=unknown generationFinished=unknown navigationError=unknown settled=unknown geminiDocumentCommitObserved=unknown serverRedirectObservedInCurrentNavigation=unknown"
     }
 
     /// Native-only observation of the exact private view. Neither a URL nor a
@@ -596,7 +603,9 @@ final class EmbeddedBrowserSession {
                      navigationPending: entry.navigation != nil,
                      generationCommitted: entry.modelCommittedGeneration == generation,
                      generationFinished: entry.modelFinishedGeneration == generation,
-                     navigationError: entry.modelFailedGeneration == generation)
+                     navigationError: entry.modelFailedGeneration == generation,
+                     geminiDocumentCommitObserved: entry.geminiDocumentCommitObserved,
+                     serverRedirectObservedInCurrentNavigation: entry.serverRedirectObservedInCurrentNavigation)
     }
 
     /// Waiting is allowed only for a current native provisional navigation on
@@ -899,6 +908,8 @@ final class EmbeddedBrowserSession {
         entry.modelCommittedGeneration = nil
         entry.modelFinishedGeneration = nil
         entry.modelFailedGeneration = nil
+        entry.modelNavigationGeneration = nil
+        entry.serverRedirectObservedInCurrentNavigation = false
     }
 
     private func observe(_ entry: Entry) {
@@ -967,7 +978,20 @@ final class EmbeddedBrowserSession {
         prepareNavigation(entry)
         if !prepared { entry.tab.documentGeneration = UUID() }
         entry.navigation = navigation
+        if entry.isModelOwned, navigation != nil {
+            entry.modelNavigationGeneration = entry.tab.documentGeneration
+        }
         refresh(tabID, view: view)
+    }
+
+    fileprivate func serverRedirected(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
+        guard let entry = entries[tabID], entry.isModelOwned, entry.view === view,
+              let navigation, entry.navigation === navigation,
+              entry.modelNavigationGeneration == entry.tab.documentGeneration,
+              entry.modelCommittedGeneration != entry.tab.documentGeneration,
+              entry.modelFinishedGeneration != entry.tab.documentGeneration,
+              entry.modelFailedGeneration != entry.tab.documentGeneration else { return }
+        entry.serverRedirectObservedInCurrentNavigation = true
     }
 
     fileprivate func completed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID, error: Error? = nil) {
@@ -997,6 +1021,10 @@ final class EmbeddedBrowserSession {
         guard let entry = entries[tabID], entry.view === view, entry.navigation === navigation else { return }
         if entry.isModelOwned, navigation != nil {
             entry.modelCommittedGeneration = entry.tab.documentGeneration
+            if entry.modelNavigationGeneration == entry.tab.documentGeneration,
+               let url = view.url, EmbeddedWebModelTransport.Provider.gemini.accepts(url.absoluteString) {
+                entry.geminiDocumentCommitObserved = true
+            }
         }
         if !entry.isModelOwned, let navigation, entry.humanCommittedNavigation !== navigation {
             entry.humanCommittedNavigation = navigation
@@ -1326,6 +1354,9 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         session?.started(webView, navigation: navigation, tabID: tabID)
+    }
+    func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+        session?.serverRedirected(webView, navigation: navigation, tabID: tabID)
     }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         session?.committed(webView, navigation: navigation, tabID: tabID)

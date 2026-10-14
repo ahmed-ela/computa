@@ -1,6 +1,6 @@
 # Embedded website provider qualification
 
-## Build111 candidate
+## Build111 installed outcomes
 
 Installed build110's Gemini 3.8 Flash browser task passed in 55.475 seconds:
 six successful native tools, one accepted form submission, the exact result,
@@ -28,12 +28,61 @@ model-selection authority. The candidate returns a narrowly guarded pending
 product observation with no current body proof or answer. The subsequent
 authorized model/inspect read remains responsible for one scoped expansion and
 the actual full canonical digest. Invalid prefixes, changed prior bodies, mode
-or model drift and changed expanded bytes remain refused. Installed build111
-qualification is pending. All 499 provider-adapter tests and all 182 selected
+or model drift and changed expanded bytes remain refused. Complete provider
+qualification remains pending. All 499 provider-adapter tests and all 182 selected
 native tests passed on held source, including the complete 162-test transport
 suite and the new navigation and collapsed-second-message fixtures. The 12
 product-identity tests also passed. Earlier compilation and fixture-measurement
 failures are retained separately; they are not counted as passing runs.
+
+The fresh build111 matrix (`1159564f`, private `live-v26`) prepared twelve cases
+and attempted six: two strict clean passes, four failures and six held without
+dispatch. Each browser case required the observed form result, exact hidden
+alphanumeric confirmation, one accepted POST and explicit task-tab close.
+
+| Case | Duration | Observed result |
+| --- | --- | --- |
+| Gemini 3.8 Flash, first browser task | 55.647 s | Passed: six successful tools, seven verified inferences in one temporary session, exact result and confirmed task-tab and final website closure. |
+| Gemini 3.8 Flash, fresh browser repeat | 0.630 s | Blocked before adapter or Send on a native committed Google checkpoint. The provisional-navigation wait correctly refused it; no owned-view visual CAPTCHA or external trigger was established. |
+| ChatGPT Instant, browser task | 14.953 s | Valid completed website inference and confirmed final closure, but the model refused the task and issued zero tools. Task qualification failed. |
+| ChatGPT Instant, code task | 303.676 s | First submission verified, then the original response deadline expired with zero tools. The helper remained unchanged; no code-task result qualified. |
+| Cerebras GPT-OSS 120B, browser task | 3.128 s | Passed all six tools, literal result, POST and close checks. Exact-turn correction evidence established zero corrective inferences. |
+| Cerebras GPT-OSS 120B, code task | 1.881 s | Three successful read commands and a successful helper patch preceded decode-stage `invalid_arguments`. Independent rerun passed the four preserved tests, but the model never ran them or completed the CLI/browser/final/close requirements. |
+
+Same-profile ordinary visible Gemini pages were healthy during the failure and
+in bounded reload/fresh-tab checks; these observations do not isolate a
+visibility, network or session cause.
+
+The GPT-OSS code rejection claimed no corrective inference. Its precise
+eligibility exclusion was not recorded by build111, so missing usage or malformed
+envelope details are hypotheses rather than findings. Prior accepted edits
+remain preserved; no call from the rejected response was published. API evidence
+uses corrected log queries with explicit UTC offsets. Earlier queries treated
+bare UTC dates as local time; their unreliable absence proofs are preserved and
+superseded, without changing the original task receipts.
+
+Two task tabs closed explicitly, and two completed website conversations have
+qualified final closure. Four website receipts record closed views; the untouched
+blocked Gemini view and failed ChatGPT code view do not add completed conversation
+closures. Root separately closed its human tab, quit the app and stopped the
+owned fixture server. The shutdown verifier confirmed absent app/server PIDs and
+listener, an exit-zero drain and six server events. App disposal does not upgrade
+task or website cleanup evidence. The immutable matrix summary is
+`7840a8d9…`; the separate shutdown receipt is `f9b9a422…`.
+
+## Build112 diagnostics
+
+Build112 adds finite observations only: API argument-rejection categories,
+existing correction-eligibility gates and correlated native context; and whether
+the exact model-owned view ever committed an allowed Gemini route or received a
+server redirect during its current provisional navigation. Neither navigation
+flag changes readiness or checkpoint handling, and false means unobserved.
+The API diagnostics do not alter parsing, tool admission, the corrective-inference
+budget or response bytes. No prompt, argument, nonce, URL, credential or raw
+response is logged. Separate unchanged-source native cohorts passed 70 API tests
+and 65 navigation/session tests with zero failures. These offline checks do not
+qualify installed build112 or establish Google's trigger, permanent CAPTCHA
+prevention or repeated provider reliability.
 
 ## Build109 ownership pilot
 
