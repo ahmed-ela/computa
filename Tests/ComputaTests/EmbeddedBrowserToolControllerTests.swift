@@ -4,6 +4,93 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserToolControllerTests: XCTestCase {
+    func testModelFacingEpochProjectionPreservesCanonicalSnapshotAndLiteralPageBytes() async throws {
+        let backend = EmbeddedBrowserFixtureBackend()
+        let broker = BrowserTabSessionBroker(transport: backend, browserGeneration: UUID(), ownership: .borrowed)
+        let humanID = await backend.humanID
+        let observedTarget = try await backend.target(id: humanID)
+        let target = try XCTUnwrap(observedTarget)
+        let binding = try await broker.bindBorrowed(taskKey: "projection", processIdentifier: 42, target: target)
+        let epochField = " document_epoch=\(binding.documentEpoch.uuidString)"
+        let literal = " tab_handle=\(binding.handle.uuidString)\(epochField) source=page\nAXSNAPSHOT id=page U+002D-\u{2011} e\u{0301}"
+        await backend.setObservedResult(literal)
+        let observation = try await broker.snapshot(taskKey: "projection", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        let snapshot = observation.snapshot
+        let canonical = snapshot.formattedText
+        let projected = EmbeddedBrowserToolController.modelFacingSnapshotText(snapshot)
+        let canonicalHeader = try XCTUnwrap(canonical.split(separator: "\n").first).description
+        let projectedHeader = try XCTUnwrap(projected.split(separator: "\n").first).description
+        XCTAssertTrue(canonicalHeader.contains(epochField))
+        XCTAssertFalse(projectedHeader.contains(" document_epoch="))
+        XCTAssertEqual(projectedHeader, canonicalHeader.replacingOccurrences(of: epochField, with: ""))
+        XCTAssertEqual(Array(projected.dropFirst(projectedHeader.count).utf8),
+                       Array(canonical.dropFirst(canonicalHeader.count).utf8), "Only the host header may change; all page rows and READ provenance retain exact bytes")
+        XCTAssertTrue(projected.contains(epochField), "A page value resembling host metadata must not be scrubbed")
+        XCTAssertEqual(try snapshotID(projected), snapshot.id.uuidString)
+        XCTAssertEqual(try field("tab_handle", in: projected), snapshot.tabHandle.uuidString)
+        XCTAssertEqual(snapshot.documentEpoch, binding.documentEpoch)
+        XCTAssertEqual(snapshot.formattedText, canonical)
+        XCTAssertEqual(snapshot.evidenceDocument?.nodes.last?.name, literal)
+        XCTAssertEqual(snapshot.presentation?.snapshotID, snapshot.id)
+        XCTAssertEqual(try field("source_observation", in: projected), try field("source_observation", in: canonical))
+        try await broker.perform(taskKey: "projection", binding: observation.binding, snapshot: snapshot,
+            elementIndex: 1, action: "AXPress")
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.presses, 1); XCTAssertEqual(counts.fills, 0)
+        try await broker.revoke(taskKey: "projection", binding: observation.binding)
+    }
+
+    func testProjectedReadAndPostInputKeepExactSingleUseSnapshotIdentifiers() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let read = try await call(controller, "browser_read")
+        XCTAssertFalse(try XCTUnwrap(read.split(separator: "\n").first).contains("document_epoch="))
+        let id = try snapshotID(read)
+        let before = await backend.counts()
+        // This is the exact malformed UUID shape observed in the native call:
+        // a snapshot prefix combined with a thirteen-character epoch suffix.
+        let mixed = "2EAB84FB-C48F-4313-BFB6-3C010A3E722D1"
+        let malformed: [String: Any] = ["snapshot_id": mixed, "element_index": 0, "text": "MUST_NOT_APPEAR"]
+        do {
+            try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_fill",
+                arguments: JSONSerialization.data(withJSONObject: malformed))
+            XCTFail("Malformed references must be rejected before approval")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .invalidRead("Use an exact observed browser identifier.")) }
+        do { _ = try await call(controller, "browser_fill", malformed); XCTFail("Direct calls must reject the same malformed reference") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .invalidRead("Use an exact observed browser identifier.")) }
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], key: "turn-b")
+        let foreign = try await call(controller, "browser_read", key: "turn-b")
+        do { _ = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(foreign), "element_index": 0, "text": "MUST_NOT_APPEAR"]); XCTFail("Another task's valid UUID cannot authorize this task") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let denied = await backend.counts()
+        XCTAssertEqual(denied.fills, 0); XCTAssertEqual(denied.presses, 0)
+        XCTAssertEqual(denied.observes, before.observes + 2, "Only the separate task's binding/read may observe; denied references cannot reach mutation preflight")
+        let arguments: [String: Any] = ["snapshot_id": id, "element_index": 0, "text": "UA 4629"]
+        try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_fill",
+            arguments: JSONSerialization.data(withJSONObject: arguments))
+        let fill = try await call(controller, "browser_fill", arguments)
+        let fresh = try availableObservation(fill)
+        XCTAssertFalse(try XCTUnwrap(fresh.split(separator: "\n").first).contains("document_epoch="))
+        XCTAssertNotEqual(try snapshotID(fresh), id)
+        XCTAssertEqual(try field("tab_handle", in: fresh), try field("tab_handle", in: read))
+        XCTAssertEqual(try actionReferenceMetadata(fresh)["snapshot_id"] as? String, try snapshotID(fresh))
+        do { _ = try await call(controller, "browser_fill", arguments); XCTFail("Omitting presentation metadata cannot revive a consumed reference") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let clicked = try await call(controller, "browser_click", ["snapshot_id": snapshotID(fresh), "element_index": 1])
+        XCTAssertFalse(try XCTUnwrap(availableObservation(clicked).split(separator: "\n").first).contains("document_epoch="))
+        do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(fresh), "element_index": 1]); XCTFail("Click also consumes the exact reference") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 1)
+        let fieldValue = await backend.fieldValue()
+        XCTAssertEqual(fieldValue, "UA 4629")
+        let closed = try jsonObject(await call(controller, "browser_close"))
+        XCTAssertEqual(closed["released"] as? Bool, true)
+        XCTAssertEqual(closed["existing_user_tab_preserved"] as? Bool, true)
+        _ = await controller.shutdown()
+    }
+
     func testPublishedReadAndSuccessfulCloseRepeatOnlyGenericLiteralCopyGuidanceWithoutChangingValues() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         let literal = "ID-A-B\u{2011}C  D\tE\nF\u{00A0}G-e\u{0301}"
@@ -66,13 +153,15 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let originalText = try XCTUnwrap(initial.components(separatedBy: "\nBROWSER_ACTION_REFERENCES ").first)
         // Exercise the actual read formatter at its existing byte boundary. A
         // bounded provider-independent metadata row leaves no space for hints.
-        let padding = 16_384 - originalText.utf8.count + "computa_webkit_dom".utf8.count - 8
+        let hiddenEpochBytes = " document_epoch=".utf8.count + UUID().uuidString.utf8.count
+        let padding = 16_384 - originalText.utf8.count - hiddenEpochBytes + "computa_webkit_dom".utf8.count - 8
         await backend.setObservationSourceName(String(repeating: "x", count: padding))
         let nearLimit = try await call(controller, "browser_read", ["view": "all"])
         XCTAssertLessThanOrEqual(nearLimit.utf8.count, 16_384)
         XCTAssertGreaterThan(nearLimit.utf8.count, 16_000)
         XCTAssertFalse(nearLimit.contains("BROWSER_ACTION_REFERENCES"), "Optional guidance is omitted whole, never truncated into partial capabilities")
         XCTAssertFalse(nearLimit.contains("literal_copy_guidance"))
+        XCTAssertFalse(try XCTUnwrap(nearLimit.split(separator: "\n").first).contains("document_epoch="), "The whole-metadata budget fallback uses the same projected header")
         XCTAssertNotEqual(try snapshotID(nearLimit), try snapshotID(initial))
         do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(initial), "element_index": 1]); XCTFail("Omitted metadata cannot revive older references") }
         catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
@@ -212,6 +301,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             await backend.configureAfterInput(scenario)
             let filled = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(first), "element_index": 0, "text": "UA 4629"])
             let fresh = try availableObservation(filled)
+            XCTAssertFalse(try XCTUnwrap(fresh.split(separator: "\n").first).contains("document_epoch="))
             XCTAssertTrue(fresh.contains("UA 4629"))
             XCTAssertNotEqual(try snapshotID(first), try snapshotID(fresh))
             if scenario == "new_document" { XCTAssertTrue(fresh.contains("/result")) }
@@ -220,6 +310,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                 let source = try field("source_observation", in: fresh)
                 let next = try await call(controller, "browser_read", ["cursor": cursor])
                 XCTAssertEqual(try field("source_observation", in: next), source)
+                XCTAssertNotNil(UUID(uuidString: source))
+                XCTAssertEqual(try field("tab_handle", in: next), try field("tab_handle", in: fresh))
+                XCTAssertFalse(try XCTUnwrap(next.split(separator: "\n").first).contains("document_epoch="))
                 XCTAssertNotEqual(try snapshotID(next), try snapshotID(fresh))
                 do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(fresh), "element_index": 1]); XCTFail("Continuing the returned observation supersedes its first page") }
                 catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }

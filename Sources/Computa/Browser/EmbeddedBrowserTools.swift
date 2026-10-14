@@ -625,6 +625,7 @@ actor EmbeddedBrowserToolController {
     /// Guidance names only controls actually exposed by this read. It does not
     /// create another capability or change current-snapshot/physical preflight.
     private func readResponse(_ snapshot: BrowserTabSnapshot) throws -> String {
+        let text = Self.modelFacingSnapshotText(snapshot)
         let state = try json([
             "snapshot_id": snapshot.id.uuidString,
             "supersedes_previous": true,
@@ -634,10 +635,25 @@ actor EmbeddedBrowserToolController {
             "next_after_input": "Use the input result's available current_observation; otherwise browser_read.",
             "literal_copy_guidance": Self.literalCopyGuidance,
         ])
-        let result = snapshot.formattedText + "\nBROWSER_ACTION_REFERENCES " + state
+        let result = text + "\nBROWSER_ACTION_REFERENCES " + state
         // Preserve the read's existing byte budget; instructions still explain
         // reference lifetime when unusually large metadata leaves no room.
-        return result.utf8.count <= 16_384 ? result : snapshot.formattedText
+        return result.utf8.count <= 16_384 ? result : text
+    }
+
+    /// The epoch remains native authority and canonical evidence, but is not a
+    /// browser tool argument. Omit only its exact host-generated header field;
+    /// page text, pagination provenance and the actionable snapshot ID stay intact.
+    nonisolated static func modelFacingSnapshotText(_ snapshot: BrowserTabSnapshot) -> String {
+        let text = snapshot.formattedText
+        let end = text.firstIndex(of: "\n") ?? text.endIndex
+        let header = text[..<end]
+        let anchor = " tab_handle=\(snapshot.tabHandle.uuidString) document_epoch=\(snapshot.documentEpoch.uuidString) source="
+        guard header.hasPrefix("AXSNAPSHOT id=\(snapshot.id.uuidString) "),
+              let range = header.range(of: anchor) else { return text }
+        var result = text
+        result.replaceSubrange(range, with: " tab_handle=\(snapshot.tabHandle.uuidString) source=")
+        return result
     }
 
     /// A single Character can contain arbitrarily many combining scalars.
