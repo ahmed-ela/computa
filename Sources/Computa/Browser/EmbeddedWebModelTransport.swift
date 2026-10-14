@@ -309,6 +309,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var outboundUTF16Count: Int?
         var outboundUTF8Count: Int?
         var resourceTimingSignatures: [String: String] = [:]
+        struct ResponseProgressInspection {
+            let sequence: Int
+            let generation: UUID
+            let fields: [String: Any]
+        }
+        var responseProgressInspection: ResponseProgressInspection?
+        var responseProgressEmitted = false
 
         init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil,
              isDiscovery: Bool = false, isRecoveryProbe: Bool = false) {
@@ -354,6 +361,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
     private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var resourceTimingDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
+    private var responseProgressDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
     #endif
 
@@ -403,6 +411,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setResourceTimingDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         resourceTimingDiagnosticObserverForTesting = observer
+    }
+
+    func setResponseProgressDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        responseProgressDiagnosticObserverForTesting = observer
     }
 
     func setFirstUserExpansionRouteCheckpointForTesting(_ hook: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?) {
@@ -525,6 +537,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.responseReadRetryUsed = false
                 session.failedPageDiagnosticAttempted = false
                 session.resourceTimingSignatures.removeAll()
+                session.responseProgressInspection = nil
+                session.responseProgressEmitted = false
                 // Claim submission before clicking: even a lost reply must not replay Send.
                 session.submitted = true
                 session.sequence += 1
@@ -551,6 +565,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try await poll(session)
             }
         } catch {
+            logResponseProgressFailure(session, cause: error is CancellationError ? "cancelled"
+                : (error as? Failure) == .deadline ? "response_deadline" : "request_error")
             // Recognized website gates are terminal for this inference. Even a
             // caller that keeps polling cannot inspect, insert, or Send again.
             // Finish still uses the original ownership/cleanup checks.
@@ -1159,6 +1175,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func logInspection(_ observed: [String: Any], session: Session) {
+        if session.provider == .chatgpt, session.state == "running",
+           browser.webView(for: session.tabID) === session.view,
+           let generation = browser.documentGeneration(for: session.tabID),
+           generation == (session.documentGeneration ?? session.initialDocumentGeneration) {
+            // Cache only finite facts from an already completed native inspect.
+            // No page text, URLs or IDs enter this diagnostic-only record.
+            session.responseProgressInspection = Self.sanitizedResponseProgressInspection(observed).map {
+                .init(sequence: session.sequence, generation: generation, fields: $0)
+            }
+        }
         if let raw = observed["quotaDiagnostic"] as? String {
             logQuotaDiagnostic(raw, session: session, action: "inspect")
         }
@@ -1197,6 +1223,64 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard signature != session.lastInspection else { return }
         session.lastInspection = signature
         Self.inspectionLog.info("inspection responses=\(signature.responses) users=\(signature.users) sequence=\(signature.sequence) pending=\(signature.pending) busy=\(signature.busy) answerComplete=\(signature.answerComplete) textBytes=\(signature.textBytes) ownershipPending=\(signature.ownershipPending) composer=\(signature.composer) temporary=\(signature.temporary) temporaryActionAvailable=\(signature.temporaryActionAvailable) modernMarkers=\(signature.modernMarkers) logicalAnswers=\(signature.logicalAnswers) scopedCopies=\(signature.scopedCopies) enabledCopies=\(signature.enabledCopies) depth=\(signature.depth)")
+    }
+
+    /// Missing optional observations remain unknown. Malformed values cannot
+    /// become false/zero, and oversized text is represented only by a sentinel.
+    static func sanitizedResponseProgressInspection(_ observed: [String: Any]) -> [String: Any]? {
+        var safe: [String: Any] = [:]
+        for key in ["responseCount", "userCount"] {
+            guard let value = ComputerToolArgumentContract.exactInt64(observed[key]),
+                  (0...10_000).contains(value) else { return nil }
+            safe[key] = value
+        }
+        for key in ["busy", "answerComplete", "responseLoadFailed"] {
+            guard let raw = observed[key] else { safe[key] = NSNull(); continue }
+            guard let value = firstUserDiagnosticBool(raw) else { return nil }
+            safe[key] = value
+        }
+        if let raw = observed["text"] {
+            guard let text = raw as? String else { return nil }
+            let bytes = text.utf8.prefix(220_001).count
+            safe["textBytes"] = bytes
+            safe["textBytesLimitExceeded"] = bytes > 220_000
+        } else {
+            safe["textBytes"] = NSNull()
+            safe["textBytesLimitExceeded"] = NSNull()
+        }
+        return safe
+    }
+
+    /// Synchronous terminal diagnostics only: never evaluate the page, wait,
+    /// authorize a response or influence the original failure/cleanup path.
+    private func logResponseProgressFailure(_ session: Session, cause: String) {
+        guard session.provider == .chatgpt, !session.isDiscovery,
+              session.state == "running", session.submitted,
+              sessions[session.token] === session, !session.responseProgressEmitted,
+              (1...10_000).contains(session.sequence), (0...10_000).contains(session.confirmedUsers),
+              ["response_deadline", "cancelled", "request_error"].contains(cause) else { return }
+        session.responseProgressEmitted = true
+        let viewCurrent = browser.webView(for: session.tabID) === session.view
+        let generation = browser.documentGeneration(for: session.tabID)
+        let documentCurrent = viewCurrent && generation == (session.documentGeneration ?? session.initialDocumentGeneration)
+        let cached = session.responseProgressInspection
+        let inspectionCurrent = documentCurrent && cached?.sequence == session.sequence && cached?.generation == generation
+        let lastInspection: Any
+        if inspectionCurrent, let cached { lastInspection = cached.fields } else { lastInspection = NSNull() }
+        let record: [String: Any] = ["kind": "chatgpt_response_progress_v1", "phase": "failure", "cause": cause,
+            "sequence": session.sequence, "confirmedUsers": session.confirmedUsers,
+            "pendingSubmission": session.pendingSubmission, "currentSubmissionVerified": session.currentSubmissionVerified,
+            "modelSelectionVerified": session.modelSelectionVerified, "modelEvidencePresent": session.modelEvidence != nil,
+            "ownedViewCurrent": viewCurrent, "ownedDocumentCurrent": documentCurrent,
+            "lastInspectionAvailable": inspectionCurrent,
+            "lastInspection": lastInspection]
+        guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
+              bytes.count <= 768 else { return }
+        let safe = String(decoding: bytes, as: UTF8.self)
+        #if DEBUG
+        responseProgressDiagnosticObserverForTesting?(safe)
+        #endif
+        Self.inspectionLog.error("responseProgressDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(safe, privacy: .public)")
     }
 
     /// The fixed adapter's fresh quota receipt can pin an empty initial
@@ -2735,7 +2819,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // is scheduled. Observe only an already-expired running response;
         // successful, preparing and early-cancelled sessions are untouched.
         if session.state == "running", ContinuousClock.now - session.turnStarted >= responseTimeout {
+            logResponseProgressFailure(session, cause: "response_deadline")
             await logFailedPageDiagnostic(session)
+        } else if cancel {
+            logResponseProgressFailure(session, cause: "cancelled")
         }
         do {
             guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }

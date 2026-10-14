@@ -214,7 +214,15 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         var firstMessages = first.removeValue(forKey: "messages") as! [[String: Any]], secondMessages = second.removeValue(forKey: "messages") as! [[String: Any]]
         XCTAssertEqual(first as NSDictionary, second as NSDictionary)
         let originalSystem = firstMessages.removeFirst(), correctiveSystem = secondMessages.removeFirst()
-        XCTAssertEqual(correctiveSystem["content"] as? String, (originalSystem["content"] as! String) + "\n\n" + APIModelResponseCodec.correctiveFeedback)
+        let correctiveText = try XCTUnwrap(correctiveSystem["content"] as? String)
+        XCTAssertTrue(correctiveText.hasPrefix((originalSystem["content"] as! String) + "\n\n" + APIModelResponseCodec.correctiveFeedback + "\n\n" + APIModelResponseCodec.schemaFeedbackMarker))
+        let suffix = String(correctiveText.split(separator: "\n").last!)
+        let facts = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(suffix.utf8)) as? [[String: Any]])
+        XCTAssertEqual(facts.count, 1); XCTAssertEqual(facts[0]["constraint"] as? String, "type_mismatch")
+        XCTAssertEqual(facts[0]["schema_path"] as? [String], ["properties", "cmd"])
+        XCTAssertEqual(facts[0]["expected_types"] as? [String], ["string"])
+        XCTAssertEqual(facts[0]["callable"] as? String, try offeredName(requests[0]))
+        XCTAssertFalse(suffix.contains("42")); XCTAssertFalse(suffix.contains("NEVER_EXECUTED"))
         XCTAssertEqual(firstMessages as NSArray, secondMessages as NSArray)
         XCTAssertEqual((completed["usage"] as? [String: Any])?["input_tokens"] as? Int, 20)
         let meta = try XCTUnwrap(completed["x_computa_correction"] as? [String: Any])
@@ -449,7 +457,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 let response: [String: Any] = ["id": "fixture-rejected-response", "model": "fixture-model", "choices": [[
                     "index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant", "content": NSNull(),
                         "tool_calls": [["id": "fixture_rejected_call", "type": "function", "function": [
-                            "name": function["name"]!, "arguments": "{\"unexpected\":\"PRIVATE_PROVIDER_ARGUMENT\"}"]]]]]]]
+                            "name": function["name"]!, "arguments": "{\"PRIVATE_UNEXPECTED_KEY_CANARY\":\"PRIVATE_PROVIDER_ARGUMENT\"}"]]]]]]]
                 return .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: try! JSONSerialization.data(withJSONObject: response))
             }
             defer { remote.stop() }
@@ -463,7 +471,7 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             let input: [[String: Any]]
             if stage == .prepare {
                 input = [["role": "user", "content": "PRIVATE_PROMPT"],
-                    ["type": "function_call", "call_id": "fixture_history_call", "name": "browser_read", "arguments": "{\"unexpected\":\"PRIVATE_HISTORY_ARGUMENT\"}"],
+                    ["type": "function_call", "call_id": "fixture_history_call", "name": "browser_read", "arguments": "{\"PRIVATE_UNEXPECTED_KEY_CANARY\":\"PRIVATE_HISTORY_ARGUMENT\"}"],
                     ["type": "function_call_output", "call_id": "fixture_history_call", "output": "PRIVATE_PRIOR_TOOL_OUTPUT"]]
             } else { input = [["role": "user", "content": "PRIVATE_PROMPT"]] }
             let request = try namingRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p, input: input)
@@ -496,8 +504,12 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
                 let argument = try XCTUnwrap(finite["argument_validation"] as? [String: Any])
                 XCTAssertEqual(argument["gate"] as? String, "decoder_excluded")
                 XCTAssertEqual((argument["validation"] as? [String: Any])?["knownUsage"] as? Bool, false)
+                let samples = try XCTUnwrap((argument["validation"] as? [String: Any])?["schemaFailures"] as? [[String: Any]])
+                XCTAssertEqual(samples.count, 1)
+                XCTAssertEqual(samples[0]["constraint"] as? String, "unexpected_fields")
             } else { XCTAssertNil(finite["argument_validation"]); XCTAssertNil(finite["native_context"]) }
-            for privateValue in ["PRIVATE", "fixture-secret", "browser_read", "unexpected", "http"] {
+            // A private key canary must not collide with the finite unexpected_fields category.
+            for privateValue in ["PRIVATE", "fixture-secret", "browser_read", "PRIVATE_UNEXPECTED_KEY_CANARY", "http"] {
                 XCTAssertFalse(record.contains(privateValue)); XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(privateValue))
             }
             for nativeID in [thread, turn, task] { XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(nativeID)) }

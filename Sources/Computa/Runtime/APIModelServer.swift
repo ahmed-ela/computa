@@ -402,7 +402,7 @@ actor APIModelServer {
             argumentDiagnostic: firstDiagnostic.map { .init(validation: $0, gate: .decoderExcluded, attempt: 1) }) }
         switch outcome {
         case .reply(let reply): return reply
-        case .argumentsRejected(let firstUsage):
+        case .argumentsRejected(let firstUsage, let rejectionDetails):
             guard let directory = correctionAccountingDirectory else {
                 throw StagedFailure(stage: .decode, cause: APIModelResponseCodec.Failure.invalidArguments,
                     argumentDiagnostic: .init(validation: firstDiagnostic, gate: .accountingDisabled, attempt: 1))
@@ -427,7 +427,7 @@ actor APIModelServer {
                 }
                 try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
                 correctionsUsed[taskID] = context // one corrective inference per native user turn
-                let correction = try APIModelResponseCodec.correctiveRequest(original)
+                let correction = try APIModelResponseCodec.correctiveRequest(original, rejectionDetails: rejectionDetails)
 #if DEBUG
                 try await beforeCorrectionDispatchForTesting?()
 #endif
@@ -443,7 +443,7 @@ actor APIModelServer {
                     body: correction.body, modelID: correction.model.id, onRejection: onRejection)
                 secondStage = .decode; terminal = .decodeFailed
                 switch try APIModelResponseCodec.decodeForCorrection(second, request: correction, onArgumentRejection: { secondDiagnostic = $0 }) {
-                case .argumentsRejected(let usage):
+                case .argumentsRejected(let usage, _):
                     secondUsage = usage; terminal = .argumentsRejected
                     throw APIModelResponseCodec.Failure.invalidArguments
                 case .reply(let reply):

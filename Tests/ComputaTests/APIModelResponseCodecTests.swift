@@ -33,13 +33,210 @@ final class APIModelResponseCodecTests: XCTestCase {
         envelope.merge(changes) { _, value in value }
         return .init(body: try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]), contentType: "application/json")
     }
+    private var strictCerebrasProvider: APIProviderDefinition {
+        .init(id: "renamed-provider", name: "User chosen name", baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
+            models: [.init(id: "gpt-oss-120b", name: "Renamed model")])
+    }
+    private func strictFixture(_ schema: [String: Any]) throws -> (APIModelResponseCodec.Request, [String: Any]) {
+        let prepared = try request(["tools": [["type": "function", "name": "fixture", "parameters": schema]]], provider: strictCerebrasProvider)
+        return (prepared, try wireFunctions(prepared)[0])
+    }
+    func testOfficialCerebrasGPTStrictToolsKeepExactSchemasAndRenamedIdentityWithoutAffectingOtherRoutes() throws {
+        let official = try request(provider: strictCerebrasProvider), functions = try wireFunctions(official)
+        XCTAssertEqual(functions.count, official.tools.count)
+        for (index, function) in functions.enumerated() {
+            XCTAssertEqual(function["strict"] as? Bool, true)
+            XCTAssertEqual(function["parameters"] as? NSDictionary, official.tools[index].schema as NSDictionary)
+            XCTAssertEqual(function["name"] as? String, official.tools[index].wireName)
+        }
+        for p in [provider,
+            APIProviderDefinition(id: "cerebras", name: "Cerebras", baseURL: URL(string: "https://other.invalid/v1")!, wireAPI: .chatCompletions, models: strictCerebrasProvider.models),
+            APIProviderDefinition(id: "cerebras", name: "Cerebras", baseURL: URL(string: "http://127.0.0.1:8000/v1")!, wireAPI: .chatCompletions, models: strictCerebrasProvider.models),
+            APIProviderDefinition(id: "other-model", name: "Cerebras", baseURL: strictCerebrasProvider.baseURL, wireAPI: .chatCompletions, models: [.init(id: "qwen-3.8-27b", name: "Qwen")])] {
+            XCTAssertTrue(try wireFunctions(request(provider: p)).allSatisfy { $0["strict"] == nil })
+        }
+        let responses = APIProviderDefinition(id: "responses", name: "Cerebras", baseURL: strictCerebrasProvider.baseURL, wireAPI: .responses, models: strictCerebrasProvider.models)
+        let raw = try JSONSerialization.jsonObject(with: request(provider: responses).body) as! [String: Any]
+        XCTAssertEqual(raw["tools"] as? NSArray, tools as NSArray)
+    }
+    func testStrictToolsPreserveOptionalFieldsCustomLiteralContractAndPerToolFallback() throws {
+        let optional: [String: Any] = ["type": "object", "properties": ["required_name": ["type": "string"], "optional_count": ["type": "integer", "minimum": 0]], "required": ["required_name"], "additionalProperties": false]
+        let (prepared, function) = try strictFixture(optional)
+        XCTAssertEqual(function["strict"] as? Bool, true); XCTAssertEqual(function["parameters"] as? NSDictionary, optional as NSDictionary)
+        XCTAssertNoThrow(try decode(["role": "assistant", "tool_calls": [["id": "optional-omitted", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": "{\"required_name\":\"ok\"}"]]]], finish: "tool_calls", request: prepared, model: "gpt-oss-120b"))
+        let mixed = try request(["tools": [self.function, ["type": "function", "name": "patterned", "parameters": ["type": "object", "properties": ["value": ["type": "string", "pattern": "^x$"]], "required": ["value"], "additionalProperties": false]], tools[1]]], provider: strictCerebrasProvider)
+        let values = try wireFunctions(mixed)
+        XCTAssertEqual(values.count, 3); XCTAssertEqual(values[0]["strict"] as? Bool, true); XCTAssertNil(values[1]["strict"]); XCTAssertEqual(values[2]["strict"] as? Bool, true)
+        for (index, value) in values.enumerated() { XCTAssertEqual(value["parameters"] as? NSDictionary, mixed.tools[index].schema as NSDictionary) }
+        let custom = try request(["tools": [["type": "custom", "name": "apply_patch", "description": "Literal native patch"]]], provider: strictCerebrasProvider)
+        let customWire = try wireFunctions(custom)[0]
+        XCTAssertEqual(customWire["strict"] as? Bool, true); XCTAssertEqual(customWire["parameters"] as? NSDictionary, custom.tools[0].schema as NSDictionary)
+        XCTAssertEqual((customWire["parameters"] as? [String: Any])?["required"] as? [String], ["input"])
+        XCTAssertTrue((customWire["description"] as? String ?? "").contains("Literal native patch"))
+    }
+    func testUnsupportedStrictKeywordsReferencesUnionsAndOpenObjectsRemainExactAndOffered() throws {
+        let leaves: [[String: Any]] = [["type": "string", "pattern": "^x$"], ["type": "string", "format": "uuid"],
+            ["type": "string", "minLength": 1], ["type": "string", "maxLength": 4], ["type": "string", "nullable": true],
+            ["type": ["string", "null"]], ["type": "array", "items": ["type": "string"], "minItems": 1],
+            ["type": "array", "items": ["type": "string"], "maxItems": 4],
+            ["oneOf": [["type": "string"], ["type": "null"]]], ["allOf": [["type": "string"]]],
+            ["$ref": "#/$defs/value"], ["type": "string", "examples": ["example"]]]
+        for leaf in leaves {
+            var schema: [String: Any] = ["type": "object", "properties": ["value": leaf], "required": ["value"], "additionalProperties": false]
+            if leaf["$ref"] != nil { schema["$defs"] = ["value": ["type": "string"]] }
+            let (prepared, wire) = try strictFixture(schema)
+            XCTAssertNil(wire["strict"]); XCTAssertEqual(wire["parameters"] as? NSDictionary, prepared.tools[0].schema as NSDictionary)
+        }
+        for schema: [String: Any] in [["type": "object", "properties": ["value": ["type": "object", "properties": ["name": ["type": "string"]]]], "additionalProperties": false],
+            ["type": "object", "properties": [:], "additionalProperties": true],
+            ["type": "object", "properties": ["value": ["type": "array"]], "additionalProperties": false],
+            ["type": "object", "properties": [:], "additionalProperties": false, "anyOf": [["type": "object", "properties": [:], "additionalProperties": false]]]] {
+            let (prepared, wire) = try strictFixture(schema)
+            XCTAssertNil(wire["strict"]); XCTAssertEqual(wire["parameters"] as? NSDictionary, prepared.tools[0].schema as NSDictionary)
+        }
+        let nestedUnion: [String: Any] = ["type": "object", "properties": ["value": ["anyOf": [["type": "string"], ["type": "null"]]]], "additionalProperties": false]
+        XCTAssertEqual(try strictFixture(nestedUnion).1["strict"] as? Bool, true)
+    }
+    func testStrictSchemaLimitsFallBackWithoutChangingParameters() throws {
+        func properties(_ count: Int) -> [String: Any] { Dictionary(uniqueKeysWithValues: (0..<count).map { ("p" + String($0), ["type": "string"]) }) }
+        for (count, expected) in [(500, true), (501, false)] {
+            let (prepared, wire) = try strictFixture(["type": "object", "properties": properties(count), "additionalProperties": false])
+            XCTAssertEqual(wire["strict"] as? Bool, expected ? true : nil); XCTAssertEqual(wire["parameters"] as? NSDictionary, prepared.tools[0].schema as NSDictionary)
+        }
+        for (count, expected) in [(5_000, true), (5_001, false)] {
+            let (prepared, wire) = try strictFixture(["type": "object", "properties": [String(repeating: "x", count: count): ["type": "string"]], "additionalProperties": false])
+            XCTAssertEqual(wire["strict"] as? Bool, expected ? true : nil); XCTAssertEqual(wire["parameters"] as? NSDictionary, prepared.tools[0].schema as NSDictionary)
+        }
+        for (levels, expected) in [(9, true), (10, false)] {
+            var schema: [String: Any] = ["type": "string"]
+            for _ in 0..<levels { schema = ["type": "object", "properties": ["p": schema], "additionalProperties": false] }
+            XCTAssertEqual(try strictFixture(schema).1["strict"] as? Bool, expected ? true : nil)
+        }
+        for (count, expected) in [(500, true), (501, false)] {
+            let schema: [String: Any] = ["type": "object", "properties": ["value": ["type": "string", "enum": (0..<count).map { "v" + String($0) }]], "additionalProperties": false]
+            let (prepared, wire) = try strictFixture(schema)
+            XCTAssertEqual(wire["strict"] as? Bool, expected ? true : nil); XCTAssertEqual(wire["parameters"] as? NSDictionary, prepared.tools[0].schema as NSDictionary)
+        }
+    }
+    func testCorrectiveRequestPreservesStrictFlagsAndNativeValidationStillRejectsEntireInvalidBatch() throws {
+        let prepared = try request(provider: strictCerebrasProvider)
+        guard case .argumentsRejected(let usage, let details) = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared), request: prepared) else { return XCTFail("Provider strict flag never grants native validation authority") }
+        XCTAssertEqual(usage.totalTokens, 14)
+        let corrected = try APIModelResponseCodec.correctiveRequest(prepared, rejectionDetails: details)
+        var original = try JSONSerialization.jsonObject(with: prepared.body) as! [String: Any]
+        var revised = try JSONSerialization.jsonObject(with: corrected.body) as! [String: Any]
+        original.removeValue(forKey: "messages"); revised.removeValue(forKey: "messages")
+        XCTAssertEqual(original as NSDictionary, revised as NSDictionary); XCTAssertEqual(corrected.allowedTools, prepared.allowedTools)
+        XCTAssertTrue(try wireFunctions(corrected).allSatisfy { $0["strict"] as? Bool == true })
+        XCTAssertThrowsError(try request(["text": ["format": ["type": "json_object"]]], provider: strictCerebrasProvider)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .unsupportedParameter)
+        }
+        let formatted = try request(["tools": [], "text": ["format": ["type": "json_object"]]], provider: strictCerebrasProvider)
+        let formattedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: formatted.body) as? [String: Any])
+        XCTAssertNil(formattedBody["tools"])
+        XCTAssertEqual((formattedBody["response_format"] as? [String: Any])?["type"] as? String, "json_object")
+    }
+    private func rejectedDetails(_ prepared: APIModelResponseCodec.Request, arguments: String) throws -> [APIModelResponseCodec.ArgumentRejectionDetail] {
+        guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, arguments: arguments), request: prepared) else {
+            XCTFail("Fixture must be atomically rejected"); return []
+        }
+        return details
+    }
+    private func schemaFeedback(_ prepared: APIModelResponseCodec.Request, details: [APIModelResponseCodec.ArgumentRejectionDetail]) throws -> ([[String: Any]], String) {
+        let corrected = try APIModelResponseCodec.correctiveRequest(prepared, rejectionDetails: details)
+        let body = try JSONSerialization.jsonObject(with: corrected.body) as! [String: Any]
+        let messages = body["messages"] as! [[String: Any]], text = messages[0]["content"] as! String
+        guard let range = text.range(of: APIModelResponseCodec.schemaFeedbackMarker) else { return ([], text) }
+        let json = String(text[range.upperBound...])
+        return (try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [[String: Any]], json)
+    }
+    func testSchemaFeedbackLocalizesCustomMissingInputAndNeverCopiesRejectedPrivateKeysOrValues() throws {
+        let custom = try request(["tools": [tools[1]]])
+        let missing = try rejectedDetails(custom, arguments: "{}")
+        XCTAssertEqual(missing.count, 1); XCTAssertEqual(missing[0].constraint, .missingRequired)
+        let (customFacts, customJSON) = try schemaFeedback(custom, details: missing)
+        XCTAssertEqual(customFacts[0]["schema_path"] as? [String], ["properties", "input"])
+        XCTAssertEqual(customFacts[0]["expected_types"] as? [String], ["string"])
+        XCTAssertEqual(customFacts[0]["callable"] as? String, custom.tools[0].wireName)
+        XCTAssertFalse(customJSON.contains("arguments"))
+        let prepared = try request()
+        let unknown = try rejectedDetails(prepared, arguments: #"{"path":"PRIVATE_REJECTED_VALUE","PRIVATE_UNKNOWN_KEY":"PRIVATE_REASONING_VALUE"}"#)
+        XCTAssertEqual(unknown[0].constraint, .unexpectedFields)
+        let (facts, json) = try schemaFeedback(prepared, details: unknown)
+        XCTAssertEqual(facts[0]["declared_fields"] as? [String], ["path"])
+        XCTAssertEqual(facts[0]["additional_fields_allowed"] as? Bool, false)
+        for privateText in ["PRIVATE_REJECTED_VALUE", "PRIVATE_UNKNOWN_KEY", "PRIVATE_REASONING_VALUE"] { XCTAssertFalse(json.contains(privateText)) }
+    }
+    func testSchemaFeedbackKnownNestedTypeAndArrayItemsAreResolvedOnlyFromOfferedSchema() throws {
+        let schema: [String: Any] = ["type": "object", "properties": ["config": ["type": "object", "properties": ["enabled": ["type": "boolean"]], "required": ["enabled"], "additionalProperties": false],
+            "values": ["type": "array", "items": ["type": "string"]]], "required": ["config", "values"], "additionalProperties": false]
+        let prepared = try request(["tools": [["type": "function", "name": "configure", "parameters": schema]]])
+        let nested = try rejectedDetails(prepared, arguments: #"{"config":{"enabled":"PRIVATE_BAD_TYPE"},"values":[]}"#)
+        XCTAssertEqual(nested[0].constraint, .typeMismatch)
+        let (facts, json) = try schemaFeedback(prepared, details: nested)
+        XCTAssertEqual(facts[0]["schema_path"] as? [String], ["properties", "config", "properties", "enabled"])
+        XCTAssertEqual(facts[0]["expected_types"] as? [String], ["boolean"]); XCTAssertFalse(json.contains("PRIVATE_BAD_TYPE"))
+        let array = try rejectedDetails(prepared, arguments: #"{"config":{"enabled":true},"values":[42]}"#)
+        let (arrayFacts, arrayJSON) = try schemaFeedback(prepared, details: array)
+        XCTAssertEqual(arrayFacts[0]["schema_path"] as? [String], ["properties", "values", "items"])
+        XCTAssertEqual(arrayFacts[0]["expected_types"] as? [String], ["string"]); XCTAssertFalse(arrayJSON.contains("42"))
+        let forged = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: 0, wireName: prepared.tools[0].wireName,
+            constraint: .typeMismatch, path: [.property("PRIVATE_UNKNOWN_SCHEMA_PATH")])
+        let (safe, forgedJSON) = try schemaFeedback(prepared, details: [forged])
+        XCTAssertEqual(safe[0]["constraint"] as? String, "schema_mismatch"); XCTAssertEqual(safe[0]["schema_path"] as? [String], [])
+        XCTAssertFalse(forgedJSON.contains("PRIVATE_UNKNOWN_SCHEMA_PATH"))
+        let wrongTool = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: 0, wireName: "PRIVATE_FAKE_TOOL", constraint: .typeMismatch, path: [])
+        XCTAssertTrue(try schemaFeedback(prepared, details: [wrongTool]).0.isEmpty)
+    }
+    func testSchemaFeedbackEnumReferencesCompositionAndTraversalLimitsStayGenericWithoutAcceptance() throws {
+        let variants: [[String: Any]] = [
+            ["type": "string", "enum": ["allowed"]],
+            ["$ref": "#/$defs/value"],
+            ["anyOf": [["type": "string"], ["type": "boolean"]]]]
+        for leaf in variants {
+            let schema: [String: Any] = ["type": "object", "properties": ["value": leaf], "required": ["value"], "additionalProperties": false,
+                "$defs": ["value": ["type": "string"]]]
+            let prepared = try request(["tools": [["type": "function", "name": "fixture", "parameters": schema]]])
+            let details = try rejectedDetails(prepared, arguments: #"{"value":42}"#)
+            // Direct type proof is allowed; reference/composition localization is deliberately generic.
+            XCTAssertEqual(details[0].constraint, leaf["type"] == nil ? .schemaMismatch : .typeMismatch)
+            let (_, json) = try schemaFeedback(prepared, details: details); XCTAssertFalse(json.contains("42"))
+        }
+        let enumPrepared = try request(["tools": [["type": "function", "name": "fixture", "parameters": ["type": "object", "properties": ["value": ["type": "string", "enum": ["allowed"]]], "required": ["value"]]]]])
+        XCTAssertEqual(try rejectedDetails(enumPrepared, arguments: #"{"value":"PRIVATE_ENUM_VALUE"}"#)[0].constraint, .schemaMismatch)
+        let arrayPrepared = try request(["tools": [["type": "function", "name": "fixture", "parameters": ["type": "object", "properties": ["values": ["type": "array", "items": ["type": "string"]]], "required": ["values"]]]]])
+        let items: [Any] = Array(repeating: "valid", count: 255).map { $0 as Any } + [42]
+        let tooMany = try JSONSerialization.data(withJSONObject: ["values": items])
+        let bounded = try rejectedDetails(arrayPrepared, arguments: String(decoding: tooMany, as: UTF8.self))
+        XCTAssertEqual(bounded[0].constraint, .schemaMismatch); XCTAssertEqual(bounded[0].path, [])
+        var nestedSchema: [String: Any] = ["type": "string"], nestedValue: Any = 42
+        for _ in 0..<9 {
+            nestedSchema = ["type": "object", "properties": ["p": nestedSchema], "required": ["p"], "additionalProperties": false]
+            nestedValue = ["p": nestedValue]
+        }
+        let nested = try request(["tools": [["type": "function", "name": "deep", "parameters": nestedSchema]]])
+        let deep = try rejectedDetails(nested, arguments: String(decoding: JSONSerialization.data(withJSONObject: nestedValue), as: UTF8.self))
+        XCTAssertEqual(deep[0].constraint, .schemaMismatch); XCTAssertEqual(deep[0].path, [])
+    }
+    func testSchemaFeedbackFiniteLogsContainOnlyToolIndexAndConstraintAndRequestStillRejectsWholeBatch() throws {
+        let prepared = try request()
+        let additional: [String: Any] = ["id": "valid-half", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": "{\"path\":\"PRIVATE_VALID_HALF\"}"]]
+        var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+        guard case .argumentsRejected(let usage, let details) = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, arguments: "{\"path\":false}", additionalCalls: [additional]), request: prepared, onArgumentRejection: { observed.append($0) }) else { return XCTFail("Entire batch must be rejected") }
+        XCTAssertEqual(usage.totalTokens, 14); XCTAssertEqual(details.count, 1)
+        let encoded = try JSONEncoder().encode(observed[0]), object = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        let finite = object["schemaFailures"] as! [[String: Any]]
+        XCTAssertEqual(Set(finite[0].keys), ["toolIndex", "constraint"])
+        let text = String(decoding: encoded, as: UTF8.self)
+        for forbidden in [prepared.tools[0].wireName, "path", "PRIVATE_VALID_HALF", "arguments"] { XCTAssertFalse(text.contains(forbidden)) }
+    }
     func testDocumentedNestedTimingMetadataAllowsOnlyOtherwiseEligibleArgumentCorrection() throws {
         let prepared = try request()
         let timing: [String: Any] = ["created": 1775679664.285658, "queue_time": 0.000630072,
             "prompt_time": 0.006339716, "completion_time": 0.01440533, "total_time": 0.022999626968]
         let changes: [String: Any] = ["created": 1775679664, "time_info": timing]
         var observed: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
-        guard case .argumentsRejected(let usage) = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, changes: changes), request: prepared, onArgumentRejection: { observed.append($0) }) else {
+        guard case .argumentsRejected(let usage, _) = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, changes: changes), request: prepared, onArgumentRejection: { observed.append($0) }) else {
             return XCTFail("Unrelated timing metadata must not poison a fully validated argument-only rejection")
         }
         XCTAssertEqual(usage, .init(inputTokens: 10, outputTokens: 4, totalTokens: 14, cachedInputTokens: 3, reasoningOutputTokens: 2))
@@ -135,8 +332,8 @@ final class APIModelResponseCodecTests: XCTestCase {
                 }
                 XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared))
             } else {
-                guard case .argumentsRejected(let usage) = try APIModelResponseCodec.decodeForCorrection(result, request: prepared, onArgumentRejection: { observed.append($0) }),
-                      case .argumentsRejected(let unchangedUsage) = try APIModelResponseCodec.decodeForCorrection(result, request: prepared) else { return XCTFail("No rejected call may become a reply") }
+                guard case .argumentsRejected(let usage, _) = try APIModelResponseCodec.decodeForCorrection(result, request: prepared, onArgumentRejection: { observed.append($0) }),
+                      case .argumentsRejected(let unchangedUsage, _) = try APIModelResponseCodec.decodeForCorrection(result, request: prepared) else { return XCTFail("No rejected call may become a reply") }
                 XCTAssertEqual(usage, unchangedUsage)
             }
             let diagnostic = try XCTUnwrap(observed.count == 1 ? observed.first : nil)
@@ -228,7 +425,7 @@ final class APIModelResponseCodecTests: XCTestCase {
     func testArgumentCorrectionRequiresCompleteBatchAndPresentExactUsageBeforeClassification() throws {
         let prepared = try request()
         for bad in ["{", "{\"path\":false}"] {
-            guard case .argumentsRejected(let usage) = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, arguments: bad), request: prepared) else { return XCTFail("Expected argument-only rejection") }
+            guard case .argumentsRejected(let usage, _) = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, arguments: bad), request: prepared) else { return XCTFail("Expected argument-only rejection") }
             XCTAssertEqual(usage, .init(inputTokens: 10, outputTokens: 4, totalTokens: 14, cachedInputTokens: 3, reasoningOutputTokens: 2))
         }
         let unknown: [String: Any] = ["id": "unknown-call", "type": "function", "function": ["name": "unoffered", "arguments": "{}"]]

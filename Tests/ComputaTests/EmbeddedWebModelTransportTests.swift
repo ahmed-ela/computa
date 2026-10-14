@@ -6,6 +6,137 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testResponseProgressProjectionPreservesUnknownsAndOmitsPrivateContent() throws {
+        let privateText = "PRIVATE_RESPONSE_CANARY😀é"
+        let input: [String: Any] = ["responseCount": 1, "userCount": 2, "busy": true,
+            "answerComplete": false, "text": privateText, "url": "https://private.invalid/?secret=CANARY",
+            "prompt": "PRIVATE_PROMPT", "error": "PRIVATE_ERROR", "ownerToken": "PRIVATE_OWNER"]
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedResponseProgressInspection(input))
+        XCTAssertEqual(Set(safe.keys), ["responseCount", "userCount", "busy", "answerComplete",
+            "responseLoadFailed", "textBytes", "textBytesLimitExceeded"])
+        XCTAssertEqual(safe["textBytes"] as? Int, privateText.utf8.count)
+        XCTAssertEqual(safe["textBytesLimitExceeded"] as? Bool, false)
+        XCTAssertTrue(safe["responseLoadFailed"] is NSNull, "An absent flag remains unknown")
+        let encoded = try JSONSerialization.data(withJSONObject: safe, options: .sortedKeys)
+        let text = String(decoding: encoded, as: UTF8.self)
+        for secret in ["PRIVATE", "https", "CANARY", "😀", "é", "ownerToken", "prompt", "error", "url"] {
+            XCTAssertFalse(text.contains(secret))
+        }
+        XCTAssertLessThan(encoded.count, 256)
+        let unknown = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedResponseProgressInspection(["responseCount": 0, "userCount": 0]))
+        for key in ["busy", "answerComplete", "responseLoadFailed", "textBytes", "textBytesLimitExceeded"] {
+            XCTAssertTrue(unknown[key] is NSNull, key)
+        }
+        for (key, value): (String, Any) in [("responseCount", true), ("userCount", 0.5),
+            ("responseCount", -1), ("userCount", 10_001), ("busy", 1), ("answerComplete", "false"),
+            ("responseLoadFailed", NSNull()), ("text", 123)] {
+            var bad = input; bad[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedResponseProgressInspection(bad), key)
+        }
+        for key in ["responseCount", "userCount"] {
+            var missing = input; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedResponseProgressInspection(missing), key)
+        }
+        var large = input; large["text"] = String(repeating: "A", count: 220_002)
+        let bounded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedResponseProgressInspection(large))
+        XCTAssertEqual(bounded["textBytes"] as? Int, 220_001)
+        XCTAssertEqual(bounded["textBytesLimitExceeded"] as? Bool, true)
+    }
+
+    func testResponseProgressFailureUsesOnlyCurrentRoundInspectionAndEmitsOnce() async throws {
+        for inspectSecondRound in [false, true] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, holdSecondReply: true))
+            defer { fixture.shutdown() }
+            var diagnostics: [String] = []
+            fixture.transport.setResponseProgressDiagnosticObserverForTesting { diagnostics.append($0) }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "PRIVATE_FIRST_PROGRESS"])
+            _ = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertTrue(diagnostics.isEmpty, "A completed first round produces no failure record")
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "PRIVATE_SECOND_PROGRESS"])
+            if inspectSecondRound {
+                let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(pending["state"] as? String, "running")
+            }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .milliseconds(1))
+            try await Task.sleep(for: .milliseconds(2))
+            for _ in 0..<2 {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("Progress diagnostics cannot admit the expired response")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+            }
+            XCTAssertEqual(diagnostics.count, 1)
+            let safe = try XCTUnwrap(diagnostics.first)
+            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
+            XCTAssertEqual(record["kind"] as? String, "chatgpt_response_progress_v1")
+            XCTAssertEqual(record["phase"] as? String, "failure")
+            XCTAssertEqual(record["cause"] as? String, "response_deadline")
+            XCTAssertEqual(record["sequence"] as? Int, 2)
+            XCTAssertEqual(record["ownedViewCurrent"] as? Bool, true)
+            XCTAssertEqual(record["ownedDocumentCurrent"] as? Bool, true)
+            XCTAssertEqual(record["modelSelectionVerified"] as? Bool, true)
+            XCTAssertEqual(record["modelEvidencePresent"] as? Bool, true)
+            XCTAssertEqual(record["lastInspectionAvailable"] as? Bool, inspectSecondRound)
+            if inspectSecondRound {
+                let observed = try XCTUnwrap(record["lastInspection"] as? [String: Any])
+                XCTAssertEqual(observed["userCount"] as? Int, 2)
+                XCTAssertEqual(observed["responseCount"] as? Int, 2)
+                // This fixture appends an enabled Copy control before adding
+                // Stop. Preserve both observed flags: busy still forbids native
+                // completion even when a completion control is present.
+                let controls = try await evaluate(view, """
+                    const lastTurn = document.getElementById('messages').lastElementChild;
+                    return { stop: !!document.getElementById('fixture-held-response-stop'),
+                      copy: !!lastTurn.querySelector('button[aria-label="Copy"]') };
+                    """) as? [String: Bool]
+                XCTAssertEqual(controls?["stop"], true)
+                XCTAssertEqual(controls?["copy"], true)
+                XCTAssertEqual(observed["busy"] as? Bool, true)
+                XCTAssertEqual(observed["answerComplete"] as? Bool, true)
+                XCTAssertEqual(record["confirmedUsers"] as? Int, 2)
+                XCTAssertEqual(record["pendingSubmission"] as? Bool, false)
+                XCTAssertEqual(record["currentSubmissionVerified"] as? Bool, true)
+            } else {
+                XCTAssertTrue(record["lastInspection"] is NSNull, "First-round cached facts must not survive a new Send claim")
+            }
+            XCTAssertLessThanOrEqual(safe.utf8.count, 768)
+            for secret in ["PRIVATE", token, "https", "Fixture reply", "Computa session marker"] { XCTAssertFalse(safe.contains(secret)) }
+            try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(diagnostics.count, 1, "Finish cannot emit another progress record for the failed round")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testResponseProgressFailureOmitsCachedInspectionAfterOwnedViewRemoval() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "PRIVATE_STALE_PROGRESS")
+        defer { fixture.shutdown() }
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        var diagnostics: [String] = []
+        fixture.transport.setResponseProgressDiagnosticObserverForTesting { diagnostics.append($0) }
+        fixture.browser.closeTab(try XCTUnwrap(fixture.createdTabs.last))
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A diagnostic must not restore a removed owned view")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
+        XCTAssertEqual(diagnostics.count, 1)
+        let safe = try XCTUnwrap(diagnostics.first)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
+        XCTAssertEqual(record["ownedViewCurrent"] as? Bool, false)
+        XCTAssertEqual(record["ownedDocumentCurrent"] as? Bool, false)
+        XCTAssertEqual(record["lastInspectionAvailable"] as? Bool, false)
+        XCTAssertTrue(record["lastInspection"] is NSNull)
+        XCTAssertFalse(safe.contains("PRIVATE")); XCTAssertFalse(safe.contains(token))
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertEqual(diagnostics.count, 1)
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testFailedPageDiagnosticProjectionAdmitsOnlyBoundedFiniteValues() throws {
         let root: [String: Any] = ["connected": 1, "visible": 1]
         let valid: [String: Any] = ["kind": "chatgpt_failed_page_v1", "route": "local_conversation", "errorCategory": "none",

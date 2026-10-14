@@ -1,5 +1,55 @@
 # Embedded website provider qualification
 
+## Build114 installed outcomes and build115 preparation
+
+Five fresh tasks were attempted; two passed cleanly and three failed. Seven
+remaining cases were held without dispatch. Cerebras offers only GPT-OSS in the
+selector; Qwen3.8 27B is temporarily hidden at the user's request because of its
+higher token usage.
+
+| Case | Duration | Observed result |
+| --- | --- | --- |
+| Cerebras GPT-OSS 120B, first code/terminal/browser task | 6.860 s | Passed thirteen tools, independent preserved tests and CLI checks, exact form result and task-tab close. No corrective inference was claimed. |
+| Cerebras GPT-OSS 120B, fresh code repeat | 1.051 s | The one corrective inference was attempted, but its response still failed schema validation. No tool was published. The specific rejected argument remains unknown. |
+| Gemini 3.8 Flash, first browser task | 57.607 s | Passed six tools, exact result and task-tab close, seven verified website inferences and one confirmed final conversation closure. |
+| Gemini 3.8 Flash, fresh browser repeat | 0.613 s | Committed Google checkpoint before adapter or Send; zero tools. A separate fresh visible same-profile Gemini tab also showed the actual unusual-traffic CAPTCHA. |
+| ChatGPT Instant in normal Chat, browser task | 317.923 s | First inference completed and opened the fixture. The second inference expired at its original five-minute response deadline. No final result or task-tab close qualified. |
+
+The Gemini checkpoint is a trusted Google `/sorry` route, not a normal account
+sign-in redirect. Its trigger and permanent prevention remain unresolved. The
+fresh visible challenge remains pending action-time approval. No challenge was
+completed and no failed prompt was replayed.
+
+ChatGPT's post-terminal finite abort observation had two visible user roots,
+one assistant and a Stop control. It does not establish the second full-body
+proof or the cause of the response stall. Empty recognized network-timing
+counts are explicitly inconclusive. Failed website view-disposal receipts do
+not add confirmed conversation closures. The owned fixture server was stopped
+and its process/listener disappeared; the app remains open for the challenge.
+
+Build115 preparation adds bounded schema-only feedback to the existing single
+corrective inference, without copying rejected keys, values or reasoning. The
+authoritative schema validator, catalog, confirmed history, ownership, deadline
+and whole-batch tool-publication gates remain unchanged. It also records finite
+terminal ChatGPT progress from the latest already-completed inspect, bound to
+the current sequence, owned view and document. Missing observations stay unknown;
+the diagnostic does not inspect, retry, admit an answer or change cleanup.
+The final API-only candidate passed all 85 API and bundled-engine checks on
+unchanged source. The 165 browser-transport checks passed before that API-only
+addition; their transport source is unchanged. These checks do not qualify an
+installed build115 provider task.
+
+Build115 also enables [Cerebras strict tool decoding](https://inference-docs.cerebras.ai/capabilities/tool-use)
+for GPT-OSS 120B on the validated official Cerebras endpoint, only when each
+existing tool parameter schema satisfies a conservative supported subset.
+It does not rewrite schemas, add required fields or remove unsupported tools.
+Uncertain schemas retain their existing wire path. The harness's generic
+Responses `strict: false` flag is not treated as a vendor decoding opt-out;
+the accepted native argument contract remains unchanged and is still validated
+before any whole batch can publish. The existing single corrective inference
+remains available when needed. Live reliability remains unqualified until the
+installed candidate completes the controlled tasks.
+
 ## Build112 installed outcomes
 
 The fresh matrix attempted four tasks: GPT-OSS's first code/terminal/browser
@@ -14,8 +64,9 @@ Eight remaining cases were held. The test server was stopped separately.
 The exact Gemini view recorded a native server redirect and no previously
 observed allowed Gemini document commit. A subsequent ordinary visible tab also
 showed Google's actual reCAPTCHA while the saved checkpoint was still present.
-That tab is retained pending action-time confirmation. This establishes a
-current ordinary-navigation block; it does not identify Google's trigger or
+At that time the tab was retained pending action-time confirmation. The app was
+later restarted for build114 without completing that challenge. This established
+an ordinary-navigation block; it did not identify Google's trigger or
 establish an old WebKit cause. CAPTCHA prevention remains unresolved.
 
 GPT-OSS's finite diagnostics established a schema mismatch with known usage and
@@ -28,8 +79,8 @@ with the same name. The build113 candidate limits that rule to the root field;
 duplicate-key, counter, size, ownership and correction-budget checks remain.
 All 76 final native checks passed on unchanged Swift source, including the
 documented metadata, the one-correction loopback variants and three bundled-engine
-checks. Installed qualification is pending; build112 was left open for the
-visible CAPTCHA. The preceding diagnostic-only run passed 72 of 73 tests; its
+checks. The later build114 qualification is recorded above. Build112 was initially
+left open for the visible CAPTCHA. The preceding diagnostic-only run passed 72 of 73 tests; its
 new fixture's mistaken rejection category is retained and corrected separately.
 
 ## Build111 installed outcomes

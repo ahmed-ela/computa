@@ -66,8 +66,25 @@ enum APIModelResponseCodec {
         case reply(Reply)
         /// No native output, generated call IDs or reasoning capsule is published.
         /// Usage is present and exact; every non-argument gate has already passed.
-        case argumentsRejected(APIModelCorrectionUsage)
+        case argumentsRejected(APIModelCorrectionUsage, [ArgumentRejectionDetail])
     }
+    enum SchemaConstraint: String, Codable, Equatable, Sendable {
+        case schemaMismatch = "schema_mismatch", missingRequired = "missing_required"
+        case typeMismatch = "type_mismatch", unexpectedFields = "unexpected_fields"
+        case arrayBounds = "array_bounds"
+    }
+    enum SchemaPathPart: Equatable, Sendable { case property(String), items }
+    struct ArgumentRejectionDetail: Sendable {
+        let toolIndex: Int
+        let wireName: String
+        let constraint: SchemaConstraint
+        let path: [SchemaPathPart]
+    }
+    struct FiniteSchemaFailure: Codable, Equatable, Sendable {
+        let toolIndex: Int
+        let constraint: SchemaConstraint
+    }
+    private struct SchemaViolation { let constraint: SchemaConstraint; let path: [SchemaPathPart] }
     /// Finite observations only. This callback cannot authorize correction or
     /// publish any call; all existing complete-envelope gates remain authoritative.
     struct ArgumentValidationDiagnostic: Codable, Equatable, Sendable {
@@ -84,6 +101,7 @@ enum APIModelResponseCodec {
         let reason: Reason
         var envelopeRejection: EnvelopeRejection? = nil
         var jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic? = nil
+        var schemaFailures: [FiniteSchemaFailure]? = nil
         let callCount: Int
         let rejectedCount: Int
         let envelopeShapeValid: Bool
@@ -94,15 +112,21 @@ enum APIModelResponseCodec {
     }
     static let correctiveFeedback = "Native validation rejected the preceding provider response because tool arguments did not match the offered JSON schemas. No call from that rejected response was executed. Produce a new response using only the unchanged offered tools and exact schema-valid arguments. Preserve the confirmed outcomes in the supplied history; do not repeat actions already completed in that history."
 
-    static func correctiveRequest(_ original: Request) throws -> Request {
+    static let schemaFeedbackMarker = "Trusted schema validation details (from the unchanged offered tools):\n"
+    static func correctiveRequest(_ original: Request, rejectionDetails: [ArgumentRejectionDetail] = []) throws -> Request {
         guard original.provider.wireAPI == .chatCompletions,
               var body = try JSONSerialization.jsonObject(with: original.body) as? [String: Any],
               var messages = body["messages"] as? [[String: Any]], !messages.isEmpty else { throw Failure.invalidRequest }
+        let suffix = trustedSchemaFeedback(original, details: rejectionDetails)
+        // Optional detail never displaces the existing generic instruction or
+        // changes the original request-size guard.
+        let feedback = original.body.count + 2 * (correctiveFeedback.utf8.count + suffix.utf8.count) + 64 <= maximumText
+            ? correctiveFeedback + suffix : correctiveFeedback
         if messages[0]["role"] as? String == "system" {
             guard let originalText = messages[0]["content"] as? String else { throw Failure.invalidRequest }
-            messages[0]["content"] = originalText + "\n\n" + correctiveFeedback
+            messages[0]["content"] = originalText + "\n\n" + feedback
         } else {
-            messages.insert(["role": "system", "content": correctiveFeedback], at: 0)
+            messages.insert(["role": "system", "content": feedback], at: 0)
         }
         body["messages"] = messages
         let bytes = try json(body)
@@ -112,6 +136,44 @@ enum APIModelResponseCodec {
                        toolNaming: original.toolNaming, allowedTools: original.allowedTools, requiredTool: original.requiredTool,
                        maximumCalls: original.maximumCalls, historyCallIDs: original.historyCallIDs,
                        capsules: original.capsules, responseConfiguration: original.responseConfiguration)
+    }
+
+    private static func trustedSchemaFeedback(_ request: Request, details: [ArgumentRejectionDetail]) -> String {
+        guard !details.isEmpty, details.count <= 8 else { return "" }
+        var records: [[String: Any]] = []
+        for detail in details.sorted(by: { $0.toolIndex < $1.toolIndex }) {
+            guard request.tools.indices.contains(detail.toolIndex), detail.path.count <= 8 else { continue }
+            let tool = request.tools[detail.toolIndex]
+            guard detail.wireName == tool.wireName, request.allowedTools.contains(tool.wireName) else { continue }
+            var schema = tool.schema, schemaPath: [String] = [], validPath = true
+            for part in detail.path {
+                switch part {
+                case .property(let name):
+                    guard name.utf8.count <= 128, let child = (schema["properties"] as? [String: [String: Any]])?[name] else { validPath = false; break }
+                    schema = child; schemaPath += ["properties", name]
+                case .items:
+                    guard let child = schema["items"] as? [String: Any] else { validPath = false; break }
+                    schema = child; schemaPath.append("items")
+                }
+                if !validPath { break }
+            }
+            // Uncertain localization falls back to a brief for the known tool;
+            // no supplied path string is ever copied without schema resolution.
+            if !validPath { schema = tool.schema; schemaPath = [] }
+            var record: [String: Any] = ["tool_index": detail.toolIndex, "callable": tool.wireName,
+                "constraint": validPath ? detail.constraint.rawValue : SchemaConstraint.schemaMismatch.rawValue,
+                "schema_path": schemaPath]
+            let types = (schema["type"] as? String).map { [$0] } ?? (schema["type"] as? [String]) ?? []
+            if !types.isEmpty, types.count <= 7, types.allSatisfy({ ["object","array","string","number","integer","boolean","null"].contains($0) }) { record["expected_types"] = types.sorted() }
+            if let required = schema["required"] as? [String], required.count <= 16, required.allSatisfy({ $0.utf8.count <= 128 }) { record["required_fields"] = required.sorted() }
+            if let properties = schema["properties"] as? [String: Any], properties.count <= 16, properties.keys.allSatisfy({ $0.utf8.count <= 128 }) { record["declared_fields"] = properties.keys.sorted() }
+            if strictBool(schema["additionalProperties"]) == false { record["additional_fields_allowed"] = false }
+            if schema["enum"] != nil { record["follow_offered_enum"] = true }
+            records.append(record)
+        }
+        guard !records.isEmpty, let bytes = try? json(records), bytes.count <= 1_536,
+              let text = String(data: bytes, encoding: .utf8) else { return "" }
+        return "\n\n" + schemaFeedbackMarker + text
     }
 
     struct TextShape: Codable, Equatable, Sendable {
@@ -197,7 +259,14 @@ enum APIModelResponseCodec {
         } else {
             body = ["model": selection.model.id, "messages": history.messages, "stream": stream, "n": 1]
             if !tools.isEmpty {
-                body["tools"] = try tools.map { ["type": "function", "function": ["name": $0.wireName, "description": try chatCompletionToolDescription($0), "parameters": $0.schema]] as [String: Any] }
+                let formatType = ((raw["text"] as? [String: Any])?["format"] as? [String: Any])?["type"] as? String ?? "text"
+                // The harness's generic Responses strict flag is not a vendor decoding opt-out; native argument validation still owns acceptance.
+                let strictRoute = selection.provider.isCerebrasInference && selection.model.id == "gpt-oss-120b" && formatType == "text"
+                body["tools"] = try tools.map { tool in
+                    var function: [String: Any] = ["name": tool.wireName, "description": try chatCompletionToolDescription(tool), "parameters": tool.schema]
+                    if strictRoute && cerebrasStrictParametersCompatible(tool.schema) { function["strict"] = true }
+                    return ["type": "function", "function": function] as [String: Any]
+                }
                 body["tool_choice"] = wireChoice
                 body["parallel_tool_calls"] = parallel
             } else if required { throw Failure.invalidTool }
@@ -291,6 +360,56 @@ enum APIModelResponseCodec {
                 "presence_penalty": 0, "frequency_penalty": 0, "top_logprobs": 0, "reasoning": reasoning,
                 "max_output_tokens": raw["max_output_tokens"] ?? NSNull(), "max_tool_calls": raw["max_tool_calls"] ?? NSNull(), "store": false, "background": false,
                 "service_tier": "default", "metadata": metadata, "safety_identifier": NSNull(), "prompt_cache_key": NSNull()]
+    }
+
+    /// Conservative intersection of native validation and Cerebras' documented
+    /// strict subset. Never rewrite a parameter, add a required field or drop a
+    /// tool. Unsupported/uncertain contracts simply omit the strict flag.
+    /// Sources: capabilities/tool-use and capabilities/structured-outputs.
+    private static func cerebrasStrictParametersCompatible(_ root: [String: Any]) -> Bool {
+        var textCharacters = 0, propertyCount = 0, enumCount = 0, nodes = 0
+        let annotations: Set<String> = ["description", "title", "default"]
+        let supported: Set<String> = ["type", "properties", "required", "additionalProperties", "items", "enum", "const", "anyOf",
+            "description", "title", "default", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]
+        func count(_ string: String) -> Bool { textCharacters += string.unicodeScalars.count; return textCharacters <= 5_000 }
+        func primitive(_ value: Any) -> Bool {
+            if value is NSNull || value is String { return true }
+            return (value as? NSNumber)?.doubleValue.isFinite == true
+        }
+        func visit(_ schema: [String: Any], depth: Int) -> Bool {
+            nodes += 1
+            guard depth <= 10, nodes <= 2_048, Set(schema.keys).isSubset(of: supported) else { return false }
+            if let branches = schema["anyOf"] as? [[String: Any]] {
+                guard depth > 1, !branches.isEmpty, branches.count <= 32,
+                      Set(schema.keys).isSubset(of: annotations.union(["anyOf"])) else { return false }
+                return branches.allSatisfy { visit($0, depth: depth + 1) }
+            }
+            guard let type = schema["type"] as? String, ["object","array","string","number","integer","boolean","null"].contains(type) else { return false }
+            if let values = schema["enum"] as? [Any] {
+                enumCount += values.count
+                guard !values.isEmpty, enumCount <= 500, values.allSatisfy({ primitive($0) && typeMatches($0, type: type) }) else { return false }
+                var enumCharacters = 0
+                for value in values { if let string = value as? String { enumCharacters += string.unicodeScalars.count; if !count(string) { return false } } }
+                if values.count > 250 && enumCharacters > 7_500 { return false }
+            }
+            if let value = schema["const"] {
+                guard primitive(value), typeMatches(value, type: type) else { return false }
+                if let string = value as? String, !count(string) { return false }
+            }
+            if ["minimum","maximum","exclusiveMinimum","exclusiveMaximum"].contains(where: { schema[$0] != nil }), !["number","integer"].contains(type) { return false }
+            if type == "object" {
+                guard strictBool(schema["additionalProperties"]) == false, let properties = schema["properties"] as? [String: [String: Any]] else { return false }
+                propertyCount += properties.count; guard propertyCount <= 500 else { return false }
+                if let required = schema["required"] as? [String], !Set(required).isSubset(of: Set(properties.keys)) { return false }
+                for name in properties.keys.sorted() { if !count(name) || !visit(properties[name]!, depth: depth + 1) { return false } }
+            } else if schema["properties"] != nil || schema["required"] != nil || schema["additionalProperties"] != nil { return false }
+            if type == "array" {
+                guard let item = schema["items"] as? [String: Any], visit(item, depth: depth + 1) else { return false }
+            } else if schema["items"] != nil { return false }
+            return true
+        }
+        guard root["type"] as? String == "object", root["anyOf"] == nil else { return false }
+        return visit(root, depth: 1)
     }
 
     private static func chatCompletionToolDescription(_ tool: Tool) throws -> String {
@@ -598,6 +717,7 @@ enum APIModelResponseCodec {
         }
         var parsedArguments: [[String: Any]] = [], argumentsRejected = false
         var rejectionReason: ArgumentValidationDiagnostic.Reason?, rejectedCount = 0
+        var rejectionDetails: [ArgumentRejectionDetail] = []
         func observe(_ reason: ArgumentValidationDiagnostic.Reason) {
             rejectedCount += 1
             if let prior = rejectionReason, prior != reason { rejectionReason = .multipleKinds }
@@ -605,7 +725,7 @@ enum APIModelResponseCodec {
         }
         func emitArgumentRejection(oversized: Bool = false) {
             guard let reason = rejectionReason else { return }
-            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, jsonRejection: jsonRejection, callCount: validatedCalls.count, rejectedCount: rejectedCount,
+            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, jsonRejection: jsonRejection, schemaFailures: rejectionDetails.isEmpty ? nil : rejectionDetails.prefix(2).map { .init(toolIndex: $0.toolIndex, constraint: $0.constraint) }, callCount: validatedCalls.count, rejectedCount: rejectedCount,
                 envelopeShapeValid: envelopeShapeValid, unambiguousJSON: unambiguousJSON,
                 streamShapeAndUsageValid: streamShapeAndUsageValid, knownUsage: correctionUsage(normalizedUsage) != nil,
                 correctionEligible: rawCorrectionEligible && correctionUsage(normalizedUsage) != nil && !oversized))
@@ -614,7 +734,11 @@ enum APIModelResponseCodec {
             guard call.arguments.utf8.count <= maximumText else {
                 observe(.oversized); emitArgumentRejection(oversized: true); throw Failure.invalidArguments
             }
-            do { parsedArguments.append(try validatedArguments(call.arguments, tool: call.tool, onRejection: observe)) }
+            do { parsedArguments.append(try validatedArguments(call.arguments, tool: call.tool, onRejection: observe, onSchemaMismatch: { violation in
+                if rejectionDetails.count < 8, let index = request.tools.firstIndex(where: { $0.wireName == call.tool.wireName }) {
+                    rejectionDetails.append(.init(toolIndex: index, wireName: call.tool.wireName, constraint: violation.constraint, path: violation.path))
+                }
+            })) }
             catch let failure as Failure where failure == .invalidArguments {
                 argumentsRejected = true; parsedArguments.append([:])
             }
@@ -629,7 +753,7 @@ enum APIModelResponseCodec {
         if argumentsRejected {
             emitArgumentRejection()
             guard rawCorrectionEligible, let known = correctionUsage(normalizedUsage) else { throw Failure.invalidArguments }
-            return .argumentsRejected(known)
+            return .argumentsRejected(known, rejectionDetails)
         }
         let responseID = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         var output: [[String: Any]] = [], actualIDs: [String] = []
@@ -1031,7 +1155,8 @@ enum APIModelResponseCodec {
     }
 
     private static func validatedArguments(_ text: String, tool: Tool,
-                                           onRejection: ((ArgumentValidationDiagnostic.Reason) -> Void)? = nil) throws -> [String: Any] {
+                                           onRejection: ((ArgumentValidationDiagnostic.Reason) -> Void)? = nil,
+                                           onSchemaMismatch: ((SchemaViolation) -> Void)? = nil) throws -> [String: Any] {
         guard text.utf8.count <= maximumText, let data = text.data(using: .utf8) else {
             onRejection?(.oversized); throw Failure.invalidArguments
         }
@@ -1042,9 +1167,56 @@ enum APIModelResponseCodec {
             onRejection?(.nonObject); throw Failure.invalidArguments
         }
         guard matches(object, schema: tool.schema, root: tool.schema, depth: 0) else {
+            if let onSchemaMismatch {
+                var nodes = 0
+                onSchemaMismatch(localizeSchemaFailure(object, schema: tool.schema, depth: 0, path: [], nodes: &nodes)
+                    ?? .init(constraint: .schemaMismatch, path: []))
+            }
             onRejection?(.schemaMismatch); throw Failure.invalidArguments
         }
         return object
+    }
+    /// Observational localization after the authoritative matches() has refused
+    /// the arguments. It never accepts anything. References/composition and any
+    /// uncertain or exhausted traversal retain a generic schema mismatch.
+    private static func localizeSchemaFailure(_ value: Any, schema: [String: Any], depth: Int,
+                                             path: [SchemaPathPart], nodes: inout Int) -> SchemaViolation? {
+        nodes += 1
+        guard depth <= 32, nodes <= 256, path.count <= 8 else { return .init(constraint: .schemaMismatch, path: []) }
+        if schema["$ref"] != nil || ["anyOf","oneOf","allOf"].contains(where: { schema[$0] != nil }) { return .init(constraint: .schemaMismatch, path: []) }
+        if value is NSNull, strictBool(schema["nullable"]) == true { return nil }
+        if let type = schema["type"] {
+            let types = (type as? String).map { [$0] } ?? (type as? [String]) ?? []
+            if !types.contains(where: { typeMatches(value, type: $0) }) { return .init(constraint: .typeMismatch, path: path) }
+        }
+        if schema["enum"] != nil { return .init(constraint: .schemaMismatch, path: []) }
+        if let object = value as? [String: Any] {
+            let properties = schema["properties"] as? [String: [String: Any]] ?? [:]
+            let required = schema["required"] as? [String] ?? []
+            guard object.count <= 256, properties.count <= 256, required.count <= 256 else { return .init(constraint: .schemaMismatch, path: []) }
+            for name in required.sorted() where object[name] == nil {
+                guard properties[name] != nil, name.utf8.count <= 128, path.count < 8 else { return .init(constraint: .schemaMismatch, path: []) }
+                return .init(constraint: .missingRequired, path: path + [.property(name)])
+            }
+            for name in properties.keys.sorted() {
+                guard let child = object[name] else { continue }
+                guard name.utf8.count <= 128, path.count < 8 else { return .init(constraint: .schemaMismatch, path: []) }
+                if let failure = localizeSchemaFailure(child, schema: properties[name]!, depth: depth + 1, path: path + [.property(name)], nodes: &nodes) { return failure }
+            }
+            if strictBool(schema["additionalProperties"]) == false && object.keys.contains(where: { properties[$0] == nil }) { return .init(constraint: .unexpectedFields, path: path) }
+        }
+        if let array = value as? [Any] {
+            guard array.count <= 256 else { return .init(constraint: .schemaMismatch, path: []) }
+            if let min = schema["minItems"] as? Int, array.count < min { return .init(constraint: .arrayBounds, path: path) }
+            if let max = schema["maxItems"] as? Int, array.count > max { return .init(constraint: .arrayBounds, path: path) }
+            if let item = schema["items"] as? [String: Any] {
+                guard path.count < 8 else { return .init(constraint: .schemaMismatch, path: []) }
+                for child in array {
+                    if let failure = localizeSchemaFailure(child, schema: item, depth: depth + 1, path: path + [.items], nodes: &nodes) { return failure }
+                }
+            }
+        }
+        return nil
     }
     // The gateway validates the schema subset emitted by the pinned native tools.
     // Unsupported constraints are rejected, never silently treated as permissive.

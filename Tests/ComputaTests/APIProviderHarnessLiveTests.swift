@@ -821,10 +821,21 @@ private actor APIHarnessCorrectionInference {
                 guard var expected = originalBody, var expectedMessages = expected["messages"] as? [[String: Any]] else {
                     throw APIHarnessFailure("missing_original_request")
                 }
+                guard let correctionText = messages.first?["content"] as? String,
+                      let markerRange = correctionText.range(of: APIModelResponseCodec.schemaFeedbackMarker),
+                      let facts = try JSONSerialization.jsonObject(with: Data(correctionText[markerRange.upperBound...].utf8)) as? [[String: Any]], facts.count == 1,
+                      facts[0]["callable"] as? String == commandName,
+                      facts[0]["constraint"] as? String == "type_mismatch",
+                      facts[0]["schema_path"] as? [String] == ["properties", "cmd"],
+                      facts[0]["expected_types"] as? [String] == ["string"] else { throw APIHarnessFailure("missing_static_schema_feedback") }
                 if expectedMessages.first?["role"] as? String == "system" {
-                    guard let text = expectedMessages[0]["content"] as? String else { throw APIHarnessFailure("system_content") }
-                    expectedMessages[0]["content"] = text + "\n\n" + APIModelResponseCodec.correctiveFeedback
-                } else { expectedMessages.insert(["role": "system", "content": APIModelResponseCodec.correctiveFeedback], at: 0) }
+                    guard let text = expectedMessages[0]["content"] as? String,
+                          correctionText.hasPrefix(text + "\n\n" + APIModelResponseCodec.correctiveFeedback + "\n\n") else { throw APIHarnessFailure("system_content") }
+                    expectedMessages[0]["content"] = correctionText
+                } else {
+                    guard correctionText.hasPrefix(APIModelResponseCodec.correctiveFeedback + "\n\n") else { throw APIHarnessFailure("system_content") }
+                    expectedMessages.insert(["role": "system", "content": correctionText], at: 0)
+                }
                 expected["messages"] = expectedMessages
                 guard NSDictionary(dictionary: body).isEqual(to: expected),
                       !String(decoding: request.body, as: UTF8.self).contains(rejectedThinking),
