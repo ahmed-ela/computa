@@ -131,12 +131,18 @@ The latest-candidate receipt collector also passed six focused oracle cases.
 ## Limits
 
 The model transport supports text and Accessibility observations. Image,
-screenshot and audio transfer are unavailable. General agent control of human
-embedded-browser tabs still needs a driver; these fixed inference adapters do
-not implement one. The separate approved Chrome connection remains available
-for browser tools.
+screenshot and audio transfer are unavailable. The native harness implements built-in browser tools separately from these fixed inference adapters. Controlled API-provider tasks have exercised navigation, reading, filling, clicking and task-owned tab cleanup. Chrome tools are currently hidden from model catalogs; the retained connection controls do not make that route available by default.
 
 Full Access does not override macOS privacy controls. These terminal tests use
 synthetic `/private/tmp` files and do not establish access to protected folders.
 Website sign-in, usage limits and future page changes can independently prevent
 inference. Open browser tabs are not restored after app restart.
+
+
+## Current repair qualification (2026-10-14)
+
+Build99's Gemini dispatch change passed the offline/native regression suite, but its fresh installed attempt hit a live Google CAPTCHA before the prompt was sent. No challenge was solved, and automated Gemini checks stopped. Earlier failed attempts remain paused with unconfirmed website cleanup.
+
+The installed GPT-OSS browser flow completed six valid calls and closed the task-owned tab, but the strict final receipt check failed. Finite API-boundary metadata locates its non-breaking-hyphen substitutions in the provider's logical content, before local serialization. This does not qualify exact receipt reproduction.
+
+ChatGPT Instant's fresh installed task failed first-message ownership before any tool call: the rendered request has a bracket/brace mismatch, while the bounded literal-DOM diagnostic cannot yet read its first child. Build100 adds four finite child-failure facts to diagnose this gap. It passed 466 browser-adapter tests and 13 selected native diagnostics/ownership tests; installed diagnosis remains pending. No acceptance or cleanup requirement was relaxed.

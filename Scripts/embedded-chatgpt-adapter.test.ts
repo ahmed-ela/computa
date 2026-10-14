@@ -241,6 +241,83 @@ defineWebsiteModelChoiceTests('chatgpt', (owned = false) => {
   return { ...f, run: (action: string, overrides: Record<string, unknown> = {}) => f.inspect({ ...overrides, action }) };
 }, Element);
 
+describe('ChatGPT literal DOM failure diagnostics', () => {
+  const fields = ['literalDOMFailureNodeKind', 'literalDOMFailureTag', 'literalDOMFailureParentTag', 'literalDOMFailureRule'];
+  const text = (data: any) => ({ nodeType: 3, data, parentElement: null });
+  const element = (tag: string, children: any[] = [], values: Record<string, string> = {}) => {
+    const node = new Element(tag, values);
+    node.children = children.filter(child => child.nodeType === 1);
+    children.forEach(child => { child.parentElement = node; });
+    Object.defineProperty(node, 'childNodes', { get: () => children });
+    return node;
+  };
+  const rejected = async (children: (prompt: string) => any[]) => {
+    const f = fixture({ userPrompt: 'Synthetic owned prompt' });
+    f.composer.focus = () => { f.document.activeElement = f.composer; };
+    const picker = installObservedModelPicker(f, 'chatgpt', Element);
+    expect((await f.inspect({ allowFirstUserBinding: false })).error).toBe('conversation_changed');
+    const prefix = 'PRIVATE_DIAGNOSTIC_CANARY\n' + 'x'.repeat(11_000) + '\nCOMPLETE_RESPONSES_REQUEST_JSON:\n';
+    const suffix = '\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n' + markerLine;
+    const prompt = prefix + '{"tools":[]}' + suffix, rendered = prefix + '{"tools":{]}' + suffix;
+    f.world.__computaModelFirstPrompt = prompt; f.world.__computaModelLastSubmissionCount = 0;
+    f.userBody!.text = prompt.slice(0, 10_240);
+    const expand = new Element('BUTTON', { 'aria-label': 'Show more' }), send = new Element('BUTTON', { 'aria-label': 'Send' });
+    f.userBody!.parentElement!.append(expand); f.body.append(send);
+    expand.onClick = () => {
+      const nodes = children(prompt);
+      nodes.forEach(node => { node.parentElement = f.userBody; });
+      f.userBody!.children = nodes.filter(node => node.nodeType === 1);
+      Object.defineProperty(f.userBody, 'childNodes', { get: () => nodes });
+      Object.defineProperty(f.userBody, 'innerText', { get: () => rendered });
+    };
+    const result = await f.inspect({ allowFirstUserExpansion: true,
+      firstUserExpansionModelChoice: { key: 'chat/latest/medium', label: 'Medium' } });
+    expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+    expect(f.world.__computaModelFirstProof).toBeUndefined(); expect(expand.clicks).toBe(1);
+    expect(send.clicks).toBe(0); expect(f.composer.events).toHaveLength(0);
+    expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+    expect(result.debugStructure).not.toContain('PRIVATE_DIAGNOSTIC_CANARY');
+    expect(result.debugStructure).not.toContain(firstMarker);
+    return JSON.parse(result.debugStructure);
+  };
+
+  test('first unsupported child exposes only finite node and rule facts while ownership still rejects', async () => {
+    for (const [build, kind, tag, parent, rule] of [
+      [() => [{ nodeType: 8, data: 'PRIVATE_DIAGNOSTIC_CANARY' }], 'comment', 'none', 'div', 'node_type'],
+      [() => [{ nodeType: 7, data: 'PRIVATE_DIAGNOSTIC_CANARY' }], 'other', 'none', 'div', 'node_type'],
+      [(prompt: string) => [element('DIV', [text(prompt)])], 'element', 'div', 'div', 'nested_div'],
+      [(prompt: string) => [element('PRE', [text(prompt)])], 'element', 'pre', 'div', 'tag'],
+      [(prompt: string) => [element('CODE', [text(prompt)])], 'element', 'code', 'div', 'tag'],
+      [(prompt: string) => [element('PRIVATE_DIAGNOSTIC_CANARY', [text(prompt)])], 'element', 'other', 'div', 'tag'],
+      [(prompt: string) => [element('SPAN', [element('P', [text(prompt)])])], 'element', 'p', 'span', 'paragraph_parent'],
+    ] as const) {
+      const diagnostic = await rejected(build);
+      expect(diagnostic).toMatchObject({ literalDOMAvailable: false, literalDOMUnavailableReason: 'unsupported_markup',
+        literalDOMMatchesPrompt: false, literalDOMMatchesRendered: false, literalDOMLength: 0 });
+      expect(Object.fromEntries(fields.map(field => [field, diagnostic[field]]))).toEqual({
+        literalDOMFailureNodeKind: kind, literalDOMFailureTag: tag, literalDOMFailureParentTag: parent, literalDOMFailureRule: rule });
+      expect(diagnostic.literalDOMNodeCount).toBe(rule === 'paragraph_parent' ? 3 : 2);
+      expect(diagnostic.literalDOMMaxDepth).toBe(rule === 'paragraph_parent' ? 2 : 1);
+    }
+  });
+
+  test('finite unsupported-child fields are absent for accepted literal diagnostics and other rejection rules', async () => {
+    for (const [build, reason] of [
+      [(prompt: string) => [text(prompt)], 'none'],
+      [(prompt: string) => [element('SPAN', [text(prompt)], { hidden: '' })], 'hidden_markup'],
+      [(prompt: string) => [element('SPAN', [text(prompt)], { inert: '' })], 'inert_markup'],
+      [(prompt: string) => [element('BUTTON', [text(prompt)])], 'control_markup'],
+      [() => [text(123)], 'read_failure'],
+    ] as const) {
+      const diagnostic = await rejected(build);
+      expect(diagnostic.literalDOMUnavailableReason).toBe(reason);
+      expect(diagnostic.literalDOMAvailable).toBe(reason === 'none');
+      expect(diagnostic.literalDOMMatchesPrompt).toBe(reason === 'none');
+      for (const field of fields) expect(diagnostic[field]).toBeUndefined();
+    }
+  });
+});
+
 describe('ChatGPT failed-page finite diagnostic', () => {
   test('reads owned root counts and controls without rehashing, menus or page actions', async () => {
     const f = fixture({ userPrompt: 'PRIVATE_PROMPT_CANARY' });

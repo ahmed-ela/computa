@@ -2488,6 +2488,14 @@ function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
     // a replacement ownership extractor, and unsupported markup grants none.
     const root = candidate.body, parts = [];
     const fail = reason => { result.literalDOMUnavailableReason = reason; throw new Error('unavailable'); };
+    const unsupported = (node, rule) => {
+      const tags = ['div', 'span', 'p', 'pre', 'code', 'button', 'section', 'article', 'a', 'strong', 'em', 'ol', 'ul', 'li', 'br', 'input', 'textarea'];
+      const tag = value => !value || value.nodeType !== 1 ? 'none'
+        : tags.includes(value.tagName?.toLowerCase()) ? value.tagName.toLowerCase() : 'other';
+      Object.assign(result, { literalDOMFailureNodeKind: node.nodeType === 1 ? 'element' : node.nodeType === 8 ? 'comment' : 'other',
+        literalDOMFailureTag: tag(node), literalDOMFailureParentTag: tag(node.parentElement), literalDOMFailureRule: rule });
+      fail('unsupported_markup');
+    };
     const append = text => {
       if (typeof text !== 'string') fail('read_failure');
       if (result.literalDOMLength + text.length > 180_200) {
@@ -2501,7 +2509,7 @@ function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
       if (result.literalDOMNodeCount > 8_192) fail('node_budget');
       if (depth > 64) fail('depth_budget');
       if (node.nodeType === 3) { append(node.data); return; }
-      if (node.nodeType !== 1) fail('unsupported_markup');
+      if (node.nodeType !== 1) unsupported(node, 'node_type');
       if (node.closest('[inert]')) fail('inert_markup');
       const style = getComputedStyle(node);
       if (node.hidden || node.closest('[hidden], [aria-hidden="true"]') || style.display === 'none'
@@ -2510,8 +2518,9 @@ function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
       if (['BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'OPTION', 'A', 'SUMMARY'].includes(node.tagName)
         || ['button', 'textbox', 'link', 'menuitem', 'slider', 'combobox'].includes(node.getAttribute('role'))
         || node.closest('[contenteditable="true"]')) fail('control_markup');
-      if (!['DIV', 'SPAN', 'P', 'BR'].includes(node.tagName) || node !== root && node.tagName === 'DIV'
-        || node.tagName === 'P' && node !== root && (node.parentElement !== root || root.tagName !== 'DIV')) fail('unsupported_markup');
+      if (!['DIV', 'SPAN', 'P', 'BR'].includes(node.tagName)) unsupported(node, 'tag');
+      if (node !== root && node.tagName === 'DIV') unsupported(node, 'nested_div');
+      if (node.tagName === 'P' && node !== root && (node.parentElement !== root || root.tagName !== 'DIV')) unsupported(node, 'paragraph_parent');
       if (node.tagName === 'BR') { result.literalDOMBRCount++; append('\n'); return; }
       if (node.tagName === 'P') {
         result.literalDOMParagraphCount++;

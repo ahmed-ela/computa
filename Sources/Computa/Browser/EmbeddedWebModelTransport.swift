@@ -1284,7 +1284,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private static let firstUserLiteralDOMFlags = ["literalDOMAvailable", "literalDOMMatchesPrompt", "literalDOMMatchesRendered",
         "literalDOMFrameUnique", "literalDOMFrameParsed", "literalDOMPayloadCompared", "literalDOMParsedJSONEqual"]
     private static let firstUserLiteralDOMCounts = ["literalDOMLength", "literalDOMNodeCount", "literalDOMMaxDepth", "literalDOMParagraphCount", "literalDOMBRCount"]
-    private static let firstUserLiteralDOMKeys = firstUserLiteralDOMFlags + firstUserLiteralDOMCounts + ["literalDOMUnavailableReason", "literalDOMPayloadUnavailableReason"]
+    private static let firstUserLiteralDOMFailureKeys = ["literalDOMFailureNodeKind", "literalDOMFailureTag", "literalDOMFailureParentTag", "literalDOMFailureRule"]
+    private static let firstUserLiteralDOMKeys = firstUserLiteralDOMFlags + firstUserLiteralDOMCounts + ["literalDOMUnavailableReason", "literalDOMPayloadUnavailableReason"] + firstUserLiteralDOMFailureKeys
 
     private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
@@ -1508,6 +1509,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   ["unavailable", "none", "missing_frame", "parse_failure", "bounds", "number_precision"].contains(payloadReason) else { return nil }
             safe["literalDOMUnavailableReason"] = reason; safe["literalDOMPayloadUnavailableReason"] = payloadReason
             let available = safe["literalDOMAvailable"] as? Bool == true
+            if firstUserLiteralDOMFailureKeys.contains(where: { value[$0] != nil }) {
+                let tags: Set<String> = ["none", "other", "div", "span", "p", "pre", "code", "button", "section", "article", "a", "strong", "em", "ol", "ul", "li", "br", "input", "textarea"]
+                guard !available, reason == "unsupported_markup",
+                      let kind = value["literalDOMFailureNodeKind"] as? String, ["element", "comment", "other"].contains(kind),
+                      let tag = value["literalDOMFailureTag"] as? String, tags.contains(tag),
+                      let parent = value["literalDOMFailureParentTag"] as? String, tags.contains(parent),
+                      let rule = value["literalDOMFailureRule"] as? String else { return nil }
+                switch rule {
+                case "node_type": guard kind != "element", tag == "none" else { return nil }
+                case "tag": guard kind == "element", !["none", "div", "span", "p", "br"].contains(tag) else { return nil }
+                case "nested_div": guard kind == "element", tag == "div", parent != "none" else { return nil }
+                case "paragraph_parent": guard kind == "element", tag == "p", parent != "none" else { return nil }
+                default: return nil
+                }
+                for key in firstUserLiteralDOMFailureKeys { safe[key] = value[key] }
+            }
             let frame = safe["literalDOMFrameUnique"] as? Bool == true, parsed = safe["literalDOMFrameParsed"] as? Bool == true
             let compared = safe["literalDOMPayloadCompared"] as? Bool == true, equal = safe["literalDOMParsedJSONEqual"] as? Bool == true
             let nodes = safe["literalDOMNodeCount"] as? Int64 ?? 0
