@@ -1,4 +1,6 @@
-# Google verification recovery — October 8, 2026
+# Google verification recovery
+
+## October 8, 2026: explicit refresh
 
 Google search and signed-in Gemini recovered in Computa 0.5.0 (34), compiled from `b6e60b77162e73a1f6ebd038b40650b820dec6a3`, without changing WebKit, the user agent, cookies, the browser profile or network settings. One **Refresh website models** action then removed Computa's saved Gemini verification checkpoint. No CAPTCHA was completed.
 
@@ -51,3 +53,17 @@ Before adopting that behavior, test stale-gate recovery on the first request, ac
 The checked-in [finite recovery receipt](evidence/google-verification-recovery-2026-10-08.json) records the installed candidate, observations, unchanged settings, limits and SHA-256 manifest of the original local experiment records. It is a curated summary, not a replacement for raw provider or network evidence. The originals remain under `work/google-captcha-experiments-20261008` in the local qualification workspace. All five manifest hashes were independently checked, and the unrelated working-file hashes were unchanged by the experiments.
 
 The earlier candidate32 CAPTCHA observations remain historical in [WEBSITE-MODEL-CHOICES.md](WEBSITE-MODEL-CHOICES.md). No post-recovery model prompt was sent; per-model qualification and historical unconfirmed cleanup remain open.
+
+## October 13, 2026: automatic recovery and a later recurrence
+
+Installed Computa 0.7.0 (88) adds event-driven recovery for a stale Gemini checkpoint. A settled, ordinary human Gemini landing document can request one prompt-free discovery probe while the app is idle. The document must still belong to the human browser, have the same committed generation and URL, and have the same saved checkpoint. Borrowing the document for tools or changing it revokes that candidate. A newer checkpoint, active task, cancelled probe, invalid catalog or unconfirmed probe disposal prevents clearing. Explicit refresh remains available; neither path replays a stopped prompt.
+
+The installed test seeded one disposable stale checkpoint while Google was already healthy, restarted the app, and navigated one human tab to Gemini. The checkpoint cleared automatically after guarded discovery and disposal. No manual refresh, prompt, CAPTCHA action, engine upgrade, user-agent change, profile reset, cookie deletion or network change was used. The seeded checkpoint was removed, the owned human tab closed, and the browser pane restored. The native cohort covering recovery passed 255 test executions; the seeded installed test establishes local recovery, not removal of a live Google challenge.
+
+A subsequent Gemini 3.8 Flash browser task passed: it opened a local flight form, read it, filled the exact flight reference, submitted it, read the exact result and closed its task tab. All seven website inferences had verified model selection, first-message ownership and confirmed cleanup. The task took 63.638 seconds.
+
+The next Gemini code task was blocked before its first website submission. The owned native page had reached Google's trusted `/sorry` route; one ordinary human navigation then showed the unusual-traffic page and CAPTCHA. Testing stopped. This recurrence means build88 does **not** establish permanent CAPTCHA prevention.
+
+The actual runtime was macOS 26.5.1 with system WebKit 21624.2.5.11.4. The compatibility tokens in the default user-agent string do not identify the installed engine version. The successful task and later challenge occurred on the same runtime and profile, so these observations do not establish that an old WebKit version caused the challenge. Seven fresh website sessions within one task are a concrete source of session/navigation traffic worth investigating; their causal role and Google's threshold remain unknown. Google's guidance lists possible traffic-related causes, but does not diagnose this Gemini session.
+
+Local checkpoint recovery and prevention of an external challenge remain separate claims. The finite installed recovery and recurrence records are preserved in the private qualification workspace; no CAPTCHA was completed during either recorded observation.

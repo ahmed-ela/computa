@@ -886,9 +886,9 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
-    func testOnlyTypedExternalWebsiteGatesCanPublishRequiredRecoveryMetadata() throws {
+    func testUnclassifiedErrorsCannotPublishRequiredRecoveryMetadata() throws {
         let otherFailures: [any Error] = [EmbeddedWebModelTransport.Failure.pageUnavailable,
-            EmbeddedWebModelTransport.Failure.ownershipFailure(.routeAfter), WebModelServer.Failure.providerFailed,
+            WebModelServer.Failure.providerFailed,
             NSError(domain: "fixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "website_verification_required"])]
         for failure in otherFailures {
             let data = try WebModelServer.errorBody(for: failure)
@@ -901,6 +901,47 @@ final class WebModelServerTests: XCTestCase {
             XCTAssertTrue(error["param"] is NSNull)
             XCTAssertNil(error["retryable"])
             XCTAssertNil(error["required_action"])
+        }
+    }
+
+    func testOwnershipFailurePreservesFiniteReasonAndCorrelatedDiagnosticWithoutReplayOrProviderGate() async throws {
+        let failure = EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptFirstUser)
+        XCTAssertFalse(failure.blocksProviderUntilRefresh, "An ownership failure belongs to this session, not the provider profile")
+        for point in [DiagnosticFailurePoint.start, .readinessPoll, .sendThrown, .responsePoll] {
+            let transport = ExternalGateWebModelTransport(point: point, failure: failure)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
+            let endpoint = try await server.start().appendingPathComponent("responses")
+            var urlRequest = URLRequest(url: endpoint)
+            urlRequest.httpMethod = "POST"; urlRequest.httpBody = request
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            urlRequest.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
+            urlRequest.setValue(try await bindWebsiteInferenceFixtureTurn(server, taskID: "ownership-task"), forHTTPHeaderField: "X-Computa-Task-ID")
+            urlRequest.setValue(try websiteInferenceFixtureMetadata(taskID: "ownership-task"), forHTTPHeaderField: "x-codex-turn-metadata")
+            let (data, response) = try await URLSession.shared.data(for: urlRequest)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 500)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let error = try XCTUnwrap(body["error"] as? [String: Any])
+            XCTAssertEqual(Set(error.keys), ["type", "message", "code", "param", "retryable", "required_action", "ownership_reason"])
+            XCTAssertEqual(error["code"] as? String, "website_ownership_unverified")
+            XCTAssertEqual(error["ownership_reason"] as? String, "first_user_message")
+            XCTAssertEqual(error["message"] as? String, failure.localizedDescription)
+            XCTAssertEqual(error["retryable"] as? Bool, false)
+            XCTAssertEqual(error["required_action"] as? String, "inspect_website")
+            XCTAssertTrue(error["param"] is NSNull)
+            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("high demand"))
+            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("response.completed"))
+            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("function_call"))
+            let taskID = websiteInferenceFixtureTaskID("ownership-task")
+            let diagnostic = try XCTUnwrap(server.takeFailureDiagnostic(taskID: taskID))
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(diagnostic.utf8)) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: decoded).isEqual(to: body), "The exact native diagnostic must survive HTTP 500's generic engine display")
+            XCTAssertNil(server.takeFailureDiagnostic(taskID: taskID), "Only the correlated native turn consumes this diagnostic")
+            let operations = await transport.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, point == .start || point == .readinessPoll ? 0 : 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count, point == .readinessPoll || point == .responsePoll ? 1 : 0)
+            _ = await server.shutdown()
         }
     }
 

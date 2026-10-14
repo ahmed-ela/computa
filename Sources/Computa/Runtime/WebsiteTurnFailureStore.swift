@@ -49,6 +49,10 @@ struct WebsiteTurnFailureStore: Sendable {
             case "sign_in_required": nativeError = EmbeddedWebModelTransport.Failure.signInRequired
             case "website_usage_limit": nativeError = EmbeddedWebModelTransport.Failure.usageLimited(webProvider)
             case "unexpected_website_page": nativeError = EmbeddedWebModelTransport.Failure.unexpectedPage(webProvider)
+            case "website_ownership_unverified":
+                guard let rawReason = error["ownership_reason"] as? String,
+                      let reason = EmbeddedWebModelTransport.OwnershipReason(rawValue: rawReason) else { return nil }
+                nativeError = EmbeddedWebModelTransport.Failure.ownershipFailure(reason)
             case "product_mode_unverified":
                 nativeError = error["message"] as? String == WebModelServer.Failure.productModeUnverified.localizedDescription
                     ? WebModelServer.Failure.productModeUnverified : EmbeddedWebModelTransport.Failure.productModeUnverified

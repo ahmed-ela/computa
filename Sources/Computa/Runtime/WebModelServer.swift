@@ -1180,6 +1180,9 @@ actor WebModelServer {
             fields["retryable"] = false
             fields["required_action"] = action
         }
+        if case let .ownershipFailure(reason) = error as? EmbeddedWebModelTransport.Failure {
+            fields["ownership_reason"] = reason.rawValue
+        }
         if case .productModeUnverified = error as? Failure {
             fields["retryable"] = false
             fields["required_action"] = "refresh_website_models"

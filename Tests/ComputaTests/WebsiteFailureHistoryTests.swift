@@ -86,4 +86,62 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         XCTAssertFalse(store.append(record)); XCTAssertThrowsError(try store.load(threadID: thread))
         XCTAssertEqual(try String(contentsOf: untouched, encoding: .utf8), "untouched")
     }
+
+    func testFiniteOwnershipReasonsSurviveStoreRecreationWithExactTurnAndModelIdentity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaOwnershipError-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reasons: [EmbeddedWebModelTransport.OwnershipReason] = [.documentGenerationBefore, .documentGenerationAfter,
+            .routeBefore, .routeAfter, .unboundCleanup, .javaScriptDocument, .javaScriptConversation, .javaScriptOwner,
+            .javaScriptUserCount, .javaScriptConversationIdentity, .javaScriptURL, .javaScriptConversationRoute,
+            .javaScriptFirstUser, .promotionFirstUser, .promotionTemporary]
+        for modelID in [syntheticChatGPTModelID, "browser/gemini", "browser/claude"] {
+            let task = UUID().uuidString, thread = UUID().uuidString
+            var expected: [WebsiteTurnFailureStore.Record] = []
+            for reason in reasons {
+                let failure = EmbeddedWebModelTransport.Failure.ownershipFailure(reason)
+                XCTAssertFalse(failure.blocksProviderUntilRefresh)
+                let data = try WebModelServer.errorBody(for: failure)
+                let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                    turnID: UUID().uuidString, modelID: modelID, diagnosticText: String(decoding: data, as: UTF8.self)))
+                XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+                expected.append(record)
+            }
+            let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+            XCTAssertEqual(restored, expected)
+            for record in restored {
+                XCTAssertEqual(record.taskID, task.lowercased()); XCTAssertEqual(record.threadID, thread.lowercased())
+                XCTAssertEqual(record.modelID, modelID); XCTAssertEqual(record.entry.turnID, record.turnID)
+                XCTAssertTrue(record.entry.body.contains("website_ownership_unverified"))
+                XCTAssertFalse(record.entry.body.contains("high demand"))
+            }
+        }
+    }
+
+    func testOwnershipStoreRejectsForgedReasonMessageMetadataAndArbitraryErrors() throws {
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        let modelID = syntheticChatGPTModelID
+        let data = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptFirstUser))
+        let mutations: [[String: Any]] = [["ownership_reason": "PRIVATE_PAGE_CANARY"], ["ownership_reason": 1],
+            ["ownership_reason": "route_after"], ["message": "PRIVATE_PAGE_CANARY"], ["retryable": 0],
+            ["retryable": true], ["code": "browser_model_error"], ["required_action": "retry_send"],
+            ["url": "https://private.invalid/PRIVATE_PAGE_CANARY"], ["prompt": "PRIVATE_PROMPT_CANARY"]]
+        for mutation in mutations {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            var error = try XCTUnwrap(object["error"] as? [String: Any])
+            mutation.forEach { error[$0.key] = $0.value }; object["error"] = error
+            let text = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: modelID, diagnosticText: text))
+        }
+        var missing = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var error = try XCTUnwrap(missing["error"] as? [String: Any]); error.removeValue(forKey: "ownership_reason"); missing["error"] = error
+        XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID, modelID: modelID,
+            diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: missing), as: UTF8.self)))
+        let arbitrary = NSError(domain: "fixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "website_ownership_unverified first_user_message PRIVATE_PAGE_CANARY"])
+        let arbitraryData = try WebModelServer.errorBody(for: arbitrary)
+        XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID, modelID: modelID,
+            diagnosticText: String(decoding: arbitraryData, as: UTF8.self)))
+        XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID, modelID: "api/cerebras/model/fixture",
+            diagnosticText: String(decoding: data, as: UTF8.self)))
+    }
 }

@@ -2088,7 +2088,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let generation = fixture.browser.documentGeneration(for: ownedID)
             var mutationApplied = false
             var firstUserDiagnostics: [String] = [], modelDiagnostics: [String] = []
+            var emissions: [(isFailure: Bool, record: String)] = []
             fixture.transport.setFirstUserDiagnosticsObserverForTesting { firstUserDiagnostics += $0 }
+            fixture.transport.setFirstUserStructureEmissionObserverForTesting { emissions.append(($0, $1)) }
             fixture.transport.setModelDiagnosticsObserverForTesting { modelDiagnostics.append($0) }
             fixture.transport.setBeforePageResultValidationDetailedForTesting { action, _ in
                 guard action == "submit", !mutationApplied else { return }
@@ -2109,6 +2111,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             defer {
                 fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
                 fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil)
+                fixture.transport.setFirstUserStructureEmissionObserverForTesting(nil)
                 fixture.transport.setModelDiagnosticsObserverForTesting(nil)
             }
             let prompt = String(repeating: "Owned private model-precheck fixture line.\n", count: 600)
@@ -2119,6 +2122,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
             }
             XCTAssertTrue(mutationApplied)
+            XCTAssertFalse(emissions.isEmpty, "Accepted first-user rejection causes must be emitted at retained error severity")
+            XCTAssertTrue(emissions.allSatisfy { $0.isFailure })
+            XCTAssertTrue(emissions.allSatisfy {
+                $0.record.utf8.count <= 960 && !$0.record.contains("Owned private model-precheck")
+                    && !$0.record.contains("Computa session marker:") && !$0.record.contains("https://")
+            })
+            let emitted = try emissions.map {
+                try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.record.utf8)) as? [String: Any])
+            }
+            XCTAssertTrue(emitted.contains { $0["reason"] as? String == "marker_not_final" })
+            XCTAssertTrue(emitted.contains { $0["expansionModelError"] as? String ==
+                (condition == "unavailable" ? "model_unverified" : "model_mismatch") })
             let observations = firstUserDiagnostics.compactMap {
                 try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
             }
@@ -2763,7 +2778,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             var acknowledged = false, rendered = false
             var firstPrivateBindAction: String?
             var firstBoundDiagnostics: [String] = []
+            var emissions: [(isFailure: Bool, record: String)] = []
             fixture.transport.setFirstUserDiagnosticsObserverForTesting { firstBoundDiagnostics += $0 }
+            fixture.transport.setFirstUserStructureEmissionObserverForTesting { emissions.append(($0, $1)) }
             let renderPending = """
                 if (!window.fixturePendingUser || !window.fixturePendingTurn) return false;
                 document.getElementById('messages').appendChild(window.fixturePendingUser);
@@ -2790,6 +2807,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             defer {
                 fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
                 fixture.transport.setFirstUserDiagnosticsObserverForTesting(nil)
+                fixture.transport.setFirstUserStructureEmissionObserverForTesting(nil)
             }
             let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                 "prompt": "A controlled delayed first bubble"])
@@ -2804,6 +2822,12 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let complete = try await waitForState("complete", fixture.transport, token: token)
             XCTAssertEqual(firstPrivateBindAction, "inspect")
             XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+            XCTAssertFalse(emissions.isEmpty)
+            XCTAssertTrue(emissions.allSatisfy { !$0.isFailure }, "Healthy first-bound diagnostics must stay at info severity")
+            XCTAssertTrue(emissions.allSatisfy {
+                $0.record.utf8.count <= 960 && !$0.record.contains("A controlled delayed first bubble")
+                    && !$0.record.contains("Computa session marker:") && !$0.record.contains("https://")
+            })
             let boundRecords = firstBoundDiagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
             XCTAssertEqual(boundRecords.filter { $0["reason"] as? String == "first_bound" }.count, 1,
                 "The separate first-user diagnostic must survive without replacing completion structure (\(boundary))")

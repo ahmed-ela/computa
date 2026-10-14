@@ -159,6 +159,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseFailed: "website_response_failed"
             case .unexpectedPage: "unexpected_website_page"
             case .productModeUnverified: "product_mode_unverified"
+            case .ownershipFailure: "website_ownership_unverified"
             default: nil
             }
         }
@@ -171,6 +172,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseFailed: "inspect_website"
             case .unexpectedPage: "inspect_website"
             case .productModeUnverified: "refresh_website_models"
+            case .ownershipFailure: "inspect_website"
             default: nil
             }
         }
@@ -308,6 +310,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
     private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
@@ -336,6 +339,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFirstUserDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
         firstUserDiagnosticsObserverForTesting = observer
+    }
+
+    func setFirstUserStructureEmissionObserverForTesting(_ observer: (@MainActor (Bool, String) -> Void)?) {
+        firstUserStructureEmissionObserverForTesting = observer
     }
 
     func setModelDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -1422,23 +1429,35 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return records
     }
 
-    private func logFirstUserStructure(_ records: [String], sequence: Int) {
+    private func logFirstUserStructure(_ records: [String], sequence: Int, isFailure: Bool = false) {
         var childIndex = 0
         for (index, safe) in records.enumerated() {
-            if index == 0 { Self.inspectionLog.info("firstUserStructure sequence=\(sequence) \(safe, privacy: .public)") }
+            let event: String
+            if index == 0 { event = "firstUserStructure" }
             else if safe.contains("\"kind\":\"first_user_context\"") {
-                Self.inspectionLog.info("firstUserContext sequence=\(sequence) \(safe, privacy: .public)")
+                event = "firstUserContext"
             }
             else if safe.contains("\"kind\":\"first_user_body\"") {
-                Self.inspectionLog.info("firstUserBody sequence=\(sequence) \(safe, privacy: .public)")
+                event = "firstUserBody"
             }
             else if safe.contains("\"kind\":\"first_user_text\"") {
-                Self.inspectionLog.info("firstUserText sequence=\(sequence) \(safe, privacy: .public)")
+                event = "firstUserText"
             }
             else {
-                Self.inspectionLog.info("firstUserChild sequence=\(sequence) index=\(childIndex) \(safe, privacy: .public)")
-                childIndex += 1
+                event = "firstUserChild"
             }
+            let child = event == "firstUserChild" ? "index=\(childIndex) " : ""
+            // Both paths receive only the existing validated finite projection.
+            // Retain rejection causes without persisting healthy-read noise.
+            if isFailure {
+                Self.inspectionLog.error("\(event, privacy: .public) sequence=\(sequence) \(child, privacy: .public)\(safe, privacy: .public)")
+            } else {
+                Self.inspectionLog.info("\(event, privacy: .public) sequence=\(sequence) \(child, privacy: .public)\(safe, privacy: .public)")
+            }
+            if event == "firstUserChild" { childIndex += 1 }
+            #if DEBUG
+            firstUserStructureEmissionObserverForTesting?(isFailure, safe)
+            #endif
         }
         #if DEBUG
         firstUserDiagnosticsObserverForTesting?(records)
@@ -1846,7 +1865,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if observed["detail"] as? String == "first_user_message",
                    let raw = observed["debugStructure"] as? String,
                    let records = Self.firstUserStructureDiagnosticRecords(raw, provider: provider) {
-                    logFirstUserStructure(records, sequence: session.sequence)
+                    logFirstUserStructure(records, sequence: session.sequence, isFailure: true)
                 }
                 let allowedDetails: [String: OwnershipReason] = [
                     "owner_token": .javaScriptOwner, "user_count": .javaScriptUserCount,
