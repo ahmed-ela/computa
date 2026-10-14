@@ -50,6 +50,8 @@ struct APIProviderDefinition: Codable, Equatable, Sendable {
 
 enum APIProviderCatalog {
     static let preferenceKey = "Computa.apiProviders.v1"
+    // Keep Cerebras limited to GPT-OSS for now. Qwen3.8 27B is hidden because of its higher token usage.
+    private static let showAdditionalCerebrasModels = false
     struct Identity: Equatable, Sendable { let providerID: String; let modelID: String }
     struct Selection: Equatable, Sendable { let provider: APIProviderDefinition; let model: APIModelDefinition }
     enum Failure: LocalizedError {
@@ -108,7 +110,9 @@ enum APIProviderCatalog {
     }
     static func options(for providers: [APIProviderDefinition]) -> [LocalModelOption] {
         guard (try? validate(providers)) != nil else { return [] }
-        return providers.flatMap { provider in provider.models.map { model in
+        return providers.flatMap { provider in provider.models.filter { model in
+            !provider.isCerebrasInference || showAdditionalCerebrasModels || model.id == "gpt-oss-120b"
+        }.map { model in
             LocalModelOption(id: appModelID(providerID: provider.id, modelID: model.id),
                 label: "\(provider.name) / \(model.name) · API",
                 detail: "Uses \(model.name) through \(provider.name), with a \(model.contextWindow)-token context window. Your task tools and access mode apply.",

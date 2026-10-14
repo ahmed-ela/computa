@@ -13,8 +13,9 @@ final class APIProviderCatalogTests: XCTestCase {
         XCTAssertNil(APIProviderCatalog.identity(for: id + "="))
         XCTAssertNil(APIProviderCatalog.identity(for: id.replacingOccurrences(of: "api/", with: "browser/")))
         let renamed = APIProviderDefinition(id: provider.id, name: "My Cerebras", baseURL: provider.baseURL,
-            wireAPI: provider.wireAPI, models: [APIModelDefinition(id: model.id, name: "Custom display")])
-        XCTAssertEqual(APIProviderCatalog.options(for: [renamed]).first?.id, id)
+            wireAPI: provider.wireAPI, models: [model, APIModelDefinition(id: "gpt-oss-120b", name: "Custom display")])
+        XCTAssertEqual(APIProviderCatalog.options(for: [renamed]).map(\.id),
+            [APIProviderCatalog.appModelID(providerID: provider.id, modelID: "gpt-oss-120b")])
     }
     func testCatalogUsesActualDiscoveredModelsAndConservativeMetadata() {
         XCTAssertTrue(APIProviderCatalog.options(for: [.cerebras]).isEmpty)
@@ -22,7 +23,10 @@ final class APIProviderCatalogTests: XCTestCase {
         XCTAssertEqual(known.contextWindow, 65_536); XCTAssertTrue(known.supportsImages); XCTAssertFalse(known.supportsToolImages)
         let other = APIProviderCatalog.discoveredModel(id: "unknown-future-model", provider: .cerebras)
         XCTAssertEqual(other.contextWindow, 32_768); XCTAssertFalse(other.supportsImages); XCTAssertFalse(other.supportsToolImages)
-        XCTAssertEqual(APIProviderCatalog.options(for: [.cerebras.withModels([known])]).count, 1)
+        XCTAssertTrue(APIProviderCatalog.options(for: [.cerebras.withModels([known])]).isEmpty)
+        let oss = APIProviderCatalog.discoveredModel(id: "gpt-oss-120b", provider: .cerebras)
+        XCTAssertEqual(APIProviderCatalog.options(for: [.cerebras.withModels([known, oss, other])]).map(\.id),
+            [APIProviderCatalog.appModelID(providerID: "cerebras", modelID: oss.id)])
         // An editable provider ID cannot grant another endpoint Cerebras-specific behavior.
         for address in ["http://127.0.0.1:1234/v1", "https://other.example/v1", "https://api.cerebras.ai:444/v1",
                         "https://api.cerebras.ai/v2", "https://api.cerebras.ai/v1//", "https://api.cerebras.ai/v1?key=fixture"] {
@@ -31,6 +35,9 @@ final class APIProviderCatalogTests: XCTestCase {
             XCTAssertFalse(custom.isCerebrasInference, address)
             let generic = APIProviderCatalog.discoveredModel(id: known.id, provider: custom)
             XCTAssertEqual(generic.contextWindow, 32_768); XCTAssertFalse(generic.supportsImages)
+            if (try? APIProviderCatalog.validate(custom)) != nil {
+                XCTAssertEqual(APIProviderCatalog.options(for: [custom.withModels([generic])]).count, 1)
+            }
         }
         for address in ["https://api.cerebras.ai/v1", "https://api.cerebras.ai:443/v1/"] {
             let official = APIProviderDefinition(id: "my-cerebras", name: "My endpoint", baseURL: URL(string: address)!,

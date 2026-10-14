@@ -28,7 +28,7 @@ with the same name. The build113 candidate limits that rule to the root field;
 duplicate-key, counter, size, ownership and correction-budget checks remain.
 All 76 final native checks passed on unchanged Swift source, including the
 documented metadata, the one-correction loopback variants and three bundled-engine
-checks. Installed qualification is pending; build112 remains open for the
+checks. Installed qualification is pending; build112 was left open for the
 visible CAPTCHA. The preceding diagnostic-only run passed 72 of 73 tests; its
 new fixture's mistaken rejection category is retained and corrected separately.
 
