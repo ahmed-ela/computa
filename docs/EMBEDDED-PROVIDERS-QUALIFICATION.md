@@ -13,7 +13,17 @@ Transformed Markdown or substituted whitespace cannot manufacture that digest.
 All 495 adapter tests passed on the held candidate. The focused native run passed
 64 checks, including refresh concurrency, submission proofs and ten repaired
 transport regressions. The final complete transport run passed all 160 tests
-with unchanged source. Installed provider qualification remains pending.
+with unchanged source. Installed build109's pilot failed after 18.681 seconds:
+the first inference completed and opened the fixture, then the second native
+Send was claimed but did not establish submission ownership. One saved cleanup
+receipt records unconfirmed closure. The exact result and fixture-tab close were
+not verified. Eleven remaining cases were held, and the app and fixture server
+were stopped separately; stopping them does not qualify model cleanup.
+
+Build110 adds failure-stage, count and boolean diagnostics for this seam without
+changing ownership, Send, body validation or cleanup decisions. The failed
+build109 receipts remain immutable. No prompt, nonce, hash or URL is added to
+the diagnostic sidecar. Installed diagnostic qualification remains pending.
 Older failed attempts below retain their original
 outcomes. Conversation reuse is an experiment for the second-inference stall,
 not an established root cause or a permanent Google CAPTCHA remedy.

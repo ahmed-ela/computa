@@ -6338,6 +6338,57 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
     }
 
+    func testChatSubmissionFailurePublishesFinitePhysicalFactsWithoutAnotherInput() async throws {
+        for bodyOnly in [false, true] {
+            let fixture = try Fixture()
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "PRIVATE_CHAT_DIAGNOSTIC_CANARY"])
+            _ = try await waitForState("complete", fixture.transport, token: token)
+            _ = try await evaluate(view, bodyOnly ? """
+                const body = document.querySelector('[data-markdown-text-style="user-message"]');
+                body.replaceWith(body.cloneNode(true)); return true;
+                """ : """
+                const root = document.querySelector('[data-message-author-role="user"]');
+                root.replaceWith(root.cloneNode(true)); return true;
+                """)
+            var emissions: [(String, String)] = []
+            fixture.transport.setSubmissionDiagnosticsObserverForTesting { event, encoded in emissions.append((event, encoded)) }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must not insert another request"])
+                XCTFail("An uncertified physical replacement must remain rejected")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+            fixture.transport.setSubmissionDiagnosticsObserverForTesting(nil)
+            let adapter = try XCTUnwrap(emissions.first { $0.0 == "submissionChatAdapter" })
+            let facts = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(adapter.1.utf8)) as? [String: Any])
+            XCTAssertEqual(facts["stage"] as? String, "observe_body")
+            XCTAssertEqual(facts["recordSequence"] as? Int, 1)
+            XCTAssertEqual(facts["userCount"] as? Int, 1)
+            XCTAssertEqual(facts["canonicalMatches"] as? Bool, true)
+            XCTAssertEqual(facts["contextMatches"] as? Bool, true)
+            XCTAssertEqual(facts["nativePinMatches"] as? Bool, true)
+            XCTAssertEqual(facts["rootSame"] as? Bool, bodyOnly)
+            XCTAssertEqual(facts["bodySame"] as? Bool, false)
+            XCTAssertEqual(facts["oldRootConnected"] as? Bool, bodyOnly)
+            XCTAssertEqual(facts["oldBodyConnected"] as? Bool, false)
+            XCTAssertEqual(facts["currentRootConnected"] as? Bool, true)
+            XCTAssertEqual(facts["currentBodyConnected"] as? Bool, true)
+            XCTAssertTrue(emissions.contains { $0.0 == "submissionNative" })
+            XCTAssertTrue(emissions.allSatisfy { $0.1.utf8.count <= 960 && !$0.1.contains("PRIVATE_CHAT_DIAGNOSTIC_CANARY") && !$0.1.contains(token) })
+            let inputCount = try await evaluate(view, "return window.fixtureInputCount;") as? Int
+            let sends = try await evaluate(view, "return window.fixturePrompts.length;") as? Int
+            XCTAssertEqual(inputCount, 1); XCTAssertEqual(sends, 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
+    }
+
     func testChatTurnPilotLimitsRejectBeforeAnotherInsertionAndKeepCleanupOwned() async throws {
         for byteLimit in [false, true] {
             let fixture = try Fixture()

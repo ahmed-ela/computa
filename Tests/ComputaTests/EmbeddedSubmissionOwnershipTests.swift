@@ -86,6 +86,61 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testChatSubmissionDiagnosticIsStrictFiniteAndCannotSupplyProof() throws {
+        let flags = ["contextMatches", "nativePinMatches", "pendingRecord", "lastVerifiedRecord", "rootSame", "bodySame",
+                     "oldRootConnected", "oldBodyConnected", "currentRootConnected", "currentBodyConnected", "canonicalMatches"]
+        var valid: [String: Any] = Dictionary(uniqueKeysWithValues: flags.map { ($0, true as Any) })
+        valid["kind"] = "chatgpt_submission_v1"; valid["action"] = "inspect"; valid["stage"] = "observe_body"
+        valid["requestedSequence"] = 2; valid["recordSequence"] = 2; valid["userCount"] = 2
+        valid["rootSame"] = false; valid["bodySame"] = false
+        valid["oldRootConnected"] = false; valid["oldBodyConnected"] = false
+        let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(valid))
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(decoded.keys), Set(valid.keys))
+        XCTAssertEqual(decoded["canonicalMatches"] as? Bool, true)
+        XCTAssertEqual(decoded["oldRootConnected"] as? Bool, false)
+        XCTAssertLessThanOrEqual(encoded.utf8.count, 960)
+        XCTAssertFalse(EmbeddedWebModelTransport.validSubmissionProof(decoded, sequence: 2, fingerprint: String(repeating: "a", count: 64)))
+        for key in flags {
+            for wrong in [1, "true", NSNull(), "PRIVATE CANARY"] as [Any] {
+                var changed = valid; changed[key] = wrong
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(changed), key)
+            }
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(missing), key)
+        }
+        for key in ["kind", "action", "stage"] {
+            var changed = valid; changed[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(changed), key)
+        }
+        for key in ["requestedSequence", "recordSequence", "userCount"] {
+            for wrong in [true, -1, 18, 1.5, "1"] as [Any] {
+                var changed = valid; changed[key] = wrong
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(changed), key)
+            }
+        }
+        for key in ["requestedSequence", "recordSequence"] {
+            var upper = valid; upper[key] = 16
+            XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(upper))
+            upper[key] = 17
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(upper))
+            upper[key] = NSNull()
+            XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(upper))
+        }
+        var overflow = valid; overflow["userCount"] = 17
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(overflow))
+        overflow["userCount"] = NSNull()
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(overflow))
+        for key in ["text", "prompt", "nonce", "fingerprint", "url", "nodeID", "submissionProof"] {
+            var changed = valid; changed[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(changed), key)
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(NSNull()))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(valid.merging(["kind": "gemini_submission_v1"]) { _, new in new }))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(valid), "The Chat sidecar cannot enter Gemini's schema")
+    }
+
+    @MainActor
     func testSubmissionDigestDiagnosticsPreserveFailureFactsWithoutProofOrPrivateData() throws {
         let flags = ["stateSame", "stateRevoked", "recordRetained", "parentRequired", "parentIntact",
                      "remountRequired", "remountIntact", "contextMatches", "rootCountMatches", "rootsSame",

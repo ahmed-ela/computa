@@ -397,6 +397,53 @@ describe('ChatGPT per-round canonical submission ownership', () => {
     expect(record.root).toBe(x.f.document.querySelectorAll('article[data-turn="user"]')[0]); expect(x.send.clicks).toBe(1);
   });
 
+  test('submission failure diagnostics distinguish exact physical replacements from content and native pin mismatch', async () => {
+    const fields = ['kind', 'action', 'stage', 'requestedSequence', 'recordSequence', 'userCount', 'contextMatches',
+      'nativePinMatches', 'pendingRecord', 'lastVerifiedRecord', 'rootSame', 'bodySame', 'oldRootConnected',
+      'oldBodyConnected', 'currentRootConnected', 'currentBodyConnected', 'canonicalMatches'].sort();
+    for (const mutation of ['whole_root', 'body_only', 'content', 'native_pin']) {
+      const x = await chatTurnFixture(); const first = await x.dispatch('PRIVATE_FIRST_CANARY'); x.answer('First'); await x.observe(first);
+      const second = await x.dispatch('PRIVATE_SECOND_CANARY'); x.answer('Second'); await x.observe(second);
+      const state: any = x.f.world.__computaChatSubmissionState;
+      if (mutation === 'whole_root') replaceRoot(x, 1);
+      if (mutation === 'body_only') {
+        const root = x.f.document.querySelectorAll('article[data-turn="user"]')[1], old = root.children[0];
+        const body = new Element('DIV', { class: 'whitespace-pre-wrap' }, second.outbound);
+        root.children = [body]; body.parentElement = root; old.connected = false;
+      }
+      if (mutation === 'content') x.f.document.querySelectorAll('article[data-turn="user"]')[1].children[0].text += '!';
+      const rejected = await x.observe(second, mutation === 'native_pin' ? { expectedSubmissionProofs: [
+        { sequence: 1, fingerprint: first.fingerprint }, { sequence: 2, fingerprint: '0'.repeat(64) }] } : {});
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      const diagnostic = rejected.submissionDiagnostic;
+      expect(Object.keys(diagnostic).sort()).toEqual(fields);
+      expect(diagnostic).toMatchObject({ kind: 'chatgpt_submission_v1', action: 'inspect', requestedSequence: 2,
+        recordSequence: 2, userCount: 2, contextMatches: true, pendingRecord: false, lastVerifiedRecord: true,
+        stage: mutation === 'native_pin' ? 'observe_count' : mutation === 'content' ? 'observe_text' : 'observe_body',
+        nativePinMatches: mutation !== 'native_pin', canonicalMatches: mutation !== 'content',
+        rootSame: mutation !== 'whole_root', bodySame: mutation !== 'whole_root' && mutation !== 'body_only',
+        oldRootConnected: mutation !== 'whole_root', oldBodyConnected: mutation !== 'whole_root' && mutation !== 'body_only',
+        currentRootConnected: true, currentBodyConnected: true });
+      const encoded = JSON.stringify(diagnostic);
+      expect(encoded.length).toBeLessThanOrEqual(960);
+      for (const privateValue of ['PRIVATE_FIRST_CANARY', 'PRIVATE_SECOND_CANARY', second.fingerprint, second.marker, x.f.document.URL])
+        expect(encoded).not.toContain(privateValue);
+      expect(rejected).not.toHaveProperty('submissionProof'); expect(rejected).not.toHaveProperty('answerComplete', true);
+      expect(state.revoked).toBe(true); expect(x.send.clicks).toBe(2);
+    }
+  });
+
+  test('diagnostic capture can fail without changing the original refusal or making another input', async () => {
+    const x = await chatTurnFixture(); const first = await x.dispatch('PRIVATE_DIAGNOSTIC_GETTER'); x.answer('First'); await x.observe(first);
+    const record: any = (x.f.world.__computaChatSubmissionState as any).lastVerified;
+    Object.defineProperty(record, 'body', { get() { throw new Error('PRIVATE_THROW_CANARY'); } });
+    const rejected = await x.f.rawRun({ action: 'insert', prompt: 'invalid sequence', expectedUserCounts: [1],
+      submissionSequence: 17, submissionMarker: firstMarker, expectedSubmissionProofs: x.proofs });
+    expect(rejected).toEqual({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(rejected).not.toHaveProperty('submissionDiagnostic'); expect(rejected).not.toHaveProperty('inserted');
+    expect(x.send.clicks).toBe(1); expect(x.f.composer.text).toBe('');
+  });
+
   test('native uppercase first nonce is retained byte-for-byte while malformed and replaced nonces reject', async () => {
     const uppercase = firstMarker.toUpperCase();
     const x = await chatTurnFixture(undefined, uppercase);

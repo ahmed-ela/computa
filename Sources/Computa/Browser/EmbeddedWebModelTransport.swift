@@ -348,6 +348,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
@@ -374,6 +375,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Separate model-enforced reads from product-only lineage observations.
     func setBeforePageResultValidationDetailedForTesting(_ hook: (@MainActor (String, Bool) async -> Void)?) {
         beforePageResultValidationDetailedForTesting = hook
+    }
+
+    func setSubmissionDiagnosticsObserverForTesting(_ observer: (@MainActor (String, String) -> Void)?) {
+        submissionDiagnosticsObserverForTesting = observer
     }
 
     func setFirstUserDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
@@ -2365,7 +2370,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
-                if provider == .gemini, observed["detail"] as? String == "submission_message" {
+                if session.usesSubmissionOwnership, observed["detail"] as? String == "submission_message" {
                     logSubmissionFailure(session, action: action, stage: .adapterRejected, observed: observed)
                 }
                 if observed["detail"] as? String == "first_user_message" {
@@ -2876,6 +2881,33 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return String(decoding: data, as: UTF8.self)
     }
 
+    static func sanitizedChatSubmissionDiagnostic(_ raw: Any?) -> String? {
+        let flags = ["contextMatches", "nativePinMatches", "pendingRecord", "lastVerifiedRecord", "rootSame", "bodySame",
+                     "oldRootConnected", "oldBodyConnected", "currentRootConnected", "currentBodyConnected", "canonicalMatches"]
+        let keys = Set(flags + ["kind", "action", "stage", "requestedSequence", "recordSequence", "userCount"])
+        guard let value = raw as? [String: Any], Set(value.keys) == keys,
+              value["kind"] as? String == "chatgpt_submission_v1",
+              let action = value["action"] as? String,
+              ["inspect", "prepare", "insert", "sendReady", "submit", "verifyModel", "verifyProductMode", "ensureChatMode",
+               "stop", "discoverModels", "selectModel", "modelDiagnostic", "enableTemporary", "cleanup", "unknown"].contains(action),
+              let stage = value["stage"] as? String,
+              ["missing_state", "begin_invocation", "begin_input", "begin_text", "begin_initial", "begin_admission", "begin_digest",
+               "claim_admission", "observe_context", "observe_ordinal", "observe_record", "observe_count", "observe_body",
+               "observe_expansion", "observe_text", "observe_parent", "observe_digest"].contains(stage),
+              let users = ComputerToolArgumentContract.exactInt64(value["userCount"]), (0...17).contains(users) else { return nil }
+        var safe: [String: Any] = ["kind": "chatgpt_submission_v1", "action": action, "stage": stage, "userCount": users]
+        for key in ["requestedSequence", "recordSequence"] {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let number = ComputerToolArgumentContract.exactInt64(value[key]), (0...16).contains(number) else { return nil }
+            safe[key] = number
+        }
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }; safe[key] = flag
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 960 else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     static func sanitizedSubmissionNodeDiagnostic(_ raw: Any?) -> String? {
         let flags = ["rootSame", "bodySame", "oldRootConnected", "oldBodyConnected", "currentRootConnected",
                      "currentBodyConnected", "remountCertificatePresent", "projectedCanonicalMatches"]
@@ -2996,10 +3028,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func logSubmissionFailure(_ session: Session, action: String, stage: SubmissionNativeStage, observed: [String: Any]) {
-        guard session.provider == .gemini else { return }
+        guard session.usesSubmissionOwnership else { return }
         // Native Send is claimed before the click. These fields deliberately
         // distinguish that intent from a verified physical website submission.
-        let context: [String: Any] = ["kind": "submission_native_v1", "action": action, "stage": stage.rawValue,
+        var context: [String: Any] = ["kind": "submission_native_v1", "action": action, "stage": stage.rawValue,
             "sequence": session.sequence, "confirmedUsers": session.confirmedUsers,
             "preparedSequence": session.preparedSubmission?.sequence ?? 0,
             "currentSequence": session.currentSubmission?.sequence ?? 0,
@@ -3007,9 +3039,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "currentBodyVerified": session.currentSubmissionVerified,
             "capabilityMatches": observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability,
             "proofPresent": observed["submissionProof"] != nil]
+        if session.provider == .chatgpt { context["provider"] = "chatgpt" }
         if let data = try? JSONSerialization.data(withJSONObject: context, options: .sortedKeys), data.count <= 1_024 {
-            Self.inspectionLog.error("submissionNative \(String(decoding: data, as: UTF8.self), privacy: .public)")
+            let encoded = String(decoding: data, as: UTF8.self)
+            Self.inspectionLog.error("submissionNative \(encoded, privacy: .public)")
+            #if DEBUG
+            submissionDiagnosticsObserverForTesting?("submissionNative", encoded)
+            #endif
         }
+        if session.provider == .chatgpt {
+            if let safe = Self.sanitizedChatSubmissionDiagnostic(observed["submissionDiagnostic"]) {
+                Self.inspectionLog.error("submissionChatAdapter \(safe, privacy: .public)")
+                #if DEBUG
+                submissionDiagnosticsObserverForTesting?("submissionChatAdapter", safe)
+                #endif
+            }
+            return
+        }
+        // The existing Gemini-only sidecars retain their schema and scope.
         if let safe = Self.sanitizedSubmissionDiagnostic(observed["submissionDiagnostic"]) {
             Self.inspectionLog.error("submissionAdapter \(safe, privacy: .public)")
             if let records = Self.submissionFirstFailureDiagnosticRecords(observed["submissionFirstFailure"],
