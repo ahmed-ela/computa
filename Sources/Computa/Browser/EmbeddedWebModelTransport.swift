@@ -440,6 +440,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
     #endif
 
+    /// Called only through the native server's manually armed handoff, never request().
+    func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool {
+        guard !Task.isCancelled, let session = sessions[sessionToken], session.provider == .chatgpt,
+              !session.isDiscovery, !session.isRecoveryProbe, ["ready", "complete"].contains(session.state),
+              session.temporary, session.modelSelectionVerified, session.modelEvidence != nil,
+              browser.webView(for: session.tabID) === session.view,
+              let generation = browser.documentGeneration(for: session.tabID),
+              generation == (session.documentGeneration ?? session.initialDocumentGeneration),
+              let binding = authorization.bind(view: ObjectIdentifier(session.view), ownerToken: session.token, generation: generation) else { return false }
+        return browser.grantModelInspectorDiagnostic(binding, tabID: session.tabID, view: session.view,
+            ownerToken: session.token, generation: generation)
+    }
+
+    func revokeInspectorDiagnostic(sessionToken: String) async {
+        guard let session = sessions[sessionToken] else { return }
+        browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
+    }
+
     func request(operation: String, params: Data) async throws -> Data {
         guard let values = try JSONSerialization.jsonObject(with: params) as? [String: String] else {
             throw Failure.invalidRequest
@@ -2815,6 +2833,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func finish(_ session: Session, cancel: Bool) async -> Data {
+        browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
         // The outer server can reach its deadline before another native poll
         // is scheduled. Observe only an already-expired running response;
         // successful, preparing and early-cancelled sessions are untouched.

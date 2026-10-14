@@ -1833,6 +1833,22 @@ if (globalThis.__computaModelOwner !== input.ownerToken) {
     globalThis.__computaModelOwner = input.ownerToken;
   else return { error: 'document_changed', detail: 'owner_token' };
 }
+// A newer native invocation can supersede a read still awaiting WebCrypto.
+// This witness grants no proof/actions; it only prevents late remount writes.
+const submissionReadInvocation = Object.freeze({ owner: input.ownerToken, document,
+  operationID: input.operationID ?? null });
+globalThis.__computaGeminiReadInvocation = submissionReadInvocation;
+const submissionReadActive = () => globalThis.__computaGeminiReadInvocation === submissionReadInvocation;
+const submissionReadCurrent = () => submissionReadActive()
+  && globalThis.__computaModelOwner === submissionReadInvocation.owner && document === submissionReadInvocation.document;
+let submissionRecoveryAttempted = false;
+async function modelRecoverSubmissionOnce(record) {
+  if (submissionRecoveryAttempted || !submissionReadCurrent()) return null;
+  submissionRecoveryAttempted = true;
+  const recovered = await modelRecoverVerifiedSubmission(record);
+  return submissionReadCurrent() ? recovered : null;
+}
+
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
   const signal = { ownerToken: input.ownerToken, observer: null };
   signal.observer = new MutationObserver(records => {
@@ -1881,6 +1897,7 @@ if (submissionOwnershipEnabled && (typeof input.submissionMarker !== 'string' ||
   || !Number.isInteger(input.submissionSequence) || input.submissionSequence < 0 || input.submissionSequence > 10_000))
   return modelSubmissionFailure(null, 'invalid_input');
 const submissionEditorActions = ['insert', 'sendReady', 'submit'];
+
 function modelSubmissionDiagnostic(record, stage) {
   // Diagnostic predicates cannot grant proof, change state, or expose values.
   // A missing/throwing diagnostic never changes the authoritative failure.
@@ -2056,6 +2073,8 @@ function modelRetainedFirstFailure(state, record = null, stage = null, digestDia
   } catch { return null; }
 }
 function modelSubmissionFailure(record = null, stage = 'observe_final', body = null, digestDiagnostic = null) {
+  // A superseded read must not poison the newer invocation's private state.
+  if (!submissionReadActive()) return { error: 'conversation_changed', detail: 'submission_message' };
   const state = globalThis.__computaGeminiSubmissionState;
   const firstFailure = modelRetainedFirstFailure(state, record, stage, digestDiagnostic);
   if (record && state && (state.pending === record || state.lastVerified === record)) state.revoked = true;
@@ -2130,7 +2149,7 @@ async function modelRecoverVerifiedSubmission(record) {
   const roots = modelUserRoots(), root = roots[record.sequence - 1], body = root && modelUserBody(root);
   const parent = state?.pending, certificate = record.remount;
   const parentCanonical = parent?.canonical ?? null, parentFingerprint = parent?.fingerprint ?? null;
-  if (!['inspect', 'verifyModel'].includes(input.action) || !state || state.revoked || state.lastVerified !== record
+  if (!submissionReadCurrent() || !['inspect', 'verifyModel'].includes(input.action) || !state || state.revoked || state.lastVerified !== record
     || record.phase !== 'verified' || record.document !== document || record.owner !== input.ownerToken
     || proof?.fingerprint !== record.fingerprint || input.allowFirstUserBinding !== false
     || input.expectedFirstUserFingerprint !== firstUserFingerprint
@@ -2166,7 +2185,7 @@ async function modelRecoverVerifiedSubmission(record) {
     && roots.every((node, index) => current[index] === node)
     && websiteModelAcknowledgedUserAppend(input, roots.length, current.length,
       { snapshotIntact: snapshotUnchanged(true), fingerprint: firstUserFingerprint, identity: firstUserIdentity }, modelTemporaryVerified());
-  if (!sameRoots && !append || globalThis.__computaGeminiSubmissionState !== state || state.revoked
+  if (!submissionReadCurrent() || !sameRoots && !append || globalThis.__computaGeminiSubmissionState !== state || state.revoked
     || state.lastVerified !== record || state.pending !== parent || record.phase !== 'verified'
     || parent && (parent.phase !== 'send_claimed' || parent.sequence !== record.sequence + 1
       || parent.sequence !== input.submissionSequence || parent.marker !== input.submissionMarker
@@ -2188,13 +2207,15 @@ async function modelRecoverVerifiedSubmission(record) {
     replacementSubmissionProof: { sequence: record.sequence, fingerprint } };
 }
 async function modelObserveSubmission(sequence, allowPending = false, pendingParent = null) {
+  if (!submissionReadActive()) return { error: 'conversation_changed', detail: 'submission_message' };
   const state = globalThis.__computaGeminiSubmissionState;
   if (sequence === 0) return modelUserRoots().length === 0 ? {} : modelSubmissionFailure(null, 'observe_count');
   if (!state || state.revoked || state.document !== document || state.owner !== input.ownerToken) return modelSubmissionFailure(null, 'observe_state');
   const bound = state.lastVerified;
   if (bound?.phase === 'verified' && input.expectedSubmissionProofs !== undefined && ['inspect', 'verifyModel'].includes(input.action)
     && (bound.remount?.kind === 'submission' || !bound.root.isConnected && !bound.body.isConnected)) {
-    const recovered = await modelRecoverVerifiedSubmission(bound);
+    const recovered = await modelRecoverSubmissionOnce(bound);
+    if (!submissionReadActive()) return { error: 'conversation_changed', detail: 'submission_message' };
     if (recovered?.error) return recovered;
   }
   const record = state.lastVerified?.sequence === sequence ? state.lastVerified : state.pending?.sequence === sequence ? state.pending : null;
@@ -2273,6 +2294,20 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     || current.length !== sequence || current.some((node, index) => node !== roots[index])
     || !root.isConnected || !body.isConnected || modelUserBody(root) !== body || normalizedBody(body) !== text
     || !priorIntact() || fingerprint !== record.fingerprint) {
+    // Already verified current queries can remount while SHA-256 yields.
+    // Discard only after the existing helper proves the entire replacement;
+    // the native single fresh-inspect budget still owns any later rebinding.
+    if (sequence > 1 && !submissionRecoveryAttempted && submissionReadCurrent()
+      && globalThis.__computaGeminiSubmissionState === state && !state.revoked
+      && state.lastVerified === record && state.pending === null && !pendingParent
+      && record.phase === 'verified' && record.root === root && record.body === body && record.remount === null
+      && !root.isConnected && !body.isConnected && current.length === sequence
+      && current[sequence - 1] !== root && current.every((node, index) => index === sequence - 1 || node === roots[index])
+      && modelSubmissionContext(record) && priorIntact() && fingerprint === record.fingerprint) {
+      const recovered = await modelRecoverSubmissionOnce(record);
+      if (recovered?.error === 'submission_observation_replaced') return recovered;
+    }
+    if (!submissionReadActive()) return { error: 'conversation_changed', detail: 'submission_message' };
     const diagnostic = modelSubmissionDigestDiagnostic(state, record, pendingParent, parentValid, remount, remountAllowed,
       roots, current, root, body, text, fingerprint, priorIntact);
     return { ...modelSubmissionFailure(record, 'observe_digest', null, diagnostic),
@@ -2645,6 +2680,7 @@ async function providerPageAction() {
   return { submitted: true };
 }
 const observed = await websiteModelFinalGuard('gemini', input, await providerPageAction(), modelTemporaryVerified);
+if (!submissionReadActive()) return { error: 'conversation_changed', detail: 'submission_message' };
 if (observed.error === 'first_user_observation_replaced') return observed;
 if (observed.error === 'submission_observation_replaced') {
   const record = globalThis.__computaGeminiSubmissionState?.lastVerified, certificate = record?.remount;

@@ -107,6 +107,7 @@ final class EmbeddedBrowserSession {
         var modelNavigationGeneration: UUID?
         var geminiDocumentCommitObserved = false
         var serverRedirectObservedInCurrentNavigation = false
+        var inspectorDiagnostic: (id: UUID, binding: ChatGPTInspectorLease.Binding, expiry: Task<Void, Never>)?
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
@@ -388,6 +389,7 @@ final class EmbeddedBrowserSession {
 
     func closeTab(_ id: UUID) {
         guard let entry = entries.removeValue(forKey: id), let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        revokeModelInspector(entry, reason: isShutdown ? .shutdown : .closed)
         let humanIndex = tabs.prefix(index).filter { entries[$0.id]?.isModelOwned == false }.count
         entry.view.isInspectable = false
         entry.tab.isWebInspectorEnabled = false
@@ -454,6 +456,7 @@ final class EmbeddedBrowserSession {
 
     func stop(tabID: UUID) {
         guard let entry = entries[tabID] else { return }
+        revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
@@ -478,6 +481,59 @@ final class EmbeddedBrowserSession {
         guard !enabled || canInspect(tabID: tabID) else { throw Failure.inspectionUnavailable }
         entry.view.isInspectable = enabled
         entry.tab.isWebInspectorEnabled = enabled
+    }
+
+    enum ModelInspectorRevocation: String {
+        case navigation, origin, closed, shutdown, expired, nativeContext = "native_context", finished
+    }
+    private static let inspectorDiagnosticLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "ModelInspectorDiagnostic")
+
+    /// Native-only, one-use capability. Human inspector policy/flags stay unchanged.
+    /// This toggles public WebKit inspection only; it does not open or capture it.
+    func grantModelInspectorDiagnostic(_ binding: ChatGPTInspectorLease.Binding, tabID: UUID,
+                                       view: WKWebView, ownerToken: String, generation: UUID) -> Bool {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.inspectorDiagnostic == nil,
+              entry.modelChanges?.ownerToken == ownerToken, entry.modelSignalOriginHost == "chatgpt.com",
+              entry.tab.documentGeneration == generation, Self.inspectorOriginAllowed(view.url) else { return false }
+        let id = UUID()
+        let activated = binding.activate(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation,
+            onRevocation: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, let current = self.entries[tabID], current.inspectorDiagnostic?.id == id else { return }
+                    self.revokeModelInspector(current, reason: .nativeContext)
+                }
+            }, action: { view.isInspectable = true })
+        guard activated else { return false }
+        let expiry = Task { @MainActor [weak self] in
+            do { try await Task.sleep(until: binding.deadline, clock: .continuous) }
+            catch { return }
+            guard let self, let current = self.entries[tabID], current.inspectorDiagnostic?.id == id else { return }
+            self.revokeModelInspector(current, reason: .expired)
+        }
+        entry.inspectorDiagnostic = (id, binding, expiry)
+        Self.inspectorDiagnosticLog.notice("inspectorDiagnostic disposition=granted")
+        return true
+    }
+
+    func revokeModelInspectorDiagnostic(tabID: UUID, ownerToken: String) {
+        guard let entry = entries[tabID], entry.modelChanges?.ownerToken == ownerToken else { return }
+        revokeModelInspector(entry, reason: .finished)
+    }
+
+    private static func inspectorOriginAllowed(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url.scheme == "https" && url.host == "chatgpt.com" && url.user == nil && url.password == nil
+            && (url.port == nil || url.port == 443)
+    }
+
+    private func revokeModelInspector(_ entry: Entry, reason: ModelInspectorRevocation) {
+        guard let diagnostic = entry.inspectorDiagnostic else { return }
+        entry.inspectorDiagnostic = nil
+        diagnostic.expiry.cancel()
+        entry.view.isInspectable = false
+        diagnostic.binding.revoke()
+        Self.inspectorDiagnosticLog.notice("inspectorDiagnostic disposition=revoked reason=\(reason.rawValue, privacy: .public)")
     }
 
     /// Binding a human page always performs a native backend observation before
@@ -893,6 +949,7 @@ final class EmbeddedBrowserSession {
     }
 
     private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
+        revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.recoverySettledGeneration = nil
         entry.tab.documentID = UUID()
@@ -931,6 +988,7 @@ final class EmbeddedBrowserSession {
 
     private func refresh(_ id: UUID, view: WKWebView, committedNavigation: Bool = false) {
         guard let entry = entries[id], entry.view === view else { return }
+        if entry.inspectorDiagnostic != nil, !Self.inspectorOriginAllowed(view.url) { revokeModelInspector(entry, reason: .origin) }
         let title = view.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         entry.tab.title = title.isEmpty ? (view.url?.host ?? "New tab") : String(title.prefix(512))
         // Includes history.pushState/fragment navigation. This is intentionally conservative;
@@ -1039,6 +1097,7 @@ final class EmbeddedBrowserSession {
 
     fileprivate func terminated(_ view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
+        revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
         entry.preparedDocumentNavigation = false

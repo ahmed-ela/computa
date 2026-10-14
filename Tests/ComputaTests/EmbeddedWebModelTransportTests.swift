@@ -6,6 +6,44 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testNativeInspectorHandoffRequiresReadyChatGPTAndFinishRevokesExactView() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt)); defer { fixture.shutdown() }
+        let arm = try InspectorArmFixture(); defer { arm.remove() }; try arm.arm()
+        let authorization = try XCTUnwrap(arm.consume())
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+        let early = await fixture.transport.grantInspectorDiagnostic(authorization, sessionToken: token)
+        XCTAssertFalse(early); XCTAssertFalse(view.isInspectable)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        do {
+            _ = try await call(fixture.transport, "webProviderGrantInspector", ["sessionToken": token])
+            XCTFail("No wire operation can grant inspection")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
+        XCTAssertFalse(view.isInspectable, "An unknown wire operation cannot grant inspection")
+        let granted = await fixture.transport.grantInspectorDiagnostic(authorization, sessionToken: token)
+        XCTAssertTrue(granted); XCTAssertTrue(view.isInspectable)
+        XCTAssertFalse(fixture.browser.canInspect(tabID: id))
+        XCTAssertFalse(fixture.humanView.isInspectable)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertFalse(view.isInspectable)
+    }
+
+    func testNativeInspectorHandoffRejectsOtherProviderAndChangedGeneration() async throws {
+        for provider in [EmbeddedWebModelTransport.Provider.gemini, .chatgpt] {
+            let fixture = try Fixture(page: Self.modelChoicePage(provider)); defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(provider), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            if provider == .chatgpt { fixture.browser.stop(tabID: id) }
+            let arm = try InspectorArmFixture(); defer { arm.remove() }; try arm.arm()
+            let authorization = try XCTUnwrap(arm.consume())
+            let granted = await fixture.transport.grantInspectorDiagnostic(authorization, sessionToken: token)
+            XCTAssertFalse(granted); XCTAssertFalse(view.isInspectable)
+        }
+    }
+
     func testResponseProgressProjectionPreservesUnknownsAndOmitsPrivateContent() throws {
         let privateText = "PRIVATE_RESPONSE_CANARY😀é"
         let input: [String: Any] = ["responseCount": 1, "userCount": 2, "busy": true,

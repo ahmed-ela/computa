@@ -3,6 +3,30 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testInspectorArmIsNativeContextBoundChatGPTOnlyAndDoesNotEnterResponseOrOperations() async throws {
+        for provider in ["chatgpt", "gemini"] {
+            let arm = try InspectorArmFixture(); defer { arm.remove() }; try arm.arm()
+            let base = FixtureWebModelTransport()
+            let transport = InspectorServerFixtureTransport(base: WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice),
+                task: arm.task, thread: arm.thread, turn: arm.turn)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: arm.root.appendingPathComponent("WebsiteReplyDiagnostics-v1"))
+            await server.configureEmbeddedTransport(transport)
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+            object["model"] = syntheticWebsiteModelID(provider)
+            let response = try await server.fixtureInfer(JSONSerialization.data(withJSONObject: object),
+                taskID: arm.task.uuidString.lowercased(), threadID: arm.thread.uuidString.lowercased(), turnID: arm.turn.uuidString.lowercased())
+            let observations = await transport.observations()
+            XCTAssertEqual(observations.grants, provider == "chatgpt" ? [true] : [])
+            XCTAssertFalse(observations.stillCurrent)
+            XCTAssertEqual(FileManager.default.fileExists(atPath: arm.armFile.path), provider != "chatgpt")
+            let operations = await base.operations()
+            XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+            let text = String(decoding: response, as: UTF8.self)
+            for privateField in ["inspector", "expiresAt", "WebsiteInspectorDiagnostics", arm.root.path] { XCTAssertFalse(text.contains(privateField)) }
+        }
+    }
+
     private let request = Data("{\"model\":\"\(syntheticChatGPTModelID)\",\"input\":[{\"role\":\"user\",\"content\":\"Say OK\"}],\"tools\":[],\"stream\":true}".utf8)
 
     func testEveryInferenceClosesItsFreshSessionBeforeReturningAndFinishPreservesProof() async throws {
@@ -2021,5 +2045,24 @@ private actor TurnCapabilityFailureTransport: WebModelTransport {
             value["modelProofContext"] = proof
         }
         return try JSONSerialization.data(withJSONObject: value)
+    }
+}
+
+private actor InspectorServerFixtureTransport: WebModelTransport {
+    private let base: any WebModelTransport
+    private let task: UUID, thread: UUID, turn: UUID
+    private var grants: [Bool] = []
+    private var authorization: ChatGPTInspectorLease?
+    init(base: any WebModelTransport, task: UUID, thread: UUID, turn: UUID) {
+        self.base = base; self.task = task; self.thread = thread; self.turn = turn
+    }
+    func request(operation: String, params: Data) async throws -> Data { try await base.request(operation: operation, params: params) }
+    func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool {
+        grants.append(authorization.matches(taskID: task, threadID: thread, turnID: turn))
+        self.authorization = authorization
+        return true
+    }
+    func observations() -> (grants: [Bool], stillCurrent: Bool) {
+        (grants, authorization?.matches(taskID: task, threadID: thread, turnID: turn) ?? false)
     }
 }

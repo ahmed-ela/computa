@@ -1,8 +1,51 @@
 # Embedded website provider qualification
 
-## Build116 installed outcomes
+## Build116 V31 Gemini diagnosis and build117 preparation
 
-Signed Computa 0.7.0 (116), source `32412096`, is installed and running. All
+The fresh V31 Gemini 3.8 Flash browser task reached four successful browser
+calls and one accepted form submission. Its fifth website submission was
+verified, then a later read failed with the saved native classification
+`website_ownership_unverified`, `ownership_reason=submission_message` and
+`retryable=false`. Final website cleanup was unconfirmed. The task remains
+failed; an accepted form submission does not prove the final result or tab close.
+
+Finite logs from the exact installed process and bounded time window identify
+the first refusal at `observe_digest`, sequence five. The original complete
+message hash, first root, owner/document context and user count still matched,
+while the fifth message's old root and body detached during the hash await.
+The later `observe_state` failure followed revocation. The live evidence does
+not establish that the replacement text was identical. This failure is separate
+from Google's CAPTCHA; the engine's generic high-demand wording does not
+establish a provider-capacity cause.
+
+The build117 candidate reuses the existing full-body/native-hash replacement
+proof at this boundary, only for an already verified submission with whole-root
+detachment and unchanged context. It returns a read-discard certificate; the
+unchanged native single fresh-inspect allowance governs the next proof.
+Changed text, markers, partial replacements, counts and native pins still fail.
+An invocation witness prevents a superseded awaited read from changing current
+state or publishing stale diagnostics. Send and deadlines are unchanged.
+
+The original adapter fails the controlled reproduction. The final applied
+adapter passes 147 Bun tests with 5,298 assertions and five selected native
+Gemini regressions. All ten native inspector-lease tests also pass. Earlier
+failed receipts are retained: one eleven-case test exceeded its standard
+timeout and was split into eleven identical parameterized cases; a patch
+changed the resource's physical filename spelling, causing native startup to
+reject it as unavailable. Restoring canonical `gemini.js` preserved its bytes
+and made the selected native tests pass. The build preflight checks exact names.
+
+The ChatGPT diagnostic lease permits public WebKit inspection only after a
+manual same-UID arm and exact current native turn/view/token/generation binding.
+It expires and revokes on lifecycle changes; it does not capture content or
+expose a model/wire grant. Same-UID scope is not human authentication.
+These offline results do not qualify an installed build117 provider task or
+resolve ChatGPT's response stall or Google's CAPTCHA trigger. Build117 live
+qualification remains pending; no failed V31 prompt is replayed or regraded.
+
+## Build116 V30 installed outcomes
+
+At V30 qualification, signed Computa 0.7.0 (116), source `32412096`, was running. All
 54 bundle files and 50 resources match the retained signed build. The actual
 selector offers only GPT-OSS under Cerebras; Qwen3.8 27B remains hidden behind
 the disabled flag with its higher token usage recorded in the source comment.
@@ -39,7 +82,7 @@ stopped with a final stop event, terminal exit 0 and its process gone; its ten
 events contain four page opens and four accepted submissions. Original source,
 fixtures, outputs and immutable receipts remain available in the private V30
 artifacts. ChatGPT's third-response stall and Google's CAPTCHA trigger remain
-unresolved. No CAPTCHA was completed, no new ChatGPT/Gemini task was dispatched,
+unresolved. During V30, no CAPTCHA was completed and no ChatGPT/Gemini task was dispatched,
 and the broader provider-reliability goal remains open.
 
 ## Build115 installed outcomes and build116 preparation

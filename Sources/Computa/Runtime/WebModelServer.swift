@@ -7,6 +7,8 @@ import Darwin
 /// Another website transport can replace the browser implementation without
 /// changing the desktop tools or local transcript.
 protocol WebModelTransport: Sendable {
+    func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool
+    func revokeInspectorDiagnostic(sessionToken: String) async
     func request(operation: String, params: Data) async throws -> Data
     func changeRevision(sessionToken: String) async throws -> UInt64?
     func waitForChange(sessionToken: String, after revision: UInt64,
@@ -14,6 +16,8 @@ protocol WebModelTransport: Sendable {
 }
 
 extension WebModelTransport {
+    func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool { false }
+    func revokeInspectorDiagnostic(sessionToken: String) async {}
     func changeRevision(sessionToken: String) async throws -> UInt64? { nil }
     func waitForChange(sessionToken: String, after revision: UInt64,
                        until deadline: ContinuousClock.Instant) async throws -> UInt64? { nil }
@@ -218,16 +222,21 @@ actor WebModelServer {
     private var responseTimeout: Duration = .seconds(300)
     private var evidenceDirectory: URL?
     private let rejectedReplyDirectory: URL?
+    private var inspectorAuthorizations: [String: ChatGPTInspectorLease] = [:]
     private let queue = DispatchQueue(label: "wtf.computa.web-model-http")
 
     func configureCleanupReceipts(directory: URL, runtimeGeneration: UUID,
                                   observer: @escaping @Sendable (WebsiteSessionCleanupReceipt) async -> Void) {
         cleanupReceiptStore = WebsiteSessionCleanupStore(directory: directory)
+        if runtimeGeneration != cleanupRuntimeGeneration { revokeAllInspectorAuthorizations() }
         cleanupRuntimeGeneration = runtimeGeneration
         cleanupReceiptObserver = observer
     }
 
-    func setCleanupRuntimeGeneration(_ generation: UUID) { cleanupRuntimeGeneration = generation }
+    func setCleanupRuntimeGeneration(_ generation: UUID) {
+        if generation != cleanupRuntimeGeneration { revokeAllInspectorAuthorizations() }
+        cleanupRuntimeGeneration = generation
+    }
 
     /// Core calls this before turn/start, removing any preceding turn's
     /// identity before the native engine can open its first HTTP inference.
@@ -242,6 +251,7 @@ actor WebModelServer {
         guard runtimeGeneration == cleanupRuntimeGeneration else { throw Failure.inferenceContextRequired }
         preparedInferenceContexts[task] = PreparedInferenceContext(threadID: thread,
             runtimeGeneration: runtimeGeneration, preparationID: preparationID)
+        inspectorAuthorizations.removeValue(forKey: task)?.revoke()
         inferenceContexts.removeValue(forKey: task)
         if usedSessionTokens[task] == nil { usedSessionTokens[task] = [] }
         closedTurns.removeValue(forKey: task)
@@ -319,7 +329,13 @@ actor WebModelServer {
         else { waiter.continuation.resume(throwing: Failure.inferenceContextRequired) }
     }
 
+    private func revokeAllInspectorAuthorizations() {
+        inspectorAuthorizations.values.forEach { $0.revoke() }
+        inspectorAuthorizations.removeAll()
+    }
+
     private func revokeInferenceContext(taskID: String) {
+        inspectorAuthorizations.removeValue(forKey: taskID)?.revoke()
         preparedInferenceContexts.removeValue(forKey: taskID)
         inferenceContexts.removeValue(forKey: taskID)
         if let waiter = contextWaiters.removeValue(forKey: taskID) {
@@ -451,6 +467,7 @@ actor WebModelServer {
     func configureEmbeddedTransport(_ value: any WebModelTransport) {
         let identity = value as AnyObject
         if embeddedTransportIdentity === identity { return }
+        revokeAllInspectorAuthorizations()
         embeddedTransport = value
         embeddedTransportIdentity = identity
         embeddedTransportGeneration = UUID()
@@ -580,6 +597,10 @@ actor WebModelServer {
 
     private func performCleanup(taskID: String, session: Session, cancel: Bool, runtimeGeneration: UUID,
                                 trigger: WebsiteSessionCleanupReceipt.Trigger) async -> CleanupResult {
+        if let authorization = inspectorAuthorizations.removeValue(forKey: taskID) {
+            authorization.revoke()
+            await session.transport.revokeInspectorDiagnostic(sessionToken: session.token)
+        }
         do {
             let reply = try await call(session.transport,
                 operation: cancel ? "webProviderCancel" : "webProviderFinish",
@@ -816,6 +837,21 @@ actor WebModelServer {
                 guard ready else { throw Failure.preparationDeadline }
             }
             try requireCurrentContext()
+            // No wire/model-tool grant. A same-UID manual arm scopes one current
+            // native turn; it is not authentication of the person who wrote it.
+            if provider == "chatgpt", route == .embedded, inspectorAuthorizations[taskID] == nil,
+               let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
+               let turn = UUID(uuidString: context.turnID),
+               let directory = rejectedReplyDirectory?.deletingLastPathComponent().appendingPathComponent("WebsiteInspectorDiagnostics-v1"),
+               let authorization = ChatGPTInspectorLease.consume(directory: directory, taskID: task, threadID: thread, turnID: turn) {
+                inspectorAuthorizations[taskID] = authorization
+                let granted = await session.transport.grantInspectorDiagnostic(authorization, sessionToken: session.token)
+                try requireCurrentContext()
+                if !granted || !authorization.matches(taskID: task, threadID: thread, turnID: turn) {
+                    authorization.revoke()
+                    if granted { await session.transport.revokeInspectorDiagnostic(sessionToken: session.token) }
+                }
+            }
             if session.usesBoundedTurn {
                 let bytes = prompt.utf8.count
                 guard session.sequence <= Self.maximumTurnInferences,
@@ -914,6 +950,10 @@ actor WebModelServer {
             }
             throw Failure.deadline
         } catch {
+            if let authorization = inspectorAuthorizations.removeValue(forKey: taskID) {
+                authorization.revoke()
+                if let lease { await lease.transport.revokeInspectorDiagnostic(sessionToken: lease.token) }
+            }
             yieldedTurns.removeValue(forKey: taskID)
             let turnLimit = (error as? EmbeddedWebModelTransport.Failure) == .turnLimit
                 || { if let failure = error as? Failure, case .turnLimit = failure { return true }; return false }()
