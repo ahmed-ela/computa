@@ -88,10 +88,11 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
     @MainActor
     func testChatSubmissionDiagnosticIsStrictFiniteAndCannotSupplyProof() throws {
         let flags = ["contextMatches", "nativePinMatches", "pendingRecord", "lastVerifiedRecord", "rootSame", "bodySame",
-                     "oldRootConnected", "oldBodyConnected", "currentRootConnected", "currentBodyConnected", "canonicalMatches"]
+                     "oldRootConnected", "oldBodyConnected", "currentRootConnected", "currentBodyConnected", "canonicalMatches", "oldRootPresent", "oldBodyPresent"]
         var valid: [String: Any] = Dictionary(uniqueKeysWithValues: flags.map { ($0, true as Any) })
         valid["kind"] = "chatgpt_submission_v1"; valid["action"] = "inspect"; valid["stage"] = "observe_body"
         valid["requestedSequence"] = 2; valid["recordSequence"] = 2; valid["userCount"] = 2
+        valid["recordPhase"] = "verified"; valid["contextChecks"] = NSNull()
         valid["rootSame"] = false; valid["bodySame"] = false
         valid["oldRootConnected"] = false; valid["oldBodyConnected"] = false
         let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(valid))
@@ -99,7 +100,7 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
         XCTAssertEqual(Set(decoded.keys), Set(valid.keys))
         XCTAssertEqual(decoded["canonicalMatches"] as? Bool, true)
         XCTAssertEqual(decoded["oldRootConnected"] as? Bool, false)
-        XCTAssertLessThanOrEqual(encoded.utf8.count, 960)
+        XCTAssertLessThanOrEqual(encoded.utf8.count, 2_048)
         XCTAssertFalse(EmbeddedWebModelTransport.validSubmissionProof(decoded, sequence: 2, fingerprint: String(repeating: "a", count: 64)))
         for key in flags {
             for wrong in [1, "true", NSNull(), "PRIVATE CANARY"] as [Any] {
@@ -138,6 +139,45 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(NSNull()))
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(valid.merging(["kind": "gemini_submission_v1"]) { _, new in new }))
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(valid), "The Chat sidecar cannot enter Gemini's schema")
+    }
+
+    @MainActor
+    func testChatContextCheckPrefixIsFiniteShortCircuitedAndCannotSupplyProof() throws {
+        let keys = ["invocationClaimed", "invocationCurrent", "statePresent", "stateNotRevoked", "stateDocumentMatches",
+                    "stateOwnerMatches", "stateCurrent", "globalOwnerMatches", "topFrame", "providerMatches",
+                    "originMatches", "urlMatches", "firstMarkerMatches", "productProofVerified", "temporaryVerified", "modelChoiceMatches"]
+        let flags = ["contextMatches", "nativePinMatches", "pendingRecord", "lastVerifiedRecord", "rootSame", "bodySame",
+                     "oldRootConnected", "oldBodyConnected", "currentRootConnected", "currentBodyConnected", "canonicalMatches", "oldRootPresent", "oldBodyPresent"]
+        var valid: [String: Any] = Dictionary(uniqueKeysWithValues: flags.map { ($0, false as Any) })
+        valid.merge(["kind": "chatgpt_submission_v1", "action": "inspect", "stage": "observe_context", "requestedSequence": 1,
+                     "recordSequence": 1, "userCount": 1, "recordPhase": "send_claimed"]) { _, new in new }
+        for failed in keys.indices {
+            let checks: [String: Any] = Dictionary(uniqueKeysWithValues: keys.enumerated().map { index, key in
+                (key, index < failed ? true as Any : index == failed ? false as Any : NSNull())
+            })
+            valid["contextChecks"] = checks
+            let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(valid))
+            XCTAssertLessThanOrEqual(safe.utf8.count, 2_048)
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
+            XCTAssertFalse(EmbeddedWebModelTransport.validSubmissionProof(decoded, sequence: 1, fingerprint: String(repeating: "a", count: 64)))
+            for bad in ["PRIVATE_CONTEXT_CANARY", 0, 1, [], [:]] as [Any] {
+                var altered = checks; altered[keys[failed]] = bad
+                var raw = valid; raw["contextChecks"] = altered
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(raw))
+            }
+            var extra = checks; extra["PRIVATE_KEY_CANARY"] = false
+            var raw = valid; raw["contextChecks"] = extra
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(raw))
+            if failed + 1 < keys.count {
+                var resumed = checks; resumed[keys[failed + 1]] = true
+                raw["contextChecks"] = resumed
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(raw))
+            }
+        }
+        valid["contextChecks"] = Dictionary(uniqueKeysWithValues: keys.map { ($0, true as Any) })
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(valid), "No failed check means no failure witness")
+        valid["contextChecks"] = NSNull(); valid["recordPhase"] = "PRIVATE_PHASE_CANARY"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(valid))
     }
 
     @MainActor

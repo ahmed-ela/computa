@@ -1645,7 +1645,10 @@ function chatGPTSubmissionDiagnostic(state, stage, selectedRecord = null) {
       rootSame: !!record?.root && root === record.root, bodySame: !!record?.body && body === record.body,
       oldRootConnected: record?.root?.isConnected === true, oldBodyConnected: record?.body?.isConnected === true,
       currentRootConnected: root?.isConnected === true, currentBodyConnected: body?.isConnected === true,
-      canonicalMatches: !!record && canonical !== null && canonical === record.canonical };
+      canonicalMatches: !!record && canonical !== null && canonical === record.canonical,
+      oldRootPresent: record?.root != null, oldBodyPresent: record?.body != null,
+      recordPhase: !record ? 'none' : ['prepared', 'send_claimed', 'verified'].includes(record.phase) ? record.phase : 'unknown',
+      contextChecks: chatGPTSubmissionContextFailure?.state === state ? chatGPTSubmissionContextFailure.checks : null };
   } catch { return null; }
 }
 function chatGPTSubmissionFailure(state, stage = 'missing_state', record = null) {
@@ -1655,16 +1658,32 @@ function chatGPTSubmissionFailure(state, stage = 'missing_state', record = null)
   if (state) state.revoked = true;
   return { error: 'conversation_changed', detail: 'submission_message', ...(submissionDiagnostic ? { submissionDiagnostic } : {}) };
 }
+// This invocation-local witness observes the authoritative conjunction once.
+// Null means short-circuiting did not evaluate that check. Returning the actual
+// operand preserves the old truthiness, ordering and product getter effects.
+const chatGPTSubmissionContextCheckKeys = Object.freeze(['invocationClaimed', 'invocationCurrent', 'statePresent',
+  'stateNotRevoked', 'stateDocumentMatches', 'stateOwnerMatches', 'stateCurrent', 'globalOwnerMatches', 'topFrame',
+  'providerMatches', 'originMatches', 'urlMatches', 'firstMarkerMatches', 'productProofVerified', 'temporaryVerified',
+  'modelChoiceMatches']);
+let chatGPTSubmissionContextFailure = null;
 function chatGPTSubmissionContext(state, initialDispatchAcknowledgment = false) {
-  return websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease
-    && state && !state.revoked && state.document === document && state.owner === input.ownerToken
-    && globalThis.__computaChatSubmissionState === state && globalThis.__computaModelOwner === state.owner
-    && window === window.top && input.provider === 'chatgpt' && location.origin === 'https://chatgpt.com'
-    && (document.URL === input.expectedURL || initialDispatchAcknowledgment && chatGPTInitialSubmissionRoute(state))
-    && state.firstMarker === input.expectedFirstUserMarker
-    && chatGPTProductModeProof() && chatGPTTemporaryVerified()
-    && (input.expectedModelChoice == null || state.modelChoice == null
+  const checks = Object.fromEntries(chatGPTSubmissionContextCheckKeys.map(key => [key, null]));
+  const check = (key, value) => { checks[key] = !!value; return value; };
+  const result = check('invocationClaimed', websiteChatInvocationLease != null)
+    && check('invocationCurrent', globalThis.__computaChatActiveInvocation === websiteChatInvocationLease)
+    && check('statePresent', state) && check('stateNotRevoked', !state.revoked)
+    && check('stateDocumentMatches', state.document === document) && check('stateOwnerMatches', state.owner === input.ownerToken)
+    && check('stateCurrent', globalThis.__computaChatSubmissionState === state)
+    && check('globalOwnerMatches', globalThis.__computaModelOwner === state.owner)
+    && check('topFrame', window === window.top) && check('providerMatches', input.provider === 'chatgpt')
+    && check('originMatches', location.origin === 'https://chatgpt.com')
+    && check('urlMatches', document.URL === input.expectedURL || initialDispatchAcknowledgment && chatGPTInitialSubmissionRoute(state))
+    && check('firstMarkerMatches', state.firstMarker === input.expectedFirstUserMarker)
+    && check('productProofVerified', chatGPTProductModeProof()) && check('temporaryVerified', chatGPTTemporaryVerified())
+    && check('modelChoiceMatches', input.expectedModelChoice == null || state.modelChoice == null
       || websiteModelChoiceEqual(state.modelChoice, input.expectedModelChoice));
+  if (!result && chatGPTSubmissionContextFailure == null) chatGPTSubmissionContextFailure = { state, checks };
+  return result;
 }
 function chatGPTInitialSubmissionRoute(state) {
   // This acknowledges only the already-claimed first click. Native still

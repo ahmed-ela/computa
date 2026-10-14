@@ -10,12 +10,18 @@ protocol WebModelTransport: Sendable {
     func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool
     func revokeInspectorDiagnostic(sessionToken: String) async
     func request(operation: String, params: Data) async throws -> Data
+    func request(operation: String, params: Data,
+                 onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data
     func changeRevision(sessionToken: String) async throws -> UInt64?
     func waitForChange(sessionToken: String, after revision: UInt64,
                        until deadline: ContinuousClock.Instant) async throws -> UInt64?
 }
 
 extension WebModelTransport {
+    func request(operation: String, params: Data,
+                 onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
+        try await request(operation: operation, params: params)
+    }
     func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool { false }
     func revokeInspectorDiagnostic(sessionToken: String) async {}
     func changeRevision(sessionToken: String) async throws -> UInt64? { nil }
@@ -707,6 +713,7 @@ actor WebModelServer {
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
         let inferenceID = UUID()
+        let submissionFailureSink = ChatSubmissionFailureDiagnosticSink()
         var lease = sessions[taskID]
         // Claim this handoff before any suspension. A duplicate request cannot
         // reuse a claim, including after validation, Send or persistence fails.
@@ -864,7 +871,7 @@ actor WebModelServer {
             sessions[taskID] = session
             lease = session
             let sent = try await call(session.transport, operation: "webProviderSend",
-                params: ["sessionToken": session.token, "prompt": prompt])
+                params: ["sessionToken": session.token, "prompt": prompt], submissionFailureSink: submissionFailureSink)
             try requireCurrentContext()
             guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
             try Self.verifyInferenceSnapshot(sent, session: &session)
@@ -877,7 +884,8 @@ actor WebModelServer {
                 try requireCurrentContext()
                 let revision = try await session.transport.changeRevision(sessionToken: session.token)
                 guard ContinuousClock.now < end else { throw Failure.deadline }
-                let value = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token])
+                let value = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token],
+                    submissionFailureSink: submissionFailureSink)
                 try requireCurrentContext()
                 guard ContinuousClock.now < end else { throw Failure.deadline }
                 switch value["state"] as? String {
@@ -950,6 +958,13 @@ actor WebModelServer {
             }
             throw Failure.deadline
         } catch {
+            let submissionDiagnostic: ChatSubmissionFailureDiagnostic?
+            if provider == "chatgpt", route == .embedded,
+               (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(.javaScriptSubmission),
+               (try? requireCurrentContext()) != nil, let lease, lease.context == context,
+               sessions[taskID]?.token == lease.token {
+                submissionDiagnostic = submissionFailureSink.snapshot
+            } else { submissionDiagnostic = nil }
             if let authorization = inspectorAuthorizations.removeValue(forKey: taskID) {
                 authorization.revoke()
                 if let lease { await lease.transport.revokeInspectorDiagnostic(sessionToken: lease.token) }
@@ -967,7 +982,8 @@ actor WebModelServer {
                 provider: provider, modelID: request.model, sessionToken: lease?.token,
                 phase: error is CancellationError ? "cancelled" : "failed",
                 errorCode: Self.errorPresentation(for: error).code,
-                sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0, route: route, turnScoped: lease.flatMap { $0.continuationPolicyEstablished ? $0.turnScoped : nil })
+                sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0, route: route, turnScoped: lease.flatMap { $0.continuationPolicyEstablished ? $0.turnScoped : nil },
+                submissionDiagnostic: (try? requireCurrentContext()) != nil ? submissionDiagnostic : nil)
             throw error
         }
     }
@@ -1126,12 +1142,16 @@ actor WebModelServer {
 
     private func recordTransactionEvidence(taskID: String, inferenceID: UUID, context: InferenceContext,
                                            provider: String, modelID: String, sessionToken: String?, phase: String, errorCode: String? = nil,
-                                           sequence: Int = 0, baseline: Int = 0, route: Route = .embedded, turnScoped: Bool? = nil) throws {
+                                           sequence: Int = 0, baseline: Int = 0, route: Route = .embedded, turnScoped: Bool? = nil,
+                                           submissionDiagnostic: ChatSubmissionFailureDiagnostic? = nil) throws {
         var record = transactionEvidenceRecord(taskID: taskID, inferenceID: inferenceID, context: context,
             provider: provider, modelID: modelID, sessionToken: sessionToken, phase: phase, route: route, turnScoped: turnScoped)
         record["sequence"] = sequence
         record["baselineResponseCount"] = baseline
         if let errorCode { record["errorCode"] = errorCode }
+        if phase == "failed", provider == "chatgpt", route == .embedded, let submissionDiagnostic {
+            record["submissionFailureDiagnostic"] = submissionDiagnostic.dictionary
+        }
         try appendEvidence(record, taskID: taskID)
     }
 
@@ -1286,9 +1306,13 @@ actor WebModelServer {
     }
 
     private func call(_ transport: any WebModelTransport, operation: String,
-                      params: [String: String]) async throws -> [String: Any] {
+                      params: [String: String], submissionFailureSink: ChatSubmissionFailureDiagnosticSink? = nil) async throws -> [String: Any] {
         let data = try JSONSerialization.data(withJSONObject: params)
-        let result = try await transport.request(operation: operation, params: data)
+        let result: Data
+        if let submissionFailureSink {
+            result = try await transport.request(operation: operation, params: data,
+                onChatSubmissionFailure: { submissionFailureSink.record($0) })
+        } else { result = try await transport.request(operation: operation, params: data) }
         guard let value = try JSONSerialization.jsonObject(with: result) as? [String: Any] else { throw Failure.invalidRequest }
         return value
     }

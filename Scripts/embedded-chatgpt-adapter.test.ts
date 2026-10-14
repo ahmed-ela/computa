@@ -467,7 +467,7 @@ describe('ChatGPT per-round canonical submission ownership', () => {
   test('submission failure diagnostics distinguish exact physical replacements from content and native pin mismatch', async () => {
     const fields = ['kind', 'action', 'stage', 'requestedSequence', 'recordSequence', 'userCount', 'contextMatches',
       'nativePinMatches', 'pendingRecord', 'lastVerifiedRecord', 'rootSame', 'bodySame', 'oldRootConnected',
-      'oldBodyConnected', 'currentRootConnected', 'currentBodyConnected', 'canonicalMatches'].sort();
+      'oldBodyConnected', 'currentRootConnected', 'currentBodyConnected', 'canonicalMatches', 'oldRootPresent', 'oldBodyPresent', 'recordPhase', 'contextChecks'].sort();
     for (const mutation of ['whole_root', 'body_only', 'content', 'native_pin']) {
       const x = await chatTurnFixture(); const first = await x.dispatch('PRIVATE_FIRST_CANARY'); x.answer('First'); await x.observe(first);
       const second = await x.dispatch('PRIVATE_SECOND_CANARY'); x.answer('Second'); await x.observe(second);
@@ -492,12 +492,78 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         oldRootConnected: mutation !== 'whole_root', oldBodyConnected: mutation !== 'whole_root' && mutation !== 'body_only',
         currentRootConnected: true, currentBodyConnected: true });
       const encoded = JSON.stringify(diagnostic);
-      expect(encoded.length).toBeLessThanOrEqual(960);
+      expect(encoded.length).toBeLessThanOrEqual(2_048);
       for (const privateValue of ['PRIVATE_FIRST_CANARY', 'PRIVATE_SECOND_CANARY', second.fingerprint, second.marker, x.f.document.URL])
         expect(encoded).not.toContain(privateValue);
       expect(rejected).not.toHaveProperty('submissionProof'); expect(rejected).not.toHaveProperty('answerComplete', true);
       expect(state.revoked).toBe(true); expect(x.send.clicks).toBe(2);
     }
+  });
+
+  test('first pending context refusal distinguishes absent physical binding from a remount without another Send', async () => {
+    const x = await chatTurnFixture(); const first = await x.dispatch('PRIVATE_UNBOUND_CONTEXT_CANARY');
+    const state: any = x.f.world.__computaChatSubmissionState, record = state.pending;
+    expect(record.root).toBeNull(); expect(record.body).toBeNull(); expect(record.phase).toBe('send_claimed');
+    expect(state.lastVerified).toBeNull();
+    const root = x.f.document.querySelectorAll('article[data-turn="user"]')[0], body = root.children[0];
+    state.revoked = true;
+    const rejected = await x.observe(first);
+    expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(rejected.submissionDiagnostic).toMatchObject({ stage: 'observe_context', pendingRecord: true, lastVerifiedRecord: false,
+      recordPhase: 'send_claimed', oldRootPresent: false, oldBodyPresent: false, rootSame: false, bodySame: false,
+      oldRootConnected: false, oldBodyConnected: false, currentRootConnected: true, currentBodyConnected: true,
+      nativePinMatches: true, canonicalMatches: true,
+      contextChecks: { invocationClaimed: true, invocationCurrent: true, statePresent: true, stateNotRevoked: false,
+        stateDocumentMatches: null, productProofVerified: null, temporaryVerified: null, modelChoiceMatches: null } });
+    expect(record.root).toBeNull(); expect(record.body).toBeNull(); expect(state.lastVerified).toBeNull();
+    expect(x.f.document.querySelectorAll('article[data-turn="user"]')[0]).toBe(root); expect(root.children[0]).toBe(body);
+    expect(rejected).not.toHaveProperty('submissionProof'); expect(rejected).not.toHaveProperty('answerComplete', true);
+    const encoded = JSON.stringify(rejected.submissionDiagnostic);
+    for (const privateValue of ['PRIVATE_UNBOUND_CONTEXT_CANARY', first.marker, first.fingerprint, x.f.document.URL]) expect(encoded).not.toContain(privateValue);
+    expect(x.send.clicks).toBe(1);
+  });
+
+  test('context observation preserves operand order short circuiting and product getter call count', () => {
+    const start = source.indexOf('const chatGPTSubmissionContextCheckKeys =');
+    const end = source.indexOf('function chatGPTInitialSubmissionRoute(state)', start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const run = new Function('env', `
+      const { document, window, location, input, globalThis, lease } = env;
+      const websiteChatInvocationLease = lease;
+      const chatGPTProductModeProof = () => { env.calls.push('product'); return env.product; };
+      const chatGPTTemporaryVerified = () => { env.calls.push('temporary'); return env.temporary; };
+      const websiteModelChoiceEqual = () => { env.calls.push('model'); return env.model; };
+      const chatGPTInitialSubmissionRoute = () => { env.calls.push('route'); return env.route; };
+      ${source.slice(start, end)}
+      const result = chatGPTSubmissionContext(env.state, env.initial === true);
+      return { result, checks: chatGPTSubmissionContextFailure?.checks ?? null };
+    `);
+    const make = () => {
+      const document = { URL: 'https://chatgpt.com/?temporary-chat=true' }, lease = {}, window: any = {}; window.top = window;
+      const state = { document, owner: 'OWNER', revoked: false, firstMarker: 'MARKER', modelChoice: {} };
+      const input = { provider: 'chatgpt', ownerToken: 'OWNER', expectedURL: document.URL, expectedFirstUserMarker: 'MARKER', expectedModelChoice: {} };
+      return { document, window, location: { origin: 'https://chatgpt.com' }, input, state, lease,
+        globalThis: { __computaChatActiveInvocation: lease, __computaChatSubmissionState: state, __computaModelOwner: 'OWNER' },
+        calls: [] as string[], product: {}, temporary: true, model: true, route: true, initial: false };
+    };
+    const healthy = make(); expect(run(healthy)).toEqual({ result: true, checks: null });
+    expect(healthy.calls).toEqual(['product', 'temporary', 'model']);
+    const revoked = make(); revoked.state.revoked = true;
+    Object.defineProperty(revoked.state, 'document', { get() { throw new Error('PRIVATE_UNREACHED_GETTER'); } });
+    const refused = run(revoked); expect(refused.result).toBe(false);
+    expect(refused.checks).toMatchObject({ stateNotRevoked: false, stateDocumentMatches: null, productProofVerified: null, modelChoiceMatches: null });
+    expect(revoked.calls).toEqual([]);
+    const product = make(); product.product = null as any;
+    expect(run(product).checks).toMatchObject({ productProofVerified: false, temporaryVerified: null, modelChoiceMatches: null });
+    expect(product.calls).toEqual(['product']);
+    const temporary = make(); temporary.temporary = false;
+    expect(run(temporary).checks).toMatchObject({ productProofVerified: true, temporaryVerified: false, modelChoiceMatches: null });
+    expect(temporary.calls).toEqual(['product', 'temporary']);
+    const model = make(); model.model = false;
+    expect(run(model).checks).toMatchObject({ productProofVerified: true, temporaryVerified: true, modelChoiceMatches: false });
+    expect(model.calls).toEqual(['product', 'temporary', 'model']);
+    const route = make(); route.document.URL = 'https://chatgpt.com/c/local-chatgpt%3Afixture'; route.initial = true;
+    expect(run(route).result).toBe(true); expect(route.calls).toEqual(['route', 'product', 'temporary', 'model']);
   });
 
   test('diagnostic capture can fail without changing the original refusal or making another input', async () => {

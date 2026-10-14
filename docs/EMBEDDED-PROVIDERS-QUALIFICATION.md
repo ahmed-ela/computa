@@ -1,5 +1,27 @@
 # Embedded website provider qualification
 
+## Build118 original-read ChatGPT diagnostic preparation
+
+The ChatGPT ownership failure in build117 needs the first failed context check
+from the original admitted native read. The candidate records a finite,
+short-circuited boolean prefix and distinguishes unbound message pointers from
+detached pointers. Its synchronous, inference-scoped sidecar is attached only
+to the exact current failed native journal. It contains no prompt, reply, URL,
+credentials or submission proof; later cleanup cannot replace it.
+
+Ownership, model selection, request counts, retry allowances and deadlines are
+unchanged. The HTTP error is unchanged. All 268 ChatGPT adapter tests passed
+with 7,317 assertions; nine selected native diagnostic, ownership, cancellation
+and continuation tests passed. An earlier test wrongly assumed that skipping
+the caller's first poll meant Send had not bound the body. The final fixture
+explicitly establishes a verified body before revocation and proves that failed
+cleanup retains its exact private view while preserving the human tab.
+
+These results qualify diagnostic capture, not a behavioral repair or an
+installed provider task. The build117 failed health check and its unconfirmed
+cleanup remain unchanged. A fresh, unarmed build118 diagnostic check will use
+its own marker and receipts after the signed build is verified.
+
 ## Build117 V32 installed outcomes
 
 Signed Computa 0.7.0 (117), source `95587e82`, is installed and running.

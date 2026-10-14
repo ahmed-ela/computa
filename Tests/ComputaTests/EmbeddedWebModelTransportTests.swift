@@ -613,6 +613,73 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testOriginalChatContextReadReturnsOneFiniteSidecarBeforeThrowAndCleanupCannotReplaceIt() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "PRIVATE_CONTEXT_READ_CANARY")
+        defer { fixture.shutdown() }
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        // Bind the body explicitly before revocation. Send's fresh model read
+        // may already bind it, so skipping the first poll cannot prove pending.
+        let phase = try await evaluate(view, "return globalThis.__computaChatSubmissionState.lastVerified?.phase;",
+            world: .world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(phase as? String, "verified")
+        _ = try await evaluate(view, "globalThis.__computaChatSubmissionState.revoked = true; return true;",
+            world: .world(name: "computa-chatgpt-model-v1"))
+        let sink = ChatSubmissionFailureDiagnosticSink()
+        do {
+            _ = try await fixture.transport.request(operation: "webProviderPoll",
+                params: JSONSerialization.data(withJSONObject: ["sessionToken": token]),
+                onChatSubmissionFailure: { sink.record($0) })
+            XCTFail("Diagnostic capture must preserve the original ownership failure")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+        let diagnostic = try XCTUnwrap(sink.snapshot).dictionary
+        XCTAssertEqual(diagnostic["stage"] as? String, "observe_context")
+        XCTAssertEqual(diagnostic["oldRootPresent"] as? Bool, true)
+        XCTAssertEqual(diagnostic["oldBodyPresent"] as? Bool, true)
+        XCTAssertEqual(diagnostic["recordPhase"] as? String, "verified")
+        let checks = try XCTUnwrap(diagnostic["contextChecks"] as? [String: Any])
+        XCTAssertEqual(checks["stateNotRevoked"] as? Bool, false)
+        XCTAssertTrue(checks["stateDocumentMatches"] is NSNull)
+        let safe = String(decoding: try JSONSerialization.data(withJSONObject: diagnostic), as: UTF8.self)
+        for secret in ["PRIVATE_CONTEXT_READ_CANARY", token, "https:", "Computa session marker"] { XCTAssertFalse(safe.contains(secret)) }
+        let duplicate = ChatSubmissionFailureDiagnosticSink()
+        do {
+            _ = try await fixture.transport.request(operation: "webProviderPoll",
+                params: JSONSerialization.data(withJSONObject: ["sessionToken": token]),
+                onChatSubmissionFailure: { duplicate.record($0) })
+            XCTFail("The original terminal guard still refuses another poll")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+        XCTAssertNil(duplicate.snapshot)
+        let cleanup = try await fixture.transport.request(operation: "webProviderFinish",
+            params: JSONSerialization.data(withJSONObject: ["sessionToken": token]),
+            onChatSubmissionFailure: { duplicate.record($0) })
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: cleanup) as? [String: Any])?["cleanup"] as? String, "failed")
+        XCTAssertNil(duplicate.snapshot, "A later cleanup read is not the original failed inference")
+        let errorBody = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptSubmission))
+        XCTAssertFalse(String(decoding: errorBody, as: UTF8.self).contains("contextChecks"))
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await assertHumanTabIntact(fixture, retaining: ownedID)
+    }
+
+    func testChatContextSidecarCannotPublishFromAReadWhoseOwnedViewWasRemovedBeforeValidation() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "PRIVATE_STALE_CONTEXT", bindFirstRead: false)
+        defer { fixture.shutdown() }
+        let tab = try XCTUnwrap(fixture.createdTabs.last)
+        _ = try await evaluate(view, "globalThis.__computaChatSubmissionState.revoked = true; return true;",
+            world: .world(name: "computa-chatgpt-model-v1"))
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect" { fixture.browser.closeTab(tab) }
+        }
+        let sink = ChatSubmissionFailureDiagnosticSink()
+        do {
+            _ = try await fixture.transport.request(operation: "webProviderPoll",
+                params: JSONSerialization.data(withJSONObject: ["sessionToken": token]),
+                onChatSubmissionFailure: { sink.record($0) })
+            XCTFail("The stale view remains rejected")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
+        XCTAssertNil(sink.snapshot)
+        try await assertHumanTabIntact(fixture)
+    }
+
     private func boundInspectionFixture(prompt: String, bindFirstRead: Bool = true) async throws -> (Fixture, String, WKWebView) {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
         do {

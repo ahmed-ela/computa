@@ -27,6 +27,84 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testOriginalChatReadFailureSidecarIsBoundToExactNativeFailedJournalWithoutChangingErrorOrRequests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-context-journal-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport()
+        let diagnostic = try await chatContextFixtureDiagnostic()
+        let transport = ChatContextSidecarFixtureTransport(base: WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice), diagnostic: diagnostic)
+        await server.configureEmbeddedTransport(transport)
+        let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+        do {
+            _ = try await server.fixtureInfer(request, taskID: task, threadID: thread, turnID: turn)
+            XCTFail("The sidecar does not recover or admit a failed inference")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+        let journal = try Data(contentsOf: root.appendingPathComponent("evidence/transactions/" + task + "/" + turn + ".jsonl"))
+            .split(separator: 0x0A).map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]) }
+        let failed = try XCTUnwrap(journal.last)
+        XCTAssertEqual(failed["phase"] as? String, "failed")
+        XCTAssertEqual(failed["taskID"] as? String, task); XCTAssertEqual(failed["threadID"] as? String, thread); XCTAssertEqual(failed["turnID"] as? String, turn)
+        XCTAssertEqual(failed["errorCode"] as? String, "website_ownership_unverified")
+        let saved = try XCTUnwrap(failed["submissionFailureDiagnostic"] as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: saved).isEqual(to: diagnostic.dictionary))
+        XCTAssertTrue(journal.dropLast().allSatisfy { $0["submissionFailureDiagnostic"] == nil })
+        XCTAssertFalse(journal.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") })
+        let ledger = await base.operations()
+        XCTAssertEqual(ledger, ["webProviderStart", "webProviderSend"])
+        let errorBody = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptSubmission))
+        XCTAssertFalse(String(decoding: errorBody, as: UTF8.self).contains("submissionFailureDiagnostic"))
+        let issues = await server.finish(taskID: task); XCTAssertTrue(issues.isEmpty)
+        let after = await base.operations(); XCTAssertEqual(after, ["webProviderStart", "webProviderSend", "webProviderFinish"])
+    }
+
+    func testUnavailableOrStaleChatContextSidecarCannotAlterOriginalFailureOrAttachToAnotherNativeContext() async throws {
+        for stale in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-context-stale-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport(), replacement = FixtureWebModelTransport()
+            let diagnostic = try await chatContextFixtureDiagnostic()
+            let beforeFailure: (@Sendable () async -> Void)?
+            if stale {
+                beforeFailure = { await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(replacement, defaultChatChoice: syntheticChatGPTChoice)) }
+            } else { beforeFailure = nil }
+            let transport = ChatContextSidecarFixtureTransport(base: WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice),
+                diagnostic: stale ? diagnostic : nil, beforeFailure: beforeFailure)
+            await server.configureEmbeddedTransport(transport)
+            let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+            do {
+                _ = try await server.fixtureInfer(request, taskID: task, threadID: thread, turnID: turn)
+                XCTFail("The original failed task stays failed")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+            let journal = try Data(contentsOf: root.appendingPathComponent("evidence/transactions/" + task + "/" + turn + ".jsonl"))
+                .split(separator: 0x0A).map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]) }
+            XCTAssertEqual(journal.last?["phase"] as? String, "failed")
+            XCTAssertTrue(journal.allSatisfy { $0["submissionFailureDiagnostic"] == nil })
+            let ledger = await base.operations(); XCTAssertEqual(ledger, ["webProviderStart", "webProviderSend"])
+            let newLedger = await replacement.operations(); XCTAssertTrue(newLedger.isEmpty)
+            _ = await server.finish(taskID: task)
+        }
+    }
+
+    private func chatContextFixtureDiagnostic() async throws -> ChatSubmissionFailureDiagnostic {
+        let value = await MainActor.run {
+            let flags = ["contextMatches", "nativePinMatches", "pendingRecord", "lastVerifiedRecord", "rootSame", "bodySame",
+                         "oldRootConnected", "oldBodyConnected", "currentRootConnected", "currentBodyConnected", "canonicalMatches", "oldRootPresent", "oldBodyPresent"]
+            var raw: [String: Any] = Dictionary(uniqueKeysWithValues: flags.map { ($0, false as Any) })
+            raw.merge(["kind": "chatgpt_submission_v1", "action": "inspect", "stage": "observe_context", "requestedSequence": 1,
+                       "recordSequence": 1, "userCount": 1, "recordPhase": "send_claimed"]) { _, new in new }
+            let keys = ["invocationClaimed", "invocationCurrent", "statePresent", "stateNotRevoked", "stateDocumentMatches",
+                        "stateOwnerMatches", "stateCurrent", "globalOwnerMatches", "topFrame", "providerMatches",
+                        "originMatches", "urlMatches", "firstMarkerMatches", "productProofVerified", "temporaryVerified", "modelChoiceMatches"]
+            raw["contextChecks"] = Dictionary(uniqueKeysWithValues: keys.enumerated().map { index, key in
+                (key, index < 3 ? true as Any : index == 3 ? false as Any : NSNull())
+            })
+            return ChatSubmissionFailureDiagnostic(adapterValue: raw)
+        }
+        return try XCTUnwrap(value)
+    }
+
     private let request = Data("{\"model\":\"\(syntheticChatGPTModelID)\",\"input\":[{\"role\":\"user\",\"content\":\"Say OK\"}],\"tools\":[],\"stream\":true}".utf8)
 
     func testEveryInferenceClosesItsFreshSessionBeforeReturningAndFinishPreservesProof() async throws {
@@ -2064,5 +2142,30 @@ private actor InspectorServerFixtureTransport: WebModelTransport {
     }
     func observations() -> (grants: [Bool], stillCurrent: Bool) {
         (grants, authorization?.matches(taskID: task, threadID: thread, turnID: turn) ?? false)
+    }
+}
+
+private actor ChatContextSidecarFixtureTransport: WebModelTransport {
+    let base: WebsiteInferenceFixtureTransport
+    let diagnostic: ChatSubmissionFailureDiagnostic?
+    let beforeFailure: (@Sendable () async -> Void)?
+
+    init(base: WebsiteInferenceFixtureTransport, diagnostic: ChatSubmissionFailureDiagnostic?,
+         beforeFailure: (@Sendable () async -> Void)? = nil) {
+        self.base = base; self.diagnostic = diagnostic; self.beforeFailure = beforeFailure
+    }
+
+    func request(operation: String, params: Data) async throws -> Data {
+        try await request(operation: operation, params: params, onChatSubmissionFailure: nil)
+    }
+
+    func request(operation: String, params: Data,
+                 onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
+        if operation == "webProviderPoll" {
+            if let diagnostic { onChatSubmissionFailure?(diagnostic) }
+            if let beforeFailure { await beforeFailure() }
+            throw EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptSubmission)
+        }
+        return try await base.request(operation: operation, params: params)
     }
 }

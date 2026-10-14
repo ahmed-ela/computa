@@ -5,6 +5,39 @@ import Foundation
 import OSLog
 @preconcurrency import WebKit
 
+/// A finite diagnostic returned by the original admitted native read. It has
+/// no model/browser operation and cannot supply submission or response proof.
+struct ChatSubmissionFailureDiagnostic: Sendable {
+    private let encoded: Data
+
+    @MainActor
+    init?(adapterValue: Any) {
+        guard let safe = EmbeddedWebModelTransport.sanitizedChatSubmissionDiagnostic(adapterValue) else { return nil }
+        encoded = Data(safe.utf8)
+    }
+
+    var dictionary: [String: Any] {
+        (try? JSONSerialization.jsonObject(with: encoded) as? [String: Any]) ?? [:]
+    }
+}
+
+/// One inference-local, synchronous callback cell. No identity, page data or
+/// callback from another inference can be merged into this cell.
+final class ChatSubmissionFailureDiagnosticSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var first: ChatSubmissionFailureDiagnostic?
+
+    func record(_ diagnostic: ChatSubmissionFailureDiagnostic) {
+        lock.lock(); defer { lock.unlock() }
+        if first == nil { first = diagnostic }
+    }
+
+    var snapshot: ChatSubmissionFailureDiagnostic? {
+        lock.lock(); defer { lock.unlock() }
+        return first
+    }
+}
+
 /// Inference-only browser access. The website has no tool or native IPC handlers.
 /// Prompts are data passed to a fixed DOM program in an isolated content world.
 @MainActor
@@ -246,6 +279,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let created = ContinuousClock.now
         var state = "loading"
         var terminalFailure: Failure?
+        struct SavedChatSubmissionFailure {
+            let generation: UUID
+            let sequence: Int
+            let diagnostic: ChatSubmissionFailureDiagnostic
+        }
+        var firstChatSubmissionFailure: SavedChatSubmissionFailure?
         // Claimed before dispatch, including calls whose reply is lost. A
         // checkpoint can never turn an ambiguous adapter call into no input.
         var providerAdapterEverDispatched = false
@@ -459,6 +498,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     func request(operation: String, params: Data) async throws -> Data {
+        try await request(operation: operation, params: params, onChatSubmissionFailure: nil)
+    }
+
+    func request(operation: String, params: Data,
+                 onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
         guard let values = try JSONSerialization.jsonObject(with: params) as? [String: String] else {
             throw Failure.invalidRequest
         }
@@ -593,6 +637,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.terminalFailure = failure
                 session.state = "failed"
                 session.initialReadRetry = nil
+            }
+            // This callback belongs to this original request's returned error,
+            // not a queued phase notification or a later cleanup inspection.
+            if !Task.isCancelled, let onChatSubmissionFailure,
+               (error as? Failure) == .ownershipFailure(.javaScriptSubmission),
+               session.provider == .chatgpt, let saved = session.firstChatSubmissionFailure,
+               saved.sequence == session.sequence, sessions[session.token] === session,
+               browser.webView(for: session.tabID) === session.view,
+               browser.documentGeneration(for: session.tabID) == saved.generation {
+                session.firstChatSubmissionFailure = nil
+                onChatSubmissionFailure(saved.diagnostic)
             }
             throw error
         }
@@ -2485,6 +2540,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
                 if session.usesSubmissionOwnership, observed["detail"] as? String == "submission_message" {
+                    // Freeze only the original returned read after the existing
+                    // callback ownership/generation/route checks, before throw.
+                    // Cleanup cannot replace it and no extra page read occurs.
+                    if provider == .chatgpt, ["inspect", "verifyModel", "verifyProductMode"].contains(action),
+                       session.state == "running", session.submitted, session.terminalFailure == nil,
+                       session.firstChatSubmissionFailure == nil, sessions[session.token] === session,
+                       let diagnostic = observed["submissionDiagnostic"].flatMap({ ChatSubmissionFailureDiagnostic(adapterValue: $0) }) {
+                        session.firstChatSubmissionFailure = .init(generation: generation,
+                            sequence: session.sequence, diagnostic: diagnostic)
+                    }
                     logSubmissionFailure(session, action: action, stage: .adapterRejected, observed: observed)
                 }
                 if observed["detail"] as? String == "first_user_message" {
@@ -3001,8 +3066,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     static func sanitizedChatSubmissionDiagnostic(_ raw: Any?) -> String? {
         let flags = ["contextMatches", "nativePinMatches", "pendingRecord", "lastVerifiedRecord", "rootSame", "bodySame",
-                     "oldRootConnected", "oldBodyConnected", "currentRootConnected", "currentBodyConnected", "canonicalMatches"]
-        let keys = Set(flags + ["kind", "action", "stage", "requestedSequence", "recordSequence", "userCount"])
+                     "oldRootConnected", "oldBodyConnected", "currentRootConnected", "currentBodyConnected", "canonicalMatches", "oldRootPresent", "oldBodyPresent"]
+        let keys = Set(flags + ["kind", "action", "stage", "requestedSequence", "recordSequence", "userCount", "recordPhase", "contextChecks"])
         guard let value = raw as? [String: Any], Set(value.keys) == keys,
               value["kind"] as? String == "chatgpt_submission_v1",
               let action = value["action"] as? String,
@@ -3022,7 +3087,32 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         for key in flags {
             guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }; safe[key] = flag
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 960 else { return nil }
+        guard let phase = value["recordPhase"] as? String,
+              ["none", "prepared", "send_claimed", "verified", "unknown"].contains(phase) else { return nil }
+        safe["recordPhase"] = phase
+        let checkKeys = ["invocationClaimed", "invocationCurrent", "statePresent", "stateNotRevoked", "stateDocumentMatches",
+                         "stateOwnerMatches", "stateCurrent", "globalOwnerMatches", "topFrame", "providerMatches",
+                         "originMatches", "urlMatches", "firstMarkerMatches", "productProofVerified", "temporaryVerified", "modelChoiceMatches"]
+        if value["contextChecks"] is NSNull {
+            safe["contextChecks"] = NSNull()
+        } else {
+            guard let checks = value["contextChecks"] as? [String: Any], Set(checks.keys) == Set(checkKeys) else { return nil }
+            var checked: [String: Any] = [:], stopped = false
+            for key in checkKeys {
+                if stopped {
+                    guard checks[key] is NSNull else { return nil }; checked[key] = NSNull()
+                } else {
+                    guard let flag = firstUserDiagnosticBool(checks[key]) else { return nil }
+                    checked[key] = flag
+                    if !flag { stopped = true }
+                }
+            }
+            guard stopped else { return nil }
+            safe["contextChecks"] = checked
+        }
+        // This enlarged diagnostic-only bound accommodates sixteen nullable
+        // checks; submission/body/request/journal limits are unchanged.
+        guard let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 2_048 else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
 
