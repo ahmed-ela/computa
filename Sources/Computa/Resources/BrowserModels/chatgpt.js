@@ -1946,6 +1946,62 @@ function chatGPTResponseLoadFailed(visible) {
   }
   return false;
 }
+function chatGPTResourceTimingDiagnostic(phase) {
+  // Resource entries are observations of ended fetches, not upload sizes or
+  // dispatch/acceptance proof. Missing entries remain explicitly inconclusive.
+  try {
+    const claim = globalThis.__computaChatResourceTimingClaim;
+    if (!claim || claim.document !== document || claim.owner !== input.ownerToken
+      || globalThis.__computaModelOwner !== input.ownerToken
+      || claim.userCount !== globalThis.__computaModelLastSubmissionCount
+      || !Number.isInteger(claim.sequence) || claim.sequence !== claim.userCount + 1
+      || claim.sequence < 1 || claim.sequence > 10_000) return null;
+    const result = { kind: 'chatgpt_resource_timing_v1', phase, sequence: claim.sequence,
+      available: false, sendMarkAvailable: false, scanTruncated: false, scannedCount: 0,
+      conversationCount: 0, preparationCount: 0, observations: [], observationsTruncated: false,
+      absenceInconclusive: true };
+    const timing = window.performance;
+    if (!timing || typeof timing.now !== 'function' || typeof timing.getEntriesByType !== 'function') return result;
+    const now = timing.now();
+    if (!Number.isFinite(now) || now < 0) return result;
+    result.available = true;
+    if (!Number.isFinite(claim.mark) || claim.mark < 0 || claim.mark > now) return result;
+    result.sendMarkAvailable = true;
+    const entries = timing.getEntriesByType('resource');
+    if (!Array.isArray(entries)) { result.available = false; return result; }
+    result.scanTruncated = entries.length > 256;
+    const scanned = entries.slice(-256); result.scannedCount = scanned.length;
+    const byteCount = value => typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 2_147_483_647;
+    for (const entry of scanned) {
+      if (!entry || typeof entry.name !== 'string' || entry.name.length > 2_048
+        || !Number.isFinite(entry.startTime) || entry.startTime < claim.mark || entry.startTime > now
+        || !Number.isFinite(entry.responseEnd) || entry.responseEnd <= 0
+        || entry.responseEnd < entry.startTime || entry.responseEnd > now
+        || !Number.isFinite(entry.duration) || entry.duration < 0 || entry.duration > 3_600_000
+        || entry.startTime - claim.mark > 3_600_000
+        || !byteCount(entry.transferSize) || !byteCount(entry.encodedBodySize) || !byteCount(entry.decodedBodySize)) continue;
+      let endpoint;
+      try {
+        const url = new URL(entry.name);
+        if (url.origin !== 'https://chatgpt.com' || url.username || url.password) continue;
+        endpoint = url.pathname === '/backend-api/f/conversation' ? 'conversation'
+          : url.pathname === '/backend-api/f/conversation/prepare' ? 'preparation' : null;
+      } catch { continue; }
+      if (!endpoint) continue;
+      const responseStatusAvailable = typeof entry.responseStatus === 'number';
+      if (responseStatusAvailable && (!Number.isInteger(entry.responseStatus) || entry.responseStatus < 0 || entry.responseStatus > 599)) continue;
+      if (endpoint === 'conversation') result.conversationCount++; else result.preparationCount++;
+      result.observations.push({ endpoint,
+        initiator: ['fetch', 'xmlhttprequest'].includes(entry.initiatorType) ? entry.initiatorType : 'other',
+        startOffsetMs: Math.floor(entry.startTime - claim.mark), durationMs: Math.floor(entry.duration),
+        transferBytes: entry.transferSize, encodedBodyBytes: entry.encodedBodySize, decodedBodyBytes: entry.decodedBodySize,
+        responseStatusAvailable, responseStatus: responseStatusAvailable ? entry.responseStatus : null });
+    }
+    result.observationsTruncated = result.observations.length > 4;
+    result.observations = result.observations.slice(-4);
+    return result;
+  } catch { return null; }
+}
 function chatGPTFailedPageDiagnostic() {
   // A deadline observation is deliberately independent of model menus,
   // first-message hashing and response extraction. It reads only this owned
@@ -2170,7 +2226,9 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
   if (action === "inspect") {
     const signIn = !composer && !!labelled(document.querySelectorAll('a, button'), /^(?:Log in|Sign in)(?:\s|$)/i);
-    return { ...state, signIn, debugStructure: chatGPTStructure(visible) };
+    const resourceTimingDiagnostic = answerComplete ? chatGPTResourceTimingDiagnostic('completion') : null;
+    return { ...state, signIn, debugStructure: chatGPTStructure(visible),
+      ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };
   }
   if (action === "enableTemporary") {
     if (temporary) return { ...state, enabled: true };
@@ -2282,8 +2340,14 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       globalThis.__computaChatSubmissionSize = Object.freeze({ document, owner: input.ownerToken, userCount,
         utf16Count: prompt.length, utf8Count: new TextEncoder().encode(prompt).length });
     } catch { /* Measurement failure cannot change the existing Send behavior. */ }
+    try {
+      const mark = typeof window.performance?.now === 'function' ? window.performance.now() : null;
+      globalThis.__computaChatResourceTimingClaim = Object.freeze({ document, owner: input.ownerToken,
+        userCount, sequence: userCount + 1, mark: Number.isFinite(mark) && mark >= 0 ? mark : null });
+    } catch { /* A missing clock cannot alter submission behavior. */ }
     send.click();
-    return { submitted: true };
+    const resourceTimingDiagnostic = chatGPTResourceTimingDiagnostic('send');
+    return { submitted: true, ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };
   }
   if (action === "stop") { if (enabled(stop)) stop.click(); return { stopped: !!stop }; }
   return { error: "unknown_action" };
@@ -2299,7 +2363,10 @@ if (globalThis.__computaModelOwner !== input.ownerToken) {
     globalThis.__computaModelOwner = input.ownerToken;
   else return { error: "document_changed", detail: "owner_token" };
 }
-if (input.action === 'failedPageDiagnostic') return { failureDiagnostic: chatGPTFailedPageDiagnostic() };
+if (input.action === 'failedPageDiagnostic') {
+  const resourceTimingDiagnostic = chatGPTResourceTimingDiagnostic('failure');
+  return { failureDiagnostic: chatGPTFailedPageDiagnostic(), ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };
+}
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
   const signal = { ownerToken: input.ownerToken, observer: null };
   signal.observer = new MutationObserver(records => {

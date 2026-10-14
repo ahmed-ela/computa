@@ -44,7 +44,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let (fixture, token, view) = try await boundInspectionFixture(prompt: prompt, bindFirstRead: false)
         defer { fixture.shutdown() }
         var diagnostics: [String] = []
+        var resourceDiagnostics: [String] = []
         fixture.transport.setFailedPageDiagnosticObserverForTesting { diagnostics.append($0) }
+        fixture.transport.setResourceTimingDiagnosticObserverForTesting { resourceDiagnostics.append($0) }
         // The first healthy read starts its completion candidate now, rather
         // than depending on how long previous fixture setup was scheduled.
         _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
@@ -81,6 +83,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let outboundShape = "\(prompt)\n\nComputa session marker: \(String(repeating: "0", count: 36))"
         XCTAssertEqual(observation["outboundUTF16Count"] as? Int, outboundShape.utf16.count)
         XCTAssertEqual(observation["outboundUTF8Count"] as? Int, outboundShape.utf8.count)
+        XCTAssertEqual(resourceDiagnostics.count, 1)
+        let resource = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(resourceDiagnostics.first).utf8)) as? [String: Any])
+        XCTAssertEqual(resource["phase"] as? String, "failure"); XCTAssertEqual(resource["sequence"] as? Int, 1)
+        XCTAssertEqual(resource["absenceInconclusive"] as? Bool, true)
         XCTAssertFalse(safe.contains("PRIVATE_")); XCTAssertFalse(safe.contains(token)); XCTAssertFalse(safe.contains("chatgpt.com"))
         try await assertHumanTabIntact(fixture)
     }
@@ -122,12 +128,99 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testResourceTimingProjectionRequiresExactPhaseSequenceAndFiniteResponseMetadata() throws {
+        let sample: [String: Any] = ["endpoint": "conversation", "initiator": "fetch", "startOffsetMs": 1, "durationMs": 50,
+            "transferBytes": 130, "encodedBodyBytes": 100, "decodedBodyBytes": 150, "responseStatusAvailable": true, "responseStatus": 200]
+        let valid: [String: Any] = ["kind": "chatgpt_resource_timing_v1", "phase": "completion", "sequence": 1,
+            "available": true, "sendMarkAvailable": true, "scanTruncated": false, "scannedCount": 1,
+            "conversationCount": 1, "preparationCount": 0, "observations": [sample],
+            "observationsTruncated": false, "absenceInconclusive": true]
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(valid, phase: "completion", sequence: 1))
+        XCTAssertLessThanOrEqual(safe.utf8.count, 2_048)
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(valid, phase: "failure", sequence: 1))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(valid, phase: "completion", sequence: 2))
+        for key in valid.keys {
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(missing, phase: "completion", sequence: 1), key)
+        }
+        for key in ["name", "url", "headers", "prompt", "owner"] {
+            var extra = valid; extra[key] = "PRIVATE_CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(extra, phase: "completion", sequence: 1))
+            var nested = sample; nested[key] = "PRIVATE_CANARY"; extra = valid; extra["observations"] = [nested]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(extra, phase: "completion", sequence: 1))
+        }
+        for (key, bad): (String, Any) in [("sequence", true), ("scannedCount", 257), ("conversationCount", true),
+                                        ("preparationCount", 2), ("available", false), ("sendMarkAvailable", false),
+                                        ("scanTruncated", true), ("observationsTruncated", true), ("absenceInconclusive", false)] {
+            var invalid = valid; invalid[key] = bad
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(invalid, phase: "completion", sequence: 1), key)
+        }
+        for (key, bad): (String, Any) in [("endpoint", "PRIVATE_URL"), ("initiator", "PRIVATE_HEADER"),
+                                        ("durationMs", true), ("startOffsetMs", -1), ("durationMs", 3_600_001),
+                                        ("transferBytes", 2_147_483_648), ("encodedBodyBytes", 1.5),
+                                        ("responseStatusAvailable", 1), ("responseStatus", true), ("responseStatus", 600)] {
+            var nested = sample; nested[key] = bad; var invalid = valid; invalid["observations"] = [nested]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(invalid, phase: "completion", sequence: 1), key)
+        }
+        for status: Any in [0, NSNull()] {
+            var nested = sample; nested["responseStatusAvailable"] = !(status is NSNull); nested["responseStatus"] = status
+            var observation = valid; observation["observations"] = [nested]
+            XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(observation, phase: "completion", sequence: 1))
+        }
+        var absent = valid
+        for key in ["scannedCount", "conversationCount", "preparationCount"] { absent[key] = 0 }
+        absent["observations"] = [[String: Any]]()
+        for available in [true, false] {
+            absent["available"] = available; absent["sendMarkAvailable"] = available
+            XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(absent, phase: "completion", sequence: 1))
+        }
+        var capped = valid; capped["sequence"] = 10_000; capped["scannedCount"] = 256; capped["scanTruncated"] = true
+        capped["conversationCount"] = 256; capped["observationsTruncated"] = true
+        var maximum = sample
+        for key in ["startOffsetMs", "durationMs"] { maximum[key] = 3_600_000 }
+        for key in ["transferBytes", "encodedBodyBytes", "decodedBodyBytes"] { maximum[key] = 2_147_483_647 }
+        capped["observations"] = Array(repeating: maximum, count: 4)
+        let bounded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedResourceTimingDiagnostic(capped, phase: "completion", sequence: 10_000))
+        XCTAssertLessThanOrEqual(bounded.utf8.count, 2_048)
+        for offset in stride(from: 0, to: bounded.utf8.count, by: 512) {
+            let data = Data(bounded.utf8).subdata(in: offset..<min(offset + 512, bounded.utf8.count))
+            let line = "resourceTimingDiagnostic provider=chatgpt sequence=10000 phase=completion id=\(UUID().uuidString) part=4/4 base64=\(data.base64EncodedString())"
+            XCTAssertLessThanOrEqual(line.utf8.count, 960)
+        }
+    }
+
+    func testResourceTimingPublishesOwnedSendAndStableCompletionWithoutExtraInput() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt)); defer { fixture.shutdown() }
+        var diagnostics: [String] = []
+        fixture.transport.setResourceTimingDiagnosticObserverForTesting { diagnostics.append($0) }
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        XCTAssertEqual(diagnostics, [])
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "PRIVATE_RESOURCE_CANARY"])
+        _ = try await waitForState("complete", fixture.transport, token: token)
+        let records = try diagnostics.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        XCTAssertEqual(records.compactMap { $0["phase"] as? String }, ["send", "completion"])
+        for record in records {
+            XCTAssertEqual(record["sequence"] as? Int, 1); XCTAssertEqual(record["absenceInconclusive"] as? Bool, true)
+            XCTAssertEqual(record["available"] as? Bool, true); XCTAssertEqual(record["sendMarkAvailable"] as? Bool, true)
+        }
+        for diagnostic in diagnostics { XCTAssertFalse(diagnostic.contains("PRIVATE")); XCTAssertFalse(diagnostic.contains(token)); XCTAssertFalse(diagnostic.contains("https:")) }
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created"); XCTAssertEqual(diagnostics.count, 2)
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testDeadlineDiagnosticDiscardsAnOwnedViewRemovedBeforePublication() async throws {
         let (fixture, token, _) = try await boundInspectionFixture(prompt: "Discard a crossed diagnostic")
         defer { fixture.shutdown() }
         let ownedID = try XCTUnwrap(fixture.createdTabs.last)
         var diagnostics: [String] = []
+        var resourceDiagnostics: [String] = []
         fixture.transport.setFailedPageDiagnosticObserverForTesting { diagnostics.append($0) }
+        fixture.transport.setResourceTimingDiagnosticObserverForTesting { resourceDiagnostics.append($0) }
         fixture.transport.setBeforePageResultValidationForTesting { action in
             if action == "failedPageDiagnostic" { fixture.browser.closeTab(ownedID) }
         }
@@ -140,6 +233,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "failed")
         XCTAssertEqual(diagnostics, ["stale"])
+        XCTAssertEqual(resourceDiagnostics, [], "A crossed owned view cannot publish resource observations either")
         try await assertHumanTabIntact(fixture)
     }
 

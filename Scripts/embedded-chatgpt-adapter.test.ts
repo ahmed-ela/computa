@@ -454,6 +454,101 @@ describe('ChatGPT literal DOM failure diagnostics', () => {
   });
 });
 
+describe('ChatGPT resource timing finite diagnostic', () => {
+  const ended = (name = 'https://chatgpt.com/backend-api/f/conversation', changes: Record<string, unknown> = {}) => ({
+    name, initiatorType: 'fetch', startTime: 101.75, responseEnd: 151.9, duration: 50.15,
+    transferSize: 130, encodedBodySize: 100, decodedBodySize: 150, ...changes,
+  });
+  const sent = async (timing?: any) => {
+    const f = fixture({ response: false }); await f.inspect();
+    f.window.performance = timing;
+    const prompt = 'PRIVATE_TIMING_PROMPT\n\n' + markerLine, send = new Element('BUTTON', { 'aria-label': 'Send prompt' });
+    f.body.append(send); f.composer.text = prompt; f.world.__computaModelFirstPrompt = prompt;
+    const result = await f.submit(prompt); expect(result.submitted).toBe(true); expect(send.clicks).toBe(1);
+    return { f, prompt, send, result };
+  };
+  test('ended resource observations feature-detect status and publish at Send completion and failure without authority', async () => {
+    let now = 100.25, entries: any[] = [], reads = 0;
+    const { f, prompt, send, result } = await sent({ now: () => now, getEntriesByType: (kind: string) => { expect(kind).toBe('resource'); reads++; return entries; } });
+    expect(result.resourceTimingDiagnostic).toMatchObject({ phase: 'send', sequence: 1, available: true, sendMarkAvailable: true,
+      conversationCount: 0, observations: [], absenceInconclusive: true });
+    const claim = f.world.__computaChatResourceTimingClaim as any;
+    expect(Object.isFrozen(claim)).toBe(true); expect(claim.mark).toBe(100.25);
+    now = 200; entries = [ended(undefined, { responseStatus: 200 }), ended('https://chatgpt.com/backend-api/f/conversation/prepare', { initiatorType: 'xmlhttprequest' }),
+      ended(undefined, { responseStatus: 0, transferSize: 0, encodedBodySize: 0, decodedBodySize: 0 })];
+    f.appendUser(prompt); f.body.querySelector('main')!.append(f.answer.parentElement!);
+    const complete = await f.inspect({ expectedUserCounts: [1] });
+    expect(complete.firstUserVerified).toBe(true); expect(complete.answerComplete).toBe(true);
+    const diagnostic = complete.resourceTimingDiagnostic;
+    expect(diagnostic).toMatchObject({ phase: 'completion', sequence: 1, conversationCount: 2, preparationCount: 1,
+      scannedCount: 3, scanTruncated: false, observationsTruncated: false, absenceInconclusive: true });
+    expect(diagnostic.observations[0]).toEqual({ endpoint: 'conversation', initiator: 'fetch', startOffsetMs: 1, durationMs: 50,
+      transferBytes: 130, encodedBodyBytes: 100, decodedBodyBytes: 150, responseStatusAvailable: true, responseStatus: 200 });
+    expect(diagnostic.observations[1].responseStatusAvailable).toBe(false); expect(diagnostic.observations[1].responseStatus).toBeNull();
+    expect(diagnostic.observations[2].responseStatus).toBe(0); expect(diagnostic.absenceInconclusive).toBe(true);
+    const before = { clicks: send.clicks, observers: f.observers.length, timers: f.scheduledDelays.length, reads };
+    const failed = await f.diagnose();
+    expect(failed.resourceTimingDiagnostic).toEqual({ ...diagnostic, phase: 'failure' });
+    expect(failed).not.toHaveProperty('submissionProof'); expect(failed).not.toHaveProperty('firstUserVerified');
+    expect(send.clicks).toBe(before.clicks); expect(f.observers.length).toBe(before.observers); expect(f.scheduledDelays.length).toBe(before.timers);
+    expect(reads).toBe(before.reads + 1); expect(f.world.__computaChatResourceTimingClaim).toBe(claim);
+    for (const secret of ['PRIVATE', firstMarker, 'https:', 'backend-api', 'name', 'upload']) expect(JSON.stringify(failed.resourceTimingDiagnostic)).not.toContain(secret);
+  });
+  test('unavailable zero incomplete future and fractional premark entries remain inconclusive without a retry', async () => {
+    for (const unavailable of [undefined, { now: () => 100.25 }, { getEntriesByType: () => [] }]) {
+      const { f, send, result } = await sent(unavailable);
+      expect(result.resourceTimingDiagnostic).toMatchObject({ available: false, sendMarkAvailable: false, observations: [], absenceInconclusive: true });
+      expect((await f.diagnose()).resourceTimingDiagnostic.available).toBe(false); expect(send.clicks).toBe(1);
+    }
+    let now = 100.25;
+    const entries = [ended(undefined, { startTime: 100.2 }), ended(undefined, { responseEnd: 0 }),
+      ended(undefined, { responseEnd: 250 }), ended(undefined, { startTime: 250, responseEnd: 251 }),
+      ended(undefined, { transferSize: true }), ended(undefined, { responseStatus: 600 })];
+    const { f, send } = await sent({ now: () => now, getEntriesByType: () => entries }); now = 200;
+    const diagnostic = (await f.diagnose()).resourceTimingDiagnostic;
+    expect(diagnostic).toMatchObject({ available: true, sendMarkAvailable: true, scannedCount: 6,
+      conversationCount: 0, preparationCount: 0, observations: [], absenceInconclusive: true });
+    expect(send.clicks).toBe(1); expect((await f.submit('different')).error).toBeDefined(); expect(send.clicks).toBe(1);
+  });
+  test('hostile names and unapproved endpoint aliases never escape finite resource metadata', async () => {
+    let now = 100.25;
+    const names = ['https://private.example/backend-api/f/conversation', 'https://chatgpt.com.evil.invalid/backend-api/f/conversation',
+      'https://PRIVATE_USER@chatgpt.com/backend-api/f/conversation', 'https://chatgpt.com/backend-api/conversation',
+      'https://chatgpt.com/backend-api/f/conversation/', 'https://chatgpt.com/backend-api/f/conversation/other',
+      'PRIVATE_NOT_A_URL', 'https://chatgpt.com/backend-api/f/conversation?PRIVATE_QUERY#PRIVATE_FRAGMENT'];
+    const { f, send } = await sent({ now: () => now, getEntriesByType: () => names.map(name => ended(name)) }); now = 200;
+    const diagnostic = (await f.diagnose()).resourceTimingDiagnostic;
+    expect(diagnostic.conversationCount).toBe(1); expect(diagnostic.observations).toHaveLength(1);
+    for (const secret of ['PRIVATE', 'http', 'backend-api', 'name', 'url', 'header', 'body']) expect(JSON.stringify(diagnostic)).not.toContain(secret);
+    expect(send.clicks).toBe(1);
+  });
+  test('resource metadata cannot follow foreign owner document claim sequence or crossed native contexts', async () => {
+    let now = 100.25; const { f, send } = await sent({ now: () => now, getEntriesByType: () => [ended()] }); now = 200;
+    const claim = f.world.__computaChatResourceTimingClaim as any;
+    for (const delta of [{ owner: 'PRIVATE_OWNER' }, { document: {} }, { userCount: 1 }, { sequence: 2 }, { sequence: true }]) {
+      f.world.__computaChatResourceTimingClaim = { ...claim, ...delta };
+      expect((await f.diagnose()).resourceTimingDiagnostic).toBeUndefined(); expect(send.clicks).toBe(1);
+    }
+    f.world.__computaChatResourceTimingClaim = claim;
+    for (const overrides of [{ ownerToken: 'PRIVATE_OWNER' }, { expectedURL: 'https://chatgpt.com/c/PRIVATE' }, { provider: 'gemini' }]) {
+      const result = await f.diagnose(overrides); expect(result.error).toBe('document_changed'); expect(result.resourceTimingDiagnostic).toBeUndefined();
+    }
+    expect(send.clicks).toBe(1);
+  });
+  test('scan observation and response-byte caps remain finite without touching performance buffers', async () => {
+    let now = 100.25; const entries = Array.from({ length: 300 }, (_, index) => ended(undefined,
+      { startTime: 101.75 + index, responseEnd: 151.9 + index, transferSize: 2_147_483_647 }));
+    const timing = { now: () => now, getEntriesByType: () => entries,
+      clearResourceTimings: () => { throw new Error('Must not clear'); }, setResourceTimingBufferSize: () => { throw new Error('Must not resize'); } };
+    const { f, send } = await sent(timing); now = 1_000;
+    const diagnostic = (await f.diagnose()).resourceTimingDiagnostic;
+    expect(diagnostic).toMatchObject({ scannedCount: 256, scanTruncated: true, conversationCount: 256,
+      preparationCount: 0, observationsTruncated: true, absenceInconclusive: true });
+    expect(diagnostic.observations).toHaveLength(4); expect(diagnostic.observations[3].startOffsetMs).toBe(300);
+    expect(JSON.stringify(diagnostic).length).toBeLessThanOrEqual(2_048); expect(entries).toHaveLength(300); expect(send.clicks).toBe(1);
+  });
+});
+
 describe('ChatGPT failed-page finite diagnostic', () => {
   test('outbound size counts are claimed once at Send and remain finite without prompt content', async () => {
     for (const text of ['PRIVATE_SIZE_CANARY😀é\uD800', 'é'.repeat(100_000)]) {

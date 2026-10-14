@@ -303,6 +303,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var failedPageDiagnosticAttempted = false
         var outboundUTF16Count: Int?
         var outboundUTF8Count: Int?
+        var resourceTimingSignatures: [String: String] = [:]
 
         init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil,
              isDiscovery: Bool = false, isRecoveryProbe: Bool = false) {
@@ -346,6 +347,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
     private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
+    private var resourceTimingDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
     #endif
 
@@ -387,6 +389,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFailedPageDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         failedPageDiagnosticObserverForTesting = observer
+    }
+
+    func setResourceTimingDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        resourceTimingDiagnosticObserverForTesting = observer
     }
 
     func setFirstUserExpansionRouteCheckpointForTesting(_ hook: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?) {
@@ -491,6 +497,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.turnStarted = .now
                 session.responseReadRetryUsed = false
                 session.failedPageDiagnosticAttempted = false
+                session.resourceTimingSignatures.removeAll()
                 // Claim submission before clicking: even a lost reply must not replay Send.
                 session.submitted = true
                 session.sequence += 1
@@ -770,6 +777,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   let observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any], observed["error"] == nil,
                   let raw = observed["failureDiagnostic"] as? [String: Any],
                   let safe = Self.sanitizedFailedPageDiagnostic(raw) else { unavailable("unavailable"); return }
+            logResourceTimingDiagnostic(observed["resourceTimingDiagnostic"], session: session, phase: "failure")
             #if DEBUG
             failedPageDiagnosticObserverForTesting?(safe)
             #endif
@@ -838,6 +846,81 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard safe["noticesTruncated"] as? Bool == ((safe["alertCount"] as? Int ?? 0) > 8 || (safe["statusCount"] as? Int ?? 0) > 8),
               let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 2_048 else { return nil }
         return String(data: bytes, encoding: .utf8)
+    }
+
+    /// Only ended resource observations, never dispatch, upload or acceptance proof.
+    static func sanitizedResourceTimingDiagnostic(_ raw: Any?, phase: String, sequence: Int) -> String? {
+        let keys: Set<String> = ["kind", "phase", "sequence", "available", "sendMarkAvailable", "scanTruncated",
+                                 "scannedCount", "conversationCount", "preparationCount", "observations",
+                                 "observationsTruncated", "absenceInconclusive"]
+        guard ["send", "completion", "failure"].contains(phase), (1...10_000).contains(sequence),
+              let value = raw as? [String: Any], Set(value.keys) == keys,
+              value["kind"] as? String == "chatgpt_resource_timing_v1", value["phase"] as? String == phase,
+              ComputerToolArgumentContract.exactInt64(value["sequence"]) == Int64(sequence) else { return nil }
+        func integer(_ raw: Any?, maximum: Int64) -> Int? {
+            guard let number = ComputerToolArgumentContract.exactInt64(raw), (0...maximum).contains(number) else { return nil }
+            return Int(number)
+        }
+        var safe: [String: Any] = ["kind": "chatgpt_resource_timing_v1", "phase": phase, "sequence": sequence]
+        for key in ["available", "sendMarkAvailable", "scanTruncated", "observationsTruncated", "absenceInconclusive"] {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }; safe[key] = flag
+        }
+        guard safe["absenceInconclusive"] as? Bool == true,
+              let scanned = integer(value["scannedCount"], maximum: 256),
+              let conversation = integer(value["conversationCount"], maximum: 256),
+              let preparation = integer(value["preparationCount"], maximum: 256), conversation + preparation <= scanned,
+              let observations = value["observations"] as? [[String: Any]], observations.count == min(conversation + preparation, 4),
+              safe["observationsTruncated"] as? Bool == (conversation + preparation > 4),
+              !(safe["scanTruncated"] as? Bool == true && scanned != 256) else { return nil }
+        if safe["available"] as? Bool != true || safe["sendMarkAvailable"] as? Bool != true {
+            guard scanned == 0, conversation == 0, preparation == 0, safe["scanTruncated"] as? Bool == false else { return nil }
+        }
+        let sampleKeys: Set<String> = ["endpoint", "initiator", "startOffsetMs", "durationMs", "transferBytes",
+                                       "encodedBodyBytes", "decodedBodyBytes", "responseStatusAvailable", "responseStatus"]
+        var samples: [[String: Any]] = []
+        for sample in observations {
+            guard Set(sample.keys) == sampleKeys, let endpoint = sample["endpoint"] as? String,
+                  ["conversation", "preparation"].contains(endpoint), let initiator = sample["initiator"] as? String,
+                  ["fetch", "xmlhttprequest", "other"].contains(initiator),
+                  let statusAvailable = firstUserDiagnosticBool(sample["responseStatusAvailable"]) else { return nil }
+            var projected: [String: Any] = ["endpoint": endpoint, "initiator": initiator, "responseStatusAvailable": statusAvailable]
+            for key in ["startOffsetMs", "durationMs", "transferBytes", "encodedBodyBytes", "decodedBodyBytes"] {
+                guard let number = integer(sample[key], maximum: key.hasSuffix("Ms") ? 3_600_000 : 2_147_483_647) else { return nil }
+                projected[key] = number
+            }
+            if statusAvailable {
+                guard let status = integer(sample["responseStatus"], maximum: 599) else { return nil }; projected["responseStatus"] = status
+            } else {
+                guard sample["responseStatus"] is NSNull else { return nil }; projected["responseStatus"] = NSNull()
+            }
+            samples.append(projected)
+        }
+        guard samples.filter({ $0["endpoint"] as? String == "conversation" }).count <= conversation,
+              samples.filter({ $0["endpoint"] as? String == "preparation" }).count <= preparation else { return nil }
+        safe["scannedCount"] = scanned; safe["conversationCount"] = conversation; safe["preparationCount"] = preparation
+        safe["observations"] = samples
+        guard let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 2_048 else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func logResourceTimingDiagnostic(_ raw: Any?, session: Session, phase: String) {
+        guard session.provider == .chatgpt, session.state == "running", session.submitted,
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == (session.documentGeneration ?? session.initialDocumentGeneration),
+              session.view.url.map({ session.provider.accepts($0.absoluteString) }) == true,
+              let safe = Self.sanitizedResourceTimingDiagnostic(raw, phase: phase, sequence: session.sequence),
+              session.resourceTimingSignatures[phase] == nil else { return }
+        session.resourceTimingSignatures[phase] = safe
+        #if DEBUG
+        resourceTimingDiagnosticObserverForTesting?(safe)
+        #endif
+        let data = Data(safe.utf8), identifier = UUID().uuidString
+        let chunks = stride(from: 0, to: data.count, by: 512).map {
+            data.subdata(in: $0..<min($0 + 512, data.count)).base64EncodedString()
+        }
+        for (index, chunk) in chunks.enumerated() {
+            Self.inspectionLog.error("resourceTimingDiagnostic provider=chatgpt sequence=\(session.sequence) phase=\(phase, privacy: .public) id=\(identifier, privacy: .public) part=\(index + 1)/\(chunks.count) base64=\(chunk, privacy: .public)")
+        }
     }
 
     private func poll(_ session: Session) async throws -> Data {
@@ -1021,7 +1104,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     if !previouslyCandidate || session.candidateSince == nil { session.candidateSince = .now }
                     session.completionCandidate = true
                     if let since = session.candidateSince,
-                       ContinuousClock.now - max(since, session.lastChanged) >= .milliseconds(1_600) { session.state = "complete" }
+                       ContinuousClock.now - max(since, session.lastChanged) >= .milliseconds(1_600) {
+                        logResourceTimingDiagnostic(observed["resourceTimingDiagnostic"], session: session, phase: "completion")
+                        session.state = "complete"
+                    }
                 }
             }
             if !session.completionCandidate { session.candidateSince = nil }
@@ -2441,6 +2527,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
         }
         guard ContinuousClock.now < evaluationDeadline else { throw Failure.pageUnavailable }
+        if provider == .chatgpt, action == "submit" {
+            logResourceTimingDiagnostic(observed["resourceTimingDiagnostic"], session: session, phase: "send")
+        }
         return observed
     }
 
