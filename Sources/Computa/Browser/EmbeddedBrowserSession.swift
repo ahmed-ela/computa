@@ -97,7 +97,8 @@ final class EmbeddedBrowserSession {
         var observations: [NSKeyValueObservation] = []
         var navigation: WKNavigation?
         var preparedDocumentNavigation = false
-        // Diagnostic facts only; these never grant adapter or recovery authority.
+        // Native lifecycle facts can defer an untouched initial inspection,
+        // but never grant adapter, document, or recovery authority.
         var modelCommittedGeneration: UUID?
         var modelFinishedGeneration: UUID?
         var modelFailedGeneration: UUID?
@@ -309,8 +310,17 @@ final class EmbeddedBrowserSession {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard tabs.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil)
-        let view = modelOwned || toolOwned ? EmbeddedModelWebView(frame: NSRect(x: 0, y: 0, width: 1_024, height: 768), configuration: configuration)
+        let view: WKWebView
+        #if DEBUG
+        if modelOwned, let factory = modelViewFactoryForTesting { view = factory(configuration) }
+        else {
+            view = modelOwned || toolOwned ? EmbeddedModelWebView(frame: NSRect(x: 0, y: 0, width: 1_024, height: 768), configuration: configuration)
+                : WKWebView(frame: .zero, configuration: configuration)
+        }
+        #else
+        view = modelOwned || toolOwned ? EmbeddedModelWebView(frame: NSRect(x: 0, y: 0, width: 1_024, height: 768), configuration: configuration)
             : WKWebView(frame: .zero, configuration: configuration)
+        #endif
         // Inspection is an explicit, ephemeral choice for each human tab.
         // An inspectable opener must not grant it to a new popup.
         view.isInspectable = false
@@ -589,6 +599,15 @@ final class EmbeddedBrowserSession {
                      navigationError: entry.modelFailedGeneration == generation)
     }
 
+    /// Waiting is allowed only for a current native provisional navigation on
+    /// the exact private view. A committed, failed, idle, or unknown document
+    /// must take the normal blocker/readiness path instead.
+    func hasUncommittedModelNavigation(tabID: UUID, view: WKWebView) -> Bool {
+        guard let facts = modelNavigationDiagnostic(tabID: tabID, view: view) else { return false }
+        return facts.viewLoading && facts.tabLoading && facts.navigationPending
+            && !facts.generationCommitted && !facts.generationFinished && !facts.navigationError
+    }
+
     static let modelSignalName = "computaChatGPTSignal"
     static let modelDiagnosticName = "computaModelDiagnostic"
     static let modelClockName = "computaModelClock"
@@ -823,10 +842,14 @@ final class EmbeddedBrowserSession {
     }
 
     #if DEBUG
+    private var modelViewFactoryForTesting: (@MainActor (WKWebViewConfiguration) -> WKWebView)?
+
     /// Fixtures load one local document themselves. Starting about:blank first
     /// would leave two competing provisional navigations in the same WebView.
-    func createUnloadedModelTabForTesting() throws -> UUID {
-        try createModelTab(initialURL: nil)
+    func createUnloadedModelTabForTesting(viewFactory: (@MainActor (WKWebViewConfiguration) -> WKWebView)? = nil) throws -> UUID {
+        modelViewFactoryForTesting = viewFactory
+        defer { modelViewFactoryForTesting = nil }
+        return try createModelTab(initialURL: nil)
     }
     #endif
 

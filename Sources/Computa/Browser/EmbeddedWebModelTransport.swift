@@ -955,6 +955,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+        if session.state == "loading", session.terminalFailure == nil, isUntouchedInference(session),
+           session.provider.blockingFailure(for: session.view.url) == .humanVerificationRequired(.gemini),
+           browser.hasUncommittedModelNavigation(tabID: session.tabID, view: session.view) {
+            // WKWebView.url may expose a checkpoint during a provisional
+            // redirect. Do not inspect it or persist a settled checkpoint yet.
+            // Native navigation events wake the same poll under its original
+            // deadline; commit immediately restores the normal blocker path.
+            try checkProviderGate(session)
+            session.initialReadRetry = nil
+            guard ContinuousClock.now - session.created < preparationTimeout else { throw preparationFailure(session) }
+            return try snapshot(session)
+        }
         try rejectWebsiteBlocker(session, action: "inspect", phase: "before")
         if session.state == "loading", session.view.isLoading {
             session.initialReadRetry = nil

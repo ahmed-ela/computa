@@ -1826,6 +1826,26 @@ async function chatGPTExpandSubmission(state, record, root, body, rendered) {
     || chatGPTSubmissionCanonical(body.innerText || body.textContent || '') !== rendered, 'submission_expansion');
   return intact() && chatGPTSubmissionCanonical(body.innerText || body.textContent || '') === record.canonical;
 }
+function chatGPTPendingProductSubmission(state, record, roots, root, body, rendered, observed) {
+  // A product-only recheck has no model or expansion authority. A recognized
+  // collapsed current body can remain pending until the normal model/inspect
+  // path proves every actual byte. This result never binds a body or answer.
+  try {
+    const parent = state.lastVerified, product = observed.productModeEvidence;
+    return input.action === 'verifyProductMode' && state.pending === record && record.phase === 'send_claimed'
+      && record.sequence > 1 && record.root == null && record.body == null && record.expansionAttempted === false
+      && input.submissionSequence === record.sequence && input.submissionMarker === record.marker
+      && roots.length === record.sequence && roots[record.sequence - 1] === root
+      && root.isConnected && body.isConnected && chatGPTUserBody(root) === body
+      && chatGPTSubmissionContext(state) && chatGPTSubmissionPins(record)
+      && parent?.sequence === record.sequence - 1 && chatGPTSubmissionPins(parent) && chatGPTSubmissionBodyIntact(parent, roots)
+      && observed.temporary === true && product?.product === 'chatgpt' && product.mode === 'chat'
+      && product.source === 'composer_mode_control' && product.temporaryTransition === 'acknowledged'
+      && typeof rendered === 'string' && rendered.length > 0 && rendered.length < record.canonical.length
+      && record.canonical.startsWith(rendered) && !rendered.includes(`Computa session marker: ${record.marker}`)
+      && chatGPTSubmissionCanonical(body.innerText || body.textContent || '') === rendered;
+  } catch { return false; }
+}
 async function chatGPTSubmissionResult(request, observed) {
   if (observed.error) return observed;
   const capability = { submissionOwnershipCapability: 'per_submission_ownership_v1' };
@@ -1858,6 +1878,8 @@ async function chatGPTSubmissionResult(request, observed) {
     return chatGPTSubmissionFailure(state, 'observe_body', record);
   let rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || '');
   if (rendered !== record.canonical && record === pending && record.sequence > 1) {
+    if (chatGPTPendingProductSubmission(state, record, roots, root, body, rendered, observed))
+      return { ...observed, ...capability, submissionPending: true, text: '', answerComplete: false };
     if (!await chatGPTExpandSubmission(state, record, root, body, rendered)) return chatGPTSubmissionFailure(state, 'observe_expansion', record);
     rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || '');
   }

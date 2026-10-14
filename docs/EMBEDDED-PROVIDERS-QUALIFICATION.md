@@ -1,6 +1,41 @@
 # Embedded website provider qualification
 
-## Build109 candidate
+## Build111 candidate
+
+Installed build110's Gemini 3.8 Flash browser task passed in 55.475 seconds:
+six successful native tools, one accepted form submission, the exact result,
+confirmed task-tab close and seven verified inferences in one temporary website
+conversation with confirmed final closure. No CAPTCHA appeared in that task.
+The fresh repeat stopped after 0.588 seconds with no tool calls or verified Send.
+Its private WebKit view had a trusted Google `/sorry` URL while its current
+navigation was still loading and had not committed. The native blocker persisted
+that provisional observation before the initial loading gate ran. The separate
+human Gemini tab remained healthy. No redirect-chain evidence establishes
+whether the private navigation would have returned to Gemini or committed a
+challenge. These results do not establish an old WebKit cause or permanent
+CAPTCHA prevention.
+
+The candidate waits on existing native navigation events only for that exact,
+untouched initial Gemini provisional checkpoint. It performs no adapter,
+editor or Send action while waiting and retains the original preparation
+deadline. A committed Google checkpoint still stops and persists the block,
+even while loading. An allowed Gemini page must pass the existing readiness and
+ownership checks. There is no reload, CAPTCHA completion or request replay.
+
+Build110 also isolated ChatGPT's second-message refusal: a product-only recheck
+encountered a collapsed current body and attempted expansion despite having no
+model-selection authority. The candidate returns a narrowly guarded pending
+product observation with no current body proof or answer. The subsequent
+authorized model/inspect read remains responsible for one scoped expansion and
+the actual full canonical digest. Invalid prefixes, changed prior bodies, mode
+or model drift and changed expanded bytes remain refused. Installed build111
+qualification is pending. All 499 provider-adapter tests and all 182 selected
+native tests passed on held source, including the complete 162-test transport
+suite and the new navigation and collapsed-second-message fixtures. The 12
+product-identity tests also passed. Earlier compilation and fixture-measurement
+failures are retained separately; they are not counted as passing runs.
+
+## Build109 ownership pilot
 
 ChatGPT now negotiates one owned temporary page per native turn. Each inference
 still receives the full request and a distinct marker, and requires the actual
@@ -23,7 +58,8 @@ were stopped separately; stopping them does not qualify model cleanup.
 Build110 adds failure-stage, count and boolean diagnostics for this seam without
 changing ownership, Send, body validation or cleanup decisions. The failed
 build109 receipts remain immutable. No prompt, nonce, hash or URL is added to
-the diagnostic sidecar. Installed diagnostic qualification remains pending.
+the diagnostic sidecar. Its installed result and diagnosed sequencing fault are
+recorded above.
 Older failed attempts below retain their original
 outcomes. Conversation reuse is an experiment for the second-inference stall,
 not an established root cause or a permanent Google CAPTCHA remedy.

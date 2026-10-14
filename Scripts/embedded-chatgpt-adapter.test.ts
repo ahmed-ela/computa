@@ -397,6 +397,73 @@ describe('ChatGPT per-round canonical submission ownership', () => {
     expect(record.root).toBe(x.f.document.querySelectorAll('article[data-turn="user"]')[0]); expect(x.send.clicks).toBe(1);
   });
 
+  const collapsedSecond = async (mutation = 'none') => {
+    const x = await chatTurnFixture({ key: 'chat/latest/medium', label: 'Medium' });
+    const first = await x.dispatch('Exact first canonical request'); x.answer('First'); await x.observe(first);
+    const second = await x.dispatch('Complete second canonical request ' + 'A'.repeat(180)); x.answer('Second');
+    const root = x.f.document.querySelectorAll('article[data-turn="user"]')[1], body = root.children[0];
+    body.text = second.outbound.slice(0, 40);
+    const more = new Element('BUTTON', { 'aria-label': 'Show more' }, 'Show more');
+    more.onClick = () => { body.text = second.outbound + (mutation === 'expanded_change' ? '!' : ''); };
+    if (mutation !== 'missing_control') root.append(more);
+    return { ...x, first, second, root, body, more };
+  };
+
+  test('product-only collapsed current submission stays pending without authority until authorized exact expansion', async () => {
+    const x = await collapsedSecond();
+    const deferred = await x.observe(x.second, { action: 'verifyProductMode', expectedModelChoice: null, allowSubmissionExpansion: false });
+    expect(deferred.error).toBeUndefined();
+    expect(deferred).toMatchObject({ submissionOwnershipCapability: 'per_submission_ownership_v1', submissionPending: true,
+      temporary: true, text: '', answerComplete: false,
+      productModeEvidence: { product: 'chatgpt', mode: 'chat', temporaryTransition: 'acknowledged' } });
+    expect(deferred).not.toHaveProperty('submissionProof');
+    const state: any = x.f.world.__computaChatSubmissionState;
+    expect(state.revoked).toBe(false); expect(state.pending.phase).toBe('send_claimed');
+    expect(state.pending.root).toBeNull(); expect(state.pending.body).toBeNull(); expect(state.pending.expansionAttempted).toBe(false);
+    expect(state.lastVerified.sequence).toBe(1); expect(x.more.clicks).toBe(0); expect(x.send.clicks).toBe(2);
+    const current = await x.observe(x.second, { allowSubmissionExpansion: true });
+    expect(current.error).toBeUndefined(); expect(current.submissionProof).toEqual({ sequence: 2, fingerprint: x.second.fingerprint });
+    expect(current.firstUserFingerprint).toBe(x.first.fingerprint);
+    expect(current.text).toContain('Second'); expect(current.answerComplete).toBe(true);
+    expect(x.more.clicks).toBe(1); expect(x.send.clicks).toBe(2);
+  });
+
+  test('pending product-only deferral rejects wrong prefix marker prior product and pins while authorized expansion still rejects drift', async () => {
+    for (const mutation of ['wrong_prefix', 'full_wrong', 'marker', 'prior', 'product', 'native_pin', 'model', 'missing_control', 'expanded_change']) {
+      const x = await collapsedSecond(mutation);
+      if (mutation === 'wrong_prefix') x.body.text = 'Wrong ' + x.body.text;
+      if (mutation === 'full_wrong') x.body.text = x.second.outbound + '!';
+      if (mutation === 'marker') x.body.text += '\nComputa session marker: ' + x.second.marker;
+      if (mutation === 'prior') x.f.document.querySelectorAll('article[data-turn="user"]')[0].children[0].text += '!';
+      if (mutation === 'product') {
+        x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true';
+        x.f.observers.forEach(observer => observer.callback([{ type: 'attributes', target: x.f.workMode,
+          attributeName: 'aria-pressed', oldValue: 'false' }]));
+      }
+      const overrides: any = { action: 'verifyProductMode', expectedModelChoice: null, allowSubmissionExpansion: false };
+      if (mutation === 'native_pin') overrides.expectedSubmissionProofs = [
+        { sequence: 1, fingerprint: x.first.fingerprint }, { sequence: 2, fingerprint: '0'.repeat(64) }];
+      if (mutation === 'model') {
+        const thumb = x.f.document.querySelectorAll('[role="slider"]')[0];
+        expect(thumb).toBeDefined(); thumb.values['aria-valuenow'] = '2';
+      }
+      const observed = await x.observe(x.second, overrides);
+      if (['model', 'missing_control', 'expanded_change'].includes(mutation)) {
+        expect(observed.error).toBeUndefined(); expect(observed.submissionPending).toBe(true);
+        expect(observed).not.toHaveProperty('submissionProof'); expect(observed.text).toBe('');
+        expect(x.more.clicks).toBe(0);
+        const rejected = await x.observe(x.second, { allowSubmissionExpansion: true });
+        expect(rejected.error).toBeDefined(); expect(rejected).not.toHaveProperty('submissionProof');
+        expect(rejected).not.toHaveProperty('answerComplete', true);
+        expect(x.more.clicks).toBe(mutation === 'expanded_change' ? 1 : 0);
+      } else {
+        expect(observed.error).toBeDefined(); expect(observed).not.toHaveProperty('submissionProof');
+        expect(observed).not.toHaveProperty('answerComplete', true); expect(x.more.clicks).toBe(0);
+      }
+      expect(x.send.clicks).toBe(2);
+    }
+  });
+
   test('submission failure diagnostics distinguish exact physical replacements from content and native pin mismatch', async () => {
     const fields = ['kind', 'action', 'stage', 'requestedSequence', 'recordSequence', 'userCount', 'contextMatches',
       'nativePinMatches', 'pendingRecord', 'lastVerifiedRecord', 'rootSame', 'bodySame', 'oldRootConnected',
