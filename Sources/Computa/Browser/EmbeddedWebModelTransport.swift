@@ -1311,8 +1311,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         if let rawReason = value["reason"] {
             let reasons: Set<String> = ["first_bound", "marker_invalid", "submission_unclaimed", "marker_mismatch", "body_limit", "marker_not_final", "marker_duplicate", "body_empty", "snapshot_before_action", "pinned_fingerprint", "native_fingerprint", "binding_not_authorized", "first_missing", "snapshot_after_action", "first_insert", "first_submit"]
-            guard let reason = rawReason as? String, reasons.contains(reason) else { return nil }
+            guard let reason = rawReason as? String,
+                  reasons.contains(reason) || provider == .gemini && reason == "submission_text" else { return nil }
             safe["reason"] = reason
+        }
+        if let rawScope = value["descendantScope"] {
+            guard provider == .gemini, value["reason"] as? String == "submission_text",
+                  rawScope as? String == "selected_body" else { return nil }
+            safe["descendantScope"] = "selected_body"
         }
         for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "allowFirstUserExpansion", "privatePinPresent", "expectedFingerprintPresent",
                     "markerValid", "firstPromptPresent", "firstPromptMatches"] {
@@ -1529,6 +1535,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 for key in ["markerExact", "markerContained", "visible", "editable"] {
                     guard let flag = firstUserDiagnosticBool(node[key]) else { return nil }
                     child[key] = flag
+                }
+                if node["outboundInnerTextMatches"] != nil || node["outboundTextContentMatches"] != nil {
+                    guard provider == .gemini, value["reason"] as? String == "submission_text",
+                          let inner = firstUserDiagnosticBool(node["outboundInnerTextMatches"]),
+                          let content = firstUserDiagnosticBool(node["outboundTextContentMatches"]) else { return nil }
+                    child["outboundInnerTextMatches"] = inner
+                    child["outboundTextContentMatches"] = content
                 }
                 projected.append(child)
             }
@@ -2549,9 +2562,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     static func sanitizedSubmissionBodyDiagnostic(_ raw: Any?) -> String? {
         let measurements = ["expectedLength", "innerTextLength", "textContentLength", "expectedLines", "innerTextLines",
-                            "textContentLines", "firstMismatchIndex", "literalDOMLength"]
+                            "textContentLines", "firstMismatchIndex", "literalDOMLength", "innerTextExpectedOffset", "textContentExpectedOffset"]
         let counts = ["nodeCount", "paragraphCount", "brCount", "textNodeCount", "spanCount", "bodyChildElements"]
-        let flags = ["innerTextMatches", "textContentMatches", "literalDOMAvailable", "literalDOMMatches"]
+        let flags = ["innerTextMatches", "textContentMatches", "literalDOMAvailable", "literalDOMMatches",
+                     "innerTextContainsExpected", "textContentContainsExpected"]
         let keys = Set(measurements + counts + flags + ["kind", "maximumDepth", "actualCategory", "expectedCategory", "literalDOMUnavailableReason"])
         guard let value = raw as? [String: Any], Set(value.keys) == keys,
               value["kind"] as? String == "gemini_submission_body_v1",
@@ -2572,6 +2586,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         for key in flags {
             guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }; safe[key] = flag
+        }
+        for prefix in ["innerText", "textContent"] {
+            let contains = safe[prefix + "ContainsExpected"] as? Bool == true
+            let matches = safe[prefix + "Matches"] as? Bool == true
+            let offset = safe[prefix + "ExpectedOffset"] as? Int64
+            guard contains == (offset != 180_201), !matches || contains && offset == 0 else { return nil }
         }
         guard !(safe["literalDOMAvailable"] as? Bool == false && safe["literalDOMMatches"] as? Bool == true),
               (safe["literalDOMAvailable"] as? Bool == true) == (reason == "none"),
@@ -2596,6 +2616,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         if let safe = Self.sanitizedSubmissionDiagnostic(observed["submissionDiagnostic"]) {
             Self.inspectionLog.error("submissionAdapter \(safe, privacy: .public)")
+        }
+        if let raw = observed["debugSubmissionStructure"] as? String,
+           let records = Self.firstUserStructureDiagnosticRecords(raw, provider: .gemini, expectedReason: "submission_text") {
+            logFirstUserStructure(records, sequence: session.sequence, isFailure: true)
         }
         if let safe = Self.sanitizedSubmissionBodyDiagnostic(observed["submissionBodyDiagnostic"]) {
             let data = Data(safe.utf8), id = UUID().uuidString

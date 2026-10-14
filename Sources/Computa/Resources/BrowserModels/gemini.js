@@ -1737,6 +1737,7 @@ function modelSubmissionDiagnostic(record, stage) {
 function modelSubmissionBodyDiagnostic(record, body) {
   const result = { kind: 'gemini_submission_body_v1', expectedLength: 0, innerTextLength: 0, textContentLength: 0,
     expectedLines: 0, innerTextLines: 0, textContentLines: 0, innerTextMatches: false, textContentMatches: false,
+    innerTextContainsExpected: false, textContentContainsExpected: false, innerTextExpectedOffset: 180_201, textContentExpectedOffset: 180_201,
     firstMismatchIndex: 0, actualCategory: 'end', expectedCategory: 'end', literalDOMAvailable: false,
     literalDOMMatches: false, literalDOMLength: 0, literalDOMUnavailableReason: 'read_failure',
     nodeCount: 0, maximumDepth: 0, paragraphCount: 0, brCount: 0, textNodeCount: 0, spanCount: 0, bodyChildElements: 0 };
@@ -1753,6 +1754,14 @@ function modelSubmissionBodyDiagnostic(record, body) {
     const canonical = normalize(expected), actual = normalize(raw), content = normalize(rawContent);
     result.innerTextMatches = canonical !== null && actual === canonical;
     result.textContentMatches = canonical !== null && content === canonical;
+    const containedOffset = value => {
+      if (canonical === null || !canonical || value === null) return 180_201;
+      const index = value.indexOf(canonical);
+      return index >= 0 && index <= 180_200 && value.indexOf(canonical, index + 1) === -1 ? index : 180_201;
+    };
+    result.innerTextExpectedOffset = containedOffset(actual); result.textContentExpectedOffset = containedOffset(content);
+    result.innerTextContainsExpected = result.innerTextExpectedOffset !== 180_201;
+    result.textContentContainsExpected = result.textContentExpectedOffset !== 180_201;
     if (canonical !== null && actual !== null) {
       let index = 0;
       while (index < Math.min(actual.length, canonical.length) && actual[index] === canonical[index]) index++;
@@ -1808,8 +1817,13 @@ function modelSubmissionFailure(record = null, stage = 'observe_final', body = n
   const error = { error: 'conversation_changed', detail: 'submission_message' };
   const diagnostic = modelSubmissionDiagnostic(record, stage);
   const bodyDiagnostic = stage === 'observe_text' && body ? modelSubmissionBodyDiagnostic(record, body) : null;
+  let structure = null;
+  if (stage === 'observe_text' && body) {
+    try { structure = modelFirstUserStructure('submission_text', false, { body, record }); } catch { }
+  }
   return { ...error, ...(diagnostic ? { submissionDiagnostic: diagnostic } : {}),
-    ...(bodyDiagnostic ? { submissionBodyDiagnostic: bodyDiagnostic } : {}) };
+    ...(bodyDiagnostic ? { submissionBodyDiagnostic: bodyDiagnostic } : {}),
+    ...(structure ? { debugSubmissionStructure: structure } : {}) };
 }
 function modelSubmissionContext(record = null, allowSubmitted = false) {
   return window === window.top && location.origin === 'https://gemini.google.com' && modelURLAllowed()
@@ -1938,26 +1952,41 @@ async function modelSubmissionResult(observed) {
     ...(proof.pending ? { submissionPending: true } : {}),
     ...(proof.pending && ['inspect', 'verifyModel'].includes(input.action) ? { text: '', answerComplete: false, pending: true } : {}) };
 }
-function modelFirstUserStructure(reason, allowSubmittedUser = false) {
-  const roots = modelUserRoots(), root = roots[0], body = root && modelUserBody(root);
+function modelFirstUserStructure(reason, allowSubmittedUser = false, submission = null) {
+  const roots = modelUserRoots();
+  const bodyScoped = reason === 'submission_text' && submission?.body && submission?.record;
+  const body = bodyScoped ? submission.body : roots[0] && modelUserBody(roots[0]);
+  const root = bodyScoped ? body.closest('user-query') : roots[0];
   const rendered = body ? normalizedBody(body) : '', lines = rendered.split('\n');
-  const marker = input.expectedFirstUserMarker;
+  const marker = bodyScoped ? submission.record.marker : input.expectedFirstUserMarker;
   const markerLine = typeof marker === 'string' && /^[a-f0-9-]{36}$/i.test(marker) ? `Computa session marker: ${marker}` : null;
   const utilities = ['block', 'flex', 'inline-flex', 'relative', 'truncate', 'whitespace-pre-wrap', 'whitespace-normal',
     'break-words', 'overflow-hidden', 'overflow-auto', 'hidden', 'text-sm', 'items-center', 'min-w-0', 'w-full'];
   const shape = node => ({ tag: node && /^[a-zA-Z][a-zA-Z0-9-]{0,31}$/.test(node.tagName) ? node.tagName.toLowerCase() : 'none',
     classes: node ? [...node.classList].filter(name => /^[a-zA-Z0-9_-]{1,48}$/.test(name)
       && (/^(?:query-|user-query-|gds-|mat-|cdk-|ng-)/.test(name) || utilities.includes(name))
-      && !rendered.includes(name) && !(globalThis.__computaModelFirstPrompt || '').includes(name)).slice(0, 6) : [] });
-  const descendants = [], queue = root ? [...root.children].filter(node => node.nodeType === 1)
+      && !rendered.includes(name) && !(globalThis.__computaModelFirstPrompt || '').includes(name)
+      && !(bodyScoped ? submission.record.canonical : '').includes(name)).slice(0, 6) : [] });
+  const boundedSubmissionNodeText = value => {
+    if (typeof value !== 'string' || value.length > 180_200) return null;
+    const text = value.replace(/\r\n?/g, '\n').normalize('NFC').trim();
+    return text.length <= 180_200 ? text : null;
+  };
+  const scopeRoot = bodyScoped ? body : root;
+  const descendants = [], queue = scopeRoot ? [...scopeRoot.children].filter(node => node.nodeType === 1)
     .map((node, index) => ({ node, path: [Math.min(index, 1_000)] })) : [];
   for (let index = 0; index < queue.length && descendants.length < 16; index++) {
-    const { node, path } = queue[index], text = normalizedBody(node);
+    const { node, path } = queue[index];
+    const text = bodyScoped ? boundedSubmissionNodeText(node.innerText || node.textContent || '') : normalizedBody(node);
     descendants.push({ ...shape(node), path, childElements: Math.min(node.childElementCount, 1_000),
       controls: Math.min(node.querySelectorAll('button, [role="button"]').length, 1_000),
-      textLength: Math.min(text.length, 220_001), markerExact: markerLine !== null && text === markerLine,
-      markerContained: markerLine !== null && text.includes(markerLine), visible: modelVisible(node),
-      editable: node.getAttribute('contenteditable') === 'true' });
+      textLength: text === null ? 220_001 : Math.min(text.length, 220_001), markerExact: markerLine !== null && text === markerLine,
+      markerContained: markerLine !== null && text !== null && text.includes(markerLine), visible: modelVisible(node),
+      editable: node.getAttribute('contenteditable') === 'true',
+      ...(bodyScoped ? {
+        outboundInnerTextMatches: text !== null && text === submission.record.canonical,
+        outboundTextContentMatches: boundedSubmissionNodeText(node.textContent || '') === submission.record.canonical
+      } : {}) });
     if (path.length < 16) [...node.children].filter(child => child.nodeType === 1).slice(0, 16)
       .forEach((child, childIndex) => queue.push({ node: child, path: [...path, childIndex] }));
   }
@@ -1967,8 +1996,9 @@ function modelFirstUserStructure(reason, allowSubmittedUser = false) {
     markerFinalLine: markerLine !== null && lines.at(-1) === markerLine,
     markerOccurrences: Math.min(markerLine === null ? 0 : lines.filter(line => line === markerLine).length, 1_000),
     controlDescendants: Math.min(body ? body.querySelectorAll('button, [role="button"]').length : 0, 1_000),
-    submitted: globalThis.__computaModelFirstSubmitted === true, markerMatches: globalThis.__computaModelFirstMarker === marker,
-    descendants };
+    submitted: globalThis.__computaModelFirstSubmitted === true,
+    markerMatches: bodyScoped ? input.submissionMarker === marker : globalThis.__computaModelFirstMarker === marker,
+    ...(bodyScoped ? { descendantScope: 'selected_body' } : {}), descendants };
   if (firstUserFingerprint !== null) {
     if (typeof pinned?.fingerprint === 'string') diagnostic.pinnedFingerprintMatch = pinned.fingerprint === firstUserFingerprint;
     if (typeof input.expectedFirstUserFingerprint === 'string') diagnostic.nativeFingerprintMatch = input.expectedFirstUserFingerprint === firstUserFingerprint;

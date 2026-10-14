@@ -91,6 +91,8 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
             "textContentLength": 67, "expectedLines": 2, "innerTextLines": 3, "textContentLines": 2,
             "firstMismatchIndex": 5, "actualCategory": "linefeed", "expectedCategory": "space",
             "innerTextMatches": false, "textContentMatches": true, "literalDOMAvailable": true,
+            "innerTextContainsExpected": false, "textContentContainsExpected": true,
+            "innerTextExpectedOffset": 180_201, "textContentExpectedOffset": 0,
             "literalDOMMatches": true, "literalDOMLength": 67, "literalDOMUnavailableReason": "none",
             "nodeCount": 4, "maximumDepth": 1, "paragraphCount": 0, "brCount": 1, "textNodeCount": 2,
             "spanCount": 0, "bodyChildElements": 1]
@@ -120,5 +122,41 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
         var unknownDepth = valid; unknownDepth["maximumDepth"] = 66
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(unknownDepth))
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(NSNull()))
+        var contradictory = valid; contradictory["innerTextExpectedOffset"] = 1
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(contradictory))
+        contradictory = valid; contradictory["textContentExpectedOffset"] = 180_201
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(contradictory))
+        contradictory = valid; contradictory["textContentExpectedOffset"] = 1
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(contradictory))
+    }
+
+    @MainActor
+    func testSubmissionStructureCanLocateExactBodyWithoutPublishingPrivateValues() throws {
+        let privateValue = "private-canary"
+        let shape: [String: Any] = ["tag": "span", "classes": ["ng-star-inserted", privateValue]]
+        let child: [String: Any] = ["tag": privateValue, "classes": [privateValue], "path": [0],
+            "childElements": 0, "controls": 0, "textLength": 42, "markerExact": false,
+            "markerContained": true, "visible": true, "editable": false,
+            "outboundInnerTextMatches": true, "outboundTextContentMatches": false]
+        let diagnostic: [String: Any] = ["kind": "first_user_structure", "provider": "gemini", "reason": "submission_text",
+            "descendantScope": "selected_body",
+            "root": shape, "body": shape, "userCount": 1, "textLength": 42, "lineCount": 2,
+            "markerOccurrences": 1, "controlDescendants": 0, "markerFinalLine": true,
+            "submitted": true, "markerMatches": true, "descendants": [child], "text": privateValue]
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(diagnostic), provider: .gemini, expectedReason: "submission_text"))
+        XCTAssertFalse(records.joined().contains(privateValue))
+        XCTAssertTrue(records.joined().contains("\"outboundInnerTextMatches\":true"))
+        XCTAssertTrue(records.joined().contains("\"descendantScope\":\"selected_body\""))
+        XCTAssertTrue(records.joined().contains("\"tag\":\"other\""))
+        XCTAssertFalse(EmbeddedWebModelTransport.validSubmissionProof(diagnostic, sequence: 1, fingerprint: String(repeating: "a", count: 64)))
+        for reason in ["first_bound", "unrecognized"] {
+            var invalid = diagnostic; invalid["reason"] = reason
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(invalid), provider: .gemini))
+        }
+        var invalidScope = diagnostic; invalidScope["descendantScope"] = privateValue
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(invalidScope), provider: .gemini))
     }
 }

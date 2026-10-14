@@ -252,7 +252,7 @@ describe('Gemini per-submission ownership', () => {
 
   test('submission body diagnostics distinguish changed bytes from rendered layout without accepting either', async () => {
     const keys = ['kind', 'expectedLength', 'innerTextLength', 'textContentLength', 'expectedLines', 'innerTextLines', 'textContentLines',
-      'innerTextMatches', 'textContentMatches', 'firstMismatchIndex', 'actualCategory', 'expectedCategory', 'literalDOMAvailable',
+      'innerTextMatches', 'textContentMatches', 'innerTextContainsExpected', 'textContentContainsExpected', 'innerTextExpectedOffset', 'textContentExpectedOffset', 'firstMismatchIndex', 'actualCategory', 'expectedCategory', 'literalDOMAvailable',
       'literalDOMMatches', 'literalDOMLength', 'literalDOMUnavailableReason', 'nodeCount', 'maximumDepth', 'paragraphCount', 'brCount',
       'textNodeCount', 'spanCount', 'bodyChildElements'];
     for (const layoutOnly of [false, true]) {
@@ -275,11 +275,11 @@ describe('Gemini per-submission ownership', () => {
       expect(value.firstMismatchIndex).toBe(normalized(text).indexOf('[literal]'));
       expect(value.expectedLength).toBe(normalized(text).length); expect(value.expectedLines).toBe(normalized(text).split('\n').length);
       expect(value.innerTextLength).toBe(text.replace('[literal]', '{altered}').length);
-      for (const key of ['expectedLength', 'innerTextLength', 'textContentLength', 'expectedLines', 'innerTextLines', 'textContentLines', 'firstMismatchIndex', 'literalDOMLength'])
+      for (const key of ['expectedLength', 'innerTextLength', 'textContentLength', 'expectedLines', 'innerTextLines', 'textContentLines', 'innerTextExpectedOffset', 'textContentExpectedOffset', 'firstMismatchIndex', 'literalDOMLength'])
         expect(Number.isInteger(value[key]) && value[key] >= 0 && value[key] <= 180201).toBe(true);
       for (const key of ['nodeCount', 'maximumDepth', 'paragraphCount', 'brCount', 'textNodeCount', 'spanCount', 'bodyChildElements'])
         expect(Number.isInteger(value[key]) && value[key] >= 0 && value[key] <= (key === 'maximumDepth' ? 65 : 8193)).toBe(true);
-      for (const key of ['innerTextMatches', 'textContentMatches', 'literalDOMAvailable', 'literalDOMMatches'])
+      for (const key of ['innerTextMatches', 'textContentMatches', 'innerTextContainsExpected', 'textContentContainsExpected', 'literalDOMAvailable', 'literalDOMMatches'])
         expect(typeof value[key]).toBe('boolean');
       expect(JSON.stringify(value)).not.toContain('PRIVATE'); expect(JSON.stringify(value)).not.toContain(marker(2));
       expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
@@ -340,6 +340,65 @@ describe('Gemini per-submission ownership', () => {
       expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
       expect(JSON.stringify(rejected.submissionBodyDiagnostic)).not.toContain('PRIVATE');
       expect(JSON.stringify(rejected.submissionBodyDiagnostic)).not.toContain(marker(2));
+    }
+  });
+
+  test('submission structure prioritizes current body children and distinguishes leading UI from the full outbound payload', async () => {
+    const f = fixture(provider, { response: false }); await finishRound(f, 1);
+    const text = await stage(f, 2), send = f.send.onClick!, prefix = 'UI PRIVATE LABEL\n\n';
+    f.send.onClick = () => {
+      send(); const body = f.userBody!, wrapper = new Element('DIV', { class: 'query-text private_canary' });
+      const label = new Element('#text', {}, prefix); (label as any).data = prefix;
+      const payload = new Element('SPAN', { class: 'user-query-payload' });
+      const node = new Element('#text', {}, text); (node as any).data = text;
+      payload.append(node); wrapper.append(label, payload); body.replaceChildren(wrapper);
+    };
+    const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+    expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+      submissionBodyDiagnostic: { innerTextMatches: false, textContentMatches: false, innerTextContainsExpected: true,
+        textContentContainsExpected: true, innerTextExpectedOffset: prefix.length, textContentExpectedOffset: prefix.length,
+        firstMismatchIndex: 0, literalDOMAvailable: false, literalDOMUnavailableReason: 'unsupported_markup' } });
+    const structure = JSON.parse(rejected.debugSubmissionStructure);
+    expect(structure).toMatchObject({ kind: 'first_user_structure', provider: 'gemini', reason: 'submission_text',
+      descendantScope: 'selected_body', root: { tag: 'user-query' }, body: { tag: 'span' }, markerMatches: true });
+    expect(structure.descendants[0]).toMatchObject({ tag: 'div', path: [0], classes: ['query-text'], childElements: 1,
+      controls: 0, markerContained: true, outboundInnerTextMatches: false, outboundTextContentMatches: false });
+    expect(structure.descendants[1]).toMatchObject({ tag: 'span', path: [0, 0], classes: ['user-query-payload'],
+      outboundInnerTextMatches: true, outboundTextContentMatches: true });
+    expect(structure.descendants.length).toBeLessThanOrEqual(16);
+    expect(rejected.debugSubmissionStructure).not.toContain('PRIVATE'); expect(rejected.debugSubmissionStructure).not.toContain('private_canary');
+    expect(rejected.debugSubmissionStructure).not.toContain(marker(2)); expect(rejected.submissionProof).toBeUndefined();
+    expect(f.send.clicks).toBe(2);
+  });
+
+  test('duplicated expected payloads and throwing structural getters cannot create proof or replace a refusal', async () => {
+    for (const mode of ['duplicate', 'getter', 'oversized']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const text = await stage(f, 2), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send(); const body = f.userBody!, wrapper = new Element('DIV'), span = new Element('SPAN');
+        const value = mode !== 'duplicate' ? text.replace('[literal]', '{altered}') : text + '\n' + text;
+        const node = new Element('#text', {}, value); (node as any).data = value;
+        span.append(node); wrapper.append(span); body.replaceChildren(wrapper);
+        if (mode === 'getter') Object.defineProperty(span, 'innerText', { get() { throw new Error('PRIVATE_STRUCTURE_GETTER'); } });
+        if (mode === 'oversized') {
+          Object.defineProperty(span, 'textContent', { get: () => 'X'.repeat(180201) });
+          Object.defineProperty(body, 'innerText', { get: () => value });
+          Object.defineProperty(body, 'textContent', { get: () => value });
+        }
+      };
+      const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+        submissionBodyDiagnostic: { innerTextContainsExpected: false, textContentContainsExpected: false,
+          innerTextExpectedOffset: 180201, textContentExpectedOffset: 180201 } });
+      if (mode === 'getter') expect(rejected.debugSubmissionStructure).toBeUndefined();
+      if (mode === 'oversized') {
+        const structure = JSON.parse(rejected.debugSubmissionStructure);
+        expect(structure.descendants.every((node: any) => node.outboundInnerTextMatches === false && node.outboundTextContentMatches === false)).toBe(true);
+        expect(structure.descendants.every((node: any) => node.textLength === 220001)).toBe(true);
+      }
+      expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
+      expect(JSON.stringify(rejected)).not.toContain('PRIVATE_STRUCTURE_GETTER');
     }
   });
 
