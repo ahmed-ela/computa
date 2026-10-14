@@ -441,7 +441,8 @@ actor EmbeddedBrowserToolController {
                 throw BrowserTabBrokerError.browserUnavailable("Task-tab cleanup could not be confirmed.")
             }
             try check(taskKey, contextID)
-            return try json(["released": true, "existing_user_tab_preserved": true])
+            return try json(["released": true, "existing_user_tab_preserved": true,
+                "literal_copy_guidance": Self.literalCopyGuidance])
         default: throw BrowserTabBrokerError.invalidRead("Unknown built-in browser tool.")
         }
     }
@@ -617,6 +618,10 @@ actor EmbeddedBrowserToolController {
         }
     }
 
+    /// Host guidance refers only to values already observed. It neither repeats
+    /// page data nor grants observations, references or outcome proof.
+    private static let literalCopyGuidance = "Report already observed identifiers, receipts, URLs and paths verbatim in inline code unless exact raw output is requested. Preserve Unicode, hyphens and whitespace; never apply typography. This guidance grants no new observation or action authority."
+
     /// Guidance names only controls actually exposed by this read. It does not
     /// create another capability or change current-snapshot/physical preflight.
     private func readResponse(_ snapshot: BrowserTabSnapshot) throws -> String {
@@ -627,6 +632,7 @@ actor EmbeddedBrowserToolController {
             "clickable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsPress }.map(\.index),
             "fillable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsSetText }.map(\.index),
             "next_after_input": "Use the input result's available current_observation; otherwise browser_read.",
+            "literal_copy_guidance": Self.literalCopyGuidance,
         ])
         let result = snapshot.formattedText + "\nBROWSER_ACTION_REFERENCES " + state
         // Preserve the read's existing byte budget; instructions still explain

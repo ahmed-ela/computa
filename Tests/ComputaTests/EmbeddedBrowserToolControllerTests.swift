@@ -4,6 +4,93 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserToolControllerTests: XCTestCase {
+    func testPublishedReadAndSuccessfulCloseRepeatOnlyGenericLiteralCopyGuidanceWithoutChangingValues() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let literal = "ID-A-B\u{2011}C  D\tE\nF\u{00A0}G-e\u{0301}"
+        await backend.setObservedResult(literal)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let read = try await call(controller, "browser_read", ["view": "all"])
+        let state = try actionReferenceMetadata(read)
+        let guidance = try XCTUnwrap(state["literal_copy_guidance"] as? String)
+        XCTAssertLessThanOrEqual(guidance.utf8.count, 384)
+        XCTAssertTrue(guidance.contains("already observed")); XCTAssertTrue(guidance.contains("inline code"))
+        XCTAssertTrue(guidance.contains("exact raw output"))
+        XCTAssertTrue(guidance.contains("Unicode, hyphens and whitespace"))
+        XCTAssertTrue(guidance.contains("no new observation or action authority"))
+        let row = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("#2 ") }).description
+        let regex = try NSRegularExpression(pattern: #"label=("(?:[^"\\]|\\.)*")"#)
+        let match = try XCTUnwrap(regex.firstMatch(in: row, range: NSRange(row.startIndex..., in: row)))
+        let range = try XCTUnwrap(Range(match.range(at: 1), in: row))
+        let published = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(row[range].utf8), options: .fragmentsAllowed) as? String)
+        XCTAssertEqual(Array(published.utf8), Array(literal.utf8), "Observation must preserve spaces, controls, Unicode and decomposed text byte-for-byte")
+        XCTAssertFalse(guidance.contains("ID-A-B"), "Guidance cannot duplicate an observed value")
+        let closeOutput = try await call(controller, "browser_close")
+        let closed = try jsonObject(closeOutput)
+        XCTAssertEqual(closed["released"] as? Bool, true)
+        XCTAssertEqual(closed["existing_user_tab_preserved"] as? Bool, true)
+        XCTAssertEqual(closed["literal_copy_guidance"] as? String, guidance)
+        XCTAssertEqual(Set(closed.keys), ["released", "existing_user_tab_preserved", "literal_copy_guidance"])
+        do { _ = try await call(controller, "browser_read"); XCTFail("Close must not provide a last snapshot or retain reading authority") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0); XCTAssertEqual(counts.closes, 1)
+        _ = await controller.shutdown()
+    }
+
+    func testUnconfirmedClosePublishesNoLiteralGuidanceAndRetiresExistingAuthority() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let read = try await call(controller, "browser_read")
+        XCTAssertNotNil(try actionReferenceMetadata(read)["literal_copy_guidance"])
+        await backend.failNextClose()
+        var closeOutput: String?
+        do { closeOutput = try await call(controller, "browser_close"); XCTFail("Unconfirmed close cannot return success guidance") }
+        catch {
+            XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("Task-tab cleanup could not be confirmed."))
+            XCTAssertFalse(error.localizedDescription.contains("literal_copy_guidance"))
+        }
+        XCTAssertNil(closeOutput)
+        do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(read), "element_index": 1]); XCTFail("Failed physical close still retires prior authority") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testLiteralGuidanceBudgetFallbackDoesNotPublishPartialMetadataOrReviveOldReferences() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let initial = try await call(controller, "browser_read", ["view": "all"])
+        let originalText = try XCTUnwrap(initial.components(separatedBy: "\nBROWSER_ACTION_REFERENCES ").first)
+        // Exercise the actual read formatter at its existing byte boundary. A
+        // bounded provider-independent metadata row leaves no space for hints.
+        let padding = 16_384 - originalText.utf8.count + "computa_webkit_dom".utf8.count - 8
+        await backend.setObservationSourceName(String(repeating: "x", count: padding))
+        let nearLimit = try await call(controller, "browser_read", ["view": "all"])
+        XCTAssertLessThanOrEqual(nearLimit.utf8.count, 16_384)
+        XCTAssertGreaterThan(nearLimit.utf8.count, 16_000)
+        XCTAssertFalse(nearLimit.contains("BROWSER_ACTION_REFERENCES"), "Optional guidance is omitted whole, never truncated into partial capabilities")
+        XCTAssertFalse(nearLimit.contains("literal_copy_guidance"))
+        XCTAssertNotEqual(try snapshotID(nearLimit), try snapshotID(initial))
+        do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(initial), "element_index": 1]); XCTFail("Omitted metadata cannot revive older references") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        await backend.setObservationSourceName(String(repeating: "x", count: 17_000))
+        var rejectedOutput: String?
+        do { rejectedOutput = try await call(controller, "browser_read", ["view": "all"]); XCTFail("Over-budget observation must fail before publication") }
+        catch { XCTAssertTrue(error is BrowserTabBrokerError) }
+        XCTAssertNil(rejectedOutput)
+        do { _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(nearLimit), "element_index": 1]); XCTFail("Failed publication must leave no retained action references") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    private func actionReferenceMetadata(_ read: String) throws -> [String: Any] {
+        let line = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("BROWSER_ACTION_REFERENCES ") })
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.dropFirst("BROWSER_ACTION_REFERENCES ".count).utf8)) as? [String: Any])
+    }
+
     func testReadPublishesOnlyCurrentEligibleActionReferencesAndInputConsumesThem() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
@@ -24,6 +111,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let observed = try XCTUnwrap(result["current_observation"] as? [String: Any])
         XCTAssertEqual(observed["status"] as? String, "available")
         let returned = try XCTUnwrap(observed["text"] as? String)
+        XCTAssertEqual(try actionReferenceMetadata(returned)["literal_copy_guidance"] as? String,
+                       state["literal_copy_guidance"] as? String)
         XCTAssertNotEqual(try snapshotID(returned), try snapshotID(read))
         do {
             _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(read), "element_index": 1])
@@ -658,6 +747,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     let humanID = UUID().uuidString
     private var targets = [String: BrowserTarget](), owned = Set<String>(), stats = Counts()
     private var generation = UUID().uuidString, field = "", result = ""
+    private var observationSourceName = "computa_webkit_dom"
     private var buttonID: Int64 = 2, buttonDisabled = false
     private var pendingRedirect: URL?
     private var link: String?
@@ -673,6 +763,8 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!,webSocketURL:nil) }
     func counts() -> Counts { stats }
     func fieldValue() -> String { field }
+    func setObservedResult(_ text: String) { result = text }
+    func setObservationSourceName(_ name: String) { observationSourceName = name }
     func failNextClose() { shouldFailClose = true }
     func addInventoryTarget(title:String,url:URL) -> String {
         let id=UUID().uuidString
@@ -750,7 +842,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             }
         }
         var observation=BrowserDocumentObservation(loaderID:generation,title:target.title,url:targets[target.targetID]?.url ?? target.url,nodes:nodes)
-        observation.sourceName="computa_webkit_dom"
+        observation.sourceName = observationSourceName
         if driftAfterCapture {
             targets[target.targetID] = BrowserTarget(targetID: target.targetID, instanceToken: target.instanceToken,
                 title: target.title, url: URL(string: "http://localhost:8123/changed-after-capture")!, webSocketURL: nil)
