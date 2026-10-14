@@ -49,4 +49,39 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
         XCTAssertNotEqual(EmbeddedWebModelTransport.promptFingerprint("raw\r\n"), EmbeddedWebModelTransport.promptFingerprint("raw\n"))
         XCTAssertNotEqual(EmbeddedWebModelTransport.promptFingerprint("value-1"), EmbeddedWebModelTransport.promptFingerprint("value‑1"))
     }
+
+    @MainActor
+    func testSubmissionDiagnosticsRejectPrivateValuesAndUnboundedMetadata() throws {
+        let valid: [String: Any] = ["kind": "gemini_submission_v1", "stage": "begin_digest", "action": "insert",
+            "phase": "insert_claimed", "requestedSequence": 1, "recordSequence": 1, "userCount": 0,
+            "statePresent": true, "recordPresent": true, "stateRevoked": true, "ownerMatches": true,
+            "documentMatches": true, "nonceMatches": true, "canonicalMatches": true, "suffixMatches": true,
+            "contextMatches": false]
+        let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(valid))
+        let roundTrip = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        XCTAssertEqual(roundTrip["stage"] as? String, "begin_digest")
+        XCTAssertEqual(roundTrip["contextMatches"] as? Bool, false)
+        XCTAssertLessThanOrEqual(encoded.utf8.count, 2_048)
+        for (key, invalid) in [("stage", "PRIVATE CANARY"), ("action", "PRIVATE CANARY"), ("phase", "PRIVATE CANARY"),
+                               ("ownerMatches", "PRIVATE CANARY"), ("userCount", "PRIVATE CANARY")] {
+            var altered = valid; altered[key] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(altered))
+        }
+        for key in ["prompt", "nonce", "fingerprint", "url", "private"] {
+            var altered = valid; altered[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(altered))
+        }
+        let invalidCounts: [Any] = [true, -1, 10_001, 1.5, "1"]
+        for key in ["requestedSequence", "recordSequence", "userCount"] {
+            for invalid in invalidCounts {
+                var altered = valid; altered[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(altered))
+            }
+        }
+        var missing = valid; missing.removeValue(forKey: "ownerMatches")
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(missing))
+        var nullable = valid; nullable["requestedSequence"] = NSNull(); nullable["recordSequence"] = NSNull()
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(nullable))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(NSNull()))
+    }
 }

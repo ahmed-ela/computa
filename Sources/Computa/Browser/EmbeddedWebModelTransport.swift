@@ -142,6 +142,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case promotionTemporary = "promotion_temporary"
     }
 
+    private enum SubmissionNativeStage: String {
+        case adapterRejected = "adapter_rejected"
+        case bindingMissing = "binding_missing"
+        case proofMissing = "proof_missing"
+        case proofInvalid = "proof_invalid"
+        case capabilityMissing = "capability_missing"
+        case currentProofMissing = "current_proof_missing"
+    }
+
     enum Failure: Error, LocalizedError, Equatable {
         case invalidRequest, unsupportedProvider, capacity, staleSession, documentChanged
         case signInRequired, temporaryUnverified, notFresh, composerUnavailable
@@ -941,6 +950,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if session.provider == .gemini, !session.isDiscovery {
                     guard session.currentSubmissionVerified,
                           session.currentSubmission?.sequence == session.sequence else {
+                        logSubmissionFailure(session, action: "inspect", stage: .currentProofMissing, observed: observed)
                         throw Failure.ownershipFailure(.javaScriptSubmission)
                     }
                 }
@@ -2042,6 +2052,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
+                if provider == .gemini, observed["detail"] as? String == "submission_message" {
+                    logSubmissionFailure(session, action: action, stage: .adapterRejected, observed: observed)
+                }
                 if observed["detail"] as? String == "first_user_message" {
                     recordFirstUserFailure(.adapterRejected, observed: observed)
                 }
@@ -2143,15 +2156,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if users == currentSubmission.sequence { binding = currentSubmission }
                 else if session.pendingSubmission, users == session.confirmedUsers { binding = session.previousSubmission }
                 else { binding = nil }
-                guard let binding else { throw Failure.ownershipFailure(.javaScriptSubmission) }
+                guard let binding else {
+                    logSubmissionFailure(session, action: action, stage: .bindingMissing, observed: observed)
+                    throw Failure.ownershipFailure(.javaScriptSubmission)
+                }
                 guard let raw = observed["submissionProof"] else {
                     if action == "inspect", session.pendingSubmission, users == currentSubmission.sequence {
                         throw Failure.submissionObservationPending
                     }
+                    logSubmissionFailure(session, action: action, stage: .proofMissing, observed: observed)
                     throw Failure.ownershipFailure(.javaScriptSubmission)
                 }
                 guard observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability,
                       Self.validSubmissionProof(raw, sequence: binding.sequence, fingerprint: binding.outboundFingerprint) else {
+                    logSubmissionFailure(session, action: action, stage: .proofInvalid, observed: observed)
                     throw Failure.ownershipFailure(.javaScriptSubmission)
                 }
                 if binding.sequence == currentSubmission.sequence { session.currentSubmissionVerified = true }
@@ -2216,6 +2234,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                maximumWait: evaluationDeadline - .now)
         if provider == .gemini, !session.isDiscovery, ["insert", "sendReady", "submit"].contains(action) {
             guard observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability else {
+                logSubmissionFailure(session, action: action, stage: .capabilityMissing, observed: observed)
                 throw Failure.ownershipFailure(.javaScriptSubmission)
             }
         }
@@ -2494,6 +2513,58 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               observed.utf8.count == 64, observed.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
               observed == fingerprint else { return false }
         return true
+    }
+
+    /// Diagnostic-only projection. Never publish message text, markers, hashes,
+    /// page identities, URLs or an arbitrary JavaScript value on rejection.
+    static func sanitizedSubmissionDiagnostic(_ raw: Any?) -> String? {
+        let flags = ["statePresent", "recordPresent", "stateRevoked", "ownerMatches", "documentMatches",
+                     "nonceMatches", "canonicalMatches", "suffixMatches", "contextMatches"]
+        let keys = Set(flags + ["kind", "stage", "action", "phase", "requestedSequence", "recordSequence", "userCount"])
+        guard let value = raw as? [String: Any], Set(value.keys) == keys,
+              value["kind"] as? String == "gemini_submission_v1",
+              let stage = value["stage"] as? String,
+              ["invalid_input", "begin_initial", "begin_admission", "begin_digest", "claim_admission",
+               "observe_state", "observe_record", "observe_parent", "observe_pending", "observe_count",
+               "observe_body", "observe_text", "observe_digest", "observe_final"].contains(stage),
+              let action = value["action"] as? String,
+              ["inspect", "prepare", "insert", "sendReady", "submit", "verifyModel", "stop", "discoverModels",
+               "selectModel", "modelDiagnostic", "enableTemporary", "unknown"].contains(action),
+              let phase = value["phase"] as? String,
+              ["none", "insert_claimed", "inserted", "send_claimed", "verified", "unknown"].contains(phase),
+              let users = ComputerToolArgumentContract.exactInt64(value["userCount"]), (0...10_000).contains(users) else { return nil }
+        var safe: [String: Any] = ["kind": "gemini_submission_v1", "stage": stage, "action": action, "phase": phase, "userCount": users]
+        for key in ["requestedSequence", "recordSequence"] {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let number = ComputerToolArgumentContract.exactInt64(value[key]), (0...10_000).contains(number) else { return nil }
+            safe[key] = number
+        }
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 2_048 else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func logSubmissionFailure(_ session: Session, action: String, stage: SubmissionNativeStage, observed: [String: Any]) {
+        guard session.provider == .gemini else { return }
+        // Native Send is claimed before the click. These fields deliberately
+        // distinguish that intent from a verified physical website submission.
+        let context: [String: Any] = ["kind": "submission_native_v1", "action": action, "stage": stage.rawValue,
+            "sequence": session.sequence, "confirmedUsers": session.confirmedUsers,
+            "preparedSequence": session.preparedSubmission?.sequence ?? 0,
+            "currentSequence": session.currentSubmission?.sequence ?? 0,
+            "sendClaimed": session.submitted, "pending": session.pendingSubmission,
+            "currentBodyVerified": session.currentSubmissionVerified,
+            "capabilityMatches": observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability,
+            "proofPresent": observed["submissionProof"] != nil]
+        if let data = try? JSONSerialization.data(withJSONObject: context, options: .sortedKeys), data.count <= 1_024 {
+            Self.inspectionLog.error("submissionNative \(String(decoding: data, as: UTF8.self), privacy: .public)")
+        }
+        if let safe = Self.sanitizedSubmissionDiagnostic(observed["submissionDiagnostic"]) {
+            Self.inspectionLog.error("submissionAdapter \(safe, privacy: .public)")
+        }
     }
 
     private func script(for provider: Provider) -> String? {

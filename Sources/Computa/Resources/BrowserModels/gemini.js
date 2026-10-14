@@ -1695,12 +1695,51 @@ const normalizedBody = node => (node.innerText || node.textContent || '').replac
 const submissionOwnershipEnabled = input.submissionMarker !== undefined || input.submissionSequence !== undefined;
 if (submissionOwnershipEnabled && (typeof input.submissionMarker !== 'string' || !/^[a-f0-9-]{36}$/i.test(input.submissionMarker)
   || !Number.isInteger(input.submissionSequence) || input.submissionSequence < 0 || input.submissionSequence > 10_000))
-  return { error: 'conversation_changed', detail: 'submission_message' };
+  return modelSubmissionFailure(null, 'invalid_input');
 const submissionEditorActions = ['insert', 'sendReady', 'submit'];
-function modelSubmissionFailure(record = null) {
+function modelSubmissionDiagnostic(record, stage) {
+  // Diagnostic predicates cannot grant proof, change state, or expose values.
+  // A missing/throwing diagnostic never changes the authoritative failure.
+  try {
+    const stages = ['invalid_input', 'begin_initial', 'begin_admission', 'begin_digest', 'claim_admission',
+      'observe_state', 'observe_record', 'observe_parent', 'observe_pending', 'observe_count', 'observe_body',
+      'observe_text', 'observe_digest', 'observe_final'];
+    const actions = ['inspect', 'prepare', 'insert', 'sendReady', 'submit', 'verifyModel', 'stop',
+      'discoverModels', 'selectModel', 'modelDiagnostic', 'enableTemporary', 'unknown'];
+    const phases = ['none', 'insert_claimed', 'inserted', 'send_claimed', 'verified', 'unknown'];
+    const boundedSequence = value => Number.isInteger(value) && value >= 0 && value <= 10_000 ? value : null;
+    const state = globalThis.__computaGeminiSubmissionState;
+    const target = record || state?.pending || state?.lastVerified || null, roots = modelUserRoots();
+    const body = boundedSequence(target?.sequence) !== null && target.sequence > 0
+      ? modelUserBody(roots[target.sequence - 1]) : null;
+    const raw = !stage.startsWith('observe_') && typeof input.prompt === 'string'
+      ? input.prompt : body && (body.innerText || body.textContent || '');
+    const canonical = typeof raw === 'string' && raw.length <= 180_200 ? raw.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
+    const marker = target?.marker, markerLine = typeof marker === 'string' && /^[a-f0-9-]{36}$/i.test(marker)
+      ? `Computa session marker: ${marker}` : null;
+    let contextMatches = false;
+    try { contextMatches = modelSubmissionContext(target, input.action === 'submit') === true; } catch { }
+    return { kind: 'gemini_submission_v1', stage: stages.includes(stage) ? stage : 'observe_final',
+      action: actions.includes(input.action) ? input.action : 'unknown',
+      phase: target ? phases.includes(target.phase) ? target.phase : 'unknown' : 'none',
+      requestedSequence: boundedSequence(input.submissionSequence), recordSequence: boundedSequence(target?.sequence),
+      userCount: Math.min(roots.length, 10_000), statePresent: !!state, recordPresent: !!target, stateRevoked: state?.revoked === true,
+      ownerMatches: globalThis.__computaModelOwner === input.ownerToken && (!state || state.owner === input.ownerToken)
+        && (!target || target.owner === input.ownerToken),
+      documentMatches: !!state && state.document === document && (!target || target.document === document),
+      nonceMatches: !!target && typeof input.submissionMarker === 'string' && marker === input.submissionMarker,
+      canonicalMatches: canonical !== null && typeof target?.canonical === 'string' && canonical === target.canonical,
+      suffixMatches: canonical !== null && markerLine !== null && canonical.split('\n').at(-1) === markerLine
+        && canonical.split(markerLine).length === 2,
+      contextMatches };
+  } catch { return null; }
+}
+function modelSubmissionFailure(record = null, stage = 'observe_final') {
   const state = globalThis.__computaGeminiSubmissionState;
   if (record && state && (state.pending === record || state.lastVerified === record)) state.revoked = true;
-  return { error: 'conversation_changed', detail: 'submission_message' };
+  const error = { error: 'conversation_changed', detail: 'submission_message' };
+  const diagnostic = modelSubmissionDiagnostic(record, stage);
+  return diagnostic ? { ...error, submissionDiagnostic: diagnostic } : error;
 }
 function modelSubmissionContext(record = null, allowSubmitted = false) {
   return window === window.top && location.origin === 'https://gemini.google.com' && modelURLAllowed()
@@ -1717,16 +1756,16 @@ function modelPreviousSubmissionIntact(sequence) {
 }
 async function modelObserveSubmission(sequence, allowPending = false, pendingParent = null) {
   const state = globalThis.__computaGeminiSubmissionState;
-  if (sequence === 0) return modelUserRoots().length === 0 ? {} : modelSubmissionFailure();
-  if (!state || state.revoked || state.document !== document || state.owner !== input.ownerToken) return modelSubmissionFailure();
+  if (sequence === 0) return modelUserRoots().length === 0 ? {} : modelSubmissionFailure(null, 'observe_count');
+  if (!state || state.revoked || state.document !== document || state.owner !== input.ownerToken) return modelSubmissionFailure(null, 'observe_state');
   const record = state.lastVerified?.sequence === sequence ? state.lastVerified : state.pending?.sequence === sequence ? state.pending : null;
-  if (!record || !['send_claimed', 'verified'].includes(record.phase)) return modelSubmissionFailure(record);
+  if (!record || !['send_claimed', 'verified'].includes(record.phase)) return modelSubmissionFailure(record, 'observe_record');
   const parentValid = !!pendingParent && state.pending === pendingParent && pendingParent.phase === 'send_claimed'
     && pendingParent.sequence === sequence + 1 && pendingParent.sequence === input.submissionSequence
     && pendingParent.marker === input.submissionMarker && state.lastVerified === record && record.phase === 'verified';
-  if (pendingParent && !parentValid) return modelSubmissionFailure(record);
+  if (pendingParent && !parentValid) return modelSubmissionFailure(record, 'observe_parent');
   if (!submissionEditorActions.includes(input.action) && input.submissionMarker !== record.marker && !parentValid)
-    return modelSubmissionFailure(record);
+    return modelSubmissionFailure(record, 'observe_parent');
   const roots = modelUserRoots();
   if (allowPending && record.phase === 'send_claimed' && roots.length === sequence - 1
     && modelSubmissionContext(record, input.action === 'submit')) {
@@ -1735,7 +1774,7 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     const previous = sequence > 1 ? await modelObserveSubmission(sequence - 1, false, record) : {};
     return previous.error ? previous : { ...previous, pending: true };
   }
-  if (roots.length !== sequence || !modelSubmissionContext(record, input.action === 'submit')) return modelSubmissionFailure(record);
+  if (roots.length !== sequence || !modelSubmissionContext(record, input.action === 'submit')) return modelSubmissionFailure(record, 'observe_count');
   const root = roots[sequence - 1], body = modelUserBody(root);
   const raw = body && (body.innerText || body.textContent || '');
   const remount = record.remount;
@@ -1747,15 +1786,15 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     && globalThis.__computaModelFirstProof?.marker === record.marker;
   if (!body || typeof raw !== 'string' || raw.length > 180_200
     || record.root && (record.root !== root || record.body !== body) && !remountAllowed
-    || sequence > 1 && (root === roots[0] || body === modelUserBody(roots[0]))) return modelSubmissionFailure(record);
+    || sequence > 1 && (root === roots[0] || body === modelUserBody(roots[0]))) return modelSubmissionFailure(record, 'observe_body');
   const text = normalizedBody(body), markerLine = `Computa session marker: ${record.marker}`;
   if (text !== record.canonical || text.split('\n').at(-1) !== markerLine || text.split(markerLine).length !== 2)
-    return modelSubmissionFailure(record);
+    return modelSubmissionFailure(record, 'observe_text');
   const previous = state.lastVerified;
   const priorIntact = () => !previous || previous === record || previous.sequence !== sequence - 1
     || roots[previous.sequence - 1] === previous.root && previous.body.isConnected
       && modelUserBody(previous.root) === previous.body && normalizedBody(previous.body) === previous.canonical;
-  if (!priorIntact()) return modelSubmissionFailure(record);
+  if (!priorIntact()) return modelSubmissionFailure(record, 'observe_pending');
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   const current = modelUserRoots();
@@ -1763,7 +1802,7 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     const append = websiteModelAcknowledgedUserAppend(input, ownedUserCount, current.length,
       firstSnapshot ? { snapshotIntact: snapshotUnchanged(true), fingerprint: firstUserFingerprint, identity: firstUserIdentity } : null,
       modelTemporaryVerified());
-    return append || (firstSnapshot && !snapshotUnchanged(true) ? modelFirstUserFailure('snapshot_before_action') : modelSubmissionFailure(record));
+    return append || (firstSnapshot && !snapshotUnchanged(true) ? modelFirstUserFailure('snapshot_before_action') : modelSubmissionFailure(record, 'observe_pending'));
   }
   if (globalThis.__computaGeminiSubmissionState !== state || state.revoked
     || state.pending !== record && state.lastVerified !== record
@@ -1773,7 +1812,7 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     || !modelSubmissionContext(record, input.action === 'submit')
     || current.length !== sequence || current.some((node, index) => node !== roots[index])
     || !root.isConnected || !body.isConnected || modelUserBody(root) !== body || normalizedBody(body) !== text
-    || !priorIntact() || fingerprint !== record.fingerprint) return modelSubmissionFailure(record);
+    || !priorIntact() || fingerprint !== record.fingerprint) return modelSubmissionFailure(record, 'observe_digest');
   record.root = root; record.body = body; record.phase = 'verified'; record.remount = null;
   state.lastVerified = record; if (state.pending === record) state.pending = null;
   return { submissionProof: { sequence, fingerprint } };
@@ -1784,7 +1823,7 @@ async function modelBeginSubmission(prompt, composer) {
   const canonical = prompt.replace(/\r\n?/g, '\n').normalize('NFC').trim(), markerLine = `Computa session marker: ${marker}`;
   let state = globalThis.__computaGeminiSubmissionState;
   if (!state) {
-    if (sequence !== 1 || ownedUserCount !== 0) return modelSubmissionFailure();
+    if (sequence !== 1 || ownedUserCount !== 0) return modelSubmissionFailure(null, 'begin_initial');
     state = { document, owner: input.ownerToken, lastVerified: null, pending: null, markers: new Set(), revoked: false };
     globalThis.__computaGeminiSubmissionState = state;
   }
@@ -1793,7 +1832,7 @@ async function modelBeginSubmission(prompt, composer) {
     || state.markers.has(marker) || sequence === 1 && marker !== input.expectedFirstUserMarker
     || sequence > 1 && marker === input.expectedFirstUserMarker || canonical.split('\n').at(-1) !== markerLine
     || canonical.split(markerLine).length !== 2 || !canonical.endsWith(`\n\n${markerLine}`)
-    || !modelSubmissionContext()) return modelSubmissionFailure();
+    || !modelSubmissionContext()) return modelSubmissionFailure(null, 'begin_admission');
   const record = { sequence, marker, canonical, document, owner: input.ownerToken, phase: 'insert_claimed', fingerprint: null, root: null, body: null };
   state.pending = record; state.markers.add(marker);
   const roots = modelUserRoots();
@@ -1801,7 +1840,7 @@ async function modelBeginSubmission(prompt, composer) {
   const current = modelUserRoots(), value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
   if (globalThis.__computaGeminiSubmissionState !== state || state.pending !== record || state.revoked
     || !modelSubmissionContext(record) || current.length !== sequence - 1 || current.some((node, index) => node !== roots[index])
-    || !modelEnabled(composer) || value?.trim() || !modelPreviousSubmissionIntact(sequence - 1)) return modelSubmissionFailure(record);
+    || !modelEnabled(composer) || value?.trim() || !modelPreviousSubmissionIntact(sequence - 1)) return modelSubmissionFailure(record, 'begin_digest');
   record.fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   return {};
 }
@@ -1812,7 +1851,7 @@ function modelClaimSubmission(prompt) {
     || record.sequence !== input.submissionSequence || record.marker !== input.submissionMarker
     || record.canonical !== prompt.replace(/\r\n?/g, '\n').normalize('NFC').trim()
     || ownedUserCount !== record.sequence - 1 || !modelSubmissionContext(record)
-    || !modelPreviousSubmissionIntact(record.sequence - 1)) return modelSubmissionFailure(record);
+    || !modelPreviousSubmissionIntact(record.sequence - 1)) return modelSubmissionFailure(record, 'claim_admission');
   record.phase = 'send_claimed'; return {};
 }
 async function modelSubmissionResult(observed) {

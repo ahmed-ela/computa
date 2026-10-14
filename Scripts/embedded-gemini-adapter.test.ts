@@ -191,6 +191,65 @@ describe('Gemini per-submission ownership', () => {
     expect(f.send.clicks).toBe(2);
   });
 
+  test('submission diagnostics expose only fixed typed predicates at actual rejected boundaries', async () => {
+    const keys = ['kind', 'stage', 'action', 'phase', 'requestedSequence', 'recordSequence', 'userCount', 'statePresent',
+      'recordPresent', 'stateRevoked', 'ownerMatches', 'documentMatches', 'nonceMatches', 'canonicalMatches', 'suffixMatches', 'contextMatches'];
+    const flags = keys.slice(7);
+    const check = (value: any, stage: string) => {
+      expect(value).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      const diagnostic = value.submissionDiagnostic;
+      expect(Object.keys(diagnostic).sort()).toEqual([...keys].sort());
+      expect(diagnostic).toMatchObject({ kind: 'gemini_submission_v1', stage });
+      for (const key of flags) expect(typeof diagnostic[key]).toBe('boolean');
+      for (const key of ['requestedSequence', 'recordSequence'])
+        expect(diagnostic[key] === null || Number.isInteger(diagnostic[key]) && diagnostic[key] >= 0 && diagnostic[key] <= 10000).toBe(true);
+      expect(Number.isInteger(diagnostic.userCount) && diagnostic.userCount >= 0 && diagnostic.userCount <= 10000).toBe(true);
+      expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE');
+      expect(JSON.stringify(diagnostic)).not.toContain(firstMarker);
+      expect(JSON.stringify(diagnostic)).not.toContain('https:');
+      return diagnostic;
+    };
+    const invalid = fixture(provider, { response: false });
+    const bad = await invalid.run('inspect', { submissionSequence: 'PRIVATE_SEQUENCE', submissionMarker: 'PRIVATE_NONCE' });
+    expect(check(bad, 'invalid_input')).toMatchObject({ action: 'inspect', phase: 'none', requestedSequence: null, recordSequence: null, userCount: 0 });
+    expect(invalid.send.clicks).toBe(0);
+    const initial = fixture(provider, { response: false }); await finishRound(initial, 1);
+    const refused = await initial.run('insert', { ...fields(2), submissionMarker: firstMarker, expectedUserCounts: [1], prompt: roundPrompt(1) });
+    expect(check(refused, 'begin_admission')).toMatchObject({ action: 'insert', phase: 'verified', requestedSequence: 2, recordSequence: 1 });
+    expect(initial.send.clicks).toBe(1);
+    const altered = fixture(provider, { response: false }); await finishRound(altered, 1);
+    const text = await stage(altered, 2), send = altered.send.onClick!;
+    altered.send.onClick = () => { send(); altered.userBody!.text = altered.userBody!.text.replace('[literal]', '{altered}'); };
+    const rejected = await altered.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+    expect(check(rejected, 'observe_text')).toMatchObject({ action: 'submit', phase: 'send_claimed', requestedSequence: 2,
+      recordSequence: 2, userCount: 2, stateRevoked: true, canonicalMatches: false, suffixMatches: true });
+    expect(altered.send.clicks).toBe(2);
+  });
+
+  test('submission diagnostic failure cannot replace the refusal or revive its private record', async () => {
+    const f = fixture(provider, { response: false }); await finishRound(f, 1);
+    const record = f.world.__computaGeminiSubmissionState.lastVerified;
+    record.phase = 'PRIVATE_PHASE';
+    Object.defineProperty(record, 'canonical', { get() { throw new Error('PRIVATE_DIAGNOSTIC_GETTER'); } });
+    const rejected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1] });
+    expect(rejected).toEqual({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(f.world.__computaGeminiSubmissionState.revoked).toBe(true);
+    expect(f.send.clicks).toBe(1); expect(JSON.stringify(rejected)).not.toContain('PRIVATE');
+  });
+
+  test('submission diagnostics retain sequence bounds and never accompany healthy proof', async () => {
+    for (const sequence of [-1, 10001, true, 'PRIVATE', Infinity]) {
+      const f = fixture(provider, { response: false });
+      const result = await f.run('inspect', { submissionSequence: sequence, submissionMarker: firstMarker });
+      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+        submissionDiagnostic: { kind: 'gemini_submission_v1', stage: 'invalid_input', requestedSequence: null } });
+      expect(result.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(0);
+    }
+    const f = fixture(provider, { response: false });
+    expect((await finishRound(f, 1)).submissionDiagnostic).toBeUndefined();
+    expect((await finishRound(f, 2)).submissionDiagnostic).toBeUndefined();
+  });
+
   test('an earlier current body changed during next insertion hashing prevents any new editor input', async () => {
     const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
     const inputs = f.composer.events.length;
