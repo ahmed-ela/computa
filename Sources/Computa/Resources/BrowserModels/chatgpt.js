@@ -2480,7 +2480,7 @@ function chatGPTFramedPayloadDiagnostic(expected, rendered) {
 }
 function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
   const result = { literalDOMAvailable: false, literalDOMMatchesPrompt: false, literalDOMMatchesRendered: false,
-    literalDOMLength: 0, literalDOMNodeCount: 0, literalDOMMaxDepth: 0, literalDOMParagraphCount: 0, literalDOMBRCount: 0,
+    literalDOMLength: 0, literalDOMNodeCount: 0, literalDOMMaxDepth: 0, literalDOMParagraphCount: 0, literalDOMBRCount: 0, literalDOMLinkCount: 0,
     literalDOMUnavailableReason: 'read_failure', literalDOMFrameUnique: false, literalDOMFrameParsed: false,
     literalDOMPayloadCompared: false, literalDOMParsedJSONEqual: false, literalDOMPayloadUnavailableReason: 'unavailable' };
   try {
@@ -2520,13 +2520,20 @@ function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
       if (node.hidden || node.closest('[hidden], [aria-hidden="true"]') || style.display === 'none'
         || ['hidden', 'collapse'].includes(style.visibility)
         || node.tagName !== 'BR' && node.getClientRects().length === 0) fail('hidden_markup');
-      if (['BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'OPTION', 'A', 'SUMMARY'].includes(node.tagName)
-        || ['button', 'textbox', 'link', 'menuitem', 'slider', 'combobox'].includes(node.getAttribute('role'))
+      // Diagnose the literal text of the observed inline anchor only. Its URL
+      // and action semantics are never read, and this stream grants no proof.
+      const role = node.getAttribute('role');
+      const inlineLink = node.tagName === 'A' && node.parentElement?.tagName === 'P'
+        && node.parentElement.parentElement === logicalRoot && logicalRoot.tagName === 'DIV'
+        && (role === null || role === 'link');
+      if (!inlineLink && ['BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'OPTION', 'A', 'SUMMARY'].includes(node.tagName)
+        || ['button', 'textbox', 'link', 'menuitem', 'slider', 'combobox'].includes(role) && !(inlineLink && role === 'link')
         || node.closest('[contenteditable="true"]')) failureNode(node, 'control', 'control_markup');
-      if (!['DIV', 'SPAN', 'P', 'BR'].includes(node.tagName)) failureNode(node, 'tag');
+      if (!inlineLink && !['DIV', 'SPAN', 'P', 'BR'].includes(node.tagName)) failureNode(node, 'tag');
       if (node !== root && node !== logicalRoot && node.tagName === 'DIV') failureNode(node, 'nested_div');
       if (node.tagName === 'P' && node !== root && (node.parentElement !== logicalRoot || logicalRoot.tagName !== 'DIV')) failureNode(node, 'paragraph_parent');
       if (node.tagName === 'BR') { result.literalDOMBRCount++; append('\n'); return; }
+      if (inlineLink) result.literalDOMLinkCount++;
       if (node.tagName === 'P') {
         result.literalDOMParagraphCount++;
         if (node !== root && parts.length) append('\n');

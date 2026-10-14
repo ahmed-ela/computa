@@ -5089,6 +5089,22 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
             }
         }
+        XCTAssertNil(literal["literalDOMLinkCount"], "Historical diagnostics without the optional count remain valid")
+        var linked = source; linked["literalDOMLinkCount"] = 2
+        linked["literalDOMLinkURL"] = "https://private_canary"; linked["literalDOMLinkText"] = "private_canary"
+        let linkedRecords = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(linked), provider: .chatgpt))
+        XCTAssertTrue(linkedRecords.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains("https://") })
+        let linkedValues = try linkedRecords.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        let linkedLiteral = try XCTUnwrap(linkedValues.first { $0["kind"] as? String == "first_user_literal_dom" })
+        XCTAssertEqual(linkedLiteral["literalDOMLinkCount"] as? Int, 2)
+        for invalid in [-1, 8_193, 1.5, true, NSNull(), "private_canary"] as [Any] {
+            var forged = linked; forged["literalDOMLinkCount"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
+        for changes in [["literalDOMLinkCount": 172], ["literalDOMParagraphCount": 0], ["literalDOMMaxDepth": 1]] as [[String: Any]] {
+            var forged = linked; forged.merge(changes) { _, new in new }
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
         for key in ["literalDOMUnavailableReason", "literalDOMPayloadUnavailableReason"] {
             for invalid in ["private_canary", 1, true, NSNull()] as [Any] {
                 var forged = source; forged[key] = invalid

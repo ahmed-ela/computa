@@ -97,6 +97,10 @@ final class EmbeddedBrowserSession {
         var observations: [NSKeyValueObservation] = []
         var navigation: WKNavigation?
         var preparedDocumentNavigation = false
+        // Diagnostic facts only; these never grant adapter or recovery authority.
+        var modelCommittedGeneration: UUID?
+        var modelFinishedGeneration: UUID?
+        var modelFailedGeneration: UUID?
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
@@ -435,6 +439,7 @@ final class EmbeddedBrowserSession {
 
     func stop(tabID: UUID) {
         guard let entry = entries[tabID] else { return }
+        resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
         entry.tab.documentID = UUID()
@@ -551,6 +556,38 @@ final class EmbeddedBrowserSession {
     }
 
     func documentGeneration(for id: UUID) -> UUID? { entries[id]?.tab.documentGeneration }
+
+    struct ModelNavigationDiagnostic: Equatable {
+        let viewLoading: Bool
+        let tabLoading: Bool
+        let navigationPending: Bool
+        let generationCommitted: Bool
+        let generationFinished: Bool
+        let navigationError: Bool
+
+        var settled: Bool {
+            generationCommitted && generationFinished && !viewLoading && !tabLoading
+                && !navigationPending && !navigationError
+        }
+
+        var logDescription: String {
+            "known=true viewLoading=\(viewLoading) tabLoading=\(tabLoading) navigationPending=\(navigationPending) generationCommitted=\(generationCommitted) generationFinished=\(generationFinished) navigationError=\(navigationError) settled=\(settled)"
+        }
+
+        static let unknownLogDescription = "known=false viewLoading=unknown tabLoading=unknown navigationPending=unknown generationCommitted=unknown generationFinished=unknown navigationError=unknown settled=unknown"
+    }
+
+    /// Native-only observation of the exact private view. Neither a URL nor a
+    /// document body is captured, and unknown ownership never becomes false facts.
+    func modelNavigationDiagnostic(tabID: UUID, view: WKWebView) -> ModelNavigationDiagnostic? {
+        guard !isShutdown, let entry = entries[tabID], entry.isModelOwned, entry.view === view else { return nil }
+        let generation = entry.tab.documentGeneration
+        return .init(viewLoading: view.isLoading, tabLoading: entry.tab.isLoading,
+                     navigationPending: entry.navigation != nil,
+                     generationCommitted: entry.modelCommittedGeneration == generation,
+                     generationFinished: entry.modelFinishedGeneration == generation,
+                     navigationError: entry.modelFailedGeneration == generation)
+    }
 
     static let modelSignalName = "computaChatGPTSignal"
     static let modelDiagnosticName = "computaModelDiagnostic"
@@ -824,6 +861,7 @@ final class EmbeddedBrowserSession {
     }
 
     private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
+        resetModelNavigationDiagnostic(entry)
         entry.recoverySettledGeneration = nil
         entry.tab.documentID = UUID()
         entry.preparedDocumentNavigation = replacesDocument
@@ -832,6 +870,12 @@ final class EmbeddedBrowserSession {
         entry.tab.isLoading = true
         signalModelChange(entry)
         if selectedTabID == entry.tab.id { errorMessage = nil }
+    }
+
+    private func resetModelNavigationDiagnostic(_ entry: Entry) {
+        entry.modelCommittedGeneration = nil
+        entry.modelFinishedGeneration = nil
+        entry.modelFailedGeneration = nil
     }
 
     private func observe(_ entry: Entry) {
@@ -905,6 +949,13 @@ final class EmbeddedBrowserSession {
 
     fileprivate func completed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID, error: Error? = nil) {
         guard let entry = entries[tabID], entry.view === view, entry.navigation === navigation else { return }
+        if entry.isModelOwned, navigation != nil {
+            if error == nil, entry.modelCommittedGeneration == entry.tab.documentGeneration {
+                entry.modelFinishedGeneration = entry.tab.documentGeneration
+            } else if error != nil {
+                entry.modelFailedGeneration = entry.tab.documentGeneration
+            }
+        }
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
         refresh(tabID, view: view)
@@ -921,6 +972,9 @@ final class EmbeddedBrowserSession {
 
     fileprivate func committed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view, entry.navigation === navigation else { return }
+        if entry.isModelOwned, navigation != nil {
+            entry.modelCommittedGeneration = entry.tab.documentGeneration
+        }
         if !entry.isModelOwned, let navigation, entry.humanCommittedNavigation !== navigation {
             entry.humanCommittedNavigation = navigation
             entry.humanCommittedDocumentID = UUID()
@@ -934,6 +988,7 @@ final class EmbeddedBrowserSession {
 
     fileprivate func terminated(_ view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
+        resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
         entry.tab.documentID = UUID()

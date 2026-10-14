@@ -448,6 +448,146 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertNotNil(session.webView(for: id))
     }
 
+    func testModelNavigationDiagnosticsTrackActualProvisionalCommitAndFinish() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let initial = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertFalse(initial.generationCommitted)
+        XCTAssertFalse(initial.generationFinished)
+        XCTAssertFalse(initial.settled, "An idle unloaded view is not a finished document")
+        let delegate = try XCTUnwrap(view.navigationDelegate)
+        let observer = ModelNavigationDiagnosticFixture(delegate: delegate) {
+            session.modelNavigationDiagnostic(tabID: id, view: view)
+        }
+        view.navigationDelegate = observer
+        defer { view.navigationDelegate = delegate }
+        view.loadHTMLString("<p>Local navigation diagnostic fixture</p>", baseURL: nil)
+        let deadline = ContinuousClock.now + .seconds(10)
+        while observer.finished == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let provisional = try XCTUnwrap(observer.provisional)
+        XCTAssertTrue(provisional.navigationPending)
+        XCTAssertFalse(provisional.generationCommitted)
+        XCTAssertFalse(provisional.generationFinished)
+        XCTAssertFalse(provisional.settled)
+        let committed = try XCTUnwrap(observer.committed)
+        XCTAssertTrue(committed.navigationPending)
+        XCTAssertTrue(committed.generationCommitted)
+        XCTAssertFalse(committed.generationFinished)
+        XCTAssertFalse(committed.settled)
+        let finished = try XCTUnwrap(observer.finished)
+        XCTAssertFalse(finished.navigationPending)
+        XCTAssertTrue(finished.generationCommitted)
+        XCTAssertTrue(finished.generationFinished)
+        XCTAssertFalse(finished.navigationError)
+        XCTAssertTrue(try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view)).settled)
+        XCTAssertTrue(session.humanTabs.isEmpty)
+    }
+
+    func testModelNavigationDiagnosticsRejectFailedOrUncommittedFinish() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let delegate = try XCTUnwrap(view.navigationDelegate)
+        // Drive the real delegate with local WebKit navigation identities;
+        // no asynchronous navigation callbacks can race this fixture.
+        view.navigationDelegate = nil
+        for committed in [false, true] {
+            let navigation = try XCTUnwrap(view.loadHTMLString("<p>Local failure</p>", baseURL: nil))
+            delegate.webView?(view, didStartProvisionalNavigation: navigation)
+            if committed { delegate.webView?(view, didCommit: navigation) }
+            let failure = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled,
+                                  userInfo: [NSLocalizedDescriptionKey: "PRIVATE_NAVIGATION_ERROR_CANARY"])
+            if committed { delegate.webView?(view, didFail: navigation, withError: failure) }
+            else { delegate.webView?(view, didFailProvisionalNavigation: navigation, withError: failure) }
+            let result = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+            XCTAssertEqual(result.generationCommitted, committed)
+            XCTAssertFalse(result.generationFinished)
+            XCTAssertTrue(result.navigationError, "Cancellation is not a successful finish")
+            XCTAssertFalse(result.navigationPending)
+            XCTAssertFalse(result.settled)
+            XCTAssertFalse(result.logDescription.contains("PRIVATE_NAVIGATION_ERROR_CANARY"))
+        }
+        let uncommitted = try XCTUnwrap(view.loadHTMLString("<p>No commit callback</p>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: uncommitted)
+        delegate.webView?(view, didFinish: uncommitted)
+        let result = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertFalse(result.generationCommitted)
+        XCTAssertFalse(result.generationFinished)
+        XCTAssertFalse(result.navigationError)
+        XCTAssertFalse(result.settled)
+    }
+
+    func testModelNavigationDiagnosticsResetAndIgnoreStaleCallbacks() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let delegate = try XCTUnwrap(view.navigationDelegate)
+        view.navigationDelegate = nil
+        let first = try XCTUnwrap(view.loadHTMLString("<p>First</p>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: first)
+        delegate.webView?(view, didCommit: first)
+        delegate.webView?(view, didFinish: first)
+        XCTAssertTrue(try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view)).generationFinished)
+        let oldGeneration = session.documentGeneration(for: id)
+        try session.navigate(tabID: id, to: XCTUnwrap(URL(string: "about:blank")))
+        XCTAssertNotEqual(session.documentGeneration(for: id), oldGeneration)
+        let prepared = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertFalse(prepared.generationCommitted, "Reset occurs synchronously before didStart")
+        XCTAssertFalse(prepared.generationFinished)
+        delegate.webView?(view, didCommit: first)
+        delegate.webView?(view, didFinish: first)
+        XCTAssertEqual(session.modelNavigationDiagnostic(tabID: id, view: view), prepared)
+        let second = try XCTUnwrap(view.loadHTMLString("<p>Second</p>", baseURL: nil))
+        delegate.webView?(view, didStartProvisionalNavigation: second)
+        let current = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        delegate.webView?(view, didCommit: first)
+        delegate.webView?(view, didFail: first, withError: NSError(domain: NSURLErrorDomain, code: -1000))
+        XCTAssertEqual(session.modelNavigationDiagnostic(tabID: id, view: view), current)
+        delegate.webView?(view, didCommit: second)
+        delegate.webView?(view, didFinish: second)
+        XCTAssertTrue(try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view)).generationFinished)
+        for terminate in [false, true] {
+            if terminate { delegate.webViewWebContentProcessDidTerminate?(view) }
+            else { session.stop(tabID: id) }
+            delegate.webView?(view, didCommit: second)
+            delegate.webView?(view, didFinish: second)
+            let reset = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+            XCTAssertFalse(reset.generationCommitted)
+            XCTAssertFalse(reset.generationFinished)
+            XCTAssertFalse(reset.navigationPending)
+            XCTAssertFalse(reset.settled)
+        }
+    }
+
+    func testModelNavigationDiagnosticsRequireExactPrivateViewAndContainOnlyFacts() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let otherID = try session.createUnloadedModelTabForTesting()
+        let humanID = try session.createTab()
+        let view = try XCTUnwrap(session.webView(for: id))
+        let other = try XCTUnwrap(session.webView(for: otherID))
+        let human = try XCTUnwrap(session.webView(for: humanID))
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: id, view: other))
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: humanID, view: human))
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: UUID(), view: view))
+        let facts = try XCTUnwrap(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertEqual(facts.logDescription, "known=true viewLoading=false tabLoading=false navigationPending=false generationCommitted=false generationFinished=false navigationError=false settled=false")
+        XCTAssertEqual(EmbeddedBrowserSession.ModelNavigationDiagnostic.unknownLogDescription,
+                       "known=false viewLoading=unknown tabLoading=unknown navigationPending=unknown generationCommitted=unknown generationFinished=unknown navigationError=unknown settled=unknown")
+        session.closeTab(id)
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: id, view: view))
+        XCTAssertNotNil(session.modelNavigationDiagnostic(tabID: otherID, view: other))
+        session.shutdown()
+        XCTAssertNil(session.modelNavigationDiagnostic(tabID: otherID, view: other))
+    }
+
     func testModelRenderHostAttachesFixedViewportWithoutChangingHumanSelectionOrFocus() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),
@@ -1358,6 +1498,35 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         for input in ["javascript:alert(1)", "file:///tmp/test", "data:text/html,x", "custom:search"] {
             XCTAssertThrowsError(try EmbeddedBrowserURLPolicy.validate(XCTUnwrap(URL(string: input))), input)
         }
+    }
+}
+
+@MainActor
+private final class ModelNavigationDiagnosticFixture: NSObject, WKNavigationDelegate {
+    let delegate: any WKNavigationDelegate
+    let snapshot: () -> EmbeddedBrowserSession.ModelNavigationDiagnostic?
+    var provisional: EmbeddedBrowserSession.ModelNavigationDiagnostic?
+    var committed: EmbeddedBrowserSession.ModelNavigationDiagnostic?
+    var finished: EmbeddedBrowserSession.ModelNavigationDiagnostic?
+
+    init(delegate: any WKNavigationDelegate, snapshot: @escaping () -> EmbeddedBrowserSession.ModelNavigationDiagnostic?) {
+        self.delegate = delegate
+        self.snapshot = snapshot
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        delegate.webView?(webView, didStartProvisionalNavigation: navigation)
+        provisional = snapshot()
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        delegate.webView?(webView, didCommit: navigation)
+        committed = snapshot()
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        delegate.webView?(webView, didFinish: navigation)
+        finished = snapshot()
     }
 }
 

@@ -359,7 +359,7 @@ describe('ChatGPT literal DOM failure diagnostics', () => {
 
   test('first control exposes only finite node facts and never skips its content or grants ownership', async () => {
     for (const [tag, values, projectedTag] of [
-      ['A', { href: 'https://PRIVATE_DIAGNOSTIC_CANARY' }, 'a'],
+      ['A', { href: 'https://PRIVATE_DIAGNOSTIC_CANARY', role: 'button' }, 'a'],
       ['BUTTON', { title: 'PRIVATE_DIAGNOSTIC_CANARY' }, 'button'],
       ['INPUT', { value: 'PRIVATE_DIAGNOSTIC_CANARY' }, 'input'],
       ['TEXTAREA', { name: 'PRIVATE_DIAGNOSTIC_CANARY' }, 'textarea'],
@@ -378,6 +378,62 @@ describe('ChatGPT literal DOM failure diagnostics', () => {
         literalDOMFailureParentTag: 'p', literalDOMFailureRule: 'control' });
       expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE_DIAGNOSTIC_CANARY');
       expect(JSON.stringify(diagnostic)).not.toContain('https://');
+    }
+  });
+
+  test('observed inline anchors diagnose literal paragraph text without reading URLs clicking or granting proof', async () => {
+    for (const [wrapper, role, altered] of [[false, null, false], [true, null, false], [true, 'link', false], [true, null, true]] as const) {
+      let anchor: Element | undefined, hrefReads = 0;
+      const diagnostic = await rejected(prompt => {
+        const literal = altered ? prompt.replace('{"tools":[]}', '{"tools":{]}') : prompt;
+        anchor = element('A', [element('SPAN', [text(literal.slice(32, 64))])],
+          { href: 'https://PRIVATE_DIAGNOSTIC_CANARY', ...(role ? { role } : {}) });
+        const getAttribute = anchor.getAttribute.bind(anchor);
+        anchor.getAttribute = name => { if (name === 'href') hrefReads++; return getAttribute(name); };
+        const row = element('P', [text(literal.slice(0, 32)), anchor, text(literal.slice(64))]);
+        return wrapper ? [element('DIV', [row])] : [row];
+      });
+      expect(diagnostic).toMatchObject({ literalDOMAvailable: true, literalDOMUnavailableReason: 'none',
+        literalDOMLinkCount: 1, literalDOMParagraphCount: 1,
+        literalDOMMatchesPrompt: !altered, literalDOMMatchesRendered: altered,
+        literalDOMFrameParsed: !altered, literalDOMParsedJSONEqual: !altered });
+      for (const field of fields) expect(diagnostic[field]).toBeUndefined();
+      expect(anchor!.clicks).toBe(0); expect(anchor!.events).toHaveLength(0); expect(hrefReads).toBe(0);
+      expect(JSON.stringify(diagnostic)).not.toContain('https://');
+    }
+    let rows = 0;
+    const lines = await rejected(prompt => {
+      const values = prompt.split('\n'); rows = values.length;
+      return [element('DIV', values.map(value => element('P', [element('A', [text(value)])])))];
+    });
+    expect(lines).toMatchObject({ literalDOMAvailable: true, literalDOMMatchesPrompt: true,
+      literalDOMLinkCount: rows, literalDOMParagraphCount: rows, literalDOMBRCount: 0 });
+    const hardBreak = await rejected(prompt => {
+      const index = prompt.indexOf('\n');
+      return [element('P', [element('A', [text(prompt.slice(0, index)), element('BR'), text(prompt.slice(index + 1))])])];
+    });
+    expect(hardBreak).toMatchObject({ literalDOMAvailable: true, literalDOMMatchesPrompt: true,
+      literalDOMLinkCount: 1, literalDOMBRCount: 1 });
+  });
+
+  test('inline anchor diagnostics reject hidden inert controls wrong parents and unsupported descendants', async () => {
+    for (const [build, reason, links] of [
+      [(prompt: string) => [element('P', [element('A', [text(prompt)], { hidden: '' })])], 'hidden_markup', 0],
+      [(prompt: string) => [element('P', [element('A', [text(prompt)], { inert: '' })])], 'inert_markup', 0],
+      [(prompt: string) => [element('P', [element('A', [text(prompt)], { role: 'button' })])], 'control_markup', 0],
+      [(prompt: string) => [element('P', [element('A', [text(prompt)], { contenteditable: 'true' })])], 'control_markup', 0],
+      [(prompt: string) => [element('A', [text(prompt)])], 'control_markup', 0],
+      [(prompt: string) => [element('P', [element('SPAN', [element('A', [text(prompt)])])])], 'control_markup', 0],
+      [(prompt: string) => [element('P', [element('A', [element('A', [text(prompt)])])])], 'control_markup', 1],
+      [(prompt: string) => [element('P', [element('A', [element('BUTTON', [text(prompt)])])])], 'control_markup', 1],
+      [(prompt: string) => [element('P', [element('A', [element('SPAN', [text(prompt)], { hidden: '' })])])], 'hidden_markup', 1],
+      [(prompt: string) => [element('P', [element('A', [element('SPAN', [text(prompt)], { inert: '' })])])], 'inert_markup', 1],
+      [(prompt: string) => [element('P', [element('A', [element('DIV', [text(prompt)])])])], 'unsupported_markup', 1],
+      [(prompt: string) => [element('P', [element('A', [element('PRE', [text(prompt)])])])], 'unsupported_markup', 1],
+    ] as const) {
+      const diagnostic = await rejected(build);
+      expect(diagnostic).toMatchObject({ literalDOMAvailable: false, literalDOMUnavailableReason: reason,
+        literalDOMLinkCount: links, literalDOMMatchesPrompt: false, literalDOMMatchesRendered: false });
     }
   });
 

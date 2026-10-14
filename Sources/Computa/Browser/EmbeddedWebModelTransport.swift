@@ -1294,7 +1294,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "literalDOMFrameUnique", "literalDOMFrameParsed", "literalDOMPayloadCompared", "literalDOMParsedJSONEqual"]
     private static let firstUserLiteralDOMCounts = ["literalDOMLength", "literalDOMNodeCount", "literalDOMMaxDepth", "literalDOMParagraphCount", "literalDOMBRCount"]
     private static let firstUserLiteralDOMFailureKeys = ["literalDOMFailureNodeKind", "literalDOMFailureTag", "literalDOMFailureParentTag", "literalDOMFailureRule"]
-    private static let firstUserLiteralDOMKeys = firstUserLiteralDOMFlags + firstUserLiteralDOMCounts + ["literalDOMUnavailableReason", "literalDOMPayloadUnavailableReason"] + firstUserLiteralDOMFailureKeys
+    private static let firstUserLiteralDOMKeys = firstUserLiteralDOMFlags + firstUserLiteralDOMCounts + ["literalDOMLinkCount", "literalDOMUnavailableReason", "literalDOMPayloadUnavailableReason"] + firstUserLiteralDOMFailureKeys
 
     private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
@@ -1512,6 +1512,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard let count = ComputerToolArgumentContract.exactInt64(value[key]), (0...limit).contains(count) else { return nil }
                 safe[key] = count
             }
+            if let rawLinks = value["literalDOMLinkCount"] {
+                guard let links = ComputerToolArgumentContract.exactInt64(rawLinks), (0...8_192).contains(links) else { return nil }
+                safe["literalDOMLinkCount"] = links
+            }
             guard let reason = value["literalDOMUnavailableReason"] as? String,
                   ["none", "read_failure", "hidden_markup", "inert_markup", "control_markup", "unsupported_markup", "node_budget", "depth_budget", "character_budget"].contains(reason),
                   let payloadReason = value["literalDOMPayloadUnavailableReason"] as? String,
@@ -1538,7 +1542,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let frame = safe["literalDOMFrameUnique"] as? Bool == true, parsed = safe["literalDOMFrameParsed"] as? Bool == true
             let compared = safe["literalDOMPayloadCompared"] as? Bool == true, equal = safe["literalDOMParsedJSONEqual"] as? Bool == true
             let nodes = safe["literalDOMNodeCount"] as? Int64 ?? 0
-            guard (safe["literalDOMParagraphCount"] as? Int64 ?? 0) + (safe["literalDOMBRCount"] as? Int64 ?? 0) <= nodes,
+            let links = safe["literalDOMLinkCount"] as? Int64 ?? 0
+            guard (safe["literalDOMParagraphCount"] as? Int64 ?? 0) + (safe["literalDOMBRCount"] as? Int64 ?? 0) + links <= nodes,
+                  links == 0 || (safe["literalDOMParagraphCount"] as? Int64 ?? 0) > 0 && (safe["literalDOMMaxDepth"] as? Int64 ?? 0) >= 2,
                   (safe["literalDOMMaxDepth"] as? Int64 ?? 0) <= max(0, nodes - 1) else { return nil }
             if available {
                 guard reason == "none", payloadReason != "unavailable",
@@ -1850,7 +1856,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // It never authorizes JavaScript on Google's checkpoint document.
             session.untouchedGoogleCheckpoint = .init(documentGeneration: generation, url: url)
         }
-        Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public)")
+        let navigation = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view)?.logDescription
+            ?? EmbeddedBrowserSession.ModelNavigationDiagnostic.unknownLogDescription
+        Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public) firstFailure=\(session.terminalFailure == nil) navigation={\(navigation, privacy: .public)}")
         throw recordedWebsiteBlocker(failure, session: session)
     }
 
