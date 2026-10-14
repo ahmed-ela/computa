@@ -2493,13 +2493,13 @@ function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
     const logicalRoot = root.nodeType === 1 && root.tagName === 'DIV' && children.length === 1
       && children[0].nodeType === 1 && children[0].tagName === 'DIV' ? children[0] : root;
     const fail = reason => { result.literalDOMUnavailableReason = reason; throw new Error('unavailable'); };
-    const unsupported = (node, rule) => {
+    const failureNode = (node, rule, reason = 'unsupported_markup') => {
       const tags = ['div', 'span', 'p', 'pre', 'code', 'button', 'section', 'article', 'a', 'strong', 'em', 'ol', 'ul', 'li', 'br', 'input', 'textarea'];
       const tag = value => !value || value.nodeType !== 1 ? 'none'
         : tags.includes(value.tagName?.toLowerCase()) ? value.tagName.toLowerCase() : 'other';
       Object.assign(result, { literalDOMFailureNodeKind: node.nodeType === 1 ? 'element' : node.nodeType === 8 ? 'comment' : 'other',
         literalDOMFailureTag: tag(node), literalDOMFailureParentTag: tag(node.parentElement), literalDOMFailureRule: rule });
-      fail('unsupported_markup');
+      fail(reason);
     };
     const append = text => {
       if (typeof text !== 'string') fail('read_failure');
@@ -2514,7 +2514,7 @@ function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
       if (result.literalDOMNodeCount > 8_192) fail('node_budget');
       if (depth > 64) fail('depth_budget');
       if (node.nodeType === 3) { append(node.data); return; }
-      if (node.nodeType !== 1) unsupported(node, 'node_type');
+      if (node.nodeType !== 1) failureNode(node, 'node_type');
       if (node.closest('[inert]')) fail('inert_markup');
       const style = getComputedStyle(node);
       if (node.hidden || node.closest('[hidden], [aria-hidden="true"]') || style.display === 'none'
@@ -2522,10 +2522,10 @@ function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
         || node.tagName !== 'BR' && node.getClientRects().length === 0) fail('hidden_markup');
       if (['BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'OPTION', 'A', 'SUMMARY'].includes(node.tagName)
         || ['button', 'textbox', 'link', 'menuitem', 'slider', 'combobox'].includes(node.getAttribute('role'))
-        || node.closest('[contenteditable="true"]')) fail('control_markup');
-      if (!['DIV', 'SPAN', 'P', 'BR'].includes(node.tagName)) unsupported(node, 'tag');
-      if (node !== root && node !== logicalRoot && node.tagName === 'DIV') unsupported(node, 'nested_div');
-      if (node.tagName === 'P' && node !== root && (node.parentElement !== logicalRoot || logicalRoot.tagName !== 'DIV')) unsupported(node, 'paragraph_parent');
+        || node.closest('[contenteditable="true"]')) failureNode(node, 'control', 'control_markup');
+      if (!['DIV', 'SPAN', 'P', 'BR'].includes(node.tagName)) failureNode(node, 'tag');
+      if (node !== root && node !== logicalRoot && node.tagName === 'DIV') failureNode(node, 'nested_div');
+      if (node.tagName === 'P' && node !== root && (node.parentElement !== logicalRoot || logicalRoot.tagName !== 'DIV')) failureNode(node, 'paragraph_parent');
       if (node.tagName === 'BR') { result.literalDOMBRCount++; append('\n'); return; }
       if (node.tagName === 'P') {
         result.literalDOMParagraphCount++;

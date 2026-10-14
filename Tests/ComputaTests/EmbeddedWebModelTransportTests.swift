@@ -5137,6 +5137,35 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             for (key, value) in zip(failureKeys, tuple) { availableFailure[key] = value }
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(availableFailure), provider: .chatgpt))
         }
+        for tag in ["a", "button", "input", "textarea", "span", "div", "other"] {
+            var observed = unavailable
+            observed["literalDOMUnavailableReason"] = "control_markup"
+            observed["literalDOMLength"] = 23_609; observed["literalDOMNodeCount"] = 293
+            observed["literalDOMMaxDepth"] = 4; observed["literalDOMParagraphCount"] = 1; observed["literalDOMBRCount"] = 99
+            let tuple = ["element", tag, "p", "control"]
+            for (key, value) in zip(failureKeys, tuple) { observed[key] = value }
+            let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(observed), provider: .chatgpt))
+            XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains("https://") })
+            let values = try records.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+            let literal = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_literal_dom" })
+            for (key, value) in zip(failureKeys, tuple) { XCTAssertEqual(literal[key] as? String, value) }
+            XCTAssertEqual(literal["literalDOMLength"] as? Int, 23_609)
+            for key in failureKeys {
+                var partial = observed; partial.removeValue(forKey: key)
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(partial), provider: .chatgpt))
+                for invalid in ["private_canary", 1, true, NSNull()] as [Any] {
+                    var forged = observed; forged[key] = invalid
+                    XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+                }
+            }
+            for changes in [["literalDOMUnavailableReason": "unsupported_markup"], ["literalDOMUnavailableReason": "hidden_markup"],
+                            ["literalDOMFailureNodeKind": "comment"], ["literalDOMFailureNodeKind": "other"],
+                            ["literalDOMFailureTag": "none"], ["literalDOMFailureRule": "tag"],
+                            ["literalDOMAvailable": true]] as [[String: Any]] {
+                var forged = observed; forged.merge(changes) { _, new in new }
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+            }
+        }
         for tuple in [["element", "none", "div", "node_type"], ["comment", "pre", "div", "node_type"],
                       ["element", "span", "div", "tag"], ["element", "pre", "div", "nested_div"],
                       ["element", "p", "none", "paragraph_parent"], ["element", "div", "none", "nested_div"]] {

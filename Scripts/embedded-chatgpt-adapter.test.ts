@@ -345,19 +345,47 @@ describe('ChatGPT literal DOM failure diagnostics', () => {
       const physical = await rejected(prompt => [element('DIV', [text(prompt)])], body => Object.assign(body.values, values));
       expect(physical).toMatchObject({ literalDOMAvailable: false, literalDOMUnavailableReason: reason,
         literalDOMNodeCount: 1, literalDOMLength: 0 });
-      for (const field of fields) { expect(wrapper[field]).toBeUndefined(); expect(physical[field]).toBeUndefined(); }
+      if (reason === 'control_markup') {
+        expect(wrapper).toMatchObject({ literalDOMFailureNodeKind: 'element', literalDOMFailureTag: 'div',
+          literalDOMFailureParentTag: 'div', literalDOMFailureRule: 'control' });
+        expect(physical).toMatchObject({ literalDOMFailureNodeKind: 'element', literalDOMFailureTag: 'div',
+          literalDOMFailureParentTag: 'article', literalDOMFailureRule: 'control' });
+      } else for (const field of fields) { expect(wrapper[field]).toBeUndefined(); expect(physical[field]).toBeUndefined(); }
     }
     const control = await rejected(prompt => [element('DIV', [element('BUTTON', [text(prompt)])])]);
     expect(control).toMatchObject({ literalDOMAvailable: false, literalDOMUnavailableReason: 'control_markup',
       literalDOMNodeCount: 3, literalDOMLength: 0 });
   });
 
-  test('finite unsupported-child fields are absent for accepted literal diagnostics and other rejection rules', async () => {
+  test('first control exposes only finite node facts and never skips its content or grants ownership', async () => {
+    for (const [tag, values, projectedTag] of [
+      ['A', { href: 'https://PRIVATE_DIAGNOSTIC_CANARY' }, 'a'],
+      ['BUTTON', { title: 'PRIVATE_DIAGNOSTIC_CANARY' }, 'button'],
+      ['INPUT', { value: 'PRIVATE_DIAGNOSTIC_CANARY' }, 'input'],
+      ['TEXTAREA', { name: 'PRIVATE_DIAGNOSTIC_CANARY' }, 'textarea'],
+      ['SELECT', {}, 'other'], ['OPTION', {}, 'other'], ['SUMMARY', {}, 'other'],
+      ['SPAN', { role: 'link' }, 'span'], ['SPAN', { role: 'textbox' }, 'span'],
+      ['SPAN', { role: 'menuitem' }, 'span'], ['SPAN', { role: 'slider' }, 'span'],
+      ['SPAN', { role: 'combobox' }, 'span'], ['SPAN', { contenteditable: 'true' }, 'span'],
+    ] as const) {
+      const diagnostic = await rejected(prompt => [element('DIV', [element('P', [
+        text(prompt.slice(0, 32)), element(tag, [text(prompt.slice(32))], values),
+      ])])]);
+      expect(diagnostic).toMatchObject({ literalDOMAvailable: false, literalDOMUnavailableReason: 'control_markup',
+        literalDOMMatchesPrompt: false, literalDOMMatchesRendered: false, literalDOMLength: 32,
+        literalDOMNodeCount: 5, literalDOMMaxDepth: 3, literalDOMParagraphCount: 1,
+        literalDOMFailureNodeKind: 'element', literalDOMFailureTag: projectedTag,
+        literalDOMFailureParentTag: 'p', literalDOMFailureRule: 'control' });
+      expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE_DIAGNOSTIC_CANARY');
+      expect(JSON.stringify(diagnostic)).not.toContain('https://');
+    }
+  });
+
+  test('finite failure fields are absent for accepted literal diagnostics and non-node rejection rules', async () => {
     for (const [build, reason] of [
       [(prompt: string) => [text(prompt)], 'none'],
       [(prompt: string) => [element('SPAN', [text(prompt)], { hidden: '' })], 'hidden_markup'],
       [(prompt: string) => [element('SPAN', [text(prompt)], { inert: '' })], 'inert_markup'],
-      [(prompt: string) => [element('BUTTON', [text(prompt)])], 'control_markup'],
       [() => [text(123)], 'read_failure'],
     ] as const) {
       const diagnostic = await rejected(build);
