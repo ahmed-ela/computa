@@ -2486,7 +2486,12 @@ function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
   try {
     // A fixed text/BR/paragraph stream diagnoses presentation only. It is not
     // a replacement ownership extractor, and unsupported markup grants none.
-    const root = candidate.body, parts = [];
+    const root = candidate.body, parts = [], children = root.childNodes;
+    // Keep the exact physical body and count/validate both nodes. Only one
+    // immediate DIV with no text, whitespace or comment siblings is logical
+    // content; this diagnostic never changes the original ownership reader.
+    const logicalRoot = root.nodeType === 1 && root.tagName === 'DIV' && children.length === 1
+      && children[0].nodeType === 1 && children[0].tagName === 'DIV' ? children[0] : root;
     const fail = reason => { result.literalDOMUnavailableReason = reason; throw new Error('unavailable'); };
     const unsupported = (node, rule) => {
       const tags = ['div', 'span', 'p', 'pre', 'code', 'button', 'section', 'article', 'a', 'strong', 'em', 'ol', 'ul', 'li', 'br', 'input', 'textarea'];
@@ -2519,8 +2524,8 @@ function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
         || ['button', 'textbox', 'link', 'menuitem', 'slider', 'combobox'].includes(node.getAttribute('role'))
         || node.closest('[contenteditable="true"]')) fail('control_markup');
       if (!['DIV', 'SPAN', 'P', 'BR'].includes(node.tagName)) unsupported(node, 'tag');
-      if (node !== root && node.tagName === 'DIV') unsupported(node, 'nested_div');
-      if (node.tagName === 'P' && node !== root && (node.parentElement !== root || root.tagName !== 'DIV')) unsupported(node, 'paragraph_parent');
+      if (node !== root && node !== logicalRoot && node.tagName === 'DIV') unsupported(node, 'nested_div');
+      if (node.tagName === 'P' && node !== root && (node.parentElement !== logicalRoot || logicalRoot.tagName !== 'DIV')) unsupported(node, 'paragraph_parent');
       if (node.tagName === 'BR') { result.literalDOMBRCount++; append('\n'); return; }
       if (node.tagName === 'P') {
         result.literalDOMParagraphCount++;

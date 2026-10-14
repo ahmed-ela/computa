@@ -244,6 +244,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let created = ContinuousClock.now
         var state = "loading"
         var terminalFailure: Failure?
+        // Claimed before dispatch, including calls whose reply is lost. A
+        // checkpoint can never turn an ambiguous adapter call into no input.
+        var providerAdapterEverDispatched = false
+        struct UntouchedGoogleCheckpoint {
+            let documentGeneration: UUID
+            let url: URL
+        }
+        var untouchedGoogleCheckpoint: UntouchedGoogleCheckpoint?
         var submitted = false
         var temporary = false
         var temporaryRequested = false
@@ -730,6 +738,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     // binding. The fixed adapter returns before any async work.
                     let input: [String: Any] = ["provider": "chatgpt", "action": "failedPageDiagnostic",
                         "expectedURL": url.absoluteString, "ownerToken": session.token, "bindOwner": false]
+                    session.providerAdapterEverDispatched = true
                     session.view.callAsyncJavaScript(script, arguments: ["input": input], in: nil, in: world) { reply in
                         switch reply {
                         case .success(let value):
@@ -1831,8 +1840,39 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let initialBlank = session.documentGeneration == nil && url?.absoluteString == "about:blank"
         let unexpected = url.map { !initialBlank && !session.provider.accepts($0.absoluteString) } ?? false
         guard let failure = session.provider.blockingFailure(for: url) ?? (unexpected ? .unexpectedPage(session.provider) : nil) else { return }
+        if failure == .humanVerificationRequired(.gemini), session.terminalFailure == nil,
+           session.untouchedGoogleCheckpoint == nil,
+           isUntouchedInference(session), sessions[session.token] === session,
+           browser.webView(for: session.tabID) === session.view,
+           let generation = browser.documentGeneration(for: session.tabID), let url {
+            // This receipt grants only disposal of this exact private view.
+            // It never authorizes JavaScript on Google's checkpoint document.
+            session.untouchedGoogleCheckpoint = .init(documentGeneration: generation, url: url)
+        }
         Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public)")
         throw recordedWebsiteBlocker(failure, session: session)
+    }
+
+    private func isUntouchedInference(_ session: Session) -> Bool {
+        session.provider == .gemini && !session.isDiscovery && !session.isRecoveryProbe
+            && !session.providerAdapterEverDispatched && session.sequence == 0
+            && !session.submitted && !session.pendingSubmission && session.confirmedUsers == 0
+            && !session.temporaryRequested && !session.temporary && !session.chatModeRequested
+            && !session.modelSelectionRequested && !session.modelSelectionVerified
+            && session.preparedSubmission == nil && session.currentSubmission == nil && session.previousSubmission == nil
+            && !session.currentSubmissionVerified && session.firstUserFingerprint == nil
+            && session.documentGeneration == nil && session.routeContext == nil && session.conversation == nil
+            && session.modelEvidence == nil && session.productModeEvidence == nil
+            && session.baseline == 0 && session.observedResponseCount == 0
+    }
+
+    private func canDisposeUntouchedGoogleCheckpoint(_ session: Session) -> Bool {
+        guard isUntouchedInference(session), sessions[session.token] === session,
+              browser.webView(for: session.tabID) === session.view,
+              let checkpoint = session.untouchedGoogleCheckpoint,
+              browser.documentGeneration(for: session.tabID) == checkpoint.documentGeneration,
+              session.view.url == checkpoint.url else { return false }
+        return session.provider.blockingFailure(for: checkpoint.url) == .humanVerificationRequired(.gemini)
     }
 
     private struct FirstUserExpansionRouteEdge {
@@ -2011,6 +2051,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     result.setTimeout(timeout)
                     guard result.isPending else { return }
+                    session.providerAdapterEverDispatched = true
                     session.view.callAsyncJavaScript(script, arguments: ["input": input], in: nil, in: world) { reply in
                         switch reply {
                         case .success(let value):
@@ -2539,7 +2580,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if !session.isDiscovery {
                 // A checkpoint may first arrive after the last poll or before
                 // mode setup. Record it even when cleanup cannot own the page.
-                try rejectWebsiteBlocker(session, action: "cleanup", phase: "before")
+                do { try rejectWebsiteBlocker(session, action: "cleanup", phase: "before") }
+                catch {
+                    guard (error as? Failure) == .humanVerificationRequired(.gemini),
+                          canDisposeUntouchedGoogleCheckpoint(session) else { throw error }
+                    // No provider adapter could have focused an editor or sent
+                    // anything. Keep the provider gate, but retire this exact
+                    // app-created view without evaluating the checkpoint.
+                    browser.closeTab(session.tabID)
+                    sessions.removeValue(forKey: session.token)
+                    session.state = "finished"
+                    return try snapshot(session, cleanup: "not_created")
+                }
             }
             if session.isDiscovery {
                 // Discovery cannot Send and its private view cannot be adopted

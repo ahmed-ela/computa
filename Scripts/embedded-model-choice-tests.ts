@@ -845,7 +845,10 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           ['BUTTON', {}, 'control_markup'], ['CODE', {}, 'unsupported_markup'], ['DIV', {}, 'unsupported_markup'],
         ] as [string, Record<string, string>, string][]) {
           const diagnostic = await rejectedFramedExpansion('{"tools":[]}', '{"tools":{]}', 'unique', (f, prompt, rendered) => {
-            publishLiteralDOM(f, rendered, [literalElement(tag, [literalText(prompt)], values)]);
+            // One sole immediate DIV is now diagnostic-only scaffolding. A
+            // second nested DIV must still be rejected without skipping it.
+            const children = tag === 'DIV' ? [literalElement('DIV', [literalText(prompt)])] : [literalText(prompt)];
+            publishLiteralDOM(f, rendered, [literalElement(tag, children, values)]);
           });
           expect(diagnostic).toMatchObject({ literalDOMAvailable: false, literalDOMMatchesPrompt: false,
             literalDOMMatchesRendered: false, literalDOMUnavailableReason: reason, literalDOMFrameUnique: false,

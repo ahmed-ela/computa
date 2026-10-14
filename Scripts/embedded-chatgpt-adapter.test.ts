@@ -251,7 +251,7 @@ describe('ChatGPT literal DOM failure diagnostics', () => {
     Object.defineProperty(node, 'childNodes', { get: () => children });
     return node;
   };
-  const rejected = async (children: (prompt: string) => any[]) => {
+  const rejected = async (children: (prompt: string) => any[], configurePhysical?: (body: Element) => void) => {
     const f = fixture({ userPrompt: 'Synthetic owned prompt' });
     f.composer.focus = () => { f.document.activeElement = f.composer; };
     const picker = installObservedModelPicker(f, 'chatgpt', Element);
@@ -269,6 +269,7 @@ describe('ChatGPT literal DOM failure diagnostics', () => {
       f.userBody!.children = nodes.filter(node => node.nodeType === 1);
       Object.defineProperty(f.userBody, 'childNodes', { get: () => nodes });
       Object.defineProperty(f.userBody, 'innerText', { get: () => rendered });
+      configurePhysical?.(f.userBody!);
     };
     const result = await f.inspect({ allowFirstUserExpansion: true,
       firstUserExpansionModelChoice: { key: 'chat/latest/medium', label: 'Medium' } });
@@ -285,7 +286,7 @@ describe('ChatGPT literal DOM failure diagnostics', () => {
     for (const [build, kind, tag, parent, rule] of [
       [() => [{ nodeType: 8, data: 'PRIVATE_DIAGNOSTIC_CANARY' }], 'comment', 'none', 'div', 'node_type'],
       [() => [{ nodeType: 7, data: 'PRIVATE_DIAGNOSTIC_CANARY' }], 'other', 'none', 'div', 'node_type'],
-      [(prompt: string) => [element('DIV', [text(prompt)])], 'element', 'div', 'div', 'nested_div'],
+      [(prompt: string) => [element('DIV', [element('DIV', [text(prompt)])])], 'element', 'div', 'div', 'nested_div'],
       [(prompt: string) => [element('PRE', [text(prompt)])], 'element', 'pre', 'div', 'tag'],
       [(prompt: string) => [element('CODE', [text(prompt)])], 'element', 'code', 'div', 'tag'],
       [(prompt: string) => [element('PRIVATE_DIAGNOSTIC_CANARY', [text(prompt)])], 'element', 'other', 'div', 'tag'],
@@ -296,9 +297,59 @@ describe('ChatGPT literal DOM failure diagnostics', () => {
         literalDOMMatchesPrompt: false, literalDOMMatchesRendered: false, literalDOMLength: 0 });
       expect(Object.fromEntries(fields.map(field => [field, diagnostic[field]]))).toEqual({
         literalDOMFailureNodeKind: kind, literalDOMFailureTag: tag, literalDOMFailureParentTag: parent, literalDOMFailureRule: rule });
-      expect(diagnostic.literalDOMNodeCount).toBe(rule === 'paragraph_parent' ? 3 : 2);
-      expect(diagnostic.literalDOMMaxDepth).toBe(rule === 'paragraph_parent' ? 2 : 1);
+      expect(diagnostic.literalDOMNodeCount).toBe(['paragraph_parent', 'nested_div'].includes(rule) ? 3 : 2);
+      expect(diagnostic.literalDOMMaxDepth).toBe(['paragraph_parent', 'nested_div'].includes(rule) ? 2 : 1);
     }
+  });
+
+  test('a sole immediate DIV diagnoses literal bytes and direct paragraphs while ownership still rejects', async () => {
+    const literal = await rejected(prompt => [element('DIV', [text(prompt)])]);
+    expect(literal).toMatchObject({ literalDOMAvailable: true, literalDOMUnavailableReason: 'none',
+      literalDOMMatchesPrompt: true, literalDOMMatchesRendered: false, literalDOMFrameParsed: true,
+      literalDOMPayloadCompared: true, literalDOMParsedJSONEqual: true, literalDOMNodeCount: 3, literalDOMMaxDepth: 2 });
+    for (const field of fields) expect(literal[field]).toBeUndefined();
+    let rows = 0;
+    const paragraphs = await rejected(prompt => {
+      const lines = prompt.split('\n'); rows = lines.length;
+      return [element('DIV', lines.map(line => element('P', [text(line)])))];
+    });
+    expect(paragraphs).toMatchObject({ literalDOMAvailable: true, literalDOMMatchesPrompt: true,
+      literalDOMMatchesRendered: false, literalDOMFrameParsed: true, literalDOMParsedJSONEqual: true,
+      literalDOMNodeCount: 2 + 2 * rows, literalDOMMaxDepth: 3, literalDOMParagraphCount: rows, literalDOMBRCount: 0 });
+    const altered = await rejected(prompt => [element('DIV', [text(prompt.replace('{"tools":[]}', '{"tools":{]}'))])]);
+    expect(altered).toMatchObject({ literalDOMAvailable: true, literalDOMMatchesPrompt: false,
+      literalDOMMatchesRendered: true, literalDOMFrameParsed: false, literalDOMPayloadCompared: false,
+      literalDOMParsedJSONEqual: false, literalDOMNodeCount: 3 });
+  });
+
+  test('sole-wrapper diagnostics reject siblings deeper wrappers hidden inert and controls without skipping nodes', async () => {
+    for (const build of [
+      (prompt: string) => [text(' '), element('DIV', [text(prompt)])],
+      (prompt: string) => [element('DIV', [text(prompt)]), text(' ')],
+      (prompt: string) => [{ nodeType: 8, data: 'PRIVATE_DIAGNOSTIC_CANARY' }, element('DIV', [text(prompt)])],
+      (prompt: string) => [element('DIV', [text(prompt)]), { nodeType: 8, data: 'PRIVATE_DIAGNOSTIC_CANARY' }],
+      (prompt: string) => [element('DIV', [text(prompt)]), element('DIV')],
+      (prompt: string) => [element('DIV', [element('DIV', [text(prompt)])])],
+      (prompt: string) => [element('DIV', [element('SPAN', [element('P', [text(prompt)])])])],
+    ]) {
+      const diagnostic = await rejected(build);
+      expect(diagnostic).toMatchObject({ literalDOMAvailable: false, literalDOMUnavailableReason: 'unsupported_markup',
+        literalDOMMatchesPrompt: false, literalDOMMatchesRendered: false });
+      expect(diagnostic.literalDOMNodeCount).toBeGreaterThanOrEqual(2);
+    }
+    for (const [values, reason] of [[{ hidden: '' }, 'hidden_markup'], [{ inert: '' }, 'inert_markup'],
+      [{ role: 'button' }, 'control_markup']] as const) {
+      const wrapper = await rejected(prompt => [element('DIV', [text(prompt)], values)]);
+      expect(wrapper).toMatchObject({ literalDOMAvailable: false, literalDOMUnavailableReason: reason,
+        literalDOMNodeCount: 2, literalDOMLength: 0 });
+      const physical = await rejected(prompt => [element('DIV', [text(prompt)])], body => Object.assign(body.values, values));
+      expect(physical).toMatchObject({ literalDOMAvailable: false, literalDOMUnavailableReason: reason,
+        literalDOMNodeCount: 1, literalDOMLength: 0 });
+      for (const field of fields) { expect(wrapper[field]).toBeUndefined(); expect(physical[field]).toBeUndefined(); }
+    }
+    const control = await rejected(prompt => [element('DIV', [element('BUTTON', [text(prompt)])])]);
+    expect(control).toMatchObject({ literalDOMAvailable: false, literalDOMUnavailableReason: 'control_markup',
+      literalDOMNodeCount: 3, literalDOMLength: 0 });
   });
 
   test('finite unsupported-child fields are absent for accepted literal diagnostics and other rejection rules', async () => {

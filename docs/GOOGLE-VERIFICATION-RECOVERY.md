@@ -121,3 +121,17 @@ The next candidate separates single-click dispatch from body verification. A suc
 
 
 Installed build99 was blocked after 0.694 seconds, before sending a task prompt or executing a native tool. A normal human navigation in Computa's persistent built-in browser confirmed a live Google `sorry` page with the unusual-traffic CAPTCHA. No CAPTCHA was completed. This recurrence means permanent prevention has not been established; the post-Send race fix remains unqualified live because this request never reached that path. Automated Gemini checks stopped and confirmation was requested under the computer-use CAPTCHA policy.
+
+## October 14: one-session task passes; fresh checkpoint recurs
+
+After restarting into build100, an ordinary human Gemini landing page was healthy again. Guarded discovery and disposal cleared the existing checkpoint without solving a CAPTCHA or changing the engine, profile, user agent, cookies or network. Restart, elapsed time and reopening the page were not isolated, so this observation does not identify what cleared Google's challenge.
+
+A fresh Gemini 3.8 Flash flight-form task passed in 68.512 seconds. Six valid built-in browser calls opened, read, filled, submitted, read the result and closed the task tab. Seven verified website inferences reused one physical temporary conversation; all complete prompt hashes and model/ownership checks passed, and final website closure was confirmed. This qualifies the post-Send acknowledgment fix and one-session continuation for this task. One physical session is not a measurement of total network requests.
+
+The next code task failed after 0.474 seconds, with zero tools. The exact installed process classified Google's trusted HTTPS `/sorry` route at native sequence0 before dispatching any provider adapter. Its new checkpoint ID differed from the recovered checkpoint. This was a fresh external challenge, not restoration of a stale app warning or a message-text false positive. No code editing or terminal behavior was exercised in that failed attempt. Automated Gemini testing stopped again.
+
+The engine and persistent profile remained the same across recovery, successful inference and recurrence. These results do not establish an old WebKit cause or permanent CAPTCHA prevention; Google's specific trigger remains unknown. Conversation reuse reduces physical session creation but did not prevent the challenge between these tasks.
+
+The next native cleanup candidate records whether any provider adapter was ever dispatched, including calls with lost replies. It can dispose of a private checkpoint view only when no adapter, preparation, model selection or submission occurred, and the captured view, lease, document generation and trusted checkpoint URL still match. It evaluates no checkpoint JavaScript and preserves the provider gate. Prior activity, replacement documents and foreign URLs retain unconfirmed cleanup. This repairs local disposal, not Google's verification decision.
+
+The candidate passed eight selected real-WebKit transport tests, covering untouched Finish and Cancel, blocked admission after disposal, changed documents and checkpoint URLs, foreign pages, redirects during awaited adapter work and challenges after submission. All 468 browser-adapter tests passed. An older diagnostic fixture was updated to reject a second nested DIV because one sole immediate DIV is now readable for diagnostic purposes; ownership rejection remains mandatory. Installed build101 qualification is still pending.
