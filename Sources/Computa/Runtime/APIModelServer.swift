@@ -37,6 +37,19 @@ actor APIModelServer {
     private var stopped = false
     private let queue = DispatchQueue(label: "com.ahmedelamin.Computa.api-model-http")
     private static let responseLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "APIModelResponse")
+    enum FailureStage: String, Sendable, CaseIterable, Equatable {
+        case prepare, requestTransport = "request_transport", decode, eventSerialization = "event_serialization"
+    }
+    private struct StagedFailure: Error {
+        let stage: FailureStage
+        let cause: any Error
+    }
+#if DEBUG
+    private var failureDiagnosticsObserverForTesting: (@Sendable (String) -> Void)?
+    func setFailureDiagnosticsObserverForTesting(_ observer: (@Sendable (String) -> Void)?) {
+        failureDiagnosticsObserverForTesting = observer
+    }
+#endif
     private struct Connection { let socket: NWConnection; let task: Task<Void, Never> }
     private var connections: [UUID: Connection] = [:]
     private struct Lane { let id: UUID; let request: Task<APIModelResponseCodec.Reply, Error> }
@@ -211,6 +224,7 @@ actor APIModelServer {
     private func handle(_ connection: NWConnection) async {
         // A cancelled slow header read is also interrupted at the socket boundary.
         let deadline = Task { try? await Task.sleep(for: .seconds(15)); if !Task.isCancelled { connection.cancel() } }
+        var failureStage: FailureStage?
         do {
             let request = try await Self.readRequest(connection); deadline.cancel()
             guard !stopped else { throw Failure.stopped }
@@ -245,6 +259,7 @@ actor APIModelServer {
             guard !stopped, !retiring.contains(taskID), contexts[taskID] == context,
                   admissions[taskID] == admissionID else { throw Failure.inferenceContextRequired }
             let proposedNaming: APIModelResponseCodec.ToolNaming = context.isNewThread && Self.hasOnlyUnmodeledInput(object) ? .semantic : .legacy
+            failureStage = .prepare
             let prepared: APIModelResponseCodec.Request
             if let toolNamingDirectory {
                 // Synchronous ownership-checked pin publication cannot yield to
@@ -269,28 +284,39 @@ actor APIModelServer {
             let onRejection: (@Sendable (APIProviderHTTPClient.RejectionDiagnostic) -> Void)?
             if let capture { onRejection = { diagnostic in capture.capture(diagnostic) } }
             else { onRejection = nil }
+            failureStage = .requestTransport
             let requestTask = Task<APIModelResponseCodec.Reply, Error> {
-                let result = try await client.request(provider: prepared.provider, key: key, path: prepared.path, body: prepared.body,
-                    modelID: prepared.model.id, onRejection: onRejection)
-                try Task.checkCancellation()
-                return try APIModelResponseCodec.decode(result, request: prepared)
+                let result: APIProviderHTTPClient.Result
+                do {
+                    result = try await client.request(provider: prepared.provider, key: key, path: prepared.path, body: prepared.body,
+                        modelID: prepared.model.id, onRejection: onRejection)
+                    try Task.checkCancellation()
+                } catch { throw StagedFailure(stage: .requestTransport, cause: error) }
+                do { return try APIModelResponseCodec.decode(result, request: prepared) }
+                catch { throw StagedFailure(stage: .decode, cause: error) }
             }
             let lane = Lane(id: UUID(), request: requestTask); lanes[taskID] = lane
             defer { if lanes[taskID]?.id == lane.id { lanes.removeValue(forKey: taskID) } }
             let reply: APIModelResponseCodec.Reply
             do {
                 reply = try await withTaskCancellationHandler { try await requestTask.value } onCancel: { requestTask.cancel() }
-            } catch let failure as APIProviderHTTPClient.Failure
-                where prepared.stream && [.rateLimited, .providerBusy].contains(failure) {
-                try Task.checkCancellation()
-                guard !stopped, contexts[taskID] == context, lanes[taskID]?.id == lane.id else { throw Failure.cancelled }
-                // The native client's HTTP-429 bridge drops the provider cause.
-                // Standard Responses failure events preserve it without replay,
-                // while non-streaming callers retain the HTTP status below.
-                try await Self.send(connection, status: "200 OK", type: "text/event-stream",
-                    body: APIModelResponseCodec.encodeRateLimitFailure(request: prepared, failure: failure))
-                return
+            } catch {
+                let cause = (error as? StagedFailure)?.cause ?? error
+                if let failure = cause as? APIProviderHTTPClient.Failure,
+                   prepared.stream && [.rateLimited, .providerBusy].contains(failure) {
+                    try Task.checkCancellation()
+                    guard !stopped, contexts[taskID] == context, lanes[taskID]?.id == lane.id else { throw Failure.cancelled }
+                    // The native client's HTTP-429 bridge drops the provider cause.
+                    // Standard Responses failure events preserve it without replay,
+                    // while non-streaming callers retain the HTTP status below.
+                    failureStage = .eventSerialization
+                    try await Self.send(connection, status: "200 OK", type: "text/event-stream",
+                        body: APIModelResponseCodec.encodeRateLimitFailure(request: prepared, failure: failure))
+                    return
+                }
+                throw error
             }
+            failureStage = .eventSerialization
             try Task.checkCancellation()
             guard !stopped, contexts[taskID] == context, lanes[taskID]?.id == lane.id else { throw Failure.cancelled }
             let encoded = try APIModelResponseCodec.encode(reply, stream: prepared.stream)
@@ -304,7 +330,15 @@ actor APIModelServer {
             try await Self.send(connection, status: "200 OK", type: prepared.stream ? "text/event-stream" : "application/json", body: encoded)
         } catch {
             deadline.cancel()
-            try? await Self.send(connection, status: Self.errorStatus(error), type: "application/json", body: Self.errorBody(error))
+            let cause = (error as? StagedFailure)?.cause ?? error
+            let stage = (error as? StagedFailure)?.stage ?? failureStage
+            if let stage, let record = Self.failureDiagnostic(cause, stage: stage) {
+                Self.responseLog.error("failureStage \(record, privacy: .public)")
+#if DEBUG
+                failureDiagnosticsObserverForTesting?(record)
+#endif
+            }
+            try? await Self.send(connection, status: Self.errorStatus(cause), type: "application/json", body: Self.errorBody(cause, stage: stage))
         }
     }
     /// This is a conservative migration check, never freshness authority. Only
@@ -335,14 +369,28 @@ actor APIModelServer {
         default: return value.replacingOccurrences(of: "([a-z])([A-Z])", with: "$1_$2", options: .regularExpression).lowercased()
         }
     }
-    static func errorBody(_ error: any Error) throws -> Data {
+    static func errorBody(_ error: any Error, stage: FailureStage? = nil) throws -> Data {
         let code: String, message: String
         if let value = error as? Failure { code = finiteCode(value.rawValue); message = value.localizedDescription }
         else if let value = error as? APIModelResponseCodec.Failure { code = finiteCode(value.rawValue); message = value.localizedDescription }
         else if let value = error as? APIProviderHTTPClient.Failure { code = finiteCode(value.rawValue); message = value.localizedDescription }
         else if error is CancellationError { code = Failure.cancelled.rawValue; message = Failure.cancelled.localizedDescription }
         else { code = APIProviderHTTPClient.Failure.unavailable.rawValue; message = APIProviderHTTPClient.Failure.unavailable.localizedDescription }
-        return try JSONSerialization.data(withJSONObject: ["error": ["type": "api_model_error", "code": code, "message": message, "x-computa-retryable": false]])
+        let scopedMessage: String
+        if error as? APIModelResponseCodec.Failure == .invalidArguments, stage == .prepare {
+            scopedMessage = "The retained tool history in this API request contains invalid arguments. This inference sent no provider request and executed no new tool."
+        } else if error as? APIModelResponseCodec.Failure == .invalidArguments, stage == .decode {
+            scopedMessage = "The provider response contained invalid tool arguments. No tool from this response was executed."
+        } else { scopedMessage = message }
+        return try JSONSerialization.data(withJSONObject: ["error": ["type": "api_model_error", "code": code, "message": scopedMessage, "x-computa-retryable": false]])
+    }
+    static func failureDiagnostic(_ error: any Error, stage: FailureStage) -> String? {
+        guard let body = try? errorBody(error, stage: stage),
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let envelope = object["error"] as? [String: Any], let code = envelope["code"] as? String,
+              let data = try? JSONSerialization.data(withJSONObject: ["kind": "api_failure_stage_v1",
+                  "stage": stage.rawValue, "code": code, "retryable": false], options: .sortedKeys), data.count <= 256 else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
     struct HTTPRequest: Sendable { let method: String; let path: String; let headers: [String: String]; let body: Data }
     static func parseRequest(_ data: Data) throws -> HTTPRequest? {

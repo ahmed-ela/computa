@@ -658,6 +658,132 @@ final class APIModelResponseCodecTests: XCTestCase {
             XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "a", "type": "function", "function": ["name": "computa_tool_0", "arguments": arguments]]]], finish: "tool_calls", request: objectRequest))
         }
     }
+    private func strictCerebras(_ model: String = "gpt-oss-120b", wireAPI: APIProviderDefinition.WireAPI = .chatCompletions) -> APIProviderDefinition {
+        .init(id: "configured-cerebras", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!,
+              wireAPI: wireAPI, models: [.init(id: model, name: model)])
+    }
+
+    func testCerebrasStrictToolsPreserveOptionalFieldsNestedTypesAndCustomGrammar() throws {
+        let schema: [String: Any] = ["type": "object", "properties": [
+            "count": ["type": "integer", "minimum": 1, "maximum": 5],
+            "note": ["type": "string"],
+            "detail": ["anyOf": [["type": "null"], ["type": "object", "properties": ["ok": ["type": "boolean"]], "additionalProperties": false]]],
+            "tags": ["type": "array", "items": ["type": "string", "enum": ["a", "b"]]]],
+            "required": ["count"], "additionalProperties": false]
+        let native: [[String: Any]] = [
+            ["type": "function", "name": "bounded", "strict": true, "parameters": schema],
+            ["type": "function", "name": "hint_only", "strict": false, "parameters": schema], tools[1]]
+        let before = try JSONSerialization.data(withJSONObject: native, options: .sortedKeys)
+        for model in ["qwen-3.8-27b", "gpt-oss-120b"] {
+            let p = strictCerebras(model), prepared = try request(["tools": native], provider: p, toolNaming: .semantic)
+            let wire = try wireFunctions(prepared)
+            XCTAssertEqual(wire[0]["strict"] as? Bool, true)
+            XCTAssertEqual(wire[1]["strict"] as? Bool, false)
+            XCTAssertEqual(wire[2]["strict"] as? Bool, true)
+            XCTAssertEqual(wire[0]["parameters"] as? NSDictionary, schema as NSDictionary)
+            XCTAssertEqual(prepared.tools[0].schema as NSDictionary, schema as NSDictionary)
+            XCTAssertEqual((wire[2]["parameters"] as? NSDictionary), prepared.tools[2].schema as NSDictionary)
+            XCTAssertTrue((wire[2]["description"] as? String)?.hasSuffix("start: /.+/") == true)
+            let alias = try XCTUnwrap(wire[0]["name"] as? String)
+            let message: [String: Any] = ["role": "assistant", "tool_calls": [["id": "good", "type": "function",
+                "function": ["name": alias, "arguments": "{\"count\":2}"]]]]
+            let reply = try decode(message, finish: "tool_calls", request: prepared, model: model)
+            XCTAssertEqual((reply.response["output"] as? [[String: Any]])?.first?["arguments"] as? String, "{\"count\":2}")
+            XCTAssertEqual(try JSONSerialization.data(withJSONObject: native, options: .sortedKeys), before)
+        }
+    }
+
+    func testCerebrasUnsupportedStrictSchemasRetainEveryConstraintWithoutNormalization() throws {
+        let unsupported: [[String: Any]] = [
+            ["type": "string", "pattern": "^[a-z]+$"], ["type": "string", "minLength": 2],
+            ["type": "string", "maxLength": 8], ["type": "string", "format": "uuid"],
+            ["type": "array", "items": ["type": "string"], "minItems": 1],
+            ["type": "array", "items": ["type": "string"], "maxItems": 3], ["type": "array"],
+            ["type": "object", "properties": ["x": ["type": "string"]]],
+            ["type": "object", "properties": [:], "additionalProperties": true],
+            ["type": "object", "properties": [:], "additionalProperties": ["type": "string"]],
+            ["type": "string", "nullable": true], ["type": ["string", "null"]],
+            ["oneOf": [["type": "string"], ["type": "integer"]]],
+            ["allOf": [["type": "string"]]], ["type": "string", "examples": ["example"]],
+            ["$ref": "#/$defs/value"]]
+        for model in ["qwen-3.8-27b", "gpt-oss-120b"] {
+            for child in unsupported {
+                var schema: [String: Any] = ["type": "object", "properties": ["value": child], "additionalProperties": false]
+                if child["$ref"] != nil { schema["$defs"] = ["value": ["type": "string"]] }
+                let prepared = try request(["tools": [["type": "function", "name": "unchanged", "strict": true, "parameters": schema]]], provider: strictCerebras(model))
+                let wire = try XCTUnwrap(wireFunctions(prepared).first)
+                XCTAssertNil(wire["strict"], String(describing: child.keys))
+                XCTAssertEqual(wire["parameters"] as? NSDictionary, schema as NSDictionary)
+                XCTAssertEqual(prepared.tools[0].schema as NSDictionary, schema as NSDictionary)
+            }
+        }
+        let open: [String: Any] = ["type": "object", "properties": [:], "additionalProperties": true]
+        let prepared = try request(["tools": [["type": "function", "name": "open", "parameters": open]]], provider: strictCerebras())
+        XCTAssertNil(try wireFunctions(prepared)[0]["strict"])
+        XCTAssertEqual(try wireFunctions(prepared)[0]["parameters"] as? NSDictionary, open as NSDictionary)
+    }
+
+    func testCerebrasStrictSchemaBudgetsFailClosedWithoutChangingTheSchema() throws {
+        func eligible(_ schema: [String: Any]) throws -> Bool {
+            let prepared = try request(["tools": [["type": "function", "name": "bounded", "parameters": schema]]], provider: strictCerebras())
+            let wire = try wireFunctions(prepared)[0]
+            XCTAssertEqual(wire["parameters"] as? NSDictionary, schema as NSDictionary)
+            return wire["strict"] as? Bool == true
+        }
+        func root(_ child: [String: Any]) -> [String: Any] {
+            ["type": "object", "properties": ["v": child], "additionalProperties": false]
+        }
+        for (count, expected) in [(500, true), (501, false)] {
+            let properties = Dictionary(uniqueKeysWithValues: (0..<count).map { ("p\($0)", ["type": "string"]) })
+            XCTAssertEqual(try eligible(["type": "object", "properties": properties, "additionalProperties": false]), expected)
+            XCTAssertEqual(try eligible(root(["type": "string", "enum": (0..<count).map { String($0) }])), expected)
+        }
+        XCTAssertTrue(try eligible(root(["type": "string", "enum": [String(repeating: "x", count: 4_999)]])))
+        XCTAssertFalse(try eligible(root(["type": "string", "enum": [String(repeating: "x", count: 5_000)]])))
+        for (levels, expected) in [(8, true), (9, false)] {
+            var child: [String: Any] = ["type": "boolean"]
+            for _ in 0..<levels { child = root(child) }
+            XCTAssertEqual(try eligible(root(child)), expected)
+        }
+        let rootUnion: [String: Any] = ["type": "object", "properties": [:], "additionalProperties": false, "anyOf": [["type": "object", "properties": [:], "additionalProperties": false]]]
+        XCTAssertFalse(try eligible(rootUnion))
+    }
+
+    func testStrictOptInIsLimitedToQualifiedCerebrasModelsAndLeavesResponsesToolsNative() throws {
+        let generic = try request(), unknown = try request(provider: strictCerebras("unqualified-model"))
+        for prepared in [generic, unknown] { XCTAssertTrue(try wireFunctions(prepared).allSatisfy { $0["strict"] == nil }) }
+        var declared = function; declared["strict"] = false
+        let native = try request(["tools": [declared]], provider: strictCerebras(wireAPI: .responses))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: native.body) as? [String: Any])
+        let emitted = try XCTUnwrap((body["tools"] as? [[String: Any]])?.first)
+        XCTAssertEqual(emitted as NSDictionary, declared as NSDictionary)
+    }
+
+    func testStrictWireStillRejectsInvalidTypesAtomicallyAndPreservesHistoryAliases() throws {
+        let p = strictCerebras(), schema: [String: Any] = ["type": "object", "properties": ["count": ["type": "integer"]], "required": ["count"], "additionalProperties": false]
+        let definitions: [[String: Any]] = [["type": "namespace", "name": "metrics", "tools": [["type": "function", "name": "count", "parameters": schema]]]]
+        let first = try request(["tools": definitions], provider: p, toolNaming: .semantic)
+        let alias = first.tools[0].wireName
+        let call: (String, String) -> [String: Any] = { id, arguments in
+            ["id": id, "type": "function", "function": ["name": alias, "arguments": arguments]]
+        }
+        XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [call("good", "{\"count\":1}"), call("bad", "{\"count\":\"2\"}")]],
+                                        finish: "tool_calls", request: first, model: p.models[0].id)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+        }
+        let history: [[String: Any]] = [["type": "function_call", "name": "count", "namespace": "metrics", "call_id": "old", "arguments": "{\"count\":1}"],
+                                       ["type": "function_call_output", "call_id": "old", "output": "one"]]
+        let resumed = try request(["tools": definitions, "input": history], provider: p, toolNaming: .semantic)
+        XCTAssertEqual(resumed.tools[0].wireName, alias)
+        XCTAssertEqual(try wireFunctions(resumed)[0]["strict"] as? Bool, true)
+        XCTAssertTrue(resumed.historyCallIDs.contains("old"))
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: resumed.body) as? [String: Any])
+        let assistant = try XCTUnwrap((wire["messages"] as? [[String: Any]])?.first(where: { $0["role"] as? String == "assistant" }))
+        let restored = try XCTUnwrap((assistant["tool_calls"] as? [[String: Any]])?.first?["function"] as? [String: Any])
+        XCTAssertEqual(restored["name"] as? String, alias)
+        XCTAssertEqual(restored["arguments"] as? String, "{\"count\":1}")
+    }
+
     func testCerebrasProfilePreservesUserImagesButRejectsToolImagesAndMinimalEffort() throws {
         let p = APIProviderDefinition(id: "different-id", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
                                       models: [.init(id: "qwen-3.8-27b", name: "Qwen", supportsImages: true)])

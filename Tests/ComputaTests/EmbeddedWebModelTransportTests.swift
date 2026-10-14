@@ -40,7 +40,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testResponseDeadlineGetsOneReadOnlyFinitePageDiagnosticWithoutResending() async throws {
-        let (fixture, token, view) = try await boundInspectionFixture(prompt: "PRIVATE_DEADLINE_PROMPT", bindFirstRead: false)
+        let prompt = "PRIVATE_DEADLINE_PROMPT😀é"
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: prompt, bindFirstRead: false)
         defer { fixture.shutdown() }
         var diagnostics: [String] = []
         fixture.transport.setFailedPageDiagnosticObserverForTesting { diagnostics.append($0) }
@@ -77,8 +78,48 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let observation = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
         XCTAssertEqual(observation["errorCategory"] as? String, "load_failed")
         XCTAssertEqual(observation["statusCount"] as? Int, 1)
+        let outboundShape = "\(prompt)\n\nComputa session marker: \(String(repeating: "0", count: 36))"
+        XCTAssertEqual(observation["outboundUTF16Count"] as? Int, outboundShape.utf16.count)
+        XCTAssertEqual(observation["outboundUTF8Count"] as? Int, outboundShape.utf8.count)
         XCTAssertFalse(safe.contains("PRIVATE_")); XCTAssertFalse(safe.contains(token)); XCTAssertFalse(safe.contains("chatgpt.com"))
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testFailedPageOutboundSizeProjectionKeepsPairedUnicodeCountsWithoutPrivateValues() throws {
+        let empty: [String: Any] = ["connected": 0, "visible": 0]
+        let base: [String: Any] = ["kind": "chatgpt_failed_page_v1", "route": "root", "errorCategory": "none",
+            "modernUsers": empty, "legacyUsers": empty, "modernAssistants": empty, "legacyAssistants": empty,
+            "stopPresent": false, "composerPresent": true, "composerEnabled": true, "copyPresent": false, "copyEnabled": false,
+            "retryPresent": false, "retryInsideUserMessage": false, "retryInsideAssistantMessage": false,
+            "retryInsideCodeOrEditor": false, "retryInsideMenuOrNavigation": false, "retryOutsideExcludedContent": false,
+            "temporaryRendered": true, "temporaryVerified": true, "alertCount": 0, "statusCount": 0,
+            "alertTextLengths": [], "statusTextLengths": [], "noticesTruncated": false]
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(base), "Historical records retain their old schema")
+        for text in ["PRIVATE_ASCII_CANARY", "A😀é", String(repeating: "é", count: 100_000)] {
+            var measured = base
+            measured["outboundUTF16Count"] = text.utf16.count; measured["outboundUTF8Count"] = text.utf8.count
+            measured["prompt"] = text; measured["nonce"] = "PRIVATE_NONCE"; measured["url"] = "PRIVATE_URL"
+            let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(measured))
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
+            XCTAssertEqual(fields["outboundUTF16Count"] as? Int, text.utf16.count)
+            XCTAssertEqual(fields["outboundUTF8Count"] as? Int, text.utf8.count)
+            XCTAssertLessThanOrEqual(safe.utf8.count, 2_048)
+            for secret in ["PRIVATE", "😀", "é", "prompt", "nonce", "url"] { XCTAssertFalse(safe.contains(secret)) }
+        }
+        var absent = base; absent["outboundUTF16Count"] = NSNull(); absent["outboundUTF8Count"] = NSNull()
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(absent))
+        let nulls = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
+        XCTAssertTrue(nulls["outboundUTF16Count"] is NSNull); XCTAssertTrue(nulls["outboundUTF8Count"] is NSNull)
+        for (utf16, utf8): (Any, Any) in [(true, 1), (1, false), (-1, 0), (1, -1), (180_201, 180_201),
+                                        (180_200, 720_801), (2, 1), (1, 4), (1.5, 2), (1, "1"),
+                                        (NSNull(), 1), (1, NSNull())] {
+            var invalid = base; invalid["outboundUTF16Count"] = utf16; invalid["outboundUTF8Count"] = utf8
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(invalid))
+        }
+        for key in ["outboundUTF16Count", "outboundUTF8Count"] {
+            var invalid = base; invalid[key] = 1
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFailedPageDiagnostic(invalid), "The pair is atomic")
+        }
     }
 
     func testDeadlineDiagnosticDiscardsAnOwnedViewRemovedBeforePublication() async throws {

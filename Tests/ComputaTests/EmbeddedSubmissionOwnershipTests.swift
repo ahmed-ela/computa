@@ -140,6 +140,70 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testRetainedFirstSubmissionFailureLogsOriginalDigestAcrossRevokedReadWithoutPrivateData() throws {
+        let flags = ["stateSame", "stateRevoked", "recordRetained", "parentRequired", "parentIntact",
+                     "remountRequired", "remountIntact", "contextMatches", "rootCountMatches", "rootsSame",
+                     "firstRootSame", "currentRootSame", "rootConnected", "bodyConnected", "bodySame",
+                     "payloadAvailable", "payloadWithinLimit", "bodyTextUnchanged", "bodyCanonicalMatches",
+                     "priorIntact", "digestMatches"]
+        var digest: [String: Any] = Dictionary(uniqueKeysWithValues: flags.map { ($0, true as Any) })
+        digest["kind"] = "gemini_submission_digest_v1"; digest["projectedLength"] = 51_758
+        for key in ["stateRevoked", "parentRequired", "remountRequired", "rootsSame", "firstRootSame",
+                    "currentRootSame", "rootConnected", "bodyConnected"] { digest[key] = false }
+        let first: [String: Any] = ["firstFailureKind": "gemini_submission_first_failure_v1",
+            "stage": "observe_digest", "action": "inspect", "sequence": 1, "digestDiagnostic": digest]
+        let current: [String: Any] = ["kind": "gemini_submission_v1", "stage": "observe_state", "action": "inspect",
+            "phase": "verified", "requestedSequence": 1, "recordSequence": 1, "userCount": 1,
+            "statePresent": true, "recordPresent": true, "stateRevoked": true, "ownerMatches": true,
+            "documentMatches": true, "nonceMatches": true, "canonicalMatches": false, "suffixMatches": true,
+            "contextMatches": true]
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(first, current: current))
+        XCTAssertEqual(records.count, 2)
+        for record in records {
+            XCTAssertLessThanOrEqual(record.utf8.count, 960)
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+            XCTAssertEqual(value["firstFailureKind"] as? String, "gemini_submission_first_failure_v1")
+            XCTAssertEqual(value["stage"] as? String, "observe_digest")
+            XCTAssertEqual(value["sequence"] as? Int, 1)
+            XCTAssertFalse(EmbeddedWebModelTransport.validSubmissionProof(value, sequence: 1, fingerprint: String(repeating: "a", count: 64)))
+            for forbidden in ["nonce", "fingerprint", "url", "prompt", "PRIVATE"] { XCTAssertFalse(record.contains(forbidden)) }
+        }
+        let retained = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[1].utf8)) as? [String: Any])
+        XCTAssertEqual(retained["stateRevoked"] as? Bool, false)
+        XCTAssertEqual(retained["rootsSame"] as? Bool, false)
+        XCTAssertEqual(retained["digestMatches"] as? Bool, true)
+        for key in first.keys {
+            var missing = first; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(missing, current: current))
+            var privateValue = first; privateValue[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(privateValue, current: current))
+        }
+        for key in ["prompt", "url", "nonce", "fingerprint"] {
+            var extra = first; extra[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(extra, current: current))
+            var nested = digest; nested[key] = "PRIVATE CANARY"
+            var invalid = first; invalid["digestDiagnostic"] = nested
+            XCTAssertNil(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(invalid, current: current))
+        }
+        for bad in [true, -1, 0, 10_001, 1.5, "1"] as [Any] {
+            var invalid = first; invalid["sequence"] = bad
+            XCTAssertNil(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(invalid, current: current))
+        }
+        for key in ["requestedSequence", "recordSequence"] {
+            var foreign = current; foreign[key] = 2
+            XCTAssertNil(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(first, current: foreign))
+        }
+        var wrongStage = first; wrongStage["stage"] = "observe_body"
+        XCTAssertNil(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(wrongStage, current: current))
+        wrongStage["digestDiagnostic"] = NSNull()
+        XCTAssertEqual(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(wrongStage, current: current)?.count, 1)
+        var invalidDigest = digest; invalidDigest["stateRevoked"] = 1
+        var invalid = first; invalid["digestDiagnostic"] = invalidDigest
+        XCTAssertNil(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(invalid, current: current))
+        XCTAssertNil(EmbeddedWebModelTransport.submissionFirstFailureDiagnosticRecords(first, current: NSNull()))
+    }
+
+    @MainActor
     func testSubmissionBodyMeasurementsCannotPublishTextOrGainProofAuthority() throws {
         let valid: [String: Any] = ["kind": "gemini_submission_body_v1", "expectedLength": 67, "innerTextLength": 68,
             "textContentLength": 67, "expectedLines": 2, "innerTextLines": 3, "textContentLines": 2,

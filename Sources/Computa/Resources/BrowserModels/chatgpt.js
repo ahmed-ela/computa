@@ -1993,7 +1993,15 @@ function chatGPTFailedPageDiagnostic() {
     && productProof?.owner === input.ownerToken && productProof?.document === document
     && productProof.temporaryRequested === true && productProof.temporaryAcknowledged === true
     && !productProof.invalidated && !chatGPTProductModeState().contradictory;
+  const size = globalThis.__computaChatSubmissionSize;
+  const sizeCurrent = size?.document === document && size.owner === input.ownerToken
+    && size.userCount === globalThis.__computaModelLastSubmissionCount
+    && Number.isInteger(size.utf16Count) && size.utf16Count >= 0 && size.utf16Count <= 180_200
+    && Number.isInteger(size.utf8Count) && size.utf8Count >= size.utf16Count
+    && size.utf8Count <= 720_800 && size.utf8Count <= 3 * size.utf16Count;
   return { kind: 'chatgpt_failed_page_v1', route,
+    outboundUTF16Count: sizeCurrent ? size.utf16Count : null,
+    outboundUTF8Count: sizeCurrent ? size.utf8Count : null,
     errorCategory: loadFailed ? 'load_failed' : signIn ? 'sign_in_required'
       : alertNodes.length || statusNodes.length ? 'unrecognized_notice' : 'none',
     modernUsers: roots('[data-markdown-text-style="user-message"]'),
@@ -2268,6 +2276,12 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       globalThis.__computaModelFirstSubmitted = true;
     }
     globalThis.__computaModelLastSubmissionCount = userCount;
+    // Diagnostic metadata only: claim counts once beside the existing Send
+    // claim, without retaining another prompt or granting observation authority.
+    try {
+      globalThis.__computaChatSubmissionSize = Object.freeze({ document, owner: input.ownerToken, userCount,
+        utf16Count: prompt.length, utf8Count: new TextEncoder().encode(prompt).length });
+    } catch { /* Measurement failure cannot change the existing Send behavior. */ }
     send.click();
     return { submitted: true };
   }

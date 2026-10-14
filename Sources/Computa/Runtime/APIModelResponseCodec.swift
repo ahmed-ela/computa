@@ -33,6 +33,7 @@ enum APIModelResponseCodec {
         let namespace: String?
         let wireName: String
         let custom: Bool
+        let strict: Bool?
         let schema: [String: Any]
         let description: String
         var identity: String { (namespace ?? "") + "\u{0}" + name }
@@ -113,7 +114,7 @@ enum APIModelResponseCodec {
         let tools = try parseTools(raw["tools"], naming: toolNaming).map { visible -> Tool in
             guard let original = historyByIdentity[visible.identity] else { throw Failure.invalidTool }
             return Tool(name: visible.name, namespace: visible.namespace, wireName: original.wireName,
-                        custom: visible.custom, schema: visible.schema, description: visible.description)
+                        custom: visible.custom, strict: visible.strict, schema: visible.schema, description: visible.description)
         }
         var allowed = Set(tools.map(\.wireName)), required = false
         var wireChoice: Any = "auto"
@@ -145,7 +146,15 @@ enum APIModelResponseCodec {
         } else {
             body = ["model": selection.model.id, "messages": history.messages, "stream": stream, "n": 1]
             if !tools.isEmpty {
-                body["tools"] = try tools.map { ["type": "function", "function": ["name": $0.wireName, "description": try chatCompletionToolDescription($0), "parameters": $0.schema]] as [String: Any] }
+                body["tools"] = try tools.map { tool -> [String: Any] in
+                    var function: [String: Any] = ["name": tool.wireName,
+                        "description": try chatCompletionToolDescription(tool), "parameters": tool.schema]
+                    if selection.provider.isCerebrasInference, ["qwen-3.8-27b", "gpt-oss-120b"].contains(selection.model.id) {
+                        if tool.strict == false { function["strict"] = false }
+                        else if cerebrasStrictSchemaEligible(tool.schema) { function["strict"] = true }
+                    }
+                    return ["type": "function", "function": function]
+                }
                 body["tool_choice"] = wireChoice
                 body["parallel_tool_calls"] = parallel
             } else if required { throw Failure.invalidTool }
@@ -262,6 +271,57 @@ enum APIModelResponseCodec {
         return stem + "__" + suffix
     }
 
+    /// Opt in only when the unchanged schema belongs to Cerebras's documented
+    /// strict subset. Unsupported constraints remain on the wire and locally
+    /// enforced; we never erase them, add required fields, or introduce nulls.
+    /// This does not constrain shell syntax or the grammar inside custom input.
+    private static func cerebrasStrictSchemaEligible(_ root: [String: Any]) -> Bool {
+        // https://inference-docs.cerebras.ai/capabilities/structured-outputs
+        // String lengths are model-dependent; refs and type arrays are left for
+        // separate qualification. Descriptions/defaults do not consume text budget.
+        let annotations: Set<String> = ["description", "title", "default"]
+        let bounds: Set<String> = ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]
+        var propertyCount = 0, enumCount = 0, textCount = 0
+        func visit(_ schema: [String: Any], depth: Int) -> Bool {
+            guard depth <= 10 else { return false }
+            if let alternatives = schema["anyOf"] as? [[String: Any]] {
+                guard depth > 1, Set(schema.keys).isSubset(of: annotations.union(["anyOf"])),
+                      !alternatives.isEmpty else { return false }
+                return alternatives.allSatisfy { visit($0, depth: depth + 1) }
+            }
+            guard let type = schema["type"] as? String,
+                  ["object", "array", "string", "number", "integer", "boolean", "null"].contains(type) else { return false }
+            var allowed = annotations.union(["type", "enum", "const"])
+            if type == "object" { allowed.formUnion(["properties", "required", "additionalProperties"]) }
+            if type == "array" { allowed.insert("items") }
+            if type == "number" || type == "integer" { allowed.formUnion(bounds) }
+            guard Set(schema.keys).isSubset(of: allowed) else { return false }
+            if let values = schema["enum"] as? [Any] {
+                guard !["object", "array"].contains(type), values.allSatisfy({ typeMatches($0, type: type) }) else { return false }
+                enumCount += values.count
+                textCount += values.compactMap { $0 as? String }.reduce(0) { $0 + $1.unicodeScalars.count }
+            }
+            if let value = schema["const"] {
+                guard !["object", "array"].contains(type), typeMatches(value, type: type) else { return false }
+                textCount += (value as? String)?.unicodeScalars.count ?? 0
+            }
+            if type == "object" {
+                guard strictBool(schema["additionalProperties"]) == false,
+                      let properties = schema["properties"] as? [String: [String: Any]],
+                      Set(schema["required"] as? [String] ?? []).isSubset(of: Set(properties.keys)) else { return false }
+                propertyCount += properties.count
+                textCount += properties.keys.reduce(0) { $0 + $1.unicodeScalars.count }
+                guard propertyCount <= 500, textCount <= 5_000,
+                      properties.values.allSatisfy({ visit($0, depth: depth + 1) }) else { return false }
+            } else if type == "array" {
+                guard let items = schema["items"] as? [String: Any], visit(items, depth: depth + 1) else { return false }
+            }
+            return enumCount <= 500 && textCount <= 5_000
+        }
+        return root["type"] as? String == "object" && root["properties"] is [String: [String: Any]]
+            && visit(root, depth: 1)
+    }
+
     private static func parseTools(_ value: Any?, naming: ToolNaming) throws -> [Tool] {
         if absent(value) { return [] }
         guard let definitions = value as? [[String: Any]], definitions.count <= 256 else { throw Failure.invalidTool }
@@ -290,7 +350,7 @@ enum APIModelResponseCodec {
             let description = custom ? try customToolDescription(definition) : (definition["description"] as? String ?? "")
             let wireName = naming == .legacy ? "computa_tool_\(result.count)" : semanticToolName(name: name, namespace: namespace)
             let tool = Tool(name: name, namespace: namespace, wireName: wireName, custom: custom,
-                            schema: schema, description: description)
+                            strict: strictBool(definition["strict"]), schema: schema, description: description)
             // Validate the complete catalog before filtering, so a collision
             // cannot be hidden or resolved by changing declaration order.
             guard identities.insert(tool.identity).inserted, wireNames.insert(wireName).inserted,

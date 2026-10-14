@@ -124,6 +124,10 @@ Installed build99 was blocked after 0.694 seconds, before sending a task prompt 
 
 ## October 14: one-session task passes; fresh checkpoint recurs
 
+Later that morning, build104's ordinary human Gemini navigation displayed a real Google `/sorry` CAPTCHA. After the authorized build105 update, an ordinary landing page was healthy again and guarded recovery cleared that checkpoint without solving the challenge. The same persistent browser profile, default user agent and installed WebKit were retained. Restart, elapsed time and storage cleanup were not isolated experiments, so this does not identify a permanent remedy or Google's trigger. Build105's next automated Gemini task failed submission ownership without showing a CAPTCHA; that is a separate failure.
+
+The installed runtime was macOS26.5.1 with WebKit21624.2.5.11.4. The user-agent tokens `Mac OS X 10_15_7` and `AppleWebKit/605.1.15` are compatibility identifiers; they do not establish an old engine. No controlled comparison currently establishes that replacing WebKit would eliminate Google's challenge. Existing successful tasks, later checkpoints and normal-page recoveries are all preserved, without claiming that a healthy landing proves permanent prevention.
+
 After restarting into build100, an ordinary human Gemini landing page was healthy again. Guarded discovery and disposal cleared the existing checkpoint without solving a CAPTCHA or changing the engine, profile, user agent, cookies or network. Restart, elapsed time and reopening the page were not isolated, so this observation does not identify what cleared Google's challenge.
 
 A fresh Gemini 3.8 Flash flight-form task passed in 68.512 seconds. Six valid built-in browser calls opened, read, filled, submitted, read the result and closed the task tab. Seven verified website inferences reused one physical temporary conversation; all complete prompt hashes and model/ownership checks passed, and final website closure was confirmed. This qualifies the post-Send acknowledgment fix and one-session continuation for this task. One physical session is not a measurement of total network requests.

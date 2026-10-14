@@ -181,6 +181,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     },
     onDigest: (hook: () => void) => { digestHook = hook; },
     diagnose: (overrides: Record<string, unknown> = {}) => invoke({ action: 'failedPageDiagnostic', bindOwner: false, ...overrides }),
+    submit: (prompt: string) => invoke({ action: 'submit', prompt }),
     inspect: async (overrides: Record<string, unknown> = {}, adopt = true) => {
       if (!productBootstrapped && !options.normalRoot && !options.unprovenProduct) {
         // Existing response/lineage fixtures begin after a real empty-root
@@ -454,6 +455,47 @@ describe('ChatGPT literal DOM failure diagnostics', () => {
 });
 
 describe('ChatGPT failed-page finite diagnostic', () => {
+  test('outbound size counts are claimed once at Send and remain finite without prompt content', async () => {
+    for (const text of ['PRIVATE_SIZE_CANARY😀é\uD800', 'é'.repeat(100_000)]) {
+      const f = fixture({ response: false }); await f.inspect();
+      expect((await f.diagnose()).failureDiagnostic).toMatchObject({ outboundUTF16Count: null, outboundUTF8Count: null });
+      const prompt = text + '\n\n' + markerLine, send = new Element('BUTTON', { 'aria-label': 'Send prompt' });
+      f.body.append(send); f.composer.text = prompt; f.world.__computaModelFirstPrompt = prompt;
+      expect(await f.submit(prompt)).toMatchObject({ submitted: true, firstUserVerified: false, firstUserFingerprint: null });
+      expect(send.clicks).toBe(1);
+      const size = f.world.__computaChatSubmissionSize as any;
+      expect(Object.isFrozen(size)).toBe(true);
+      expect(Object.keys(size).sort()).toEqual(['document', 'owner', 'userCount', 'utf16Count', 'utf8Count']);
+      const before = { observers: f.observers.length, timers: f.scheduledDelays.length, events: f.composer.events.length };
+      const diagnostic = (await f.diagnose()).failureDiagnostic;
+      expect(diagnostic.outboundUTF16Count).toBe(prompt.length);
+      expect(diagnostic.outboundUTF8Count).toBe(new TextEncoder().encode(prompt).length);
+      expect(diagnostic.outboundUTF8Count).toBeGreaterThan(diagnostic.outboundUTF16Count);
+      expect(diagnostic).not.toHaveProperty('submissionProof'); expect(diagnostic).not.toHaveProperty('firstUserVerified');
+      expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE_SIZE'); expect(JSON.stringify(diagnostic)).not.toContain(firstMarker);
+      expect(f.observers.length).toBe(before.observers); expect(f.scheduledDelays.length).toBe(before.timers);
+      expect(f.composer.events.length).toBe(before.events); expect(send.clicks).toBe(1);
+      expect((await f.submit(prompt)).error).toBe('conversation_changed');
+      expect(send.clicks).toBe(1); expect(f.world.__computaChatSubmissionSize).toBe(size);
+    }
+  });
+  test('outbound size diagnostics cannot follow foreign document owner claim or malformed counts', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    const prompt = 'PRIVATE_SIZE_CANARY\n\n' + markerLine, send = new Element('BUTTON', { 'aria-label': 'Send prompt' });
+    f.body.append(send); f.composer.text = prompt; f.world.__computaModelFirstPrompt = prompt;
+    expect(await f.submit(prompt)).toMatchObject({ submitted: true, firstUserVerified: false, firstUserFingerprint: null });
+    const measured = f.world.__computaChatSubmissionSize as any;
+    for (const changes of [{ document: {} }, { owner: 'PRIVATE_OWNER' }, { userCount: 1 },
+      { utf16Count: true }, { utf16Count: -1 }, { utf16Count: 180_201 }, { utf8Count: 0 },
+      { utf8Count: 720_801 }, { utf8Count: measured.utf16Count * 3 + 1 }, { utf8Count: 1.5 }]) {
+      f.world.__computaChatSubmissionSize = { ...measured, ...changes };
+      const diagnostic = (await f.diagnose()).failureDiagnostic;
+      expect(diagnostic).toMatchObject({ outboundUTF16Count: null, outboundUTF8Count: null });
+      expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE_'); expect(send.clicks).toBe(1);
+    }
+    f.world.__computaChatSubmissionSize = measured;
+    expect((await f.diagnose()).failureDiagnostic.outboundUTF16Count).toBe(prompt.length);
+  });
   test('reads owned root counts and controls without rehashing, menus or page actions', async () => {
     const f = fixture({ userPrompt: 'PRIVATE_PROMPT_CANARY' });
     await f.inspect();
@@ -467,6 +509,7 @@ describe('ChatGPT failed-page finite diagnostic', () => {
     const result = await f.diagnose({ expectedModelChoice: { key: 'chat/latest/high', label: 'High' }, expectedFirstUserFingerprint: 'invalid' });
     expect(result.error).toBeUndefined();
     expect(result.failureDiagnostic).toEqual({ kind: 'chatgpt_failed_page_v1', route: 'root', errorCategory: 'none',
+      outboundUTF16Count: null, outboundUTF8Count: null,
       modernUsers: { connected: 0, visible: 0 }, legacyUsers: { connected: 1, visible: 1 },
       modernAssistants: { connected: 1, visible: 1 }, legacyAssistants: { connected: 1, visible: 1 },
       stopPresent: false, composerPresent: true, composerEnabled: true, copyPresent: true, copyEnabled: true,

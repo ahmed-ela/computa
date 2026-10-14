@@ -376,6 +376,70 @@ describe('Gemini per-submission ownership', () => {
     }
   });
 
+  const maskedFirstSubmissionFailure = async () => {
+    const f = fixture(provider, { response: false }); await finishRound(f, 1);
+    const state = f.world.__computaGeminiSubmissionState, record = state.lastVerified;
+    const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+    const expectedModelChoice = { key: '3.1 Pro', label: '3.1 Pro' };
+    const subtle: any = crypto.subtle, original = subtle.digest; let hashes = 0;
+    subtle.digest = async (algorithm: any, data: any) => {
+      const result = await original.call(subtle, algorithm, data);
+      if (new TextDecoder().decode(data) === normalized(roundPrompt(1)) && ++hashes === 2) replaceBoundRoot(f);
+      return result;
+    };
+    let discarded: any;
+    try { discarded = await f.run('inspect', { ...fields(1), expectedUserCounts: [1], expectedModelChoice }); }
+    finally { subtle.digest = original; }
+    // The outer first-lineage discard masks the inner submission refusal.
+    // Its existing result and one-read recovery policy are intentionally unchanged.
+    expect(discarded).toEqual({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+    expect(state.revoked).toBe(true); expect(record.remount).toBeNull(); expect(f.send.clicks).toBe(1);
+    return { f, state, record };
+  };
+
+  test('first finite submission failure survives a masked cross-root discard and later revoked inspection', async () => {
+    const { f, state, record } = await maskedFirstSubmissionFailure();
+    const cache = f.world.__computaGeminiSubmissionFailures, retained = cache.get(state);
+    expect(Object.isFrozen(retained.bundle)).toBe(true);
+    expect(Object.isFrozen(retained.bundle.digestDiagnostic)).toBe(true);
+    const rejected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1] });
+    expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+      submissionDiagnostic: { stage: 'observe_state', stateRevoked: true },
+      submissionFirstFailure: { firstFailureKind: 'gemini_submission_first_failure_v1', stage: 'observe_digest',
+        action: 'inspect', sequence: 1, digestDiagnostic: { stateSame: true, stateRevoked: false,
+          recordRetained: true, rootsSame: false, firstRootSame: false, currentRootSame: false,
+          rootConnected: false, bodyConnected: false, digestMatches: true } } });
+    expect(rejected.submissionProof).toBeUndefined(); expect(rejected.replacementSubmissionProof).toBeUndefined();
+    const again = await f.run('inspect', { ...fields(1), expectedUserCounts: [1] });
+    expect(again.submissionFirstFailure).toEqual(rejected.submissionFirstFailure);
+    expect(cache.get(state)).toBe(retained); expect(state.lastVerified).toBe(record); expect(state.revoked).toBe(true);
+    expect(await f.run('submit', { ...fields(1), expectedUserCounts: [1], prompt: roundPrompt(1) })).toHaveProperty('error');
+    expect(f.send.clicks).toBe(1);
+    const encoded = JSON.stringify(rejected.submissionFirstFailure);
+    for (const secret of ['PRIVATE', marker(1), record.canonical, record.fingerprint, 'https:']) expect(encoded).not.toContain(secret);
+  });
+
+  test('first-failure cache cannot follow foreign state record document owner or malformed finite data', async () => {
+    for (const fault of ['state', 'transferredState', 'record', 'document', 'owner', 'canonical', 'fingerprint', 'malformed', 'unknownMap']) {
+      const { f, state, record } = await maskedFirstSubmissionFailure();
+      const cache = f.world.__computaGeminiSubmissionFailures, retained = cache.get(state);
+      if (fault === 'state' || fault === 'transferredState') {
+        const replacement = { ...state }; f.world.__computaGeminiSubmissionState = replacement;
+        if (fault === 'transferredState') cache.set(replacement, retained);
+      } else if (fault === 'record') state.lastVerified = { ...record };
+      else if (fault === 'document') state.document = {};
+      else if (fault === 'owner') state.owner = 'PRIVATE_OTHER_OWNER';
+      else if (fault === 'canonical') record.canonical += 'PRIVATE_OTHER_BODY';
+      else if (fault === 'fingerprint') record.fingerprint = '0'.repeat(64);
+      else if (fault === 'unknownMap') f.world.__computaGeminiSubmissionFailures = { private: 'PRIVATE_MAP' };
+      else cache.set(state, { ...retained, bundle: { ...retained.bundle, nonce: 'PRIVATE_NONCE' } });
+      const rejected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1] });
+      expect(rejected).toHaveProperty('error'); expect(rejected.submissionFirstFailure).toBeUndefined();
+      expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(1);
+      expect(JSON.stringify(rejected)).not.toContain('PRIVATE_');
+    }
+  });
+
   test('submission diagnostics retain sequence bounds and never accompany healthy proof', async () => {
     for (const sequence of [-1, 10001, true, 'PRIVATE', Infinity]) {
       const f = fixture(provider, { response: false });

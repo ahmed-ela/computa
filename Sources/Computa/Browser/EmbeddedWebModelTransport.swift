@@ -301,6 +301,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var observedResponseCount = 0
         var responseCodeStructure: [String: Any]?
         var failedPageDiagnosticAttempted = false
+        var outboundUTF16Count: Int?
+        var outboundUTF8Count: Int?
 
         init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil,
              isDiscovery: Bool = false, isRecoveryProbe: Bool = false) {
@@ -492,6 +494,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // Claim submission before clicking: even a lost reply must not replay Send.
                 session.submitted = true
                 session.sequence += 1
+                if session.provider == .chatgpt {
+                    session.outboundUTF16Count = outbound.utf16.count
+                    session.outboundUTF8Count = outbound.utf8.count
+                    // Retained finite metadata makes healthy and failed rounds
+                    // comparable. A native claim is not backend acceptance.
+                    Self.inspectionLog.error("outboundSize provider=chatgpt sequence=\(session.sequence) claimed=true outboundUTF16Count=\(outbound.utf16.count) outboundUTF8Count=\(outbound.utf8.count)")
+                }
                 if session.provider == .gemini {
                     guard let binding = session.preparedSubmission, binding.sequence == session.sequence else { throw Failure.invalidRequest }
                     session.previousSubmission = session.currentSubmission
@@ -705,6 +714,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               !session.failedPageDiagnosticAttempted, !Task.isCancelled else { return }
         session.failedPageDiagnosticAttempted = true
         let sequence = session.sequence
+        let outboundUTF16Count = session.outboundUTF16Count ?? -1
+        let outboundUTF8Count = session.outboundUTF8Count ?? -1
         let ownedGeneration = session.documentGeneration ?? session.initialDocumentGeneration
         let url = session.view.url
         func current() -> Bool {
@@ -714,7 +725,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.view.url == url && url.map { session.provider.accepts($0.absoluteString) } == true
         }
         func unavailable(_ category: String) {
-            Self.inspectionLog.error("failedPageDiagnostic provider=chatgpt sequence=\(sequence) result=\(category, privacy: .public)")
+            Self.inspectionLog.error("failedPageDiagnostic provider=chatgpt sequence=\(sequence) result=\(category, privacy: .public) outboundUTF16Count=\(outboundUTF16Count) outboundUTF8Count=\(outboundUTF8Count)")
             #if DEBUG
             failedPageDiagnosticObserverForTesting?(category)
             #endif
@@ -788,6 +799,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return number.intValue
         }
         var safe: [String: Any] = ["kind": "chatgpt_failed_page_v1", "route": route, "errorCategory": category]
+        let sizeKeys = ["outboundUTF16Count", "outboundUTF8Count"]
+        if sizeKeys.contains(where: { value[$0] != nil }) {
+            if value[sizeKeys[0]] is NSNull, value[sizeKeys[1]] is NSNull {
+                safe[sizeKeys[0]] = NSNull(); safe[sizeKeys[1]] = NSNull()
+            } else {
+                guard let utf16 = integer(value[sizeKeys[0]], maximum: 180_200),
+                      let utf8 = integer(value[sizeKeys[1]], maximum: 720_800),
+                      utf8 >= utf16, utf8 <= 3 * utf16 else { return nil }
+                safe[sizeKeys[0]] = utf16; safe[sizeKeys[1]] = utf8
+            }
+        }
         for key in ["modernUsers", "legacyUsers", "modernAssistants", "legacyAssistants"] {
             guard let roots = value[key] as? [String: Any], let connected = integer(roots["connected"], maximum: 10_000),
                   let visible = integer(roots["visible"], maximum: connected) else { return nil }
@@ -2784,6 +2806,40 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// The first refusal survives a discarded outer read, but supplies no proof.
+    /// Each record remains below the existing unified logging message budget.
+    static func submissionFirstFailureDiagnosticRecords(_ raw: Any?, current: Any?) -> [String]? {
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["firstFailureKind", "stage", "action", "sequence", "digestDiagnostic"],
+              value["firstFailureKind"] as? String == "gemini_submission_first_failure_v1",
+              let stage = value["stage"] as? String,
+              ["begin_digest", "claim_admission", "observe_record", "observe_parent", "observe_pending",
+               "observe_count", "observe_body", "observe_text", "observe_digest", "observe_final"].contains(stage),
+              let action = value["action"] as? String,
+              ["inspect", "prepare", "insert", "sendReady", "submit", "verifyModel", "stop", "discoverModels",
+               "selectModel", "modelDiagnostic", "enableTemporary"].contains(action),
+              let sequence = ComputerToolArgumentContract.exactInt64(value["sequence"]), (1...10_000).contains(sequence),
+              sanitizedSubmissionDiagnostic(current) != nil, let current = current as? [String: Any],
+              ComputerToolArgumentContract.exactInt64(current["requestedSequence"]) == sequence,
+              ComputerToolArgumentContract.exactInt64(current["recordSequence"]) == sequence else { return nil }
+        let header: [String: Any] = ["firstFailureKind": "gemini_submission_first_failure_v1",
+                                     "stage": stage, "action": action, "sequence": sequence]
+        var records = [header]
+        if !(value["digestDiagnostic"] is NSNull) {
+            guard stage == "observe_digest", let safe = sanitizedSubmissionDigestDiagnostic(value["digestDiagnostic"]),
+                  var digest = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] else { return nil }
+            digest.merge(header) { _, retained in retained }
+            records.append(digest)
+        }
+        var encoded: [String] = []
+        for record in records {
+            guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
+                  bytes.count <= 960 else { return nil }
+            encoded.append(String(decoding: bytes, as: UTF8.self))
+        }
+        return encoded
+    }
+
     static func sanitizedSubmissionBodyDiagnostic(_ raw: Any?) -> String? {
         let measurements = ["expectedLength", "innerTextLength", "textContentLength", "expectedLines", "innerTextLines",
                             "textContentLines", "firstMismatchIndex", "literalDOMLength", "innerTextExpectedOffset", "textContentExpectedOffset"]
@@ -2840,6 +2896,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         if let safe = Self.sanitizedSubmissionDiagnostic(observed["submissionDiagnostic"]) {
             Self.inspectionLog.error("submissionAdapter \(safe, privacy: .public)")
+            if let records = Self.submissionFirstFailureDiagnosticRecords(observed["submissionFirstFailure"],
+                                                                          current: observed["submissionDiagnostic"]) {
+                for record in records { Self.inspectionLog.error("submissionFirstFailure \(record, privacy: .public)") }
+            }
             if (observed["submissionDiagnostic"] as? [String: Any])?["stage"] as? String == "observe_body",
                let nodes = Self.sanitizedSubmissionNodeDiagnostic(observed["submissionNodesDiagnostic"]) {
                 Self.inspectionLog.error("submissionNodes \(nodes, privacy: .public)")

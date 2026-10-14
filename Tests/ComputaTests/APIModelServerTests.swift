@@ -24,6 +24,12 @@ private final class APICredentialCounter: APIProviderCredentials, @unchecked Sen
     func remove(for providerID: String) throws { lock.lock(); defer { lock.unlock() }; writes += 1 }
     func counts() -> (reads: Int, writes: Int) { lock.lock(); defer { lock.unlock() }; return (reads, writes) }
 }
+private final class APIFailureDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var records: [String] = []
+    func record(_ value: String) { lock.lock(); defer { lock.unlock() }; records.append(value) }
+    func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return records }
+}
 private final class APILoopbackFixture: @unchecked Sendable {
     struct Response: Sendable { let status: String; let headers: [String: String]; let body: Data }
     let listener: NWListener
@@ -129,6 +135,89 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request?.body)) as? [String: Any])
         let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
         return try XCTUnwrap((tools.first?["function"] as? [String: Any])?["name"] as? String)
+    }
+
+    func testFailureStageProjectionPreservesCodesWithoutPrivatePayloadOrHistoryClaims() throws {
+        for stage in APIModelServer.FailureStage.allCases {
+            let record = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: stage))
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+            XCTAssertEqual(Set(value.keys), ["kind", "stage", "code", "retryable"])
+            XCTAssertEqual(value["kind"] as? String, "api_failure_stage_v1")
+            XCTAssertEqual(value["stage"] as? String, stage.rawValue)
+            XCTAssertEqual(value["code"] as? String, "invalid_arguments")
+            XCTAssertEqual(value["retryable"] as? Bool, false)
+            XCTAssertLessThanOrEqual(record.utf8.count, 256)
+        }
+        let unknown = NSError(domain: "PRIVATE_DOMAIN", code: 14, userInfo: [NSLocalizedDescriptionKey: "PRIVATE_PROMPT_SECRET_URL_SCHEMA"])
+        let record = try XCTUnwrap(APIModelServer.failureDiagnostic(unknown, stage: .requestTransport))
+        XCTAssertFalse(record.contains("PRIVATE"))
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+        XCTAssertEqual(value["code"] as? String, "unavailable")
+        let legacy = try APIModelServer.errorBody(APIModelResponseCodec.Failure.invalidArguments)
+        let legacyError = try XCTUnwrap((JSONSerialization.jsonObject(with: legacy) as? [String: Any])?["error"] as? [String: Any])
+        XCTAssertEqual(legacyError["message"] as? String, APIModelResponseCodec.Failure.invalidArguments.localizedDescription)
+        XCTAssertNil(legacyError["x-computa-failure-stage"], "The phase is an internal diagnostic, not a new public error schema.")
+        XCTAssertEqual(APIModelServer.errorStatus(APIModelResponseCodec.Failure.invalidArguments), "400 Bad Request")
+    }
+
+    func testActualAPIArgumentFailureSeparatesPrepareHistoryFromDecodeBeforeAnyToolPublication() async throws {
+        for stage in [APIModelServer.FailureStage.prepare, .decode] {
+            let records = APIRequestRecorder(), credentials = APICredentialCounter(), diagnostics = APIFailureDiagnosticRecorder()
+            let remote = try APILoopbackFixture { request in
+                await records.record(request)
+                let body = try! JSONSerialization.jsonObject(with: request.body) as! [String: Any]
+                let tools = body["tools"] as! [[String: Any]], function = tools[0]["function"] as! [String: Any]
+                let response: [String: Any] = ["id": "fixture-rejected-response", "model": "fixture-model", "choices": [[
+                    "index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant", "content": NSNull(),
+                        "tool_calls": [["id": "fixture_rejected_call", "type": "function", "function": [
+                            "name": function["name"]!, "arguments": "{\"unexpected\":\"PRIVATE_PROVIDER_ARGUMENT\"}"]]]]]]]
+                return .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: try! JSONSerialization.data(withJSONObject: response))
+            }
+            defer { remote.stop() }
+            let p = provider(try await remote.start())
+            let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)))
+            await server.setFailureDiagnosticsObserverForTesting { diagnostics.record($0) }
+            try await server.updateProviders([p])
+            let base = try await server.start(), task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString, preparation = UUID()
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+            let input: [[String: Any]]
+            if stage == .prepare {
+                input = [["role": "user", "content": "PRIVATE_PROMPT"],
+                    ["type": "function_call", "call_id": "fixture_history_call", "name": "browser_read", "arguments": "{\"unexpected\":\"PRIVATE_HISTORY_ARGUMENT\"}"],
+                    ["type": "function_call_output", "call_id": "fixture_history_call", "output": "PRIVATE_PRIOR_TOOL_OUTPUT"]]
+            } else { input = [["role": "user", "content": "PRIVATE_PROMPT"]] }
+            let request = try namingRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p, input: input)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let error = try XCTUnwrap(object["error"] as? [String: Any])
+            XCTAssertEqual(error["type"] as? String, "api_model_error")
+            XCTAssertEqual(error["code"] as? String, "invalid_arguments")
+            XCTAssertEqual(error["x-computa-retryable"] as? Bool, false)
+            XCTAssertNil(object["output"]); XCTAssertNil(object["tool_calls"])
+            let message = try XCTUnwrap(error["message"] as? String)
+            if stage == .prepare {
+                XCTAssertTrue(message.contains("retained tool history")); XCTAssertTrue(message.contains("This inference sent no provider request"))
+            } else {
+                XCTAssertTrue(message.contains("provider response")); XCTAssertTrue(message.contains("No tool from this response was executed"))
+                XCTAssertFalse(message.contains("no provider request"))
+            }
+            let upstreamCount = await records.count()
+            XCTAssertEqual(upstreamCount, stage == .prepare ? 0 : 1)
+            XCTAssertEqual(credentials.counts().reads, stage == .prepare ? 0 : 1)
+            XCTAssertEqual(credentials.counts().writes, 0)
+            let emitted = diagnostics.snapshot(); XCTAssertEqual(emitted.count, 1)
+            let record = try XCTUnwrap(emitted.first)
+            let finite = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+            XCTAssertEqual(finite["stage"] as? String, stage.rawValue)
+            XCTAssertEqual(finite["code"] as? String, "invalid_arguments")
+            XCTAssertLessThanOrEqual(record.utf8.count, 256)
+            for privateValue in ["PRIVATE", "fixture-secret", thread, turn, task, "browser_read", "unexpected", "http"] {
+                XCTAssertFalse(record.contains(privateValue)); XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(privateValue))
+            }
+            await server.shutdown()
+        }
     }
 
     func testFreshNativeThreadNamingPinSurvivesGatewayRestartAndCompactedInput() async throws {

@@ -1995,8 +1995,69 @@ function modelSubmissionBodyDiagnostic(record, body) {
     return result;
   } catch { return result; }
 }
-function modelSubmissionFailure(record = null, stage = 'observe_final', body = null) {
+function modelFirstFailureProjection(value) {
+  // A cache is diagnostic data, including when private test state is malformed.
+  // Reconstruct only fixed scalar fields; it is never an ownership input.
+  try {
+    const keys = ['firstFailureKind', 'stage', 'action', 'sequence', 'digestDiagnostic'];
+    const stages = ['begin_digest', 'claim_admission', 'observe_record', 'observe_parent', 'observe_pending',
+      'observe_count', 'observe_body', 'observe_text', 'observe_digest', 'observe_final'];
+    const actions = ['inspect', 'prepare', 'insert', 'sendReady', 'submit', 'verifyModel', 'stop',
+      'discoverModels', 'selectModel', 'modelDiagnostic', 'enableTemporary'];
+    if (!value || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))
+      || value.firstFailureKind !== 'gemini_submission_first_failure_v1' || !stages.includes(value.stage)
+      || !actions.includes(value.action) || !Number.isInteger(value.sequence) || value.sequence < 1 || value.sequence > 10_000) return null;
+    let digestDiagnostic = null;
+    if (value.digestDiagnostic !== null) {
+      const digest = value.digestDiagnostic;
+      const flags = ['stateSame', 'stateRevoked', 'recordRetained', 'parentRequired', 'parentIntact',
+        'remountRequired', 'remountIntact', 'contextMatches', 'rootCountMatches', 'rootsSame', 'firstRootSame',
+        'currentRootSame', 'rootConnected', 'bodyConnected', 'bodySame', 'payloadAvailable', 'payloadWithinLimit',
+        'bodyTextUnchanged', 'bodyCanonicalMatches', 'priorIntact', 'digestMatches'];
+      if (value.stage !== 'observe_digest' || !digest || Object.keys(digest).length !== flags.length + 2
+        || digest.kind !== 'gemini_submission_digest_v1' || !Number.isInteger(digest.projectedLength)
+        || digest.projectedLength < 0 || digest.projectedLength > 180_201
+        || flags.some(key => typeof digest[key] !== 'boolean')
+        || !digest.payloadAvailable && digest.projectedLength !== 0
+        || digest.payloadWithinLimit !== (digest.payloadAvailable && digest.projectedLength <= 180_200)
+        || !digest.payloadWithinLimit && (digest.bodyTextUnchanged || digest.bodyCanonicalMatches)
+        || !digest.parentRequired && !digest.parentIntact || !digest.remountRequired && !digest.remountIntact) return null;
+      digestDiagnostic = Object.freeze({ kind: digest.kind, projectedLength: digest.projectedLength,
+        ...Object.fromEntries(flags.map(key => [key, digest[key]])) });
+    }
+    return Object.freeze({ firstFailureKind: value.firstFailureKind, stage: value.stage,
+      action: value.action, sequence: value.sequence, digestDiagnostic });
+  } catch { return null; }
+}
+function modelRetainedFirstFailure(state, record = null, stage = null, digestDiagnostic = null) {
+  try {
+    if (!state || globalThis.__computaGeminiSubmissionState !== state || state.document !== document
+      || state.owner !== input.ownerToken || globalThis.__computaModelOwner !== input.ownerToken) return null;
+    let cache = globalThis.__computaGeminiSubmissionFailures;
+    if (cache === undefined && record && !state.revoked) {
+      cache = new WeakMap(); globalThis.__computaGeminiSubmissionFailures = cache;
+    }
+    if (!(cache instanceof WeakMap)) return null;
+    const bound = target => target && (state.pending === target || state.lastVerified === target)
+      && target.document === document && target.owner === input.ownerToken
+      && target.sequence === input.submissionSequence && target.marker === input.submissionMarker
+      && typeof target.canonical === 'string' && typeof target.fingerprint === 'string';
+    if (!cache.has(state) && record && !state.revoked && bound(record)) {
+      const bundle = modelFirstFailureProjection({ firstFailureKind: 'gemini_submission_first_failure_v1',
+        stage, action: input.action, sequence: record.sequence, digestDiagnostic });
+      if (bundle) cache.set(state, Object.freeze({ state, record, document, owner: input.ownerToken,
+        sequence: record.sequence, marker: record.marker, canonical: record.canonical, fingerprint: record.fingerprint, bundle }));
+    }
+    const saved = cache.get(state);
+    if (!saved || saved.state !== state || saved.document !== document || saved.owner !== input.ownerToken || !bound(saved.record)
+      || record && saved.record !== record || saved.sequence !== saved.record.sequence || saved.marker !== saved.record.marker
+      || saved.canonical !== saved.record.canonical || saved.fingerprint !== saved.record.fingerprint) return null;
+    return modelFirstFailureProjection(saved.bundle);
+  } catch { return null; }
+}
+function modelSubmissionFailure(record = null, stage = 'observe_final', body = null, digestDiagnostic = null) {
   const state = globalThis.__computaGeminiSubmissionState;
+  const firstFailure = modelRetainedFirstFailure(state, record, stage, digestDiagnostic);
   if (record && state && (state.pending === record || state.lastVerified === record)) state.revoked = true;
   const error = { error: 'conversation_changed', detail: 'submission_message' };
   const diagnostic = modelSubmissionDiagnostic(record, stage);
@@ -2006,6 +2067,7 @@ function modelSubmissionFailure(record = null, stage = 'observe_final', body = n
     try { structure = modelFirstUserStructure('submission_text', false, { body, record }); } catch { }
   }
   return { ...error, ...(diagnostic ? { submissionDiagnostic: diagnostic } : {}),
+    ...(firstFailure ? { submissionFirstFailure: firstFailure } : {}),
     ...(bodyDiagnostic ? { submissionBodyDiagnostic: bodyDiagnostic } : {}),
     ...(structure ? { debugSubmissionStructure: structure } : {}) };
 }
@@ -2213,7 +2275,7 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     || !priorIntact() || fingerprint !== record.fingerprint) {
     const diagnostic = modelSubmissionDigestDiagnostic(state, record, pendingParent, parentValid, remount, remountAllowed,
       roots, current, root, body, text, fingerprint, priorIntact);
-    return { ...modelSubmissionFailure(record, 'observe_digest'),
+    return { ...modelSubmissionFailure(record, 'observe_digest', null, diagnostic),
       ...(diagnostic ? { submissionDigestDiagnostic: diagnostic } : {}) };
   }
   record.root = root; record.body = body; record.phase = 'verified'; record.remount = null;
