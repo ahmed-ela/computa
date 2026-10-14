@@ -147,6 +147,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case bindingMissing = "binding_missing"
         case proofMissing = "proof_missing"
         case proofInvalid = "proof_invalid"
+        case replacementRefreshRejected = "replacement_refresh_rejected"
         case capabilityMissing = "capability_missing"
         case currentProofMissing = "current_proof_missing"
     }
@@ -427,6 +428,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       ["ready", "complete"].contains(session.state), !session.pendingSubmission else {
                     throw Failure.invalidRequest
                 }
+                if session.provider == .gemini, session.submitted {
+                    // Re-prove the completed round before any preparation can
+                    // focus or change the editor. Read-only remount recovery
+                    // cannot become an insertion or Send retry.
+                    guard session.currentSubmissionVerified, session.firstUserFingerprint != nil,
+                          let binding = session.currentSubmission, binding.sequence == session.sequence,
+                          session.confirmedUsers == session.sequence else {
+                        throw Failure.ownershipFailure(.javaScriptSubmission)
+                    }
+                    let preflight = try await page(session, action: "inspect")
+                    guard preflight["temporary"] as? Bool == true,
+                          count(preflight, "userCount") == binding.sequence,
+                          preflight["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability,
+                          let preflightProof = preflight["submissionProof"],
+                          Self.validSubmissionProof(preflightProof,
+                              sequence: binding.sequence, fingerprint: binding.outboundFingerprint) else {
+                        throw Failure.ownershipFailure(.javaScriptSubmission)
+                    }
+                }
                 let before = try await page(session, action: "prepare")
                 guard before["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
                 guard before["prepared"] as? Bool == true else { throw Failure.editorFailure("focus_unavailable") }
@@ -435,8 +455,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                           session.provider.conversationURL(before["url"] as? String) == nil else { throw Failure.notFresh }
                 }
                 session.baseline = count(before, "responseCount")
-                // Keep the lineage marker out of the local transcript. It is an
-                // opaque transport suffix for the first website submission only.
+                // Keep transport markers out of the local transcript. Gemini
+                // gets a fresh suffix each round; other providers pin the first.
                 let submissionMarker = session.submitted && session.provider == .gemini
                     ? UUID().uuidString.lowercased() : session.firstUserMarker
                 let outbound = !session.submitted || session.provider == .gemini
@@ -1897,6 +1917,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowFirstUserExpansion": allowFirstUserExpansion,
         ]
         if provider == .gemini, !session.isDiscovery {
+            // Only already-dispatched bindings authorize a detached-message
+            // inspection. A prepared, unsent body cannot supply this pin.
+            input["expectedSubmissionProofs"] = [session.previousSubmission, session.currentSubmission]
+                .compactMap { $0 }.map { ["sequence": $0.sequence, "fingerprint": $0.outboundFingerprint] as [String: Any] }
             let editorAction = ["insert", "sendReady", "submit"].contains(action)
             if let binding = editorAction ? session.preparedSubmission : session.currentSubmission {
                 input["submissionMarker"] = binding.marker
@@ -2105,6 +2129,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
+                                      refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
+                                      maximumWait: evaluationDeadline - .now)
+            case "submission_observation_replaced":
+                let bindings = [session.currentSubmission, session.previousSubmission].compactMap { $0 }
+                guard provider == .gemini, refreshReadOnlyObservation,
+                      ["inspect", "verifyModel"].contains(action),
+                      observed["detail"] as? String == "readonly_model_observation",
+                      session.submitted, session.firstUserFingerprint != nil,
+                      let proof = observed["replacementSubmissionProof"],
+                      bindings.contains(where: { Self.validSubmissionProof(proof,
+                          sequence: $0.sequence, fingerprint: $0.outboundFingerprint) }) else {
+                    logSubmissionFailure(session, action: action, stage: .replacementRefreshRejected, observed: observed)
+                    throw Failure.ownershipFailure(.javaScriptSubmission)
+                }
+                return try await page(session, action: "inspect", enforceModel: enforceModel,
+                                      refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait,
+                                      recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
                                       maximumWait: evaluationDeadline - .now)
             case "first_user_observation_replaced":

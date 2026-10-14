@@ -781,6 +781,124 @@ describe('Gemini per-submission ownership', () => {
       expect(JSON.stringify(diagnostic)).not.toContain('https:'); expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
     }
   });
+
+  const nativePins = async (...sequences: number[]) => Promise.all(sequences.map(async sequence => ({ sequence,
+    fingerprint: await fingerprint(roundPrompt(sequence)) })));
+
+  test('native-pinned current-round recovery and next readonly preflight finish before any preparation focus', async () => {
+    const { f, styles } = queryFixture(true); await finishRound(f, 1); const second = await finishRound(f, 2);
+    const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+    const expectedModelChoice = { key: '3.1 Pro', label: '3.1 Pro' }, expectedSubmissionProofs = await nativePins(1, 2);
+    const args = { ...fields(2), expectedUserCounts: [2], expectedModelChoice, expectedSubmissionProofs };
+    const firstReplacement = replaceBoundRoot(f, styles);
+    expect(await f.run('verifyModel', args)).toEqual({ error: 'submission_observation_replaced', detail: 'readonly_model_observation',
+      replacementSubmissionProof: { sequence: 2, fingerprint: await fingerprint(roundPrompt(2)) } });
+    expect(firstReplacement.record.root).toBe(firstReplacement.oldRoot); expect(firstReplacement.record.remount.kind).toBe('submission');
+    const fresh = await f.run('inspect', args);
+    expect(fresh).toMatchObject({ firstUserVerified: true, firstUserFingerprint: second.firstUserFingerprint,
+      submissionProof: { sequence: 2, fingerprint: await fingerprint(roundPrompt(2)) } });
+    expect(firstReplacement.record.root).toBe(firstReplacement.root); expect(firstReplacement.record.remount).toBeNull();
+    const nextReplacement = replaceBoundRoot(f, styles);
+    let focuses = 0; const focus = f.composer.onFocus!;
+    f.composer.onFocus = () => { focuses++; focus(); };
+    const before = f.composer.events.length;
+    // Native performs this read before prepare, rather than recovering through
+    // a mutation or repeating insertion/Send.
+    expect(await f.run('inspect', args)).toMatchObject({ error: 'submission_observation_replaced', replacementSubmissionProof: { sequence: 2 } });
+    expect(focuses).toBe(0); expect(f.composer.events.length).toBe(before); expect(f.send.clicks).toBe(2);
+    expect((await f.run('inspect', args)).submissionProof).toEqual({ sequence: 2, fingerprint: await fingerprint(roundPrompt(2)) });
+    expect(nextReplacement.record.remount).toBeNull(); expect(focuses).toBe(0);
+    expect(await f.run('prepare', args)).toMatchObject({ prepared: true }); expect(focuses).toBe(1);
+    await finishRound(f, 3); expect(f.send.clicks).toBe(3);
+    expect(f.world.__computaGeminiSubmissionState.lastVerified.sequence).toBe(3);
+  });
+
+  test('a remounted verified prior round is certified before pending current proof even when its claimed body appends during hashing', async () => {
+    for (const appendDuringDigest of [false, true]) {
+      const { f, styles } = queryFixture(true); await finishRound(f, 1); await finishRound(f, 2);
+      const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+      const expectedModelChoice = { key: '3.1 Pro', label: '3.1 Pro' };
+      const text = await stage(f, 3); f.send.onClick = () => { f.composer.replaceChildren(); };
+      expect(await f.run('submit', { ...fields(3), expectedUserCounts: [2], prompt: text })).toMatchObject({ submitted: true, submissionPending: true });
+      const prior = replaceBoundRoot(f, styles), expectedSubmissionProofs = await nativePins(2, 3);
+      const args = { ...fields(3), expectedUserCounts: [2, 3], expectedSubmissionProofs, expectedModelChoice };
+      let discard: any;
+      if (appendDuringDigest) {
+        const subtle: any = crypto.subtle, original = subtle.digest; let appended = false;
+        subtle.digest = async (algorithm: any, data: any) => {
+          const digest = await original.call(subtle, algorithm, data);
+          if (!appended && new TextDecoder().decode(data) === normalized(roundPrompt(2))) { appended = true; f.appendUser(text); }
+          return digest;
+        };
+        try { discard = await f.run('inspect', args); expect(appended).toBe(true); }
+        finally { subtle.digest = original; }
+      } else discard = await f.run('inspect', args);
+      expect(discard).toEqual({ error: 'submission_observation_replaced', detail: 'readonly_model_observation',
+        replacementSubmissionProof: { sequence: 2, fingerprint: await fingerprint(roundPrompt(2)) } });
+      expect(discard.submissionProof).toBeUndefined(); expect(discard.text).toBeUndefined(); expect(f.send.clicks).toBe(3);
+      expect(prior.record.remount.root).toBe(prior.root); expect(prior.record.root).toBe(prior.oldRoot);
+      const fresh = await f.run('inspect', args);
+      expect(prior.record.remount).toBeNull(); expect(prior.record.root).toBe(prior.root);
+      if (appendDuringDigest) expect(fresh).toMatchObject({ submissionProof: { sequence: 3, fingerprint: await fingerprint(text) } });
+      else {
+        expect(fresh).toMatchObject({ submissionPending: true, text: '', answerComplete: false,
+          submissionProof: { sequence: 2, fingerprint: await fingerprint(roundPrompt(2)) } });
+        expect(f.world.__computaGeminiSubmissionState.pending.sequence).toBe(3);
+        f.appendUser(text);
+        expect(await f.run('inspect', args)).toMatchObject({ submissionProof: { sequence: 3, fingerprint: await fingerprint(text) } });
+      }
+      expect(f.world.__computaGeminiSubmissionState.lastVerified.sequence).toBe(3); expect(f.send.clicks).toBe(3);
+    }
+  });
+
+  test('current-round certificates reject malformed native pins unsafe physical aliases and changes during fresh consumption', async () => {
+    const good = await nativePins(1, 2), wrong = '0'.repeat(64);
+    const invalid: any[] = [undefined, [], [good[0]], [good[1], good[0]], [good[1], good[1]],
+      [...good, { sequence: 3, fingerprint: wrong }], [good[0], { sequence: 3, fingerprint: wrong }],
+      [good[0], { sequence: 2, fingerprint: wrong }], [good[0], { sequence: true, fingerprint: good[1].fingerprint }],
+      [good[0], { sequence: '2', fingerprint: good[1].fingerprint }], [good[0], { ...good[1], extra: true }],
+      [good[0], { ...good[1], fingerprint: good[1].fingerprint.toUpperCase() }]];
+    for (const expectedSubmissionProofs of invalid) {
+      const { f, styles } = queryFixture(true); await finishRound(f, 1); await finishRound(f, 2);
+      const replaced = replaceBoundRoot(f, styles);
+      const denied = await f.run('inspect', { ...fields(2), expectedUserCounts: [2], expectedSubmissionProofs });
+      expect(denied).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      expect(denied.replacementSubmissionProof).toBeUndefined(); expect(replaced.record.remount).toBeNull(); expect(f.send.clicks).toBe(2);
+    }
+    for (const fault of ['bodyOnly', 'connectedBody', 'canonical', 'consumeBody', 'consumeDigest', 'prepare']) {
+      const { f, styles, textNode } = queryFixture(true); await finishRound(f, 1); await finishRound(f, 2);
+      const record = f.world.__computaGeminiSubmissionState.lastVerified;
+      let replaced: ReturnType<typeof replaceBoundRoot> | null = null;
+      if (fault === 'bodyOnly') {
+        const old: Element = record.body, parent = old.parentElement!, copy = old.cloneNode(true);
+        parent.children[parent.children.indexOf(old)] = copy; copy.parentElement = parent; old.connected = false;
+      } else {
+        replaced = replaceBoundRoot(f, styles);
+        if (fault === 'connectedBody') f.body.append(replaced.oldBody);
+        if (fault === 'canonical') replaced.body.querySelector('p.query-text-line')!.replaceChildren(textNode(' ALTERED '));
+      }
+      const args = { ...fields(2), expectedUserCounts: [2], expectedSubmissionProofs: good };
+      let denied: any;
+      if (fault.startsWith('consume')) {
+        expect(await f.run('inspect', args)).toMatchObject({ error: 'submission_observation_replaced' });
+        if (fault === 'consumeBody') { replaceBoundRoot(f, styles, record.remount.root); denied = await f.run('inspect', args); }
+        else {
+          const subtle: any = crypto.subtle, original = subtle.digest; let changed = false;
+          subtle.digest = async (algorithm: any, data: any) => {
+            const digest = await original.call(subtle, algorithm, data);
+            if (!changed && new TextDecoder().decode(data) === normalized(roundPrompt(2))) {
+              changed = true; replaced!.body.querySelector('p.query-text-line')!.replaceChildren(textNode(' ALTERED '));
+            }
+            return digest;
+          };
+          try { denied = await f.run('inspect', args); expect(changed).toBe(true); }
+          finally { subtle.digest = original; }
+        }
+      } else denied = await f.run(fault === 'prepare' ? 'prepare' : 'inspect', args);
+      expect(denied.error).toBeDefined(); expect(denied.error).not.toBe('submission_observation_replaced');
+      expect(denied.submissionProof).toBeUndefined(); expect(denied.text).toBeUndefined(); expect(f.send.clicks).toBe(2);
+    }
+  });
 });
 
 // Matches the prompt-free Gemini 4 observation: normal model picker, exact

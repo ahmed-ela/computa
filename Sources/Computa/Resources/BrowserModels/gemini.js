@@ -1603,7 +1603,7 @@ function modelQueryHeadingFacts(node) {
       insetClipped: /^inset\(\s*50%\s*\)$/.test(style.clipPath || '') };
   } catch { return empty; }
 }
-function modelExpectedQueryCanonical(body) {
+function modelExpectedQueryCanonical(body, recovery = null) {
   try {
     if (window !== window.top || document.URL !== input.expectedURL || location.origin !== 'https://gemini.google.com'
       || globalThis.__computaModelOwner !== input.ownerToken || !modelURLAllowed() || !modelTemporaryVerified()) return null;
@@ -1622,9 +1622,13 @@ function modelExpectedQueryCanonical(body) {
       const records = [state.pending, state.lastVerified].filter(record => record?.sequence === sequence);
       if (records.length !== 1) return null;
       const record = records[0];
+      const recoveryPermit = recovery?.record === record && recovery.root === root && recovery.body === body
+        && state.lastVerified === record && record.phase === 'verified' && record.root && record.body
+        && !record.root.isConnected && !record.body.isConnected
+        && modelExpectedSubmissionProof(sequence)?.fingerprint === record.fingerprint;
       if (record.document !== document || record.owner !== input.ownerToken
         || !['send_claimed', 'verified'].includes(record.phase)
-        || record.phase === 'verified' && (record.root !== root || record.body !== body)
+        || record.phase === 'verified' && (record.root !== root || record.body !== body) && !recoveryPermit
         || record.phase === 'send_claimed' && (record.root !== null || record.body !== null)
         || record.marker === input.expectedFirstUserMarker) return null;
       text = record.canonical; marker = record.marker;
@@ -1636,7 +1640,7 @@ function modelExpectedQueryCanonical(body) {
       && canonical.split(suffix).length === 2 ? canonical : null;
   } catch { return null; }
 }
-function modelQueryPayload(body) {
+function modelQueryPayload(body, recovery = null) {
   // The measured rich message scaffold has a clipped screen-reader heading
   // followed by one literal paragraph per outbound line. Never use rendered
   // innerText as a fallback after recognizing this scaffold.
@@ -1728,7 +1732,7 @@ function modelQueryPayload(body) {
         directTextCounts.push(nodes.filter(node => node.nodeType === 3).length);
       }
     }
-    const expected = modelExpectedQueryCanonical(body), raw = lines.join('\n');
+    const expected = modelExpectedQueryCanonical(body, recovery), raw = lines.join('\n');
     const normalize = text => text.replace(/\r\n?/g, '\n').normalize('NFC').trim();
     const singleFrame = lines.every((line, index) => blank[index]
       || line.length >= 3 && line.startsWith(' ') && line.endsWith(' '));
@@ -1856,6 +1860,18 @@ const modelUserPayloadText = node => {
   const payload = modelQueryPayload(node);
   return payload.recognized ? payload.text ?? '' : node.innerText || node.textContent || '';
 };
+function modelExpectedSubmissionProof(sequence) {
+  const proofs = input.expectedSubmissionProofs;
+  if (!Array.isArray(proofs) || proofs.length > 2 || Object.keys(proofs).join(',') !== proofs.map((_, index) => String(index)).join(',')) return null;
+  for (let index = 0; index < proofs.length; index++) {
+    const proof = proofs[index];
+    if (!proof || Array.isArray(proof) || typeof proof !== 'object' || Object.keys(proof).sort().join(',') !== 'fingerprint,sequence'
+      || !Number.isInteger(proof.sequence) || proof.sequence < 1 || proof.sequence > 10_000
+      || typeof proof.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(proof.fingerprint)
+      || index > 0 && proof.sequence !== proofs[index - 1].sequence + 1) return null;
+  }
+  return proofs.find(proof => proof.sequence === sequence) || null;
+}
 const normalizedBody = node => {
   const text = modelUserPayloadText(node);
   return typeof text === 'string' ? text.replace(/\r\n?/g, '\n').normalize('NFC').trim() : '';
@@ -2017,10 +2033,80 @@ function modelSubmissionNodesDiagnostic(record, root, body, raw, cause) {
         && normalizedBody(body) === record.canonical };
   } catch { return null; }
 }
+async function modelRecoverVerifiedSubmission(record) {
+  // Only one persisted verified record participates. The native pair is an
+  // expected-byte pin, never a source of message text or an unsent draft.
+  const state = globalThis.__computaGeminiSubmissionState, proof = modelExpectedSubmissionProof(record.sequence);
+  const roots = modelUserRoots(), root = roots[record.sequence - 1], body = root && modelUserBody(root);
+  const parent = state?.pending, certificate = record.remount;
+  const parentCanonical = parent?.canonical ?? null, parentFingerprint = parent?.fingerprint ?? null;
+  if (!['inspect', 'verifyModel'].includes(input.action) || !state || state.revoked || state.lastVerified !== record
+    || record.phase !== 'verified' || record.document !== document || record.owner !== input.ownerToken
+    || proof?.fingerprint !== record.fingerprint || input.allowFirstUserBinding !== false
+    || input.expectedFirstUserFingerprint !== firstUserFingerprint
+    || globalThis.__computaModelFirstProof?.fingerprint !== firstUserFingerprint
+    || globalThis.__computaModelFirstProof?.marker !== input.expectedFirstUserMarker
+    || !firstSnapshot || !modelSubmissionContext(record) || !record.root || !record.body
+    || record.root.isConnected || record.body.isConnected || !root || !body || root === record.root || body === record.body
+    || roots.length < record.sequence || roots.length > record.sequence + 1
+    || parent && (parent.sequence !== record.sequence + 1 || parent.sequence !== input.submissionSequence
+      || parent.marker !== input.submissionMarker || parent.phase !== 'send_claimed')
+    || !parent && (roots.length !== record.sequence || input.submissionSequence !== record.sequence || input.submissionMarker !== record.marker)) return null;
+  if (certificate && (certificate.kind !== 'submission' || input.action !== 'inspect'
+    || certificate.sequence !== record.sequence || certificate.fingerprint !== proof.fingerprint
+    || certificate.previousRoot !== record.root || certificate.previousBody !== record.body
+    || certificate.root !== root || certificate.body !== body || certificate.pendingParent !== parent
+    || certificate.parentCanonical !== parentCanonical || certificate.parentFingerprint !== parentFingerprint
+    || !Array.isArray(certificate.roots) || certificate.roots.length > roots.length
+    || certificate.roots.some((node, index) => roots[index] !== node)
+    || roots.length > certificate.roots.length && !(parent && roots.length === certificate.roots.length + 1))) return null;
+  const oldRoot = record.root, oldBody = record.body, canonical = record.canonical, marker = record.marker;
+  const read = () => {
+    const payload = modelQueryPayload(body, { record, root, body });
+    const text = payload.recognized ? payload.text : body.innerText || body.textContent || '';
+    return typeof text === 'string' && text.length <= 180_200 ? text.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
+  };
+  const text = read(), markerLine = `Computa session marker: ${marker}`;
+  if (text !== canonical || text.split('\n').at(-1) !== markerLine || text.split(markerLine).length !== 2) return null;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const current = modelUserRoots();
+  const sameRoots = current.length === roots.length && roots.every((node, index) => current[index] === node);
+  const append = !sameRoots && parent && current.length === roots.length + 1 && roots.length === record.sequence
+    && roots.every((node, index) => current[index] === node)
+    && websiteModelAcknowledgedUserAppend(input, roots.length, current.length,
+      { snapshotIntact: snapshotUnchanged(true), fingerprint: firstUserFingerprint, identity: firstUserIdentity }, modelTemporaryVerified());
+  if (!sameRoots && !append || globalThis.__computaGeminiSubmissionState !== state || state.revoked
+    || state.lastVerified !== record || state.pending !== parent || record.phase !== 'verified'
+    || parent && (parent.phase !== 'send_claimed' || parent.sequence !== record.sequence + 1
+      || parent.sequence !== input.submissionSequence || parent.marker !== input.submissionMarker
+      || parent.canonical !== parentCanonical || parent.fingerprint !== parentFingerprint)
+    || record.root !== oldRoot || record.body !== oldBody || oldRoot.isConnected || oldBody.isConnected
+    || record.canonical !== canonical || record.marker !== marker || record.fingerprint !== proof.fingerprint
+    || record.remount !== certificate || modelExpectedSubmissionProof(record.sequence)?.fingerprint !== proof.fingerprint
+    || !root.isConnected || !body.isConnected || current[record.sequence - 1] !== root || modelUserBody(root) !== body
+    || read() !== text || fingerprint !== proof.fingerprint || !modelSubmissionContext(record, !!append)) return null;
+  if (certificate) {
+    // A fresh inspect is the only consumer. Continue normal current/pending
+    // proof checks afterwards; no answer or new-round proof is supplied here.
+    record.root = root; record.body = body; record.remount = null;
+    return append || {};
+  }
+  record.remount = { kind: 'submission', sequence: record.sequence, fingerprint,
+    previousRoot: oldRoot, previousBody: oldBody, root, body, roots: current, pendingParent: parent, parentCanonical, parentFingerprint };
+  return { error: 'submission_observation_replaced', detail: 'readonly_model_observation',
+    replacementSubmissionProof: { sequence: record.sequence, fingerprint } };
+}
 async function modelObserveSubmission(sequence, allowPending = false, pendingParent = null) {
   const state = globalThis.__computaGeminiSubmissionState;
   if (sequence === 0) return modelUserRoots().length === 0 ? {} : modelSubmissionFailure(null, 'observe_count');
   if (!state || state.revoked || state.document !== document || state.owner !== input.ownerToken) return modelSubmissionFailure(null, 'observe_state');
+  const bound = state.lastVerified;
+  if (bound?.phase === 'verified' && input.expectedSubmissionProofs !== undefined && ['inspect', 'verifyModel'].includes(input.action)
+    && (bound.remount?.kind === 'submission' || !bound.root.isConnected && !bound.body.isConnected)) {
+    const recovered = await modelRecoverVerifiedSubmission(bound);
+    if (recovered?.error) return recovered;
+  }
   const record = state.lastVerified?.sequence === sequence ? state.lastVerified : state.pending?.sequence === sequence ? state.pending : null;
   if (!record || !['send_claimed', 'verified'].includes(record.phase)) return modelSubmissionFailure(record, 'observe_record');
   const parentValid = !!pendingParent && state.pending === pendingParent && pendingParent.phase === 'send_claimed'
@@ -2042,6 +2128,8 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
   const raw = body && modelUserPayloadText(body);
   const remount = record.remount;
   const remountAllowed = sequence === 1 && input.action === 'inspect' && input.allowFirstUserBinding === false
+    && remount?.kind !== 'submission'
+    && (input.expectedSubmissionProofs === undefined || modelExpectedSubmissionProof(sequence)?.fingerprint === record.fingerprint)
     && remount?.root === root && remount.body === body && remount.previousRoot === record.root
     && remount.previousBody === record.body && !record.root.isConnected && !record.body.isConnected
     && input.expectedFirstUserFingerprint === record.fingerprint
@@ -2054,7 +2142,7 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     // A first root can be replaced after the preceding invocation returned.
     // Use its persisted OLD physical snapshot to obtain the existing discard
     // receipt; only the next fresh inspect may consume that certificate.
-    if (bodyCause === 'physical_replaced' && sequence === 1 && ['inspect', 'verifyModel'].includes(input.action)
+    if (bodyCause === 'physical_replaced' && sequence === 1 && input.expectedSubmissionProofs === undefined && ['inspect', 'verifyModel'].includes(input.action)
       && state.lastVerified === record && state.pending === null && record.phase === 'verified' && !record.remount
       && record.root && record.body && !record.root.isConnected && !record.body.isConnected
       && firstSnapshot?.root === root && firstSnapshot.body === body && snapshotUnchanged()
@@ -2461,6 +2549,17 @@ async function providerPageAction() {
 }
 const observed = await websiteModelFinalGuard('gemini', input, await providerPageAction(), modelTemporaryVerified);
 if (observed.error === 'first_user_observation_replaced') return observed;
+if (observed.error === 'submission_observation_replaced') {
+  const record = globalThis.__computaGeminiSubmissionState?.lastVerified, certificate = record?.remount;
+  const proof = record && modelExpectedSubmissionProof(record.sequence);
+  // This certified discard already checked an exact claimed append edge.
+  // Return no observation; the ordinary count guard must not turn it into a
+  // different failure before native takes its single fresh full inspection.
+  if (certificate?.kind === 'submission' && observed.detail === 'readonly_model_observation'
+    && proof?.fingerprint === certificate.fingerprint && certificate.sequence === record.sequence
+    && observed.replacementSubmissionProof?.sequence === record.sequence
+    && observed.replacementSubmissionProof?.fingerprint === proof.fingerprint) return observed;
+}
 if (['inspect', 'verifyModel'].includes(input.action) && modelUserRoots().length !== ownedUserCount) {
   const append = websiteModelAcknowledgedUserAppend(input, ownedUserCount, modelUserRoots().length,
     firstSnapshot ? { snapshotIntact: snapshotUnchanged(true), fingerprint: firstUserFingerprint, identity: firstUserIdentity } : null,

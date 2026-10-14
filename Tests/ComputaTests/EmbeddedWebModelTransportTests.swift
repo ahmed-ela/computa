@@ -5647,6 +5647,170 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testGeminiLaterQueryRemountAndNextSendPreflightPreserveThreeRoundLineage() async throws {
+        let choice = Self.fixtureChoice(.gemini)
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini, initiallySelectTarget: true,
+            unmountClosedMenu: true, basePage: Self.geminiQueryParagraphPage(.framed)))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: tabID)
+        let prompts = ["Preserve first query\n\nInitial exact context", "  Preserve second query\n\nLiteral user spaces \t",
+                       "Preserve third query\nDistinct tool result and NBSP\u{00a0}"]
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompts[0]])
+        let first = try await waitForState("complete", fixture.transport, token: token)
+        let firstProof = try XCTUnwrap(first["modelProofContext"] as? [String: Any])
+        var replacement: [String: Any]?
+        var followingActions: [String] = []
+        var replacementObservations: [[String: Any]] = []
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            do {
+                if replacement != nil {
+                    followingActions.append(action)
+                    if ["verifyModel", "inspect"].contains(action) {
+                        replacementObservations.append(try await self.geminiVerifiedQueryState(view, sequence: 2))
+                        if action == "inspect" { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+                    }
+                } else if action == "inspect" {
+                    replacement = try await self.replaceVerifiedGeminiQuery(view, sequence: 2, bodyOnly: false, changeText: false)
+                }
+            } catch { XCTFail("Could not observe second-round remount: \(error)") }
+        }
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompts[1]])
+        let second = try await waitForState("complete", fixture.transport, token: token)
+        let replaced = try XCTUnwrap(replacement)
+        XCTAssertEqual(replaced["oldRootDisconnected"] as? Bool, true)
+        XCTAssertEqual(replaced["oldBodyDisconnected"] as? Bool, true)
+        XCTAssertEqual(replaced["recordKeepsOldPointers"] as? Bool, true)
+        XCTAssertEqual(followingActions, ["verifyModel", "inspect"])
+        XCTAssertEqual(replacementObservations.count, 2)
+        let discarded = try XCTUnwrap(replacementObservations.first)
+        let rebound = try XCTUnwrap(replacementObservations.last)
+        XCTAssertEqual(discarded["currentPointers"] as? Bool, false)
+        XCTAssertEqual(discarded["certificateLinksOldAndCurrent"] as? Bool, true)
+        XCTAssertEqual(rebound["currentPointers"] as? Bool, true)
+        XCTAssertEqual(rebound["receiptConsumed"] as? Bool, true)
+        XCTAssertEqual(rebound["revoked"] as? Bool, false)
+        let outboundValue = try await evaluate(view, "return window.fixturePrompts[1];")
+        let outbound = try XCTUnwrap(outboundValue as? String)
+        let secondDigest = EmbeddedWebModelTransport.outboundFingerprint(outbound)
+        for observed in replacementObservations {
+            XCTAssertEqual(observed["sequence"] as? Int, 2)
+            XCTAssertEqual(observed["fingerprint"] as? String, secondDigest)
+            XCTAssertEqual(observed["firstFingerprint"] as? String, firstProof["firstUserFingerprint"] as? String)
+        }
+
+        // This replacement already exists when a new Send is requested. Its
+        // read-only preflight must recover before prepare focuses the editor.
+        let stalePrior = try await replaceVerifiedGeminiQuery(view, sequence: 2, bodyOnly: false, changeText: false)
+        XCTAssertNotNil(stalePrior)
+        _ = try await evaluate(view, """
+            const editor = document.getElementById('fixture-editor'); editor.blur();
+            window.fixtureContinuationFocuses = 0;
+            editor.addEventListener('focus', () => { window.fixtureContinuationFocuses++; }); return true;
+            """)
+        var preflightActions: [String] = []
+        var preflightObservations: [[String: Any]] = []
+        var prepareLedger: [String: Any]?
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            do {
+                preflightActions.append(action)
+                if action == "inspect" {
+                    var proof = try await self.geminiVerifiedQueryState(view, sequence: 2)
+                    let ledger = try await self.evaluate(view, "return {focuses: window.fixtureContinuationFocuses, sends: window.fixturePrompts.length, inputs: window.fixtureInputCount};") as? [String: Any]
+                    proof.merge(try XCTUnwrap(ledger)) { _, new in new }
+                    preflightObservations.append(proof)
+                } else if action == "prepare" {
+                    prepareLedger = try await self.evaluate(view, "return {focuses: window.fixtureContinuationFocuses, sends: window.fixturePrompts.length, inputs: window.fixtureInputCount};") as? [String: Any]
+                    fixture.transport.setBeforePageResultValidationForTesting(nil)
+                }
+            } catch { XCTFail("Could not observe continuation preflight: \(error)") }
+        }
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompts[2]])
+        let third = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(Array(preflightActions.prefix(2)), ["inspect", "inspect"])
+        XCTAssertEqual(preflightActions.last, "prepare")
+        XCTAssertTrue(preflightActions.dropLast().allSatisfy { ["inspect", "verifyModel"].contains($0) })
+        XCTAssertEqual(preflightObservations.count, 2)
+        XCTAssertEqual(preflightObservations.first?["certificateLinksOldAndCurrent"] as? Bool, true)
+        XCTAssertEqual(preflightObservations.last?["currentPointers"] as? Bool, true)
+        XCTAssertEqual(preflightObservations.last?["receiptConsumed"] as? Bool, true)
+        for observed in preflightObservations {
+            XCTAssertEqual(observed["fingerprint"] as? String, secondDigest)
+            XCTAssertEqual(observed["focuses"] as? Int, 0)
+            XCTAssertEqual(observed["sends"] as? Int, 2)
+            XCTAssertEqual(observed["inputs"] as? Int, 2)
+        }
+        XCTAssertEqual(prepareLedger?["focuses"] as? Int, 1)
+        XCTAssertEqual(prepareLedger?["sends"] as? Int, 2)
+        XCTAssertEqual(prepareLedger?["inputs"] as? Int, 2)
+        for (index, snapshot) in [first, second, third].enumerated() {
+            let proof = try XCTUnwrap(snapshot["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(proof["sequence"] as? Int, index + 1)
+            XCTAssertEqual(proof["baselineResponseCount"] as? Int, index)
+            XCTAssertEqual(proof["responseCount"] as? Int, index + 1)
+            XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompts[index]))
+            XCTAssertEqual(proof["firstUserFingerprint"] as? String, firstProof["firstUserFingerprint"] as? String)
+            XCTAssertEqual(proof["documentGeneration"] as? String, firstProof["documentGeneration"] as? String)
+            XCTAssertEqual(snapshot["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+            try assertChoiceEvidence(snapshot, choice: choice)
+        }
+        XCTAssertEqual(fixture.browser.documentGeneration(for: tabID), generation)
+        let captured = try await capturedUserPrompts(view)
+        XCTAssertEqual(captured, prompts)
+        try await assertChoiceLedger(view, insertions: 3, sends: 3, selections: 0)
+        XCTAssertEqual(fixture.createdTabs, [tabID])
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: tabID))
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGeminiNextSendPreflightRejectsBodyOnlyOrAlteredPriorQueryBeforeFocus() async throws {
+        for bodyOnly in [true, false] {
+            let choice = Self.fixtureChoice(.gemini)
+            let fixture = try Fixture(page: Self.modelChoicePage(.gemini, initiallySelectTarget: true,
+                unmountClosedMenu: true, basePage: Self.geminiQueryParagraphPage(.framed)))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            for prompt in ["Preserve first payload", "Preserve second payload\n\nExact prior content"] {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                _ = try await waitForState("complete", fixture.transport, token: token)
+            }
+            let value = try await replaceVerifiedGeminiQuery(view, sequence: 2, bodyOnly: bodyOnly, changeText: !bodyOnly)
+            let replaced = try XCTUnwrap(value)
+            XCTAssertEqual(replaced["oldRootDisconnected"] as? Bool, !bodyOnly)
+            XCTAssertEqual(replaced["oldBodyDisconnected"] as? Bool, true)
+            _ = try await evaluate(view, """
+                const editor = document.getElementById('fixture-editor'); editor.blur();
+                window.fixtureContinuationFocuses = 0;
+                editor.addEventListener('focus', () => { window.fixtureContinuationFocuses++; }); return true;
+                """)
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Do not insert third payload"])
+                XCTFail("Unproved prior replacement must fail before continuation preparation")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never retry the rejected append"])
+            let focuses = try await evaluate(view, "return window.fixtureContinuationFocuses;") as? Int
+            XCTAssertEqual(focuses, 0)
+            try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 0)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            XCTAssertTrue(fixture.browser.webView(for: tabID) === view)
+            try await assertHumanTabIntact(fixture, retaining: tabID)
+        }
+    }
+
     func testGeminiBetweenInvocationBodyOnlyOrChangedQueryCannotRebindOrReplay() async throws {
         for bodyOnly in [true, false] {
             let choice = Self.fixtureChoice(.gemini)
@@ -7225,12 +7389,12 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     /// Observe private proof without writing it; the fixture changes only real
     /// DOM nodes after a completed adapter read and before the next invocation.
-    private func replaceVerifiedGeminiQuery(_ view: WKWebView, bodyOnly: Bool, changeText: Bool) async throws -> [String: Any]? {
+    private func replaceVerifiedGeminiQuery(_ view: WKWebView, sequence: Int = 1, bodyOnly: Bool, changeText: Bool) async throws -> [String: Any]? {
         try await evaluate(view, """
             const state = globalThis.__computaGeminiSubmissionState, record = state?.lastVerified;
-            const root = document.querySelector('user-query');
+            const root = [...document.querySelectorAll('user-query')][\(sequence - 1)];
             const body = root?.querySelector('.user-query-bubble-with-background > span.ng-star-inserted');
-            if (!record || record.sequence !== 1 || record.phase !== 'verified' || state.revoked
+            if (!record || record.sequence !== \(sequence) || record.phase !== 'verified' || state.revoked
               || state.pending || record.root !== root || record.body !== body || !root?.isConnected || !body?.isConnected) return null;
             const firstPinMatches = globalThis.__computaModelFirstProof?.fingerprint === record.fingerprint;
             const replacement = (\(bodyOnly ? "true" : "false") ? body : root).cloneNode(true);
@@ -7243,6 +7407,23 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
               oldRootDisconnected: !root.isConnected, oldBodyDisconnected: !body.isConnected,
               recordKeepsOldPointers: record.root === root && record.body === body, fingerprint: record.fingerprint};
             """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+    }
+
+    private func geminiVerifiedQueryState(_ view: WKWebView, sequence: Int) async throws -> [String: Any] {
+        let value = try await evaluate(view, """
+            const state = globalThis.__computaGeminiSubmissionState, record = state?.lastVerified;
+            const root = [...document.querySelectorAll('user-query')][\(sequence - 1)];
+            const body = root?.querySelector('.user-query-bubble-with-background > span.ng-star-inserted');
+            return {sequence: record?.sequence, revoked: state?.revoked === true,
+              currentPointers: record?.root === root && record?.body === body,
+              certificateLinksOldAndCurrent: !!record?.remount
+                && record.remount.previousRoot === record.root && record.remount.previousBody === record.body
+                && !record.root.isConnected && !record.body.isConnected
+                && record.remount.root === root && record.remount.body === body,
+              receiptConsumed: record?.remount == null, fingerprint: record?.fingerprint,
+              firstFingerprint: globalThis.__computaModelFirstProof?.fingerprint};
+            """, world: .world(name: "computa-chatgpt-model-v1"))
+        return try XCTUnwrap(value as? [String: Any])
     }
 
     private enum GeminiQueryParagraphVariant {
