@@ -1,5 +1,47 @@
 # Embedded website provider qualification
 
+## Build116 installed outcomes
+
+Signed Computa 0.7.0 (116), source `32412096`, is installed and running. All
+54 bundle files and 50 resources match the retained signed build. The actual
+selector offers only GPT-OSS under Cerebras; Qwen3.8 27B remains hidden behind
+the disabled flag with its higher token usage recorded in the source comment.
+
+Four fresh GPT-OSS tasks were attempted within the prepared twelve-case
+matrix: three strict clean passes, one strict nonqualification, and eight
+ChatGPT/Gemini cases held without dispatch. All four GPT-OSS tasks produced the
+correct literal browser result, exactly one accepted form submission and a
+confirmed task-tab close. No API correction or native task error was recorded.
+
+| Case | Duration | Strict result and observed outcome |
+| --- | --- | --- |
+| GPT-OSS 120B, first code/terminal/browser task | 7.546 s | Clean. Thirteen native calls, exact helper patch, four preserved tests passed, independently verified CLI and browser result, confirmed close. |
+| GPT-OSS 120B, fresh code repeat | 10.702 s | Not qualified under the zero-failure gate: the model first ran the deliberately broken seed's tests, which exited 1 with five expected off-by-one assertions. It then patched only the helper, reran the identical command with all four tests passing, and completed the correct CLI/browser/result/close sequence. No receipt was regraded. |
+| GPT-OSS 120B, first browser-only task | 2.984 s | Clean. Six successful browser calls, exact result, one accepted submission and confirmed close. |
+| GPT-OSS 120B, fresh browser-only repeat | 3.840 s | Clean. Six successful browser calls with the same independent result and cleanup checks. |
+
+The strict code-repeat failure is a benchmark-policy mismatch with test-first
+repair, rather than a rejected provider tool call. The original nonqualification
+remains visible. The browser-only tests were released separately after explicit
+review of that expected baseline failure; the earlier clean-only sequence did
+not continue automatically. These bounded results establish working task
+composition, not a guarantee of future provider reliability.
+
+Build116 removes the build115 strict-tool wire experiment that Cerebras rejected.
+It retains bounded schema feedback, unchanged authoritative validation, finite
+ChatGPT response-progress diagnostics and manually armed private-capture
+publication dispositions. The final 89 API/capture/bundled-engine checks passed
+on unchanged source. The 165 browser-transport checks passed for the unchanged
+transport cohort. Tests do not upgrade earlier failed live results.
+
+All four task tabs were explicitly closed. The synthetic fixture server was
+stopped with a final stop event, terminal exit 0 and its process gone; its ten
+events contain four page opens and four accepted submissions. Original source,
+fixtures, outputs and immutable receipts remain available in the private V30
+artifacts. ChatGPT's third-response stall and Google's CAPTCHA trigger remain
+unresolved. No CAPTCHA was completed, no new ChatGPT/Gemini task was dispatched,
+and the broader provider-reliability goal remains open.
+
 ## Build115 installed outcomes and build116 preparation
 
 The fresh matrix attempted two tasks: zero clean passes, two failures and ten
