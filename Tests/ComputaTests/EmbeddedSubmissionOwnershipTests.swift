@@ -152,10 +152,12 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
         XCTAssertTrue(records.joined().contains("\"descendantScope\":\"selected_body\""))
         XCTAssertTrue(records.joined().contains("\"tag\":\"other\""))
         XCTAssertFalse(EmbeddedWebModelTransport.validSubmissionProof(diagnostic, sequence: 1, fingerprint: String(repeating: "a", count: 64)))
-        for reason in ["first_bound", "unrecognized"] {
+        for reason in ["unrecognized"] {
             var invalid = diagnostic; invalid["reason"] = reason
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(invalid), provider: .gemini))
         }
+        var bound = diagnostic; bound["reason"] = "first_bound"
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(bound), provider: .gemini))
         var invalidScope = diagnostic; invalidScope["descendantScope"] = privateValue
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(invalidScope), provider: .gemini))
         let headingFlags = ["headingSemantic", "absolutePosition", "onePixelBox", "overflowHidden", "rectClipped", "insetClipped"]
@@ -173,5 +175,59 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
             forged["descendants"] = [forgedChild]
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .gemini))
         }
+    }
+
+    @MainActor
+    func testQueryTemplateDiagnosticsAreBoundedPrivateAndCannotGrantSubmissionProof() throws {
+        let valid: [String: Any] = ["kind": "gemini_query_template_v1", "expectedAvailable": true,
+            "rowCount": 169, "brRowCount": 20, "textRowCount": 149, "directTextNodeMin": 3,
+            "directTextNodeMax": 3, "allTextRowsSingleFrame": true, "rawWholeMatches": false,
+            "singleFrameWholeMatches": true, "rawRowMatches": 20, "singleFrameRowMatches": 169,
+            "leadingSpaceRows": 149, "trailingSpaceRows": 149, "selectedMode": "ascii_space_frame_v1"]
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedQueryTemplateDiagnostic(valid))
+        XCTAssertFalse(EmbeddedWebModelTransport.validSubmissionProof(valid, sequence: 1, fingerprint: String(repeating: "a", count: 64)))
+        for key in valid.keys {
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedQueryTemplateDiagnostic(missing))
+            var privateValue = valid; privateValue[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedQueryTemplateDiagnostic(privateValue))
+        }
+        for key in ["text", "prompt", "url", "fingerprint", "nonce"] {
+            var leak = valid; leak[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedQueryTemplateDiagnostic(leak))
+        }
+        for key in ["rowCount", "brRowCount", "textRowCount", "directTextNodeMin", "directTextNodeMax",
+                    "rawRowMatches", "singleFrameRowMatches", "leadingSpaceRows", "trailingSpaceRows"] {
+            let invalidMeasurements: [Any] = [true, -1, 8_193, 1.5, "1", NSNull()]
+            for invalid in invalidMeasurements {
+                var changed = valid; changed[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedQueryTemplateDiagnostic(changed))
+            }
+        }
+        for key in ["expectedAvailable", "allTextRowsSingleFrame", "rawWholeMatches", "singleFrameWholeMatches"] {
+            var changed = valid; changed[key] = 1
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedQueryTemplateDiagnostic(changed))
+        }
+        let contradictions: [(String, Any)] = [("brRowCount", 21), ("directTextNodeMin", 4), ("rawRowMatches", 170),
+                ("leadingSpaceRows", 150), ("trailingSpaceRows", 148), ("allTextRowsSingleFrame", false),
+                ("expectedAvailable", false), ("rawWholeMatches", true), ("selectedMode", "unverified")]
+        for (key, value) in contradictions {
+            var changed = valid; changed[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedQueryTemplateDiagnostic(changed))
+        }
+        let shape: [String: Any] = ["tag": "span", "classes": ["ng-star-inserted"]]
+        var structure: [String: Any] = ["kind": "first_user_structure", "provider": "gemini", "reason": "first_bound",
+            "descendantScope": "selected_body", "root": shape, "body": shape, "userCount": 1,
+            "textLength": 51_758, "lineCount": 169, "markerOccurrences": 1, "controlDescendants": 0,
+            "markerFinalLine": true, "submitted": true, "markerMatches": true, "descendants": [], "queryTemplate": valid]
+        func encode() throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: structure), as: UTF8.self) }
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(), provider: .gemini))
+        XCTAssertEqual(records.count, 2)
+        XCTAssertTrue(records.last?.contains("gemini_query_template_v1") == true)
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 })
+        structure["descendantScope"] = nil
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(), provider: .gemini))
+        structure["descendantScope"] = "selected_body"; structure["provider"] = "chatgpt"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(), provider: .chatgpt))
     }
 }

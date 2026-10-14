@@ -1603,6 +1603,39 @@ function modelQueryHeadingFacts(node) {
       insetClipped: /^inset\(\s*50%\s*\)$/.test(style.clipPath || '') };
   } catch { return empty; }
 }
+function modelExpectedQueryCanonical(body) {
+  try {
+    if (window !== window.top || document.URL !== input.expectedURL || location.origin !== 'https://gemini.google.com'
+      || globalThis.__computaModelOwner !== input.ownerToken || !modelURLAllowed() || !modelTemporaryVerified()) return null;
+    const root = body.closest('user-query'), roots = modelUserRoots(), sequence = roots.indexOf(root) + 1;
+    if (sequence < 1 || sequence > 10_000 || modelUserBody(root) !== body) return null;
+    let text, marker;
+    if (sequence === 1) {
+      const context = globalThis.__computaModelFirstPromptContext;
+      if (context?.document !== document || context.owner !== input.ownerToken
+        || context.marker !== input.expectedFirstUserMarker || globalThis.__computaModelFirstSubmitted !== true
+        || globalThis.__computaModelFirstMarker !== context.marker) return null;
+      text = globalThis.__computaModelFirstPrompt; marker = context.marker;
+    } else {
+      const state = globalThis.__computaGeminiSubmissionState;
+      if (!state || state.revoked || state.document !== document || state.owner !== input.ownerToken) return null;
+      const records = [state.pending, state.lastVerified].filter(record => record?.sequence === sequence);
+      if (records.length !== 1) return null;
+      const record = records[0];
+      if (record.document !== document || record.owner !== input.ownerToken
+        || !['send_claimed', 'verified'].includes(record.phase)
+        || record.phase === 'verified' && (record.root !== root || record.body !== body)
+        || record.phase === 'send_claimed' && (record.root !== null || record.body !== null)
+        || record.marker === input.expectedFirstUserMarker) return null;
+      text = record.canonical; marker = record.marker;
+    }
+    if (typeof text !== 'string' || text.length > 180_200 || typeof marker !== 'string'
+      || !/^[a-f0-9-]{36}$/i.test(marker)) return null;
+    const canonical = text.replace(/\r\n?/g, '\n').normalize('NFC').trim(), suffix = `Computa session marker: ${marker}`;
+    return canonical.length <= 180_200 && canonical.endsWith(`\n\n${suffix}`)
+      && canonical.split(suffix).length === 2 ? canonical : null;
+  } catch { return null; }
+}
 function modelQueryPayload(body) {
   // The measured rich message scaffold has a clipped screen-reader heading
   // followed by one literal paragraph per outbound line. Never use rendered
@@ -1660,7 +1693,8 @@ function modelQueryPayload(body) {
           if (headerCharacters > 8_192) throw new Error('query_heading_length');
         } else {
           characters += node.data.length;
-          if (characters > 180_200) throw new Error('query_payload_length');
+          // The only candidate framing adds two ASCII spaces per text row.
+          if (characters > 180_200 + 2 * 8_192) throw new Error('query_payload_length');
         }
         return node.data;
       }
@@ -1672,7 +1706,7 @@ function modelQueryPayload(body) {
     // Validate the omitted header subtree too; its text is never included in
     // the prompt, and controls or unknown rich markup cannot hide there.
     [...heading.childNodes].forEach(child => literal(child, 3, true));
-    const rows = children.slice(1), lines = [];
+    const rows = children.slice(1), lines = [], blank = [], directTextCounts = [];
     for (const row of rows) {
       safeElement(row);
       if (row.tagName !== 'P' || !row.classList.contains('query-text-line') || row.getAttribute('role') !== null)
@@ -1684,17 +1718,37 @@ function modelQueryPayload(body) {
       if (nodes.length === 1 && nodes[0].nodeType === 1 && nodes[0].tagName === 'BR') {
         countNode(nodes[0], 3); safeElement(nodes[0]);
         if (nodes[0].getAttribute('role') !== null || nodes[0].childNodes.length !== 0) return { recognized, text: null };
-        lines.push('');
+        lines.push(''); blank.push(true);
       } else {
         const line = [...row.childNodes].map(node => literal(node, 3)).join('');
         // One paragraph represents one line; nested linebreaks or empty
         // paragraphs without the measured lone BR are ambiguous.
         if (!line.length || /[\r\n]/.test(line)) return { recognized, text: null };
-        lines.push(line);
+        lines.push(line); blank.push(false);
+        directTextCounts.push(nodes.filter(node => node.nodeType === 3).length);
       }
     }
-    const text = lines.join('\n');
-    return { recognized, text: text.length <= 180_200 ? text : null };
+    const expected = modelExpectedQueryCanonical(body), raw = lines.join('\n');
+    const normalize = text => text.replace(/\r\n?/g, '\n').normalize('NFC').trim();
+    const singleFrame = lines.every((line, index) => blank[index]
+      || line.length >= 3 && line.startsWith(' ') && line.endsWith(' '));
+    const framedLines = singleFrame ? lines.map((line, index) => blank[index] ? '' : line.slice(1, -1)) : null;
+    const framed = framedLines?.join('\n');
+    const rawWholeMatches = expected !== null && raw.length <= 180_200 && normalize(raw) === expected;
+    const singleFrameWholeMatches = expected !== null && framed !== undefined && framed.length <= 180_200 && normalize(framed) === expected;
+    const selectedMode = rawWholeMatches ? 'literal' : singleFrameWholeMatches ? 'ascii_space_frame_v1' : 'unverified';
+    const expectedLines = expected?.split('\n');
+    const rowMatches = candidate => expectedLines?.length === rows.length && candidate
+      ? candidate.filter((line, index) => line.normalize('NFC') === expectedLines[index]).length : 0;
+    const queryTemplate = { kind: 'gemini_query_template_v1', expectedAvailable: expected !== null,
+      rowCount: rows.length, brRowCount: blank.filter(Boolean).length, textRowCount: directTextCounts.length,
+      directTextNodeMin: directTextCounts.length ? Math.min(...directTextCounts) : 0,
+      directTextNodeMax: directTextCounts.length ? Math.max(...directTextCounts) : 0,
+      allTextRowsSingleFrame: singleFrame, rawWholeMatches, singleFrameWholeMatches,
+      rawRowMatches: rowMatches(lines), singleFrameRowMatches: rowMatches(framedLines),
+      leadingSpaceRows: lines.filter((line, index) => !blank[index] && line.startsWith(' ')).length,
+      trailingSpaceRows: lines.filter((line, index) => !blank[index] && line.endsWith(' ')).length, selectedMode };
+    return { recognized, text: rawWholeMatches ? raw : singleFrameWholeMatches ? framed : null, queryTemplate };
   } catch { return { recognized, text: null }; }
 }
 function modelTemporaryHeadingFacts(heading) {
@@ -2071,6 +2125,8 @@ function modelFirstUserStructure(reason, allowSubmittedUser = false, submission 
   const bodyScoped = reason === 'submission_text' && submission?.body && submission?.record;
   const body = bodyScoped ? submission.body : roots[0] && modelUserBody(roots[0]);
   const root = bodyScoped ? body.closest('user-query') : roots[0];
+  const queryPayload = body ? modelQueryPayload(body) : null;
+  const selectedBodyScope = bodyScoped || queryPayload?.recognized === true;
   const rendered = body ? normalizedBody(body) : '', lines = rendered.split('\n');
   const marker = bodyScoped ? submission.record.marker : input.expectedFirstUserMarker;
   const markerLine = typeof marker === 'string' && /^[a-f0-9-]{36}$/i.test(marker) ? `Computa session marker: ${marker}` : null;
@@ -2086,7 +2142,7 @@ function modelFirstUserStructure(reason, allowSubmittedUser = false, submission 
     const text = value.replace(/\r\n?/g, '\n').normalize('NFC').trim();
     return text.length <= 180_200 ? text : null;
   };
-  const scopeRoot = bodyScoped ? body : root;
+  const scopeRoot = selectedBodyScope ? body : root;
   const descendants = [], queue = scopeRoot ? [...scopeRoot.children].filter(node => node.nodeType === 1)
     .map((node, index) => ({ node, path: [Math.min(index, 1_000)] })) : [];
   for (let index = 0; index < queue.length && descendants.length < 16; index++) {
@@ -2113,7 +2169,8 @@ function modelFirstUserStructure(reason, allowSubmittedUser = false, submission 
     controlDescendants: Math.min(body ? body.querySelectorAll('button, [role="button"]').length : 0, 1_000),
     submitted: globalThis.__computaModelFirstSubmitted === true,
     markerMatches: bodyScoped ? input.submissionMarker === marker : globalThis.__computaModelFirstMarker === marker,
-    ...(bodyScoped ? { descendantScope: 'selected_body' } : {}), descendants };
+    ...(selectedBodyScope ? { descendantScope: 'selected_body' } : {}),
+    ...(queryPayload?.queryTemplate ? { queryTemplate: queryPayload.queryTemplate } : {}), descendants };
   if (firstUserFingerprint !== null) {
     if (typeof pinned?.fingerprint === 'string') diagnostic.pinnedFingerprintMatch = pinned.fingerprint === firstUserFingerprint;
     if (typeof input.expectedFirstUserFingerprint === 'string') diagnostic.nativeFingerprintMatch = input.expectedFirstUserFingerprint === firstUserFingerprint;
@@ -2304,6 +2361,7 @@ async function providerPageAction() {
         || !prompt.endsWith(`\n\nComputa session marker: ${expectedFirstUserMarker}`))
         return modelFirstUserFailure('first_insert');
       globalThis.__computaModelFirstPrompt = prompt;
+      globalThis.__computaModelFirstPromptContext = { document, owner: input.ownerToken, marker: expectedFirstUserMarker };
     }
     composer.focus();
     if (composer instanceof HTMLTextAreaElement) {

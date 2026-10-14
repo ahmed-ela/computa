@@ -1271,6 +1271,46 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return number.boolValue
     }
 
+    /// Finite rendering measurements only. These fields never grant ownership.
+    static func sanitizedQueryTemplateDiagnostic(_ raw: Any) -> [String: Any]? {
+        let flags = ["expectedAvailable", "allTextRowsSingleFrame", "rawWholeMatches", "singleFrameWholeMatches"]
+        let counts = ["rowCount", "brRowCount", "textRowCount", "directTextNodeMin", "directTextNodeMax",
+                      "rawRowMatches", "singleFrameRowMatches", "leadingSpaceRows", "trailingSpaceRows"]
+        let keys = Set(flags + counts + ["kind", "selectedMode"])
+        guard let value = raw as? [String: Any], Set(value.keys) == keys,
+              value["kind"] as? String == "gemini_query_template_v1",
+              let mode = value["selectedMode"] as? String,
+              ["literal", "ascii_space_frame_v1", "unverified"].contains(mode) else { return nil }
+        var safe: [String: Any] = ["kind": "gemini_query_template_v1", "selectedMode": mode]
+        var measured: [String: Int64] = [:], observed: [String: Bool] = [:]
+        for key in counts {
+            guard let count = ComputerToolArgumentContract.exactInt64(value[key]), (0...8_192).contains(count) else { return nil }
+            measured[key] = count; safe[key] = count
+        }
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            observed[key] = flag; safe[key] = flag
+        }
+        let rows = measured["rowCount"]!, textRows = measured["textRowCount"]!
+        guard rows > 0, measured["brRowCount"]! + textRows == rows,
+              measured["directTextNodeMin"]! <= measured["directTextNodeMax"]!,
+              ["rawRowMatches", "singleFrameRowMatches"].allSatisfy({ measured[$0]! <= rows }),
+              ["leadingSpaceRows", "trailingSpaceRows"].allSatisfy({ measured[$0]! <= textRows }),
+              textRows != 0 || measured["directTextNodeMax"]! == 0 else { return nil }
+        let expected = observed["expectedAvailable"]!, framed = observed["allTextRowsSingleFrame"]!
+        let rawMatch = observed["rawWholeMatches"]!, frameMatch = observed["singleFrameWholeMatches"]!
+        guard expected || (!rawMatch && !frameMatch && measured["rawRowMatches"] == 0 && measured["singleFrameRowMatches"] == 0),
+              !frameMatch || framed,
+              framed || measured["singleFrameRowMatches"] == 0,
+              !framed || measured["leadingSpaceRows"] == textRows && measured["trailingSpaceRows"] == textRows else { return nil }
+        switch mode {
+        case "literal": guard rawMatch else { return nil }
+        case "ascii_space_frame_v1": guard !rawMatch, frameMatch else { return nil }
+        default: guard !rawMatch, !frameMatch else { return nil }
+        }
+        return safe
+    }
+
     static func sanitizedFirstUserStructure(_ raw: String, provider: Provider) -> String? {
         guard raw.utf8.count <= 8_192,
               let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
@@ -1316,9 +1356,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             safe["reason"] = reason
         }
         if let rawScope = value["descendantScope"] {
-            guard provider == .gemini, value["reason"] as? String == "submission_text",
+            guard provider == .gemini,
                   rawScope as? String == "selected_body" else { return nil }
             safe["descendantScope"] = "selected_body"
+        }
+        if let query = value["queryTemplate"] {
+            guard provider == .gemini, safe["descendantScope"] as? String == "selected_body",
+                  let projected = sanitizedQueryTemplateDiagnostic(query) else { return nil }
+            safe["queryTemplate"] = projected
         }
         for key in ["pinnedFingerprintMatch", "nativeFingerprintMatch", "allowFirstUserBinding", "allowFirstUserExpansion", "privatePinPresent", "expectedFingerprintPresent",
                     "markerValid", "firstPromptPresent", "firstPromptMatches"] {
@@ -1537,7 +1582,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     child[key] = flag
                 }
                 if node["outboundInnerTextMatches"] != nil || node["outboundTextContentMatches"] != nil {
-                    guard provider == .gemini, value["reason"] as? String == "submission_text",
+                    guard provider == .gemini, safe["descendantScope"] as? String == "selected_body",
                           let inner = firstUserDiagnosticBool(node["outboundInnerTextMatches"]),
                           let content = firstUserDiagnosticBool(node["outboundTextContentMatches"]) else { return nil }
                     child["outboundInnerTextMatches"] = inner
@@ -1565,6 +1610,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               var summary = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] else { return nil }
         if let expectedReason, summary["reason"] as? String != expectedReason { return nil }
         let children = summary.removeValue(forKey: "descendants") as? [[String: Any]] ?? []
+        var queryObservation = summary.removeValue(forKey: "queryTemplate") as? [String: Any] ?? [:]
+        if !queryObservation.isEmpty { queryObservation["provider"] = provider.rawValue }
         var payloadObservation: [String: Any] = [:]
         for key in firstUserPayloadKeys {
             if let value = summary.removeValue(forKey: key) { payloadObservation[key] = value }
@@ -1620,7 +1667,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var records: [String] = []
         for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
             + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation])
-            + (payloadObservation.isEmpty ? [] : [payloadObservation]) + (literalDOMObservation.isEmpty ? [] : [literalDOMObservation]) + children {
+            + (payloadObservation.isEmpty ? [] : [payloadObservation]) + (literalDOMObservation.isEmpty ? [] : [literalDOMObservation])
+            + (queryObservation.isEmpty ? [] : [queryObservation]) + children {
             guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: .sortedKeys), bytes.count <= 960 else { return nil }
             records.append(String(decoding: bytes, as: UTF8.self))
         }
@@ -1646,6 +1694,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             else if safe.contains("\"kind\":\"first_user_literal_dom\"") {
                 event = "firstUserLiteralDOM"
+            }
+            else if safe.contains("\"kind\":\"gemini_query_template_v1\"") {
+                event = "firstUserQueryTemplate"
             }
             else {
                 event = "firstUserChild"

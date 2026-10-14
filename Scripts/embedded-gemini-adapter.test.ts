@@ -414,7 +414,7 @@ describe('Gemini per-submission ownership', () => {
 
   const clippedStyle = { visibility: 'visible', display: 'block', position: 'absolute', width: '1px', height: '1px',
     overflow: 'hidden', clip: 'rect(0px, 0px, 0px, 0px)', clipPath: 'inset(50%)' };
-  function queryFixture() {
+  function queryFixture(framed = false) {
     const styles = new Map<Element, Record<string, unknown>>();
     const f = fixture(provider, { response: false,
       computedStyle: node => styles.get(node) ?? { visibility: node.values.visibility || 'visible', display: 'block' } });
@@ -429,9 +429,10 @@ describe('Gemini per-submission ownership', () => {
       styles.set(heading, { ...clippedStyle }); query.append(heading);
       const rows = text.replace(/\r\n?/g, '\n').split('\n').map((line, index) => {
         const row = new Element('P', { class: 'query-text-line ng-star-inserted' });
+        const rendered = framed ? ' ' + line + ' ' : line;
         if (!line) row.append(new Element('BR'));
-        else if (index % 3 === 0) { const span = new Element('SPAN', { class: 'ng-star-inserted' }); span.append(textNode(line)); row.append(span); }
-        else row.append(textNode(line));
+        else if (index % 3 === 0) { const span = new Element('SPAN', { class: 'ng-star-inserted' }); span.append(textNode(rendered)); row.append(span); }
+        else row.append(textNode(rendered));
         query.append(row); return row;
       });
       f.userBody!.replaceChildren(query);
@@ -571,6 +572,105 @@ describe('Gemini per-submission ownership', () => {
     expect(f.userBody!.innerText.length).toBeGreaterThan(180200);
     expect(value.submissionProof).toEqual({ sequence: 1, fingerprint: await fingerprint(text) });
     expect(f.send.clicks).toBe(1);
+  });
+
+  test('one uniform ASCII-space frame preserves user indentation and 169 exact rows across seven owned rounds', async () => {
+    const { f, shapes } = queryFixture(true);
+    const lines = Array.from({ length: 167 }, (_, i) => i % 8 === 0 ? '' : `PRIVATE ${i}:  \t  [literal] e\u0301\u00a0\u200b tail  `);
+    lines[0] = 'PRIVATE first line';
+    const text = lines.join('\n') + '\n\n' + markerLine, first = await finishRound(f, 1, text);
+    const diagnostic = JSON.parse(first.debugStructure), query = diagnostic.queryTemplate;
+    const keys = ['kind', 'expectedAvailable', 'rowCount', 'brRowCount', 'textRowCount', 'directTextNodeMin', 'directTextNodeMax',
+      'allTextRowsSingleFrame', 'rawWholeMatches', 'singleFrameWholeMatches', 'rawRowMatches', 'singleFrameRowMatches',
+      'leadingSpaceRows', 'trailingSpaceRows', 'selectedMode'];
+    expect(Object.keys(query).sort()).toEqual(keys.sort());
+    expect(query).toMatchObject({ kind: 'gemini_query_template_v1', expectedAvailable: true, rowCount: 169,
+      allTextRowsSingleFrame: true, rawWholeMatches: false, singleFrameWholeMatches: true,
+      rawRowMatches: query.brRowCount, singleFrameRowMatches: 169, selectedMode: 'ascii_space_frame_v1' });
+    expect(query.textRowCount + query.brRowCount).toBe(169);
+    expect(query.leadingSpaceRows).toBe(query.textRowCount); expect(query.trailingSpaceRows).toBe(query.textRowCount);
+    expect(query.directTextNodeMin).toBe(0); expect(query.directTextNodeMax).toBe(1);
+    expect(diagnostic).toMatchObject({ descendantScope: 'selected_body', lineCount: 169, markerFinalLine: true });
+    expect(shapes[0].rows[1].textContent).toBe(' ' + lines[1] + ' ');
+    expect(first.firstUserFingerprint).toBe(await fingerprint(text));
+    for (let sequence = 2; sequence <= 7; sequence++) {
+      const current = await finishRound(f, sequence);
+      expect(current.firstUserFingerprint).toBe(first.firstUserFingerprint);
+      expect(current.submissionProof).toEqual({ sequence, fingerprint: await fingerprint(roundPrompt(sequence)) });
+    }
+    for (const key of ['expectedAvailable', 'allTextRowsSingleFrame', 'rawWholeMatches', 'singleFrameWholeMatches'])
+      expect(typeof query[key]).toBe('boolean');
+    for (const key of keys.filter(key => !['kind', 'selectedMode', 'expectedAvailable', 'allTextRowsSingleFrame', 'rawWholeMatches', 'singleFrameWholeMatches'].includes(key)))
+      expect(Number.isInteger(query[key]) && query[key] >= 0 && query[key] <= 8192).toBe(true);
+    expect(JSON.stringify(query)).not.toContain('PRIVATE'); expect(JSON.stringify(query)).not.toContain(firstMarker);
+    expect(f.send.clicks).toBe(7);
+  });
+
+  test('space framing is uniform whole-body selection and cannot repair mixed formats whitespace or changed content', async () => {
+    const text = 'PRIVATE first\n  user indentation and trailing  \nPRIVATE third [literal]\n\n' + markerLine;
+    for (const fault of ['mixed', 'double', 'left', 'right', 'nbsp', 'tab', 'content', 'marker', 'trimUser']) {
+      const { f, shapes, textNode } = queryFixture(true), send = f.send.onClick!;
+      await stage(f, 1, text);
+      f.send.onClick = () => {
+        send(); const rows = shapes[0].rows;
+        if (fault === 'double') for (const row of rows.filter(row => row.children[0].tagName !== 'BR'))
+          row.replaceChildren(textNode(' ' + row.textContent + ' '));
+        else {
+          const row = rows[2], raw = row.textContent;
+          const altered = fault === 'mixed' ? raw.slice(1, -1) : fault === 'left' ? raw.slice(1)
+            : fault === 'right' ? raw.slice(0, -1) : fault === 'nbsp' ? '\u00a0' + raw.slice(1, -1) + '\u00a0'
+            : fault === 'tab' ? '\t' + raw.slice(1, -1) + '\t' : fault === 'content' ? raw.replace('[literal]', '{altered}') : raw;
+          row.replaceChildren(textNode(altered));
+          if (fault === 'marker') rows.at(-1)!.replaceChildren(textNode(' Computa session marker: ' + marker(2) + ' '));
+          if (fault === 'trimUser') rows[1].replaceChildren(textNode(' ' + rows[1].textContent.trim() + ' '));
+        }
+      };
+      const rejected = await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text });
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(1);
+    }
+    const { f, shapes } = queryFixture(true); await finishRound(f, 1);
+    const text2 = await stage(f, 2);
+    const crossed = await withDigestMutation(f, 2, 'send_claimed', () => {
+      const node = shapes[1].rows[0].children[0].children[0]; (node as any).data += 'X'; node.text = (node as any).data;
+    }, () => f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text2 }));
+    expect(crossed).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(crossed.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
+  });
+
+  test('framed expected text belongs only to its private document owner nonce ordinal and physical body', async () => {
+    for (const fault of ['document', 'owner', 'firstNonce', 'ordinal', 'recordNonce', 'bodyPointer', 'otherBody']) {
+      const { f, shapes, textNode } = queryFixture(true); await finishRound(f, 1);
+      if (['document', 'owner', 'firstNonce'].includes(fault)) {
+        const context = f.world.__computaModelFirstPromptContext;
+        if (fault === 'document') context.document = {};
+        else if (fault === 'owner') context.owner = '00000000-0000-0000-0000-000000000000';
+        else context.marker = marker(2);
+        const inputs = f.composer.events.length;
+        const rejected = await f.run('insert', { ...fields(2), expectedUserCounts: [1], prompt: roundPrompt(2) });
+        expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+        expect(f.composer.events.length).toBe(inputs); expect(f.send.clicks).toBe(1);
+      } else {
+        await finishRound(f, 2);
+        const record = f.world.__computaGeminiSubmissionState.lastVerified;
+        if (fault === 'ordinal') record.sequence = 1;
+        else if (fault === 'recordNonce') record.marker = marker(3);
+        else if (fault === 'bodyPointer') record.body = shapes[0].query.parentElement;
+        else {
+          const first = roundPrompt(1).split('\n');
+          shapes[1].rows.forEach((row, index) => row.replaceChildren(index === 1 ? new Element('BR') : textNode(' ' + first[index] + ' ')));
+        }
+        const rejected = await f.run('inspect', { ...fields(2), expectedUserCounts: [2] });
+        expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+        expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
+      }
+    }
+    const { f, shapes, textNode } = queryFixture(true); await finishRound(f, 1);
+    shapes[0].rows[0].replaceChildren(textNode(' ALTERED '));
+    const inputs = f.composer.events.length;
+    expect(await f.run('insert', { ...fields(2), expectedUserCounts: [1], prompt: roundPrompt(2) }))
+      .toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+    expect(f.composer.events.length).toBe(inputs); expect(f.send.clicks).toBe(1);
   });
 });
 
