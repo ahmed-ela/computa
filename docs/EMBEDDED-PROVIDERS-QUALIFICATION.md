@@ -1,5 +1,38 @@
 # Embedded website provider qualification
 
+## Build118 installed diagnostic health
+
+Signed Computa 0.7.0 (118), compiled source `2386e1de`, is installed and running.
+All 54 bundle files and 50 resources match the retained signed build; signatures
+and the unchanged bundled engine were verified.
+
+One fresh, unarmed normal ChatGPT Instant health task returned its exact marker
+in 16.572 seconds with zero tools, one completed website inference and one
+causally verified physical website closure. Native model identity and the
+unchanged lifecycle checks passed. The earlier ownership failure did not recur,
+so this check supplies no first-failed-context diagnosis and does not qualify
+browser or code/terminal workflows.
+
+The receipt collector initially rejected its own binding due to a shadowed
+local variable, then incorrectly assumed a UI Send intent could not precede
+asynchronous native start. Both private collector defects were corrected with
+meaningful regressions and independent review; the final 16 pure tests passed.
+The original completed task was collected without replay, preserving the exact
+identity, literal result and causal closure gates. Its Send intent preceded
+native start by 541 milliseconds and remains diagnostic, not acceptance proof.
+
+A fresh ordinary Gemini navigation showed its signed-in composer and Flash
+picker without a CAPTCHA. Later finite store reads show no saved checkpoint and
+`verified / healthy_human_document`, indicating guarded automatic recovery.
+The store has no transition timestamp, so completion cannot be tied conclusively
+to that navigation, and prompt-free discovery may have created another owned
+view. No refresh, provider prompt or CAPTCHA completion was performed in the
+control. The control tab was closed and the browser pane restored.
+
+The recurring CAPTCHA trigger and broad provider reliability remain unresolved.
+The old failed receipts are unchanged. One duplicate install backup was removed
+only after its 54 files matched the retained signed build117 original.
+
 ## Build118 original-read ChatGPT diagnostic preparation
 
 The ChatGPT ownership failure in build117 needs the first failed context check
@@ -24,7 +57,7 @@ its own marker and receipts after the signed build is verified.
 
 ## Build117 V32 installed outcomes
 
-Signed Computa 0.7.0 (117), source `95587e82`, is installed and running.
+At V32 qualification, signed Computa 0.7.0 (117), source `95587e82`, was installed and running.
 All 54 bundle files and 50 resources match the retained signed build.
 The Cerebras selector still offers only GPT-OSS; the Qwen3.8 27B source flag
 remains disabled with higher token usage documented as its temporary rationale.
