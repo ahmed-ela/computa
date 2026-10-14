@@ -29,6 +29,9 @@ actor APIModelServer {
     private let suppliedCapsules: APIReasoningCapsules?
     private let rejectionDiagnosticsDirectory: URL?
     private let toolNamingDirectory: URL?
+    private let correctionAccountingDirectory: URL?
+    private let inferenceTimeout: Duration
+    private var correctionsUsed: [String: Context] = [:]
     private var capsules: APIReasoningCapsules?
     private var providers: [APIProviderDefinition] = []
     private var listener: NWListener?
@@ -46,6 +49,8 @@ actor APIModelServer {
     }
 #if DEBUG
     private var failureDiagnosticsObserverForTesting: (@Sendable (String) -> Void)?
+    private var beforeCorrectionDispatchForTesting: (@Sendable () async throws -> Void)?
+    func setBeforeCorrectionDispatchForTesting(_ hook: (@Sendable () async throws -> Void)?) { beforeCorrectionDispatchForTesting = hook }
     func setFailureDiagnosticsObserverForTesting(_ observer: (@Sendable (String) -> Void)?) {
         failureDiagnosticsObserverForTesting = observer
     }
@@ -56,7 +61,7 @@ actor APIModelServer {
     private var lanes: [String: Lane] = [:]
     private struct Prepared: Equatable { let threadID: String; let preparationID: UUID; let isNewThread: Bool }
     private struct Identity: Equatable, Sendable { let threadID: String; let turnID: String }
-    private struct Context: Equatable { let identity: Identity; let preparationID: UUID; let isNewThread: Bool }
+    private struct Context: Equatable, Sendable { let identity: Identity; let preparationID: UUID; let isNewThread: Bool }
     private struct Waiter { let id: UUID; let continuation: CheckedContinuation<Context, Error> }
     private var prepared: [String: Prepared] = [:]
     private var contexts: [String: Context] = [:]
@@ -67,10 +72,13 @@ actor APIModelServer {
 
     init(credentials: any APIProviderCredentials = APIProviderCredentialStore(),
          client: APIProviderHTTPClient = APIProviderHTTPClient(), capsules: APIReasoningCapsules? = nil,
-         rejectionDiagnosticsDirectory: URL? = nil, toolNamingDirectory: URL? = nil) {
+         rejectionDiagnosticsDirectory: URL? = nil, toolNamingDirectory: URL? = nil,
+         correctionAccountingDirectory: URL? = nil, inferenceTimeout: Duration = .seconds(300)) {
         self.credentials = credentials; self.client = client; suppliedCapsules = capsules
         self.rejectionDiagnosticsDirectory = rejectionDiagnosticsDirectory
         self.toolNamingDirectory = toolNamingDirectory
+        self.correctionAccountingDirectory = correctionAccountingDirectory
+        self.inferenceTimeout = min(max(inferenceTimeout, .milliseconds(1)), .seconds(300))
     }
     func updateProviders(_ values: [APIProviderDefinition]) throws {
         try APIProviderCatalog.validate(values)
@@ -143,7 +151,7 @@ actor APIModelServer {
     func cancel(taskID: String) async {
         guard let task = try? Self.canonicalID(taskID) else { return }
         retiring.insert(task)
-        prepared.removeValue(forKey: task); contexts.removeValue(forKey: task)
+        prepared.removeValue(forKey: task); contexts.removeValue(forKey: task); correctionsUsed.removeValue(forKey: task)
         waiters.removeValue(forKey: task)?.continuation.resume(throwing: Failure.cancelled)
         if let lane = lanes[task] {
             lane.request.cancel(); _ = await lane.request.result
@@ -197,7 +205,7 @@ actor APIModelServer {
     func shutdown() async {
         stopped = true; starting?.cancel(); listener?.cancel(); listener = nil; baseURL = nil
         let active = lanes
-        prepared.removeAll(); contexts.removeAll()
+        prepared.removeAll(); contexts.removeAll(); correctionsUsed.removeAll()
         for waiter in waiters.values { waiter.continuation.resume(throwing: Failure.stopped) }; waiters.removeAll()
         for lane in active.values { lane.request.cancel() }
         for lane in active.values { _ = await lane.request.result }
@@ -278,24 +286,28 @@ actor APIModelServer {
             do { guard let value = try credentials.key(for: selection.provider.id) else { throw APIProviderHTTPClient.Failure.missingCredential }; key = value }
             catch let failure as APIProviderHTTPClient.Failure { throw failure }
             catch { throw Failure.credentialUnavailable }
-            let client = self.client
             let capture = APIRejectedRequestCapture.consume(directory: rejectionDiagnosticsDirectory, taskID: UUID(uuidString: taskID)!,
                 threadID: UUID(uuidString: context.identity.threadID)!, turnID: UUID(uuidString: context.identity.turnID)!)
             let onRejection: (@Sendable (APIProviderHTTPClient.RejectionDiagnostic) -> Void)?
             if let capture { onRejection = { diagnostic in capture.capture(diagnostic) } }
             else { onRejection = nil }
             failureStage = .requestTransport
+            let laneID = UUID()
+            let inferenceDeadline = ContinuousClock.now.advanced(by: inferenceTimeout)
             let requestTask = Task<APIModelResponseCodec.Reply, Error> {
-                let result: APIProviderHTTPClient.Result
-                do {
-                    result = try await client.request(provider: prepared.provider, key: key, path: prepared.path, body: prepared.body,
-                        modelID: prepared.model.id, onRejection: onRejection)
-                    try Task.checkCancellation()
-                } catch { throw StagedFailure(stage: .requestTransport, cause: error) }
-                do { return try APIModelResponseCodec.decode(result, request: prepared) }
-                catch { throw StagedFailure(stage: .decode, cause: error) }
+                try await withThrowingTaskGroup(of: APIModelResponseCodec.Reply.self) { group in
+                    group.addTask { try await self.performInference(prepared, key: key, taskID: taskID,
+                        context: context, laneID: laneID, deadline: inferenceDeadline, onRejection: onRejection) }
+                    group.addTask {
+                        try await ContinuousClock().sleep(until: inferenceDeadline)
+                        throw StagedFailure(stage: .requestTransport, cause: APIProviderHTTPClient.Failure.timeout)
+                    }
+                    defer { group.cancelAll() }
+                    guard let reply = try await group.next() else { throw Failure.cancelled }
+                    return reply
+                }
             }
-            let lane = Lane(id: UUID(), request: requestTask); lanes[taskID] = lane
+            let lane = Lane(id: laneID, request: requestTask); lanes[taskID] = lane
             defer { if lanes[taskID]?.id == lane.id { lanes.removeValue(forKey: taskID) } }
             let reply: APIModelResponseCodec.Reply
             do {
@@ -310,8 +322,10 @@ actor APIModelServer {
                     // Standard Responses failure events preserve it without replay,
                     // while non-streaming callers retain the HTTP status below.
                     failureStage = .eventSerialization
-                    try await Self.send(connection, status: "200 OK", type: "text/event-stream",
-                        body: APIModelResponseCodec.encodeRateLimitFailure(request: prepared, failure: failure))
+                    guard ContinuousClock.now < inferenceDeadline else { throw APIProviderHTTPClient.Failure.timeout }
+                    let failed = try APIModelResponseCodec.encodeRateLimitFailure(request: prepared, failure: failure)
+                    guard ContinuousClock.now < inferenceDeadline else { throw APIProviderHTTPClient.Failure.timeout }
+                    try await Self.send(connection, status: "200 OK", type: "text/event-stream", body: failed)
                     return
                 }
                 throw error
@@ -319,7 +333,9 @@ actor APIModelServer {
             failureStage = .eventSerialization
             try Task.checkCancellation()
             guard !stopped, contexts[taskID] == context, lanes[taskID]?.id == lane.id else { throw Failure.cancelled }
+            guard ContinuousClock.now < inferenceDeadline else { throw APIProviderHTTPClient.Failure.timeout }
             let encoded = try APIModelResponseCodec.encode(reply, stream: prepared.stream)
+            guard ContinuousClock.now < inferenceDeadline else { throw APIProviderHTTPClient.Failure.timeout }
             // Only finite final-message metadata, correlated by the response ID
             // already retained in native usage records. Never capture the text.
             if let diagnostic = APIModelResponseCodec.finalTextDiagnostic(reply, encoded: encoded, stream: prepared.stream),
@@ -327,6 +343,7 @@ actor APIModelServer {
                let record = String(data: data, encoding: .utf8) {
                 Self.responseLog.notice("finalTextBoundary \(record, privacy: .public)")
             }
+            try requireInference(taskID: taskID, context: context, laneID: lane.id, deadline: inferenceDeadline)
             try await Self.send(connection, status: "200 OK", type: prepared.stream ? "text/event-stream" : "application/json", body: encoded)
         } catch {
             deadline.cancel()
@@ -341,6 +358,99 @@ actor APIModelServer {
             try? await Self.send(connection, status: Self.errorStatus(cause), type: "application/json", body: Self.errorBody(cause, stage: stage))
         }
     }
+    private func requireInference(taskID: String, context: Context, laneID: UUID, deadline: ContinuousClock.Instant) throws {
+        try Task.checkCancellation()
+        guard ContinuousClock.now < deadline else { throw APIProviderHTTPClient.Failure.timeout }
+        guard !stopped, !retiring.contains(taskID), contexts[taskID] == context,
+              prepared[taskID]?.preparationID == context.preparationID, lanes[taskID]?.id == laneID else { throw Failure.cancelled }
+    }
+
+    private func performInference(_ original: APIModelResponseCodec.Request, key: String, taskID: String,
+                                  context: Context, laneID: UUID, deadline: ContinuousClock.Instant,
+                                  onRejection: (@Sendable (APIProviderHTTPClient.RejectionDiagnostic) -> Void)?) async throws -> APIModelResponseCodec.Reply {
+        try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+        let first: APIProviderHTTPClient.Result
+        do { first = try await client.request(provider: original.provider, key: key, path: original.path,
+            body: original.body, modelID: original.model.id, onRejection: onRejection) }
+        catch { throw StagedFailure(stage: .requestTransport, cause: error) }
+        let outcome: APIModelResponseCodec.DecodeOutcome
+        do { outcome = try APIModelResponseCodec.decodeForCorrection(first, request: original) }
+        catch { throw StagedFailure(stage: .decode, cause: error) }
+        switch outcome {
+        case .reply(let reply): return reply
+        case .argumentsRejected(let firstUsage):
+            guard let directory = correctionAccountingDirectory else {
+                throw StagedFailure(stage: .decode, cause: APIModelResponseCodec.Failure.invalidArguments)
+            }
+            let accounting = APIModelCorrectionAccounting(directory: directory)
+            let ticket: APIModelCorrectionAccounting.Ticket
+            do { ticket = try accounting.begin(taskID: taskID, threadID: context.identity.threadID,
+                turnID: context.identity.turnID, firstUsage: firstUsage) }
+            catch {
+                Self.responseLog.error("argumentCorrection accounting_unavailable; no corrective request claimed")
+                throw StagedFailure(stage: .decode, cause: APIModelResponseCodec.Failure.invalidArguments)
+            }
+            var secondClaimed = false, finished = false
+            var secondUsage: APIModelCorrectionUsage?
+            var secondStage = FailureStage.decode
+            var terminal = APIModelCorrectionAccounting.Outcome.decodeFailed
+            do {
+                guard correctionsUsed[taskID] != context else {
+                    terminal = .budgetExhausted; throw APIModelResponseCodec.Failure.invalidArguments
+                }
+                try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+                correctionsUsed[taskID] = context // one corrective inference per native user turn
+                let correction = try APIModelResponseCodec.correctiveRequest(original)
+#if DEBUG
+                try await beforeCorrectionDispatchForTesting?()
+#endif
+                try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+                try accounting.claimed(ticket)
+                secondClaimed = true
+                // Claim is not network acceptance proof. There is no actor await
+                // between this final identity check and starting the same native
+                // HTTP client; it checks cancellation again before URLSession.
+                try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+                secondStage = .requestTransport; terminal = .transportFailed
+                let second = try await client.request(provider: correction.provider, key: key, path: correction.path,
+                    body: correction.body, modelID: correction.model.id, onRejection: onRejection)
+                secondStage = .decode; terminal = .decodeFailed
+                switch try APIModelResponseCodec.decodeForCorrection(second, request: correction) {
+                case .argumentsRejected(let usage):
+                    secondUsage = usage; terminal = .argumentsRejected
+                    throw APIModelResponseCodec.Failure.invalidArguments
+                case .reply(let reply):
+                    secondUsage = APIModelResponseCodec.correctionUsage(reply.response["usage"])
+                    try requireInference(taskID: taskID, context: context, laneID: laneID, deadline: deadline)
+                    let corrected = try APIModelResponseCodec.withCorrectionMetadata(reply, ticket: ticket, secondUsage: secondUsage)
+                    try accounting.finish(ticket, claimed: secondClaimed, usage: secondUsage, outcome: .responseValidated)
+                    finished = true
+                    logCorrection(ticket, outcome: .responseValidated)
+                    return corrected
+                }
+            } catch {
+                if error is CancellationError || error as? Failure == .cancelled || error as? APIProviderHTTPClient.Failure == .cancelled { terminal = .cancelled }
+                if error as? APIProviderHTTPClient.Failure == .timeout || ContinuousClock.now >= deadline { terminal = .timedOut }
+                if !finished {
+                    do { try accounting.finish(ticket, claimed: secondClaimed, usage: secondUsage, outcome: terminal) }
+                    catch { Self.responseLog.error("argumentCorrection terminal_accounting_unavailable; first usage remains durable") }
+                }
+                logCorrection(ticket, outcome: terminal)
+                throw StagedFailure(stage: secondStage, cause: error)
+            }
+        }
+    }
+
+    private func logCorrection(_ ticket: APIModelCorrectionAccounting.Ticket, outcome: APIModelCorrectionAccounting.Outcome) {
+        // Native context identifiers correlate recovery without text or tool IDs.
+        let record: [String: Any] = ["kind": "api_argument_correction_v1", "correction_id": ticket.id.uuidString.lowercased(),
+            "task_id": ticket.taskID, "thread_id": ticket.threadID, "turn_id": ticket.turnID,
+            "outcome": outcome.rawValue, "normal_usage": "accepted_response_only", "clean_completion": false]
+        guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys), bytes.count <= 512,
+              let text = String(data: bytes, encoding: .utf8) else { return }
+        Self.responseLog.notice("argumentCorrection \(text, privacy: .public)")
+    }
+
     /// This is a conservative migration check, never freshness authority. Only
     /// Core's actual thread/start flag can opt a missing pin into semantic names.
     /// Unknown item types or model-generated history keep the legacy mapping.

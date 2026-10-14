@@ -115,6 +115,14 @@ The identical read task with actual Cerebras Qwen on that installed build comple
 The owned localhost server and Cerebras diagnostic tab were closed; Safari's temporary developer setting was restored to its original disabled value. Fixture files and immutable receipts remain private for review. No real email or flight information was read, no release was published, and the PR remains draft.
 
 
+## Bounded argument correction
+
+The next candidate can request one new Chat Completions inference per native user turn after a fully received response fails only JSON argument or schema validation. It first validates the complete envelope, model, completion state, all tool identities and call IDs, reasoning bounds and present usage. No item from the rejected batch is published. History preparation errors, incomplete responses, unknown tools, transport failures and rate limits do not enter correction.
+
+The corrective request preserves the original model, catalog, valid history and options, adding only fixed trusted validation feedback. It cannot repair argument text, lower schema constraints, fall back to another model or repeat a completed action. The same native context and lane must remain current immediately before dispatch. Both requests share one 300-second deadline, and a second rejection stops the inference.
+
+Known first-attempt usage is durably saved before another request can start in `CodexHome/APIModelCorrectionUsage-v1`. Records contain only finite usage, canonical context IDs and claimed/validated outcomes. Missing second-attempt usage remains unknown. Standard Responses usage describes the accepted response, preserving the native engine's context gauge; the separate journal and `x_computa_correction` extension record known billable totals and their completeness. Native token totals alone do not include rejected attempt usage. A corrected task is reported as recovered, even when its eventual native tool calls succeed. Installed qualification is pending.
+
 ## Final-text boundary diagnosis
 
 A retained GPT-OSS browser task completed six tool calls and closed its tab, but its final receipt substituted five non-breaking hyphens (U+2011) for the required ASCII hyphens (U+002D). Those characters already appear in the native response item, before UI rendering. Source inspection found no codec typography conversion; the prior artifact alone does not establish whether the provider or adapter introduced them.

@@ -2,10 +2,12 @@
 
 Computa keeps canonical conversation history, terminal sessions, browser-tool
 tabs and file diffs locally. The Responses bridge sends the full current
-request, including offered tools and their outputs, to a website. Each API
-inference therefore uses a new owned temporary website conversation. Reusing a
-website conversation would append duplicate full histories and eventually
-depend on old message nodes that the site can virtualize away.
+request, including offered tools and their outputs, to a website. Gemini uses
+one owned temporary conversation per native user turn. The ChatGPT candidate
+uses the same policy only after negotiating `per_submission_ownership_v1`.
+Claude and transports without this capability use a new owned temporary
+conversation per inference. Retained pages still receive the full canonical
+request; their website history duplicates earlier requests and is bounded.
 
 An inference conversation is distinct from a native user turn. A turn may need
 many inference conversations while retaining one native thread, turn, command
@@ -43,12 +45,16 @@ or turn a completed task into a server failure.
 2. Retain the returned UUID lease, save `started`, and verify the requested
    concrete model and product mode.
 3. Submit once, save `submission_verified`, and observe completion through the
-   transport's event-driven page waits. Website sequence is always one and its
-   response baseline is zero for this fresh conversation.
-4. Require current model, document generation and first-user-message proof;
+   transport's event-driven page waits. A fresh conversation starts at sequence
+   one and response baseline zero. Retained conversations require a contiguous
+   submission sequence and the exact prior response baseline.
+4. Require current model, document generation, immutable first-user-message
+   proof and, on retained pages, the current full submission fingerprint;
    parse the strict response envelope and save `complete`.
-5. Close only that owned lease, synchronize and read back its exact linked
-   cleanup receipt, then save `release_verified` with that cleanup attempt ID.
+5. For a retained-page tool continuation, save the verified yield and keep the
+   same lease. For a final response or per-inference page, close only that owned
+   lease, synchronize and read back its exact linked cleanup receipt, then save
+   `release_verified` with that cleanup attempt ID.
 6. Only then return HTTP/SSE output or release native tool calls.
 
 An uncertain mutation is not replayed. Failed closure retains the exact lease.
@@ -116,13 +122,23 @@ Writes synchronize and verify exact bytes before publication. Per-turn,
 per-task and global bounds produce finite failures instead of unbounded writes.
 Website evidence contains identity, structural counts, finite phases and
 fingerprints, not prompt text, tool payloads, responses, cookies or credentials.
-Start phases carry sequence zero and baseline zero; verified response phases
-carry sequence one and baseline zero. Failed/cancelled phases omit progress
+Start phases carry sequence zero and baseline zero. Per-inference verified
+responses carry sequence one and baseline zero. Retained-page records carry
+the actual contiguous submission sequence and response baseline. ChatGPT's
+start request records capability pending until the transport negotiates the
+actual policy; it cannot manufacture a version-two start record. Failed/cancelled phases omit progress
 counts when no verified snapshot exists. Validators must preserve that absence
 and reject an abort as successful qualification rather than invent progress.
 
-Qualification must correlate each inference's native context and release with
-its exact durable cleanup attempt. A later `no_owned_session` observation does
+The ChatGPT pilot rejects a seventeenth inference or more than one MiB of
+actual outbound prompt bytes in one native turn before insertion. It closes
+the owned page rather than rolling over or replaying a request. This is an
+experimental bound, not a measured website context limit or a proven remedy
+for the observed second-inference stall.
+
+Qualification must correlate each inference's native context and verified
+yield or final release. Final release requires its exact durable cleanup
+attempt. A later `no_owned_session` observation does
 not prove an earlier conversation was closed. See the [workflow
 benchmark](HARNESS-WORKFLOW-BENCHMARK.md) and [built-in browser
 contract](BUILT-IN-BROWSER-TOOLS.md) for distinct execution and page-action proof.

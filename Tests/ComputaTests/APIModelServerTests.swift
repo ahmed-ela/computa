@@ -8,6 +8,7 @@ private actor APIRequestRecorder {
     func record(_ request: APIModelServer.HTTPRequest) { requests.append(request) }
     func count() -> Int { requests.count }
     func first() -> APIModelServer.HTTPRequest? { requests.first }
+    func snapshot() -> [APIModelServer.HTTPRequest] { requests }
 }
 private struct APIFixtureCredentials: APIProviderCredentials {
     let value: String?
@@ -135,6 +136,195 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request?.body)) as? [String: Any])
         let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
         return try XCTUnwrap((tools.first?["function"] as? [String: Any])?["name"] as? String)
+    }
+
+    private func correctionResponse(_ request: APIModelServer.HTTPRequest, invalid: Bool, usage: Bool = true) -> APILoopbackFixture.Response {
+        let body = try! JSONSerialization.jsonObject(with: request.body) as! [String: Any]
+        let tools = body["tools"] as! [[String: Any]], name = (tools[0]["function"] as! [String: Any])["name"] as! String
+        let calls: [[String: Any]] = invalid
+            ? [["id": "rejected-valid-mutating", "type": "function", "function": ["name": name, "arguments": "{\"cmd\":\"touch NEVER_EXECUTED\"}"]],
+               ["id": "rejected-invalid", "type": "function", "function": ["name": name, "arguments": "{\"cmd\":42}"]]]
+            : [["id": "corrected-call", "type": "function", "function": ["name": name, "arguments": "{\"cmd\":\"echo fixture\"}"]]]
+        var envelope: [String: Any] = ["id": "remote-fixture", "object": "chat.completion", "model": "fixture-model",
+            "choices": [["index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant", "tool_calls": calls]]]]
+        if usage { envelope["usage"] = ["prompt_tokens": invalid ? 10 : 20, "completion_tokens": invalid ? 4 : 8, "total_tokens": invalid ? 14 : 28] }
+        return .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: try! JSONSerialization.data(withJSONObject: envelope))
+    }
+    private func correctionRequest(base: URL, server: APIModelServer, task: String, thread: String, turn: String,
+                                   provider: APIProviderDefinition) throws -> URLRequest {
+        var request = try localRequest(base: base, token: server.bearerToken, task: task, thread: thread, turn: turn, provider: provider)
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+        raw["instructions"] = "PRIVATE_ORIGINAL_SYSTEM"
+        raw["tools"] = [["type": "function", "name": "exec_fixture", "parameters": ["type": "object",
+            "properties": ["cmd": ["type": "string"]], "required": ["cmd"], "additionalProperties": false]]]
+        request.httpBody = try JSONSerialization.data(withJSONObject: raw); return request
+    }
+    private func completedResponse(_ bytes: Data) throws -> [String: Any] {
+        let text = try XCTUnwrap(String(data: bytes, encoding: .utf8))
+        let events = try text.components(separatedBy: "\n\n").compactMap { event -> [String: Any]? in
+            guard let line = event.components(separatedBy: "\n").first(where: { $0.hasPrefix("data: ") }) else { return nil }
+            let payload = String(line.dropFirst(6))
+            if payload == "[DONE]" { return nil }
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
+        }
+        return try XCTUnwrap(events.first { $0["type"] as? String == "response.completed" }?["response"] as? [String: Any])
+    }
+    private func correctionRecords(_ directory: URL) throws -> [APIModelCorrectionAccounting.Record] {
+        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: Data(contentsOf: $0)) }
+    }
+    func testActualLoopbackCorrectsOneFullyReceivedBadBatchWithoutPublishingItsValidHalf() async throws {
+        let recorder = APIRequestRecorder(), credentials = APICredentialCounter(), root = try namingRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounting = root.appendingPathComponent("accounting")
+        let remote = try APILoopbackFixture { request in
+            await recorder.record(request); return self.correctionResponse(request, invalid: await recorder.count() == 1)
+        }
+        defer { remote.stop() }
+        let endpoint = try await remote.start(), p = provider(endpoint)
+        let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: accounting)
+        let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+        try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+        let request = try correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p)
+        let (bytes, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let completed = try completedResponse(bytes), output = try XCTUnwrap(completed["output"] as? [[String: Any]])
+        XCTAssertEqual(output.compactMap { $0["call_id"] as? String }, ["corrected-call"])
+        let text = String(decoding: bytes, as: UTF8.self)
+        XCTAssertFalse(text.contains("rejected-valid-mutating")); XCTAssertFalse(text.contains("NEVER_EXECUTED"))
+        XCTAssertEqual(completed["instructions"] as? String, "PRIVATE_ORIGINAL_SYSTEM")
+        let outputText = String(decoding: try JSONSerialization.data(withJSONObject: output), as: UTF8.self)
+        XCTAssertFalse(outputText.contains("PRIVATE_ORIGINAL"))
+        let requests = await recorder.snapshot(); XCTAssertEqual(requests.count, 2); XCTAssertEqual(credentials.counts().reads, 1)
+        var first = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[0].body) as? [String: Any])
+        var second = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[1].body) as? [String: Any])
+        var firstMessages = first.removeValue(forKey: "messages") as! [[String: Any]], secondMessages = second.removeValue(forKey: "messages") as! [[String: Any]]
+        XCTAssertEqual(first as NSDictionary, second as NSDictionary)
+        let originalSystem = firstMessages.removeFirst(), correctiveSystem = secondMessages.removeFirst()
+        XCTAssertEqual(correctiveSystem["content"] as? String, (originalSystem["content"] as! String) + "\n\n" + APIModelResponseCodec.correctiveFeedback)
+        XCTAssertEqual(firstMessages as NSArray, secondMessages as NSArray)
+        XCTAssertEqual((completed["usage"] as? [String: Any])?["input_tokens"] as? Int, 20)
+        let meta = try XCTUnwrap(completed["x_computa_correction"] as? [String: Any])
+        XCTAssertEqual((meta["known_billable_usage"] as? [String: Any])?["input_tokens"] as? Int, 30)
+        XCTAssertEqual(meta["billable_usage_complete"] as? Bool, true); XCTAssertEqual(meta["recovered"] as? Bool, true)
+        let records = try correctionRecords(accounting); XCTAssertEqual(records.count, 3)
+        XCTAssertEqual(records.filter { $0.phase == "finished" }.first?.secondUsage?.totalTokens, 28)
+        XCTAssertTrue(records.allSatisfy { $0.taskID == task && $0.threadID == thread && $0.turnID == turn })
+        await server.shutdown()
+    }
+    func testCorrectionPreservesValidSecondReplyWithUnknownUsageWithoutInventingZero() async throws {
+        let recorder = APIRequestRecorder(), root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("accounting")
+        let remote = try APILoopbackFixture { request in
+            await recorder.record(request); let first = await recorder.count() == 1
+            return self.correctionResponse(request, invalid: first, usage: first)
+        }
+        defer { remote.stop() }
+        let p = provider(try await remote.start()), server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture"),
+            capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
+        let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+        try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+        let (bytes, response) = try await URLSession.shared.data(for: correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let completed = try completedResponse(bytes), meta = try XCTUnwrap(completed["x_computa_correction"] as? [String: Any])
+        XCTAssertTrue(completed["usage"] is NSNull); XCTAssertEqual(meta["billable_usage_complete"] as? Bool, false)
+        XCTAssertEqual(meta["second_usage_unknown"] as? Bool, true)
+        XCTAssertEqual((meta["known_billable_usage"] as? [String: Any])?["total_tokens"] as? Int, 14)
+        let final = try XCTUnwrap(correctionRecords(directory).first { $0.phase == "finished" })
+        XCTAssertNil(final.secondUsage); XCTAssertTrue(final.secondUsageUnknown); XCTAssertEqual(final.outcome, .responseValidated)
+        await server.shutdown()
+    }
+    func testOneCorrectionBudgetPersistsAcrossInferencesInSameNativeTurnAndStopsAtSecondBadReply() async throws {
+        for secondBad in [false, true] {
+            let recorder = APIRequestRecorder(), root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+            let remote = try APILoopbackFixture { request in
+                await recorder.record(request); let count = await recorder.count()
+                return self.correctionResponse(request, invalid: count != 2 || secondBad)
+            }
+            defer { remote.stop() }
+            let p = provider(try await remote.start()), server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture"),
+                capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: root.appendingPathComponent("accounting"))
+            let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+            try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+            let request = try correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p)
+            let (firstBytes, firstResponse) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((firstResponse as? HTTPURLResponse)?.statusCode, secondBad ? 400 : 200)
+            if !secondBad {
+                let (bytes, response) = try await URLSession.shared.data(for: request)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+                XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("output_item.done"))
+            } else { XCTAssertFalse(String(decoding: firstBytes, as: UTF8.self).contains("output_item.done")) }
+            let count = await recorder.count(); XCTAssertEqual(count, secondBad ? 2 : 3)
+            await server.shutdown()
+        }
+    }
+    func testCancelledContextOrSharedDeadlineBeforeCorrectionStartsNoSecondRequestAndKeepsFirstUsage() async throws {
+        for cancelContext in [true, false] {
+            let recorder = APIRequestRecorder(), root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+            let gate = APICorrectionGate(), directory = root.appendingPathComponent("accounting")
+            let remote = try APILoopbackFixture { request in await recorder.record(request); return self.correctionResponse(request, invalid: true) }
+            defer { remote.stop() }
+            let p = provider(try await remote.start()), server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture"),
+                capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory, inferenceTimeout: .seconds(2))
+            let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+            try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+            await server.setBeforeCorrectionDispatchForTesting { await gate.enter(); try await Task.sleep(for: .seconds(20)) }
+            let request = try correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p)
+            let responseTask = Task { try await URLSession.shared.data(for: request) }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !(await gate.entered), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            let entered = await gate.entered; XCTAssertTrue(entered)
+            if cancelContext { await server.cancel(taskID: task) }
+            _ = try await responseTask.value
+            let count = await recorder.count(); XCTAssertEqual(count, 1)
+            let records = try correctionRecords(directory), first = records.first { $0.phase == "first_received" }, final = records.first { $0.phase == "finished" }
+            XCTAssertEqual(first?.firstUsage.totalTokens, 14)
+            XCTAssertEqual(final?.secondRequestClaimed, false); XCTAssertEqual(final?.secondUsageUnknown, false)
+            XCTAssertNil(final?.secondUsage)
+            XCTAssertFalse(records.contains { $0.phase == "second_claimed" })
+            await server.shutdown()
+        }
+    }
+    func testTransportRateLimitAndAccountingDirectoryFailureNeverCorrectOrPublishTools() async throws {
+        for rateLimit in [true, false] {
+            let recorder = APIRequestRecorder(), root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+            let wrongDirectory = root.appendingPathComponent("not-directory"); try Data("PRIVATE_FILE".utf8).write(to: wrongDirectory)
+            let remote = try APILoopbackFixture { request in
+                await recorder.record(request)
+                return rateLimit ? .init(status: "429 Too Many Requests", headers: ["Content-Type": "application/json"], body: Data("{}".utf8))
+                    : self.correctionResponse(request, invalid: true)
+            }
+            defer { remote.stop() }
+            let p = provider(try await remote.start()), server = APIModelServer(credentials: APIFixtureCredentials(value: "fixture"),
+                capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: wrongDirectory)
+            let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+            try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+            let (bytes, _) = try await URLSession.shared.data(for: correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p))
+            let count = await recorder.count(); XCTAssertEqual(count, 1)
+            let text = String(decoding: bytes, as: UTF8.self); XCTAssertFalse(text.contains("output_item.done"))
+            if rateLimit {
+                let events = try text.components(separatedBy: "\n\n").compactMap { event -> [String: Any]? in
+                    guard let line = event.components(separatedBy: "\n").first(where: { $0.hasPrefix("data: ") }) else { return nil }
+                    let payload = String(line.dropFirst(6))
+                    if payload == "[DONE]" { return nil }
+                    return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
+                }
+                let failed = try XCTUnwrap(events.first { $0["type"] as? String == "response.failed" }?["response"] as? [String: Any])
+                XCTAssertEqual(failed["instructions"] as? String, "PRIVATE_ORIGINAL_SYSTEM",
+                               "The existing normalized Responses resource preserves its caller's instructions")
+                XCTAssertEqual((failed["output"] as? [[String: Any]])?.count, 0)
+                let error = try XCTUnwrap(failed["error"] as? [String: Any])
+                XCTAssertEqual(error["code"] as? String, "rate_limit_exceeded")
+                XCTAssertFalse(String(decoding: try JSONSerialization.data(withJSONObject: error), as: UTF8.self).contains("PRIVATE"))
+            } else { XCTAssertFalse(text.contains("PRIVATE")) }
+            XCTAssertEqual(try Data(contentsOf: wrongDirectory), Data("PRIVATE_FILE".utf8))
+            await server.shutdown()
+        }
     }
 
     func testFailureStageProjectionPreservesCodesWithoutPrivatePayloadOrHistoryClaims() throws {
@@ -704,3 +894,5 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
     }
 
 }
+
+private actor APICorrectionGate { var entered = false; func enter() { entered = true } }

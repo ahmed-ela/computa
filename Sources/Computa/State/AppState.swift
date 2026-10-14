@@ -281,7 +281,12 @@ final class AppState {
         }
     }
 
+    /// Manual discovery shares recovery's idle boundary. A blocked request is
+    /// dropped, not queued for automatic retry after the native turn ends.
+    var canRefreshWebsiteModels: Bool { humanWebsiteRecoveryIsIdle }
+
     func refreshWebsiteModels() async {
+        guard canRefreshWebsiteModels else { return }
         await refreshWebsiteModels(providers: WebsiteModelCatalog.providers, retryBlocked: true)
     }
 
@@ -368,6 +373,8 @@ final class AppState {
                 self.websiteModelRefreshCurrentIntent = intent
                 defer { self.websiteModelRefreshCurrentIntent = nil }
                 let provider = intent.provider
+                let manual = intent.retryBlocked && intent.candidate == nil
+                guard !manual || self.canRefreshWebsiteModels else { continue }
                 if let candidate = intent.candidate {
                     guard self.recoveryCandidateIsCurrent(candidate) else {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded,
@@ -386,12 +393,17 @@ final class AppState {
                         var validator: (@MainActor () -> Bool)?
                         if let candidate = intent.candidate {
                             validator = { [weak self] in self?.recoveryCandidateIsCurrent(candidate) == true }
+                        } else if manual {
+                            // This existing validator runs before page creation
+                            // and immediately before any saved gate is cleared.
+                            validator = { [weak self] in self?.canRefreshWebsiteModels == true }
                         }
                         choices = try await self.websiteTransport().discoverModels(provider: provider,
                             retryBlocked: intent.retryBlocked, recoveryCandidateIsCurrent: validator)
                     }
                     guard !Task.isCancelled, !self.isShuttingDown,
                           self.websiteModelRefreshGeneration == generation else { break }
+                    guard !manual || self.canRefreshWebsiteModels else { continue }
                     // Injection is not checkpoint-clearance authority. Production
                     // discovery clears only behind its cleanup/identity validator.
                     if let candidate = intent.candidate,

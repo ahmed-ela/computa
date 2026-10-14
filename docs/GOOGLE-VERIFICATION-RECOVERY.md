@@ -1,5 +1,32 @@
 # Google verification recovery
 
+## Current diagnosis
+
+Google's precise challenge trigger remains unknown. The real build104 CAPTCHA
+and later healthy Gemini tasks used the same system WebKit runtime and persistent
+profile. WebKit's [default user-agent version is frozen](https://bugs.webkit.org/show_bug.cgi?id=278284);
+its old-looking compatibility tokens do not date the installed engine. Google's
+[unusual-traffic guidance](https://support.google.com/websearch/answer/86640)
+describes automated and shared-network traffic, but those possibilities have
+not been isolated in this environment.
+
+The source audit found no automatic Google search, login, reload or periodic
+recovery loop. Startup discovers only missing cached provider catalogs once.
+A saved gate blocks ordinary owned-page creation before loading. Manual refresh
+reads the three providers sequentially; automatic recovery probes only Gemini,
+once for an unchanged checkpoint and committed human document. These guards
+were unchanged between build104 and build105, so the later recovery cannot be
+attributed to a new navigation guard. One conversation per turn reduces page
+creation but is not a count of all network requests or a permanent CAPTCHA fix.
+
+The build109 candidate also refuses manual model refresh while tasks,
+compaction, steering, queued dispatch or approvals are active. The native
+handler rechecks before each provider load and after awaited discovery, and
+the same validator prevents a late probe from clearing a checkpoint. Both
+refresh controls reflect this guard. A rejected refresh is dropped rather
+than replayed when the app becomes idle. This removes a possible overlapping
+provider load; no experiment establishes that the overlap caused a CAPTCHA.
+
 ## October 8, 2026: explicit refresh
 
 Google search and signed-in Gemini recovered in Computa 0.5.0 (34), compiled from `b6e60b77162e73a1f6ebd038b40650b820dec6a3`, without changing WebKit, the user agent, cookies, the browser profile or network settings. One **Refresh website models** action then removed Computa's saved Gemini verification checkpoint. No CAPTCHA was completed.

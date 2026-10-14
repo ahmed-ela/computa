@@ -153,7 +153,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     enum Failure: Error, LocalizedError, Equatable {
-        case invalidRequest, unsupportedProvider, capacity, staleSession, documentChanged
+        case invalidRequest, unsupportedProvider, capacity, staleSession, documentChanged, turnLimit
         case signInRequired, temporaryUnverified, notFresh, composerUnavailable
         case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
         case submissionObservationPending
@@ -172,6 +172,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .unexpectedPage: "unexpected_website_page"
             case .productModeUnverified: "product_mode_unverified"
             case .ownershipFailure: "website_ownership_unverified"
+            case .turnLimit: "website_turn_limit"
             default: nil
             }
         }
@@ -202,6 +203,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var errorDescription: String? {
             switch self {
             case .invalidRequest: "The built-in browser model request could not be validated."
+            case .turnLimit: "The bounded website conversation limit was reached. No prompt was replayed; start a new task."
             case .unsupportedProvider: "That model provider is not supported in the built-in browser."
             case .capacity: "Finish an existing website-model task before opening another session. If failed sessions remain retained, restart Computa to free local capacity; their website cleanup remains unconfirmed."
             case .staleSession: "The owned browser model session is no longer available."
@@ -268,6 +270,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var currentSubmission: SubmissionBinding?
         var previousSubmission: SubmissionBinding?
         var currentSubmissionVerified = false
+        var submittedUTF8Count = 0
+        var usesSubmissionOwnership: Bool { !isDiscovery && (provider == .gemini || provider == .chatgpt) }
+        var usesBoundedTurn: Bool { usesSubmissionOwnership && provider == .chatgpt }
         var confirmedUsers = 0
         var pendingSubmission = false
         var baseline = 0
@@ -404,6 +409,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         responseTimeout = max(.milliseconds(1), min(.seconds(300), response))
     }
 
+    /// Establish the test's original response deadline after its owned queue
+    /// blocker has started; this never runs in production or renews a retry.
+    func anchorResponseDeadlineForTesting(sessionToken: String) -> Bool {
+        guard let session = sessions[sessionToken], session.state == "running", session.submitted,
+              session.firstUserFingerprint != nil, !session.pendingSubmission else { return false }
+        session.turnStarted = .now
+        return true
+    }
+
     func setInspectionTimeoutForTesting(_ timeout: Duration) {
         inspectionTimeout = max(.milliseconds(1), min(.seconds(30), timeout))
     }
@@ -444,7 +458,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       ["ready", "complete"].contains(session.state), !session.pendingSubmission else {
                     throw Failure.invalidRequest
                 }
-                if session.provider == .gemini, session.submitted {
+                // These pilot limits bound duplicated website context; they
+                // are engineering guards, not measured provider context sizes.
+                let submissionMarker = session.submitted && session.usesSubmissionOwnership
+                    ? UUID().uuidString.lowercased() : session.firstUserMarker
+                let outbound = !session.submitted || session.usesSubmissionOwnership
+                    ? "\(prompt)\n\nComputa session marker: \(submissionMarker)" : prompt
+                let outboundBytes = outbound.utf8.count
+                guard outboundBytes <= 180_000 else { throw Failure.invalidRequest }
+                if session.usesBoundedTurn {
+                    guard session.sequence < Self.maximumTurnSubmissions,
+                          outboundBytes <= Self.maximumTurnUTF8Bytes - session.submittedUTF8Count else {
+                        throw Failure.turnLimit
+                    }
+                }
+                if session.usesSubmissionOwnership, session.submitted {
                     // Re-prove the completed round before any preparation can
                     // focus or change the editor. Read-only remount recovery
                     // cannot become an insertion or Send retry.
@@ -471,14 +499,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                           session.provider.conversationURL(before["url"] as? String) == nil else { throw Failure.notFresh }
                 }
                 session.baseline = count(before, "responseCount")
-                // Keep transport markers out of the local transcript. Gemini
-                // gets a fresh suffix each round; other providers pin the first.
-                let submissionMarker = session.submitted && session.provider == .gemini
-                    ? UUID().uuidString.lowercased() : session.firstUserMarker
-                let outbound = !session.submitted || session.provider == .gemini
-                    ? "\(prompt)\n\nComputa session marker: \(submissionMarker)" : prompt
-                guard outbound.utf8.count <= 180_000 else { throw Failure.invalidRequest }
-                if session.provider == .gemini {
+                // Each proof-capable round has a unique transport-only suffix.
+                if session.usesSubmissionOwnership {
                     session.preparedSubmission = Session.SubmissionBinding(sequence: session.sequence + 1,
                         marker: submissionMarker, promptFingerprint: Self.promptFingerprint(prompt),
                         outboundFingerprint: Self.outboundFingerprint(outbound))
@@ -501,6 +523,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // Claim submission before clicking: even a lost reply must not replay Send.
                 session.submitted = true
                 session.sequence += 1
+                if session.usesSubmissionOwnership { session.submittedUTF8Count += outboundBytes }
                 if session.provider == .chatgpt {
                     session.outboundUTF16Count = outbound.utf16.count
                     session.outboundUTF8Count = outbound.utf8.count
@@ -508,7 +531,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     // comparable. A native claim is not backend acceptance.
                     Self.inspectionLog.error("outboundSize provider=chatgpt sequence=\(session.sequence) claimed=true outboundUTF16Count=\(outbound.utf16.count) outboundUTF8Count=\(outbound.utf8.count)")
                 }
-                if session.provider == .gemini {
+                if session.usesSubmissionOwnership {
                     guard let binding = session.preparedSubmission, binding.sequence == session.sequence else { throw Failure.invalidRequest }
                     session.previousSubmission = session.currentSubmission
                     session.currentSubmission = binding
@@ -1081,7 +1104,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard response.utf8.count <= 220_000 else { throw Failure.responseTooLarge }
             if count(observed, "responseCount") > session.baseline,
                count(observed, "userCount") == session.sequence, !session.pendingSubmission, !response.isEmpty {
-                if session.provider == .gemini, !session.isDiscovery {
+                if session.usesSubmissionOwnership {
                     guard session.currentSubmissionVerified,
                           session.currentSubmission?.sequence == session.sequence else {
                         logSubmissionFailure(session, action: "inspect", stage: .currentProofMissing, observed: observed)
@@ -2089,8 +2112,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowFirstUserBinding": action == "inspect" && session.sequence == 1
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
             "allowFirstUserExpansion": allowFirstUserExpansion,
+            "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
+                && session.pendingSubmission && session.sequence > 1,
         ]
-        if provider == .gemini, !session.isDiscovery {
+        if session.usesSubmissionOwnership {
             // Only already-dispatched bindings authorize a detached-message
             // inspection. A prepared, unsent body cannot supply this pin.
             input["expectedSubmissionProofs"] = [session.previousSubmission, session.currentSubmission]
@@ -2437,7 +2462,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                 }
             }
-            if provider == .gemini, !session.isDiscovery, let currentSubmission = session.currentSubmission,
+            if session.usesSubmissionOwnership, let currentSubmission = session.currentSubmission,
                count(observed, "userCount") > 0 {
                 let users = count(observed, "userCount")
                 let binding: Session.SubmissionBinding?
@@ -2520,7 +2545,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                combinedContextRecheck: combinedContextRecheck,
                                                maximumWait: evaluationDeadline - .now)
-        if provider == .gemini, !session.isDiscovery, ["insert", "sendReady", "submit"].contains(action) {
+        if session.usesSubmissionOwnership, ["insert", "sendReady", "submit"].contains(action) {
             guard observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability else {
                 logSubmissionFailure(session, action: action, stage: .capabilityMissing, observed: observed)
                 throw Failure.ownershipFailure(.javaScriptSubmission)
@@ -2768,7 +2793,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                   "state": session.state, "text": session.response, "sequence": session.sequence]
         if let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
         if let evidence = session.productModeEvidence { value["productModeEvidence"] = evidence.dictionary }
-        if session.provider == .gemini, !session.isDiscovery {
+        if session.usesSubmissionOwnership {
             value["turnContinuationCapability"] = Self.turnContinuationCapability
         }
         if session.state == "complete", let structure = session.responseCodeStructure {
@@ -2779,7 +2804,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                             "firstUserFingerprint": session.firstUserFingerprint ?? "",
                                             "responseCount": session.observedResponseCount,
                                             "baselineResponseCount": session.baseline]
-            if session.provider == .gemini, !session.isDiscovery,
+            if session.usesSubmissionOwnership,
                var context = value["modelProofContext"] as? [String: Any] {
                 context["submittedPromptFingerprint"] = session.currentSubmissionVerified
                     ? session.currentSubmission?.promptFingerprint ?? "" : ""
@@ -2793,6 +2818,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func count(_ observation: [String: Any], _ key: String) -> Int { observation[key] as? Int ?? 0 }
 
     static let turnContinuationCapability = "per_submission_ownership_v1"
+    static let maximumTurnSubmissions = 16
+    static let maximumTurnUTF8Bytes = 1_048_576
 
     static func promptFingerprint(_ prompt: String) -> String {
         SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()

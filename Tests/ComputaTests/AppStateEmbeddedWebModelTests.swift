@@ -228,6 +228,89 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         }
     }
 
+    func testManualRefreshRejectsActiveNativeWorkWithoutQueueingOrChangingCatalog() async {
+        let busy: [@MainActor (AppState) -> Void] = [
+            { $0.tasks = [.init(id: "running", title: "Active task", summary: "", status: .running,
+                               workspace: "/tmp", model: LocalModelCatalog.defaultModelID)] },
+            { $0.activeTurnTaskIDs.insert("turn-not-yet-reflected-in-task-status") },
+            { $0.compactionStateByTask["compacting"] = .running },
+            { $0.resolvingApprovalIDs.insert("approval-being-resolved") },
+        ]
+        for makeBusy in busy {
+            let browser = EmbeddedBrowserSession(persistent: false)
+            defer { browser.shutdown() }
+            browser.recordHumanVerificationRequired(provider: "gemini")
+            let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
+            let preferences = isolatedTestPreferences()
+            let cached = WebsiteModelCatalog.providers.flatMap(Self.choices)
+            WebsiteModelCatalog.save(cached, to: preferences)
+            var probes: [String] = []
+            let runtime = EmbeddedConfigurationRuntime(browser: browser)
+            let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser,
+                websiteModelDiscovery: { provider in probes.append(provider); return Self.choices(provider) })
+            makeBusy(state)
+            XCTAssertFalse(WebUISnapshot(state: state).canRefreshWebsiteModels)
+            await state.refreshWebsiteModels()
+            XCTAssertTrue(probes.isEmpty, "Rejected manual refresh must create no provider probe")
+            XCTAssertFalse(state.websiteModelsRefreshing)
+            XCTAssertTrue(state.websiteModelRefreshIntentsForTesting.isEmpty)
+            XCTAssertEqual(state.websiteModelChoices, cached)
+            XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+            state.activeTurnTaskIDs.removeAll()
+            state.compactionStateByTask.removeAll()
+            state.resolvingApprovalIDs.removeAll()
+            state.tasks = [.init(id: "terminal", title: "Failed or paused persisted goal", summary: "", status: .waiting,
+                                 workspace: "/tmp", model: LocalModelCatalog.defaultModelID),
+                           .init(id: "completed", title: "Completed chat", summary: "", status: .completed,
+                                 workspace: "/tmp", model: LocalModelCatalog.defaultModelID)]
+            await Task.yield()
+            XCTAssertTrue(probes.isEmpty, "Returning to idle must not replay a rejected refresh")
+            XCTAssertTrue(WebUISnapshot(state: state).canRefreshWebsiteModels)
+            await state.refreshWebsiteModels()
+            XCTAssertEqual(probes, WebsiteModelCatalog.providers)
+            XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint,
+                           "Injected catalog results never clear a saved checkpoint")
+            XCTAssertEqual(runtime.submissions, 0)
+        }
+    }
+
+    func testManualRefreshAdmittedWhileIdleDropsRemainingProbesIfANativeTurnStarts() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        browser.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
+        let preferences = isolatedTestPreferences()
+        let cached = WebsiteModelCatalog.providers.flatMap(Self.choices)
+        WebsiteModelCatalog.save(cached, to: preferences)
+        var probes: [String] = []
+        var held: CheckedContinuation<[WebsiteModelChoice], Error>?
+        let replacement = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/high", label: "High")
+        let state = AppState(tasks: [], preferences: preferences, browserSession: browser,
+            websiteModelDiscovery: { provider in
+                probes.append(provider)
+                if probes.count == 1 { return try await withCheckedThrowingContinuation { held = $0 } }
+                return Self.choices(provider)
+            })
+        let refresh = Task { await state.refreshWebsiteModels() }
+        try await waitUntil { held != nil }
+        XCTAssertTrue(state.websiteModelsRefreshing)
+        XCTAssertTrue(state.canRefreshWebsiteModels, "The idle predicate must not depend on its own refresh flag")
+        state.activeTurnTaskIDs.insert("new-native-turn")
+        XCTAssertFalse(WebUISnapshot(state: state).canRefreshWebsiteModels)
+        held?.resume(returning: [replacement]); held = nil
+        await refresh.value
+        XCTAssertEqual(probes, ["chatgpt"], "An already-started probe may finish, but no later provider may load")
+        XCTAssertEqual(state.websiteModelChoices, cached, "Late manual results cannot change the catalog during a turn")
+        XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        XCTAssertFalse(state.websiteModelsRefreshing)
+        XCTAssertTrue(state.websiteModelRefreshIntentsForTesting.isEmpty)
+        state.activeTurnTaskIDs.removeAll()
+        await Task.yield()
+        XCTAssertEqual(probes, ["chatgpt"], "Idle transition must not requeue the skipped probes")
+        await state.refreshWebsiteModels()
+        XCTAssertEqual(probes, ["chatgpt"] + WebsiteModelCatalog.providers)
+    }
+
     private static func choices(_ provider: String) -> [WebsiteModelChoice] {
         provider == "chatgpt" ? [.init(provider: provider, key: "chat/latest/instant", label: "Instant")]
             : [.init(provider: provider, key: "fixture-choice", label: "Fixture choice")]

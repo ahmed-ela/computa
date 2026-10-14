@@ -1,0 +1,100 @@
+import XCTest
+import Darwin
+@testable import Computa
+
+final class APIModelCorrectionTests: XCTestCase {
+    private let id = "550e8400-e29b-41d4-a716-446655440000"
+    private let usage = APIModelCorrectionUsage(inputTokens: 120, outputTokens: 80, totalTokens: 200,
+                                               cachedInputTokens: 40, reasoningOutputTokens: 20)
+    private func root() throws -> URL {
+        guard let path = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        defer { free(path) }
+        let url = URL(fileURLWithPath: String(cString: path), isDirectory: true).appendingPathComponent("ComputaCorrection-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        return url
+    }
+    private func records(_ directory: URL) throws -> [APIModelCorrectionAccounting.Record] {
+        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: Data(contentsOf: $0)) }
+    }
+    func testFirstKnownUsageIsDurableAndSecondAbsentIsUnknownAfterCancellation() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("APIModelCorrectionUsage-v1"), store = APIModelCorrectionAccounting(directory: directory)
+        let ticket = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: usage)
+        let firstFile = directory.appendingPathComponent(ticket.id.uuidString.lowercased() + ".first_received.json")
+        let firstBytes = try Data(contentsOf: firstFile)
+        XCTAssertEqual(try records(directory).count, 1)
+        if directory.path.hasPrefix("/private/var/") {
+            XCTAssertNotEqual(directory.path, directory.standardizedFileURL.path,
+                              "Foundation's spelling change must not revoke an already-owned physical directory")
+        }
+        XCTAssertThrowsError(try store.finish(ticket, claimed: true, usage: nil, outcome: .cancelled), "An unclaimed second request cannot be recorded as claimed")
+        try store.claimed(ticket)
+        try store.finish(ticket, claimed: true, usage: nil, outcome: .cancelled)
+        let all = try records(directory), final = try XCTUnwrap(all.first { $0.phase == "finished" })
+        XCTAssertEqual(all.count, 3); XCTAssertEqual(final.firstUsage, usage)
+        XCTAssertNil(final.secondUsage); XCTAssertTrue(final.secondUsageUnknown)
+        XCTAssertEqual(final.outcome, .cancelled); XCTAssertTrue(final.secondRequestClaimed)
+        XCTAssertEqual(try Data(contentsOf: firstFile), firstBytes)
+        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            let bytes = try Data(contentsOf: file), attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+            XCTAssertLessThanOrEqual(bytes.count, 2_048); XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o400)
+            let text = String(decoding: bytes, as: UTF8.self)
+            for forbidden in ["prompt", "arguments", "http", "credential", "reasoning_text", "tool_schema"] { XCTAssertFalse(text.contains(forbidden)) }
+        }
+    }
+    func testCompletedCorrectionPreservesSeparateKnownUsageAndExclusiveTerminalRecord() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("journal"), store = APIModelCorrectionAccounting(directory: directory)
+        let ticket = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: usage)
+        try store.claimed(ticket); try store.finish(ticket, claimed: true, usage: usage, outcome: .responseValidated)
+        let final = try XCTUnwrap(records(directory).first { $0.phase == "finished" })
+        XCTAssertEqual(final.secondUsage, usage); XCTAssertFalse(final.secondUsageUnknown)
+        XCTAssertEqual(try final.firstUsage.adding(XCTUnwrap(final.secondUsage)).totalTokens, 400)
+        let file = directory.appendingPathComponent(ticket.id.uuidString.lowercased() + ".finished.json"), before = try Data(contentsOf: file)
+        XCTAssertThrowsError(try store.finish(ticket, claimed: true, usage: nil, outcome: .cancelled))
+        XCTAssertEqual(try Data(contentsOf: file), before)
+        XCTAssertThrowsError(try usage.adding(.init(inputTokens: Int.max, outputTokens: 0, totalTokens: Int.max, cachedInputTokens: 0, reasoningOutputTokens: 0)))
+    }
+    func testAccountingRejectsSymlinkDirectoryAncestorUnsafeModeAndNoncanonicalIdentity() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let real = root.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let alias = root.appendingPathComponent("alias"); try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: real)
+        for directory in [alias, alias.appendingPathComponent("child")] {
+            XCTAssertThrowsError(try APIModelCorrectionAccounting(directory: directory).begin(taskID: id, threadID: id, turnID: id, firstUsage: usage))
+        }
+        let unsafe = root.appendingPathComponent("unsafe")
+        try FileManager.default.createDirectory(at: unsafe, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o755])
+        XCTAssertThrowsError(try APIModelCorrectionAccounting(directory: unsafe).begin(taskID: id, threadID: id, turnID: id, firstUsage: usage))
+        let store = APIModelCorrectionAccounting(directory: root.appendingPathComponent("valid"))
+        var decorated = try XCTUnwrap(URLComponents(url: root.appendingPathComponent("decorated"), resolvingAgainstBaseURL: false))
+        decorated.query = "not_directory_metadata"
+        XCTAssertThrowsError(try APIModelCorrectionAccounting(directory: XCTUnwrap(decorated.url)).begin(taskID: id, threadID: id, turnID: id, firstUsage: usage))
+        decorated.query = nil; decorated.fragment = "not_directory_metadata"
+        XCTAssertThrowsError(try APIModelCorrectionAccounting(directory: XCTUnwrap(decorated.url)).begin(taskID: id, threadID: id, turnID: id, firstUsage: usage))
+        decorated.fragment = nil; decorated.host = "foreign.invalid"
+        XCTAssertThrowsError(try APIModelCorrectionAccounting(directory: XCTUnwrap(decorated.url)).begin(taskID: id, threadID: id, turnID: id, firstUsage: usage))
+        for invalid in ["../../private", id.uppercased(), "PRIVATE_SECRET"] {
+            XCTAssertThrowsError(try store.begin(taskID: invalid, threadID: id, turnID: id, firstUsage: usage))
+        }
+        XCTAssertThrowsError(try store.begin(taskID: id, threadID: id, turnID: id,
+            firstUsage: .init(inputTokens: 1, outputTokens: 1, totalTokens: 0, cachedInputTokens: 0, reasoningOutputTokens: 0)))
+    }
+    func testChangedFirstReceiptForgedTicketAndWrongFileTypesNeverAuthorizeSecondClaim() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("journal"), store = APIModelCorrectionAccounting(directory: directory)
+        let ticket = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: usage)
+        let forged = APIModelCorrectionAccounting.Ticket(id: ticket.id, taskID: id, threadID: id, turnID: id,
+            firstUsage: .init(inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, reasoningOutputTokens: 0))
+        XCTAssertThrowsError(try store.claimed(forged))
+        let first = directory.appendingPathComponent(ticket.id.uuidString.lowercased() + ".first_received.json")
+        let backup = root.appendingPathComponent("backup"); try FileManager.default.moveItem(at: first, to: backup)
+        try FileManager.default.createSymbolicLink(at: first, withDestinationURL: backup)
+        XCTAssertThrowsError(try store.claimed(ticket))
+        try FileManager.default.removeItem(at: first)
+        XCTAssertEqual(mkfifo(first.path, 0o600), 0)
+        XCTAssertThrowsError(try store.claimed(ticket), "O_NONBLOCK and regular-file checks prevent a FIFO hang")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(ticket.id.uuidString.lowercased() + ".second_claimed.json").path))
+    }
+}

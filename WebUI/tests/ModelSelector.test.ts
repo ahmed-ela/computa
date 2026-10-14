@@ -44,12 +44,25 @@ describe('website model selectors', () => {
 
   test('busy tasks disable model input and discovery refresh reflects its state', () => {
     expect(selector(options[1].id, 'Task model', true)).toMatch(/<select[^>]*disabled/);
-    const idle = renderToStaticMarkup(h(WebsiteModelsRefresh, { onRefresh: () => {} })).html;
-    const running = renderToStaticMarkup(h(WebsiteModelsRefresh, { refreshing: true, onRefresh: () => {} })).html;
+    const idle = renderToStaticMarkup(h(WebsiteModelsRefresh, { canRefresh: true, onRefresh: () => {} })).html;
+    const running = renderToStaticMarkup(h(WebsiteModelsRefresh, { canRefresh: true, refreshing: true, onRefresh: () => {} })).html;
     expect(idle).toContain('Refresh models');
     expect(idle).toContain('aria-label="Refresh website models"');
+    expect(idle).not.toMatch(/<button[^>]*disabled/);
     expect(running).toContain('Refreshing…');
     expect(running).toMatch(/<button[^>]*disabled/);
+  });
+
+  test('discovery refresh requires explicit native idle permission in composer and Settings', () => {
+    for (const canRefresh of [false, undefined]) {
+      const blocked = renderToStaticMarkup(h(WebsiteModelsRefresh, { canRefresh, onRefresh: () => {} })).html;
+      expect(blocked).toMatch(/<button[^>]*disabled/);
+      expect(blocked).toContain('Finish active tasks and approvals');
+      expect(blocked).toContain('aria-label="Refresh website models"');
+    }
+    const allowed = renderToStaticMarkup(h(WebsiteModelsRefresh, { canRefresh: true, onRefresh: () => {} })).html;
+    expect(allowed).not.toMatch(/<button[^>]*disabled/);
+    expect(allowed).toContain('Read the model choices available');
   });
 
   test('observed website labels and IDs are escaped as text and attribute values', async () => {

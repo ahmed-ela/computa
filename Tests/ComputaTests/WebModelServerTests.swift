@@ -249,7 +249,96 @@ final class WebModelServerTests: XCTestCase {
             XCTAssertEqual(evidence.count, 45)
             XCTAssertEqual(evidence.compactMap { $0["phase"] as? String }, Array(repeating:
                 ["start_requested", "started", "submission_verified", "complete", "release_verified"], count: 9).flatMap { $0 })
-            XCTAssertTrue(evidence.allSatisfy { $0["transactionMode"] as? String == "temporary_conversation_per_inference" && $0["turnID"] as? String == turn })
+            XCTAssertTrue(evidence.allSatisfy { ($0["transactionMode"] as? String == "temporary_conversation_per_inference"
+                || provider == "chatgpt" && $0["phase"] as? String == "start_requested" && $0["transactionMode"] as? String == "capability_pending")
+                && $0["turnID"] as? String == turn })
+        }
+    }
+
+    func testChatAdvertisedContinuationKeepsCompleteRequestsAndOneLeaseUntilFinal() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("computa-chat-turn-" + UUID().uuidString)
+        let replies = (0..<2).map { #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"round-"# + String($0) + #""}}]}"# }
+            + [#"{"type":"message","text":"Exact final"}"#]
+        let base = FixtureWebModelTransport(replyTexts: replies)
+        let transport = ChatContinuationFixtureTransport(base: base)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        await server.configureEmbeddedTransport(transport)
+        var input: [[String: Any]] = [["role": "user", "content": "Exact three-round task"]]
+        for round in 0..<3 {
+            let output = try await server.fixtureInfer(turnRequest(input: input, model: syntheticChatGPTModelID), taskID: "chat-three")
+            let items = try responseOutput(output)
+            if round < 2 {
+                input += items + [["type": "function_call_output", "call_id": try XCTUnwrap(items.first?["call_id"] as? String), "output": "Observed exit 0"]]
+                let operations = await base.operations()
+                XCTAssertFalse(operations.contains("webProviderFinish"))
+            }
+        }
+        let operations = await base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 3)
+        XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, 1)
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual((try canonicalRequest(in: XCTUnwrap(prompts.last)))["input"] as? NSArray, input as NSArray)
+        let journal = try turnJournal(root: root, task: "chat-three")
+        XCTAssertEqual(journal.first?["transactionMode"] as? String, "capability_pending")
+        XCTAssertEqual(journal.first?["transactionPolicyEstablished"] as? Bool, false)
+        XCTAssertTrue(journal.dropFirst().allSatisfy { $0["transactionMode"] as? String == "temporary_conversation_per_turn" })
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "yield_verified" }.count, 2)
+        let receipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(receipts.count, 1); XCTAssertEqual(receipts.first?.outcome, .closed)
+    }
+
+    func testChatTurnCurrentSubmissionAndPinnedModelContextCannotAdmitStaleReply() async throws {
+        for mutation in [TurnSnapshotMutation.submittedFingerprint, .responseCount, .firstFingerprint, .generation, .model, .capability] {
+            let base = FixtureWebModelTransport(replyTexts: [#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"first"}}]}"#])
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            let transport = ChatContinuationFixtureTransport(base: base, mutation: mutation)
+            await server.configureEmbeddedTransport(transport)
+            let original: [[String: Any]] = [["role": "user", "content": "Exact original task"]]
+            let first = try await server.fixtureInfer(turnRequest(input: original, model: syntheticChatGPTModelID), taskID: "chat-mutation")
+            let calls = try responseOutput(first)
+            let next = original + calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String), "output": "Observed exit 0"]]
+            do { _ = try await server.fixtureInfer(turnRequest(input: next, model: syntheticChatGPTModelID), taskID: "chat-mutation"); XCTFail("No altered completion or prior reply") }
+            catch { XCTAssertNotNil(WebModelServer.errorPresentation(for: error).code) }
+            let beforeCleanup = await base.operations()
+            XCTAssertEqual(beforeCleanup.filter { $0 == "webProviderSend" }.count, 2)
+            let issues = await server.fixtureFinish(taskID: "chat-mutation")
+            XCTAssertTrue(issues.isEmpty)
+        }
+    }
+
+    func testChatPilotCapsCloseTheRetainedLeaseWithoutRolloverOrAnotherSend() async throws {
+        for byteLimit in [false, true] {
+            let tool = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"bounded"}}]}"#
+            let base = FixtureWebModelTransport(replyTexts: Array(repeating: tool, count: 20))
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base))
+            var input: [[String: Any]] = [["role": "user", "content": "Exact bounded task"]]
+            var dispatched = 0, total = 0, reached = false
+            for _ in 0..<18 {
+                let request = try turnRequest(input: input, model: syntheticChatGPTModelID)
+                var object = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+                object["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: "chat-limit")]
+                let promptBytes = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: object)).prompt.utf8.count
+                do {
+                    let response = try await server.fixtureInfer(request, taskID: "chat-limit")
+                    total += promptBytes; dispatched += 1
+                    let calls = try responseOutput(response)
+                    input += calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
+                        "output": byteLimit ? String(repeating: "A", count: 10_000) : "Observed exit 0"]]
+                } catch {
+                    XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_turn_limit")
+                    XCTAssertTrue(byteLimit ? total + promptBytes > WebModelServer.maximumTurnPromptUTF8Bytes : dispatched == 16)
+                    reached = true; break
+                }
+            }
+            XCTAssertTrue(reached)
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, dispatched)
+            XCTAssertEqual(operations.filter { ["webProviderFinish", "webProviderCancel"].contains($0) }.count, 1)
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1); XCTAssertEqual(receipts.first?.outcome, .closed); XCTAssertEqual(receipts.first?.receiptSaved, true)
         }
     }
 
@@ -1707,6 +1796,45 @@ private actor FixtureWebModelTransport: WebModelTransport {
                 "source": "selected_model_indicator", "verification": "website_selection"]
         }
         return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
+    }
+}
+
+private actor ChatContinuationFixtureTransport: WebModelTransport {
+    let transport: WebsiteInferenceFixtureTransport
+    let mutation: TurnSnapshotMutation?
+    private var fingerprint = ""
+    private var sends = 0
+    init(base: FixtureWebModelTransport, mutation: TurnSnapshotMutation? = nil) {
+        transport = WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice)
+        self.mutation = mutation
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+        if operation == "webProviderSend" {
+            sends += 1
+            fingerprint = await EmbeddedWebModelTransport.promptFingerprint(try XCTUnwrap(input["prompt"]))
+        }
+        let responseData = try await transport.request(operation: operation, params: params)
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+        if ["ready", "running", "complete"].contains(value["state"] as? String ?? "") {
+            value["turnContinuationCapability"] = "per_submission_ownership_v1"
+            if var context = value["modelProofContext"] as? [String: Any] {
+                context["submittedPromptFingerprint"] = fingerprint
+                if sends == 2, value["state"] as? String == "complete", let mutation {
+                    switch mutation {
+                    case .submittedFingerprint: context["submittedPromptFingerprint"] = String(repeating: "0", count: 64)
+                    case .firstFingerprint: context["firstUserFingerprint"] = String(repeating: "1", count: 64)
+                    case .generation: context["documentGeneration"] = UUID().uuidString
+                    case .responseCount: context["responseCount"] = context["baselineResponseCount"]
+                    case .capability: value["turnContinuationCapability"] = "unknown"
+                    case .model: value.removeValue(forKey: "modelEvidence")
+                    default: break
+                    }
+                }
+                value["modelProofContext"] = context
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: value)
     }
 }
 

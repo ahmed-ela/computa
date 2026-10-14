@@ -23,6 +23,128 @@ final class APIModelResponseCodecTests: XCTestCase {
         let definitions = try XCTUnwrap(body["tools"] as? [[String: Any]])
         return try definitions.map { try XCTUnwrap($0["function"] as? [String: Any]) }
     }
+    private func correctionResult(_ prepared: APIModelResponseCodec.Request, arguments: String = "{\"path\":false}",
+                                  changes: [String: Any] = [:], additionalCalls: [[String: Any]] = []) throws -> APIProviderHTTPClient.Result {
+        let call: [String: Any] = ["id": "rejected-call", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": arguments]]
+        var envelope: [String: Any] = ["id": "remote-rejected", "model": prepared.model.id,
+            "choices": [["index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant", "tool_calls": [call] + additionalCalls]]],
+            "usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14,
+                      "prompt_tokens_details": ["cached_tokens": 3], "completion_tokens_details": ["reasoning_tokens": 2]]]
+        envelope.merge(changes) { _, value in value }
+        return .init(body: try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]), contentType: "application/json")
+    }
+    func testArgumentCorrectionRequiresCompleteBatchAndPresentExactUsageBeforeClassification() throws {
+        let prepared = try request()
+        for bad in ["{", "{\"path\":false}"] {
+            guard case .argumentsRejected(let usage) = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, arguments: bad), request: prepared) else { return XCTFail("Expected argument-only rejection") }
+            XCTAssertEqual(usage, .init(inputTokens: 10, outputTokens: 4, totalTokens: 14, cachedInputTokens: 3, reasoningOutputTokens: 2))
+        }
+        let unknown: [String: Any] = ["id": "unknown-call", "type": "function", "function": ["name": "unoffered", "arguments": "{}"]]
+        let duplicate: [String: Any] = ["id": "rejected-call", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": "{\"path\":\"ok\"}"]]
+        for call in [unknown, duplicate] {
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, additionalCalls: [call]), request: prepared)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+        for changes: [String: Any] in [["model": "wrong"], ["usage": NSNull()],
+                ["usage": ["prompt_tokens": true, "completion_tokens": 4]],
+                ["usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 99]]] {
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, changes: changes), request: prepared))
+        }
+    }
+    func testArgumentCorrectionDoesNotHideBadReasoningOrIncompleteStreamOrMissingArgumentShape() throws {
+        let prepared = try request()
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: correctionResult(prepared).body) as? [String: Any])
+        var choices = raw["choices"] as! [[String: Any]], message = choices[0]["message"] as! [String: Any]
+        message["reasoning"] = ["PRIVATE_REASONING"]; choices[0]["message"] = message; raw["choices"] = choices
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: JSONSerialization.data(withJSONObject: raw), contentType: "application/json"), request: prepared)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidResponse)
+        }
+        choices[0]["finish_reason"] = "length"; raw["choices"] = choices
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: JSONSerialization.data(withJSONObject: raw), contentType: "application/json"), request: prepared))
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: Data("data: {}\n\n".utf8), contentType: "text/event-stream"), request: prepared))
+        let oversized = String(repeating: "a", count: 2_000_001)
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, arguments: oversized), request: prepared))
+        var hugeReasoning = try XCTUnwrap(JSONSerialization.jsonObject(with: correctionResult(prepared).body) as? [String: Any])
+        var hugeChoices = hugeReasoning["choices"] as! [[String: Any]], hugeMessage = hugeChoices[0]["message"] as! [String: Any]
+        hugeMessage["reasoning"] = oversized; hugeChoices[0]["message"] = hugeMessage; hugeReasoning["choices"] = hugeChoices
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: JSONSerialization.data(withJSONObject: hugeReasoning), contentType: "application/json"), request: prepared)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidReasoning)
+        }
+        let streamID = "remote-stream", alias = prepared.tools[0].wireName
+        func chunk(_ delta: [String: Any], finish: Any = NSNull(), usage: Any = NSNull()) -> [String: Any] {
+            ["id": streamID, "object": "chat.completion.chunk", "model": prepared.model.id,
+             "choices": [["index": 0, "delta": delta, "finish_reason": finish]], "usage": usage]
+        }
+        let start = chunk(["role": "assistant", "tool_calls": [["index": 0, "id": "bad-stream", "type": "function", "function": ["name": alias, "arguments": "{"]]]])
+        let finish = chunk([:], finish: "tool_calls")
+        let validUsage: [String: Any] = ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14]
+        let end: [String: Any] = ["id": streamID, "model": prepared.model.id, "choices": [], "usage": validUsage]
+        for malformed in [chunk(["tool_calls": [["index": 0, "function": ["arguments": 42]]]]),
+                chunk(["role": 42]), chunk(["tool_calls": [["index": 0, "function": false]]]),
+                chunk(["tool_calls": [["index": 0, "function": ["arguments": NSNull()]]]]),
+                chunk(["tool_calls": [["index": 0, "id": NSNull()]]]),
+                chunk([:], usage: ["prompt_tokens": true, "completion_tokens": 4, "total_tokens": 5])] {
+            var bytes = Data()
+            for value in [start, malformed, finish, end] {
+                bytes.append(Data("data: ".utf8)); bytes.append(try JSONSerialization.data(withJSONObject: value)); bytes.append(Data("\n\n".utf8))
+            }
+            bytes.append(Data("data: [DONE]\n\n".utf8))
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: bytes, contentType: "text/event-stream"), request: prepared))
+        }
+        let normal = try correctionResult(prepared).body, bodyText = String(decoding: normal, as: UTF8.self)
+        // These otherwise parse through Foundation; ambiguity must not spend an inference.
+        for ambiguous in [bodyText.replacingOccurrences(of: "\"prompt_tokens\":10", with: "\"prompt_tokens\":10.00000000000000001"),
+                          bodyText.replacingOccurrences(of: "\"total_tokens\":14", with: "\"total_tokens\":14,\"total_tokens\":14")] {
+            XCTAssertNotEqual(ambiguous, bodyText)
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: Data(ambiguous.utf8), contentType: "application/json"), request: prepared))
+        }
+        let nonString: [String: Any] = ["id": "non-string", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": true]]
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, additionalCalls: [nonString]), request: prepared)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+    }
+    func testCorrectiveRequestChangesOnlyTrustedLeadingFeedbackAndPreservesConfirmedHistoryAndCatalog() throws {
+        let history: [[String: Any]] = [["role": "user", "content": "PRIVATE_USER_URL_/_😀"],
+            ["type": "function_call", "call_id": "prior", "name": "read", "namespace": "files", "arguments": "{\"path\":\"completed\"}"],
+            ["type": "function_call_output", "call_id": "prior", "output": "PRIVATE_CONFIRMED_RESULT"]]
+        let original = try request(["input": history])
+        let corrected = try APIModelResponseCodec.correctiveRequest(original)
+        var before = try XCTUnwrap(JSONSerialization.jsonObject(with: original.body) as? [String: Any])
+        var after = try XCTUnwrap(JSONSerialization.jsonObject(with: corrected.body) as? [String: Any])
+        var beforeMessages = before.removeValue(forKey: "messages") as! [[String: Any]]
+        var afterMessages = after.removeValue(forKey: "messages") as! [[String: Any]]
+        XCTAssertEqual(before as NSDictionary, after as NSDictionary)
+        let first = beforeMessages.removeFirst(), updated = afterMessages.removeFirst()
+        XCTAssertEqual(updated["role"] as? String, "system")
+        XCTAssertEqual(updated["content"] as? String, (first["content"] as! String) + "\n\n" + APIModelResponseCodec.correctiveFeedback)
+        XCTAssertEqual(beforeMessages as NSArray, afterMessages as NSArray)
+        XCTAssertEqual(corrected.historyCallIDs, original.historyCallIDs)
+        XCTAssertEqual(corrected.allowedTools, original.allowedTools)
+        XCTAssertEqual(corrected.tools.map(\.wireName), original.tools.map(\.wireName))
+        XCTAssertEqual(corrected.toolNaming, original.toolNaming)
+        XCTAssertFalse(APIModelResponseCodec.correctiveFeedback.contains("PRIVATE"))
+        XCTAssertTrue(APIModelResponseCodec.correctiveFeedback.contains("No call from that rejected response was executed"))
+        XCTAssertEqual(try APIModelResponseCodec.correctiveRequest(request(["instructions": NSNull()])).provider, original.provider)
+    }
+    func testCorrectionMetadataSeparatesBillableUsageFromAcceptedContextAndNeverAddsCalls() throws {
+        let prepared = try request()
+        let reply = try decode(["role": "assistant", "content": "done"], request: prepared)
+        let first = APIModelCorrectionUsage(inputTokens: 10, outputTokens: 4, totalTokens: 14, cachedInputTokens: 3, reasoningOutputTokens: 2)
+        let second = try XCTUnwrap(APIModelResponseCodec.correctionUsage(reply.response["usage"]))
+        let ticket = APIModelCorrectionAccounting.Ticket(id: UUID(), taskID: taskID, threadID: taskID, turnID: taskID, firstUsage: first)
+        let corrected = try APIModelResponseCodec.withCorrectionMetadata(reply, ticket: ticket, secondUsage: second)
+        XCTAssertEqual(corrected.response["usage"] as? NSDictionary, reply.response["usage"] as? NSDictionary)
+        XCTAssertEqual(corrected.response["output"] as? NSArray, reply.response["output"] as? NSArray)
+        let meta = try XCTUnwrap(corrected.response["x_computa_correction"] as? [String: Any])
+        XCTAssertEqual(meta["recovered"] as? Bool, true); XCTAssertEqual(meta["attempt_count"] as? Int, 2)
+        XCTAssertEqual((meta["known_billable_usage"] as? [String: Any])?["input_tokens"] as? Int, 22)
+        XCTAssertEqual((corrected.response["usage"] as? [String: Any])?["input_tokens"] as? Int, 12)
+        let encoded = String(decoding: try APIModelResponseCodec.encode(corrected, stream: true), as: UTF8.self)
+        XCTAssertTrue(encoded.contains("x_computa_correction")); XCTAssertFalse(encoded.contains("function_call")); XCTAssertFalse(encoded.contains("custom_tool_call"))
+        XCTAssertFalse(encoded.contains("PRIVATE"))
+    }
+
     func testSemanticToolNamesStayStableAcrossFilteringReorderingAndNamedChoice() throws {
         let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
         let browser: [String: Any] = ["type": "function", "name": "browser_open", "description": "Open the requested built-in page.",

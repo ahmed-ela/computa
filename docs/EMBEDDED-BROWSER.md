@@ -6,8 +6,11 @@ Computa owns a native WKWebView tab pane beside the chat. People can browse in
 the pane; fresh agent chats receive the nine typed
 [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md) for bounded page observation
 and actions. The Swift app's ChatGPT, Gemini and Claude adapters use separate
-owned Temporary Chat or Incognito pages in the same profile, with a fresh page
-for each [inference transaction](WEBSITE-INFERENCE-TRANSACTIONS.md). Neither path
+owned Temporary Chat or Incognito pages in the same profile. Gemini retains one
+owned page for a native turn; the ChatGPT candidate does the same only after
+negotiating per-submission ownership. Claude and transports without that
+capability use a fresh page for each
+[inference transaction](WEBSITE-INFERENCE-TRANSACTIONS.md). Neither path
 requires Chrome. Existing Chrome/native tools remain available independently.
 Installed Qwen tasks, arbitrary public sites and sustained concurrent human use
 retain their [separate qualification gates](../TODO.md#embedded-browser-agent-control).
@@ -35,12 +38,15 @@ retain their [separate qualification gates](../TODO.md#embedded-browser-agent-co
   temporary-mode checks remain mandatory; deadlines and stable-response timers
   remain. The local harness executes tools and stores transcripts.
   Before the first Send, the entire editor contents must match the outbound
-  prompt, including an opaque session marker at its end. The first rendered
-  user message must contain that marker as its last nonempty line. Its normalized
-  rendered body is fingerprinted once and must match on every later read,
+  prompt, including an opaque submission marker at its end. Each retained-page
+  submission has a distinct marker and sequence. Its rendered user message must
+  contain that marker as its last nonempty line. Its normalized rendered body is
+  fingerprinted once and must match the native outbound fingerprint on later reads,
   mutation and cleanup, including the one allowed local-to-server SPA route
-  promotion. This supports Markdown rendering without treating rendered text as
-  the original prompt bytes.
+  promotion. Legacy first-message lineage can pin rendered Markdown. Retained
+  submission proof additionally requires the complete canonical outbound body;
+  removing Markdown delimiters or changing its whitespace cannot satisfy that
+  digest merely because the visible message has a matching marker.
 - Owned model views stay attached to a permanent render host behind the workspace,
   including while the Browser pane is hidden. The host does not accept input or
   expose model pages in Accessibility. DOM editor focus preserves the native

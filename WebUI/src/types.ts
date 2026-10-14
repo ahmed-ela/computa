@@ -151,6 +151,7 @@ export interface AppSnapshot {
   defaultModel: string;
   modelOptions: ModelOption[];
   websiteModelsRefreshing?: boolean;
+  canRefreshWebsiteModels?: boolean;
   websiteModelsError?: string;
   showToolPayloads: boolean;
   isInspectorPresented: boolean;

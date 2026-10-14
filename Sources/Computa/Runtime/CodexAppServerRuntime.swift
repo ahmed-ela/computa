@@ -1340,13 +1340,17 @@ private extension CodexAppServerRuntime {
                 URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
                     .appendingPathComponent("APIRequestDiagnostics-v1", isDirectory: true), toolNamingDirectory:
                 URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
-                    .appendingPathComponent("APIToolNaming-v1", isDirectory: true))
+                    .appendingPathComponent("APIToolNaming-v1", isDirectory: true), correctionAccountingDirectory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("APIModelCorrectionUsage-v1", isDirectory: true))
             #else
             self.apiModelServer = APIModelServer(rejectionDiagnosticsDirectory:
                 URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
                     .appendingPathComponent("APIRequestDiagnostics-v1", isDirectory: true), toolNamingDirectory:
                 URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
-                    .appendingPathComponent("APIToolNaming-v1", isDirectory: true))
+                    .appendingPathComponent("APIToolNaming-v1", isDirectory: true), correctionAccountingDirectory:
+                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                    .appendingPathComponent("APIModelCorrectionUsage-v1", isDirectory: true))
             #endif
             self.events = events
             self.browserBroker = browserBroker

@@ -159,7 +159,8 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
   const ownerToken = "f33c8869-a5d3-4b9d-b29e-7b6f591a8e30";
   let nativeFingerprint: string | undefined;
   let adapterClockOffset = 0;
-  let digestHook: (() => void) | undefined;
+  let digestHook: (() => void | Promise<void>) | undefined;
+  let digestExpectedText: string | undefined;
   let productBootstrapped = false;
   const invoke = (request: Record<string, unknown>, useHook = true) => execute({ provider: 'chatgpt', ownerToken, bindOwner: true,
     expectedURL: document.URL, expectedUserCounts: [options.userPrompt === undefined ? 0 : 1],
@@ -169,17 +170,19 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
       timers.push(callback); scheduledDelays.push(delay);
     }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
       const digest = await crypto.subtle.digest(algorithm, data);
-      if (useHook) { digestHook?.(); digestHook = undefined; }
+      if (useHook && (digestExpectedText === undefined || new TextDecoder().decode(data) === digestExpectedText)) {
+        const hook = digestHook; digestHook = undefined; digestExpectedText = undefined; await hook?.();
+      }
       return digest;
     } } }, class TextArea extends Element {}, { now: () => Date.now() + adapterClockOffset });
-  return { posted, observers, location, document, world, window, body, temporary, composer, modeGroup, chatMode, workMode, scheduledDelays, userBody, answer: outer,
+  return { rawRun: invoke, messages, posted, observers, location, document, world, window, body, temporary, composer, modeGroup, chatMode, workMode, scheduledDelays, userBody, answer: outer,
     advanceTime: (milliseconds: number) => { adapterClockOffset += milliseconds; },
     setHit: (node: Element | null | undefined) => { hitOverride = node; },
     appendUser: (prompt: string) => {
       const root = new Element('ARTICLE', { 'data-turn': 'user', 'data-testid': 'conversation-turn-appended' });
-      root.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, prompt)); messages.append(root);
+      root.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, prompt)); messages.append(root); return root;
     },
-    onDigest: (hook: () => void) => { digestHook = hook; },
+    onDigest: (hook: () => void | Promise<void>, expectedText?: string) => { digestHook = hook; digestExpectedText = expectedText; },
     diagnose: (overrides: Record<string, unknown> = {}) => invoke({ action: 'failedPageDiagnostic', bindOwner: false, ...overrides }),
     submit: (prompt: string) => invoke({ action: 'submit', prompt }),
     inspect: async (overrides: Record<string, unknown> = {}, adopt = true) => {
@@ -241,6 +244,312 @@ defineWebsiteModelChoiceTests('chatgpt', (owned = false) => {
   const f = fixture({ response: owned, ...(owned ? { userPrompt: 'Synthetic owned prompt' } : {}) });
   return { ...f, run: (action: string, overrides: Record<string, unknown> = {}) => f.inspect({ ...overrides, action }) };
 }, Element);
+
+async function chatTurnFixture(modelChoice?: { key: string; label: string }, initialMarker = firstMarker) {
+  const f = fixture({ response: false });
+  await f.inspect({ expectedUserCounts: [0], expectedFirstUserMarker: initialMarker });
+  if (modelChoice) {
+    installObservedModelPicker(f, 'chatgpt', Element, { genericHeader: true });
+    const model = await f.inspect({ action: 'verifyModel', expectedUserCounts: [0], expectedModelChoice: modelChoice });
+    expect(model.error).toBeUndefined();
+  }
+  const selection: any = { anchorNode: f.composer, focusNode: f.composer,
+    removeAllRanges() {}, addRange() {} };
+  (f.window as any).getSelection = () => selection;
+  (f.document as any).createRange = () => ({ selectNodeContents(node: Element) {
+    selection.anchorNode = node; selection.focusNode = node;
+  }, collapse() {} });
+  (f.composer as any).focus = () => { (f.document as any).activeElement = f.composer; };
+  (f.document as any).execCommand = (command: string, _ui: boolean, text: string) => {
+    if (command !== 'insertText') return false; f.composer.text = text; return true;
+  };
+  const send = new Element('BUTTON', { 'aria-label': 'Send prompt' }); f.body.append(send);
+  let outgoing = '', addBody = true;
+  send.onClick = () => { if (addBody) f.appendUser(outgoing); f.composer.text = ''; };
+  const proofs: { sequence: number; fingerprint: string }[] = [];
+  const records: { sequence: number; marker: string; outbound: string; fingerprint: string }[] = [];
+  const hex = async (text: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256',
+    new TextEncoder().encode(text.replace(/\r\n?/g, '\n').normalize('NFC').trim())))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const values = (record: typeof records[number], current = proofs) => ({ submissionSequence: record.sequence,
+    submissionMarker: record.marker, expectedFirstUserMarker: initialMarker, expectedSubmissionProofs: current.slice(-2), ...(modelChoice ? { expectedModelChoice: modelChoice } : {}) });
+  return { f, send, records, proofs, values,
+    addBody(value: boolean) { addBody = value; },
+    async dispatch(text: string) {
+      const sequence = records.length + 1, marker = sequence === 1 ? initialMarker
+        : `00000000-0000-4000-8000-${sequence.toString(16).padStart(12, '0')}`;
+      const outbound = text + '\n\nComputa session marker: ' + marker;
+      const record = { sequence, marker, outbound, fingerprint: await hex(outbound) };
+      const inserted = await f.rawRun({ action: 'insert', prompt: outbound, expectedUserCounts: [sequence - 1], ...values(record) });
+      expect(inserted.error).toBeUndefined(); expect(inserted.inserted).toBe(true);
+      const ready = await f.rawRun({ action: 'sendReady', prompt: outbound, expectedUserCounts: [sequence - 1], ...values(record) });
+      expect(ready.sendReady).toBe(true);
+      outgoing = outbound; proofs.push({ sequence, fingerprint: record.fingerprint }); records.push(record);
+      const ack = await f.rawRun({ action: 'submit', prompt: outbound, expectedUserCounts: [sequence - 1], ...values(record) });
+      expect(ack.error).toBeUndefined(); expect(ack.submitted).toBe(true); expect(ack.submissionPending).toBe(true);
+      expect(ack.text).toBe(''); expect(ack.answerComplete).toBe(false); expect(ack).not.toHaveProperty('submissionProof');
+      return record;
+    },
+    async observe(record = records.at(-1)!, overrides: Record<string, unknown> = {}) {
+      return await f.inspect({ expectedUserCounts: [record.sequence], ...values(record), ...overrides });
+    },
+    answer(text: string) {
+      const root = new Element('ARTICLE', { 'data-turn': 'assistant' });
+      root.append(new Element('DIV', { 'data-markdown-text-style': 'assistant-message' }, JSON.stringify({ type: 'message', text })),
+        new Element('BUTTON', { 'aria-label': 'Copy' })); f.messages.append(root); return root;
+    } };
+}
+
+describe('ChatGPT per-round canonical submission ownership', () => {
+  const replaceRoot = (x: Awaited<ReturnType<typeof chatTurnFixture>>, ordinal = 0, changed = false) => {
+    const roots = x.f.document.querySelectorAll('article[data-turn="user"]'), old = roots[ordinal];
+    const root = new Element('ARTICLE', { 'data-turn': 'user' });
+    root.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, old.children[0].text + (changed ? '!' : '')));
+    x.f.messages.children = x.f.messages.children.map(node => node === old ? root : node);
+    root.parentElement = x.f.messages; old.connected = false;
+    return { old, root, body: root.children[0] };
+  };
+
+  test('first claimed root-to-conversation acknowledgement publishes no body authority and fresh URL read proves it', async () => {
+    const x = await chatTurnFixture(); const click = x.send.onClick!;
+    x.send.onClick = () => { click(); x.f.document.URL = 'https://chatgpt.com/c/local-chatgpt%3Afixture?temporary-chat=true';
+      x.f.location.pathname = '/c/local-chatgpt%3Afixture'; };
+    const first = await x.dispatch('Exact first route transition');
+    x.answer('First complete'); const current = await x.observe(first);
+    expect(current.error).toBeUndefined(); expect(current.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+    expect(x.send.clicks).toBe(1);
+    const second = await x.dispatch('Exact second route-stable request'); x.answer('Second complete');
+    expect((await x.observe(second)).submissionProof).toEqual({ sequence: 2, fingerprint: second.fingerprint });
+    expect(x.send.clicks).toBe(2);
+  });
+
+  test('a first Send cannot acknowledge foreign or unrelated routes and later Send cannot promote a new route', async () => {
+    for (const [route, later] of [['https://foreign.test/c/x', false], ['https://chatgpt.com/settings', false],
+      ['https://chatgpt.com/c/different?temporary-chat=true', true]] as const) {
+      const x = await chatTurnFixture();
+      if (later) { const first = await x.dispatch('Exact first'); x.answer('First'); await x.observe(first); }
+      const sequence = later ? 2 : 1, marker = later ? '00000000-0000-4000-8000-000000000002' : firstMarker;
+      const outbound = 'Exact route request\n\nComputa session marker: ' + marker;
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(outbound));
+      const fingerprint = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+      const values = { submissionSequence: sequence, submissionMarker: marker, expectedUserCounts: [sequence - 1],
+        expectedSubmissionProofs: [...x.proofs.slice(-1)] };
+      expect((await x.f.rawRun({ action: 'insert', prompt: outbound, ...values })).inserted).toBe(true);
+      const click = x.send.onClick!;
+      x.send.onClick = () => { x.f.appendUser(outbound); x.f.composer.text = ''; x.f.document.URL = route; };
+      const ack = await x.f.rawRun({ action: 'submit', prompt: outbound, ...values,
+        expectedSubmissionProofs: [...x.proofs.slice(-1), { sequence, fingerprint }] });
+      expect(ack.error).toBeDefined(); expect(ack).not.toHaveProperty('submissionProof'); expect(ack).not.toHaveProperty('answerComplete', true);
+      expect(x.send.clicks).toBe(sequence);
+    }
+  });
+
+  test('only an existing certified first-body discard can rebind an exact detached root on fresh inspect', async () => {
+    const x = await chatTurnFixture({ key: 'chat/latest/medium', label: 'Medium' });
+    const first = await x.dispatch('Exact first certified replacement'); x.answer('First'); await x.observe(first); await x.observe(first);
+    const state: any = x.f.world.__computaChatSubmissionState, record = state.lastVerified;
+    expect(record.nativeFirstPinned).toBe(true);
+    let replacement: ReturnType<typeof replaceRoot>;
+    x.f.onDigest(() => { replacement = replaceRoot(x); }, first.outbound);
+    const discarded = await x.observe(first);
+    expect(discarded).toMatchObject({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+    expect(discarded).not.toHaveProperty('submissionProof'); expect(discarded).not.toHaveProperty('text');
+    expect(record.root).toBe(replacement!.old); expect(record.replacement.root).toBe(replacement!.root);
+    const current = await x.observe(first);
+    expect(current.error).toBeUndefined(); expect(current.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+    expect(record.root).toBe(replacement!.root); expect(record.replacement).toBeNull(); expect(state.revoked).toBe(false);
+    expect(x.send.clicks).toBe(1);
+
+    // No certificate exists for a replacement between reads, even at seq1.
+    replaceRoot(x);
+    const unissued = await x.observe(first);
+    expect(unissued.error).toBeDefined(); expect(unissued).not.toHaveProperty('submissionProof'); expect(x.send.clicks).toBe(1);
+  });
+
+  test('a certified candidate is refused after replacement body or native pin changes and during its digest', async () => {
+    for (const mutation of ['body', 'root', 'native_pin', 'digest']) {
+      const x = await chatTurnFixture({ key: 'chat/latest/medium', label: 'Medium' });
+      const first = await x.dispatch('Exact certified bytes'); x.answer('First'); await x.observe(first); await x.observe(first);
+      x.f.onDigest(() => { replaceRoot(x); }, first.outbound);
+      expect((await x.observe(first)).error).toBe('first_user_observation_replaced');
+      if (mutation === 'body') x.f.document.querySelectorAll('article[data-turn="user"]')[0].children[0].text += '!';
+      if (mutation === 'root') replaceRoot(x);
+      if (mutation === 'digest') x.f.onDigest(() => { replaceRoot(x); }, first.outbound);
+      const current = await x.observe(first, mutation === 'native_pin' ? { expectedSubmissionProofs: [{ sequence: 1, fingerprint: '0'.repeat(64) }] } : {});
+      expect(current.error).toBeDefined(); expect(current).not.toHaveProperty('submissionProof'); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('a private-only first read rejects its crossed replacement but a separate Native-authorized binding proves exact bytes', async () => {
+    const x = await chatTurnFixture({ key: 'chat/latest/medium', label: 'Medium' });
+    const first = await x.dispatch('Exact provisional first read'); x.answer('First');
+    const initial = await x.f.rawRun({ action: 'inspect', expectedUserCounts: [1], ...x.values(first),
+      expectedFirstUserFingerprint: null, allowFirstUserBinding: true });
+    expect(initial.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+    const record: any = (x.f.world.__computaChatSubmissionState as any).lastVerified;
+    expect(record.nativeFirstPinned).not.toBe(true);
+    x.f.onDigest(() => { replaceRoot(x); }, first.outbound);
+    const crossed = await x.f.rawRun({ action: 'inspect', expectedUserCounts: [1], ...x.values(first),
+      expectedFirstUserFingerprint: null, allowFirstUserBinding: true });
+    expect(crossed).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+    expect(crossed).not.toHaveProperty('submissionProof'); expect(record.replacement).toBeUndefined();
+    const independentlyBound = await x.observe(first, { expectedFirstUserFingerprint: null, allowFirstUserBinding: true });
+    expect(independentlyBound.error).toBeUndefined(); expect(independentlyBound.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+    expect(record.root).toBe(x.f.document.querySelectorAll('article[data-turn="user"]')[0]); expect(x.send.clicks).toBe(1);
+  });
+
+  test('native uppercase first nonce is retained byte-for-byte while malformed and replaced nonces reject', async () => {
+    const uppercase = firstMarker.toUpperCase();
+    const x = await chatTurnFixture(undefined, uppercase);
+    const record = await x.dispatch('Exact native uppercase request');
+    x.answer('Uppercase body verified');
+    const verified = await x.observe(record);
+    expect(verified.error).toBeUndefined();
+    expect(verified.submissionProof).toEqual({ sequence: 1, fingerprint: record.fingerprint });
+    expect(verified.firstUserFingerprint).toBe(record.fingerprint);
+    expect(record.outbound.endsWith('Computa session marker: ' + uppercase)).toBe(true);
+    const state: any = x.f.world.__computaChatSubmissionState;
+    expect(state.firstMarker).toBe(uppercase); expect(state.lastVerified.marker).toBe(uppercase);
+    expect(state.lastVerified.canonical).toBe(record.outbound);
+    const replaced = await x.observe(record, { expectedFirstUserMarker: uppercase.toLowerCase() });
+    expect(replaced.error).toBeDefined(); expect(replaced).not.toHaveProperty('submissionProof');
+    expect(x.send.clicks).toBe(1);
+
+    for (const marker of [uppercase.replace('B', 'G'), uppercase.slice(1), uppercase + '0']) {
+      const bad = await chatTurnFixture(undefined, uppercase);
+      const outbound = 'Exact input\n\nComputa session marker: ' + marker;
+      const rejected = await bad.f.rawRun({ action: 'insert', prompt: outbound, expectedUserCounts: [0],
+        expectedFirstUserMarker: uppercase, submissionSequence: 1, submissionMarker: marker, expectedSubmissionProofs: [] });
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      expect(rejected).not.toHaveProperty('inserted'); expect(bad.send.clicks).toBe(0); expect(bad.f.composer.text).toBe('');
+    }
+
+    const beforeSend = await chatTurnFixture(undefined, uppercase);
+    const outbound = 'Exact pending input\n\nComputa session marker: ' + uppercase;
+    const fingerprint = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(outbound)))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const input = { prompt: outbound, expectedUserCounts: [0], expectedFirstUserMarker: uppercase,
+      submissionSequence: 1, submissionMarker: uppercase, expectedSubmissionProofs: [] };
+    const inserted = await beforeSend.f.rawRun({ ...input, action: 'insert' });
+    expect(inserted.inserted).toBe(true);
+    const replacedAtClaim = await beforeSend.f.rawRun({ ...input, action: 'submit', submissionMarker: uppercase.toLowerCase(),
+      expectedSubmissionProofs: [{ sequence: 1, fingerprint }] });
+    expect(replacedAtClaim).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(replacedAtClaim).not.toHaveProperty('submitted'); expect(beforeSend.send.clicks).toBe(0);
+  });
+
+  test('seven rounds retain exact outbound fingerprints and suppress the previous answer', async () => {
+    const x = await chatTurnFixture();
+    for (let i = 0; i < 7; i++) {
+      const record = await x.dispatch(`Complete request ${i}: {"input":["literal .:/- ${i}"],"tools":[]}`);
+      const beforeAnswer = await x.observe(record);
+      expect(beforeAnswer.error).toBeUndefined(); expect(beforeAnswer.submissionProof).toEqual({ sequence: i + 1, fingerprint: record.fingerprint });
+      expect(beforeAnswer.text).toBe(''); expect(beforeAnswer.answerComplete).toBe(false);
+      x.answer(`Round ${i} complete`);
+      const complete = await x.observe(record);
+      expect(complete.error).toBeUndefined(); expect(complete.answerComplete).toBe(true);
+      expect(complete.submissionProof).toEqual({ sequence: i + 1, fingerprint: record.fingerprint });
+      expect(complete.firstUserFingerprint).toBe(x.records[0].fingerprint);
+      expect(complete.text).toContain(`Round ${i} complete`);
+    }
+    expect(x.send.clicks).toBe(7); expect(new Set(x.records.map(r => r.marker)).size).toBe(7);
+  });
+
+  test('changed current or prior bodies and physical replacements cannot yield another response', async () => {
+    for (const mutation of ['current', 'prior', 'body', 'root', 'ordinal', 'native_pin', 'model', 'owner', 'route']) {
+      const x = await chatTurnFixture(); const first = await x.dispatch('Exact first request'); x.answer('First'); await x.observe(first);
+      const second = await x.dispatch('Exact second request'); x.answer('Second');
+      const roots = x.f.document.querySelectorAll('article[data-turn="user"]');
+      if (mutation === 'current') roots[1].children[0].text += ' changed';
+      if (mutation === 'prior') roots[0].children[0].text += ' changed';
+      if (mutation === 'body') { const old = roots[1].children[0]; old.connected = false;
+        const replacement = new Element('DIV', { class: 'whitespace-pre-wrap' }, second.outbound);
+        roots[1].children = [replacement]; replacement.parentElement = roots[1];
+        // First bind, then replacing the certified body is refused below.
+        old.connected = true; roots[1].children = [old]; await x.observe(second);
+        old.connected = false; roots[1].children = [replacement]; }
+      if (mutation === 'root') { await x.observe(second); const old = roots[1]; old.connected = false;
+        const replacement = new Element('ARTICLE', { 'data-turn': 'user' }); replacement.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, second.outbound));
+        x.f.messages.children = x.f.messages.children.map(node => node === old ? replacement : node); replacement.parentElement = x.f.messages; }
+      if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+      if (mutation === 'route') x.f.document.URL = 'https://chatgpt.com/c/other';
+      const overrides: any = mutation === 'ordinal' ? { submissionSequence: 1 } : mutation === 'native_pin'
+        ? { expectedSubmissionProofs: [{ sequence: 1, fingerprint: first.fingerprint }, { sequence: 2, fingerprint: '0'.repeat(64) }] }
+        : mutation === 'model' ? { expectedModelChoice: { provider: 'chatgpt', key: 'foreign', label: 'Foreign' } }
+        : mutation === 'route' ? { expectedURL: 'https://chatgpt.com/' } : {};
+      const rejected = await x.observe(second, overrides);
+      expect(rejected.error).toBeDefined(); expect(rejected).not.toHaveProperty('submissionProof');
+      expect(rejected).not.toHaveProperty('answerComplete', true); expect(x.send.clicks).toBe(2);
+    }
+  });
+
+  test('body, ordinal and owner changes during the digest revoke proof without another Send', async () => {
+    for (const mutation of ['body', 'append', 'owner']) {
+      const x = await chatTurnFixture(); const record = await x.dispatch('Exact pending request');
+      x.f.onDigest(() => { if (mutation === 'body') x.f.document.querySelectorAll('article[data-turn="user"]')[0].children[0].text += '!';
+        if (mutation === 'append') x.f.appendUser('Unowned extra body'); if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign'; });
+      const rejected = await x.observe(record); expect(rejected.error).toBeDefined(); expect(rejected).not.toHaveProperty('submissionProof');
+      expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('a replacement readonly invocation owns proof while a timed-out digest cannot revoke or bind', async () => {
+    const x = await chatTurnFixture(); const first = await x.dispatch('Exact first'); x.answer('First'); await x.observe(first);
+    const second = await x.dispatch('Exact second'); x.answer('Second');
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const enteredGate = new Promise<void>(resolve => { entered = resolve; });
+    x.f.onDigest(async () => { entered(); await gate; }, second.outbound);
+    const staleRead = x.observe(second); await enteredGate;
+    const fresh = await x.observe(second);
+    expect(fresh.submissionProof).toEqual({ sequence: 2, fingerprint: second.fingerprint });
+    const state: any = x.f.world.__computaChatSubmissionState;
+    expect(state.pending).toBeNull(); expect(state.revoked).toBe(false);
+    release();
+    const stale = await staleRead;
+    expect(stale.error).toBe('document_changed'); expect(stale).not.toHaveProperty('submissionProof');
+    expect(state.revoked).toBe(false); expect(state.lastVerified.sequence).toBe(2);
+    expect((await x.observe(second)).submissionProof).toEqual({ sequence: 2, fingerprint: second.fingerprint });
+    expect(x.send.clicks).toBe(2);
+  });
+
+  test('later expansion uses only the sole current message ancestor and still requires exact whole bytes', async () => {
+    for (const altered of [false, true]) {
+      const x = await chatTurnFixture({ key: 'chat/latest/medium', label: 'Medium' });
+      const first = await x.dispatch('Exact first request'); x.answer('First'); await x.observe(first);
+      const second = await x.dispatch('Complete second request ' + 'A'.repeat(160));
+      const root = x.f.document.querySelectorAll('article[data-turn="user"]')[1], body = root.children[0];
+      body.text = second.outbound.slice(0, 30);
+      const wrapper = new Element('DIV'); x.f.messages.children = x.f.messages.children.map(node => node === root ? wrapper : node);
+      wrapper.parentElement = x.f.messages; root.parentElement = wrapper; wrapper.children = [root];
+      const more = new Element('BUTTON', { 'aria-label': 'Show more' }, 'Show more');
+      more.onClick = () => { body.text = second.outbound + (altered ? '!' : ''); };
+      wrapper.append(more); x.answer('Second');
+      const result = await x.observe(second, { allowSubmissionExpansion: true });
+      if (altered) { expect(result.error).toBeDefined(); expect(result).not.toHaveProperty('submissionProof'); }
+      else { expect(result.error).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence: 2, fingerprint: second.fingerprint }); }
+      expect(more.clicks).toBe(1); expect(x.send.clicks).toBe(2);
+    }
+  });
+
+  test('missing private round state cannot downgrade dispatched native pins to a legacy answer', async () => {
+    for (const malformed of [false, true]) {
+      const x = await chatTurnFixture(); const record = await x.dispatch('Exact owned request'); x.answer('Observed final'); await x.observe(record);
+      delete x.f.world.__computaChatSubmissionState;
+      const rejected = await x.observe(record, malformed ? { expectedSubmissionProofs: { sequence: 1 } } : {});
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      expect(rejected).not.toHaveProperty('submissionProof'); expect(rejected).not.toHaveProperty('text'); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('pending absence and duplicate claimed submissions never publish an answer or replay Send', async () => {
+    const x = await chatTurnFixture(); x.addBody(false); const record = await x.dispatch('Exact body not yet rendered');
+    const pending = await x.observe(record, { expectedUserCounts: [0, 1] });
+    expect(pending.error).toBeUndefined(); expect(pending.submissionPending).toBe(true);
+    expect(pending.text).toBe(''); expect(pending.answerComplete).toBe(false); expect(pending).not.toHaveProperty('submissionProof');
+    x.f.composer.text = record.outbound;
+    const replay = await x.f.rawRun({ action: 'submit', prompt: record.outbound, expectedUserCounts: [0], ...x.values(record) });
+    expect(replay.error).toBeDefined(); expect(x.send.clicks).toBe(1);
+  });
+});
 
 describe('ChatGPT literal DOM failure diagnostics', () => {
   const fields = ['literalDOMFailureNodeKind', 'literalDOMFailureTag', 'literalDOMFailureParentTag', 'literalDOMFailureRule'];

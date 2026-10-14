@@ -21,9 +21,10 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
   );
 }
 
-export function WebsiteModelsRefresh({ refreshing = false, onRefresh }: {
-  refreshing?: boolean; onRefresh: () => void }) {
+export function WebsiteModelsRefresh({ refreshing = false, canRefresh = false, onRefresh }: {
+  refreshing?: boolean; canRefresh?: boolean; onRefresh: () => void }) {
   return <Button variant="ghost" size="sm" aria-label="Refresh website models"
-    title="Read the model choices available in your signed-in websites"
-    disabled={refreshing} onClick={onRefresh}>{refreshing ? 'Refreshing…' : 'Refresh models'}</Button>;
+    title={canRefresh ? 'Read the model choices available in your signed-in websites'
+      : 'Finish active tasks and approvals before refreshing website models'}
+    disabled={refreshing || !canRefresh} onClick={onRefresh}>{refreshing ? 'Refreshing…' : 'Refresh models'}</Button>;
 }

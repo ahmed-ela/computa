@@ -62,6 +62,34 @@ enum APIModelResponseCodec {
         /// Finite source facts only; no additional text or reasoning is retained.
         let finalTextSource: FinalTextSource?
     }
+    enum DecodeOutcome: Sendable {
+        case reply(Reply)
+        /// No native output, generated call IDs or reasoning capsule is published.
+        /// Usage is present and exact; every non-argument gate has already passed.
+        case argumentsRejected(APIModelCorrectionUsage)
+    }
+    static let correctiveFeedback = "Native validation rejected the preceding provider response because tool arguments did not match the offered JSON schemas. No call from that rejected response was executed. Produce a new response using only the unchanged offered tools and exact schema-valid arguments. Preserve the confirmed outcomes in the supplied history; do not repeat actions already completed in that history."
+
+    static func correctiveRequest(_ original: Request) throws -> Request {
+        guard original.provider.wireAPI == .chatCompletions,
+              var body = try JSONSerialization.jsonObject(with: original.body) as? [String: Any],
+              var messages = body["messages"] as? [[String: Any]], !messages.isEmpty else { throw Failure.invalidRequest }
+        if messages[0]["role"] as? String == "system" {
+            guard let originalText = messages[0]["content"] as? String else { throw Failure.invalidRequest }
+            messages[0]["content"] = originalText + "\n\n" + correctiveFeedback
+        } else {
+            messages.insert(["role": "system", "content": correctiveFeedback], at: 0)
+        }
+        body["messages"] = messages
+        let bytes = try json(body)
+        guard bytes.count <= maximumText else { throw Failure.invalidRequest }
+        return Request(localModelID: original.localModelID, provider: original.provider, model: original.model,
+                       threadID: original.threadID, stream: original.stream, body: bytes, tools: original.tools,
+                       toolNaming: original.toolNaming, allowedTools: original.allowedTools, requiredTool: original.requiredTool,
+                       maximumCalls: original.maximumCalls, historyCallIDs: original.historyCallIDs,
+                       capsules: original.capsules, responseConfiguration: original.responseConfiguration)
+    }
+
     struct TextShape: Codable, Equatable, Sendable {
         let utf8Bytes: Int
         let unicodeScalars: Int
@@ -483,14 +511,24 @@ enum APIModelResponseCodec {
     }
 
     static func decode(_ result: APIProviderHTTPClient.Result, request: Request) throws -> Reply {
-        if request.provider.wireAPI == .responses { return try decodeResponses(result.body, request: request) }
+        switch try decodeForCorrection(result, request: request) {
+        case .reply(let reply): return reply
+        case .argumentsRejected: throw Failure.invalidArguments
+        }
+    }
+
+    static func decodeForCorrection(_ result: APIProviderHTTPClient.Result, request: Request) throws -> DecodeOutcome {
+        if request.provider.wireAPI == .responses { return .reply(try decodeResponses(result.body, request: request)) }
         let envelope: [String: Any], textDeltas: [String], argumentDeltas: [[String]]
+        let rawCorrectionEligible: Bool
         if result.contentType.contains("text/event-stream") {
             let assembled = try assembleChatStream(result.body)
             envelope = assembled.object; textDeltas = assembled.text; argumentDeltas = assembled.arguments
+            rawCorrectionEligible = assembled.correctionEligible
         } else {
             guard let object = try JSONSerialization.jsonObject(with: result.body) as? [String: Any] else { throw Failure.invalidResponse }
             envelope = object; textDeltas = []; argumentDeltas = []
+            rawCorrectionEligible = correctionEnvelopeShape(object, streaming: false) && APIModelCorrectionJSON.isUnambiguous(result.body)
         }
         guard envelope["model"] as? String == request.model.id else { throw Failure.modelMismatch }
         guard let choices = envelope["choices"] as? [[String: Any]], choices.count == 1,
@@ -509,18 +547,47 @@ enum APIModelResponseCodec {
         else { throw Failure.invalidResponse }
         guard calls.count <= request.maximumCalls, !request.requiredTool || !calls.isEmpty,
               (finish == "tool_calls") == !calls.isEmpty else { throw Failure.invalidResponse }
-        let responseID = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        var output: [[String: Any]] = [], callIDs = request.historyCallIDs, actualIDs: [String] = []
+        // Complete the entire envelope, identities, reasoning and usage BEFORE
+        // an argument-only classification. A first bad call cannot hide a later
+        // unknown tool, duplicate ID, malformed reasoning or invalid usage.
+        let normalizedUsage = try usage(envelope["usage"], responses: false)
+        guard absent(message["reasoning"]) || message["reasoning"] is String else { throw Failure.invalidResponse }
+        var callIDs = request.historyCallIDs
+        var validatedCalls: [(id: String, tool: Tool, arguments: String)] = []
         for call in calls {
             guard call["type"] as? String == "function", let id = call["id"] as? String, validCallID(id), callIDs.insert(id).inserted,
                   let function = call["function"] as? [String: Any], let wireName = function["name"] as? String,
                   request.allowedTools.contains(wireName), let tool = request.tools.first(where: { $0.wireName == wireName }),
                   let arguments = function["arguments"] as? String else { throw Failure.invalidTool }
-            let parsed = try validatedArguments(arguments, tool: tool)
-            var item: [String: Any] = ["id": (tool.custom ? "ctc_" : "fc_") + UUID().uuidString, "type": tool.custom ? "custom_tool_call" : "function_call", "status": "completed", "call_id": id, "name": tool.name]
+            validatedCalls.append((id, tool, arguments))
+        }
+        var parsedArguments: [[String: Any]] = [], argumentsRejected = false
+        for call in validatedCalls {
+            guard call.arguments.utf8.count <= maximumText else { throw Failure.invalidArguments }
+            do { parsedArguments.append(try validatedArguments(call.arguments, tool: call.tool)) }
+            catch let failure as Failure where failure == .invalidArguments {
+                argumentsRejected = true; parsedArguments.append([:])
+            }
+        }
+        if let reasoning = message["reasoning"] as? String, !reasoning.isEmpty {
+            // Same encoded-size guard as seal, without generating or publishing
+            // a capsule for the rejected response. Generated response IDs have
+            // this fixed ASCII width; exact call IDs and reasoning are retained.
+            try APIReasoningCapsules.validatePayload(.init(reasoning: reasoning, callIDs: validatedCalls.map(\.id),
+                responseID: "resp_" + String(repeating: "0", count: 32), toolNaming: request.toolNaming.rawValue))
+        }
+        if argumentsRejected {
+            guard rawCorrectionEligible, let known = correctionUsage(normalizedUsage) else { throw Failure.invalidArguments }
+            return .argumentsRejected(known)
+        }
+        let responseID = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        var output: [[String: Any]] = [], actualIDs: [String] = []
+        for (index, call) in validatedCalls.enumerated() {
+            let tool = call.tool
+            var item: [String: Any] = ["id": (tool.custom ? "ctc_" : "fc_") + UUID().uuidString, "type": tool.custom ? "custom_tool_call" : "function_call", "status": "completed", "call_id": call.id, "name": tool.name]
             if let namespace = tool.namespace { item["namespace"] = namespace }
-            if tool.custom { item["input"] = parsed["input"] as! String } else { item["arguments"] = arguments }
-            output.append(item); actualIDs.append(id)
+            if tool.custom { item["input"] = parsedArguments[index]["input"] as! String } else { item["arguments"] = call.arguments }
+            output.append(item); actualIDs.append(call.id)
         }
         if !text.isEmpty {
             output.insert(["id": "msg_" + UUID().uuidString, "type": "message", "status": "completed", "role": "assistant",
@@ -533,11 +600,10 @@ enum APIModelResponseCodec {
             output.insert(["id": id, "type": "reasoning", "status": "completed", "summary": [], "encrypted_content": capsule], at: 0)
         } else if !absent(message["reasoning"]) && !(message["reasoning"] is String) { throw Failure.invalidResponse }
         guard !output.isEmpty else { throw Failure.invalidResponse }
-        let usage = try usage(envelope["usage"], responses: false)
-        let resource = response(id: responseID, request: request, output: output, text: text, usage: usage)
-        return Reply(response: resource,
-                     textDeltas: textDeltas.isEmpty && !text.isEmpty ? [text] : textDeltas, argumentDeltas: argumentDeltas,
-                     finalTextSource: calls.isEmpty ? finalTextSource(text, response: resource) : nil)
+        let resource = response(id: responseID, request: request, output: output, text: text, usage: normalizedUsage)
+        return .reply(Reply(response: resource,
+                           textDeltas: textDeltas.isEmpty && !text.isEmpty ? [text] : textDeltas, argumentDeltas: argumentDeltas,
+                           finalTextSource: calls.isEmpty ? finalTextSource(text, response: resource) : nil))
     }
 
     private static func decodeResponses(_ data: Data, request: Request) throws -> Reply {
@@ -590,11 +656,38 @@ enum APIModelResponseCodec {
                      finalTextSource: count == 0 ? finalTextSource(text, response: resource) : nil)
     }
 
-    private struct ChatStream { let object: [String: Any]; let text: [String]; let arguments: [[String]] }
+    private struct ChatStream { let object: [String: Any]; let text: [String]; let arguments: [[String]]; let correctionEligible: Bool }
+    private static func correctionEnvelopeShape(_ value: [String: Any], streaming: Bool) -> Bool {
+        guard absent(value["error"]), let id = value["id"] as? String, !id.isEmpty, id.utf8.count <= 256,
+              !id.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              absent(value["object"]) || value["object"] as? String == (streaming ? "chat.completion.chunk" : "chat.completion"),
+              absent(value["system_fingerprint"]) || value["system_fingerprint"] is String else { return false }
+        if !absent(value["created"]), (try? integer(value["created"], default: -1, range: 0...4_102_444_800)) == nil { return false }
+        return true
+    }
+    private static func correctionDeltaShape(_ delta: [String: Any]) -> Bool {
+        if delta["role"] != nil, !(delta["role"] is String) { return false }
+        for key in ["content", "reasoning"] {
+            if !absent(delta[key]), !(delta[key] is String) { return false }
+        }
+        guard absent(delta["refusal"]), absent(delta["function_call"]) else { return false }
+        if let calls = delta["tool_calls"] as? [[String: Any]] {
+            for call in calls {
+                if call["id"] != nil, !(call["id"] is String) { return false }
+                if call["type"] != nil, call["type"] as? String != "function" { return false }
+                if call["function"] != nil {
+                    guard let function = call["function"] as? [String: Any] else { return false }
+                    for key in ["name", "arguments"] { if function[key] != nil, !(function[key] is String) { return false } }
+                }
+            }
+        } else if !absent(delta["tool_calls"]) { return false }
+        return true
+    }
     private static func assembleChatStream(_ data: Data) throws -> ChatStream {
         guard let string = String(data: data, encoding: .utf8) else { throw Failure.invalidResponse }
         var done = false, model: String?, id: String?, role: String?, finish: String?, usage: Any?
         var text: [String] = [], reasoning = "", calls: [Int: (id: String, name: String, arguments: [String])] = [:]
+        var correctionEligible = true, previousUsage: Data?
         for event in string.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n\n") {
             let payload = event.components(separatedBy: "\n").filter { $0.hasPrefix("data:") }.map { String($0.dropFirst(5)).trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
             if payload.isEmpty { continue }
@@ -603,12 +696,21 @@ enum APIModelResponseCodec {
             guard let chunkData = payload.data(using: .utf8), let chunk = try JSONSerialization.jsonObject(with: chunkData) as? [String: Any],
                   chunk["error"] == nil, let chunkModel = chunk["model"] as? String, let chunkID = chunk["id"] as? String,
                   let choices = chunk["choices"] as? [[String: Any]], choices.count <= 1 else { throw Failure.invalidResponse }
+            correctionEligible = correctionEligible && correctionEnvelopeShape(chunk, streaming: true) && APIModelCorrectionJSON.isUnambiguous(chunkData)
+            if !absent(chunk["usage"]) {
+                if let normalized = try? Self.usage(chunk["usage"], responses: false), let bytes = try? json(normalized) {
+                    if let previousUsage, previousUsage != bytes { correctionEligible = false }
+                    previousUsage = bytes
+                } else { correctionEligible = false }
+            }
             if let model { guard model == chunkModel, id == chunkID else { throw Failure.invalidResponse } }
             else { model = chunkModel; id = chunkID }
             if !absent(chunk["usage"]) { usage = chunk["usage"] }
             guard let choice = choices.first else { continue }
             guard try integer(choice["index"], default: -1, range: 0...0) == 0, finish == nil,
                   let delta = choice["delta"] as? [String: Any] else { throw Failure.invalidResponse }
+            correctionEligible = correctionEligible && correctionDeltaShape(delta)
+            if !absent(choice["finish_reason"]), !(choice["finish_reason"] is String) { correctionEligible = false }
             if let value = delta["role"] as? String { guard value == "assistant", role == nil || role == value else { throw Failure.invalidResponse }; role = value }
             if let value = delta["content"] as? String { text.append(value) } else if !absent(delta["content"]) { throw Failure.invalidResponse }
             if let value = delta["reasoning"] as? String { reasoning += value } else if !absent(delta["reasoning"]) { throw Failure.invalidResponse }
@@ -634,7 +736,7 @@ enum APIModelResponseCodec {
         }
         let message: [String: Any] = ["role": "assistant", "content": text.joined(), "reasoning": reasoning, "tool_calls": rows]
         return ChatStream(object: ["id": id, "model": model, "choices": [["index": 0, "message": message, "finish_reason": finish]], "usage": usage ?? NSNull()],
-                          text: text, arguments: (0..<calls.count).map { calls[$0]!.arguments })
+                          text: text, arguments: (0..<calls.count).map { calls[$0]!.arguments }, correctionEligible: correctionEligible)
     }
 
     /// An admitted streaming request that received an upstream 429 terminates with
@@ -823,6 +925,28 @@ enum APIModelResponseCodec {
         let cached = try integer(inputDetails?["cached_tokens"], default: 0, range: 0...input)
         return ["input_tokens": input, "output_tokens": output, "total_tokens": total, "input_tokens_details": ["cached_tokens": cached], "output_tokens_details": ["reasoning_tokens": reasoning]]
     }
+    static func correctionUsage(_ normalized: Any?) -> APIModelCorrectionUsage? {
+        guard let value = normalized as? [String: Any], let input = value["input_tokens"] as? Int,
+              let output = value["output_tokens"] as? Int, let total = value["total_tokens"] as? Int,
+              let inputDetails = value["input_tokens_details"] as? [String: Any], let cached = inputDetails["cached_tokens"] as? Int,
+              let outputDetails = value["output_tokens_details"] as? [String: Any], let reasoning = outputDetails["reasoning_tokens"] as? Int else { return nil }
+        return .init(inputTokens: input, outputTokens: output, totalTokens: total,
+                     cachedInputTokens: cached, reasoningOutputTokens: reasoning)
+    }
+    static func withCorrectionMetadata(_ reply: Reply, ticket: APIModelCorrectionAccounting.Ticket,
+                                       secondUsage: APIModelCorrectionUsage?) throws -> Reply {
+        let combined = try secondUsage.map { try ticket.firstUsage.adding($0) } ?? ticket.firstUsage
+        var response = reply.response
+        // Standard usage remains the accepted response ONLY. The pinned engine
+        // uses it for context occupancy; summed attempts would trigger compaction.
+        response["x_computa_correction"] = ["version": 1, "correction_id": ticket.id.uuidString.lowercased(),
+            "recovered": true, "attempt_count": 2, "context_usage": "accepted_response_only",
+            "billable_usage_complete": secondUsage != nil, "second_usage_unknown": secondUsage == nil,
+            "known_billable_usage": combined.responseUsage]
+        return Reply(response: response, textDeltas: reply.textDeltas, argumentDeltas: reply.argumentDeltas,
+                     finalTextSource: reply.finalTextSource)
+    }
+
     private static func validatedArguments(_ text: String, tool: Tool) throws -> [String: Any] {
         guard text.utf8.count <= maximumText, let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -977,9 +1101,12 @@ struct APIReasoningCapsules: Sendable {
         guard let task = UUID(uuidString: threadID) else { throw APIModelResponseCodec.Failure.invalidReasoning }
         return try JSONSerialization.data(withJSONObject: ["version": "1", "item": itemID, "provider": providerID, "model": modelID, "baseURL": baseURL.absoluteString, "thread": task.uuidString.lowercased()], options: [.sortedKeys])
     }
+    static func validatePayload(_ payload: Payload) throws {
+        guard try JSONEncoder().encode(payload).count <= 2_000_000 else { throw APIModelResponseCodec.Failure.invalidReasoning }
+    }
     func seal(_ payload: Payload, itemID: String, providerID: String, modelID: String, baseURL: URL, threadID: String) throws -> String {
+        try Self.validatePayload(payload)
         let data = try JSONEncoder().encode(payload)
-        guard data.count <= 2_000_000 else { throw APIModelResponseCodec.Failure.invalidReasoning }
         let box = try AES.GCM.seal(data, using: SymmetricKey(data: key), authenticating: context(itemID: itemID, providerID: providerID, modelID: modelID, baseURL: baseURL, threadID: threadID))
         guard let combined = box.combined else { throw APIModelResponseCodec.Failure.invalidReasoning }
         return "computa-api-reasoning-v1:" + combined.base64EncodedString()

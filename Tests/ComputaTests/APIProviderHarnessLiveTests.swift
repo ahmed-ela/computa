@@ -314,6 +314,161 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         }
     }
 
+    func testBundledEngineRejectsEntireBadBatchBeforeOneCorrectionAndExecutesOnlyAcceptedTools() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
+            "Set TEST_RUNNER_COMPUTA_API_ENGINE_TEST=1 for the isolated bundled API harness qualification.")
+        let artifact: ComputaRuntimeArtifact
+        do { artifact = try ComputaRuntimeArtifact.resolve() }
+        catch ComputaRuntimeArtifact.ValidationError.resourcesUnavailable {
+            throw XCTSkip("The bundled AgentRuntime resources are absent in this source-only checkout.")
+        } catch ComputaRuntimeArtifact.ValidationError.unavailableFile {
+            throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
+        }
+        XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-6")
+        let failuresBefore = testRun?.failureCount ?? 0
+        // Match the passing harness: descriptor-based stores reject the /var symlink alias.
+        guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        defer { free(resolved) }
+        let root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+            .appendingPathComponent("ComputaAPICorrection-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("PrivateCodexHome", isDirectory: true)
+        let project = root.appendingPathComponent("Project", isDirectory: true)
+        let accounting = home.appendingPathComponent("APIModelCorrectionUsage-v1", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
+        let marker = "API_CORRECTION_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let fakeKey = "SYNTHETIC_ONLY_API_KEY_" + UUID().uuidString
+        let rejectedThinking = "REJECTED_PRIVATE_THINKING_" + UUID().uuidString
+        let credentials = APIHarnessCredentials(providerID: "fixture-correction", value: fakeKey)
+        try Data("old\n".utf8).write(to: project.appendingPathComponent("fixture.txt"))
+        try Data("untouched\n".utf8).write(to: project.appendingPathComponent("unrelated.txt"))
+        try Data((marker + "\n").utf8).write(to: project.appendingPathComponent("receipt.txt"))
+        let inference = APIHarnessCorrectionInference(project: project, accounting: accounting,
+            marker: marker, expectedKey: fakeKey, rejectedThinking: rejectedThinking)
+        let upstream = try APIHarnessHTTPFixture { await inference.respond($0) }
+        var ownedRuntime: CodexAppServerRuntime?
+        var pump: Task<Void, Never>?
+        do {
+            let model = APIModelDefinition(id: "fixture-correction-model", name: "Synthetic Correction", contextWindow: 65_536)
+            let provider = APIProviderDefinition(id: "fixture-correction", name: "Synthetic Loopback",
+                baseURL: try await upstream.start(), wireAPI: .chatCompletions, models: [model])
+            let modelID = APIProviderCatalog.appModelID(providerID: provider.id, modelID: model.id)
+            let traceURL = root.appendingPathComponent("native-protocol.jsonl")
+            var configuration = CodexAppServerRuntime.Configuration.externalLocalQwen
+            configuration.executable = .bundled
+            configuration.model = modelID
+            configuration.codexHomePath = home.path
+            configuration.workspacePath = project.path
+            configuration.protocolTracePath = traceURL.path
+            configuration.apiModelServerForTesting = APIModelServer(credentials: credentials,
+                capsules: try APIReasoningCapsules(key: Data(repeating: 0x6C, count: 32)),
+                toolNamingDirectory: home.appendingPathComponent("APIToolNaming-v1", isDirectory: true),
+                correctionAccountingDirectory: accounting)
+            let runtime = CodexAppServerRuntime(configuration: configuration, visualGrounder: APIHarnessNoVisualGrounder())
+            ownedRuntime = runtime
+            let taskID = UUID().uuidString.lowercased()
+            let audit = APIHarnessEventAudit(taskID: taskID)
+            pump = Task { for await event in runtime.events() { audit.receive(event) } }
+            try await runtime.configureAPIProviders([provider])
+            let tasks = try await runtime.loadTasks()
+            XCTAssertTrue(tasks.isEmpty)
+            try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
+            try await runtime.submit(prompt: "Change fixture.txt from old to fixed with apply_patch. Then run one command "
+                + "to verify fixture.txt and unrelated.txt, append one line to execution-count.txt, and read receipt.txt. "
+                + "Return only that observed receipt. Do not create rejected-batch.txt or change unrelated.txt.",
+                toTaskID: taskID, modelID: modelID)
+            try await waitForTerminal(audit)
+            XCTAssertEqual(audit.status, .completed)
+            XCTAssertEqual(audit.errors, [])
+            XCTAssertEqual(audit.approvals, 0)
+            XCTAssertEqual(audit.finalTexts, [marker])
+            XCTAssertEqual(audit.fileEntries.filter { $0.toolEvent?.status == .succeeded }.count, 1)
+            XCTAssertEqual(audit.commands.filter { $0.toolEvent?.status == .succeeded }.count, 1)
+            let patch = try XCTUnwrap(audit.fileEntries.last { $0.toolEvent?.status == .succeeded })
+            XCTAssertEqual(patch.fileChanges?.count, 1)
+            let change = try XCTUnwrap(patch.fileChanges?.first)
+            XCTAssertEqual(URL(fileURLWithPath: change.path).resolvingSymlinksInPath().path,
+                           project.appendingPathComponent("fixture.txt").resolvingSymlinksInPath().path)
+            XCTAssertTrue(change.diff.contains("-old"))
+            XCTAssertTrue(change.diff.contains("+fixed"))
+            let command = try XCTUnwrap(audit.commands.last { $0.toolEvent?.status == .succeeded })
+            XCTAssertTrue(command.toolEvent?.output?.contains(marker) == true)
+            XCTAssertTrue(command.toolEvent?.output?.contains("Exit code: 0") == true)
+            XCTAssertFalse(command.toolEvent?.input.contains(marker) == true)
+            XCTAssertEqual(try String(contentsOf: project.appendingPathComponent("fixture.txt"), encoding: .utf8), "fixed\n")
+            XCTAssertEqual(try String(contentsOf: project.appendingPathComponent("unrelated.txt"), encoding: .utf8), "untouched\n")
+            XCTAssertEqual(try String(contentsOf: project.appendingPathComponent("execution-count.txt"), encoding: .utf8), "executed\n")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: project.appendingPathComponent("rejected-batch.txt").path))
+            let receipt = await inference.receipt()
+            XCTAssertEqual(receipt.requests, 4, "Three native inferences plus exactly one private corrective inference.")
+            XCTAssertTrue(receipt.rejectedBatchHadNoEffectsAtCorrection)
+            XCTAssertTrue(receipt.firstUsageDurableBeforeCorrection)
+            XCTAssertTrue(receipt.correctiveRequestPreservedOriginal)
+            XCTAssertTrue(receipt.acceptedToolHistoryOnly)
+            XCTAssertEqual(receipt.failures, [])
+            XCTAssertEqual(credentials.counts().reads, 3, "The correction retains the already admitted credential; native rounds still read independently.")
+            XCTAssertEqual(credentials.counts().mutations, 0)
+            let shutdown = await runtime.shutdown()
+            XCTAssertTrue(shutdown.succeeded, shutdown.issues.joined(separator: "; "))
+            pump?.cancel()
+            let trace = try AppServerWireTrace.load(traceURL)
+            XCTAssertEqual(trace.parseFailures, [])
+            XCTAssertEqual(trace.messages.filter { $0.direction == .clientToServer && $0.method == "turn/start" }.count, 1)
+            let threadID = try threadStarted(in: trace)
+            let turnIDs = Set(trace.messages.compactMap { message -> String? in
+                guard message.direction == .serverToClient, message.method == "thread/tokenUsage/updated",
+                      let params = message.object["params"] as? [String: Any] else { return nil }
+                return params["turnId"] as? String
+            })
+            XCTAssertEqual(turnIDs.count, 1)
+            let turnID = try XCTUnwrap(turnIDs.first)
+            let lastTotals = trace.messages.compactMap { message -> Int? in
+                guard message.direction == .serverToClient, message.method == "thread/tokenUsage/updated",
+                      let params = message.object["params"] as? [String: Any],
+                      let usage = params["tokenUsage"] as? [String: Any], let last = usage["last"] as? [String: Any] else { return nil }
+                return last["totalTokens"] as? Int
+            }
+            XCTAssertTrue(lastTotals.contains(36), "The accepted corrected response reports its own 23+13 tokens to the pinned engine.")
+            XCTAssertFalse(lastTotals.contains(54), "Rejected18+accepted36 must never become context occupancy.")
+            let journalFiles = try FileManager.default.contentsOfDirectory(at: accounting, includingPropertiesForKeys: nil)
+            XCTAssertEqual(journalFiles.count, 3)
+            let records = try journalFiles.map { try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: Data(contentsOf: $0)) }
+            XCTAssertEqual(Set(records.map(\.correctionID)).count, 1)
+            XCTAssertEqual(Set(records.map(\.phase)), Set(["first_received", "second_claimed", "finished"]))
+            for record in records {
+                XCTAssertEqual(record.taskID, taskID)
+                XCTAssertEqual(record.threadID, threadID.lowercased())
+                XCTAssertEqual(record.turnID, turnID.lowercased())
+                XCTAssertEqual(record.firstUsage, APIModelCorrectionUsage(inputTokens: 11, outputTokens: 7,
+                    totalTokens: 18, cachedInputTokens: 2, reasoningOutputTokens: 3))
+            }
+            let finished = try XCTUnwrap(records.first { $0.phase == "finished" })
+            XCTAssertEqual(finished.outcome, .responseValidated)
+            XCTAssertTrue(finished.secondRequestClaimed)
+            XCTAssertFalse(finished.secondUsageUnknown)
+            XCTAssertEqual(finished.secondUsage, APIModelCorrectionUsage(inputTokens: 23, outputTokens: 13,
+                totalTokens: 36, cachedInputTokens: 4, reasoningOutputTokens: 5))
+            for rejectedID in ["rejected-valid-patch", "rejected-invalid-command"] {
+                XCTAssertFalse(trace.messages.contains { String(decoding: $0.wireData, as: UTF8.self).contains(rejectedID) },
+                    "No item or delta from either call in the rejected batch may reach the native engine.")
+            }
+            assertNoPrivateState(in: trace, fakeKey: fakeKey, reasoning: [rejectedThinking])
+            try assertNoPrivateState(in: [traceURL, home], fakeKey: fakeKey, reasoning: [rejectedThinking])
+            guard (testRun?.failureCount ?? 0) == failuresBefore else {
+                throw APIHarnessFailure("The bundled correction invariants failed.")
+            }
+            await upstream.stop()
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            if let ownedRuntime { _ = await ownedRuntime.shutdown() }
+            pump?.cancel()
+            await upstream.stop()
+            print("syntheticAPICorrectionFailureArtifacts=\(root.path)")
+            throw error
+        }
+    }
+
     private func waitForTerminal(_ audit: APIHarnessEventAudit) async throws {
         let deadline = ContinuousClock.now + .seconds(60)
         while !audit.terminal, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
@@ -597,6 +752,172 @@ private actor APIHarnessInference {
         var result = Data()
         for value in frames { result.append(Data("data: ".utf8)); result.append(try JSONSerialization.data(withJSONObject: value)); result.append(Data("\n\n".utf8)) }
         result.append(Data("data: [DONE]\n\n".utf8)); return result
+    }
+}
+
+private actor APIHarnessCorrectionInference {
+    struct Receipt: Sendable {
+        var requests = 0
+        var rejectedBatchHadNoEffectsAtCorrection = false
+        var firstUsageDurableBeforeCorrection = false
+        var correctiveRequestPreservedOriginal = false
+        var acceptedToolHistoryOnly = false
+        var failures = [String]()
+    }
+    private let project: URL
+    private let accounting: URL
+    private let marker: String
+    private let expectedKey: String
+    private let rejectedThinking: String
+    private var observations = Receipt()
+    private var originalBody: [String: Any]?
+    init(project: URL, accounting: URL, marker: String, expectedKey: String, rejectedThinking: String) {
+        self.project = project; self.accounting = accounting; self.marker = marker
+        self.expectedKey = expectedKey; self.rejectedThinking = rejectedThinking
+    }
+    func receipt() -> Receipt { observations }
+    func respond(_ request: APIModelServer.HTTPRequest) -> APIHarnessHTTPFixture.Response {
+        observations.requests += 1
+        do {
+            guard request.method == "POST", request.path == "/v1/chat/completions",
+                  request.headers["authorization"] == "Bearer " + expectedKey,
+                  let body = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+                  body["model"] as? String == "fixture-correction-model", body["stream"] as? Bool == true,
+                  let tools = body["tools"] as? [[String: Any]], let messages = body["messages"] as? [[String: Any]] else {
+                throw APIHarnessFailure("request_contract")
+            }
+            let patchName = try toolName(tools, property: "input", descriptionContains: "patch")
+            let commandName = try toolName(tools, property: "cmd")
+            let message: [String: Any], finish: String, usage: [String: Any]
+            switch observations.requests {
+            case 1:
+                guard body["parallel_tool_calls"] as? Bool == true else { throw APIHarnessFailure("parallel_batch_not_offered") }
+                originalBody = body
+                let patch = "*** Begin Patch\n*** Add File: rejected-batch.txt\n+must never execute\n*** End Patch"
+                message = ["role": "assistant", "content": rejectedThinking + "_VISIBLE", "reasoning": rejectedThinking,
+                    "tool_calls": [try call(patchName, id: "rejected-valid-patch", arguments: ["input": patch]),
+                                   try call(commandName, id: "rejected-invalid-command", arguments: ["cmd": 42])]]
+                finish = "tool_calls"; usage = tokens(input: 11, output: 7, cached: 2, reasoning: 3)
+            case 2:
+                // This check occurs in the second actual upstream HTTP handler,
+                // before its response can publish any native item or tool effect.
+                guard !FileManager.default.fileExists(atPath: project.appendingPathComponent("rejected-batch.txt").path),
+                      !FileManager.default.fileExists(atPath: project.appendingPathComponent("execution-count.txt").path),
+                      try String(contentsOf: project.appendingPathComponent("fixture.txt"), encoding: .utf8) == "old\n" else {
+                    throw APIHarnessFailure("rejected_batch_executed")
+                }
+                observations.rejectedBatchHadNoEffectsAtCorrection = true
+                let records = try FileManager.default.contentsOfDirectory(at: accounting, includingPropertiesForKeys: nil).map {
+                    try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: Data(contentsOf: $0))
+                }
+                guard records.count == 2, Set(records.map(\.phase)) == Set(["first_received", "second_claimed"]),
+                      Set(records.map(\.correctionID)).count == 1,
+                      records.allSatisfy({ $0.firstUsage.totalTokens == 18 && $0.secondUsage == nil }),
+                      records.first(where: { $0.phase == "second_claimed" })?.secondRequestClaimed == true,
+                      records.first(where: { $0.phase == "second_claimed" })?.secondUsageUnknown == true else {
+                    throw APIHarnessFailure("first_usage_not_durable_before_correction")
+                }
+                observations.firstUsageDurableBeforeCorrection = true
+                guard var expected = originalBody, var expectedMessages = expected["messages"] as? [[String: Any]] else {
+                    throw APIHarnessFailure("missing_original_request")
+                }
+                if expectedMessages.first?["role"] as? String == "system" {
+                    guard let text = expectedMessages[0]["content"] as? String else { throw APIHarnessFailure("system_content") }
+                    expectedMessages[0]["content"] = text + "\n\n" + APIModelResponseCodec.correctiveFeedback
+                } else { expectedMessages.insert(["role": "system", "content": APIModelResponseCodec.correctiveFeedback], at: 0) }
+                expected["messages"] = expectedMessages
+                guard NSDictionary(dictionary: body).isEqual(to: expected),
+                      !String(decoding: request.body, as: UTF8.self).contains(rejectedThinking),
+                      !messages.contains(where: { $0["role"] as? String == "tool" }) else {
+                    throw APIHarnessFailure("correction_changed_request_or_published_rejected_batch")
+                }
+                observations.correctiveRequestPreservedOriginal = true
+                // Native cwd may use /var while the private stores require /private/var.
+                // Resolve the synthetic patch within that already-bound isolated cwd.
+                let patch = "*** Begin Patch\n*** Update File: fixture.txt\n@@\n-old\n+fixed\n*** End Patch"
+                message = ["role": "assistant", "content": NSNull(),
+                    "tool_calls": [try call(patchName, id: "accepted-patch", arguments: ["input": patch])]]
+                finish = "tool_calls"; usage = tokens(input: 23, output: 13, cached: 4, reasoning: 5)
+            case 3:
+                guard matchingToolOutput(messages, id: "accepted-patch")?.contains("Success. Updated the following files") == true,
+                      !String(decoding: request.body, as: UTF8.self).contains("rejected-valid-patch"),
+                      !String(decoding: request.body, as: UTF8.self).contains("rejected-invalid-command"),
+                      !String(decoding: request.body, as: UTF8.self).contains(APIModelResponseCodec.correctiveFeedback) else {
+                    throw APIHarnessFailure("accepted_patch_history")
+                }
+                let command = "/usr/bin/python3 -c 'from pathlib import Path; assert Path(\"fixture.txt\").read_text() == \"fixed\\n\"; assert Path(\"unrelated.txt\").read_text() == \"untouched\\n\"; assert not Path(\"rejected-batch.txt\").exists(); count=Path(\"execution-count.txt\"); count.open(\"a\").write(\"executed\\n\"); print(Path(\"receipt.txt\").read_text().strip())'"
+                guard !command.contains(marker) else { throw APIHarnessFailure("marker_in_command") }
+                message = ["role": "assistant", "content": NSNull(), "tool_calls": [try call(commandName,
+                    id: "accepted-command", arguments: ["cmd": command, "workdir": project.path,
+                        "yield_time_ms": 10_000, "max_output_tokens": 1_000])]]
+                finish = "tool_calls"; usage = tokens(input: 41, output: 17, cached: 0, reasoning: 0)
+            case 4:
+                guard matchingToolOutput(messages, id: "accepted-patch")?.contains("Success. Updated the following files") == true,
+                      let commandOutput = matchingToolOutput(messages, id: "accepted-command"), commandOutput.contains(marker),
+                      commandOutput.contains("Process exited with code 0"),
+                      !String(decoding: request.body, as: UTF8.self).contains("rejected-valid-patch"),
+                      !String(decoding: request.body, as: UTF8.self).contains("rejected-invalid-command") else {
+                    throw APIHarnessFailure("accepted_command_history")
+                }
+                observations.acceptedToolHistoryOnly = true
+                message = ["role": "assistant", "content": marker]
+                finish = "stop"; usage = tokens(input: 61, output: 19, cached: 0, reasoning: 0)
+            default: throw APIHarnessFailure("unexpected_provider_request")
+            }
+            return .init(status: "200 OK", body: try stream(message: message, finish: finish, usage: usage))
+        } catch {
+            observations.failures.append((error as? APIHarnessFailure)?.message ?? "fixture_response_failed")
+            return .init(status: "400 Bad Request", body: Data("{\"error\":{\"code\":\"fixture_contract_rejected\"}}".utf8), contentType: "application/json")
+        }
+    }
+    private func toolName(_ tools: [[String: Any]], property: String, descriptionContains: String? = nil) throws -> String {
+        let candidates = tools.compactMap { item -> String? in
+            guard item["type"] as? String == "function", let function = item["function"] as? [String: Any],
+                  let schema = function["parameters"] as? [String: Any], let properties = schema["properties"] as? [String: Any],
+                  properties[property] != nil, let name = function["name"] as? String else { return nil }
+            if let descriptionContains, !(function["description"] as? String ?? "").lowercased().contains(descriptionContains) { return nil }
+            return name
+        }
+        guard candidates.count == 1 else { throw APIHarnessFailure("native_tool_missing_or_ambiguous") }
+        return candidates[0]
+    }
+    private func call(_ name: String, id: String, arguments: [String: Any]) throws -> [String: Any] {
+        ["id": id, "type": "function", "function": ["name": name,
+            "arguments": String(decoding: try JSONSerialization.data(withJSONObject: arguments, options: .sortedKeys), as: UTF8.self)]]
+    }
+    private func matchingToolOutput(_ messages: [[String: Any]], id: String) -> String? {
+        let calls = messages.filter { $0["role"] as? String == "assistant" }.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
+        let outputs = messages.filter { $0["role"] as? String == "tool" && $0["tool_call_id"] as? String == id }
+        guard calls.filter({ $0["id"] as? String == id }).count == 1, outputs.count == 1 else { return nil }
+        return outputs.first?["content"] as? String
+    }
+    private func tokens(input: Int, output: Int, cached: Int, reasoning: Int) -> [String: Any] {
+        ["prompt_tokens": input, "completion_tokens": output, "total_tokens": input + output,
+         "prompt_tokens_details": ["cached_tokens": cached], "completion_tokens_details": ["reasoning_tokens": reasoning]]
+    }
+    private func stream(message: [String: Any], finish: String, usage: [String: Any]) throws -> Data {
+        let id = "chatcmpl-correction-\(observations.requests)"
+        func frame(_ delta: [String: Any], finishReason: Any = NSNull()) -> [String: Any] {
+            ["id": id, "object": "chat.completion.chunk", "model": "fixture-correction-model",
+             "choices": [["index": 0, "delta": delta, "finish_reason": finishReason]]]
+        }
+        var frames = [frame(["role": "assistant"])]
+        if let reasoning = message["reasoning"] as? String { frames.append(frame(["reasoning": reasoning])) }
+        if let text = message["content"] as? String { frames.append(frame(["content": text])) }
+        if let calls = message["tool_calls"] as? [[String: Any]] {
+            for (index, original) in calls.enumerated() {
+                var call = original; call["index"] = index
+                frames.append(frame(["tool_calls": [call]]))
+            }
+        }
+        frames.append(frame([:], finishReason: finish))
+        frames.append(["id": id, "object": "chat.completion.chunk", "model": "fixture-correction-model", "choices": [], "usage": usage])
+        var result = Data()
+        for frame in frames {
+            result.append(Data("data: ".utf8)); result.append(try JSONSerialization.data(withJSONObject: frame)); result.append(Data("\n\n".utf8))
+        }
+        result.append(Data("data: [DONE]\n\n".utf8))
+        return result
     }
 }
 

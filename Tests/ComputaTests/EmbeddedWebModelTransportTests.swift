@@ -392,6 +392,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let blocker = FixtureWebContentWork(view: view)
         defer { blocker.detach() }
         try await blocker.start(milliseconds: 1_200)
+        XCTAssertTrue(fixture.transport.anchorResponseDeadlineForTesting(sessionToken: token))
         let began = ContinuousClock.now
         do {
             _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
@@ -1136,9 +1137,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let recoveredToken = try XCTUnwrap(recovered["sessionToken"] as? String)
         _ = try await waitForState("ready", fixture.transport, token: recoveredToken)
         _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": recoveredToken])
+        let blockedView = try XCTUnwrap(fixture.browser.webView(for: blockedID))
+        let untouched = try await evaluate(blockedView, "return globalThis.__computaModelOwner === undefined;", world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+        XCTAssertEqual(untouched, true)
+        try await assertChoiceLedger(blockedView, insertions: 0, sends: 0, selections: 0)
         let cancelled = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
-        XCTAssertEqual(cancelled["cleanup"] as? String, "failed", "Recovery cannot grant ownership of the old challenge document")
-        try await assertHumanTabIntact(fixture, retaining: blockedID)
+        XCTAssertEqual(cancelled["cleanup"] as? String, "not_created", "Only the exact untouched private checkpoint view is disposed")
+        XCTAssertNil(fixture.browser.webView(for: blockedID))
+        XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty, "Old disposal cannot re-latch the explicitly recovered gate")
+        try await assertHumanTabIntact(fixture)
     }
 
     func testCleanupFirstCheckpointBlocksNewAndActiveSessionsUntilExplicitRecovery() async throws {
@@ -1333,9 +1340,16 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let first = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"), browser: firstBrowser)
         let started = try await call(first.transport, "webProviderStart", ["provider": "gemini"])
         let token = try XCTUnwrap(started["sessionToken"] as? String)
-        try await waitForFixture(XCTUnwrap(first.browser.webView(for: XCTUnwrap(first.createdTabs.last))))
+        let blockedID = try XCTUnwrap(first.createdTabs.last)
+        let blockedView = try XCTUnwrap(first.browser.webView(for: blockedID))
+        try await waitForFixture(blockedView)
+        let untouched = try await evaluate(blockedView, "return globalThis.__computaModelOwner === undefined;", world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+        XCTAssertEqual(untouched, true)
+        try await assertChoiceLedger(blockedView, insertions: 0, sends: 0, selections: 0)
         let finished = try await call(first.transport, "webProviderFinish", ["sessionToken": token])
-        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(first.browser.webView(for: blockedID))
+        try await assertHumanTabIntact(first)
         let savedID = try XCTUnwrap(firstBrowser.savedHumanVerificationCheckpointIDs["gemini"])
         first.shutdown()
 
@@ -2460,7 +2474,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    func testExpandedFirstPrefixAcceptsOnlyExistingASCIIWhitespaceEquivalenceWithoutReplay() async throws {
+    func testChatTurnFullCanonicalExpansionRejectsASCIIWhitespaceSubstitutionWithoutReplay() async throws {
         let mutations = [
             "ascii": "userBody.textContent = prompt.replace('Owned ', 'Owned ' + '\\n'.repeat(15));",
             "punctuation": "userBody.textContent = prompt.replace('Owned', 'Ow!ed');",
@@ -2484,13 +2498,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let params: [String: String] = ["sessionToken": token,
                 "prompt": String(repeating: "Owned prefix comparison fixture line.\n", count: 600)]
             if condition == "ascii" {
-                let sent = try await call(fixture.transport, "webProviderSend", params)
-                XCTAssertEqual(sent["state"] as? String, "running")
-                let complete = try await waitForState("complete", fixture.transport, token: token)
-                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
-                try assertChoiceEvidence(complete, choice: choice)
-                let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
-                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+                do {
+                    _ = try await fixturePhaseProbe("strict_expansion_send") { try await call(fixture.transport, "webProviderSend", params) }
+                    XCTFail("ASCII run equivalence cannot replace the actual full outbound digest")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("A failed full canonical proof cannot admit an answer")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
             } else {
                 do {
                     _ = try await call(fixture.transport, "webProviderSend", params)
@@ -2506,7 +2521,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 } catch { XCTAssertTrue(error is EmbeddedWebModelTransport.Failure) }
             }
             let values = diagnostics.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
-            let comparison = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_text" })
+            // The legacy expansion diagnostic can recognize ASCII run
+            // equivalence, while the new full outbound proof refuses it.
+            var privateComparison: [String: Any]?
+            if condition == "ascii" {
+                let observation = try await evaluate(view, "return globalThis.__computaModelFirstExpansion?.textDiagnostic;",
+                    world: .world(name: "computa-chatgpt-model-v1"))
+                privateComparison = observation as? [String: Any]
+            }
+            let comparison = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_text" } ?? privateComparison)
             XCTAssertEqual(comparison["expansionTextAnalyzed"] as? Bool, true)
             XCTAssertEqual(comparison["expansionClicked"] as? Bool, true)
             XCTAssertEqual(comparison["expansionExactPrefixMatches"] as? Bool, false)
@@ -2527,9 +2550,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(clicks, 1)
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
-            XCTAssertEqual(finished["cleanup"] as? String, condition == "ascii" ? "not_created" : "failed")
-            if condition == "ascii" { try await assertHumanTabIntact(fixture) }
-            else { try await assertHumanTabIntact(fixture, retaining: ownedID) }
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
         }
     }
 
@@ -3663,7 +3685,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         do {
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must reject a user append without a pending Send"])
             XCTFail("A retained private submit claim cannot admit an unsolicited user count increment")
-        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptUserCount)) }
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
         try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
         let race = try await evaluate(view, "return {opens: window.fixtureDelayedPickerOpens, renderedCounts: window.fixtureRaceRenderedCounts};") as? [String: Any]
         XCTAssertEqual(race?["opens"] as? Int, 2)
@@ -6279,32 +6301,102 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(prompts, [])
     }
 
+    func testChatTurnSubmissionProofRetainsOneOwnedViewAcrossThreeExactRounds() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let started = try await fixturePhaseProbe("start") { try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"]) }
+        XCTAssertEqual(started["turnContinuationCapability"] as? String, "per_submission_ownership_v1")
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await fixturePhaseProbe("wait_fixture") { try await waitForFixture(view) }
+        _ = try await fixturePhaseProbe("ready") { try await waitForState("ready", fixture.transport, token: token) }
+        let prompts = ["Complete first request {\"input\":[\"literal .:/-\"]}",
+        "Full second request\n  preserved spaces\tand\u{00a0}NBSP", "Complete third request"]
+        var firstPin: String?
+        for (index, prompt) in prompts.enumerated() {
+            let sent = try await fixturePhaseProbe("send") { try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt]) }
+            XCTAssertEqual(sent["state"] as? String, "running")
+            let complete = try await fixturePhaseProbe("complete") { try await waitForState("complete", fixture.transport, token: token) }
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(proof["sequence"] as? Int, index + 1)
+            XCTAssertEqual(proof["responseCount"] as? Int, index + 1)
+            XCTAssertEqual(proof["baselineResponseCount"] as? Int, index)
+            XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
+            let pin = try XCTUnwrap(proof["firstUserFingerprint"] as? String)
+            if let firstPin { XCTAssertEqual(pin, firstPin) } else { firstPin = pin }
+            XCTAssertTrue(fixture.browser.webView(for: ownedID) === view)
+        }
+        let capturedPrompts = try await capturedUserPrompts(view)
+        let captured = try XCTUnwrap(capturedPrompts)
+        XCTAssertEqual(captured.map { $0.trimmingCharacters(in: .newlines) }, prompts)
+        let inputCount = try await evaluate(view, "return window.fixtureInputCount;") as? Int
+        XCTAssertEqual(inputCount, 3)
+        let closed = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: ownedID))
+        XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
+    }
+
+    func testChatTurnPilotLimitsRejectBeforeAnotherInsertionAndKeepCleanupOwned() async throws {
+        for byteLimit in [false, true] {
+            let fixture = try Fixture()
+            defer { fixture.shutdown() }
+            let started = try await fixturePhaseProbe("start") { try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"]) }
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await fixturePhaseProbe("wait_fixture") { try await waitForFixture(view) }
+            _ = try await fixturePhaseProbe("ready") { try await waitForState("ready", fixture.transport, token: token) }
+            let accepted = byteLimit ? 6 : 16
+            let prompt = byteLimit ? String(repeating: "A", count: 170_000) : "Exact bounded round"
+            for _ in 0..<accepted {
+                _ = try await fixturePhaseProbe("send") { try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt]) }
+                _ = try await fixturePhaseProbe("complete") { try await waitForState("complete", fixture.transport, token: token) }
+            }
+            for _ in 0..<2 {
+                do {
+                    _ = try await fixturePhaseProbe("send") { try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt]) }
+                    XCTFail("No insertion or Send beyond the pilot bound")
+                } catch let failure as EmbeddedWebModelTransport.Failure { XCTAssertEqual(failure, .turnLimit) }
+            }
+            let inputCount = try await evaluate(view, "return window.fixtureInputCount;") as? Int
+            let sends = try await evaluate(view, "return window.fixturePrompts.length;") as? Int
+            XCTAssertEqual(inputCount, accepted); XCTAssertEqual(sends, accepted)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            let closed = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+            XCTAssertNil(fixture.browser.webView(for: ownedID))
+            XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
+        }
+    }
+
     func testOwnedTemporaryChatSendsLiteralTextAndClosesOnlyItsTab() async throws {
         let fixture = try Fixture()
         defer { fixture.shutdown() }
-        let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let started = try await fixturePhaseProbe("start") { try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"]) }
         let token = try XCTUnwrap(started["sessionToken"] as? String)
         let ownedID = try XCTUnwrap(fixture.createdTabs.last)
         let ownedView = try XCTUnwrap(fixture.browser.webView(for: ownedID))
         XCTAssertEqual(fixture.browser.selectedTabID, fixture.humanID)
         XCTAssertTrue(ownedView.configuration.websiteDataStore === fixture.humanView.configuration.websiteDataStore)
-        try await waitForFixture(ownedView)
-        let documentURL = try await evaluate(ownedView, "return document.URL;") as? String
+        try await fixturePhaseProbe("wait_fixture") { try await waitForFixture(ownedView) }
+        let documentURL = try await fixturePhaseProbe("evaluate_document") { try await evaluate(ownedView, "return document.URL;") } as? String
         XCTAssertEqual(documentURL, "https://chatgpt.com/")
-        _ = try await waitForState("ready", fixture.transport, token: token)
-        let temporaryURL = try await evaluate(ownedView, "return document.URL;") as? String
+        _ = try await fixturePhaseProbe("ready") { try await waitForState("ready", fixture.transport, token: token) }
+        let temporaryURL = try await fixturePhaseProbe("evaluate_document") { try await evaluate(ownedView, "return document.URL;") } as? String
         XCTAssertEqual(temporaryURL, "https://chatgpt.com/?temporary-chat=true")
 
         let prompt = "A \"quote\", a \\ backslash, C++ & Swift\n\nASCII  spaces\tand\u{00a0}NBSP\n  {\"key\":\"escaped tags </script><script>window.fixtureInjected = true</script>\"}\nTail \"double quote\""
-        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        let sent = try await fixturePhaseProbe("send") { try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt]) }
         XCTAssertEqual(sent["state"] as? String, "running")
-        let complete = try await waitForState("complete", fixture.transport, token: token)
+        let complete = try await fixturePhaseProbe("complete") { try await waitForState("complete", fixture.transport, token: token) }
         XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
         let captured = try await capturedUserPrompts(ownedView)
         // WebKit may expose the final contenteditable block separator as one
         // trailing newline. Every character inside the prompt remains exact.
         XCTAssertTrue(captured == [prompt] || captured == [prompt + "\n"],
-                      "The prompt must reach the editor literally and be submitted once")
+        "The prompt must reach the editor literally and be submitted once")
         let clearedFocus = try await evaluate(ownedView, "return window.fixtureFocusClears > 0;") as? Bool
         XCTAssertEqual(clearedFocus, true, "The fixture must remove WebKit's incidental focus selection")
         let inputCount = try await evaluate(ownedView, "return window.fixtureInputCount;") as? Int
@@ -6348,7 +6440,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
     }
 
-    func testRenderedMarkdownPinsLineageAndRejectsSameCountBodyReplacement() async throws {
+    func testChatTurnRenderedMarkdownCannotSupplyTheFullOutboundDigest() async throws {
         let fixture = try Fixture()
         defer { fixture.shutdown() }
         let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
@@ -6370,32 +6462,50 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             """)
         _ = try await waitForState("ready", fixture.transport, token: token)
         let prompt = "Use `tool_calls` and `exec_command` with \"quotes\"\n\n  ASCII  spaces and\u{00a0}NBSP"
-        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
-        _ = try await waitForState("complete", fixture.transport, token: token)
+        do {
+            _ = try await fixturePhaseProbe("rendered_markdown_send") { try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt]) }
+            XCTFail("Rendered CODE nodes missing literal source delimiters cannot prove the complete outbound request")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
         let captured = try await capturedUserPrompts(view)
         XCTAssertTrue(captured == [prompt] || captured == [prompt + "\n"])
         let codeCount = try await evaluate(view, "return document.querySelector('[data-user-message-bubble]').querySelectorAll('code').length;") as? Int
         XCTAssertEqual(codeCount, 2)
         let rawBody = try await evaluate(view, "return document.querySelector('.whitespace-pre-wrap').innerText;") as? String
-        XCTAssertFalse(rawBody?.contains("`tool_calls`") == true, "The fixture must omit Markdown delimiters after rendering")
-        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "A follow-up after pinned lineage"])
-        _ = try await waitForState("complete", fixture.transport, token: token)
-        _ = try await evaluate(view, """
-            document.querySelector('[data-user-message-bubble] .whitespace-pre-wrap code').textContent = 'foreign_schema';
-            return true;
-            """)
-        do {
-            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must not follow substituted content"])
-            XCTFail("The same marker and message count cannot adopt a changed first body")
-        } catch {
-            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+        XCTAssertFalse(rawBody?.contains("`tool_calls`") == true)
+        for operation in ["webProviderPoll", "webProviderSend"] {
+            var params = ["sessionToken": token]
+            if operation == "webProviderSend" { params["prompt"] = "Must not continue an unverified body" }
+            do { _ = try await call(fixture.transport, operation, params); XCTFail("No response or next Send after canonical mismatch") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
         }
-        let afterRejected = try await capturedUserPrompts(view)
-        XCTAssertEqual(afterRejected?.map { $0.trimmingCharacters(in: .newlines) }, [prompt, "A follow-up after pinned lineage"])
+        let inputs = try await evaluate(view, "return window.fixtureInputCount;") as? Int
+        let sends = try await evaluate(view, "return window.fixturePrompts.length;") as? Int
+        XCTAssertEqual(inputs, 1); XCTAssertEqual(sends, 1)
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "failed")
-        XCTAssertTrue(fixture.browser.webView(for: ownedID) === view)
-        XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
+        try await assertHumanTabIntact(fixture, retaining: ownedID)
+    }
+
+    func testChatTurnExactLiteralMarkdownDelimitersRetainTheFullOutboundDigest() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let prompts = ["Use `tool_calls` and `exec_command` with literal source delimiters", "Exact second request"]
+        for prompt in prompts {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
+        }
+        let captured = try await capturedUserPrompts(view)
+        XCTAssertEqual(captured?.map { $0.trimmingCharacters(in: .newlines) }, prompts)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
     }
 
     func testFirstMarkerOverheadRejectsOversizedOutboundBeforeInsertion() async throws {
@@ -7368,14 +7478,26 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
     }
 
+    /// Finite local-fixture errors are captured before the
+    /// caller's defer disposes WebKit and can obscure the original phase.
+    private func fixturePhaseProbe<T>(_ phase: String, _ operation: @MainActor () async throws -> T) async throws -> T {
+        do { return try await operation() }
+        catch {
+            let value = error as NSError
+            let failure = (error as? EmbeddedWebModelTransport.Failure).map { String(describing: $0) } ?? "other"
+            print("WKFixtureOriginalError phase=\(phase) type=\(String(reflecting: type(of: error))) domain=\(value.domain) code=\(value.code) native=\(failure)")
+            throw error
+        }
+    }
+
     private func capturedUserPrompts(_ view: WKWebView) async throws -> [String]? {
         let value = try await evaluate(view, "return window.fixturePrompts;")
         var prompts = try XCTUnwrap(value as? [String])
-        let perSubmission = view.url?.host == "gemini.google.com"
+        let perSubmission = ["gemini.google.com", "chatgpt.com"].contains(view.url?.host ?? "")
         var markers = Set<String>()
         for index in prompts.indices where index == 0 || perSubmission {
-            // Every Gemini round has its own final transport nonce. Other
-            // providers retain first-message metadata only. Decode no source
+            // Every proof-capable round has its own final transport nonce.
+            // Claude retains first-message metadata only. Decode no source
             // text before this exact UUID-shaped final suffix.
             let raw = prompts[index]
             let suffix = try XCTUnwrap(raw.range(of: #"\n\nComputa session marker: [A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\n?$"#, options: .regularExpression))
@@ -7385,7 +7507,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             if raw.hasSuffix("\n") { prompts[index] += "\n" }
         }
         if !perSubmission {
-            XCTAssertFalse(prompts.dropFirst().contains { $0.contains("Computa session marker:") }, "Non-Gemini continuations retain first-message metadata only")
+            XCTAssertFalse(prompts.dropFirst().contains { $0.contains("Computa session marker:") }, "Unsupported continuations retain first-message metadata only")
         }
         return prompts
     }

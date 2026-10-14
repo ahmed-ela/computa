@@ -49,13 +49,14 @@ actor WebModelServer {
     enum Failure: LocalizedError {
         case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
         case modelUnverified, modelMismatch, productModeUnverified
-        case modelNotFound, inferenceContextRequired, persistenceRequired, startOwnershipUnconfirmed
+        case modelNotFound, inferenceContextRequired, persistenceRequired, startOwnershipUnconfirmed, turnLimit
         case malformedReply(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         var errorDescription: String? {
             switch self {
             case .chromeRequired: "Connect the Computa Chrome extension, then sign in to the selected website in Chrome."
             case .embeddedRequired: "Open the selected website in Computa's built-in browser and sign in before using this model."
             case .invalidRequest: "The browser model request could not be validated."
+            case .turnLimit: "The bounded website conversation limit was reached. No prompt was replayed; start a new task."
             case .busy: "This browser model already has a request running."
             case .providerFailed: "The website could not produce a response. Check its sign-in, usage limit, or error message in the browser."
             case .preparationDeadline: "The website did not become ready before the 45-second preparation deadline. This website inference was not submitted."
@@ -78,6 +79,14 @@ actor WebModelServer {
         case embedded, chrome
     }
 
+    // Bounded pilot policy: complete requests remain intact and duplicate
+    // prior website history. Reaching a limit disposes the owned lease.
+    static let maximumTurnInferences = 16
+    static let maximumTurnPromptUTF8Bytes = 1_048_576
+    private static func usesTurnContinuation(provider: String, route: Route) -> Bool {
+        provider == "gemini" || (provider == "chatgpt" && route == .embedded)
+    }
+
     private struct Session: Sendable {
         let token: String
         let provider: String
@@ -89,7 +98,10 @@ actor WebModelServer {
         let context: InferenceContext
         let transportGeneration: UUID
         let turnScoped: Bool
+        let continuationPolicyEstablished: Bool
         var submittedPromptFingerprint = ""
+        var cumulativePromptUTF8Count = 0
+        var usesBoundedTurn: Bool { turnScoped && provider == "chatgpt" }
         var sequence = 1
         var baselineResponseCount = 0
         var documentGeneration: UUID?
@@ -711,10 +723,16 @@ actor WebModelServer {
                       let completedText = previous.completedText,
                       previous.sequence < 1_024 else { throw Failure.invalidRequest }
                 try yielded.continuation.validate(next: request)
+                if previous.usesBoundedTurn {
+                    guard previous.sequence < Self.maximumTurnInferences,
+                          request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - previous.cumulativePromptUTF8Count else {
+                        throw Failure.turnLimit
+                    }
+                }
                 prompt = request.prompt
                 try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                     provider: provider, modelID: request.model, sessionToken: previous.token, phase: "continuation_requested",
-                    sequence: previous.sequence + 1, baseline: completedCount)
+                    sequence: previous.sequence + 1, baseline: completedCount, route: route, turnScoped: previous.turnScoped)
                 let observed = try await call(previous.transport, operation: "webProviderPoll", params: ["sessionToken": previous.token])
                 try requireCurrentContext()
                 guard observed["state"] as? String == "complete" else { throw Self.snapshotFailure(observed) }
@@ -733,7 +751,7 @@ actor WebModelServer {
                 lease = session
                 try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                     provider: provider, modelID: request.model, sessionToken: session.token, phase: "continued",
-                    sequence: session.sequence, baseline: session.baselineResponseCount)
+                    sequence: session.sequence, baseline: session.baselineResponseCount, route: route, turnScoped: session.turnScoped)
             } else {
                 guard yielded == nil else { throw Failure.invalidRequest }
                 if let closed = closedTurns[taskID] {
@@ -747,16 +765,21 @@ actor WebModelServer {
                     params["modelChoice"] = encoded
                 }
                 try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
-                    provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested")
+                    provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested", route: route)
                 unresolvedStartAttempts[taskID] = UnresolvedStartAttempt(inferenceID: inferenceID, context: context,
                     provider: provider, modelID: request.model, route: route)
                 let reply = try await call(transport, operation: "webProviderStart", params: params)
                 guard let rawToken = reply["sessionToken"] as? String, let token = UUID(uuidString: rawToken) else {
                     throw Self.snapshotFailure(reply)
                 }
+                let advertised = reply["turnContinuationCapability"]
+                let turnScoped = Self.usesTurnContinuation(provider: provider, route: route)
+                    && (provider != "chatgpt" || advertised as? String == "per_submission_ownership_v1")
                 session = Session(token: rawToken, provider: provider, modelID: request.model,
                     modelChoice: choice, route: route, transport: transport, inferenceID: inferenceID,
-                    context: context, transportGeneration: transportGeneration, turnScoped: provider == "gemini")
+                    context: context, transportGeneration: transportGeneration, turnScoped: turnScoped,
+                    continuationPolicyEstablished: provider != "chatgpt" || route != .embedded || advertised == nil
+                        || advertised as? String == "per_submission_ownership_v1")
                 // Capture ownership before cancellation or validation can fail.
                 sessions[taskID] = session
                 closedTurns.removeValue(forKey: taskID)
@@ -765,10 +788,12 @@ actor WebModelServer {
                     unresolvedStartAttempts.removeValue(forKey: taskID)
                 }
                 try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
-                    provider: provider, modelID: request.model, sessionToken: session.token, phase: "started")
+                    provider: provider, modelID: request.model, sessionToken: session.token, phase: "started", route: route, turnScoped: session.continuationPolicyEstablished ? session.turnScoped : nil)
                 guard usedSessionTokens[taskID, default: []].insert(token.uuidString.lowercased()).inserted else { throw Failure.invalidRequest }
                 try requireCurrentContext()
                 guard ["ready", "loading"].contains(reply["state"] as? String ?? "") else { throw Self.snapshotFailure(reply) }
+                if provider == "chatgpt", route == .embedded, advertised != nil,
+                   advertised as? String != "per_submission_ownership_v1" { throw Failure.invalidRequest }
                 if session.turnScoped {
                     guard reply["turnContinuationCapability"] as? String == "per_submission_ownership_v1" else { throw Failure.invalidRequest }
                     try WebsiteTurnContinuation.validateRequest(request)
@@ -791,6 +816,14 @@ actor WebModelServer {
                 guard ready else { throw Failure.preparationDeadline }
             }
             try requireCurrentContext()
+            if session.usesBoundedTurn {
+                let bytes = prompt.utf8.count
+                guard session.sequence <= Self.maximumTurnInferences,
+                      bytes <= Self.maximumTurnPromptUTF8Bytes - session.cumulativePromptUTF8Count else {
+                    throw Failure.turnLimit
+                }
+                session.cumulativePromptUTF8Count += bytes
+            }
             session.submittedPromptFingerprint = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
             sessions[taskID] = session
             lease = session
@@ -882,11 +915,19 @@ actor WebModelServer {
             throw Failure.deadline
         } catch {
             yieldedTurns.removeValue(forKey: taskID)
+            let turnLimit = (error as? EmbeddedWebModelTransport.Failure) == .turnLimit
+                || { if let failure = error as? Failure, case .turnLimit = failure { return true }; return false }()
+            if turnLimit {
+                let closed = await cleanup(taskID: taskID, cancel: true,
+                    runtimeGeneration: context.runtimeGeneration, trigger: .automatic)
+                guard closed.receipt.outcome == .closed else { throw Failure.cleanupFailed }
+                guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
+            }
             try? recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                 provider: provider, modelID: request.model, sessionToken: lease?.token,
                 phase: error is CancellationError ? "cancelled" : "failed",
                 errorCode: Self.errorPresentation(for: error).code,
-                sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0)
+                sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0, route: route, turnScoped: lease.flatMap { $0.continuationPolicyEstablished ? $0.turnScoped : nil })
             throw error
         }
     }
@@ -1045,9 +1086,9 @@ actor WebModelServer {
 
     private func recordTransactionEvidence(taskID: String, inferenceID: UUID, context: InferenceContext,
                                            provider: String, modelID: String, sessionToken: String?, phase: String, errorCode: String? = nil,
-                                           sequence: Int = 0, baseline: Int = 0) throws {
+                                           sequence: Int = 0, baseline: Int = 0, route: Route = .embedded, turnScoped: Bool? = nil) throws {
         var record = transactionEvidenceRecord(taskID: taskID, inferenceID: inferenceID, context: context,
-            provider: provider, modelID: modelID, sessionToken: sessionToken, phase: phase)
+            provider: provider, modelID: modelID, sessionToken: sessionToken, phase: phase, route: route, turnScoped: turnScoped)
         record["sequence"] = sequence
         record["baselineResponseCount"] = baseline
         if let errorCode { record["errorCode"] = errorCode }
@@ -1055,12 +1096,17 @@ actor WebModelServer {
     }
 
     private func transactionEvidenceRecord(taskID: String, inferenceID: UUID, context: InferenceContext,
-                                            provider: String, modelID: String, sessionToken: String?, phase: String) -> [String: Any] {
+                                            provider: String, modelID: String, sessionToken: String?, phase: String, route: Route, turnScoped: Bool?) -> [String: Any] {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let policy: Bool?
+        if let turnScoped { policy = turnScoped }
+        else if provider == "chatgpt", route == .embedded { policy = nil }
+        else { policy = Self.usesTurnContinuation(provider: provider, route: route) }
         var record: [String: Any] = ["schemaVersion": 2, "timestamp": formatter.string(from: Date()),
-            "transactionMode": provider == "gemini" ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference",
-            "transactionVersion": provider == "gemini" ? 2 : 1,
+            "transactionMode": policy.map { $0 ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference" } ?? "capability_pending",
+            "transactionVersion": policy.map { $0 ? 2 : 1 } ?? 0,
+            "transactionPolicyEstablished": policy != nil,
             "taskID": taskID, "threadID": context.threadID, "turnID": context.turnID,
             "runtimeGeneration": context.runtimeGeneration.uuidString.lowercased(),
             "preparationID": context.preparationID.uuidString.lowercased(),
@@ -1075,7 +1121,7 @@ actor WebModelServer {
         try Self.verifyInferenceSnapshot(snapshot, session: &checkedSession)
         guard let context = snapshot["modelProofContext"] as? [String: Any] else { throw Failure.invalidRequest }
         var record = transactionEvidenceRecord(taskID: taskID, inferenceID: inferenceID, context: session.context,
-            provider: session.provider, modelID: session.modelID, sessionToken: session.token, phase: phase)
+            provider: session.provider, modelID: session.modelID, sessionToken: session.token, phase: phase, route: session.route, turnScoped: session.turnScoped)
         for key in ["responseCount", "baselineResponseCount", "firstUserFingerprint"] {
             record[key] = context[key]
         }
@@ -1326,6 +1372,7 @@ actor WebModelServer {
             case .usageLimited:
                 return .init(status: "429 Too Many Requests", type: "too_many_requests", code: failure.diagnosticCode!)
             case .capacity: return .init(status: "429 Too Many Requests", type: "too_many_requests", code: "provider_capacity")
+            case .turnLimit: return .init(status: "409 Conflict", type: "invalid_request", code: "website_turn_limit")
             case .modelUnavailable: return .init(status: "404 Not Found", type: "not_found", code: "model_unavailable", param: "model")
             case .invalidRequest, .unsupportedProvider: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_request")
             case .deadline, .preparationDeadline: return .init(status: "504 Gateway Timeout", type: "server_error", code: "provider_timeout")
@@ -1334,6 +1381,7 @@ actor WebModelServer {
         }
         if let failure = error as? Failure {
             switch failure {
+            case .turnLimit: return .init(status: "409 Conflict", type: "invalid_request", code: "website_turn_limit")
             case .invalidRequest: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_request")
             case .modelNotFound: return .init(status: "404 Not Found", type: "not_found", code: "model_not_found", param: "model")
             case .productModeUnverified: return .init(status: "500 Internal Server Error", type: "model_error", code: "product_mode_unverified")

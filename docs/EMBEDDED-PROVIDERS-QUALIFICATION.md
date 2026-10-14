@@ -1,5 +1,23 @@
 # Embedded website provider qualification
 
+## Build109 candidate
+
+ChatGPT now negotiates one owned temporary page per native turn. Each inference
+still receives the full request and a distinct marker, and requires the actual
+complete canonical submission digest. The pilot stops before insertion at
+sixteen inferences or one MiB of cumulative outbound bytes. Exact first-Send
+route acknowledgement and certified first-body replacement retain their existing
+native checks; neither can publish an answer without a fresh body proof.
+Transformed Markdown or substituted whitespace cannot manufacture that digest.
+
+All 495 adapter tests passed on the held candidate. The focused native run passed
+64 checks, including refresh concurrency, submission proofs and ten repaired
+transport regressions. The final complete transport run passed all 160 tests
+with unchanged source. Installed provider qualification remains pending.
+Older failed attempts below retain their original
+outcomes. Conversation reuse is an experiment for the second-inference stall,
+not an established root cause or a permanent Google CAPTCHA remedy.
+
 ## Target
 
 The Developer ID signed Swift app `0.2.0 (4)` was installed at
@@ -186,3 +204,5 @@ Gemini 3.8 Flash's fresh build107 code/terminal/browser task passed in 88.971 se
 Installed build106 ChatGPT's first outbound claim contained 54,223 UTF16 units and UTF8 bytes; its second contained 55,369, with exact Native/adapter agreement. The first inference completed, while the second again timed out with one owned user, no assistant, no Stop control and an enabled composer. These ASCII prompts do not cross a 60,000-character or 64KiB threshold. Actual website upload bytes and backend acceptance remain unknown.
 
 The build108 diagnostic candidate records bounded public Resource Timing observations for ChatGPT conversation and preparation requests. It preserves the exact private send mark, current view/document/sequence guards and original deadlines. It never intercepts requests or records URLs, bodies or headers; response byte counts are not upload sizes. Missing entries, missing status support and status zero remain inconclusive. All 482 browser-adapter tests and five selected native WebKit/privacy/deadline tests passed with unchanged source, and independent review was clear. Installed diagnosis remains pending.
+
+Installed build108 repeated the same ChatGPT failure: its first inference completed and opened the fixture page; its second verified submission but timed out after 298.169 seconds. The full task failed after 318.321 seconds with one tool. Outbound claims again measured 54,223 and 55,369 UTF16 units/UTF8 bytes. The first completed inference had one ended conversation fetch and one preparation fetch, while the second deadline scan had no matching ended entry among 112 untruncated resource entries. HTTP status was unavailable. Missing entries do not establish that no request was dispatched or that the backend rejected it. Both temporary pages closed with saved receipts; the unfinished task's fixture-tab close was not verified. The original failed task and website receipts remain preserved.
