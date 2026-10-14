@@ -84,4 +84,41 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(nullable))
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionDiagnostic(NSNull()))
     }
+
+    @MainActor
+    func testSubmissionBodyMeasurementsCannotPublishTextOrGainProofAuthority() throws {
+        let valid: [String: Any] = ["kind": "gemini_submission_body_v1", "expectedLength": 67, "innerTextLength": 68,
+            "textContentLength": 67, "expectedLines": 2, "innerTextLines": 3, "textContentLines": 2,
+            "firstMismatchIndex": 5, "actualCategory": "linefeed", "expectedCategory": "space",
+            "innerTextMatches": false, "textContentMatches": true, "literalDOMAvailable": true,
+            "literalDOMMatches": true, "literalDOMLength": 67, "literalDOMUnavailableReason": "none",
+            "nodeCount": 4, "maximumDepth": 1, "paragraphCount": 0, "brCount": 1, "textNodeCount": 2,
+            "spanCount": 0, "bodyChildElements": 1]
+        let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(valid))
+        XCTAssertLessThanOrEqual(encoded.utf8.count, 2_048)
+        let projected = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        XCTAssertEqual(projected["innerTextMatches"] as? Bool, false)
+        XCTAssertEqual(projected["literalDOMMatches"] as? Bool, true)
+        for key in ["text", "prompt", "marker", "fingerprint", "url"] {
+            var altered = valid; altered[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(altered))
+        }
+        for key in ["actualCategory", "expectedCategory", "literalDOMUnavailableReason"] {
+            var altered = valid; altered[key] = "PRIVATE CANARY"
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(altered))
+        }
+        let invalidMeasurements: [Any] = [true, -1, 180_202, 1.5, "1", NSNull()]
+        for invalid in invalidMeasurements {
+            var altered = valid; altered["innerTextLength"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(altered))
+        }
+        var unavailableMatch = valid; unavailableMatch["literalDOMAvailable"] = false
+        unavailableMatch["literalDOMUnavailableReason"] = "hidden"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(unavailableMatch))
+        var unknownCount = valid; unknownCount["nodeCount"] = 8_194
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(unknownCount))
+        var unknownDepth = valid; unknownDepth["maximumDepth"] = 66
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(unknownDepth))
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedSubmissionBodyDiagnostic(NSNull()))
+    }
 }

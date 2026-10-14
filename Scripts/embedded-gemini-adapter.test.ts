@@ -250,6 +250,99 @@ describe('Gemini per-submission ownership', () => {
     expect((await finishRound(f, 2)).submissionDiagnostic).toBeUndefined();
   });
 
+  test('submission body diagnostics distinguish changed bytes from rendered layout without accepting either', async () => {
+    const keys = ['kind', 'expectedLength', 'innerTextLength', 'textContentLength', 'expectedLines', 'innerTextLines', 'textContentLines',
+      'innerTextMatches', 'textContentMatches', 'firstMismatchIndex', 'actualCategory', 'expectedCategory', 'literalDOMAvailable',
+      'literalDOMMatches', 'literalDOMLength', 'literalDOMUnavailableReason', 'nodeCount', 'maximumDepth', 'paragraphCount', 'brCount',
+      'textNodeCount', 'spanCount', 'bodyChildElements'];
+    for (const layoutOnly of [false, true]) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const text = await stage(f, 2), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send(); const body = f.userBody!, visible = text.replace('[literal]', '{altered}');
+        const literal = new Element('SPAN'), node = new Element('#text', {}, layoutOnly ? text : visible);
+        (node as any).data = node.text; literal.append(node); body.replaceChildren(literal);
+        Object.defineProperty(body, 'innerText', { get: () => visible });
+      };
+      const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+        submissionDiagnostic: { stage: 'observe_text' } });
+      const value = rejected.submissionBodyDiagnostic;
+      expect(Object.keys(value).sort()).toEqual([...keys].sort());
+      expect(value).toMatchObject({ kind: 'gemini_submission_body_v1', innerTextMatches: false,
+        textContentMatches: layoutOnly, actualCategory: 'brace', expectedCategory: 'bracket', literalDOMAvailable: true,
+        literalDOMMatches: layoutOnly, literalDOMUnavailableReason: 'none', paragraphCount: 0, brCount: 0, textNodeCount: 1 });
+      expect(value.firstMismatchIndex).toBe(normalized(text).indexOf('[literal]'));
+      expect(value.expectedLength).toBe(normalized(text).length); expect(value.expectedLines).toBe(normalized(text).split('\n').length);
+      expect(value.innerTextLength).toBe(text.replace('[literal]', '{altered}').length);
+      for (const key of ['expectedLength', 'innerTextLength', 'textContentLength', 'expectedLines', 'innerTextLines', 'textContentLines', 'firstMismatchIndex', 'literalDOMLength'])
+        expect(Number.isInteger(value[key]) && value[key] >= 0 && value[key] <= 180201).toBe(true);
+      for (const key of ['nodeCount', 'maximumDepth', 'paragraphCount', 'brCount', 'textNodeCount', 'spanCount', 'bodyChildElements'])
+        expect(Number.isInteger(value[key]) && value[key] >= 0 && value[key] <= (key === 'maximumDepth' ? 65 : 8193)).toBe(true);
+      for (const key of ['innerTextMatches', 'textContentMatches', 'literalDOMAvailable', 'literalDOMMatches'])
+        expect(typeof value[key]).toBe('boolean');
+      expect(JSON.stringify(value)).not.toContain('PRIVATE'); expect(JSON.stringify(value)).not.toContain(marker(2));
+      expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
+      expect(await f.run('inspect', { ...fields(2), expectedUserCounts: [2] })).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    }
+  });
+
+  test('known BR and paragraph literal streams remain diagnostic rather than substitute ownership', async () => {
+    for (const paragraphs of [false, true]) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const text = `PRIVATE paragraph A\nparagraph B\n\nComputa session marker: ${marker(2)}`;
+      await stage(f, 2, text); const send = f.send.onClick!;
+      f.send.onClick = () => {
+        send(); const body = f.userBody!; body.replaceChildren();
+        const parts = text.split('\n');
+        for (const [index, part] of parts.entries()) {
+          const node = new Element('#text', {}, part); (node as any).data = part;
+          if (paragraphs) { const paragraph = new Element('P'); paragraph.append(node); body.append(paragraph); }
+          else { if (index) body.append(new Element('BR')); body.append(node); }
+        }
+        Object.defineProperty(body, 'innerText', { get: () => text.replace('\n', ' ') });
+        Object.defineProperty(body, 'textContent', { get: () => parts.join('') });
+      };
+      const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+        submissionBodyDiagnostic: { innerTextMatches: false, textContentMatches: false, literalDOMAvailable: true,
+          literalDOMMatches: true, literalDOMUnavailableReason: 'none', actualCategory: 'space', expectedCategory: 'linefeed',
+          paragraphCount: paragraphs ? 4 : 0, brCount: paragraphs ? 0 : 3, textNodeCount: 4 } });
+      expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
+    }
+  });
+
+  test('hidden controls unknown markup and exhausted literal budgets cannot produce an available submission body diagnostic', async () => {
+    for (const shape of ['hidden', 'inert', 'control', 'markup', 'depth', 'nodes', 'length', 'getter']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const text = await stage(f, 2), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send(); const body = f.userBody!, node = new Element('#text', {}, text); (node as any).data = text;
+        body.replaceChildren();
+        const wrapper = new Element(shape === 'markup' ? 'EM' : 'SPAN');
+        if (shape === 'hidden') wrapper.values.hidden = '';
+        if (shape === 'inert') wrapper.values.inert = '';
+        if (shape === 'control') wrapper.values.role = 'link';
+        body.append(wrapper);
+        let parent = wrapper;
+        if (shape === 'depth') for (let i = 0; i < 65; i++) { const child = new Element('SPAN'); parent.append(child); parent = child; }
+        if (shape === 'nodes') for (let i = 0; i < 8192; i++) body.append(new Element('SPAN'));
+        if (shape === 'length') (node as any).data = 'X'.repeat(180201);
+        parent.append(node);
+        Object.defineProperty(body, 'innerText', { get: () => text.replace('[literal]', '{altered}') });
+        if (shape === 'getter') Object.defineProperty(body, 'textContent', { get() { throw new Error('PRIVATE_BODY_GETTER'); } });
+      };
+      const rejected = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+      const reason = ({ control: 'control', markup: 'unsupported_markup', depth: 'depth_budget', nodes: 'node_budget',
+        length: 'length_budget', getter: 'read_failure', hidden: 'hidden', inert: 'inert' } as any)[shape];
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message',
+        submissionBodyDiagnostic: { literalDOMAvailable: false, literalDOMMatches: false, literalDOMUnavailableReason: reason } });
+      expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
+      expect(JSON.stringify(rejected.submissionBodyDiagnostic)).not.toContain('PRIVATE');
+      expect(JSON.stringify(rejected.submissionBodyDiagnostic)).not.toContain(marker(2));
+    }
+  });
+
   test('an earlier current body changed during next insertion hashing prevents any new editor input', async () => {
     const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
     const inputs = f.composer.events.length;

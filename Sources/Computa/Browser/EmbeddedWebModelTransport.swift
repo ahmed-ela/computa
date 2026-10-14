@@ -2547,6 +2547,38 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return String(decoding: data, as: UTF8.self)
     }
 
+    static func sanitizedSubmissionBodyDiagnostic(_ raw: Any?) -> String? {
+        let measurements = ["expectedLength", "innerTextLength", "textContentLength", "expectedLines", "innerTextLines",
+                            "textContentLines", "firstMismatchIndex", "literalDOMLength"]
+        let counts = ["nodeCount", "paragraphCount", "brCount", "textNodeCount", "spanCount", "bodyChildElements"]
+        let flags = ["innerTextMatches", "textContentMatches", "literalDOMAvailable", "literalDOMMatches"]
+        let keys = Set(measurements + counts + flags + ["kind", "maximumDepth", "actualCategory", "expectedCategory", "literalDOMUnavailableReason"])
+        guard let value = raw as? [String: Any], Set(value.keys) == keys,
+              value["kind"] as? String == "gemini_submission_body_v1",
+              let reason = value["literalDOMUnavailableReason"] as? String,
+              ["none", "missing_body", "hidden", "inert", "control", "unsupported_markup", "length_budget", "node_budget", "depth_budget", "read_failure"].contains(reason)
+        else { return nil }
+        var safe: [String: Any] = ["kind": "gemini_submission_body_v1", "literalDOMUnavailableReason": reason]
+        for key in ["actualCategory", "expectedCategory"] {
+            guard let category = value[key] as? String,
+                  ["linefeed", "carriage_return", "space", "quote", "bracket", "brace", "backslash", "other", "end"].contains(category) else { return nil }
+            safe[key] = category
+        }
+        for (fields, maximum) in [(measurements, 180_201), (counts, 8_193), (["maximumDepth"], 65)] {
+            for key in fields {
+                guard let number = ComputerToolArgumentContract.exactInt64(value[key]), (0...Int64(maximum)).contains(number) else { return nil }
+                safe[key] = number
+            }
+        }
+        for key in flags {
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }; safe[key] = flag
+        }
+        guard !(safe["literalDOMAvailable"] as? Bool == false && safe["literalDOMMatches"] as? Bool == true),
+              (safe["literalDOMAvailable"] as? Bool == true) == (reason == "none"),
+              let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 2_048 else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     private func logSubmissionFailure(_ session: Session, action: String, stage: SubmissionNativeStage, observed: [String: Any]) {
         guard session.provider == .gemini else { return }
         // Native Send is claimed before the click. These fields deliberately
@@ -2564,6 +2596,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         if let safe = Self.sanitizedSubmissionDiagnostic(observed["submissionDiagnostic"]) {
             Self.inspectionLog.error("submissionAdapter \(safe, privacy: .public)")
+        }
+        if let safe = Self.sanitizedSubmissionBodyDiagnostic(observed["submissionBodyDiagnostic"]) {
+            let data = Data(safe.utf8), id = UUID().uuidString
+            let chunks = stride(from: 0, to: data.count, by: 512).map { offset in
+                data.subdata(in: offset..<min(offset + 512, data.count)).base64EncodedString()
+            }
+            for (index, chunk) in chunks.enumerated() {
+                Self.inspectionLog.error("submissionBody id=\(id, privacy: .public) part=\(index + 1)/\(chunks.count) base64=\(chunk, privacy: .public)")
+            }
         }
     }
 

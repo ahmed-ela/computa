@@ -1734,12 +1734,82 @@ function modelSubmissionDiagnostic(record, stage) {
       contextMatches };
   } catch { return null; }
 }
-function modelSubmissionFailure(record = null, stage = 'observe_final') {
+function modelSubmissionBodyDiagnostic(record, body) {
+  const result = { kind: 'gemini_submission_body_v1', expectedLength: 0, innerTextLength: 0, textContentLength: 0,
+    expectedLines: 0, innerTextLines: 0, textContentLines: 0, innerTextMatches: false, textContentMatches: false,
+    firstMismatchIndex: 0, actualCategory: 'end', expectedCategory: 'end', literalDOMAvailable: false,
+    literalDOMMatches: false, literalDOMLength: 0, literalDOMUnavailableReason: 'read_failure',
+    nodeCount: 0, maximumDepth: 0, paragraphCount: 0, brCount: 0, textNodeCount: 0, spanCount: 0, bodyChildElements: 0 };
+  try {
+    const normalize = value => typeof value === 'string' && value.length <= 180_200
+      ? value.replace(/\r\n?/g, '\n').normalize('NFC').trim() : null;
+    const length = value => typeof value === 'string' ? Math.min(value.length, 180_201) : 0;
+    const lines = value => typeof value !== 'string' ? 0 : value.length > 180_200 ? 180_201
+      : value.split(/\r\n?|\n/).length;
+    const expected = record?.canonical, raw = body?.innerText, rawContent = body?.textContent;
+    result.expectedLength = length(expected); result.innerTextLength = length(raw); result.textContentLength = length(rawContent);
+    result.expectedLines = lines(expected); result.innerTextLines = lines(raw); result.textContentLines = lines(rawContent);
+    result.bodyChildElements = Math.min(body?.childElementCount || 0, 8_193);
+    const canonical = normalize(expected), actual = normalize(raw), content = normalize(rawContent);
+    result.innerTextMatches = canonical !== null && actual === canonical;
+    result.textContentMatches = canonical !== null && content === canonical;
+    if (canonical !== null && actual !== null) {
+      let index = 0;
+      while (index < Math.min(actual.length, canonical.length) && actual[index] === canonical[index]) index++;
+      result.firstMismatchIndex = Math.min(index, 180_201);
+      const category = (text, position) => position >= text.length ? 'end' : text[position] === '\n' ? 'linefeed'
+        : text[position] === '\r' ? 'carriage_return' : text[position] === ' ' ? 'space'
+        : ['"', "'", '`'].includes(text[position]) ? 'quote' : ['[', ']'].includes(text[position]) ? 'bracket'
+        : ['{', '}'].includes(text[position]) ? 'brace' : text[position] === '\\' ? 'backslash' : 'other';
+      result.actualCategory = category(actual, index); result.expectedCategory = category(canonical, index);
+    }
+    // This fixed known-node stream is diagnostic only. Unknown or hidden
+    // markup, controls and budget exhaustion cannot establish availability.
+    const parts = [];
+    const fail = reason => { result.literalDOMUnavailableReason = reason; throw new Error('unavailable'); };
+    if (!body) fail('missing_body');
+    if (canonical === null || actual === null || content === null) fail('length_budget');
+    const append = text => {
+      if (typeof text !== 'string') fail('read_failure');
+      if (result.literalDOMLength + text.length > 180_200) { result.literalDOMLength = 180_201; fail('length_budget'); }
+      parts.push(text); result.literalDOMLength += text.length;
+    };
+    const walk = (node, depth) => {
+      result.nodeCount = Math.min(result.nodeCount + 1, 8_193);
+      result.maximumDepth = Math.max(result.maximumDepth, Math.min(depth, 65));
+      if (result.nodeCount > 8_192) fail('node_budget');
+      if (depth > 64) fail('depth_budget');
+      if (node.nodeType === 3) { result.textNodeCount++; append(node.data); return; }
+      if (node.nodeType !== 1) fail('unsupported_markup');
+      if (node.closest('[inert]')) fail('inert');
+      const style = getComputedStyle(node);
+      if (node.hidden || node.closest('[hidden], [aria-hidden="true"]') || style.display === 'none'
+        || ['hidden', 'collapse'].includes(style.visibility)
+        || node.tagName !== 'BR' && node.getClientRects().length === 0) fail('hidden');
+      if (['BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'OPTION', 'A', 'SUMMARY'].includes(node.tagName)
+        || ['button', 'textbox', 'link', 'menuitem', 'slider', 'combobox'].includes(node.getAttribute('role'))
+        || node.closest('[contenteditable="true"]')) fail('control');
+      if (!['DIV', 'SPAN', 'P', 'BR'].includes(node.tagName) || node !== body && node.tagName === 'DIV'
+        || node.tagName === 'P' && node !== body && node.parentElement !== body) fail('unsupported_markup');
+      if (node.tagName === 'SPAN') result.spanCount++;
+      if (node.tagName === 'BR') { result.brCount++; append('\n'); return; }
+      if (node.tagName === 'P') { result.paragraphCount++; if (node !== body && parts.length) append('\n'); }
+      for (const child of node.childNodes) walk(child, depth + 1);
+    };
+    walk(body, 0);
+    result.literalDOMAvailable = true; result.literalDOMUnavailableReason = 'none';
+    result.literalDOMMatches = normalize(parts.join('')) === canonical;
+    return result;
+  } catch { return result; }
+}
+function modelSubmissionFailure(record = null, stage = 'observe_final', body = null) {
   const state = globalThis.__computaGeminiSubmissionState;
   if (record && state && (state.pending === record || state.lastVerified === record)) state.revoked = true;
   const error = { error: 'conversation_changed', detail: 'submission_message' };
   const diagnostic = modelSubmissionDiagnostic(record, stage);
-  return diagnostic ? { ...error, submissionDiagnostic: diagnostic } : error;
+  const bodyDiagnostic = stage === 'observe_text' && body ? modelSubmissionBodyDiagnostic(record, body) : null;
+  return { ...error, ...(diagnostic ? { submissionDiagnostic: diagnostic } : {}),
+    ...(bodyDiagnostic ? { submissionBodyDiagnostic: bodyDiagnostic } : {}) };
 }
 function modelSubmissionContext(record = null, allowSubmitted = false) {
   return window === window.top && location.origin === 'https://gemini.google.com' && modelURLAllowed()
@@ -1789,7 +1859,7 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
     || sequence > 1 && (root === roots[0] || body === modelUserBody(roots[0]))) return modelSubmissionFailure(record, 'observe_body');
   const text = normalizedBody(body), markerLine = `Computa session marker: ${record.marker}`;
   if (text !== record.canonical || text.split('\n').at(-1) !== markerLine || text.split(markerLine).length !== 2)
-    return modelSubmissionFailure(record, 'observe_text');
+    return modelSubmissionFailure(record, 'observe_text', body);
   const previous = state.lastVerified;
   const priorIntact = () => !previous || previous === record || previous.sequence !== sequence - 1
     || roots[previous.sequence - 1] === previous.root && previous.body.isConnected
