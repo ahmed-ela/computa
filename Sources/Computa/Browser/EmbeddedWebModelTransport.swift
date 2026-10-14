@@ -1275,7 +1275,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard raw.utf8.count <= 8_192,
               let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
               value["kind"] as? String == "first_user_structure", value["provider"] as? String == provider.rawValue else { return nil }
-        let tags: Set<String> = ["none", "div", "span", "p", "pre", "code", "button", "section", "article", "user-query", "a", "strong", "em", "ol", "ul", "li", "br", "input", "textarea", "mat-icon"]
+        let tags: Set<String> = ["none", "div", "span", "p", "pre", "code", "button", "section", "article", "user-query", "a", "strong", "em", "ol", "ul", "li", "br", "input", "textarea", "mat-icon", "h1", "h2", "h3", "h4", "h5", "h6"]
         let utilityClasses: Set<String> = ["ng-star-inserted", "cdk-visually-hidden", "hidden", "invisible", "truncate", "overflow-hidden", "whitespace-pre-wrap"]
         let sitePrefixes = ["query-", "user-query-", "gds-", "mat-", "cdk-", "ng-"]
         func shape(_ source: [String: Any], discovery: Bool = false) -> [String: Any]? {
@@ -1542,6 +1542,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                           let content = firstUserDiagnosticBool(node["outboundTextContentMatches"]) else { return nil }
                     child["outboundInnerTextMatches"] = inner
                     child["outboundTextContentMatches"] = content
+                }
+                let headingFlags = ["headingSemantic", "absolutePosition", "onePixelBox", "overflowHidden", "rectClipped", "insetClipped"]
+                if headingFlags.contains(where: { node[$0] != nil }) {
+                    guard provider == .gemini else { return nil }
+                    for key in headingFlags {
+                        guard let flag = firstUserDiagnosticBool(node[key]) else { return nil }
+                        child[key] = flag
+                    }
                 }
                 projected.append(child)
             }

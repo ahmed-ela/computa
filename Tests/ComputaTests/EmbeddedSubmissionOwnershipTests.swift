@@ -158,5 +158,20 @@ final class EmbeddedSubmissionOwnershipTests: XCTestCase {
         }
         var invalidScope = diagnostic; invalidScope["descendantScope"] = privateValue
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(invalidScope), provider: .gemini))
+        let headingFlags = ["headingSemantic", "absolutePosition", "onePixelBox", "overflowHidden", "rectClipped", "insetClipped"]
+        var measuredChild = child; measuredChild["tag"] = "h2"
+        for key in headingFlags { measuredChild[key] = key != "insetClipped" }
+        var measured = diagnostic; measured["descendants"] = [measuredChild]
+        let measuredRecords = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(measured), provider: .gemini))
+        XCTAssertTrue(measuredRecords.joined().contains("\"headingSemantic\":true"))
+        XCTAssertTrue(measuredRecords.joined().contains("\"tag\":\"h2\""))
+        for key in headingFlags {
+            var forgedChild = measuredChild; forgedChild[key] = 1
+            var forged = measured; forged["descendants"] = [forgedChild]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .gemini))
+            forgedChild = measuredChild; forgedChild.removeValue(forKey: key)
+            forged["descendants"] = [forgedChild]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .gemini))
+        }
     }
 }

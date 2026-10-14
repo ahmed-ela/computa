@@ -5438,6 +5438,127 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
     }
 
+    func testGeminiQueryParagraphsProveEveryLiteralLineAcrossTwoOwnedSubmissions() async throws {
+        let fixture = try Fixture(page: Self.geminiQueryParagraphPage())
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: tabID)
+        let prompt = (0..<167).map { index in
+            index == 41 || index == 42 ? "" : "Row \(index): 'literal' \"quoted\" \\path  spaces\tNBSP\u{00a0}emoji 🚀"
+        }.joined(separator: "\n")
+        XCTAssertEqual(prompt.components(separatedBy: "\n").count, 167)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        let first = try await waitForState("complete", fixture.transport, token: token)
+        let firstProof = try XCTUnwrap(first["modelProofContext"] as? [String: Any])
+        let firstFingerprint = try XCTUnwrap(firstProof["firstUserFingerprint"] as? String)
+        XCTAssertEqual(first["turnContinuationCapability"] as? String, "per_submission_ownership_v1")
+        XCTAssertEqual(firstProof["sequence"] as? Int, 1)
+        XCTAssertEqual(firstProof["baselineResponseCount"] as? Int, 0)
+        XCTAssertEqual(firstProof["responseCount"] as? Int, 1)
+        XCTAssertEqual(firstProof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
+        let renderedValue = try await evaluate(view, #"""
+            const payload = document.querySelector('user-query .user-query-bubble-with-background > span.ng-star-inserted');
+            const query = payload.querySelector(':scope > div.query-text.gds-body-l');
+            const rows = [...query.querySelectorAll(':scope > p.query-text-line')];
+            const literal = rows.map(row => [...row.childNodes].map(node => node.nodeType === Node.TEXT_NODE ? node.data : '').join('')).join('\n');
+            return { rowCount: rows.length, blankRows: rows.filter(row => row.childNodes.length === 1 && row.firstChild.nodeName === 'BR').length,
+              literalMatchesOutbound: literal === window.fixturePrompts[0], rawInnerTextDiffers: payload.innerText !== literal };
+            """#)
+        let rendered = try XCTUnwrap(renderedValue as? [String: Any])
+        XCTAssertEqual(rendered["rowCount"] as? Int, 169, "The private blank line and nonce add exactly two physical query rows")
+        XCTAssertEqual(rendered["blankRows"] as? Int, 3)
+        XCTAssertEqual(rendered["literalMatchesOutbound"] as? Bool, true)
+        XCTAssertEqual(rendered["rawInnerTextDiffers"] as? Bool, true, "Real WebKit must include layout/accessibility text that is absent from the literal paragraph stream")
+        let firstOutboundValue = try await evaluate(view, "return window.fixturePrompts[0];")
+        let firstOutbound = try XCTUnwrap(firstOutboundValue as? String)
+        XCTAssertEqual(firstFingerprint, EmbeddedWebModelTransport.outboundFingerprint(firstOutbound))
+
+        let nextPrompt = "Distinct tool result\n\nKeep  two spaces, apostrophe's and NBSP\u{00a0}unchanged"
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": nextPrompt])
+        let second = try await waitForState("complete", fixture.transport, token: token)
+        let secondProof = try XCTUnwrap(second["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(secondProof["sequence"] as? Int, 2)
+        XCTAssertEqual(secondProof["baselineResponseCount"] as? Int, 1)
+        XCTAssertEqual(secondProof["responseCount"] as? Int, 2)
+        XCTAssertEqual(secondProof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(nextPrompt))
+        XCTAssertEqual(secondProof["firstUserFingerprint"] as? String, firstFingerprint)
+        XCTAssertEqual(secondProof["documentGeneration"] as? String, firstProof["documentGeneration"] as? String)
+        XCTAssertEqual(fixture.browser.documentGeneration(for: tabID), generation)
+        let captured = try await capturedUserPrompts(view)
+        XCTAssertEqual(captured, [prompt, nextPrompt])
+        let inputCount = try await evaluate(view, "return window.fixtureInputCount;") as? Int
+        XCTAssertEqual(inputCount, 2)
+        XCTAssertEqual(fixture.createdTabs, [tabID], "Both rounds must keep the sole owned physical conversation")
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: tabID))
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGeminiQueryParagraphsRejectUnrecognizedHeadersExtraRowsAndControlsWithoutReplay() async throws {
+        for variant in [GeminiQueryParagraphVariant.unclippedHeader, .forgedHeader, .extraRow, .rowControl] {
+            let fixture = try Fixture(page: Self.geminiQueryParagraphPage(variant))
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "An exact query\n\nLast literal line"])
+                _ = try await waitForState("complete", fixture.transport, token: token)
+                XCTFail("Malformed query payload must not complete: \(variant)")
+            } catch {
+                let failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure)
+                XCTAssertTrue(failure == .ownershipFailure(.javaScriptSubmission) || failure == .ownershipFailure(.javaScriptFirstUser), "\(variant): \(failure)")
+            }
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never replay the failed query"])
+            let countValue = try await evaluate(view, "return { sends: window.fixturePrompts.length, inputs: window.fixtureInputCount };")
+            let counts = try XCTUnwrap(countValue as? [String: Any])
+            XCTAssertEqual(counts["sends"] as? Int, 1, "\(variant)")
+            XCTAssertEqual(counts["inputs"] as? Int, 1, "\(variant)")
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed", "An unproved payload must retain its failed lease")
+            XCTAssertTrue(fixture.browser.webView(for: tabID) === view)
+            try await assertHumanTabIntact(fixture, retaining: tabID)
+        }
+    }
+
+    func testGeminiChangedPriorQueryParagraphRejectsSecondSubmissionWithoutInsertion() async throws {
+        let fixture = try Fixture(page: Self.geminiQueryParagraphPage())
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Preserve the first row\n\nAnd the final row"])
+        _ = try await waitForState("complete", fixture.transport, token: token)
+        _ = try await evaluate(view, "document.querySelector('user-query .query-text-line').firstChild.data = 'Changed prior row'; return true;")
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never insert after prior payload drift"])
+            XCTFail("A changed prior row must revoke second-round admission")
+        } catch {
+            let failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure)
+            XCTAssertTrue(failure == .ownershipFailure(.javaScriptSubmission) || failure == .ownershipFailure(.javaScriptFirstUser))
+        }
+        let countValue = try await evaluate(view, "return { sends: window.fixturePrompts.length, inputs: window.fixtureInputCount };")
+        let counts = try XCTUnwrap(countValue as? [String: Any])
+        XCTAssertEqual(counts["sends"] as? Int, 1)
+        XCTAssertEqual(counts["inputs"] as? Int, 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertTrue(fixture.browser.webView(for: tabID) === view)
+        try await assertHumanTabIntact(fixture, retaining: tabID)
+    }
+
     func testGeminiWaitsForAnEnabledTemporaryActionAfterItsComposerLoads() async throws {
         let fixture = try Fixture(page: Self.providerPage(.gemini))
         defer { fixture.shutdown() }
@@ -6906,6 +7027,38 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             } else document.getElementById('messages').appendChild(user);
             """).replacingOccurrences(of: "body.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';",
                 with: "body.textContent = window.fixturePrompts.length === 2 ? '{\"type\":\"message\",\"text\":\"Appended fixture reply\"}' : '{\"type\":\"message\",\"text\":\"Fixture reply\"}';")
+    }
+
+    private enum GeminiQueryParagraphVariant {
+        case literal, unclippedHeader, forgedHeader, extraRow, rowControl
+    }
+
+    private static func geminiQueryParagraphPage(_ variant: GeminiQueryParagraphVariant = .literal) -> String {
+        // Only these tests use the measured query component. The original
+        // provider fixture remains a simple literal SPAN for legacy coverage.
+        providerPage(.gemini).replacingOccurrences(of: "const prompt = editor.innerText;", with: #"""
+            // Quill's terminal editor block contributes one LF after the
+            // private nonce. The measured query renderer omits only that LF.
+            const prompt = editor.innerText.replace(/(\n\nComputa session marker: [A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12})\n(?![\s\S])/, '$1');
+            """#).replacingOccurrences(
+            of: "const literal = document.createElement('span'); literal.textContent = prompt; payload.appendChild(literal);",
+            with: """
+            const query = document.createElement('div'); query.className = 'query-text gds-body-l';
+            const heading = document.createElement('h2');
+            heading.className = 'cdk-visually-hidden';
+            \(variant == .forgedHeader ? "heading.setAttribute('role', 'presentation');" : "")
+            heading.style.cssText = '\(variant == .unclippedHeader ? "position:static;width:auto;height:auto;overflow:visible;clip:auto;" : "position:absolute;width:1px;height:1px;padding:0;margin:-1px;border:0;overflow:hidden;clip:rect(0px,0px,0px,0px);clip-path:inset(50%);white-space:nowrap;user-select:none;")';
+            const headingText = document.createElement('span'); headingText.textContent = 'Synthetic accessibility heading '.repeat(4);
+            heading.appendChild(headingText); query.appendChild(heading);
+            prompt.split('\\n').forEach(line => {
+              const row = document.createElement('p'); row.className = 'query-text-line ng-star-inserted';
+              row.appendChild(line ? document.createTextNode(line) : document.createElement('br'));
+              query.appendChild(row);
+            });
+            \(variant == .extraRow ? "const extra = document.createElement('p'); extra.className = 'query-text-line ng-star-inserted'; extra.textContent = 'Unowned extra line'; query.appendChild(extra);" : "")
+            \(variant == .rowControl ? "const control = document.createElement('button'); control.textContent = 'Unowned control'; query.querySelector('p').appendChild(control);" : "")
+            payload.appendChild(query);
+            """)
     }
 
     private static func providerPage(_ provider: EmbeddedWebModelTransport.Provider) -> String {

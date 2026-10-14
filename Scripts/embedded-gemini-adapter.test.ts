@@ -411,6 +411,167 @@ describe('Gemini per-submission ownership', () => {
     expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
     expect(f.composer.textContent).toBe(''); expect(f.composer.events.length).toBe(inputs); expect(f.send.clicks).toBe(2);
   });
+
+  const clippedStyle = { visibility: 'visible', display: 'block', position: 'absolute', width: '1px', height: '1px',
+    overflow: 'hidden', clip: 'rect(0px, 0px, 0px, 0px)', clipPath: 'inset(50%)' };
+  function queryFixture() {
+    const styles = new Map<Element, Record<string, unknown>>();
+    const f = fixture(provider, { response: false,
+      computedStyle: node => styles.get(node) ?? { visibility: node.values.visibility || 'visible', display: 'block' } });
+    const shapes: { query: Element; heading: Element; rows: Element[] }[] = [];
+    const textNode = (text: string) => { const node = new Element('#text', {}, text); (node as any).data = text; return node; };
+    const send = f.send.onClick!;
+    f.send.onClick = () => {
+      const text = f.composer.innerText; send();
+      const query = new Element('DIV', { class: 'query-text gds-body-l' });
+      const heading = new Element('H2', { class: 'cdk-visually-hidden' });
+      const label = new Element('SPAN'); label.append(textNode('PRIVATE screen-reader query heading')); heading.append(label);
+      styles.set(heading, { ...clippedStyle }); query.append(heading);
+      const rows = text.replace(/\r\n?/g, '\n').split('\n').map((line, index) => {
+        const row = new Element('P', { class: 'query-text-line ng-star-inserted' });
+        if (!line) row.append(new Element('BR'));
+        else if (index % 3 === 0) { const span = new Element('SPAN', { class: 'ng-star-inserted' }); span.append(textNode(line)); row.append(span); }
+        else row.append(textNode(line));
+        query.append(row); return row;
+      });
+      f.userBody!.replaceChildren(query);
+      Object.defineProperty(f.userBody!, 'innerText', { configurable: true,
+        get: () => heading.textContent + '\n\n' + rows.map(row => row.innerText).join('\n\n') });
+      shapes.push({ query, heading, rows });
+    };
+    return { f, styles, shapes, textNode };
+  }
+
+  test('measured query paragraphs preserve all 169 lines and seven independent full-body round proofs', async () => {
+    const { f, shapes } = queryFixture();
+    const lines = Array.from({ length: 167 }, (_, i) => i === 5 ? '' : `PRIVATE line ${i}: \t  [literal] e\u0301\u00a0\u200b tail `);
+    const firstText = lines.join('\n') + '\n\n' + markerLine;
+    const first = await finishRound(f, 1, firstText);
+    expect(shapes[0].rows.length).toBe(169); expect(f.userBody!.innerText).not.toBe(firstText);
+    expect(f.userBody!.textContent).not.toBe(firstText);
+    const diagnostic = JSON.parse(first.debugStructure);
+    expect(diagnostic).toMatchObject({ reason: 'first_bound', lineCount: 169, markerFinalLine: true, markerOccurrences: 1 });
+    const header = diagnostic.descendants.find((node: any) => node.classes.includes('cdk-visually-hidden'));
+    expect(header).toMatchObject({ tag: 'h2', headingSemantic: true, absolutePosition: true, onePixelBox: true,
+      overflowHidden: true, rectClipped: true, insetClipped: true });
+    for (let sequence = 2; sequence <= 7; sequence++) {
+      const value = await finishRound(f, sequence);
+      expect(value.firstUserFingerprint).toBe(first.firstUserFingerprint);
+      expect(value.submissionProof).toEqual({ sequence, fingerprint: await fingerprint(roundPrompt(sequence)) });
+    }
+    expect(f.send.clicks).toBe(7);
+    expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE'); expect(JSON.stringify(diagnostic)).not.toContain(firstMarker);
+  });
+
+  test('query heading omission requires actual semantic and clipped CSS facts rather than its class', async () => {
+    for (const fault of ['class', 'role', 'position', 'box', 'overflow', 'clip', 'moved', 'duplicate']) {
+      const { f, shapes, styles } = queryFixture(); const send = f.send.onClick!;
+      const text = await stage(f, 1);
+      f.send.onClick = () => {
+        send(); const { query, heading, rows } = shapes[0];
+        if (fault === 'class') heading.values.class = 'ng-star-inserted';
+        else if (fault === 'role') heading.values.role = 'presentation';
+        else if (fault === 'moved') { query.children.splice(0, 1); query.children.splice(1, 0, heading); }
+        else if (fault === 'duplicate') query.append(heading.cloneNode(true));
+        else styles.set(heading, { ...clippedStyle,
+          ...(fault === 'position' ? { position: 'relative' } : {}), ...(fault === 'box' ? { width: '2px' } : {}),
+          ...(fault === 'overflow' ? { overflow: 'visible' } : {}), ...(fault === 'clip' ? { clip: 'auto', clipPath: 'none' } : {}) });
+        expect(rows.length).toBeGreaterThan(0);
+      };
+      const result = await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text });
+      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      expect(result.firstUserVerified).not.toBe(true); expect(result.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(1);
+      if (fault === 'role') {
+        const structure = JSON.parse(result.debugSubmissionStructure);
+        expect(structure.descendants.find((node: any) => node.classes.includes('cdk-visually-hidden')))
+          .toMatchObject({ headingSemantic: false, rectClipped: true, insetClipped: true });
+      }
+    }
+    for (const clipping of ['rect', 'inset']) {
+      const { f, shapes, styles } = queryFixture(), send = f.send.onClick!;
+      f.send.onClick = () => { send(); styles.set(shapes.at(-1)!.heading, { ...clippedStyle,
+        ...(clipping === 'rect' ? { clip: 'rect(0px 0px 0px 0px)', clipPath: 'none' } : { clip: 'auto' }) }); };
+      expect((await finishRound(f, 1)).submissionProof.fingerprint).toBe(await fingerprint(roundPrompt(1)));
+    }
+  });
+
+  test('recognized query markup rejects hidden controls extra content and malformed rows without rendered fallback', async () => {
+    for (const fault of ['control', 'headerControl', 'hidden', 'inert', 'unknown', 'extra', 'outside', 'nested', 'blank', 'break', 'spanClass', 'spanRole', 'queryClass', 'containerClass']) {
+      const { f, shapes, textNode } = queryFixture(); const text = await stage(f, 1), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send(); const { query, heading, rows } = shapes[0], row = rows[0];
+        if (fault === 'control') row.append(new Element('BUTTON'));
+        else if (fault === 'headerControl') heading.append(new Element('A', { role: 'link' }));
+        else if (fault === 'hidden') row.values.hidden = '';
+        else if (fault === 'inert') row.values.inert = '';
+        else if (fault === 'unknown') { const unknown = new Element('EM'); unknown.append(textNode('PRIVATE ROUND 1: [literal] e\u0301 and whitespace')); row.replaceChildren(unknown); }
+        else if (fault === 'extra') { const extra = new Element('P', { class: 'query-text-line' }); extra.append(textNode('EXTRA')); query.append(extra); }
+        else if (fault === 'outside') f.userBody!.append(textNode('EXTRA'));
+        else if (fault === 'nested') { const wrapper = new Element('DIV'); f.userBody!.replaceChildren(wrapper); wrapper.append(query); query.connected = true; }
+        else if (fault === 'blank') rows[1].replaceChildren(textNode(''));
+        else if (fault === 'break') row.append(new Element('BR'));
+        else if (fault === 'spanClass') row.children[0].values.class = 'unknown';
+        else if (fault === 'spanRole') row.children[0].values.role = 'heading';
+        else if (fault === 'queryClass') query.values.class = 'gds-body-l';
+        else query.values.class = 'query-text';
+        // A superficially matching rendered getter must not authorize a malformed rich subtree.
+        Object.defineProperty(f.userBody!, 'innerText', { configurable: true, get: () => text });
+      };
+      const result = await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text });
+      if (!result.error) {
+        const inspected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1] });
+        expect(inspected).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+        expect(inspected.submissionProof).toBeUndefined();
+      } else expect(result).toMatchObject({ error: 'conversation_changed' });
+      expect(f.send.clicks).toBe(1);
+    }
+  });
+
+  test('query literal bytes and heading eligibility are rechecked across digest and prior-round admission', async () => {
+    for (const fault of ['byte', 'space', 'format', 'css', 'replace']) {
+      const { f, shapes, styles, textNode } = queryFixture(); await finishRound(f, 1);
+      const text = await stage(f, 2);
+      const rejected = await withDigestMutation(f, 2, 'send_claimed', () => {
+        const { heading, rows } = shapes[1];
+        if (fault === 'css') styles.set(heading, { ...clippedStyle, width: '2px' });
+        else if (fault === 'replace') { const span = rows[0].children[0]; span.replaceChildren(textNode('ALTERED')); }
+        else { const node = rows[0].children[0].children[0]; (node as any).data += fault === 'space' ? '\u00a0' : fault === 'format' ? '\u200b' : 'X'; node.text = (node as any).data; }
+      }, () => f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text }));
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      expect(rejected.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
+      expect(await f.run('inspect', { ...fields(2), expectedUserCounts: [2] })).toMatchObject({ error: 'conversation_changed' });
+    }
+    const { f, shapes, textNode } = queryFixture(); await finishRound(f, 1);
+    shapes[0].rows[0].replaceChildren(textNode('ALTERED'));
+    const inputs = f.composer.events.length;
+    const refused = await f.run('insert', { ...fields(2), expectedUserCounts: [1], prompt: roundPrompt(2) });
+    expect(refused).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+    expect(f.send.clicks).toBe(1); expect(f.composer.events.length).toBe(inputs); expect(f.composer.textContent).toBe('');
+  });
+
+  test('query payload budgets and physical body aliases cannot bypass exact full-body proof', async () => {
+    for (const fault of ['length', 'headerLength', 'nodes', 'depth', 'alias']) {
+      const { f, shapes, textNode } = queryFixture(); const text = await stage(f, 1), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send(); const { query, heading, rows } = shapes[0];
+        if (fault === 'length') rows[0].replaceChildren(textNode('X'.repeat(180201)));
+        else if (fault === 'headerLength') heading.children[0].replaceChildren(textNode('X'.repeat(8193)));
+        else if (fault === 'nodes') for (let i = 0; i < 8192; i++) rows[0].append(new Element('SPAN'));
+        else if (fault === 'depth') { let parent = rows[0]; parent.replaceChildren(); for (let i = 0; i < 65; i++) { const child = new Element('SPAN'); parent.append(child); parent = child; } parent.append(textNode(text.split('\n')[0])); }
+        else f.userBody!.append(query.cloneNode(true));
+      };
+      const result = await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text });
+      expect(result).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      expect(result.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(1);
+    }
+    const { f, shapes, textNode } = queryFixture(), send = f.send.onClick!;
+    const suffix = '\n\n' + markerLine, text = 'X'.repeat(180000 - suffix.length) + suffix;
+    f.send.onClick = () => { send(); shapes[0].heading.children[0].replaceChildren(textNode('X'.repeat(409))); };
+    const value = await finishRound(f, 1, text);
+    expect(f.userBody!.innerText.length).toBeGreaterThan(180200);
+    expect(value.submissionProof).toEqual({ sequence: 1, fingerprint: await fingerprint(text) });
+    expect(f.send.clicks).toBe(1);
+  });
 });
 
 // Matches the prompt-free Gemini 4 observation: normal model picker, exact

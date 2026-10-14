@@ -334,7 +334,8 @@ function matches(node: Element, selector: string): boolean {
 class TextArea extends Element { value = ""; }
 class FixtureInputEvent { constructor(public type: string, public options: unknown) {} }
 export type Provider = "claude" | "gemini";
-export function fixture(provider: Provider, options: { temporary?: boolean; userPrompt?: string; renderedMarkdown?: boolean; response?: boolean } = {}) {
+export function fixture(provider: Provider, options: { temporary?: boolean; userPrompt?: string; renderedMarkdown?: boolean; response?: boolean;
+  computedStyle?: (node: Element) => Record<string, unknown> } = {}) {
   const source = readFileSync(new URL(`../Sources/Computa/Resources/BrowserModels/${provider}.js`, import.meta.url), "utf8");
   const execute = new AsyncFunction("input", "document", "window", "location", "getComputedStyle", "MutationObserver", "setTimeout", "globalThis", "crypto", "HTMLTextAreaElement", "InputEvent", source);
   const origin = provider === "claude" ? "https://claude.ai" : "https://gemini.google.com";
@@ -431,7 +432,7 @@ export function fixture(provider: Provider, options: { temporary?: boolean; user
       const result = await execute({ provider, action, expectedURL: document.URL, expectedUserCounts: expectedCounts, ownerToken, bindOwner: true,
         expectedFirstUserMarker: firstMarker, expectedFirstUserFingerprint: nativeFingerprint,
         allowFirstUserBinding: nativeFingerprint === undefined, ...overrides }, document, window, location,
-        (node: Element) => ({ visibility: node.values.visibility || "visible" }), Observer,
+        options.computedStyle ?? ((node: Element) => ({ visibility: node.values.visibility || "visible" })), Observer,
         (callback: () => void, delay: number) => { timers.push(callback); delays.push(delay); }, world,
         { subtle: { digest: async (algorithm: string, data: Uint8Array) => { const digest = await crypto.subtle.digest(algorithm, data); digestHook?.(); digestHook = undefined; return digest; } } }, TextArea, FixtureInputEvent);
       if (adopt && result.firstUserVerified) nativeFingerprint = result.firstUserFingerprint;

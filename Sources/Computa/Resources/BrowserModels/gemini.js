@@ -1590,6 +1590,113 @@ function modelUserBody(root) {
     || body.querySelector('button, [role="button"], [contenteditable="true"], [role="textbox"]')) return null;
   return body;
 }
+function modelQueryHeadingFacts(node) {
+  const empty = { headingSemantic: false, absolutePosition: false, onePixelBox: false,
+    overflowHidden: false, rectClipped: false, insetClipped: false };
+  try {
+    if (!node || node.nodeType !== 1) return empty;
+    const role = node.getAttribute('role'), style = getComputedStyle(node);
+    return { headingSemantic: /^H[1-6]$/.test(node.tagName) && (role === null || role === 'heading') || role === 'heading',
+      absolutePosition: style.position === 'absolute', onePixelBox: style.width === '1px' && style.height === '1px',
+      overflowHidden: style.overflow === 'hidden' || style.overflowX === 'hidden' && style.overflowY === 'hidden',
+      rectClipped: /^rect\(\s*0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?\s*\)$/.test(style.clip || ''),
+      insetClipped: /^inset\(\s*50%\s*\)$/.test(style.clipPath || '') };
+  } catch { return empty; }
+}
+function modelQueryPayload(body) {
+  // The measured rich message scaffold has a clipped screen-reader heading
+  // followed by one literal paragraph per outbound line. Never use rendered
+  // innerText as a fallback after recognizing this scaffold.
+  let recognized = false;
+  try {
+    const containers = [...body.querySelectorAll('div.query-text')];
+    // A block wrapper cannot silently become the legacy literal-SPAN path
+    // just because a required rich-scaffold class disappeared.
+    recognized = containers.length > 0 || body.querySelector('div') !== null;
+    if (!recognized) return { recognized: false, text: null };
+    if (containers.length !== 1 || containers[0].parentElement !== body
+      || !containers[0].classList.contains('gds-body-l')) return { recognized, text: null };
+    const query = containers[0];
+    let count = 0, characters = 0, headerCharacters = 0;
+    const countNode = (node, depth) => {
+      if (++count > 8_192 || depth > 64) throw new Error('query_payload_budget');
+      if (node.nodeType === 8) return;
+      if (node.nodeType !== 1 && node.nodeType !== 3) throw new Error('query_payload_node');
+    };
+    const structuralChildren = (node, depth) => [...node.childNodes].filter(child => {
+      countNode(child, depth);
+      if (child.nodeType === 8) return false; // Angular comments have no rendered bytes.
+      if (child.nodeType === 3 && child.data === '') return false;
+      if (child.nodeType !== 1) throw new Error('query_payload_outside_text');
+      return true;
+    });
+    const safeElement = node => {
+      if (!modelVisible(node) || node.getAttribute('hidden') !== null || node.getAttribute('inert') !== null
+        || node.getAttribute('contenteditable') !== null || node.getAttribute('tabindex') !== null
+        || node.getAttribute('aria-hidden') === 'true') throw new Error('query_payload_hidden');
+      const role = node.getAttribute('role');
+      if (role !== null && role !== 'heading') throw new Error('query_payload_control');
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse')
+        throw new Error('query_payload_hidden');
+    };
+    countNode(body, 0); safeElement(body);
+    const outer = structuralChildren(body, 1);
+    if (outer.length !== 1 || outer[0] !== query) return { recognized, text: null };
+    safeElement(query);
+    const children = structuralChildren(query, 2), heading = children[0];
+    if (children.length < 2 || !heading.classList.contains('cdk-visually-hidden')) return { recognized, text: null };
+    safeElement(heading);
+    const facts = modelQueryHeadingFacts(heading);
+    if (!facts.headingSemantic || !facts.absolutePosition || !facts.onePixelBox || !facts.overflowHidden
+      || !facts.rectClipped && !facts.insetClipped) return { recognized, text: null };
+    const literal = (node, depth, header = false) => {
+      countNode(node, depth);
+      if (node.nodeType === 8) return '';
+      if (node.nodeType === 3) {
+        if (typeof node.data !== 'string') throw new Error('query_payload_text');
+        if (header) {
+          headerCharacters += node.data.length;
+          if (headerCharacters > 8_192) throw new Error('query_heading_length');
+        } else {
+          characters += node.data.length;
+          if (characters > 180_200) throw new Error('query_payload_length');
+        }
+        return node.data;
+      }
+      safeElement(node);
+      if (node.tagName !== 'SPAN' || node.getAttribute('role') !== null
+        || !header && [...node.classList].some(name => name !== 'ng-star-inserted')) throw new Error('query_payload_markup');
+      return [...node.childNodes].map(child => literal(child, depth + 1, header)).join('');
+    };
+    // Validate the omitted header subtree too; its text is never included in
+    // the prompt, and controls or unknown rich markup cannot hide there.
+    [...heading.childNodes].forEach(child => literal(child, 3, true));
+    const rows = children.slice(1), lines = [];
+    for (const row of rows) {
+      safeElement(row);
+      if (row.tagName !== 'P' || !row.classList.contains('query-text-line') || row.getAttribute('role') !== null)
+        return { recognized, text: null };
+      const nodes = [...row.childNodes].filter(node => {
+        if (node.nodeType === 8) { countNode(node, 3); return false; }
+        return true;
+      });
+      if (nodes.length === 1 && nodes[0].nodeType === 1 && nodes[0].tagName === 'BR') {
+        countNode(nodes[0], 3); safeElement(nodes[0]);
+        if (nodes[0].getAttribute('role') !== null || nodes[0].childNodes.length !== 0) return { recognized, text: null };
+        lines.push('');
+      } else {
+        const line = [...row.childNodes].map(node => literal(node, 3)).join('');
+        // One paragraph represents one line; nested linebreaks or empty
+        // paragraphs without the measured lone BR are ambiguous.
+        if (!line.length || /[\r\n]/.test(line)) return { recognized, text: null };
+        lines.push(line);
+      }
+    }
+    const text = lines.join('\n');
+    return { recognized, text: text.length <= 180_200 ? text : null };
+  } catch { return { recognized, text: null }; }
+}
 function modelTemporaryHeadingFacts(heading) {
   const direct = [...heading.childNodes].filter(node => node.nodeType === 3).map(node => node.textContent || '').join('').trim();
   const initialTitle = direct === 'Just stopping by?' || [...heading.querySelectorAll('*')].slice(0, 256)
@@ -1691,7 +1798,14 @@ const ownedMessages = modelUserRoots();
 const ownedUserCount = ownedMessages.length;
 if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(ownedUserCount))
   return { error: 'conversation_changed', detail: 'user_count' };
-const normalizedBody = node => (node.innerText || node.textContent || '').replace(/\r\n?/g, '\n').normalize('NFC').trim();
+const modelUserPayloadText = node => {
+  const payload = modelQueryPayload(node);
+  return payload.recognized ? payload.text ?? '' : node.innerText || node.textContent || '';
+};
+const normalizedBody = node => {
+  const text = modelUserPayloadText(node);
+  return typeof text === 'string' ? text.replace(/\r\n?/g, '\n').normalize('NFC').trim() : '';
+};
 const submissionOwnershipEnabled = input.submissionMarker !== undefined || input.submissionSequence !== undefined;
 if (submissionOwnershipEnabled && (typeof input.submissionMarker !== 'string' || !/^[a-f0-9-]{36}$/i.test(input.submissionMarker)
   || !Number.isInteger(input.submissionSequence) || input.submissionSequence < 0 || input.submissionSequence > 10_000))
@@ -1860,7 +1974,7 @@ async function modelObserveSubmission(sequence, allowPending = false, pendingPar
   }
   if (roots.length !== sequence || !modelSubmissionContext(record, input.action === 'submit')) return modelSubmissionFailure(record, 'observe_count');
   const root = roots[sequence - 1], body = modelUserBody(root);
-  const raw = body && (body.innerText || body.textContent || '');
+  const raw = body && modelUserPayloadText(body);
   const remount = record.remount;
   const remountAllowed = sequence === 1 && input.action === 'inspect' && input.allowFirstUserBinding === false
     && remount?.root === root && remount.body === body && remount.previousRoot === record.root
@@ -1983,6 +2097,7 @@ function modelFirstUserStructure(reason, allowSubmittedUser = false, submission 
       textLength: text === null ? 220_001 : Math.min(text.length, 220_001), markerExact: markerLine !== null && text === markerLine,
       markerContained: markerLine !== null && text !== null && text.includes(markerLine), visible: modelVisible(node),
       editable: node.getAttribute('contenteditable') === 'true',
+      ...(node.classList.contains('cdk-visually-hidden') ? modelQueryHeadingFacts(node) : {}),
       ...(bodyScoped ? {
         outboundInnerTextMatches: text !== null && text === submission.record.canonical,
         outboundTextContentMatches: boundedSubmissionNodeText(node.textContent || '') === submission.record.canonical
