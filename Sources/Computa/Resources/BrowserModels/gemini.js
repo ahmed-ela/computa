@@ -1692,6 +1692,143 @@ const ownedUserCount = ownedMessages.length;
 if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(ownedUserCount))
   return { error: 'conversation_changed', detail: 'user_count' };
 const normalizedBody = node => (node.innerText || node.textContent || '').replace(/\r\n?/g, '\n').normalize('NFC').trim();
+const submissionOwnershipEnabled = input.submissionMarker !== undefined || input.submissionSequence !== undefined;
+if (submissionOwnershipEnabled && (typeof input.submissionMarker !== 'string' || !/^[a-f0-9-]{36}$/i.test(input.submissionMarker)
+  || !Number.isInteger(input.submissionSequence) || input.submissionSequence < 0 || input.submissionSequence > 10_000))
+  return { error: 'conversation_changed', detail: 'submission_message' };
+const submissionEditorActions = ['insert', 'sendReady', 'submit'];
+function modelSubmissionFailure(record = null) {
+  const state = globalThis.__computaGeminiSubmissionState;
+  if (record && state && (state.pending === record || state.lastVerified === record)) state.revoked = true;
+  return { error: 'conversation_changed', detail: 'submission_message' };
+}
+function modelSubmissionContext(record = null, allowSubmitted = false) {
+  return window === window.top && location.origin === 'https://gemini.google.com' && modelURLAllowed()
+    && document.URL === input.expectedURL && globalThis.__computaModelOwner === input.ownerToken
+    && modelTemporaryVerified() && (!record || record.document === document && record.owner === input.ownerToken)
+    && (!firstSnapshot || snapshotUnchanged(allowSubmitted));
+}
+function modelPreviousSubmissionIntact(sequence) {
+  if (sequence === 0) return modelUserRoots().length === 0;
+  const state = globalThis.__computaGeminiSubmissionState, record = state?.lastVerified, roots = modelUserRoots();
+  return !!record && !state.revoked && record.sequence === sequence && record.phase === 'verified'
+    && modelSubmissionContext(record) && roots.length === sequence && roots[sequence - 1] === record.root
+    && record.body.isConnected && modelUserBody(record.root) === record.body && normalizedBody(record.body) === record.canonical;
+}
+async function modelObserveSubmission(sequence, allowPending = false, pendingParent = null) {
+  const state = globalThis.__computaGeminiSubmissionState;
+  if (sequence === 0) return modelUserRoots().length === 0 ? {} : modelSubmissionFailure();
+  if (!state || state.revoked || state.document !== document || state.owner !== input.ownerToken) return modelSubmissionFailure();
+  const record = state.lastVerified?.sequence === sequence ? state.lastVerified : state.pending?.sequence === sequence ? state.pending : null;
+  if (!record || !['send_claimed', 'verified'].includes(record.phase)) return modelSubmissionFailure(record);
+  const parentValid = !!pendingParent && state.pending === pendingParent && pendingParent.phase === 'send_claimed'
+    && pendingParent.sequence === sequence + 1 && pendingParent.sequence === input.submissionSequence
+    && pendingParent.marker === input.submissionMarker && state.lastVerified === record && record.phase === 'verified';
+  if (pendingParent && !parentValid) return modelSubmissionFailure(record);
+  if (!submissionEditorActions.includes(input.action) && input.submissionMarker !== record.marker && !parentValid)
+    return modelSubmissionFailure(record);
+  const roots = modelUserRoots();
+  if (allowPending && record.phase === 'send_claimed' && roots.length === sequence - 1
+    && modelSubmissionContext(record, input.action === 'submit')) {
+    // No proof for the unrendered round. Recheck only the previous whole body
+    // so native can retain its already-confirmed count during this pending read.
+    const previous = sequence > 1 ? await modelObserveSubmission(sequence - 1, false, record) : {};
+    return previous.error ? previous : { ...previous, pending: true };
+  }
+  if (roots.length !== sequence || !modelSubmissionContext(record, input.action === 'submit')) return modelSubmissionFailure(record);
+  const root = roots[sequence - 1], body = modelUserBody(root);
+  const raw = body && (body.innerText || body.textContent || '');
+  const remount = record.remount;
+  const remountAllowed = sequence === 1 && input.action === 'inspect' && input.allowFirstUserBinding === false
+    && remount?.root === root && remount.body === body && remount.previousRoot === record.root
+    && remount.previousBody === record.body && !record.root.isConnected && !record.body.isConnected
+    && input.expectedFirstUserFingerprint === record.fingerprint
+    && globalThis.__computaModelFirstProof?.fingerprint === record.fingerprint
+    && globalThis.__computaModelFirstProof?.marker === record.marker;
+  if (!body || typeof raw !== 'string' || raw.length > 180_200
+    || record.root && (record.root !== root || record.body !== body) && !remountAllowed
+    || sequence > 1 && (root === roots[0] || body === modelUserBody(roots[0]))) return modelSubmissionFailure(record);
+  const text = normalizedBody(body), markerLine = `Computa session marker: ${record.marker}`;
+  if (text !== record.canonical || text.split('\n').at(-1) !== markerLine || text.split(markerLine).length !== 2)
+    return modelSubmissionFailure(record);
+  const previous = state.lastVerified;
+  const priorIntact = () => !previous || previous === record || previous.sequence !== sequence - 1
+    || roots[previous.sequence - 1] === previous.root && previous.body.isConnected
+      && modelUserBody(previous.root) === previous.body && normalizedBody(previous.body) === previous.canonical;
+  if (!priorIntact()) return modelSubmissionFailure(record);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const current = modelUserRoots();
+  if (parentValid && current.length === sequence + 1) {
+    const append = websiteModelAcknowledgedUserAppend(input, ownedUserCount, current.length,
+      firstSnapshot ? { snapshotIntact: snapshotUnchanged(true), fingerprint: firstUserFingerprint, identity: firstUserIdentity } : null,
+      modelTemporaryVerified());
+    return append || (firstSnapshot && !snapshotUnchanged(true) ? modelFirstUserFailure('snapshot_before_action') : modelSubmissionFailure(record));
+  }
+  if (globalThis.__computaGeminiSubmissionState !== state || state.revoked
+    || state.pending !== record && state.lastVerified !== record
+    || parentValid && (state.pending !== pendingParent || pendingParent.phase !== 'send_claimed'
+      || pendingParent.sequence !== input.submissionSequence || pendingParent.marker !== input.submissionMarker)
+    || remountAllowed && record.remount !== remount
+    || !modelSubmissionContext(record, input.action === 'submit')
+    || current.length !== sequence || current.some((node, index) => node !== roots[index])
+    || !root.isConnected || !body.isConnected || modelUserBody(root) !== body || normalizedBody(body) !== text
+    || !priorIntact() || fingerprint !== record.fingerprint) return modelSubmissionFailure(record);
+  record.root = root; record.body = body; record.phase = 'verified'; record.remount = null;
+  state.lastVerified = record; if (state.pending === record) state.pending = null;
+  return { submissionProof: { sequence, fingerprint } };
+}
+async function modelBeginSubmission(prompt, composer) {
+  if (!submissionOwnershipEnabled) return {};
+  const sequence = input.submissionSequence, marker = input.submissionMarker;
+  const canonical = prompt.replace(/\r\n?/g, '\n').normalize('NFC').trim(), markerLine = `Computa session marker: ${marker}`;
+  let state = globalThis.__computaGeminiSubmissionState;
+  if (!state) {
+    if (sequence !== 1 || ownedUserCount !== 0) return modelSubmissionFailure();
+    state = { document, owner: input.ownerToken, lastVerified: null, pending: null, markers: new Set(), revoked: false };
+    globalThis.__computaGeminiSubmissionState = state;
+  }
+  if (state.revoked || state.document !== document || state.owner !== input.ownerToken || state.pending
+    || sequence !== (state.lastVerified?.sequence || 0) + 1 || ownedUserCount !== sequence - 1
+    || state.markers.has(marker) || sequence === 1 && marker !== input.expectedFirstUserMarker
+    || sequence > 1 && marker === input.expectedFirstUserMarker || canonical.split('\n').at(-1) !== markerLine
+    || canonical.split(markerLine).length !== 2 || !canonical.endsWith(`\n\n${markerLine}`)
+    || !modelSubmissionContext()) return modelSubmissionFailure();
+  const record = { sequence, marker, canonical, document, owner: input.ownerToken, phase: 'insert_claimed', fingerprint: null, root: null, body: null };
+  state.pending = record; state.markers.add(marker);
+  const roots = modelUserRoots();
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+  const current = modelUserRoots(), value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
+  if (globalThis.__computaGeminiSubmissionState !== state || state.pending !== record || state.revoked
+    || !modelSubmissionContext(record) || current.length !== sequence - 1 || current.some((node, index) => node !== roots[index])
+    || !modelEnabled(composer) || value?.trim() || !modelPreviousSubmissionIntact(sequence - 1)) return modelSubmissionFailure(record);
+  record.fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  return {};
+}
+function modelClaimSubmission(prompt) {
+  if (!submissionOwnershipEnabled) return {};
+  const state = globalThis.__computaGeminiSubmissionState, record = state?.pending;
+  if (!state || state.revoked || !record || record.phase !== 'inserted'
+    || record.sequence !== input.submissionSequence || record.marker !== input.submissionMarker
+    || record.canonical !== prompt.replace(/\r\n?/g, '\n').normalize('NFC').trim()
+    || ownedUserCount !== record.sequence - 1 || !modelSubmissionContext(record)
+    || !modelPreviousSubmissionIntact(record.sequence - 1)) return modelSubmissionFailure(record);
+  record.phase = 'send_claimed'; return {};
+}
+async function modelSubmissionResult(observed) {
+  if (!submissionOwnershipEnabled || observed.error) return observed;
+  const capability = { submissionOwnershipCapability: 'per_submission_ownership_v1' };
+  if (!['inspect', 'prepare', 'verifyModel', ...submissionEditorActions].includes(input.action)) return { ...observed, ...capability };
+  // Native alone classifies a synchronous first SPA promotion after Send. Do
+  // not bind from the crossed invocation; inspect its newly admitted route.
+  if (input.action === 'submit' && document.URL !== input.expectedURL) return { ...observed, ...capability };
+  const sequence = input.submissionSequence - (['insert', 'sendReady'].includes(input.action) ? 1 : 0);
+  const proof = await modelObserveSubmission(sequence, ['inspect', 'verifyModel', 'submit'].includes(input.action));
+  if (proof.error) return proof;
+  return { ...observed, ...capability, ...(proof.submissionProof ? { submissionProof: proof.submissionProof } : {}),
+    ...(proof.pending ? { submissionPending: true } : {}),
+    ...(proof.pending && ['inspect', 'verifyModel'].includes(input.action) ? { text: '', answerComplete: false, pending: true } : {}) };
+}
 function modelFirstUserStructure(reason, allowSubmittedUser = false) {
   const roots = modelUserRoots(), root = roots[0], body = root && modelUserBody(root);
   const rendered = body ? normalizedBody(body) : '', lines = rendered.split('\n');
@@ -1735,6 +1872,23 @@ function modelFirstUserStructure(reason, allowSubmittedUser = false) {
     ownerSame: globalThis.__computaModelOwner === input.ownerToken };
   while (JSON.stringify(diagnostic).length > 8_192 && diagnostic.descendants.length) diagnostic.descendants.pop();
   return JSON.stringify(diagnostic);
+}
+async function modelFirstUserReplacementObservation(snapshot) {
+  // Only the existing exact first-lineage discard proof can propose a remount.
+  // It still admits no result: native must request one fresh full inspect.
+  const result = await websiteModelReplacementObservation(input, ownedUserCount, snapshot,
+    { roots: modelUserRoots, body: modelUserBody, text: normalizedBody, identity: () => firstUserIdentity, temporary: modelTemporaryVerified });
+  if (result?.error === 'first_user_observation_replaced' && submissionOwnershipEnabled) {
+    const state = globalThis.__computaGeminiSubmissionState, record = state?.lastVerified;
+    const roots = modelUserRoots(), root = roots[0], body = root && modelUserBody(root);
+    if (state && !state.revoked && record?.sequence === 1 && record.phase === 'verified'
+      && record.root === snapshot.root && record.body === snapshot.body && !record.remount
+      && record.fingerprint === input.expectedFirstUserFingerprint && body
+      && normalizedBody(body) === record.canonical) {
+      record.remount = { previousRoot: record.root, previousBody: record.body, root, body };
+    }
+  }
+  return result;
 }
 function modelFirstUserFailure(reason, allowSubmittedUser = false) {
   return { error: 'conversation_changed', detail: 'first_user_message',
@@ -1787,8 +1941,7 @@ if (ownedUserCount > 0) {
       && firstSnapshot.body.isConnected && modelUserBody(current[0]) === firstSnapshot.body
       && normalizedBody(firstSnapshot.body) === firstSnapshot.text && modelTemporaryVerified())
       return { error: 'submission_observation_pending' };
-    return await websiteModelReplacementObservation(input, ownedUserCount, firstSnapshot,
-      { roots: modelUserRoots, body: modelUserBody, text: normalizedBody, identity: () => firstUserIdentity, temporary: modelTemporaryVerified })
+    return await modelFirstUserReplacementObservation(firstSnapshot)
       || modelFirstUserFailure('snapshot_before_action');
   }
   if (!modelTemporaryVerified()) return { error: 'temporary_mode_unverified' };
@@ -1810,6 +1963,11 @@ if (ownedUserCount > 0) {
 
 async function providerPageAction() {
   websiteModelDiagnosticPhase('page_action');
+  if (submissionOwnershipEnabled && ['inspect', 'prepare', 'verifyModel', ...submissionEditorActions].includes(input.action)) {
+    const sequence = input.submissionSequence - (submissionEditorActions.includes(input.action) ? 1 : 0);
+    const prior = await modelObserveSubmission(sequence, ['inspect', 'verifyModel'].includes(input.action));
+    if (prior.error) return prior;
+  }
   const modelState = websiteModelPickerState('gemini');
   if (['discoverModels', 'selectModel', 'modelDiagnostic'].includes(input.action))
     return websiteModelPickerAction(modelState, input, ownedUserCount === 0
@@ -1826,8 +1984,7 @@ async function providerPageAction() {
       || currentCount !== ownedUserCount) return websiteModelAcknowledgedUserAppend(input, ownedUserCount, currentCount,
         firstSnapshot ? { snapshotIntact: snapshotUnchanged(true), fingerprint: firstUserFingerprint, identity: firstUserIdentity } : null,
         modelTemporaryVerified()) || { error: 'conversation_changed', detail: 'user_count' };
-    if (firstSnapshot && !snapshotUnchanged()) return await websiteModelReplacementObservation(input, ownedUserCount, firstSnapshot,
-      { roots: modelUserRoots, body: modelUserBody, text: normalizedBody, identity: () => firstUserIdentity, temporary: modelTemporaryVerified })
+    if (firstSnapshot && !snapshotUnchanged()) return await modelFirstUserReplacementObservation(firstSnapshot)
       || modelFirstUserFailure('snapshot_after_model_read');
     modelState.evidence = proof.modelEvidence;
   }
@@ -1885,6 +2042,8 @@ async function providerPageAction() {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 180_000) return { error: 'prompt_not_inserted' };
   if (action === 'insert') {
     if (value?.trim()) return { error: 'composer_not_empty' };
+    const claimed = await modelBeginSubmission(prompt, composer);
+    if (claimed.error) return claimed;
     if (ownedUserCount === 0) {
       if (globalThis.__computaModelFirstSubmitted || typeof expectedFirstUserMarker !== 'string'
         || !/^[a-f0-9-]{36}$/i.test(expectedFirstUserMarker)
@@ -1928,6 +2087,7 @@ async function providerPageAction() {
         composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
       } else if (!document.execCommand('insertText', false, prompt)) return { error: 'insert_command_rejected' };
     }
+    if (submissionOwnershipEnabled) globalThis.__computaGeminiSubmissionState.pending.phase = 'inserted';
     return { ...state, inserted: true };
   }
   const actual = (value || '').replace(/\r\n/g, '\n').trim(), expected = prompt.trim();
@@ -1941,6 +2101,8 @@ async function providerPageAction() {
   const send = modelFind(['button[aria-label="Send message"]', 'button[aria-label="Send"]', 'button.send-button']);
   if (action === 'sendReady') return { ...state, sendReady: modelEnabled(send) };
   if (!modelEnabled(send)) return { error: 'send_unavailable' };
+  const submission = modelClaimSubmission(prompt);
+  if (submission.error) return submission;
   if (globalThis.__computaModelLastSubmissionCount !== undefined
     && ownedUserCount <= globalThis.__computaModelLastSubmissionCount)
     return { error: 'conversation_changed', detail: 'user_count' };
@@ -1965,8 +2127,7 @@ if (['inspect', 'verifyModel'].includes(input.action) && modelUserRoots().length
   if (!firstSnapshot) return { error: 'conversation_changed', detail: 'user_count' };
 }
 if (firstSnapshot) {
-  if (!snapshotUnchanged(input.action === 'submit')) return await websiteModelReplacementObservation(input, ownedUserCount, firstSnapshot,
-    { roots: modelUserRoots, body: modelUserBody, text: normalizedBody, identity: () => firstUserIdentity, temporary: modelTemporaryVerified })
+  if (!snapshotUnchanged(input.action === 'submit')) return await modelFirstUserReplacementObservation(firstSnapshot)
     || modelFirstUserFailure('snapshot_after_action', input.action === 'submit');
   if (!modelTemporaryVerified()) return { error: 'temporary_mode_unverified' };
   if (observed.error) return observed;
@@ -1977,8 +2138,8 @@ if (firstSnapshot) {
       identity: firstUserIdentity };
   }
   // Submit intentionally exposes its acknowledgment only, as in the native contract.
-  if (input.action === 'submit') return observed;
-  return { ...observed, firstUserVerified: true, firstUserFingerprint, firstUserMarkerVerified: true,
-    ...(firstBound ? { debugStructure: modelFirstUserStructure('first_bound') } : {}) };
+  if (input.action === 'submit') return await modelSubmissionResult(observed);
+  return await modelSubmissionResult({ ...observed, firstUserVerified: true, firstUserFingerprint, firstUserMarkerVerified: true,
+    ...(firstBound ? { debugStructure: modelFirstUserStructure('first_bound') } : {}) });
 }
-return { ...observed, firstUserVerified: false, firstUserFingerprint: null };
+return await modelSubmissionResult({ ...observed, firstUserVerified: false, firstUserFingerprint: null });

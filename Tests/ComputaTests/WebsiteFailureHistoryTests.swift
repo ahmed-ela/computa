@@ -93,7 +93,7 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         let reasons: [EmbeddedWebModelTransport.OwnershipReason] = [.documentGenerationBefore, .documentGenerationAfter,
             .routeBefore, .routeAfter, .unboundCleanup, .javaScriptDocument, .javaScriptConversation, .javaScriptOwner,
             .javaScriptUserCount, .javaScriptConversationIdentity, .javaScriptURL, .javaScriptConversationRoute,
-            .javaScriptFirstUser, .promotionFirstUser, .promotionTemporary]
+            .javaScriptFirstUser, .javaScriptSubmission, .promotionFirstUser, .promotionTemporary]
         for modelID in [syntheticChatGPTModelID, "browser/gemini", "browser/claude"] {
             let task = UUID().uuidString, thread = UUID().uuidString
             var expected: [WebsiteTurnFailureStore.Record] = []
@@ -143,5 +143,28 @@ final class WebsiteFailureHistoryTests: XCTestCase {
             diagnosticText: String(decoding: arbitraryData, as: UTF8.self)))
         XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID, modelID: "api/cerebras/model/fixture",
             diagnosticText: String(decoding: data, as: UTF8.self)))
+    }
+
+    func testContinuationFailurePersistsOnlyCanonicalGeminiNativeEvidence() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaContinuationError-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        let data = try WebModelServer.errorBody(for: WebsiteTurnContinuation.Failure.invalidToolOutputs)
+        let text = String(decoding: data, as: UTF8.self)
+        let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+            turnID: turnID, modelID: "browser/gemini", diagnosticText: text))
+        XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+        XCTAssertEqual(try WebsiteTurnFailureStore(directory: root).load(threadID: thread), [record])
+        for model in [syntheticChatGPTModelID, "browser/claude", "api/cerebras/model/fixture"] {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: model, diagnosticText: text))
+        }
+        for mutation in [["reason": "private canary"], ["reason": "changed_history"],
+                         ["message": "private canary"], ["retryable": true], ["prompt": "private canary"]] as [[String: Any]] {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            var error = try XCTUnwrap(object["error"] as? [String: Any]); mutation.forEach { error[$0.key] = $0.value }; object["error"] = error
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: "browser/gemini", diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)))
+        }
     }
 }

@@ -2478,12 +2478,69 @@ function chatGPTFramedPayloadDiagnostic(expected, rendered) {
     return result;
   } catch { return result; }
 }
+function chatGPTLiteralDOMDiagnostic(candidate, rendered) {
+  const result = { literalDOMAvailable: false, literalDOMMatchesPrompt: false, literalDOMMatchesRendered: false,
+    literalDOMLength: 0, literalDOMNodeCount: 0, literalDOMMaxDepth: 0, literalDOMParagraphCount: 0, literalDOMBRCount: 0,
+    literalDOMUnavailableReason: 'read_failure', literalDOMFrameUnique: false, literalDOMFrameParsed: false,
+    literalDOMPayloadCompared: false, literalDOMParsedJSONEqual: false, literalDOMPayloadUnavailableReason: 'unavailable' };
+  try {
+    // A fixed text/BR/paragraph stream diagnoses presentation only. It is not
+    // a replacement ownership extractor, and unsupported markup grants none.
+    const root = candidate.body, parts = [];
+    const fail = reason => { result.literalDOMUnavailableReason = reason; throw new Error('unavailable'); };
+    const append = text => {
+      if (typeof text !== 'string') fail('read_failure');
+      if (result.literalDOMLength + text.length > 180_200) {
+        result.literalDOMLength = 180_201; fail('character_budget');
+      }
+      parts.push(text); result.literalDOMLength += text.length;
+    };
+    const walk = (node, depth) => {
+      result.literalDOMNodeCount = Math.min(result.literalDOMNodeCount + 1, 8_193);
+      result.literalDOMMaxDepth = Math.max(result.literalDOMMaxDepth, Math.min(depth, 65));
+      if (result.literalDOMNodeCount > 8_192) fail('node_budget');
+      if (depth > 64) fail('depth_budget');
+      if (node.nodeType === 3) { append(node.data); return; }
+      if (node.nodeType !== 1) fail('unsupported_markup');
+      if (node.closest('[inert]')) fail('inert_markup');
+      const style = getComputedStyle(node);
+      if (node.hidden || node.closest('[hidden], [aria-hidden="true"]') || style.display === 'none'
+        || ['hidden', 'collapse'].includes(style.visibility)
+        || node.tagName !== 'BR' && node.getClientRects().length === 0) fail('hidden_markup');
+      if (['BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'OPTION', 'A', 'SUMMARY'].includes(node.tagName)
+        || ['button', 'textbox', 'link', 'menuitem', 'slider', 'combobox'].includes(node.getAttribute('role'))
+        || node.closest('[contenteditable="true"]')) fail('control_markup');
+      if (!['DIV', 'SPAN', 'P', 'BR'].includes(node.tagName) || node !== root && node.tagName === 'DIV'
+        || node.tagName === 'P' && node !== root && (node.parentElement !== root || root.tagName !== 'DIV')) fail('unsupported_markup');
+      if (node.tagName === 'BR') { result.literalDOMBRCount++; append('\n'); return; }
+      if (node.tagName === 'P') {
+        result.literalDOMParagraphCount++;
+        if (node !== root && parts.length) append('\n');
+      }
+      for (const child of node.childNodes) walk(child, depth + 1);
+    };
+    walk(root, 0);
+    const normalize = value => value.replace(/\r\n?/g, '\n').normalize('NFC').trim();
+    const text = normalize(parts.join(''));
+    const payload = chatGPTFramedPayloadDiagnostic(candidate.canonical, text);
+    result.literalDOMAvailable = true; result.literalDOMUnavailableReason = 'none';
+    result.literalDOMMatchesPrompt = text === candidate.canonical;
+    result.literalDOMMatchesRendered = typeof rendered === 'string' && text === normalize(rendered);
+    result.literalDOMFrameUnique = payload.payloadRenderedFrameUnique;
+    result.literalDOMFrameParsed = payload.payloadRenderedParsed;
+    result.literalDOMPayloadCompared = payload.payloadCompared;
+    result.literalDOMParsedJSONEqual = payload.payloadParsedJSONEqual;
+    result.literalDOMPayloadUnavailableReason = payload.payloadUnavailableReason;
+    return result;
+  } catch { return result; }
+}
 function chatGPTLatchExpansionTextDiagnostic(candidate, text) {
   if (candidate.textDiagnostic) return;
   try {
     const facts = chatGPTFirstUserExpansionTextFacts(candidate, text);
     const payload = chatGPTFramedPayloadDiagnostic(candidate.canonical, text);
-    if (!facts) { candidate.textDiagnostic = { expansionTextAnalyzed: false, expansionClicked: candidate.clicked === true, ...payload }; return; }
+    const literalDOM = chatGPTLiteralDOMDiagnostic(candidate, text);
+    if (!facts) { candidate.textDiagnostic = { expansionTextAnalyzed: false, expansionClicked: candidate.clicked === true, ...payload, ...literalDOM }; return; }
     const { complete, compatible, ...diagnostic } = facts;
     const actual = text.replace(/[ \t\n]+/g, ' '), expected = candidate.canonical.replace(/[ \t\n]+/g, ' ');
     const count = (value, predicate) => Math.min([...value].filter(predicate).length, 1_000);
@@ -2518,7 +2575,7 @@ function chatGPTLatchExpansionTextDiagnostic(candidate, text) {
         expansionFirstActualCharacter: character(actual),
         expansionFirstExpectedCharacter: character(expected),
       }) });
-    candidate.textDiagnostic = { ...diagnostic, ...payload };
+    candidate.textDiagnostic = { ...diagnostic, ...payload, ...literalDOM };
   } catch { /* A diagnostic cannot change admission or the original error. */ }
 }
 

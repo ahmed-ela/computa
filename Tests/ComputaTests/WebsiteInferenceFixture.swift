@@ -103,10 +103,18 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
     private let base: any WebModelTransport
     private var generations: [String: String] = [:]
     private var providers: [String: String] = [:]
+    private var sequences: [String: Int] = [:]
+    private var baselines: [String: Int] = [:]
+    private var completedCounts: [String: Int] = [:]
+    private var submittedFingerprints: [String: String] = [:]
     private let defaultChatChoice: WebsiteModelChoice?
-    init(_ base: any WebModelTransport, defaultChatChoice: WebsiteModelChoice? = nil) {
+    private let defaultGeminiChoice: WebsiteModelChoice?
+    private var hasExplicitChoice: [String: Bool] = [:]
+    init(_ base: any WebModelTransport, defaultChatChoice: WebsiteModelChoice? = nil,
+         defaultGeminiChoice: WebsiteModelChoice? = WebsiteModelChoice(provider: "gemini", key: "fixture-default-flash", label: "Fixture Default Flash")) {
         self.base = base
         self.defaultChatChoice = defaultChatChoice
+        self.defaultGeminiChoice = defaultGeminiChoice
     }
 
     func changeRevision(sessionToken: String) async throws -> UInt64? {
@@ -122,8 +130,27 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
         if operation == "webProviderStart", let token = snapshot["sessionToken"] as? String {
             generations[token] = UUID().uuidString.lowercased()
             providers[token] = input["provider"]
+            hasExplicitChoice[token] = input["modelChoice"] != nil
+            sequences[token] = 0
+            baselines[token] = 0
+            completedCounts[token] = 0
         }
         let token = snapshot["sessionToken"] as? String ?? input["sessionToken"]
+        if let token, operation == "webProviderSend", snapshot["state"] as? String == "running" {
+            sequences[token, default: 0] += 1
+            baselines[token] = completedCounts[token, default: 0]
+            if let prompt = input["prompt"] {
+                submittedFingerprints[token] = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
+            }
+        }
+        if let token, snapshot["state"] as? String == "complete" {
+            completedCounts[token] = baselines[token, default: 0] + 1
+        }
+        // This synthetic transport explicitly attests only its own serialized
+        // Send bytes. Real WebKit must independently verify the rendered body.
+        if let token, providers[token] == "gemini", snapshot["turnContinuationCapability"] == nil {
+            snapshot["turnContinuationCapability"] = "per_submission_ownership_v1"
+        }
         if ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? ""),
            let token, providers[token] == "chatgpt", let choice = defaultChatChoice,
            snapshot["modelEvidence"] == nil, let context = syntheticChatSelection(choice) {
@@ -132,21 +159,37 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
             snapshot["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
                 "source": "selected_model_indicator", "verification": "website_selection", "chatSelection": context]
         }
+        if ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? ""),
+           let token, providers[token] == "gemini", hasExplicitChoice[token] == false,
+           let choice = defaultGeminiChoice, snapshot["modelEvidence"] == nil {
+            snapshot["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
+                "source": "selected_model_indicator", "verification": "website_selection"]
+        }
         if ["running", "complete"].contains(snapshot["state"] as? String ?? ""), let token {
             if snapshot["sessionToken"] == nil { snapshot["sessionToken"] = token }
-            if snapshot["sequence"] == nil { snapshot["sequence"] = 1 }
+            if snapshot["sequence"] == nil { snapshot["sequence"] = sequences[token, default: 1] }
             if snapshot["modelProofContext"] == nil {
                 let fingerprint = SHA256.hash(data: Data(("synthetic-lease:" + token).utf8)).map { String(format: "%02x", $0) }.joined()
                 snapshot["modelProofContext"] = ["documentGeneration": generations[token] ?? UUID().uuidString.lowercased(),
-                    "sequence": 1, "baselineResponseCount": 0,
-                    "responseCount": snapshot["state"] as? String == "complete" ? 1 : 0,
+                    "sequence": sequences[token, default: 1], "baselineResponseCount": baselines[token, default: 0],
+                    "responseCount": snapshot["state"] as? String == "complete" ? completedCounts[token, default: 1] : baselines[token, default: 0],
                     "firstUserFingerprint": fingerprint]
+                if providers[token] == "gemini" {
+                    var context = snapshot["modelProofContext"] as! [String: Any]
+                    context["submittedPromptFingerprint"] = submittedFingerprints[token, default: ""]
+                    snapshot["modelProofContext"] = context
+                }
             }
         }
         if ["webProviderFinish", "webProviderCancel"].contains(operation),
            ["deleted", "not_created"].contains(snapshot["cleanup"] as? String ?? ""), let token {
             generations.removeValue(forKey: token)
             providers.removeValue(forKey: token)
+            hasExplicitChoice.removeValue(forKey: token)
+            sequences.removeValue(forKey: token)
+            baselines.removeValue(forKey: token)
+            completedCounts.removeValue(forKey: token)
+            submittedFingerprints.removeValue(forKey: token)
         }
         return try JSONSerialization.data(withJSONObject: snapshot)
     }

@@ -1,5 +1,6 @@
 import AppKit
 import CoreFoundation
+import CryptoKit
 import Foundation
 import OSLog
 @preconcurrency import WebKit
@@ -136,6 +137,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case javaScriptURL = "document_url"
         case javaScriptConversationRoute = "conversation_route"
         case javaScriptFirstUser = "first_user_message"
+        case javaScriptSubmission = "submission_message"
         case promotionFirstUser = "promotion_first_user"
         case promotionTemporary = "promotion_temporary"
     }
@@ -238,6 +240,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var chatModeRequested = false
         var productModeEvidence: WebsiteProductModeEvidence?
         var sequence = 0
+        struct SubmissionBinding {
+            let sequence: Int
+            let marker: String
+            let promptFingerprint: String
+            let outboundFingerprint: String
+        }
+        var preparedSubmission: SubmissionBinding?
+        var currentSubmission: SubmissionBinding?
+        var previousSubmission: SubmissionBinding?
+        var currentSubmissionVerified = false
         var confirmedUsers = 0
         var pendingSubmission = false
         var baseline = 0
@@ -416,8 +428,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.baseline = count(before, "responseCount")
                 // Keep the lineage marker out of the local transcript. It is an
                 // opaque transport suffix for the first website submission only.
-                let outbound = session.submitted ? prompt : "\(prompt)\n\nComputa session marker: \(session.firstUserMarker)"
+                let submissionMarker = session.submitted && session.provider == .gemini
+                    ? UUID().uuidString.lowercased() : session.firstUserMarker
+                let outbound = !session.submitted || session.provider == .gemini
+                    ? "\(prompt)\n\nComputa session marker: \(submissionMarker)" : prompt
                 guard outbound.utf8.count <= 180_000 else { throw Failure.invalidRequest }
+                if session.provider == .gemini {
+                    session.preparedSubmission = Session.SubmissionBinding(sequence: session.sequence + 1,
+                        marker: submissionMarker, promptFingerprint: Self.promptFingerprint(prompt),
+                        outboundFingerprint: Self.outboundFingerprint(outbound))
+                }
                 let inserted = try await page(session, action: "insert", prompt: outbound)
                 guard inserted["inserted"] as? Bool == true else { throw Failure.editorFailure("insertion_unconfirmed") }
                 // Wait only through read-only checks. Site normalization can enable
@@ -435,6 +455,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // Claim submission before clicking: even a lost reply must not replay Send.
                 session.submitted = true
                 session.sequence += 1
+                if session.provider == .gemini {
+                    guard let binding = session.preparedSubmission, binding.sequence == session.sequence else { throw Failure.invalidRequest }
+                    session.previousSubmission = session.currentSubmission
+                    session.currentSubmission = binding
+                    session.currentSubmissionVerified = false
+                }
                 session.pendingSubmission = true
                 session.state = "running"
                 let sent = try await page(session, action: "submit", prompt: outbound)
@@ -868,6 +894,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 session.state = "ready"
                             }
                         }
+                    } else if session.provider == .gemini, !session.isDiscovery {
+                        // Website default still needs a concrete observed model
+                        // pin before a retained turn can receive its first Send.
+                        var defaultObservation = observed
+                        if defaultObservation["modelEvidence"] == nil || defaultObservation["modelEvidence"] is NSNull {
+                            // Read the checked option on this same empty owned
+                            // page. Discovery never selects a different model.
+                            while ContinuousClock.now < deadline {
+                                let revision = try browser.modelChangeRevision(for: session.tabID)
+                                let current = try await page(session, action: "discoverModels",
+                                    maximumWait: min(.seconds(10), deadline - .now))
+                                if current["pending"] as? Bool != true { defaultObservation = current; break }
+                                _ = try await waitForChange(sessionToken: session.token, after: revision, until: deadline)
+                            }
+                            guard ContinuousClock.now < deadline else { throw preparationFailure(session) }
+                        }
+                        session.modelEvidence = try validatedModelEvidence(defaultObservation, session: session)
+                        session.modelSelectionVerified = true
+                        _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
+                        session.state = "ready"
                     } else { session.state = "ready" }
                 } else if !session.temporaryRequested, observed["temporaryActionAvailable"] as? Bool == true {
                     session.temporaryRequested = true
@@ -892,6 +938,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard response.utf8.count <= 220_000 else { throw Failure.responseTooLarge }
             if count(observed, "responseCount") > session.baseline,
                count(observed, "userCount") == session.sequence, !session.pendingSubmission, !response.isEmpty {
+                if session.provider == .gemini, !session.isDiscovery {
+                    guard session.currentSubmissionVerified,
+                          session.currentSubmission?.sequence == session.sequence else {
+                        throw Failure.ownershipFailure(.javaScriptSubmission)
+                    }
+                }
                 if session.response != response {
                     session.response = response; session.lastChanged = .now; session.candidateSince = nil
                 }
@@ -1199,6 +1251,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private static let firstUserPayloadFlags = ["payloadExpectedFrameUnique", "payloadRenderedFrameUnique", "payloadExpectedParsed",
         "payloadRenderedParsed", "payloadOutsideFrameMatches", "payloadCompared", "payloadParsedJSONEqual", "payloadObjectKeyOrderChanged"]
     private static let firstUserPayloadKeys = firstUserPayloadFlags + ["payloadMismatchField", "payloadMismatchKind", "payloadExpectedType", "payloadRenderedType", "payloadUnavailableReason"]
+    private static let firstUserLiteralDOMFlags = ["literalDOMAvailable", "literalDOMMatchesPrompt", "literalDOMMatchesRendered",
+        "literalDOMFrameUnique", "literalDOMFrameParsed", "literalDOMPayloadCompared", "literalDOMParsedJSONEqual"]
+    private static let firstUserLiteralDOMCounts = ["literalDOMLength", "literalDOMNodeCount", "literalDOMMaxDepth", "literalDOMParagraphCount", "literalDOMBRCount"]
+    private static let firstUserLiteralDOMKeys = firstUserLiteralDOMFlags + firstUserLiteralDOMCounts + ["literalDOMUnavailableReason", "literalDOMPayloadUnavailableReason"]
 
     private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
@@ -1354,6 +1410,45 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
             }
         }
+        if firstUserLiteralDOMKeys.contains(where: { value[$0] != nil }) {
+            guard provider == .chatgpt else { return nil }
+            for key in firstUserLiteralDOMFlags {
+                guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+                safe[key] = flag
+            }
+            for key in firstUserLiteralDOMCounts {
+                let limit: Int64 = key == "literalDOMLength" ? 180_201 : key == "literalDOMMaxDepth" ? 65 : key == "literalDOMNodeCount" ? 8_193 : 8_192
+                guard let count = ComputerToolArgumentContract.exactInt64(value[key]), (0...limit).contains(count) else { return nil }
+                safe[key] = count
+            }
+            guard let reason = value["literalDOMUnavailableReason"] as? String,
+                  ["none", "read_failure", "hidden_markup", "inert_markup", "control_markup", "unsupported_markup", "node_budget", "depth_budget", "character_budget"].contains(reason),
+                  let payloadReason = value["literalDOMPayloadUnavailableReason"] as? String,
+                  ["unavailable", "none", "missing_frame", "parse_failure", "bounds", "number_precision"].contains(payloadReason) else { return nil }
+            safe["literalDOMUnavailableReason"] = reason; safe["literalDOMPayloadUnavailableReason"] = payloadReason
+            let available = safe["literalDOMAvailable"] as? Bool == true
+            let frame = safe["literalDOMFrameUnique"] as? Bool == true, parsed = safe["literalDOMFrameParsed"] as? Bool == true
+            let compared = safe["literalDOMPayloadCompared"] as? Bool == true, equal = safe["literalDOMParsedJSONEqual"] as? Bool == true
+            let nodes = safe["literalDOMNodeCount"] as? Int64 ?? 0
+            guard (safe["literalDOMParagraphCount"] as? Int64 ?? 0) + (safe["literalDOMBRCount"] as? Int64 ?? 0) <= nodes,
+                  (safe["literalDOMMaxDepth"] as? Int64 ?? 0) <= max(0, nodes - 1) else { return nil }
+            if available {
+                guard reason == "none", payloadReason != "unavailable",
+                      (safe["literalDOMLength"] as? Int64 ?? 0) <= 180_200,
+                      nodes > 0, nodes <= 8_192,
+                      (safe["literalDOMMaxDepth"] as? Int64 ?? 0) <= 64,
+                      !parsed || frame, !equal || compared, !compared || parsed && payloadReason == "none",
+                      payloadReason != "none" || compared else { return nil }
+                if payloadReason == "missing_frame" { guard !parsed else { return nil } }
+                if ["bounds", "number_precision"].contains(payloadReason) { guard parsed else { return nil } }
+            } else {
+                guard reason != "none", payloadReason == "unavailable",
+                      firstUserLiteralDOMFlags.filter({ $0 != "literalDOMAvailable" }).allSatisfy({ safe[$0] as? Bool == false }) else { return nil }
+                if reason == "node_budget" { guard safe["literalDOMNodeCount"] as? Int64 == 8_193 else { return nil } }
+                if reason == "depth_budget" { guard safe["literalDOMMaxDepth"] as? Int64 == 65 else { return nil } }
+                if reason == "character_budget" { guard safe["literalDOMLength"] as? Int64 == 180_201 else { return nil } }
+            }
+        }
         for key in firstUserTextFlags {
             if let rawFlag = value[key] {
                 guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
@@ -1447,6 +1542,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             payloadObservation["kind"] = "first_user_payload"; payloadObservation["provider"] = provider.rawValue
             for key in ["action", "scope"] { payloadObservation[key] = summary[key] }
         }
+        var literalDOMObservation: [String: Any] = [:]
+        for key in firstUserLiteralDOMKeys {
+            if let value = summary.removeValue(forKey: key) { literalDOMObservation[key] = value }
+        }
+        if !literalDOMObservation.isEmpty {
+            literalDOMObservation["kind"] = "first_user_literal_dom"; literalDOMObservation["provider"] = provider.rawValue
+            for key in ["action", "scope"] { literalDOMObservation[key] = summary[key] }
+        }
         var textObservation: [String: Any] = [:]
         for key in firstUserTextKeys {
             if let value = summary.removeValue(forKey: key) { textObservation[key] = value }
@@ -1486,7 +1589,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var records: [String] = []
         for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
             + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation])
-            + (payloadObservation.isEmpty ? [] : [payloadObservation]) + children {
+            + (payloadObservation.isEmpty ? [] : [payloadObservation]) + (literalDOMObservation.isEmpty ? [] : [literalDOMObservation]) + children {
             guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: .sortedKeys), bytes.count <= 960 else { return nil }
             records.append(String(decoding: bytes, as: UTF8.self))
         }
@@ -1509,6 +1612,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             else if safe.contains("\"kind\":\"first_user_payload\"") {
                 event = "firstUserPayload"
+            }
+            else if safe.contains("\"kind\":\"first_user_literal_dom\"") {
+                event = "firstUserLiteralDOM"
             }
             else {
                 event = "firstUserChild"
@@ -1708,6 +1814,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.pendingSubmission && session.firstUserFingerprint == nil,
             "allowFirstUserExpansion": allowFirstUserExpansion,
         ]
+        if provider == .gemini, !session.isDiscovery {
+            let editorAction = ["insert", "sendReady", "submit"].contains(action)
+            if let binding = editorAction ? session.preparedSubmission : session.currentSubmission {
+                input["submissionMarker"] = binding.marker
+                input["submissionSequence"] = binding.sequence
+            }
+        }
         if allowFirstUserExpansion, !routeContinuation.isEmpty {
             // A bounded contiguous chain survives an unconsumed intermediate
             // read. Cleanup and unrelated read refreshes receive no receipts.
@@ -1723,6 +1836,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
                 input["expectedModelChoice"] = ["key": choice.key, "label": choice.label]
             }
+        } else if provider == .gemini, session.modelSelectionVerified, let evidence = session.modelEvidence,
+                  !["stop", "cleanup", "discoverModels"].contains(action) {
+            input["expectedModelChoice"] = ["key": evidence.selected.key, "label": evidence.selected.label]
         }
         if let fingerprint = session.firstUserFingerprint { input["expectedFirstUserFingerprint"] = fingerprint }
         if let conversation = session.conversation, !promotion { input["expectedConversation"] = conversation }
@@ -1938,6 +2054,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     "owner_token": .javaScriptOwner, "user_count": .javaScriptUserCount,
                     "conversation_identity": .javaScriptConversationIdentity, "document_url": .javaScriptURL,
                     "conversation_route": .javaScriptConversationRoute, "first_user_message": .javaScriptFirstUser,
+                    "submission_message": .javaScriptSubmission,
                 ]
                 let detail = (observed["detail"] as? String).flatMap { allowedDetails[$0] }
                 throw Failure.ownershipFailure(detail ?? (error == "document_changed" ? .javaScriptDocument : .javaScriptConversation))
@@ -2019,6 +2136,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                 }
             }
+            if provider == .gemini, !session.isDiscovery, let currentSubmission = session.currentSubmission,
+               count(observed, "userCount") > 0 {
+                let users = count(observed, "userCount")
+                let binding: Session.SubmissionBinding?
+                if users == currentSubmission.sequence { binding = currentSubmission }
+                else if session.pendingSubmission, users == session.confirmedUsers { binding = session.previousSubmission }
+                else { binding = nil }
+                guard let binding else { throw Failure.ownershipFailure(.javaScriptSubmission) }
+                guard let raw = observed["submissionProof"] else {
+                    if action == "inspect", session.pendingSubmission, users == currentSubmission.sequence {
+                        throw Failure.submissionObservationPending
+                    }
+                    throw Failure.ownershipFailure(.javaScriptSubmission)
+                }
+                guard observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability,
+                      Self.validSubmissionProof(raw, sequence: binding.sequence, fingerprint: binding.outboundFingerprint) else {
+                    throw Failure.ownershipFailure(.javaScriptSubmission)
+                }
+                if binding.sequence == currentSubmission.sequence { session.currentSubmissionVerified = true }
+            }
             if action == "inspect", session.pendingSubmission, count(observed, "userCount") == 0 {
                 try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
                                                        enforceModel: enforceModel, recheck: recheckModelAfterAwait,
@@ -2077,6 +2214,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                combinedContextRecheck: combinedContextRecheck,
                                                maximumWait: evaluationDeadline - .now)
+        if provider == .gemini, !session.isDiscovery, ["insert", "sendReady", "submit"].contains(action) {
+            guard observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability else {
+                throw Failure.ownershipFailure(.javaScriptSubmission)
+            }
+        }
         guard ContinuousClock.now < evaluationDeadline else { throw Failure.pageUnavailable }
         return observed
     }
@@ -2305,6 +2447,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                   "state": session.state, "text": session.response, "sequence": session.sequence]
         if let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
         if let evidence = session.productModeEvidence { value["productModeEvidence"] = evidence.dictionary }
+        if session.provider == .gemini, !session.isDiscovery {
+            value["turnContinuationCapability"] = Self.turnContinuationCapability
+        }
         if session.state == "complete", let structure = session.responseCodeStructure {
             value["completionEvidence"] = ["codeStructure": structure]
         }
@@ -2313,12 +2458,43 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                             "firstUserFingerprint": session.firstUserFingerprint ?? "",
                                             "responseCount": session.observedResponseCount,
                                             "baselineResponseCount": session.baseline]
+            if session.provider == .gemini, !session.isDiscovery,
+               var context = value["modelProofContext"] as? [String: Any] {
+                context["submittedPromptFingerprint"] = session.currentSubmissionVerified
+                    ? session.currentSubmission?.promptFingerprint ?? "" : ""
+                value["modelProofContext"] = context
+            }
         }
         if let cleanup { value["cleanup"] = cleanup }
         return try JSONSerialization.data(withJSONObject: value)
     }
 
     private func count(_ observation: [String: Any], _ key: String) -> Int { observation[key] as? Int ?? 0 }
+
+    static let turnContinuationCapability = "per_submission_ownership_v1"
+
+    static func promptFingerprint(_ prompt: String) -> String {
+        SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Match the adapter's existing CRLF/NFC/ECMAScript trim policy exactly.
+    /// This hash is proof of the full outbound body, including its private marker.
+    static func outboundFingerprint(_ outbound: String) -> String {
+        let spaces = CharacterSet(charactersIn: "\u{0009}\u{000A}\u{000B}\u{000C}\u{000D}\u{0020}\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}")
+        let canonical = outbound.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .precomposedStringWithCanonicalMapping.trimmingCharacters(in: spaces)
+        return promptFingerprint(canonical)
+    }
+
+    static func validSubmissionProof(_ raw: Any, sequence: Int, fingerprint: String) -> Bool {
+        guard (1...10_000).contains(sequence), fingerprint.utf8.count == 64,
+              let value = raw as? [String: Any], Set(value.keys) == ["sequence", "fingerprint"],
+              let observedSequence = ComputerToolArgumentContract.exactInt64(value["sequence"]),
+              observedSequence == Int64(sequence), let observed = value["fingerprint"] as? String,
+              observed.utf8.count == 64, observed.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              observed == fingerprint else { return false }
+        return true
+    }
 
     private func script(for provider: Provider) -> String? {
         if let script = scripts[provider] { return script }

@@ -724,7 +724,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
         expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
       };
-      const rejectedFramedExpansion = async (expectedJSON: string, renderedJSON: string, frame = 'unique') => {
+      const rejectedFramedExpansion = async (expectedJSON: string, renderedJSON: string, frame = 'unique',
+        decorate?: (f: any, prompt: string, rendered: string) => void) => {
         const { f, picker, expand, send } = await collapsed();
         const prefix = 'PRIVATE FRAME PREFIX\n' + 'x'.repeat(11_000) + '\nCOMPLETE_RESPONSES_REQUEST_JSON:\n';
         const suffix = '\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n' + markerLine;
@@ -734,6 +735,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           const rendered = prefix + renderedJSON + suffix;
           f.userBody.text = frame === 'missing' ? rendered.replace('COMPLETE_RESPONSES_REQUEST_JSON:\n', '')
             : frame === 'duplicate' ? rendered + '\nEND_COMPLETE_RESPONSES_REQUEST_JSON.' : rendered;
+          decorate?.(f, prompt, f.userBody.text);
         };
         const result = await f.run('inspect', expansionInput);
         rejected(result); expect(expand.clicks).toBe(1); noSend(f, picker, send);
@@ -797,6 +799,87 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             payloadUnavailableReason: reason, payloadMismatchField: 'none', payloadMismatchKind: 'none',
             payloadExpectedType: 'none', payloadRenderedType: 'none',
           });
+        }
+      });
+
+      const literalText = (data: any) => ({ nodeType: 3, data });
+      const literalElement = (tag: string, children: any[], values: Record<string, string> = {}) => {
+        const element = new Node(tag, values);
+        element.children = children.filter(child => child.nodeType === 1);
+        for (const child of children) child.parentElement = element;
+        Object.defineProperty(element, 'childNodes', { get: () => children });
+        Object.defineProperty(element, 'textContent', { get: () => children.map(child => child.nodeType === 3
+          ? typeof child.data === 'string' ? child.data : '' : child.textContent).join('') });
+        return element;
+      };
+      const publishLiteralDOM = (f: any, rendered: string, children: any[]) => {
+        for (const child of children) child.parentElement = f.userBody;
+        f.userBody.children = children.filter(child => child.nodeType === 1);
+        Object.defineProperty(f.userBody, 'innerText', { get: () => rendered });
+        Object.defineProperty(f.userBody, 'textContent', { get: () => children.map(child => child.nodeType === 3
+          ? typeof child.data === 'string' ? child.data : '' : child.textContent).join('') });
+        Object.defineProperty(f.userBody, 'childNodes', { get: () => children });
+      };
+
+      test('literal DOM text BR and paragraph comparisons remain diagnostic when the rendered first body is invalid', async () => {
+        for (const kind of ['text', 'br', 'paragraph']) {
+          const diagnostic = await rejectedFramedExpansion('{"tools":[]}', '{"tools":{]}', 'unique', (f, prompt, rendered) => {
+            const lines = prompt.split('\n');
+            const children = kind === 'text' ? [literalText(prompt)] : kind === 'paragraph'
+              ? lines.map(line => literalElement('P', [literalText(line)]))
+              : lines.flatMap((line, index) => index ? [literalElement('BR', []), literalText(line)] : [literalText(line)]);
+            publishLiteralDOM(f, rendered, children);
+          });
+          expect(diagnostic).toMatchObject({ payloadRenderedParsed: false, literalDOMAvailable: true,
+            literalDOMMatchesPrompt: true, literalDOMMatchesRendered: false, literalDOMUnavailableReason: 'none',
+            literalDOMFrameUnique: true, literalDOMFrameParsed: true, literalDOMPayloadCompared: true,
+            literalDOMParsedJSONEqual: true, literalDOMPayloadUnavailableReason: 'none' });
+          expect(diagnostic.literalDOMParagraphCount > 0).toBe(kind === 'paragraph');
+          expect(diagnostic.literalDOMBRCount > 0).toBe(kind === 'br');
+        }
+      });
+
+      test('hidden inert interactive or unsupported literal markup cannot claim a matching source stream', async () => {
+        for (const [tag, values, reason] of [
+          ['SPAN', { 'aria-hidden': 'true' }, 'hidden_markup'], ['SPAN', { inert: '' }, 'inert_markup'],
+          ['BUTTON', {}, 'control_markup'], ['CODE', {}, 'unsupported_markup'], ['DIV', {}, 'unsupported_markup'],
+        ] as [string, Record<string, string>, string][]) {
+          const diagnostic = await rejectedFramedExpansion('{"tools":[]}', '{"tools":{]}', 'unique', (f, prompt, rendered) => {
+            publishLiteralDOM(f, rendered, [literalElement(tag, [literalText(prompt)], values)]);
+          });
+          expect(diagnostic).toMatchObject({ literalDOMAvailable: false, literalDOMMatchesPrompt: false,
+            literalDOMMatchesRendered: false, literalDOMUnavailableReason: reason, literalDOMFrameUnique: false,
+            literalDOMFrameParsed: false, literalDOMPayloadCompared: false, literalDOMParsedJSONEqual: false,
+            literalDOMPayloadUnavailableReason: 'unavailable' });
+        }
+      });
+
+      test('literal DOM diagnostics retain altered nested text and stop at exact node depth character and read budgets', async () => {
+        for (const kind of ['changed', 'nodes', 'depth', 'characters', 'read']) {
+          const diagnostic = await rejectedFramedExpansion('{"tools":[]}', '{"tools":{]}', 'unique', (f, prompt, rendered) => {
+            let children: any[];
+            if (kind === 'changed') children = [literalElement('SPAN', [literalText(prompt.replace('{"tools":[]}', '{"tools":{}}'))])];
+            else if (kind === 'nodes') children = Array.from({ length: 8_200 }, () => literalText(''));
+            else if (kind === 'depth') {
+              let nested = literalElement('SPAN', [literalText(prompt)]);
+              for (let i = 0; i < 66; i++) nested = literalElement('SPAN', [nested]);
+              children = [nested];
+            } else if (kind === 'characters') children = [literalText('x'.repeat(180_201))];
+            else children = [literalText(123)];
+            publishLiteralDOM(f, rendered, children);
+          });
+          if (kind === 'changed') expect(diagnostic).toMatchObject({ literalDOMAvailable: true, literalDOMMatchesPrompt: false,
+            literalDOMMatchesRendered: false, literalDOMFrameParsed: true, literalDOMPayloadCompared: true,
+            literalDOMParsedJSONEqual: false, literalDOMUnavailableReason: 'none' });
+          else {
+            expect(diagnostic).toMatchObject({ literalDOMAvailable: false, literalDOMMatchesPrompt: false,
+              literalDOMMatchesRendered: false, literalDOMUnavailableReason: kind === 'nodes' ? 'node_budget'
+                : kind === 'depth' ? 'depth_budget' : kind === 'characters' ? 'character_budget' : 'read_failure',
+              literalDOMPayloadUnavailableReason: 'unavailable' });
+            if (kind === 'nodes') expect(diagnostic.literalDOMNodeCount).toBe(8_193);
+            if (kind === 'depth') expect(diagnostic.literalDOMMaxDepth).toBe(65);
+            if (kind === 'characters') expect(diagnostic.literalDOMLength).toBe(180_201);
+          }
         }
       });
 

@@ -2996,7 +2996,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             do {
                 _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must not replay the failed continuation"])
                 XCTFail("A pending failed continuation cannot admit another Send")
-            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .invalidRequest) }
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
             try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
             fixture.transport.setBeforePageResultValidationForTesting(nil)
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
@@ -3192,7 +3192,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             do {
                 _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Do not replay the uncertain first Send"])
                 XCTFail("A failed first-route admission cannot authorize another Send")
-            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .invalidRequest) }
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.routeAfter)) }
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             XCTAssertTrue(fixture.browser.webView(for: ownedID) === view)
             XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
@@ -3329,7 +3329,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             do {
                 _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must not continue changed first-message lineage"])
                 XCTFail("Changed first lineage cannot authorize a continuation Send")
-            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .invalidRequest) }
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             recordPhase("continuation_rejected")
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
@@ -4340,7 +4340,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let tabID = try XCTUnwrap(fixture.createdTabs.last)
         let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
         try await waitForFixture(view)
-        _ = try await waitForState("ready", fixture.transport, token: token)
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        let model = try WebsiteModelEvidence.parse(ready["modelEvidence"], provider: "gemini", expected: nil)
+        XCTAssertEqual(model.selected.label, "3.1 Pro", "A bare start pins the observed current family, without choosing the fixture target")
+        XCTAssertEqual(model.source, "checked_model_option")
+        let readiness = try await evaluate(view, "return {choices: window.fixtureModelSelectionClicks, opens: window.fixtureModelTriggerClicks, closed: document.getElementById('fixture-model-trigger').getAttribute('aria-expanded') === 'false', sends: window.fixturePrompts.length};") as? [String: Any]
+        XCTAssertEqual(readiness?["choices"] as? Int, 0)
+        XCTAssertGreaterThan(readiness?["opens"] as? Int ?? 0, 0)
+        XCTAssertEqual(readiness?["closed"] as? Bool, true)
+        XCTAssertEqual(readiness?["sends"] as? Int, 0)
         _ = try await evaluate(view, """
             document.getElementById('fixture-send').addEventListener('click', () => {
                 history.replaceState({}, '', '/u/0/app/owned_123');
@@ -4435,21 +4443,41 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         _ = try await waitForState("complete", fixture.transport, token: token)
         let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Append this after the send acknowledgment"])
         XCTAssertEqual(sent["state"] as? String, "running")
+        let pendingProof = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(pendingProof["submittedPromptFingerprint"] as? String, "", "A reverified previous body cannot prove the pending second prompt")
         let beforeCount = try await evaluate(view, "return document.querySelectorAll('user-query').length;") as? Int
         XCTAssertEqual(beforeCount, 1, "The second click is acknowledged before its user bubble appears")
         try await armFixtureAppendDuringDigest(view)
         let observedRevision = try await fixture.transport.changeRevision(sessionToken: token)
         let revision = try XCTUnwrap(observedRevision)
-        let discarded = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-        XCTAssertEqual(discarded["state"] as? String, "running")
-        XCTAssertEqual(discarded["sequence"] as? Int, 2)
-        XCTAssertEqual(discarded["text"] as? String, "", "The crossed read cannot admit a response or stale ownership state")
+        var inspectedProofSequences: [Int] = []
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect" else { return }
+            let sequence = try? await self.evaluate(view, "return globalThis.__computaGeminiSubmissionState?.lastVerified?.sequence ?? 0;",
+                world: .world(name: "computa-chatgpt-model-v1")) as? Int
+            if let sequence { inspectedProofSequences.append(sequence) }
+        }
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
+        let refreshed = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertEqual(inspectedProofSequences, [1, 2], "Discard the crossed previous-body read, then perform exactly one full inspect proving body two")
+        XCTAssertEqual(refreshed["state"] as? String, "running")
+        XCTAssertEqual(refreshed["sequence"] as? Int, 2)
+        XCTAssertEqual(refreshed["text"] as? String, #"{"type":"message","text":"Appended fixture reply"}"#,
+                       "The returned snapshot comes only from the fresh second-body proof and its distinct response")
+        let refreshedProof = try XCTUnwrap(refreshed["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(refreshedProof["submittedPromptFingerprint"] as? String,
+                       EmbeddedWebModelTransport.promptFingerprint("Append this after the send acknowledgment"))
+        XCTAssertEqual(refreshedProof["responseCount"] as? Int, 2)
         let afterCount = try await evaluate(view, "return document.querySelectorAll('user-query').length;") as? Int
         XCTAssertEqual(afterCount, 2)
         let notifiedRevision = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: .now + .seconds(1))
         XCTAssertGreaterThan(try XCTUnwrap(notifiedRevision), revision, "The real append must wake the armed versioned observer")
         let completed = try await waitForState("complete", fixture.transport, token: token)
-        XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Appended fixture reply"}"#)
+        let completedProof = try XCTUnwrap(completed["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(completedProof["submittedPromptFingerprint"] as? String,
+                       EmbeddedWebModelTransport.promptFingerprint("Append this after the send acknowledgment"))
         let prompts = try await capturedUserPrompts(view)
         XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, ["Preserve the first payload", "Append this after the send acknowledgment"])
         let insertions = try await evaluate(view, "return window.fixtureInputCount;") as? Int
@@ -4473,7 +4501,12 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         _ = try await waitForState("ready", fixture.transport, token: token)
         _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Preserve the first payload"])
         _ = try await waitForState("complete", fixture.transport, token: token)
-        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Append this after the send acknowledgment"])
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Append this after the send acknowledgment"])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        let pendingProof = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(pendingProof["submittedPromptFingerprint"] as? String, "")
+        let beforeCount = try await evaluate(view, "return document.querySelectorAll('user-query').length;") as? Int
+        XCTAssertEqual(beforeCount, 1)
         try await armFixtureAppendDuringDigest(view)
         do {
             _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
@@ -4937,6 +4970,80 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             ["payloadCompared": false, "payloadParsedJSONEqual": false, "payloadObjectKeyOrderChanged": false, "payloadUnavailableReason": "missing_frame"],
         ] as [[String: Any]] {
             var forged = equal; forged.merge(changes) { _, new in new }
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
+    }
+
+    func testLiteralDOMDiagnosticsAreFiniteStrictlyTypedBoundedAndDoNotPublishSourceText() throws {
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        let flags = ["literalDOMAvailable", "literalDOMMatchesPrompt", "literalDOMMatchesRendered", "literalDOMFrameUnique",
+                     "literalDOMFrameParsed", "literalDOMPayloadCompared", "literalDOMParsedJSONEqual"]
+        let limits = ["literalDOMLength": 180_201, "literalDOMNodeCount": 8_193, "literalDOMMaxDepth": 65,
+                      "literalDOMParagraphCount": 8_192, "literalDOMBRCount": 8_192]
+        var source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt", "reason": "snapshot_before_action",
+            "scope": "digest", "action": "inspect", "root": ["tag": "div", "classes": []], "body": ["tag": "div", "classes": []],
+            "userCount": 1, "textLength": 51_783, "lineCount": 98, "markerOccurrences": 1, "controlDescendants": 0,
+            "markerFinalLine": true, "submitted": true, "markerMatches": true,
+            "bodySelection": "whitespace_pre_wrap", "expansionOutcome": "text_mismatch",
+            "literalDOMLength": 51_783, "literalDOMNodeCount": 340, "literalDOMMaxDepth": 3,
+            "literalDOMParagraphCount": 1, "literalDOMBRCount": 168,
+            "literalDOMUnavailableReason": "none", "literalDOMPayloadUnavailableReason": "none",
+            "literalDOMText": "private_canary", "literalDOMHTML": "private_canary", "literalDOMAttribute": "private_canary",
+            "prompt": "private_canary", "response": "private_canary", "url": "https://private_canary"]
+        for key in flags { source[key] = true }
+        source["literalDOMMatchesRendered"] = false
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(source), provider: .chatgpt))
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains("https://") })
+        let values = try records.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        let literal = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_literal_dom" })
+        XCTAssertEqual(literal["literalDOMMatchesPrompt"] as? Bool, true)
+        XCTAssertEqual(literal["literalDOMMatchesRendered"] as? Bool, false)
+        XCTAssertEqual(literal["literalDOMBRCount"] as? Int, 168)
+        XCTAssertEqual(literal["scope"] as? String, "digest")
+        XCTAssertEqual(literal["action"] as? String, "inspect")
+        XCTAssertNil(values[0]["literalDOMMatchesPrompt"])
+        XCTAssertNil(try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_body" })["literalDOMMatchesPrompt"])
+        for key in flags {
+            for invalid in [1, 0, "private_canary", NSNull()] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+            var partial = source; partial.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(partial), provider: .chatgpt), key)
+        }
+        for (key, maximum) in limits {
+            for invalid in [-1, maximum + 1, 1.5, true, NSNull(), "private_canary"] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        for key in ["literalDOMUnavailableReason", "literalDOMPayloadUnavailableReason"] {
+            for invalid in ["private_canary", 1, true, NSNull()] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        var otherProvider = source; otherProvider["provider"] = "gemini"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(otherProvider), provider: .gemini))
+        for reason in ["read_failure", "hidden_markup", "inert_markup", "control_markup", "unsupported_markup", "node_budget", "depth_budget", "character_budget"] {
+            var unavailable = source
+            for key in flags { unavailable[key] = false }
+            unavailable["literalDOMUnavailableReason"] = reason; unavailable["literalDOMPayloadUnavailableReason"] = "unavailable"
+            if reason == "node_budget" { unavailable["literalDOMNodeCount"] = 8_193 }
+            if reason == "depth_budget" { unavailable["literalDOMMaxDepth"] = 65 }
+            if reason == "character_budget" { unavailable["literalDOMLength"] = 180_201 }
+            XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(unavailable), provider: .chatgpt))
+            unavailable["literalDOMMatchesPrompt"] = true
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(unavailable), provider: .chatgpt))
+        }
+        for changes in [
+            ["literalDOMFrameUnique": false], ["literalDOMFrameParsed": false], ["literalDOMPayloadCompared": false],
+            ["literalDOMUnavailableReason": "hidden_markup"], ["literalDOMPayloadUnavailableReason": "unavailable"],
+            ["literalDOMLength": 180_201], ["literalDOMNodeCount": 8_193], ["literalDOMMaxDepth": 65],
+        ] as [[String: Any]] {
+            var forged = source; forged.merge(changes) { _, new in new }
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
         }
     }
@@ -6367,7 +6474,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         """ : "")
         window.fixtureModelSelect = label => {
           window.fixtureModelCurrentLabel = label;
-          \(provider == .chatgpt ? "window.fixtureModelUpdateHeader();" : "document.getElementById('fixture-model-header').textContent = \(genericHeader ? "'ChatGPT'" : "label");")
+          \(provider == .chatgpt ? "window.fixtureModelUpdateHeader();" : "document.getElementById('fixture-model-header').textContent = \(genericHeader ? (provider == .gemini ? "'Pro'" : "'ChatGPT'") : "label");")
           modelMenu.querySelectorAll('[data-fixture-model]').forEach(node => node.setAttribute('aria-checked', String(node.dataset.fixtureModel === label)));
           \(provider == .claude ? "modelTrigger.setAttribute('aria-label', 'Model: ' + label + ' Medium');" : "")
         };
@@ -6499,13 +6606,21 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     private func capturedUserPrompts(_ view: WKWebView) async throws -> [String]? {
         let value = try await evaluate(view, "return window.fixturePrompts;")
         var prompts = try XCTUnwrap(value as? [String])
-        if let first = prompts.first {
-            // The transport-only suffix must be fresh UUID-shaped metadata at
-            // the end; preserve every original character before that suffix.
-            let suffix = try XCTUnwrap(first.range(of: #"\n\nComputa session marker: [A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\n?$"#, options: .regularExpression))
-            prompts[0] = String(first[..<suffix.lowerBound])
-            if first.hasSuffix("\n") { prompts[0] += "\n" }
-            XCTAssertFalse(prompts.dropFirst().contains { $0.contains("Computa session marker:") }, "Only the first website submission carries transport metadata")
+        let perSubmission = view.url?.host == "gemini.google.com"
+        var markers = Set<String>()
+        for index in prompts.indices where index == 0 || perSubmission {
+            // Every Gemini round has its own final transport nonce. Other
+            // providers retain first-message metadata only. Decode no source
+            // text before this exact UUID-shaped final suffix.
+            let raw = prompts[index]
+            let suffix = try XCTUnwrap(raw.range(of: #"\n\nComputa session marker: [A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\n?$"#, options: .regularExpression))
+            let marker = String(raw[suffix]).trimmingCharacters(in: .newlines)
+            XCTAssertTrue(markers.insert(marker).inserted, "Each admitted round must use a different transport nonce")
+            prompts[index] = String(raw[..<suffix.lowerBound])
+            if raw.hasSuffix("\n") { prompts[index] += "\n" }
+        }
+        if !perSubmission {
+            XCTAssertFalse(prompts.dropFirst().contains { $0.contains("Computa session marker:") }, "Non-Gemini continuations retain first-message metadata only")
         }
         return prompts
     }
@@ -6612,10 +6727,16 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     private func armFixtureAppendDuringDigest(_ view: WKWebView) async throws {
         _ = try await evaluate(view, """
             const original = crypto.subtle.digest.bind(crypto.subtle);
+            const expectedFirstBody = document.querySelector('user-query .user-query-bubble-with-background > span.ng-star-inserted > span')?.textContent;
+            if (typeof expectedFirstBody !== 'string' || document.querySelectorAll('user-query').length !== 1
+              || globalThis.__computaGeminiSubmissionState?.pending?.phase !== 'send_claimed'
+              || globalThis.__computaGeminiSubmissionState.pending.sequence !== 2)
+              throw new Error('Expected one proved first body and an acknowledged pending second Send');
+            const canonical = expectedFirstBody.replace(/\\r\\n?/g, '\\n').normalize('NFC').trim();
             let armed = true;
             crypto.subtle.digest = async (...digestArguments) => {
               const digest = await original(...digestArguments);
-              if (armed) {
+              if (armed && new TextDecoder().decode(digestArguments[1]) === canonical) {
                 armed = false;
                 await new Promise(resolve => setTimeout(() => {
                   document.dispatchEvent(new Event('fixture-append-pending-user'));
@@ -6735,8 +6856,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 let id = try self.browser.createUnloadedModelTabForTesting()
                 let view = try XCTUnwrap(self.browser.webView(for: id))
                 view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
-                let html = url.host == "chatgpt.com" && !self.page.contains("fixture-model-trigger")
-                    ? EmbeddedWebModelTransportTests.modelChoicePage(.chatgpt, basePage: self.page) : self.page
+                let html: String
+                if !self.page.contains("fixture-model-trigger"), url.host == "chatgpt.com" {
+                    html = EmbeddedWebModelTransportTests.modelChoicePage(.chatgpt, basePage: self.page)
+                } else if !self.page.contains("fixture-model-trigger"), url.host == "gemini.google.com" {
+                    // A bare provider start still needs observed checked family
+                    // proof. Generic Pro has no version: the unchanged local
+                    // page must reveal its actual selected family in the picker.
+                    html = EmbeddedWebModelTransportTests.modelChoicePage(.gemini, genericHeader: true, basePage: self.page)
+                } else { html = self.page }
                 view.loadHTMLString(html, baseURL: self.initialURL ?? url)
                 self.createdTabs.append(id)
                 return id
@@ -6776,7 +6904,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 \(mutatesFirstBody ? "const first = document.querySelector('user-query .user-query-bubble-with-background > span.ng-star-inserted > span'); first.textContent = first.textContent.replace('Preserve', 'Substitute');" : "")
               }, { once: true });
             } else document.getElementById('messages').appendChild(user);
-            """)
+            """).replacingOccurrences(of: "body.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';",
+                with: "body.textContent = window.fixturePrompts.length === 2 ? '{\"type\":\"message\",\"text\":\"Appended fixture reply\"}' : '{\"type\":\"message\",\"text\":\"Fixture reply\"}';")
     }
 
     private static func providerPage(_ provider: EmbeddedWebModelTransport.Provider) -> String {

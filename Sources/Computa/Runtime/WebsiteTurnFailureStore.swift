@@ -53,6 +53,10 @@ struct WebsiteTurnFailureStore: Sendable {
                 guard let rawReason = error["ownership_reason"] as? String,
                       let reason = EmbeddedWebModelTransport.OwnershipReason(rawValue: rawReason) else { return nil }
                 nativeError = EmbeddedWebModelTransport.Failure.ownershipFailure(reason)
+            case "website_continuation_unverified":
+                guard provider == "gemini", let rawReason = error["reason"] as? String,
+                      let reason = WebsiteTurnContinuation.Failure(rawValue: rawReason) else { return nil }
+                nativeError = reason
             case "product_mode_unverified":
                 nativeError = error["message"] as? String == WebModelServer.Failure.productModeUnverified.localizedDescription
                     ? WebModelServer.Failure.productModeUnverified : EmbeddedWebModelTransport.Failure.productModeUnverified

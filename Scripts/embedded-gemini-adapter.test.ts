@@ -7,6 +7,201 @@ const outbound = prompt + "\n\n" + markerLine;
 
 defineWebsiteModelChoiceTests(provider, (owned = false) => fixture(provider, owned ? { userPrompt: 'Synthetic owned prompt' } : {}), Element);
 
+describe('Gemini per-submission ownership', () => {
+  const marker = (sequence: number) => sequence === 1 ? firstMarker : 'a909845c-2857-4b22-a66b-' + String(sequence).padStart(12, '0');
+  const fields = (sequence: number) => ({ submissionSequence: sequence, submissionMarker: marker(Math.max(1, sequence)) });
+  const roundPrompt = (sequence: number) => `PRIVATE ROUND ${sequence}: [literal] e\u0301 and whitespace\n\nComputa session marker: ${marker(sequence)}`;
+  const normalized = (text: string) => text.replace(/\r\n?/g, '\n').normalize('NFC').trim();
+  const fingerprint = async (text: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalized(text))))]
+    .map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const stage = async (f: ReturnType<typeof fixture>, sequence: number, text = roundPrompt(sequence)) => {
+    expect(await f.run('prepare', { ...fields(sequence - 1), expectedUserCounts: [sequence - 1] })).toMatchObject({ prepared: true });
+    expect(await f.run('insert', { ...fields(sequence), expectedUserCounts: [sequence - 1], prompt: text })).toMatchObject({ inserted: true });
+    expect(await f.run('sendReady', { ...fields(sequence), expectedUserCounts: [sequence - 1], prompt: text })).toMatchObject({ sendReady: true });
+    return text;
+  };
+  const finishRound = async (f: ReturnType<typeof fixture>, sequence: number, text = roundPrompt(sequence)) => {
+    await stage(f, sequence, text);
+    expect(await f.run('submit', { ...fields(sequence), expectedUserCounts: [sequence - 1], prompt: text })).toMatchObject({
+      submitted: true, submissionOwnershipCapability: 'per_submission_ownership_v1' });
+    const value = await f.run('inspect', { ...fields(sequence), expectedUserCounts: [sequence] });
+    expect(value).toMatchObject({ firstUserVerified: true, submissionOwnershipCapability: 'per_submission_ownership_v1',
+      submissionProof: { sequence, fingerprint: await fingerprint(text) } });
+    return value;
+  };
+  const withDigestMutation = async (f: ReturnType<typeof fixture>, sequence: number, phase: string, mutate: () => void,
+    operation: () => Promise<any>) => {
+    const subtle: any = crypto.subtle, original = subtle.digest;
+    let changed = false;
+    subtle.digest = async (algorithm: any, data: any) => {
+      const digest = await original.call(subtle, algorithm, data);
+      if (!changed && f.world.__computaGeminiSubmissionState?.pending?.phase === phase
+        && new TextDecoder().decode(data) === normalized(roundPrompt(sequence))) { changed = true; mutate(); }
+      return digest;
+    };
+    try { const value = await operation(); expect(changed).toBe(true); return value; }
+    finally { subtle.digest = original; }
+  };
+
+  test('seven exact round bodies get independent fingerprints while the first lineage remains pinned', async () => {
+    const f = fixture(provider, { response: false });
+    let first: string | undefined;
+    for (let sequence = 1; sequence <= 7; sequence++) {
+      const value = await finishRound(f, sequence);
+      first ||= value.firstUserFingerprint;
+      expect(value.firstUserFingerprint).toBe(first);
+      expect(value.submissionProof.fingerprint).not.toBe(sequence === 1 ? '' : first);
+      expect(f.world.__computaGeminiSubmissionState.lastVerified.sequence).toBe(sequence);
+      expect(f.world.__computaGeminiSubmissionState.pending).toBeNull();
+    }
+    expect(f.send.clicks).toBe(7);
+  });
+
+  test('a changed second body fails despite a valid composer and cannot be repaired or resent', async () => {
+    const f = fixture(provider, { response: false }); await finishRound(f, 1);
+    const text = await stage(f, 2), send = f.send.onClick!;
+    f.send.onClick = () => { send(); f.userBody!.text = f.userBody!.text.replace('[literal]', '{altered}'); };
+    expect(await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text })).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    f.userBody!.text = text;
+    const repeated = await f.run('inspect', { ...fields(2), expectedUserCounts: [2] });
+    expect(repeated).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(repeated.submissionProof).toBeUndefined(); expect(f.send.clicks).toBe(2);
+  });
+
+  test('pending append cannot expose a previous answer and later verifies without another Send', async () => {
+    const f = fixture(provider, { response: false }); await finishRound(f, 1);
+    f.messages.append(f.article);
+    const text = await stage(f, 2); f.send.onClick = () => { f.composer.replaceChildren(); };
+    const sent = await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text });
+    expect(sent).toMatchObject({ submitted: true, submissionOwnershipCapability: 'per_submission_ownership_v1' });
+    const previousProof = { sequence: 1, fingerprint: await fingerprint(roundPrompt(1)) };
+    expect(sent).toMatchObject({ submissionPending: true, submissionProof: previousProof });
+    // Native rechecks the pinned model after the Send acknowledgment, before
+    // the new user body exists. Only the previous round may supply its proof.
+    const rechecked = await f.run('verifyModel', { ...fields(2), expectedUserCounts: [1, 2] });
+    expect(rechecked).toMatchObject({ submissionPending: true, pending: true, answerComplete: false, text: '', submissionProof: previousProof });
+    const pending = await f.run('inspect', { ...fields(2), expectedUserCounts: [1, 2] });
+    expect(pending).toMatchObject({ submissionPending: true, pending: true, answerComplete: false, text: '', submissionProof: previousProof });
+    expect(f.world.__computaGeminiSubmissionState.pending.sequence).toBe(2);
+    expect(f.world.__computaGeminiSubmissionState.lastVerified.sequence).toBe(1);
+    f.appendUser(text);
+    expect(await f.run('inspect', { ...fields(2), expectedUserCounts: [2] })).toMatchObject({
+      submissionProof: { sequence: 2, fingerprint: await fingerprint(text) } });
+    expect(f.send.clicks).toBe(2);
+  });
+
+  test('an acknowledged second body arriving during the first hash discards the read and cannot excuse first-body corruption', async () => {
+    for (const corruptFirst of [false, true]) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      const picker = installObservedModelPicker(f, provider, Element); picker.selected('3.1 Pro');
+      const choice = { key: '3.1 Pro', label: '3.1 Pro' };
+      const firstBody = f.world.__computaGeminiSubmissionState.lastVerified.body;
+      const text = await stage(f, 2); f.send.onClick = () => { f.composer.replaceChildren(); };
+      expect(await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text })).toMatchObject({ submitted: true, submissionPending: true });
+      let appends = 0;
+      f.onDigest(() => {
+        if (corruptFirst) firstBody.text = firstBody.text.replace('PRIVATE', 'ALTERED');
+        f.appendUser(text); appends++;
+      });
+      const discarded = await f.run('inspect', { ...fields(2), expectedUserCounts: [1, 2], expectedModelChoice: choice });
+      expect(discarded).toMatchObject(corruptFirst
+        ? { error: 'conversation_changed', detail: 'first_user_message' }
+        : { error: 'acknowledged_user_append', detail: 'readonly_model_observation' });
+      expect(discarded.submissionProof).toBeUndefined(); expect(appends).toBe(1); expect(f.send.clicks).toBe(2);
+      const fresh = await f.run('inspect', { ...fields(2), expectedUserCounts: [2], expectedModelChoice: choice });
+      expect(fresh).toMatchObject(corruptFirst ? { error: 'conversation_changed', detail: 'first_user_message' }
+        : { submissionProof: { sequence: 2, fingerprint: await fingerprint(text) } });
+      expect(f.send.clicks).toBe(2);
+    }
+  });
+
+  test('repeated insertion reused markers and replayed Send never claim another round', async () => {
+    for (const attack of ['insert', 'marker', 'send']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1);
+      if (attack === 'marker') {
+        expect(await f.run('insert', { ...fields(2), submissionMarker: firstMarker, expectedUserCounts: [1], prompt: roundPrompt(1) }))
+          .toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      } else {
+        const text = await stage(f, 2);
+        if (attack === 'insert') expect(await f.run('insert', { ...fields(2), expectedUserCounts: [1], prompt: text })).toMatchObject({ error: 'composer_not_empty' });
+        else {
+          f.send.onClick = () => { f.composer.replaceChildren(); };
+          expect(await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text })).toMatchObject({ submitted: true });
+          f.composer.text = text;
+          expect(await f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text })).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+        }
+      }
+      expect(f.send.clicks).toBe(attack === 'send' ? 2 : 1);
+    }
+  });
+
+  test('body owner route temporary and ambiguous-body changes across the current digest reject proof', async () => {
+    for (const change of ['body', 'owner', 'route', 'temporary', 'replace', 'ambiguous']) {
+      const f = fixture(provider, { response: false }); await finishRound(f, 1); const text = await stage(f, 2);
+      const rejected = await withDigestMutation(f, 2, 'send_claimed', () => {
+        if (change === 'body') f.userBody!.text += ' altered';
+        else if (change === 'owner') f.world.__computaModelOwner = '00000000-0000-0000-0000-000000000000';
+        else if (change === 'route') f.document.URL += '?crossed=1';
+        else if (change === 'temporary') f.temporary(false);
+        else {
+          const body = f.userBody!, parent = body.parentElement!;
+          const replacement = new Element('SPAN', { class: 'ng-star-inserted' }, body.text);
+          if (change === 'ambiguous') parent.append(replacement);
+          else { parent.children[parent.children.indexOf(body)] = replacement; replacement.parentElement = parent; body.connected = false; body.parentElement = null; }
+        }
+      }, () => f.run('submit', { ...fields(2), expectedUserCounts: [1], prompt: text }));
+      expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+      expect(rejected.submissionProof).toBeUndefined(); expect(JSON.stringify(rejected)).not.toContain('PRIVATE'); expect(f.send.clicks).toBe(2);
+    }
+  });
+
+  test('only the existing exact first-root discard can rebind its round proof on a fresh inspect', async () => {
+    const f = fixture(provider, { response: false }); const bound = await finishRound(f, 1);
+    const picker = installObservedModelPicker(f, provider, Element, { unmountMenus: true });
+    picker.selected('3.1 Pro');
+    const choice = { key: '3.1 Pro', label: '3.1 Pro' };
+    const original = picker.trigger.onClick!;
+    let replacement: Element | undefined, oldRoot: Element | undefined, oldBody: Element | undefined;
+    picker.trigger.onClick = () => {
+      const closing = picker.trigger.values['aria-expanded'] === 'true';
+      original();
+      if (closing && !replacement) {
+        oldRoot = f.messages.querySelector('user-query')!;
+        oldBody = f.world.__computaGeminiSubmissionState.lastVerified.body;
+        replacement = oldRoot.cloneNode(true);
+        const parent = oldRoot.parentElement!;
+        parent.children[parent.children.indexOf(oldRoot)] = replacement;
+        replacement.parentElement = parent; oldRoot.connected = false;
+      }
+    };
+    picker.open(); picker.trigger.values['aria-expanded'] = 'true';
+    const discarded = await f.run('inspect', { ...fields(1), expectedUserCounts: [1], expectedModelChoice: choice });
+    expect(discarded).toMatchObject({ error: 'first_user_observation_replaced', detail: 'readonly_model_observation' });
+    expect(discarded.submissionProof).toBeUndefined();
+    const record = f.world.__computaGeminiSubmissionState.lastVerified;
+    expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody);
+    expect(record.remount.root).toBe(replacement);
+    const refreshed = await f.run('inspect', { ...fields(1), expectedUserCounts: [1], expectedModelChoice: choice });
+    expect(refreshed).toMatchObject({ firstUserFingerprint: bound.firstUserFingerprint,
+      submissionProof: { sequence: 1, fingerprint: await fingerprint(roundPrompt(1)) } });
+    expect(record.root).toBe(replacement); expect(record.remount).toBeNull();
+    expect(record.body.isConnected).toBe(true); expect(oldBody!.isConnected).toBe(false);
+    expect(f.send.clicks).toBe(1);
+    await finishRound(f, 2);
+    expect(f.send.clicks).toBe(2);
+  });
+
+  test('an earlier current body changed during next insertion hashing prevents any new editor input', async () => {
+    const f = fixture(provider, { response: false }); await finishRound(f, 1); await finishRound(f, 2);
+    const inputs = f.composer.events.length;
+    expect(await f.run('prepare', { ...fields(2), expectedUserCounts: [2] })).toMatchObject({ prepared: true });
+    const rejected = await withDigestMutation(f, 3, 'insert_claimed', () => { f.userBody!.text += ' altered'; },
+      () => f.run('insert', { ...fields(3), expectedUserCounts: [2], prompt: roundPrompt(3) }));
+    expect(rejected).toMatchObject({ error: 'conversation_changed', detail: 'submission_message' });
+    expect(f.composer.textContent).toBe(''); expect(f.composer.events.length).toBe(inputs); expect(f.send.clicks).toBe(2);
+  });
+});
+
 // Matches the prompt-free Gemini 4 observation: normal model picker, exact
 // versioned family leaves, and a scoped Selected marker on 4 Argon. Chat/Task
 // composer controls are separate; a recognized family does not prove mode.

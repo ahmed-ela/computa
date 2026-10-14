@@ -62,8 +62,24 @@ The installed test seeded one disposable stale checkpoint while Google was alrea
 
 A subsequent Gemini 3.8 Flash browser task passed: it opened a local flight form, read it, filled the exact flight reference, submitted it, read the exact result and closed its task tab. All seven website inferences had verified model selection, first-message ownership and confirmed cleanup. The task took 63.638 seconds.
 
-The next Gemini code task was blocked before its first website submission. The owned native page had reached Google's trusted `/sorry` route; one ordinary human navigation then showed the unusual-traffic page and CAPTCHA. Testing stopped. This recurrence means build88 does **not** establish permanent CAPTCHA prevention.
+The next Gemini code task was blocked before its first website submission. It started about 11 minutes 38 seconds after the successful task's last verified release, rather than immediately after its seventh inference. The owned native page had reached Google's trusted `/sorry` route; one ordinary human navigation then showed the unusual-traffic page and CAPTCHA. Testing stopped. This recurrence means build88 does **not** establish permanent CAPTCHA prevention, and the timing does not identify a request-rate threshold.
 
 The actual runtime was macOS 26.5.1 with system WebKit 21624.2.5.11.4. The compatibility tokens in the default user-agent string do not identify the installed engine version. The successful task and later challenge occurred on the same runtime and profile, so these observations do not establish that an old WebKit version caused the challenge. Seven fresh website sessions within one task are a concrete source of session/navigation traffic worth investigating; their causal role and Google's threshold remain unknown. Google's guidance lists possible traffic-related causes, but does not diagnose this Gemini session.
 
 Local checkpoint recovery and prevention of an external challenge remain separate claims. The finite installed recovery and recurrence records are preserved in the private qualification workspace; no CAPTCHA was completed during either recorded observation.
+
+On October 14 at 02:06 UTC, one ordinary human navigation in installed build90 again showed the signed-in Gemini composer without a CAPTCHA. The real recurrence checkpoint cleared through automatic recovery, with a finite `verified / healthy_human_document` report. No manual refresh, model task, CAPTCHA action, engine or profile change, cookie deletion, user-agent override or network change was used. The inspection tab closed and the browser pane returned to its previous state. This confirms recovery from that checkpoint, not prevention of another challenge or Google's original cause.
+
+## Gemini conversation lifecycle
+
+Gemini now retains one owned temporary conversation through a native user turn's tool loop, then closes it at completion or cancellation. A separate user follow-up starts fresh. ChatGPT and Claude retain their existing per-inference lifecycle. This reduces conversation creation and navigation; it does not reduce the number of model submissions or truncate the full request sent at each step.
+
+Reuse requires the same native turn, transport generation, selected model, owned document and first-message fingerprint. The next request must contain the exact accepted history, the output items actually emitted to the native engine and one matching result for every tool call. Duplicate keys, forged IDs, altered arguments, changed configuration and extra user input fail before Send. Actual engine-assigned tool-result IDs remain part of the subsequent history.
+
+Each submission has a new private marker and an exact outbound-body digest. While the next user bubble is absent, read-only checks can reverify the prior body but cannot expose an answer or prove the pending prompt. An append crossing an awaited digest discards that read; a fresh read must verify the current body. No insertion or Send is replayed.
+
+The version2 transaction journal distinguishes `yield_verified` from physical closure. Intermediate tool handoffs retain the owned conversation and never count as cleanup. Final `release_verified` requires a saved receipt from closing that exact session. Uncertain delivery, cancellation or a changed proof revokes reuse; cleanup remains separately evidenced.
+
+Native engine and browser fixtures establish the lifecycle and traffic reduction independently of live provider behavior. Preventing Google's external challenge still requires a bounded live comparison; the exact Google trigger and permanent CAPTCHA prevention remain unproven.
+
+The build91 source passed 223 native tests and 441 browser-adapter tests. The bundled native engine completed six tool calls and a final answer using one start, seven Sends and one finish. The real WKWebView race fixture separately verified a distinct second answer against its current prompt digest after discarding the crossed read; changing the first body still failed ownership. These are offline qualification results, not installed or live Google evidence.

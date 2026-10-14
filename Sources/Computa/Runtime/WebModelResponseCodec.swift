@@ -1,7 +1,7 @@
 import Foundation
 import CoreFoundation
 
-/// The browser is a stateless model transport. It never owns a tool or executes
+/// The browser is a model transport. It never owns a tool or executes
 /// an action: validated function calls return to the existing App Server loop.
 enum WebModelResponseCodec {
     static let maximumPromptBytes = 160 * 1_024
@@ -21,6 +21,9 @@ enum WebModelResponseCodec {
         /// Serialized storage keeps the request safely transferable across the
         /// server actor while preserving the standard response configuration.
         fileprivate let responseConfiguration: Data
+        /// Private, lossless admission input, before presentation-only tool
+        /// filtering. Continuations must also reject changes to hidden tools.
+        let continuationRequest: Data
     }
 
     fileprivate struct OfferedTool: Sendable {
@@ -230,7 +233,7 @@ enum WebModelResponseCodec {
                        offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered,
                        toolPolicy: policy, parallelToolCalls: parallel,
                        maximumToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue,
-                       responseConfiguration: configuration)
+                       responseConfiguration: configuration, continuationRequest: data)
     }
 
     /// Only actual local instruction fields can establish an already-supplied
