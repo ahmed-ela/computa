@@ -2404,11 +2404,86 @@ function chatGPTFirstUserExpansionTextFacts(candidate, text) {
     expansionASCIIPromptMatches: promptMatches, expansionASCIIRenderedLength: actual.length,
     expansionASCIIPrefixLength: prefix.length, expansionASCIIPromptLength: expected.length };
 }
+function chatGPTFramedPayloadDiagnostic(expected, rendered) {
+  const result = { payloadExpectedFrameUnique: false, payloadRenderedFrameUnique: false,
+    payloadExpectedParsed: false, payloadRenderedParsed: false, payloadOutsideFrameMatches: false,
+    payloadCompared: false, payloadParsedJSONEqual: false, payloadObjectKeyOrderChanged: false, payloadUnavailableReason: 'missing_frame',
+    payloadMismatchField: 'none', payloadMismatchKind: 'none', payloadExpectedType: 'none', payloadRenderedType: 'none' };
+  try {
+    const begin = 'COMPLETE_RESPONSES_REQUEST_JSON:\n', end = '\nEND_COMPLETE_RESPONSES_REQUEST_JSON.';
+    if (typeof expected !== 'string' || typeof rendered !== 'string' || expected.length > 180_200 || rendered.length > 180_200) {
+      result.payloadUnavailableReason = 'bounds'; return result;
+    }
+    const frame = value => {
+      if (typeof value !== 'string' || value.length > 180_200) return null;
+      const start = value.indexOf(begin), finish = value.indexOf(end);
+      if (start < 0 || finish < start + begin.length || value.indexOf(begin, start + begin.length) !== -1
+        || value.indexOf(end, finish + end.length) !== -1) return null;
+      return { payload: value.slice(start + begin.length, finish), before: value.slice(0, start), after: value.slice(finish + end.length) };
+    };
+    const left = frame(expected), right = frame(rendered);
+    result.payloadExpectedFrameUnique = left !== null; result.payloadRenderedFrameUnique = right !== null;
+    if (!left || !right) return result;
+    result.payloadOutsideFrameMatches = left.before === right.before && left.after === right.after;
+    result.payloadUnavailableReason = 'parse_failure';
+    let expectedValue, renderedValue;
+    try { expectedValue = JSON.parse(left.payload); result.payloadExpectedParsed = true; } catch { }
+    try { renderedValue = JSON.parse(right.payload); result.payloadRenderedParsed = true; } catch { }
+    if (!result.payloadExpectedParsed || !result.payloadRenderedParsed) return result;
+    result.payloadUnavailableReason = 'bounds';
+    const type = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+    let nodes = 0;
+    const validate = (value, depth) => {
+      if (++nodes > 8_192 || depth > 64) throw new Error('bounded');
+      if (typeof value === 'number' && (!Number.isFinite(value) || Number.isInteger(value) && !Number.isSafeInteger(value))) {
+        result.payloadUnavailableReason = 'number_precision';
+        throw new Error('bounded');
+      }
+      if (Array.isArray(value)) { for (const item of value) validate(item, depth + 1); }
+      else if (value !== null && typeof value === 'object') {
+        const keys = Object.keys(value); if (keys.length > 8_192) throw new Error('bounded');
+        for (const key of keys) validate(value[key], depth + 1);
+      }
+    };
+    validate(expectedValue, 0); validate(renderedValue, 0);
+    let mismatch = null, orderChanged = false;
+    const field = key => ['instructions', 'input', 'tools', 'metadata'].includes(key) ? key : 'other';
+    const record = (top, kind, expectedType, renderedType) => {
+      mismatch ||= { payloadMismatchField: top, payloadMismatchKind: kind, payloadExpectedType: expectedType, payloadRenderedType: renderedType };
+    };
+    const compare = (a, b, top = 'other', depth = 0) => {
+      const at = type(a), bt = type(b);
+      if (at !== bt) { record(top, ['array', 'object'].includes(at) || ['array', 'object'].includes(bt) ? 'container_type' : 'leaf_type', at, bt); return; }
+      if (at === 'array') {
+        if (a.length !== b.length) record(top, 'array_length', at, bt);
+        for (let i = 0; i < Math.min(a.length, b.length); i++) compare(a[i], b[i], top, depth + 1);
+      } else if (at === 'object') {
+        const ak = Object.keys(a), bk = Object.keys(b), owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+        const sameKeys = ak.length === bk.length && ak.every(key => owns(b, key));
+        if (sameKeys && ak.some((key, i) => key !== bk[i])) orderChanged = true;
+        for (const key of ak) {
+          const child = depth === 0 ? field(key) : top;
+          if (!owns(b, key)) record(child, 'object_keys', type(a[key]), 'missing');
+          else compare(a[key], b[key], child, depth + 1);
+        }
+        for (const key of bk) if (!owns(a, key)) record(depth === 0 ? field(key) : top, 'object_keys', 'missing', type(b[key]));
+      } else if (!Object.is(a, b)) record(top, 'leaf_value', at, bt);
+    };
+    compare(expectedValue, renderedValue);
+    // Parsed JSON equivalence is diagnostic only: JSON.parse resolves duplicate
+    // keys and numeric lexemes. It cannot replace the original ownership proof.
+    result.payloadCompared = true; result.payloadParsedJSONEqual = mismatch === null;
+    result.payloadObjectKeyOrderChanged = orderChanged; result.payloadUnavailableReason = 'none';
+    if (mismatch) Object.assign(result, mismatch);
+    return result;
+  } catch { return result; }
+}
 function chatGPTLatchExpansionTextDiagnostic(candidate, text) {
   if (candidate.textDiagnostic) return;
   try {
     const facts = chatGPTFirstUserExpansionTextFacts(candidate, text);
-    if (!facts) { candidate.textDiagnostic = { expansionTextAnalyzed: false, expansionClicked: candidate.clicked === true }; return; }
+    const payload = chatGPTFramedPayloadDiagnostic(candidate.canonical, text);
+    if (!facts) { candidate.textDiagnostic = { expansionTextAnalyzed: false, expansionClicked: candidate.clicked === true, ...payload }; return; }
     const { complete, compatible, ...diagnostic } = facts;
     const actual = text.replace(/[ \t\n]+/g, ' '), expected = candidate.canonical.replace(/[ \t\n]+/g, ' ');
     const count = (value, predicate) => Math.min([...value].filter(predicate).length, 1_000);
@@ -2443,7 +2518,7 @@ function chatGPTLatchExpansionTextDiagnostic(candidate, text) {
         expansionFirstActualCharacter: character(actual),
         expansionFirstExpectedCharacter: character(expected),
       }) });
-    candidate.textDiagnostic = diagnostic;
+    candidate.textDiagnostic = { ...diagnostic, ...payload };
   } catch { /* A diagnostic cannot change admission or the original error. */ }
 }
 

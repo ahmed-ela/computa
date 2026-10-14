@@ -724,6 +724,81 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
         expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
       };
+      const rejectedFramedExpansion = async (expectedJSON: string, renderedJSON: string, frame = 'unique') => {
+        const { f, picker, expand, send } = await collapsed();
+        const prefix = 'PRIVATE FRAME PREFIX\n' + 'x'.repeat(11_000) + '\nCOMPLETE_RESPONSES_REQUEST_JSON:\n';
+        const suffix = '\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n' + markerLine;
+        const prompt = prefix + expectedJSON + suffix;
+        f.world.__computaModelFirstPrompt = prompt; f.userBody.text = prompt.slice(0, 10_240);
+        expand.onClick = () => {
+          const rendered = prefix + renderedJSON + suffix;
+          f.userBody.text = frame === 'missing' ? rendered.replace('COMPLETE_RESPONSES_REQUEST_JSON:\n', '')
+            : frame === 'duplicate' ? rendered + '\nEND_COMPLETE_RESPONSES_REQUEST_JSON.' : rendered;
+        };
+        const result = await f.run('inspect', expansionInput);
+        rejected(result); expect(expand.clicks).toBe(1); noSend(f, picker, send);
+        expect(f.world.__computaModelFirstProof).toBeUndefined();
+        expect(result.debugStructure).not.toContain('private_key');
+        expect(result.debugStructure).not.toContain('private_value');
+        return JSON.parse(result.debugStructure);
+      };
+
+      test('framed payload diagnostics classify exact parsed differences without retaining keys or changing rejection', async () => {
+        const cases = [
+          ['{"tools":[]}', '{"tools":{}}', 'tools', 'container_type', 'array', 'object'],
+          ['{"input":["private_value_a","private_value_b"]}', '{"input":["private_value_b","private_value_a"]}', 'input', 'leaf_value', 'string', 'string'],
+          ['{"instructions":"private_value_a"}', '{"instructions":"private_value_b"}', 'instructions', 'leaf_value', 'string', 'string'],
+          ['{"metadata":{"private_key":"private_value_a"}}', '{"metadata":{"private_key":"private_value_b"}}', 'metadata', 'leaf_value', 'string', 'string'],
+          ['{"private_key":"private_value_a"}', '{"private_key":"private_value_b"}', 'other', 'leaf_value', 'string', 'string'],
+          ['{"input":[]}', '{}', 'input', 'object_keys', 'array', 'missing'],
+          ['{"tools":[1]}', '{"tools":[]}', 'tools', 'array_length', 'array', 'array'],
+          ['{"input":null}', '{"input":true}', 'input', 'leaf_type', 'null', 'boolean'],
+        ];
+        for (const [expected, rendered, field, kind, expectedType, renderedType] of cases) {
+          expect(await rejectedFramedExpansion(expected, rendered)).toMatchObject({
+            payloadExpectedFrameUnique: true, payloadRenderedFrameUnique: true,
+            payloadExpectedParsed: true, payloadRenderedParsed: true, payloadOutsideFrameMatches: true,
+            payloadCompared: true, payloadParsedJSONEqual: false, payloadUnavailableReason: 'none',
+            payloadMismatchField: field, payloadMismatchKind: kind,
+            payloadExpectedType: expectedType, payloadRenderedType: renderedType,
+          });
+        }
+      });
+
+      test('parsed equality from object reordering or duplicate keys never authorizes an altered expanded prompt', async () => {
+        for (const [expected, rendered, reordered] of [
+          ['{"tools":[],"input":[],"metadata":{"private_key":"private_value"}}', '{"metadata":{"private_key":"private_value"},"input":[],"tools":[]}', true],
+          ['{"instructions":"private_value"}', '{"instructions":"different","instructions":"private_value"}', false],
+        ] as const) {
+          expect(await rejectedFramedExpansion(expected, rendered)).toMatchObject({
+            expansionASCIIPromptMatches: false, payloadCompared: true, payloadParsedJSONEqual: true,
+            payloadOutsideFrameMatches: true, payloadObjectKeyOrderChanged: reordered, payloadUnavailableReason: 'none',
+            payloadMismatchField: 'none', payloadMismatchKind: 'none', payloadExpectedType: 'none', payloadRenderedType: 'none',
+          });
+        }
+      });
+
+      test('framed payload diagnostics stop within finite frame parse depth node and numeric budgets', async () => {
+        const nested = '['.repeat(70) + '0' + ']'.repeat(70);
+        const many = '[' + Array(8_200).fill('0').join(',') + ']';
+        for (const [rendered, frame, reason, renderedFrame, renderedParsed] of [
+          ['{', 'unique', 'parse_failure', true, false],
+          ['{"tools":{}}', 'missing', 'missing_frame', false, false],
+          ['{"tools":{}}', 'duplicate', 'missing_frame', false, false],
+          ['{"tools":' + nested + '}', 'unique', 'bounds', true, true],
+          ['{"tools":' + many + '}', 'unique', 'bounds', true, true],
+          ['{"tools":9007199254740993}', 'unique', 'number_precision', true, true],
+          ['{"tools":1e309}', 'unique', 'number_precision', true, true],
+          ['{"tools":"' + 'x'.repeat(181_000) + '"}', 'unique', 'bounds', false, false],
+        ] as const) {
+          expect(await rejectedFramedExpansion('{"tools":[]}', rendered, frame)).toMatchObject({
+            payloadRenderedFrameUnique: renderedFrame, payloadRenderedParsed: renderedParsed,
+            payloadCompared: false, payloadParsedJSONEqual: false, payloadObjectKeyOrderChanged: false,
+            payloadUnavailableReason: reason, payloadMismatchField: 'none', payloadMismatchKind: 'none',
+            payloadExpectedType: 'none', payloadRenderedType: 'none',
+          });
+        }
+      });
 
       test('one delayed expansion waits for an event and binds only the complete exact first body', async () => {
         const { f, picker, expand, send, prompt } = await collapsed();

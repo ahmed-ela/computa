@@ -15,7 +15,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertLessThanOrEqual(guidance.utf8.count, 384)
         XCTAssertTrue(guidance.contains("already observed")); XCTAssertTrue(guidance.contains("inline code"))
         XCTAssertTrue(guidance.contains("exact raw output"))
-        XCTAssertTrue(guidance.contains("Unicode, hyphens and whitespace"))
+        XCTAssertTrue(guidance.contains("Preserve original Unicode and whitespace"))
+        XCTAssertTrue(guidance.contains("ASCII '-' (U+002D) must never become U+2011"))
+        XCTAssertTrue(guidance.contains("Inline code changes presentation, not characters"))
         XCTAssertTrue(guidance.contains("no new observation or action authority"))
         let row = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("#2 ") }).description
         let regex = try NSRegularExpression(pattern: #"label=("(?:[^"\\]|\\.)*")"#)

@@ -620,7 +620,7 @@ actor EmbeddedBrowserToolController {
 
     /// Host guidance refers only to values already observed. It neither repeats
     /// page data nor grants observations, references or outcome proof.
-    private static let literalCopyGuidance = "Report already observed identifiers, receipts, URLs and paths verbatim in inline code unless exact raw output is requested. Preserve Unicode, hyphens and whitespace; never apply typography. This guidance grants no new observation or action authority."
+    private static let literalCopyGuidance = "Copy already observed identifiers, receipts, URLs and paths verbatim in inline code unless exact raw output is requested. Preserve original Unicode and whitespace: ASCII '-' (U+002D) must never become U+2011. Inline code changes presentation, not characters. This grants no new observation or action authority."
 
     /// Guidance names only controls actually exposed by this read. It does not
     /// create another capability or change current-snapshot/physical preflight.

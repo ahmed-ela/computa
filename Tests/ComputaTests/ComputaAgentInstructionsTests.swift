@@ -319,9 +319,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains(literal))
             let normalized = text.replacingOccurrences(of: "\n", with: " ")
             XCTAssertTrue(normalized.contains("identifiers, receipts, URLs and paths verbatim in inline code"))
-            XCTAssertTrue(normalized.contains("unless the user requires exact unformatted output"))
-            XCTAssertTrue(normalized.contains("Preserve original Unicode characters"))
-            XCTAssertTrue(normalized.contains("never change hyphens or apply typographic substitutions"))
+            XCTAssertTrue(normalized.contains("unless raw output is requested"))
+            XCTAssertTrue(normalized.contains("Preserve original Unicode and whitespace"))
+            XCTAssertTrue(normalized.contains("ASCII '-' (U+002D) must never become U+2011"))
+            XCTAssertTrue(normalized.contains("Inline code changes presentation, not characters"))
         }
         XCTAssertFalse(literal.contains("GPT"))
         XCTAssertFalse(literal.contains("expected_marker"))

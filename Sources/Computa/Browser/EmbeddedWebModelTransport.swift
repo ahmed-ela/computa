@@ -1196,6 +1196,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         "slash", "colon", "less_than", "greater_than", "left_bracket", "backslash", "right_bracket", "underscore", "backtick",
         "left_brace", "right_brace", "tilde", "no_break_space", "zero_width_space", "word_joiner", "byte_order_mark"]
     private static let firstUserTextKeys = firstUserTextFlags + firstUserTextLengths + firstUserTextCounts + firstUserTextCharacters + ["expansionFirstMismatchClass"]
+    private static let firstUserPayloadFlags = ["payloadExpectedFrameUnique", "payloadRenderedFrameUnique", "payloadExpectedParsed",
+        "payloadRenderedParsed", "payloadOutsideFrameMatches", "payloadCompared", "payloadParsedJSONEqual", "payloadObjectKeyOrderChanged"]
+    private static let firstUserPayloadKeys = firstUserPayloadFlags + ["payloadMismatchField", "payloadMismatchKind", "payloadExpectedType", "payloadRenderedType", "payloadUnavailableReason"]
 
     private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
@@ -1299,6 +1302,58 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 safe[key] = flag
             }
         }
+        if firstUserPayloadKeys.contains(where: { value[$0] != nil }) {
+            guard provider == .chatgpt else { return nil }
+            var flags: [String: Bool] = [:]
+            for key in firstUserPayloadFlags {
+                guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+                flags[key] = flag; safe[key] = flag
+            }
+            let fields: [String: Set<String>] = [
+                "payloadMismatchField": ["none", "instructions", "input", "tools", "metadata", "other"],
+                "payloadMismatchKind": ["none", "container_type", "leaf_type", "leaf_value", "array_length", "object_keys"],
+                "payloadExpectedType": ["none", "missing", "object", "array", "string", "number", "boolean", "null"],
+                "payloadRenderedType": ["none", "missing", "object", "array", "string", "number", "boolean", "null"],
+                "payloadUnavailableReason": ["none", "missing_frame", "parse_failure", "bounds", "number_precision"],
+            ]
+            for (key, allowed) in fields {
+                guard let text = value[key] as? String, allowed.contains(text) else { return nil }
+                safe[key] = text
+            }
+            let frames = flags["payloadExpectedFrameUnique"] == true && flags["payloadRenderedFrameUnique"] == true
+            let parsed = flags["payloadExpectedParsed"] == true && flags["payloadRenderedParsed"] == true
+            guard flags["payloadExpectedParsed"] != true || flags["payloadExpectedFrameUnique"] == true,
+                  flags["payloadRenderedParsed"] != true || flags["payloadRenderedFrameUnique"] == true,
+                  flags["payloadOutsideFrameMatches"] != true || frames else { return nil }
+            let compared = flags["payloadCompared"] == true, equal = flags["payloadParsedJSONEqual"] == true
+            let noMismatch = value["payloadMismatchField"] as? String == "none" && value["payloadMismatchKind"] as? String == "none"
+                && value["payloadExpectedType"] as? String == "none" && value["payloadRenderedType"] as? String == "none"
+            if !compared {
+                guard !equal, flags["payloadObjectKeyOrderChanged"] != true, noMismatch,
+                      let reason = value["payloadUnavailableReason"] as? String, reason != "none" else { return nil }
+                if reason == "missing_frame" { guard !frames else { return nil } }
+                if reason == "parse_failure" { guard frames, !parsed else { return nil } }
+                if reason == "number_precision" { guard frames, parsed else { return nil } }
+            } else {
+                guard frames, parsed, value["payloadUnavailableReason"] as? String == "none" else { return nil }
+                if equal { guard noMismatch else { return nil } }
+                else {
+                    guard value["payloadMismatchField"] as? String != "none", value["payloadMismatchKind"] as? String != "none",
+                          let expected = value["payloadExpectedType"] as? String, expected != "none",
+                          let rendered = value["payloadRenderedType"] as? String, rendered != "none" else { return nil }
+                    let containers: Set<String> = ["object", "array"]
+                    switch value["payloadMismatchKind"] as? String {
+                    case "container_type": guard expected != rendered, expected != "missing", rendered != "missing",
+                        containers.contains(expected) || containers.contains(rendered) else { return nil }
+                    case "leaf_type": guard expected != rendered, !containers.contains(expected), !containers.contains(rendered), expected != "missing", rendered != "missing" else { return nil }
+                    case "leaf_value": guard expected == rendered, ["string", "number", "boolean"].contains(expected) else { return nil }
+                    case "array_length": guard expected == "array", rendered == "array" else { return nil }
+                    case "object_keys": guard (expected == "missing") != (rendered == "missing") else { return nil }
+                    default: return nil
+                    }
+                }
+            }
+        }
         for key in firstUserTextFlags {
             if let rawFlag = value[key] {
                 guard let flag = firstUserDiagnosticBool(rawFlag) else { return nil }
@@ -1384,6 +1439,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               var summary = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] else { return nil }
         if let expectedReason, summary["reason"] as? String != expectedReason { return nil }
         let children = summary.removeValue(forKey: "descendants") as? [[String: Any]] ?? []
+        var payloadObservation: [String: Any] = [:]
+        for key in firstUserPayloadKeys {
+            if let value = summary.removeValue(forKey: key) { payloadObservation[key] = value }
+        }
+        if !payloadObservation.isEmpty {
+            payloadObservation["kind"] = "first_user_payload"; payloadObservation["provider"] = provider.rawValue
+            for key in ["action", "scope"] { payloadObservation[key] = summary[key] }
+        }
         var textObservation: [String: Any] = [:]
         for key in firstUserTextKeys {
             if let value = summary.removeValue(forKey: key) { textObservation[key] = value }
@@ -1422,7 +1485,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         var records: [String] = []
         for value in [summary] + (context.isEmpty ? [] : [context]) + (bodyObservation.isEmpty ? [] : [bodyObservation])
-            + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation]) + children {
+            + (productObservation.isEmpty ? [] : [productObservation]) + (textObservation.isEmpty ? [] : [textObservation])
+            + (payloadObservation.isEmpty ? [] : [payloadObservation]) + children {
             guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: .sortedKeys), bytes.count <= 960 else { return nil }
             records.append(String(decoding: bytes, as: UTF8.self))
         }
@@ -1442,6 +1506,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             else if safe.contains("\"kind\":\"first_user_text\"") {
                 event = "firstUserText"
+            }
+            else if safe.contains("\"kind\":\"first_user_payload\"") {
+                event = "firstUserPayload"
             }
             else {
                 event = "firstUserChild"

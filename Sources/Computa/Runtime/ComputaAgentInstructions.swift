@@ -223,9 +223,9 @@ enum ComputaAgentInstructions {
     """
 
     static let literalIdentifiers = """
-    Present observed identifiers, receipts, URLs and paths verbatim in inline code,
-    unless the user requires exact unformatted output. Preserve original Unicode
-    characters; never change hyphens or apply typographic substitutions.
+    Copy identifiers, receipts, URLs and paths verbatim in inline code unless raw
+    output is requested. Preserve original Unicode and whitespace. ASCII '-' (U+002D)
+    must never become U+2011. Inline code changes presentation, not characters.
     """
 
     /// Guidance for deciding when to answer, not a runtime proof that a task

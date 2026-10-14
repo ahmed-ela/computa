@@ -4857,6 +4857,90 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertNil(bodyValues[0]["bodyTextContentLength"])
     }
 
+    func testFramedPayloadDiagnosticsAreFiniteStrictlyTypedBoundedAndSeparateFromBody() throws {
+        func encode(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        let flags = ["payloadExpectedFrameUnique", "payloadRenderedFrameUnique", "payloadExpectedParsed", "payloadRenderedParsed",
+                     "payloadOutsideFrameMatches", "payloadCompared", "payloadParsedJSONEqual", "payloadObjectKeyOrderChanged"]
+        let enums = ["payloadMismatchField", "payloadMismatchKind", "payloadExpectedType", "payloadRenderedType", "payloadUnavailableReason"]
+        var source: [String: Any] = ["kind": "first_user_structure", "provider": "chatgpt", "reason": "snapshot_before_action",
+            "scope": "digest", "action": "inspect", "root": ["tag": "div", "classes": []], "body": ["tag": "div", "classes": []],
+            "userCount": 1, "textLength": 51_738, "lineCount": 98, "markerOccurrences": 1, "controlDescendants": 0,
+            "markerFinalLine": true, "submitted": true, "markerMatches": true,
+            "bodySelection": "whitespace_pre_wrap", "expansionOutcome": "text_mismatch",
+            "payloadMismatchField": "tools", "payloadMismatchKind": "container_type", "payloadExpectedType": "array",
+            "payloadRenderedType": "object", "payloadUnavailableReason": "none",
+            "payloadPrivateKey": "private_canary", "payloadPrivateValue": "private_canary",
+            "prompt": "private_canary", "response": "private_canary", "url": "https://private_canary"]
+        for key in flags { source[key] = true }
+        source["payloadParsedJSONEqual"] = false
+        let projected = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(source), provider: .chatgpt))
+        XCTAssertFalse(projected.contains("private_canary"))
+        let records = try XCTUnwrap(EmbeddedWebModelTransport.firstUserStructureDiagnosticRecords(try encode(source), provider: .chatgpt))
+        XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") && !$0.contains("https://") })
+        let values = try records.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+        let payload = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_payload" })
+        XCTAssertEqual(payload["provider"] as? String, "chatgpt")
+        XCTAssertEqual(payload["action"] as? String, "inspect")
+        XCTAssertEqual(payload["scope"] as? String, "digest")
+        XCTAssertEqual(payload["payloadMismatchField"] as? String, "tools")
+        XCTAssertEqual(payload["payloadExpectedType"] as? String, "array")
+        XCTAssertEqual(payload["payloadRenderedType"] as? String, "object")
+        let body = try XCTUnwrap(values.first { $0["kind"] as? String == "first_user_body" })
+        XCTAssertNil(body["payloadMismatchField"])
+        XCTAssertNil(values[0]["payloadCompared"])
+        for key in flags {
+            for invalid in [1, 0, "private_canary", NSNull()] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+        }
+        for key in enums {
+            for invalid in ["private_canary", "TOOLS", 1, true, NSNull()] as [Any] {
+                var forged = source; forged[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt), key)
+            }
+            var incomplete = source; incomplete.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(incomplete), provider: .chatgpt), key)
+        }
+        var otherProvider = source; otherProvider["provider"] = "gemini"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(otherProvider), provider: .gemini))
+        var equal = source
+        equal["payloadParsedJSONEqual"] = true
+        for key in enums { equal[key] = "none" }
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(equal), provider: .chatgpt))
+        var unavailable = equal
+        unavailable["payloadCompared"] = false; unavailable["payloadParsedJSONEqual"] = false
+        unavailable["payloadObjectKeyOrderChanged"] = false; unavailable["payloadUnavailableReason"] = "bounds"
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(unavailable), provider: .chatgpt))
+        unavailable["payloadUnavailableReason"] = "parse_failure"; unavailable["payloadRenderedParsed"] = false
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(unavailable), provider: .chatgpt))
+        unavailable["payloadUnavailableReason"] = "number_precision"; unavailable["payloadRenderedParsed"] = true
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(unavailable), provider: .chatgpt))
+        unavailable["payloadUnavailableReason"] = "missing_frame"; unavailable["payloadRenderedParsed"] = false
+        unavailable["payloadRenderedFrameUnique"] = false; unavailable["payloadOutsideFrameMatches"] = false
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(unavailable), provider: .chatgpt))
+        let impossible: [[String: Any]] = [
+            ["payloadParsedJSONEqual": true], ["payloadRenderedParsed": false],
+            ["payloadExpectedFrameUnique": false], ["payloadMismatchKind": "leaf_type"],
+            ["payloadMismatchKind": "array_length"], ["payloadMismatchKind": "object_keys"],
+            ["payloadUnavailableReason": "bounds"],
+        ]
+        for changes in impossible {
+            var forged = source; forged.merge(changes) { _, new in new }
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
+        for changes in [
+            ["payloadCompared": false, "payloadParsedJSONEqual": false, "payloadObjectKeyOrderChanged": true, "payloadUnavailableReason": "bounds"],
+            ["payloadCompared": false, "payloadParsedJSONEqual": false, "payloadUnavailableReason": "none"],
+            ["payloadCompared": false, "payloadParsedJSONEqual": false, "payloadObjectKeyOrderChanged": false, "payloadUnavailableReason": "missing_frame"],
+        ] as [[String: Any]] {
+            var forged = equal; forged.merge(changes) { _, new in new }
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
+    }
+
     func testExpansionTextComparisonDiagnosticsAreFiniteStrictAndSeparateFromBody() throws {
         func encode(_ value: [String: Any]) throws -> String {
             String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
