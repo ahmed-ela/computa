@@ -1173,7 +1173,15 @@ private extension CodexAppServerRuntime {
         private let events: AsyncStream<AgentRuntimeEvent>.Continuation
         private let browserBroker: ChromeTabBroker
         private var embeddedBrowserTools: EmbeddedBrowserToolController?
-        private var embeddedBrowserTurnKeys = [AgentTask.ID: String]()
+        private struct EmbeddedBrowserTurnLease {
+            let key: String
+            let threadID: String
+            let turnID: String
+            let generation: UUID
+            let submission: UUID?
+        }
+        private var embeddedBrowserTurnKeys = [AgentTask.ID: EmbeddedBrowserTurnLease]()
+        private var embeddedBrowserTaskCleanups = [AgentTask.ID: (turnID: String, task: Task<[String], Never>)]()
         private let visualGrounder: any VisualGroundingClient
         private let borrowedChromeConnector: @Sendable (ChromeConnectionRequest) async throws -> BorrowedChromeSessionOwner
         private var fileChangeTranscripts = [AgentTask.ID: AppServerFileChangeTranscript]()
@@ -1250,6 +1258,9 @@ private extension CodexAppServerRuntime {
         private var pendingCompactionRequests: Set<AgentTask.ID> = []
         private var compactionReservations: Set<AgentTask.ID> = []
         private var turnSubmissionClaims: [AgentTask.ID: UUID] = [:]
+        // Unlike an in-flight claim, this survives its removal so a delayed
+        // prior terminal event cannot overwrite even a failed newer submit.
+        private var latestSubmissionClaims: [AgentTask.ID: UUID] = [:]
         private var cancelledSubmissions: Set<UUID> = []
         private var measuredContext: [AgentTask.ID: RuntimeContextUsage] = [:]
         private struct ResumingContext {
@@ -1750,7 +1761,7 @@ private extension CodexAppServerRuntime {
             // Cancel pending tool work before suspension or target cleanup.
             for operation in dynamicToolTasks.values { operation.task.cancel() }
             // Revoke desktop authority before awaiting owned command cleanup.
-            for taskID in Array(computerV2Sessions.keys) { discardComputerV2Session(taskID: taskID) }
+            for taskID in Array(computerV2Sessions.keys) { discardComputerV2Session(taskID: taskID, trigger: .shutdown) }
             let task = Task {
                 await self.prepareCommandShutdown()
                 self.isShuttingDown = true
@@ -1859,13 +1870,49 @@ private extension CodexAppServerRuntime {
         }
 
         @discardableResult
-        private func discardComputerV2Session(taskID: AgentTask.ID) -> Task<Void, Never>? {
+        private func discardComputerV2Session(taskID: AgentTask.ID,
+            trigger: EmbeddedBrowserCleanupReport.Trigger = .automatic) -> Task<Void, Never>? {
             let embeddedCleanup: Task<Void, Never>?
-            if let key = embeddedBrowserTurnKeys.removeValue(forKey: taskID), let controller = embeddedBrowserTools {
+            if let lease = embeddedBrowserTurnKeys.removeValue(forKey: taskID), let controller = embeddedBrowserTools {
                 let id = UUID()
-                let cleanup = Task<Void, Never> {
-                    let issues = await controller.release(taskKey: key)
+                let result = Task<[String], Never> {
+                    let report = await controller.releaseReport(taskKey: lease.key, trigger: trigger)
+                    var issues = report.issues
+                    if report.wasUsed {
+                        let receipt = EmbeddedBrowserCleanupReceipt(taskID: taskID, threadID: lease.threadID,
+                            turnID: lease.turnID, runtimeGeneration: lease.generation, report: report)
+                        let store = EmbeddedBrowserCleanupReceiptStore(codexHomePath: configuration.codexHomePath)
+                        let saved = store?.save(receipt) ?? false
+                        if !saved { issues.append("Built-in browser cleanup evidence could not be saved.") }
+                        // A late old-turn disposal is still saved above, but
+                        // cannot describe the current turn's resource state.
+                        if serverGeneration == lease.generation,
+                           latestSubmissionClaims[taskID] == lease.submission,
+                           turnIdentity.latestTurnID(for: taskID) == lease.turnID {
+                            let closed = report.targets.filter(\.closed)
+                            let automatic = closed.filter { $0.trigger != .explicit }.count
+                            let body: String
+                            if !issues.isEmpty {
+                                body = "Built-in browser cleanup is unconfirmed. " + issues.joined(separator: " ")
+                            } else if automatic > 0 {
+                                body = "Computa closed \(automatic) task-created browser tab(s) during cleanup. This is app cleanup, not a model-issued browser_close or verification of its answer. Existing user tabs were preserved."
+                            } else if !closed.isEmpty {
+                                body = "The model's browser_close closed \(closed.count) task-created browser tab(s). The cleanup record is saved. Existing user tabs were preserved."
+                            } else {
+                                body = "The task's browser binding was released. Existing user tabs were preserved."
+                            }
+                            events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(
+                                id: "embedded-browser-cleanup:\(lease.turnID)", kind: .system,
+                                title: issues.isEmpty ? "Browser cleanup" : "Browser cleanup unconfirmed",
+                                body: body, turnID: lease.turnID)))
+                        }
+                    }
                     childCleanupIssues.append(contentsOf: issues)
+                    return issues
+                }
+                embeddedBrowserTaskCleanups[taskID] = (lease.turnID, result)
+                let cleanup = Task<Void, Never> {
+                    _ = await result.value
                     browserCleanupTasks.removeValue(forKey: id)
                 }
                 browserCleanupTasks[id] = cleanup
@@ -1966,6 +2013,12 @@ private extension CodexAppServerRuntime {
             }
             if let cleanup = webCleanupTasks[taskID] { _ = await cleanup.value }
             if let cleanup = apiCleanupTasks[taskID] { _ = await cleanup.value }
+            if let cleanup = embeddedBrowserTaskCleanups[taskID] {
+                _ = await cleanup.task.value
+                if embeddedBrowserTaskCleanups[taskID]?.turnID == cleanup.turnID {
+                    embeddedBrowserTaskCleanups.removeValue(forKey: taskID)
+                }
+            }
             guard !isPreparingCommandShutdown, !commandCleanupTasks.contains(taskID) else {
                 throw RuntimeError.serverError("Wait for this task's command cleanup to finish.")
             }
@@ -1981,6 +2034,7 @@ private extension CodexAppServerRuntime {
             }
             let claim = UUID()
             turnSubmissionClaims[taskID] = claim
+            latestSubmissionClaims[taskID] = claim
             defer {
                 if turnSubmissionClaims[taskID] == claim { turnSubmissionClaims.removeValue(forKey: taskID) }
                 cancelledSubmissions.remove(claim)
@@ -2447,12 +2501,21 @@ private extension CodexAppServerRuntime {
         }
 
         private func publishTerminalStatus(taskID: AgentTask.ID, status: TaskStatus, cancelled: Bool) {
-            guard let cleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: cancelled) else {
+            let generation = serverGeneration
+            let turnID = turnIdentity.latestTurnID(for: taskID)
+            let submission = latestSubmissionClaims[taskID]
+            let browserCleanup = embeddedBrowserTaskCleanups[taskID].flatMap { $0.turnID == turnID ? $0.task : nil }
+            let inferenceCleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: cancelled)
+            guard browserCleanup != nil || inferenceCleanup != nil else {
                 events.yield(.taskStatusChanged(taskID: taskID, status: status))
                 return
             }
             Task {
-                let issues = await cleanup.value
+                var issues = await browserCleanup?.value ?? []
+                issues += await inferenceCleanup?.value ?? []
+                guard generation == serverGeneration,
+                      submission == latestSubmissionClaims[taskID],
+                      turnIdentity.latestTurnID(for: taskID) == turnID else { return }
                 events.yield(.taskStatusChanged(taskID: taskID, status: issues.isEmpty ? status : .waiting))
             }
         }
@@ -2693,6 +2756,7 @@ private extension CodexAppServerRuntime {
             }
             let claim = UUID()
             turnSubmissionClaims[taskID] = claim
+            latestSubmissionClaims[taskID] = claim
             defer {
                 if turnSubmissionClaims[taskID] == claim {
                     turnSubmissionClaims.removeValue(forKey: taskID)
@@ -4990,8 +5054,12 @@ private extension CodexAppServerRuntime {
                 throw RuntimeError.serverError(violation)
             }
             let generation = serverGeneration
-            let key = embeddedBrowserTurnKeys[taskID] ?? "\(generation):\(taskID):\(turnID)"
-            embeddedBrowserTurnKeys[taskID] = key
+            let lease = embeddedBrowserTurnKeys[taskID] ?? EmbeddedBrowserTurnLease(
+                key: "\(generation):\(taskID):\(turnID)", threadID: threadForTask[taskID] ?? taskID,
+                turnID: turnID, generation: generation, submission: latestSubmissionClaims[taskID])
+            guard lease.turnID == turnID, lease.generation == generation else { throw CancellationError() }
+            embeddedBrowserTurnKeys[taskID] = lease
+            let key = lease.key
             let input = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
             if ["browser_click", "browser_fill"].contains(tool) {
                 // Validate the currently published target's eligibility before
@@ -5002,7 +5070,7 @@ private extension CodexAppServerRuntime {
             guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
                   generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
                   computerV2Sessions[taskID]?.epoch == epoch,
-                  embeddedBrowserTurnKeys[taskID] == key else { throw CancellationError() }
+                  embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
             if EmbeddedBrowserTools.requiresApproval(tool: tool) {
                 guard await requestComputerUseApproval(taskID: taskID,
                     title: "Allow built-in browser action?", summary: tool,
@@ -5013,12 +5081,12 @@ private extension CodexAppServerRuntime {
             guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
                   generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
                   computerV2Sessions[taskID]?.epoch == epoch,
-                  embeddedBrowserTurnKeys[taskID] == key else { throw CancellationError() }
+                  embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
             let result = try await controller.execute(taskKey: key, tool: tool, arguments: input, scope: scope)
             guard !Task.isCancelled, !isShuttingDown, !isPreparingCommandShutdown,
                   generation == serverGeneration, turnIdentity.activeTurnID(for: taskID) == turnID,
                   computerV2Sessions[taskID]?.epoch == epoch,
-                  embeddedBrowserTurnKeys[taskID] == key else { throw CancellationError() }
+                  embeddedBrowserTurnKeys[taskID]?.key == key else { throw CancellationError() }
             return [textContent(result)]
         }
 
@@ -8752,6 +8820,7 @@ private extension CodexAppServerRuntime {
             pendingCompactionRequests.removeAll()
             compactionReservations.removeAll()
             turnSubmissionClaims.removeAll()
+            latestSubmissionClaims.removeAll()
             compactionProgress.removeAll()
             contextStoppedTurns.removeAll()
             for task in compactionStopTasks.values { task.cancel() }

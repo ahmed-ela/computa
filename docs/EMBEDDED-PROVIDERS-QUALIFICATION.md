@@ -1,5 +1,87 @@
 # Embedded website provider qualification
 
+## Candidate119 task-tab cleanup accounting
+
+The V35 GPT-OSS failure exposed a separate host bookkeeping gap: native turn
+completion scheduled task-tab disposal, but published terminal status without
+waiting for that disposal or retaining an exact-turn result. The model had
+already claimed closure without issuing `browser_close`.
+
+Candidate119 records the original task, thread, turn, runtime generation and
+owned tab instance. Explicit close, replacement, automatic cleanup and shutdown
+have separate provenance. The runtime waits for browser and inference cleanup
+before terminal publication. Failed physical closure or failure to save its
+private receipt leaves the task waiting with a cleanup warning. Existing user
+tabs remain preserved; old-turn callbacks cannot certify a newer submission.
+
+An unconfirmed earlier close and an unresolved opening remain unconfirmed.
+An empty later context cannot replace those observations with success, and
+evicting old report details cannot restore a retired key's browser authority.
+The immutable receipt contains native identifiers and finite outcomes only,
+without page content, URLs, prompts or replies. This is host resource evidence;
+it does not invent a model tool call, verify the answer or regrade old tests.
+
+All 97 selected native tests passed: eight receipt-store tests, 33 controller
+tests, 22 runtime/browser tests, 15 turn/steer contract tests and 19 streaming
+regressions. The first compiled check caught a macOS `/var` alias that Foundation
+keeps after URL symlink resolution; the final factory resolves the trusted
+existing app-data home with `realpath`, preserving the new receipt directory's
+strict checks. Its regression passes through the real runtime fixture. An older
+released-key assertion now expects the earlier `handleMissing` rejection while
+retaining its no-dispatch and backend-counter checks. The failed test log remains
+preserved; it was not counted as a pass.
+
+Installed build118 remains running so the ordinary failed ChatGPT tab can be
+inspected if access is approved. No candidate119 installed-product or provider
+pass is claimed here.
+
+## Build118 V34 and V35 outcomes
+
+V35 prepared twelve fresh cases: three attempted, one strict clean, two failed
+and nine held. Its results remain separate from the earlier V34 matrix.
+
+| V35 case | Native duration | Result |
+| --- | ---: | --- |
+| Gemini code/terminal/browser | 0.565 seconds | Verification required before any tool or verified website submission |
+| Hosted GPT-OSS browser R1 | 3.576 seconds | Strict clean: six successful calls, exact form result and explicit tab close |
+| Hosted GPT-OSS browser R2 | 4.154 seconds | Failed task: eight valid calls, rejected reference and no explicit close |
+
+Both hosted GPT-OSS runs used the exact selected Cerebras API model, with zero
+corrective inferences, native agent errors or failed tool calls. In R2 the
+model supplied `UA2078` instead of the requested `UA 2078`; the browser's filled
+value and rejected server submission agree. Existing instructions already
+required verbatim identifiers and preserved whitespace. Later reads exposed
+the rejection, but the model did not correct it and falsely claimed the tab
+was closed. The fixture deliberately requires exact spacing and one form
+submission. This establishes a literal-copy and close-obligation failure in
+that controlled task; it does not establish a general flight-search failure
+or an adapter mutation. The failed receipt is unchanged.
+
+Gemini's fresh owned navigation reached Google's main-frame verification
+checkpoint via a server redirect. The native guard stopped inference with
+`website_verification_required`. A later finite store read found the new
+checkpoint; the older healthy recovery report no longer matched it. The
+subsequent `closed/not_created` disposal does not qualify a completed model
+conversation. No challenge was completed or prompt replayed. The trigger and
+permanent CAPTCHA prevention remain unresolved.
+
+Separately, V34 Gemini completed the code/terminal/browser workflow in 81.368
+seconds: nine successful calls, the actual helper patch, four unchanged tests,
+independent CLI validation, the exact browser result, explicit task-tab close
+and a causally qualified final website closure. Its original strict receipt
+remains unqualified solely because the private shell-scope checker rejected
+the decorative `echo '--- TEST ---'` separator. A bounded, reviewed checker
+correction was prepared prospectively for V35 with regression coverage; it did
+not regrade or replay V34. V34 had twelve prepared cases, one attempted,
+zero strict clean and eleven held.
+
+Both fixture servers stopped with exit zero, final stop events and their
+processes and listeners gone. A later UI inventory corroborated removal of
+the GPT-OSS R2 task tab while preserving the failed ordinary ChatGPT control;
+it is not a durable proof of closure before native completion. The projectless
+V34 task could not display a review diff without selecting a workspace, so no
+review-pane pass is claimed. Remaining provider cases were held.
+
 ## Build118 V33 workflow failure and ordinary-browser control
 
 V33 prepared twelve fresh cases and attempted one normal ChatGPT Instant
@@ -49,13 +131,15 @@ The original completed task was collected without replay, preserving the exact
 identity, literal result and causal closure gates. Its Send intent preceded
 native start by 541 milliseconds and remains diagnostic, not acceptance proof.
 
-A fresh ordinary Gemini navigation showed its signed-in composer and Flash
-picker without a CAPTCHA. Later finite store reads show no saved checkpoint and
-`verified / healthy_human_document`, indicating guarded automatic recovery.
+A fresh ordinary Gemini navigation before V34 showed its signed-in composer
+and Flash picker without a CAPTCHA. Finite store reads then showed no saved
+checkpoint and `verified / healthy_human_document`, indicating guarded recovery.
 The store has no transition timestamp, so completion cannot be tied conclusively
 to that navigation, and prompt-free discovery may have created another owned
 view. No refresh, provider prompt or CAPTCHA completion was performed in the
 control. The control tab was closed and the browser pane restored.
+V35 subsequently encountered a new verification checkpoint, as recorded above;
+the earlier recovery observation does not clear that later checkpoint.
 
 The recurring CAPTCHA trigger and broad provider reliability remain unresolved.
 The old failed receipts are unchanged. One duplicate install backup was removed

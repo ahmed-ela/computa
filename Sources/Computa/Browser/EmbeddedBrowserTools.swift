@@ -196,12 +196,20 @@ actor EmbeddedBrowserToolController {
         var inventoryOffset = 0
         var inventoryCursor: String?
         var scope: ComputerTaskScope?
+        var cleanupTargets = [EmbeddedBrowserCleanupReport.Target]()
+        var cleanupFailures = [EmbeddedBrowserCleanupReport.Issue]()
+        var userBindingReleased = false
     }
     private let transport: any EmbeddedBrowserControlBackend
     private let broker: BrowserTabSessionBroker
     private var contexts = [String: Context]()
     private var leases = [String: String]()
     private var inFlight = Set<String>()
+    // A repeated release cannot turn a failed or pending disposal into an
+    // empty successful result. Retired keys never grant browser authority.
+    private var releasedReports = [String: EmbeddedBrowserCleanupReport]()
+    private var retiredKeys = Set<String>()
+    private var releasing = [String: Task<EmbeddedBrowserCleanupReport, Never>]()
     private var closed = false
 
     init(transport: any EmbeddedBrowserControlBackend) {
@@ -216,7 +224,7 @@ actor EmbeddedBrowserToolController {
     func preflightMutation(
         taskKey: String, tool: String, arguments: Data, scope: ComputerTaskScope? = nil
     ) async throws {
-        guard !closed else { throw BrowserTabBrokerError.handleMissing }
+        guard !closed, !retiredKeys.contains(taskKey) else { throw BrowserTabBrokerError.handleMissing }
         guard let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any] else {
             throw BrowserTabBrokerError.invalidRead("Browser arguments must be a JSON object.")
         }
@@ -240,7 +248,7 @@ actor EmbeddedBrowserToolController {
     func execute(taskKey: String, tool: String, arguments: Data, scope: ComputerTaskScope? = nil)
         async throws -> String
     {
-        guard !closed else { throw BrowserTabBrokerError.handleMissing }
+        guard !closed, !retiredKeys.contains(taskKey) else { throw BrowserTabBrokerError.handleMissing }
         guard let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any] else {
             throw BrowserTabBrokerError.invalidRead("Browser arguments must be a JSON object.")
         }
@@ -337,8 +345,8 @@ actor EmbeddedBrowserToolController {
                         owned: contexts[taskKey]?.ownedTarget != nil, alreadyBound: true)
                 }
             }
-            let cleanup = await unbind(taskKey: taskKey)
-            guard cleanup.isEmpty else {
+            let cleanup = await unbind(taskKey: taskKey, trigger: .replacement)
+            guard cleanup.isSettled else {
                 throw BrowserTabBrokerError.browserUnavailable(
                     "Previous task-tab cleanup could not be confirmed.")
             }
@@ -436,8 +444,8 @@ actor EmbeddedBrowserToolController {
             ])
         case "browser_close":
             _ = try bound(taskKey, contextID)
-            let cleanup = await unbind(taskKey: taskKey)
-            guard cleanup.isEmpty else {
+            let cleanup = await unbind(taskKey: taskKey, trigger: .explicit)
+            guard cleanup.isSettled else {
                 throw BrowserTabBrokerError.browserUnavailable("Task-tab cleanup could not be confirmed.")
             }
             try check(taskKey, contextID)
@@ -450,9 +458,29 @@ actor EmbeddedBrowserToolController {
     /// Revocation precedes every cleanup await. An opening operation retains the
     /// same revoked lifetime and closes any target it receives late.
     func release(taskKey: String) async -> [String] {
+        await releaseReport(taskKey: taskKey).issues
+    }
+
+    func releaseReport(taskKey: String, trigger: EmbeddedBrowserCleanupReport.Trigger = .automatic) async -> EmbeddedBrowserCleanupReport {
+        if let saved = releasedReports[taskKey] { return saved }
+        if let operation = releasing[taskKey] { return await operation.value }
+        guard retiredKeys.insert(taskKey).inserted else {
+            // The bounded detail cache may retire old reports, but never
+            // their authority tombstones or uncertainty about missing proof.
+            return EmbeddedBrowserCleanupReport(targets: [], userBindingReleased: false,
+                pendingOperation: false, failures: [.historyLimit])
+        }
         contexts[taskKey]?.lifetime.revoke()
         contexts[taskKey]?.bindingLifetime?.revoke()
-        return await unbind(taskKey: taskKey, removeContext: true)
+        let operation = Task { await self.unbind(taskKey: taskKey, trigger: trigger, removeContext: true) }
+        releasing[taskKey] = operation
+        let report = await operation.value
+        releasing.removeValue(forKey: taskKey)
+        if releasedReports.count >= 256, let retired = releasedReports.keys.sorted().first {
+            releasedReports.removeValue(forKey: retired)
+        }
+        releasedReports[taskKey] = report
+        return report
     }
 
     func shutdown() async -> [String] {
@@ -462,14 +490,21 @@ actor EmbeddedBrowserToolController {
             context.bindingLifetime?.revoke()
         }
         var issues = [String]()
-        for key in Array(contexts.keys) { issues += await unbind(taskKey: key, removeContext: true) }
+        for key in Array(contexts.keys) { issues += await releaseReport(taskKey: key, trigger: .shutdown).issues }
         await broker.invalidateAll()
         issues += await transport.closeOwnedTargets()
         return issues
     }
 
-    private func unbind(taskKey: String, removeContext: Bool = false) async -> [String] {
-        guard let context = contexts[taskKey] else { return [] }
+    private func unbind(taskKey: String, trigger: EmbeddedBrowserCleanupReport.Trigger, removeContext: Bool = false) async -> EmbeddedBrowserCleanupReport {
+        let pending = removeContext && inFlight.contains(taskKey)
+        guard let context = contexts[taskKey] else {
+            return EmbeddedBrowserCleanupReport(targets: [], userBindingReleased: false,
+                pendingOperation: pending, failures: pending ? [.operationPending] : [])
+        }
+        var targets = context.cleanupTargets
+        var failures = context.cleanupFailures
+        var userBindingReleased = context.userBindingReleased
         context.bindingLifetime?.revoke()
         if removeContext {
             contexts.removeValue(forKey: taskKey)
@@ -488,18 +523,32 @@ actor EmbeddedBrowserToolController {
         if let target = context.leasedTarget, leases[target.targetID] == taskKey {
             leases.removeValue(forKey: target.targetID)
         }
-        var issues = [String]()
         if let binding = context.binding {
             do { try await broker.revoke(taskKey: taskKey, binding: binding) } catch {
-                issues.append("Built-in browser binding cleanup failed.")
+                failures.append(.bindingReleaseFailed)
             }
         }
         if let target = context.ownedTarget {
-            do { try await transport.closeTarget(target: target) } catch {
-                issues.append("Owned built-in browser tab cleanup could not be confirmed.")
+            var disposed = false
+            do { try await transport.closeTarget(target: target); disposed = true } catch {
+                failures.append(.ownedTargetCloseFailed)
             }
+            if targets.count < 64 {
+                targets.append(.init(targetID: target.targetID, instanceToken: target.instanceToken,
+                    trigger: trigger, closed: disposed))
+            } else { failures.append(.historyLimit) }
+        } else if context.binding != nil || context.leasedTarget != nil {
+            userBindingReleased = true
         }
-        return issues
+        if pending { failures.append(.operationPending) }
+        failures = Array(Set(failures)).sorted { $0.rawValue < $1.rawValue }
+        if !removeContext, contexts[taskKey]?.id == context.id {
+            contexts[taskKey]?.cleanupTargets = targets
+            contexts[taskKey]?.cleanupFailures = failures
+            contexts[taskKey]?.userBindingReleased = userBindingReleased
+        }
+        return EmbeddedBrowserCleanupReport(targets: targets, userBindingReleased: userBindingReleased,
+            pendingOperation: pending, failures: failures)
     }
 
     private func check(_ taskKey: String, _ id: UUID) throws {

@@ -332,6 +332,89 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    func testCompletionWaitsForPhysicalTabDisposalAndSavesAutomaticProvenance() async throws {
+        try await withHarness(approval: true) { harness in
+            await harness.backend.holdNextClose()
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+            ])
+            try await self.waitForAsync { await harness.backend.isCloseHeld() }
+            XCTAssertEqual(harness.audit.status, .running, "Native completion cannot publish resources-settled completion before disposal")
+            XCTAssertTrue(try harness.cleanupReceipts().isEmpty)
+            XCTAssertFalse(harness.audit.entries.contains { $0.title == "Browser cleanup" })
+            await harness.backend.resumeClose()
+            try await self.waitFor { harness.audit.status == .completed }
+            let receipts = try harness.cleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            let receipt = try XCTUnwrap(receipts.first)
+            XCTAssertEqual(receipt.taskID, Harness.taskID)
+            XCTAssertEqual(receipt.threadID, "embedded-browser-thread")
+            XCTAssertEqual(receipt.turnID, "embedded-turn-1")
+            XCTAssertTrue(receipt.report.isSettled)
+            XCTAssertEqual(receipt.report.targets.count, 1)
+            XCTAssertTrue(receipt.report.targets[0].closed)
+            XCTAssertEqual(receipt.report.targets[0].trigger, .automatic)
+            XCTAssertFalse(try harness.rows().contains { $0["tool"] as? String == "browser_close" })
+            XCTAssertTrue(harness.audit.entries.contains { $0.title == "Browser cleanup" && $0.body.contains("not a model-issued browser_close") })
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.ownedClosed, 1)
+            XCTAssertEqual(counts.humanCloseAttempts, 0)
+            XCTAssertTrue(counts.humanIntact)
+        }
+    }
+
+    func testExplicitCloseIsSavedOnceWithoutAutomaticCloseCredit() async throws {
+        try await withHarness(approval: true) { harness in
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_close", "arguments": [:]],
+            ])
+            try await self.waitFor { harness.audit.status == .completed }
+            let receipts = try harness.cleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            let receipt = try XCTUnwrap(receipts.first)
+            XCTAssertTrue(receipt.report.isSettled)
+            XCTAssertEqual(receipt.report.targets.map(\.trigger), [.explicit])
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.ownedClosed, 1)
+            XCTAssertTrue(counts.humanIntact)
+            XCTAssertTrue(harness.audit.entries.contains { $0.body.contains("model's browser_close") })
+        }
+    }
+
+    func testFailedPhysicalCloseKeepsTerminalWaitingAndSavesUncertainty() async throws {
+        try await withHarness(approval: true, allowsCleanupFailure: true) { harness in
+            await harness.backend.failNextClose()
+            try await harness.submit([["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]]])
+            try await self.waitFor { harness.audit.status == .waiting }
+            let receipts = try harness.cleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            let receipt = try XCTUnwrap(receipts.first)
+            XCTAssertFalse(receipt.report.isSettled)
+            XCTAssertEqual(receipt.report.targets.map(\.closed), [false])
+            XCTAssertTrue(receipt.report.failures.contains(.ownedTargetCloseFailed))
+            XCTAssertTrue(harness.audit.entries.contains { $0.title == "Browser cleanup unconfirmed" })
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.ownedClosed, 0)
+            XCTAssertTrue(counts.humanIntact)
+        }
+    }
+
+    func testCleanupPersistenceFailureCannotPublishCompletedOrRepeatPhysicalClose() async throws {
+        try await withHarness(approval: true, allowsCleanupFailure: true) { harness in
+            try Data("not a directory".utf8).write(to: harness.root.appendingPathComponent("EmbeddedBrowserCleanup-v1"))
+            try await harness.submit([["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]]])
+            try await self.waitFor { harness.audit.status == .waiting }
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.ownedClosed, 1)
+            XCTAssertTrue(counts.humanIntact)
+            XCTAssertTrue(harness.audit.entries.contains {
+                $0.title == "Browser cleanup unconfirmed" && $0.body.contains("evidence could not be saved")
+            })
+        }
+    }
+
     func testDecliningOpenAndFillNeverDispatchesBrowserInput() async throws {
         for mutation in ["browser_open", "browser_fill"] {
             try await withHarness(approval: false) { harness in
@@ -642,10 +725,18 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try CanonicalDynamicToolTestContract.validate(specs)
             return Set(specs.compactMap { $0["name"] as? String })
         }
+        func cleanupReceipts() throws -> [EmbeddedBrowserCleanupReceipt] {
+            let directory = root.appendingPathComponent("EmbeddedBrowserCleanup-v1", isDirectory: true)
+            guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+            return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }
+                .map { try JSONDecoder().decode(EmbeddedBrowserCleanupReceipt.self, from: Data(contentsOf: $0)) }
+        }
     }
 
     private func withHarness(configured: Bool = true, approval: Bool? = nil,
                              externalChromeTools: Bool = false, legacyPIDFixture: LegacyPIDFixture? = nil,
+                             allowsCleanupFailure: Bool = false,
                              _ body: @MainActor (Harness) async throws -> Void) async throws {
         let harness = try await Harness(configured: configured, approval: approval,
             externalChromeTools: externalChromeTools, legacyPIDFixture: legacyPIDFixture)
@@ -654,7 +745,8 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
             try await body(harness)
             let report = await harness.runtime.shutdown()
             harness.events?.cancel()
-            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            if allowsCleanupFailure { XCTAssertFalse(report.succeeded) }
+            else { XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; ")) }
         } catch {
             _ = await harness.runtime.shutdown()
             harness.events?.cancel()
@@ -852,6 +944,15 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     private var owned = Set<String>()
     private var values = [String: String]()
     private var results = [String: String]()
+    private var holdClose = false
+    private var closeHeld = false
+    private var closeWaiter: CheckedContinuation<Void, Never>?
+    private var failClose = false
+
+    func holdNextClose() { holdClose = true }
+    func failNextClose() { failClose = true }
+    func isCloseHeld() -> Bool { closeHeld }
+    func resumeClose() { closeWaiter?.resume(); closeWaiter = nil }
 
     func counts() -> Counts {
         var result = ledger
@@ -868,7 +969,16 @@ actor InertRuntimeBrowser: EmbeddedBrowserControlBackend {
     }
     func target(id: String) -> BrowserTarget? { targets[id] }
     func activateTarget(id: String) { ledger.activations += 1 }
-    func closeTarget(target: BrowserTarget) throws {
+    func closeTarget(target: BrowserTarget) async throws {
+        if holdClose {
+            holdClose = false; closeHeld = true
+            await withCheckedContinuation { closeWaiter = $0 }
+            closeHeld = false
+        }
+        if failClose {
+            failClose = false
+            throw BrowserTabBrokerError.browserUnavailable("Synthetic close failed")
+        }
         guard owned.remove(target.targetID) != nil else { ledger.humanCloseAttempts += 1; throw BrowserTabBrokerError.ownershipMismatch }
         ledger.ownedClosed += 1; targets.removeValue(forKey: target.targetID)
     }

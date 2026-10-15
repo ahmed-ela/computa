@@ -609,6 +609,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                 XCTFail("The open receipt must not authorize \(scenario)")
             } catch {
                 if scenario == "foreign_inventory" { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
+                else if scenario == "released" { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
                 else if scenario == "replaced" { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
                 else if let failure = error as? BrowserTabBrokerError, case .invalidRead = failure { /* Exact observed target or scope denied. */ }
                 else { XCTFail("Unexpected error for \(scenario): \(error)") }
@@ -646,11 +647,54 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         await backend.holdNextCreate()
         let operation = Task { try await self.call(controller,"browser_open",["url":"http://localhost:8123/flight"]) }
         await backend.waitUntilCreateHeld()
-        _ = await controller.release(taskKey:"turn-a")
+        let initial = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertFalse(initial.isSettled)
+        XCTAssertTrue(initial.pendingOperation)
+        XCTAssertTrue(initial.failures.contains(.operationPending))
+        XCTAssertTrue(initial.targets.isEmpty, "An unresolved opening is not an invented owned-target receipt")
         await backend.resumeCreate()
         do { _ = try await operation.value; XCTFail("Canceled opening must not bind") } catch { XCTAssertEqual(error as? BrowserTabBrokerError,.handleMissing) }
         let counts = await backend.counts()
         XCTAssertEqual(counts.creates,1); XCTAssertEqual(counts.closes,1); XCTAssertEqual(counts.observes,0)
+        let repeated = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertEqual(repeated, initial, "Later absence cannot replace the original pending observation with successful closure")
+    }
+
+    func testFailedExplicitCloseRemainsUnconfirmedAtTurnEndWithoutReplayingClose() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        await backend.failNextClose()
+        do { _ = try await call(controller, "browser_close"); XCTFail("Physical failure must not return tool success") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("Task-tab cleanup could not be confirmed.")) }
+        let report = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertFalse(report.isSettled)
+        XCTAssertFalse(report.pendingOperation)
+        XCTAssertEqual(report.targets.map(\.trigger), [.explicit])
+        XCTAssertEqual(report.targets.map(\.closed), [false])
+        XCTAssertTrue(report.failures.contains(.ownedTargetCloseFailed))
+        let repeated = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertEqual(repeated, report)
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.closes, 0, "Turn-end bookkeeping cannot replay the failed explicit close")
+        _ = await controller.shutdown()
+    }
+
+    func testRetiredKeyCannotRegainAuthorityAfterDetailedReportEviction() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], key: "000-old")
+        _ = await controller.releaseReport(taskKey: "000-old")
+        for index in 0..<256 { _ = await controller.releaseReport(taskKey: "later-\(index)") }
+        do {
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/MUST_NOT_OPEN"], key: "000-old")
+            XCTFail("Detail eviction must never restore a retired task key")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        let unavailable = await controller.releaseReport(taskKey: "000-old")
+        XCTAssertFalse(unavailable.isSettled)
+        XCTAssertTrue(unavailable.failures.contains(.historyLimit))
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.creates, 1)
+        XCTAssertEqual(counts.closes, 1)
+        _ = await controller.shutdown()
     }
 
     func testReleaseDuringMutationRevokesPermitBeforeLateDispatch() async throws {
