@@ -610,6 +610,54 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testChatGPTNestedAlertAsideLoadFailureAbortsWithoutRetryOrReplay() async throws {
+        for alreadyBound in [false, true] {
+            let (fixture, token, view) = try await boundInspectionFixture(
+                prompt: "Detect the measured semantic website error", bindFirstRead: alreadyBound)
+            defer { fixture.shutdown() }
+            let count = try await evaluate(view, """
+                const main = document.createElement('main');
+                const alert = document.createElement('aside'); alert.setAttribute('role', 'alert');
+                const empty = document.createElement('div'), content = document.createElement('div');
+                const row = document.createElement('div'), errorBranch = document.createElement('div');
+                const labelWrapper = document.createElement('div'), label = document.createElement('div');
+                label.textContent = 'Load failed';
+                const controlBranch = document.createElement('div'), retry = document.createElement('button');
+                retry.textContent = 'Retry'; window.fixtureRetryClicks = 0;
+                retry.addEventListener('click', () => window.fixtureRetryClicks++);
+                alert.append(empty, content); content.append(row); row.append(errorBranch, controlBranch);
+                errorBranch.append(labelWrapper); labelWrapper.append(label); controlBranch.append(retry);
+                main.append(alert); document.body.append(main); return alert.querySelectorAll('*').length + 1;
+                """)
+            XCTAssertEqual(count as? Int, 9, "The measured error fixture contains exactly nine elements")
+            var evaluations: [String] = []
+            fixture.transport.setBeforePageResultValidationForTesting { evaluations.append($0) }
+            let began = ContinuousClock.now
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("The owned semantic error widget must abort before the deadline")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFailed(.chatgpt)) }
+            XCTAssertLessThan(ContinuousClock.now - began, .seconds(3))
+            XCTAssertTrue(evaluations.contains("inspect"))
+            let evaluationsAtFailure = evaluations
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("The website response failure must stay terminal")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFailed(.chatgpt)) }
+            XCTAssertEqual(evaluations, evaluationsAtFailure)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            let retryClicks = try await evaluate(view, "return window.fixtureRetryClicks;")
+            XCTAssertEqual(retryClicks as? Int, 0)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            try await assertHumanTabIntact(fixture)
+            let next = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let nextToken = try XCTUnwrap(next["sessionToken"] as? String)
+            _ = try await waitForState("ready", fixture.transport, token: nextToken)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": nextToken])
+        }
+    }
+
     func testChatGPTModalLoadFailureCannotOverrideCurrentModelVerification() async throws {
         let (fixture, token, view) = try await boundInspectionFixture(prompt: "Keep current model proof ahead of a modal error")
         defer { fixture.shutdown() }

@@ -2265,3 +2265,96 @@ describe('bounded abort-only response error widget', () => {
     }
   });
 });
+
+
+describe('bounded semantic alert aside response error', () => {
+  const alertWidget = (f: ReturnType<typeof fixture>) => {
+    // The nine elements measured in the admitted live page, without page text
+    // outside the fixed error/Retry literals or any account data.
+    const alert = new Element('ASIDE', { role: 'alert' }), empty = new Element('DIV');
+    const content = new Element('DIV'), row = new Element('DIV'), errorBranch = new Element('DIV');
+    const labelWrapper = new Element('DIV'), label = new Element('DIV', {}, 'Load failed');
+    const controlBranch = new Element('DIV'), retry = new Element('BUTTON', {}, 'Retry');
+    alert.append(empty, content); content.append(row); row.append(errorBranch, controlBranch);
+    errorBranch.append(labelWrapper); labelWrapper.append(label); controlBranch.append(retry);
+    f.body.querySelector('main')!.append(alert);
+    return { alert, empty, content, row, errorBranch, labelWrapper, label, controlBranch, retry };
+  };
+  test('the exact nine-element nested alert-aside is an abort-only owned error', async () => {
+    const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = alertWidget(f);
+    expect(w.alert.descendants().length + 1).toBe(9); expect(w.alert.textContent).toBe('Load failedRetry');
+    w.retry.values.role = 'button'; w.retry.values.tabindex = '0';
+    const result = await f.inspect(); expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true);
+    expect(result.responseLoadFailed).toBe(true); expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
+  });
+  test('unknown text, hidden labels, extra controls and unbounded shapes never become the known error', async () => {
+    for (const variant of ['no-alert', 'complementary', 'compound-alert', 'unknown', 'extra-text', 'second-label', 'hidden-label', 'hidden-retry',
+      'disabled', 'aria-disabled', 'extra-button', 'input', 'link', 'script', 'wide', 'deep', 'long-label', 'extra-retry-text']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = alertWidget(f);
+      if (variant === 'no-alert') delete w.alert.values.role;
+      if (variant === 'complementary') w.alert.values.role = 'complementary';
+      if (variant === 'compound-alert') w.alert.values.role = 'alert complementary';
+      if (variant === 'unknown') w.label.text = 'PRIVATE_UNKNOWN';
+      if (variant === 'extra-text') w.empty.text = 'Unrelated';
+      if (variant === 'second-label') w.empty.text = 'Load failed';
+      if (variant === 'hidden-label') w.errorBranch.values.hidden = '';
+      if (variant === 'hidden-retry') w.retry.values['aria-hidden'] = 'true';
+      if (variant === 'disabled') w.retry.disabled = true;
+      if (variant === 'aria-disabled') w.retry.values['aria-disabled'] = 'true';
+      if (variant === 'extra-button') w.empty.append(new Element('BUTTON', {}, 'Continue'));
+      if (variant === 'input') w.empty.append(new Element('INPUT'));
+      if (variant === 'link') w.labelWrapper.append(new Element('A', { href: '/private' }));
+      if (variant === 'script') w.empty.append(new Element('SCRIPT'));
+      if (variant === 'wide') for (let i = 0; i < 130; i++) w.empty.append(new Element('DIV'));
+      if (variant === 'deep') { let parent = w.empty; for (let i = 0; i < 18; i++) { const node = new Element('DIV'); parent.append(node); parent = node; } }
+      if (variant === 'long-label') w.label.text = ' '.repeat(129) + 'Load failed';
+      if (variant === 'extra-retry-text') { w.retry.values['aria-label'] = 'Retry'; w.retry.text = 'Retry PRIVATE_EXTRA'; }
+      const result = await f.inspect(); expect(result.error).toBeUndefined(); expect(result.responseLoadFailed).toBe(false);
+      expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
+    }
+  });
+  test('all protected ancestors remain excluded outside the semantic alert aside', async () => {
+    for (const kind of ['nav', 'aside', 'menu', 'menubar', 'navigation', 'complementary', 'navigation region', 'complementary region',
+      'textbox', 'button', 'assistant', 'pre', 'code', 'markdown', 'editable-empty', 'editable-plaintext', 'editable-false']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = alertWidget(f);
+      const main = f.body.querySelector('main')!; main.children = main.children.filter(child => child !== w.alert);
+      const attrs = kind === 'assistant' ? { 'data-message-author-role': 'assistant' }
+        : kind === 'markdown' ? { class: 'markdown' }
+        : kind.startsWith('editable-') ? { contenteditable: kind === 'editable-empty' ? '' : kind === 'editable-plaintext' ? 'plaintext-only' : 'false' }
+        : ['nav', 'aside', 'pre', 'code'].includes(kind) ? {} : { role: kind };
+      const outer = new Element(['nav', 'aside', 'pre', 'code'].includes(kind) ? kind.toUpperCase() : 'DIV', attrs);
+      outer.append(w.alert); main.append(outer);
+      const result = await f.inspect(); expect(result.error).toBeUndefined(); expect(result.responseLoadFailed).toBe(false);
+      expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
+    }
+    const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = alertWidget(f);
+    f.body.values.role = 'navigation region';
+    expect((await f.inspect()).responseLoadFailed).toBe(false); expect(w.retry.clicks).toBe(0);
+  });
+  test('protected label branches and custom controls cannot supply an alert-aside error label', async () => {
+    for (const kind of ['assistant', 'code', 'pre', 'editor-empty', 'editor-plaintext', 'markdown', 'textbox', 'button', 'link',
+      'checkbox', 'combobox', 'navigation region', 'complementary region', 'menu', 'menubar', 'tabindex', 'hidden-nested']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = alertWidget(f);
+      if (kind === 'assistant') w.label.values['data-message-author-role'] = 'assistant';
+      else if (['code', 'pre'].includes(kind)) w.label.tagName = kind.toUpperCase();
+      else if (kind.startsWith('editor-')) w.label.values.contenteditable = kind === 'editor-empty' ? '' : 'plaintext-only';
+      else if (kind === 'markdown') w.label.values.class = 'markdown';
+      else if (kind === 'tabindex') w.label.values.tabindex = '-1';
+      else if (kind === 'hidden-nested') { w.label.text = ''; w.label.append(new Element('DIV', { hidden: '' }, 'Load failed')); }
+      else w.label.values.role = kind;
+      const result = await f.inspect(); expect(result.responseLoadFailed).toBe(false); expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
+    }
+  });
+  test('a known semantic alert cannot override current ownership, first-user, product, origin or frame guards', async () => {
+    for (const drift of ['owner', 'user', 'work', 'origin', 'frame']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = alertWidget(f);
+      if (drift === 'owner') f.world.__computaModelOwner = 'FOREIGN_OWNER';
+      if (drift === 'user') f.userBody!.text = 'Changed user body\n\n' + markerLine;
+      if (drift === 'work') { f.workMode.values['aria-pressed'] = 'true'; f.chatMode.values['aria-pressed'] = 'false'; }
+      if (drift === 'origin') f.location.origin = 'https://foreign.example';
+      if (drift === 'frame') f.window.top = {};
+      const result = await f.inspect(); expect(result.error).toBeDefined(); expect(result.responseLoadFailed).toBeUndefined();
+      expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
+    }
+  });
+});

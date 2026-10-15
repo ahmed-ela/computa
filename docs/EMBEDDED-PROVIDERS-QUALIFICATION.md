@@ -59,7 +59,7 @@ The remote Inspector window was closed, Safari's developer-features setting
 restored off, the per-tab inspection grant revoked, and the exact synthetic tab
 closed. The user's Safari Start Page was preserved. No challenge was completed.
 
-## Build120 repair candidate (not yet installed)
+## Build120 repair candidate (superseded before installation)
 
 The candidate adds one passive, native-only settlement window to the initial
 untouched Gemini navigation. A committed but unfinished Google checkpoint can
@@ -115,8 +115,39 @@ logs remain preserved. The final 21-test native run passed all 15 navigation tes
 and six focused response-error/diagnostic tests, including direct/nested labels,
 bound/unbound ownership, zero Retry clicks and no second terminal evaluation.
 The final adapter run passed 289 tests and 8,017 assertions with unchanged inputs.
-These are regression results; build120 still requires installation and live
-provider qualification. No earlier failed live receipt was regraded.
+These are retained regression results. Build120 was signed and verified but
+superseded before installation; it supplies no live provider qualification.
+No earlier failed live receipt was regraded.
+
+## Build121 nested ChatGPT error alert
+
+Approved inspection of the retained ordinary build119 test tab identified the
+actual error widget: nine elements rooted at `aside[role="alert"]`, with a
+wrapped Load failed label and one wrapped Retry button. Build120 excluded all
+asides and only matched a direct label/Retry widget. That classifier gap could
+leave an already failed website response waiting until the full deadline.
+
+Build121 adds a bounded traversal for this exact semantic alert. It accepts only
+the known label and one enabled Retry, rejecting extra text, controls, hidden
+labels, oversized/deep trees, transcripts, editors and enclosing navigation.
+The existing native ownership/model checks and generic-widget path are
+unchanged. Recognition only aborts; it never clicks Retry, replays a request or
+accepts an answer. The private adapter suite passed 294 tests with 8,237
+assertions; independent review added 75 pure counterexample checks. All four
+focused native WebKit tests passed with unchanged Swift inputs, covering the
+measured alert, generic widgets, typed terminal failure and the unrelated-modal
+guard. The new fixture checks bound and unbound first-message state, one Send,
+zero Retry clicks, no second terminal evaluation, cleanup and a fresh session.
+Signed artifact and installed behavior are separate verification steps.
+
+One controlled ordinary-tab Retry restored the synthetic prompt to its composer.
+One subsequent native Send did not pause at the URL breakpoint and returned to
+an empty root-page composer. Fetch access-control failures were visible, but
+their request attribution and the actual upload body were not established.
+This is not an underlying request-cause diagnosis or a successful model task.
+No headers, bodies, credentials or HAR were retained. The created breakpoint
+was removed, remote Inspector closed, Safari developer features restored off,
+and the per-tab Inspector grant revoked. The Safari Start Page was preserved.
 
 ## Build119 fresh provider observations
 

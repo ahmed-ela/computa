@@ -2249,6 +2249,53 @@ function chatGPTStructure(visible) {
   }
   return serialized;
 }
+function chatGPTAlertAsideLoadFailed(retry, main, visible) {
+  const alert = retry.closest('aside');
+  if (!alert || alert.getAttribute('role') !== 'alert' || !main || alert.closest('main') !== main
+    || !visible(alert) || !visible(retry) || retry.disabled || retry.getAttribute('aria-disabled') === 'true'
+    || alert.parentElement?.closest('aside')) return false;
+  const protectedContent = '[data-message-author-role], [data-markdown-text-style], article[data-turn], [data-user-message-bubble], .markdown, pre, code, #prompt-textarea, [contenteditable], textarea, [role="menu"], [role="menubar"], [role="navigation"], [role="complementary"], nav';
+  if (alert.closest(protectedContent) || alert.querySelector(protectedContent)) return false;
+  const controlRoles = new Set(['button', 'checkbox', 'combobox', 'grid', 'gridcell', 'link', 'listbox',
+    'menu', 'menubar', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'radiogroup',
+    'scrollbar', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab', 'tablist', 'textbox', 'toolbar',
+    'tree', 'treegrid', 'treeitem', 'navigation', 'complementary']);
+  const controlTags = new Set(['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'DETAILS', 'AUDIO', 'VIDEO', 'IFRAME', 'OBJECT', 'EMBED']);
+  let ancestors = 0;
+  for (let node = alert; node; node = node.parentElement) {
+    if (++ancestors > 64 || (node.getAttribute('role') || '').trim().split(/\s+/).some(role => controlRoles.has(role))
+      || controlTags.has(node.tagName) || node.getAttribute('contenteditable') !== null
+      || (['A', 'AREA'].includes(node.tagName) && node.getAttribute('href') !== null)
+      || (node.tagName === 'LABEL' && node.getAttribute('for') !== null)) return false;
+  }
+  // This is one finite semantic error widget, not a broad ancestor text search.
+  // Visit all nodes, including hidden/empty branches, before accepting its label.
+  const inertTags = new Set(['DIV', 'SPAN', 'P', 'STRONG', 'EM', 'B', 'I', 'SMALL']);
+  const stack = [{ node: alert, depth: 0, inRetry: false }];
+  let visited = 0, errorText = '', retryText = '';
+  while (stack.length) {
+    const { node, depth, inRetry } = stack.pop();
+    if (++visited > 128 || depth > 16) return false;
+    if (node.nodeType === 8) continue;
+    if (node.nodeType === 3) {
+      const text = node.textContent || '';
+      if (text.length > 128 || text.trim() && !visible(node.parentElement)) return false;
+      if (inRetry) retryText += text; else errorText += text;
+      if (errorText.length > 128 || retryText.length > 128) return false;
+      continue;
+    }
+    if (node.nodeType !== 1 || node !== alert && node !== retry && !inertTags.has(node.tagName)
+      || node.getAttribute('contenteditable') !== null || node !== retry && node.getAttribute('tabindex') !== null) return false;
+    const role = node.getAttribute('role');
+    if (node !== alert && role !== null && ![node === retry ? 'button' : 'none', 'presentation'].includes(role)) return false;
+    const children = [...node.childNodes];
+    if (children.length > 128 || stack.length + children.length > 128) return false;
+    for (let index = children.length - 1; index >= 0; index--)
+      stack.push({ node: children[index], depth: depth + 1, inRetry: inRetry || node === retry });
+  }
+  return errorText.replace(/\s+/g, ' ').trim() === 'Load failed'
+    && retryText.replace(/\s+/g, ' ').trim() === 'Retry';
+}
 function chatGPTResponseLoadFailed(visible) {
   // Abort-only website error evidence from this admitted read. A single small
   // direct widget can use plain text or nested labels, including in a dialog.
@@ -2258,6 +2305,7 @@ function chatGPTResponseLoadFailed(visible) {
     && (node.getAttribute('aria-label') || node.innerText || '').trim() === 'Retry');
   if (retries.length !== 1) return false;
   const retry = retries[0], region = retry.parentElement, main = retry.closest('main');
+  if (chatGPTAlertAsideLoadFailed(retry, main, visible)) return true;
   if (retry.disabled || retry.getAttribute('aria-disabled') === 'true' || retry.closest(protectedContent)
     || !region || !main || region === main || !visible(region)
     || ['MAIN', 'BODY', 'HTML'].includes(region.tagName) || region.closest('main') !== main
