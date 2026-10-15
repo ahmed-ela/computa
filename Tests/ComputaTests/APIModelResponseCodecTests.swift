@@ -47,6 +47,141 @@ final class APIModelResponseCodecTests: XCTestCase {
         let json = String(text[range.upperBound...])
         return (try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [[String: Any]], json)
     }
+
+    func testFatalJSONResponseGuardsRetainExactFailuresAndEmitOnlyOneFiniteLabel() throws {
+        let prepared = try request()
+        typealias Guard = APIModelResponseCodec.InvalidResponseDiagnostic.Guard
+        let valid: [String: Any] = ["model": "fixture-model", "choices": [["index": 0,
+            "message": ["role": "assistant", "content": "PRIVATE_RESPONSE_CANARY"], "finish_reason": "stop"]],
+            "usage": ["prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5]]
+        func changedMessage(_ field: String, _ value: Any) -> [String: Any] {
+            var envelope = valid, choices = envelope["choices"] as! [[String: Any]], message = choices[0]["message"] as! [String: Any]
+            message[field] = value; choices[0]["message"] = message; envelope["choices"] = choices; return envelope
+        }
+        func changedUsage(_ field: String, _ value: Any) -> [String: Any] {
+            var envelope = valid, usage = envelope["usage"] as! [String: Any]
+            usage[field] = value; envelope["usage"] = usage; return envelope
+        }
+        var cases: [(Any, Guard)] = [([], .chatRootObject),
+            (valid.merging(["choices": []]) { _, value in value }, .chatChoiceEnvelope),
+            (valid.merging(["choices": [["index": true, "message": ["role": "assistant", "content": "safe"], "finish_reason": "stop"]]]) { _, value in value }, .chatChoiceIndex),
+            (changedMessage("content", []), .chatContentType),
+            (changedMessage("refusal", "PRIVATE_REFUSAL_CANARY"), .chatUnsupportedMessageFields),
+            (changedMessage("tool_calls", false), .chatCallsType),
+            (valid.merging(["choices": [["index": 0, "message": ["role": "assistant", "content": "safe"], "finish_reason": "tool_calls"]]]) { _, value in value }, .chatCallFinishConsistency),
+            (changedMessage("reasoning", []), .chatReasoningType), (changedMessage("content", ""), .chatEmptyOutput),
+            (valid.merging(["usage": []]) { _, value in value }, .usageObject)]
+        cases += [(changedUsage("prompt_tokens", true), .usageInputTokens),
+            (changedUsage("completion_tokens", 1.5), .usageOutputTokens), (changedUsage("total_tokens", -1), .usageTotalTokens),
+            (changedUsage("total_tokens", 6), .usageTotalConsistency),
+            (changedUsage("completion_tokens_details", "PRIVATE_USAGE_CANARY"), .usageOutputDetails),
+            (changedUsage("completion_tokens_details", ["reasoning_tokens": 4]), .usageReasoningTokens),
+            (changedUsage("prompt_tokens_details", []), .usageInputDetails),
+            (changedUsage("prompt_tokens_details", ["cached_tokens": 3]), .usageCachedTokens)]
+        for (envelope, guardID) in cases {
+            let result = APIProviderHTTPClient.Result(body: try JSONSerialization.data(withJSONObject: envelope), contentType: "application/json")
+            for observe in [false, true] {
+                var observed: [APIModelResponseCodec.InvalidResponseDiagnostic] = []
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared,
+                    onInvalidResponse: observe ? { observed.append($0) } : nil)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidResponse, "\(guardID)")
+                }
+                XCTAssertEqual(observed, observe ? [.init(format: .chatJSON, guardID: guardID)] : [])
+                if let diagnostic = observed.first {
+                    XCTAssertTrue(diagnostic.isConsistent)
+                    let bytes = try JSONEncoder().encode(diagnostic)
+                    let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                    XCTAssertEqual(Set(fields.keys), ["format", "guardID"])
+                    XCTAssertLessThan(bytes.count, 128); XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("PRIVATE"))
+                }
+            }
+        }
+    }
+
+    func testFatalSSEGuardsRetainExactFailuresWithoutCapturingChunkValues() throws {
+        let prepared = try request()
+        typealias Guard = APIModelResponseCodec.InvalidResponseDiagnostic.Guard
+        func row(_ delta: Any, index: Any = 0, id: String = "PRIVATE_REMOTE_CANARY", finish: Any = NSNull()) -> [String: Any] {
+            ["id": id, "model": "fixture-model", "choices": [["index": index, "delta": delta, "finish_reason": finish]]]
+        }
+        func wire(_ chunks: [[String: Any]], done: Bool = true) throws -> Data {
+            var data = Data()
+            for chunk in chunks { data.append(Data("data: ".utf8)); data.append(try JSONSerialization.data(withJSONObject: chunk)); data.append(Data("\n\n".utf8)) }
+            if done { data.append(Data("data: [DONE]\n\n".utf8)) }; return data
+        }
+        let first = row(["role": "assistant", "content": "PRIVATE_TEXT_CANARY"])
+        var missingID = first; missingID.removeValue(forKey: "id")
+        let initialCall: [String: Any] = ["index": 0, "id": "PRIVATE_CALL_CANARY", "function": ["name": "computa_tool_0", "arguments": "{}"]]
+        let cases: [(Data, Guard)] = [
+            (Data([0xff]), .sseUTF8), (try wire([first], done: true) + wire([first]), .sseAfterDone),
+            (try wire([missingID]), .sseChunkEnvelope), (try wire([first, row([:], id: "PRIVATE_CHANGED_CANARY")]), .sseChunkIdentity),
+            (try wire([row(["role": "assistant"], index: true)]), .sseChoiceIndex), (try wire([row([])]), .sseChoiceDelta),
+            (try wire([row(["role": "user"])]), .sseRole), (try wire([row(["content": []])]), .sseContentType),
+            (try wire([row(["reasoning": []])]), .sseReasoningType),
+            (try wire([row(["tool_calls": [["index": true]]])]), .sseToolIndex),
+            (try wire([row(["role": "assistant", "tool_calls": [initialCall]]), row(["tool_calls": [initialCall]])]), .sseRepeatedCallID),
+            (try wire([row(["tool_calls": false])]), .sseCallsType)]
+        for (body, guardID) in cases {
+            let result = APIProviderHTTPClient.Result(body: body, contentType: "text/event-stream")
+            for observe in [false, true] {
+                var observed: [APIModelResponseCodec.InvalidResponseDiagnostic] = []
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared,
+                    onInvalidResponse: observe ? { observed.append($0) } : nil)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidResponse, "\(guardID)")
+                }
+                XCTAssertEqual(observed, observe ? [.init(format: .chatSSE, guardID: guardID)] : [])
+                XCTAssertFalse(String(decoding: try JSONEncoder().encode(observed), as: UTF8.self).contains("PRIVATE"))
+            }
+        }
+    }
+
+    func testResponseGuardObservationIgnoresNonfatalUsageProbeAndOtherFailureKinds() throws {
+        let prepared = try request()
+        // The existing assembler tolerates an unusable intermediate usage field
+        // for a clean reply. That speculative try? must never emit a fatal label.
+        let chunks: [[String: Any]] = [
+            ["id": "remote", "model": "fixture-model", "choices": [["index": 0, "delta": ["role": "assistant", "content": "safe"], "finish_reason": "stop"]], "usage": false],
+            ["id": "remote", "model": "fixture-model", "choices": [], "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]]]
+        var wire = Data()
+        for chunk in chunks { wire.append(Data("data: ".utf8)); wire.append(try JSONSerialization.data(withJSONObject: chunk)); wire.append(Data("\n\n".utf8)) }
+        wire.append(Data("data: [DONE]\n\n".utf8))
+        var observed: [APIModelResponseCodec.InvalidResponseDiagnostic] = []
+        guard case .reply = try APIModelResponseCodec.decodeForCorrection(.init(body: wire, contentType: "text/event-stream"), request: prepared,
+            onInvalidResponse: { observed.append($0) }) else { return XCTFail("Expected unchanged clean reply") }
+        XCTAssertTrue(observed.isEmpty)
+        let failures: [(APIProviderHTTPClient.Result, APIModelResponseCodec.Failure)] = [
+            (try correctionResult(prepared, changes: ["model": "other"]), .modelMismatch),
+            (.init(body: Data("data: [DONE]\n\n".utf8), contentType: "text/event-stream"), .incompleteResponse)]
+        for (result, expected) in failures {
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared,
+                onInvalidResponse: { observed.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, expected) }
+            XCTAssertTrue(observed.isEmpty)
+        }
+        guard case .argumentsRejected = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared), request: prepared,
+            onInvalidResponse: { observed.append($0) }) else { return XCTFail("Existing bounded argument-correction classification must be unchanged") }
+        XCTAssertTrue(observed.isEmpty)
+    }
+
+    func testNativeResponsesFatalGuardLabelsStayBoundToTheirOwnFormat() throws {
+        let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL, wireAPI: .responses, models: provider.models)
+        let prepared = try request(provider: p)
+        typealias Guard = APIModelResponseCodec.InvalidResponseDiagnostic.Guard
+        let items: [([String: Any], Guard)] = [
+            (["type": "message"], .responsesItemIdentity),
+            (["type": "message", "id": "i", "role": "user"], .responsesMessage),
+            (["type": "reasoning", "id": "i", "summary": false], .responsesSummary),
+            (["type": "reasoning", "id": "i", "summary": [], "encrypted_content": false], .responsesEncryptedType),
+            (["type": "PRIVATE_UNKNOWN_CANARY", "id": "i"], .responsesItemType)]
+        for (item, guardID) in items {
+            let body = try JSONSerialization.data(withJSONObject: ["object": "response", "status": "completed", "model": "fixture-model", "output": [item]])
+            var observed: [APIModelResponseCodec.InvalidResponseDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: body, contentType: "application/json"), request: prepared,
+                onInvalidResponse: { observed.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidResponse) }
+            XCTAssertEqual(observed, [.init(format: .responsesJSON, guardID: guardID)])
+            XCTAssertTrue(try XCTUnwrap(observed.first).isConsistent)
+        }
+    }
+
     func testSchemaFeedbackLocalizesCustomMissingInputAndNeverCopiesRejectedPrivateKeysOrValues() throws {
         let custom = try request(["tools": [tools[1]]])
         let missing = try rejectedDetails(custom, arguments: "{}")

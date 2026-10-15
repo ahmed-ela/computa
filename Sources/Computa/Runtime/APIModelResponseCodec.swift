@@ -28,6 +28,68 @@ enum APIModelResponseCodec {
             }
         }
     }
+    /// A fatal decoder guard identifier only; no provider values, counts, IDs,
+    /// text, arguments, headers or response bytes enter this observation.
+    struct InvalidResponseDiagnostic: Codable, Equatable, Sendable {
+        enum Format: String, Codable, Sendable, CaseIterable {
+            case chatJSON = "chat_json", chatSSE = "chat_sse", responsesJSON = "responses_json"
+        }
+        enum Guard: String, Codable, Sendable, CaseIterable {
+            case chatRootObject = "chat_root_object", chatChoiceEnvelope = "chat_choice_envelope"
+            case chatChoiceIndex = "chat_choice_index", chatContentType = "chat_content_type"
+            case chatUnsupportedMessageFields = "chat_unsupported_message_fields", chatCallsType = "chat_calls_type"
+            case chatCallFinishConsistency = "chat_call_finish_consistency", chatReasoningType = "chat_reasoning_type"
+            case chatRetainedReasoningType = "chat_retained_reasoning_type", chatEmptyOutput = "chat_empty_output"
+            case sseUTF8 = "sse_utf8", sseAfterDone = "sse_after_done", sseChunkEnvelope = "sse_chunk_envelope"
+            case sseChunkIdentity = "sse_chunk_identity", sseChoiceIndex = "sse_choice_index"
+            case sseChoiceDelta = "sse_choice_delta", sseRole = "sse_role", sseContentType = "sse_content_type"
+            case sseReasoningType = "sse_reasoning_type", sseToolIndex = "sse_tool_index"
+            case sseRepeatedCallID = "sse_repeated_call_id", sseCallsType = "sse_calls_type"
+            case responsesItemIdentity = "responses_item_identity", responsesMessage = "responses_message"
+            case responsesSummary = "responses_summary", responsesEncryptedType = "responses_encrypted_type"
+            case responsesItemType = "responses_item_type"
+            case usageObject = "usage_object", usageInputTokens = "usage_input_tokens"
+            case usageOutputTokens = "usage_output_tokens", usageTotalTokens = "usage_total_tokens"
+            case usageTotalConsistency = "usage_total_consistency", usageOutputDetails = "usage_output_details"
+            case usageReasoningTokens = "usage_reasoning_tokens", usageInputDetails = "usage_input_details"
+            case usageCachedTokens = "usage_cached_tokens"
+        }
+        let format: Format
+        let guardID: Guard
+        var isConsistent: Bool {
+            switch guardID {
+            case .chatRootObject: return format == .chatJSON
+            case .chatChoiceEnvelope, .chatChoiceIndex, .chatContentType, .chatUnsupportedMessageFields,
+                 .chatCallsType, .chatCallFinishConsistency, .chatReasoningType, .chatRetainedReasoningType, .chatEmptyOutput:
+                return format == .chatJSON || format == .chatSSE
+            case .sseUTF8, .sseAfterDone, .sseChunkEnvelope, .sseChunkIdentity, .sseChoiceIndex, .sseChoiceDelta,
+                 .sseRole, .sseContentType, .sseReasoningType, .sseToolIndex, .sseRepeatedCallID, .sseCallsType:
+                return format == .chatSSE
+            case .responsesItemIdentity, .responsesMessage, .responsesSummary, .responsesEncryptedType, .responsesItemType:
+                return format == .responsesJSON
+            case .usageObject, .usageInputTokens, .usageOutputTokens, .usageTotalTokens, .usageTotalConsistency,
+                 .usageOutputDetails, .usageReasoningTokens, .usageInputDetails, .usageCachedTokens:
+                return true
+            }
+        }
+    }
+    private typealias InvalidResponseObserver = (InvalidResponseDiagnostic.Guard) -> Void
+    private static func invalidResponse(_ guardID: InvalidResponseDiagnostic.Guard,
+                                        _ observe: InvalidResponseObserver?) -> Failure {
+        observe?(guardID)
+        return .invalidResponse
+    }
+    /// Preserve the shared integer validator and its exact Failure. Only fatal
+    /// response-field callers label the guard; request validation is untouched.
+    private static func responseInteger(_ value: Any?, default fallback: Int, range: ClosedRange<Int>,
+                                        guardID: InvalidResponseDiagnostic.Guard,
+                                        observe: InvalidResponseObserver?) throws -> Int {
+        do { return try integer(value, default: fallback, range: range) }
+        catch {
+            if error as? Failure == .invalidResponse { observe?(guardID) }
+            throw error
+        }
+    }
     struct Tool: @unchecked Sendable {
         let name: String
         let namespace: String?
@@ -604,21 +666,27 @@ enum APIModelResponseCodec {
     }
 
     static func decodeForCorrection(_ result: APIProviderHTTPClient.Result, request: Request,
-                                    onArgumentRejection: ((ArgumentValidationDiagnostic) -> Void)? = nil) throws -> DecodeOutcome {
-        if request.provider.wireAPI == .responses { return .reply(try decodeResponses(result.body, request: request)) }
+                                    onArgumentRejection: ((ArgumentValidationDiagnostic) -> Void)? = nil,
+                                    onInvalidResponse: ((InvalidResponseDiagnostic) -> Void)? = nil) throws -> DecodeOutcome {
+        let format: InvalidResponseDiagnostic.Format = request.provider.wireAPI == .responses ? .responsesJSON
+            : (result.contentType.contains("text/event-stream") ? .chatSSE : .chatJSON)
+        let observeResponseGuard: InvalidResponseObserver? = onInvalidResponse.map { callback in
+            { guardID in callback(.init(format: format, guardID: guardID)) }
+        }
+        if request.provider.wireAPI == .responses { return .reply(try decodeResponses(result.body, request: request, observe: observeResponseGuard)) }
         let envelope: [String: Any], textDeltas: [String], argumentDeltas: [[String]]
         let rawCorrectionEligible: Bool, envelopeShapeValid: Bool, unambiguousJSON: Bool, streamShapeAndUsageValid: Bool
         let envelopeRejection: ArgumentValidationDiagnostic.EnvelopeRejection?
         let jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic?
         if result.contentType.contains("text/event-stream") {
-            let assembled = try assembleChatStream(result.body, diagnostics: onArgumentRejection != nil)
+            let assembled = try assembleChatStream(result.body, diagnostics: onArgumentRejection != nil, observe: observeResponseGuard)
             envelope = assembled.object; textDeltas = assembled.text; argumentDeltas = assembled.arguments
             rawCorrectionEligible = assembled.correctionEligible
             envelopeShapeValid = assembled.envelopeShapeValid; unambiguousJSON = assembled.unambiguousJSON
             envelopeRejection = assembled.envelopeRejection; jsonRejection = assembled.jsonRejection
             streamShapeAndUsageValid = assembled.streamShapeAndUsageValid
         } else {
-            guard let object = try JSONSerialization.jsonObject(with: result.body) as? [String: Any] else { throw Failure.invalidResponse }
+            guard let object = try JSONSerialization.jsonObject(with: result.body) as? [String: Any] else { throw invalidResponse(.chatRootObject, observeResponseGuard) }
             envelope = object; textDeltas = []; argumentDeltas = []
             envelopeShapeValid = correctionEnvelopeShape(object, streaming: false)
             envelopeRejection = envelopeShapeValid ? nil : correctionEnvelopeRejection(object, streaming: false)
@@ -629,26 +697,26 @@ enum APIModelResponseCodec {
         }
         guard envelope["model"] as? String == request.model.id else { throw Failure.modelMismatch }
         guard let choices = envelope["choices"] as? [[String: Any]], choices.count == 1,
-              try integer(choices[0]["index"], default: 0, range: 0...0) == 0,
+              try responseInteger(choices[0]["index"], default: 0, range: 0...0, guardID: .chatChoiceIndex, observe: observeResponseGuard) == 0,
               let message = choices[0]["message"] as? [String: Any], message["role"] as? String == "assistant",
-              let finish = choices[0]["finish_reason"] as? String else { throw Failure.invalidResponse }
+              let finish = choices[0]["finish_reason"] as? String else { throw invalidResponse(.chatChoiceEnvelope, observeResponseGuard) }
         guard ["stop", "tool_calls"].contains(finish) else { throw Failure.incompleteResponse }
         let text: String
         if absent(message["content"]) { text = "" }
         else if let value = message["content"] as? String { text = value }
-        else { throw Failure.invalidResponse }
-        guard absent(message["refusal"]), absent(message["function_call"]) else { throw Failure.invalidResponse }
+        else { throw invalidResponse(.chatContentType, observeResponseGuard) }
+        guard absent(message["refusal"]), absent(message["function_call"]) else { throw invalidResponse(.chatUnsupportedMessageFields, observeResponseGuard) }
         let calls: [[String: Any]]
         if absent(message["tool_calls"]) { calls = [] }
         else if let value = message["tool_calls"] as? [[String: Any]] { calls = value }
-        else { throw Failure.invalidResponse }
+        else { throw invalidResponse(.chatCallsType, observeResponseGuard) }
         guard calls.count <= request.maximumCalls, !request.requiredTool || !calls.isEmpty,
-              (finish == "tool_calls") == !calls.isEmpty else { throw Failure.invalidResponse }
+              (finish == "tool_calls") == !calls.isEmpty else { throw invalidResponse(.chatCallFinishConsistency, observeResponseGuard) }
         // Complete the entire envelope, identities, reasoning and usage BEFORE
         // an argument-only classification. A first bad call cannot hide a later
         // unknown tool, duplicate ID, malformed reasoning or invalid usage.
-        let normalizedUsage = try usage(envelope["usage"], responses: false)
-        guard absent(message["reasoning"]) || message["reasoning"] is String else { throw Failure.invalidResponse }
+        let normalizedUsage = try usage(envelope["usage"], responses: false, observe: observeResponseGuard)
+        guard absent(message["reasoning"]) || message["reasoning"] is String else { throw invalidResponse(.chatReasoningType, observeResponseGuard) }
         var callIDs = request.historyCallIDs
         var validatedCalls: [(id: String, tool: Tool, arguments: String)] = []
         for call in calls {
@@ -716,15 +784,15 @@ enum APIModelResponseCodec {
             let capsule = try request.capsules.seal(.init(reasoning: reasoning, callIDs: actualIDs, responseID: responseID, toolNaming: request.toolNaming.rawValue), itemID: id,
                                                    providerID: request.provider.id, modelID: request.model.id, baseURL: request.provider.baseURL, threadID: request.threadID)
             output.insert(["id": id, "type": "reasoning", "status": "completed", "summary": [], "encrypted_content": capsule], at: 0)
-        } else if !absent(message["reasoning"]) && !(message["reasoning"] is String) { throw Failure.invalidResponse }
-        guard !output.isEmpty else { throw Failure.invalidResponse }
+        } else if !absent(message["reasoning"]) && !(message["reasoning"] is String) { throw invalidResponse(.chatRetainedReasoningType, observeResponseGuard) }
+        guard !output.isEmpty else { throw invalidResponse(.chatEmptyOutput, observeResponseGuard) }
         let resource = response(id: responseID, request: request, output: output, text: text, usage: normalizedUsage)
         return .reply(Reply(response: resource,
                            textDeltas: textDeltas.isEmpty && !text.isEmpty ? [text] : textDeltas, argumentDeltas: argumentDeltas,
                            finalTextSource: calls.isEmpty ? finalTextSource(text, response: resource) : nil))
     }
 
-    private static func decodeResponses(_ data: Data, request: Request) throws -> Reply {
+    private static func decodeResponses(_ data: Data, request: Request, observe: InvalidResponseObserver?) throws -> Reply {
         guard let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any], raw["object"] as? String == "response",
               raw["status"] as? String == "completed", absent(raw["error"]), absent(raw["incomplete_details"]),
               let original = raw["output"] as? [[String: Any]], !original.isEmpty else { throw Failure.incompleteResponse }
@@ -732,7 +800,7 @@ enum APIModelResponseCodec {
         var output: [[String: Any]] = [], text = "", ids = request.historyCallIDs, itemIDs = Set<String>(), count = 0
         let responseID = raw["id"] as? String ?? "resp_" + UUID().uuidString
         for value in original {
-            guard let type = value["type"] as? String, let id = value["id"] as? String, !id.isEmpty, itemIDs.insert(id).inserted else { throw Failure.invalidResponse }
+            guard let type = value["type"] as? String, let id = value["id"] as? String, !id.isEmpty, itemIDs.insert(id).inserted else { throw invalidResponse(.responsesItemIdentity, observe) }
             switch type {
             case "function_call", "custom_tool_call":
                 guard absent(value["status"]) || value["status"] as? String == "completed" else { throw Failure.incompleteResponse }
@@ -752,24 +820,24 @@ enum APIModelResponseCodec {
                 if let namespace = tool.namespace { item["namespace"] = namespace }; output.append(item); count += 1
             case "message":
                 guard value["role"] as? String == "assistant", value["status"] as? String == "completed",
-                      let parts = value["content"] as? [[String: Any]], parts.allSatisfy({ $0["type"] as? String == "output_text" && $0["text"] is String }) else { throw Failure.invalidResponse }
+                      let parts = value["content"] as? [[String: Any]], parts.allSatisfy({ $0["type"] as? String == "output_text" && $0["text"] is String }) else { throw invalidResponse(.responsesMessage, observe) }
                 let messageText = parts.compactMap { $0["text"] as? String }.joined(); text += messageText
                 output.append(["id": id, "type": "message", "role": "assistant", "status": "completed", "content": [["type": "output_text", "text": messageText, "annotations": []]]])
             case "reasoning":
-                guard let summary = value["summary"] as? [[String: Any]], summary.allSatisfy({ $0["type"] as? String == "summary_text" && $0["text"] is String }) else { throw Failure.invalidResponse }
+                guard let summary = value["summary"] as? [[String: Any]], summary.allSatisfy({ $0["type"] as? String == "summary_text" && $0["text"] is String }) else { throw invalidResponse(.responsesSummary, observe) }
                 var item: [String: Any] = ["id": id, "type": type, "status": "completed", "summary": summary]
                 if let encrypted = value["encrypted_content"] as? String {
                     let payload = APIReasoningCapsules.Payload(reasoning: nil, callIDs: [], responseID: responseID, remoteEncryptedContent: encrypted, remoteItemID: id)
                     item["encrypted_content"] = try request.capsules.seal(payload, itemID: id, providerID: request.provider.id,
                                                                          modelID: request.model.id, baseURL: request.provider.baseURL, threadID: request.threadID)
-                } else if !absent(value["encrypted_content"]) { throw Failure.invalidResponse }
+                } else if !absent(value["encrypted_content"]) { throw invalidResponse(.responsesEncryptedType, observe) }
                 output.append(item)
-            default: throw Failure.invalidResponse
+            default: throw invalidResponse(.responsesItemType, observe)
             }
         }
         guard count <= request.maximumCalls, !request.requiredTool || count > 0 else { throw Failure.invalidTool }
         let resource = response(id: "resp_" + UUID().uuidString, request: request, output: output, text: text,
-                                usage: try usage(raw["usage"], responses: true))
+                                usage: try usage(raw["usage"], responses: true, observe: observe))
         return Reply(response: resource, textDeltas: text.isEmpty ? [] : [text], argumentDeltas: [],
                      finalTextSource: count == 0 ? finalTextSource(text, response: resource) : nil)
     }
@@ -822,8 +890,8 @@ enum APIModelResponseCodec {
         } else if !absent(delta["tool_calls"]) { return false }
         return true
     }
-    private static func assembleChatStream(_ data: Data, diagnostics: Bool = false) throws -> ChatStream {
-        guard let string = String(data: data, encoding: .utf8) else { throw Failure.invalidResponse }
+    private static func assembleChatStream(_ data: Data, diagnostics: Bool = false, observe: InvalidResponseObserver?) throws -> ChatStream {
+        guard let string = String(data: data, encoding: .utf8) else { throw invalidResponse(.sseUTF8, observe) }
         var done = false, model: String?, id: String?, role: String?, finish: String?, usage: Any?
         var text: [String] = [], reasoning = "", calls: [Int: (id: String, name: String, arguments: [String])] = [:]
         var correctionEligible = true, previousUsage: Data?
@@ -833,11 +901,11 @@ enum APIModelResponseCodec {
         for event in string.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n\n") {
             let payload = event.components(separatedBy: "\n").filter { $0.hasPrefix("data:") }.map { String($0.dropFirst(5)).trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
             if payload.isEmpty { continue }
-            guard !done else { throw Failure.invalidResponse }
+            guard !done else { throw invalidResponse(.sseAfterDone, observe) }
             if payload == "[DONE]" { done = true; continue }
             guard let chunkData = payload.data(using: .utf8), let chunk = try JSONSerialization.jsonObject(with: chunkData) as? [String: Any],
                   chunk["error"] == nil, let chunkModel = chunk["model"] as? String, let chunkID = chunk["id"] as? String,
-                  let choices = chunk["choices"] as? [[String: Any]], choices.count <= 1 else { throw Failure.invalidResponse }
+                  let choices = chunk["choices"] as? [[String: Any]], choices.count <= 1 else { throw invalidResponse(.sseChunkEnvelope, observe) }
             let shapeValid = correctionEnvelopeShape(chunk, streaming: true), unambiguous = APIModelCorrectionJSON.isUnambiguous(chunkData)
             envelopeShapeValid = envelopeShapeValid && shapeValid; unambiguousJSON = unambiguousJSON && unambiguous
             if !shapeValid, envelopeRejection == nil { envelopeRejection = correctionEnvelopeRejection(chunk, streaming: true) }
@@ -849,24 +917,24 @@ enum APIModelResponseCodec {
                     previousUsage = bytes
                 } else { correctionEligible = false; streamShapeAndUsageValid = false }
             }
-            if let model { guard model == chunkModel, id == chunkID else { throw Failure.invalidResponse } }
+            if let model { guard model == chunkModel, id == chunkID else { throw invalidResponse(.sseChunkIdentity, observe) } }
             else { model = chunkModel; id = chunkID }
             if !absent(chunk["usage"]) { usage = chunk["usage"] }
             guard let choice = choices.first else { continue }
-            guard try integer(choice["index"], default: -1, range: 0...0) == 0, finish == nil,
-                  let delta = choice["delta"] as? [String: Any] else { throw Failure.invalidResponse }
+            guard try responseInteger(choice["index"], default: -1, range: 0...0, guardID: .sseChoiceIndex, observe: observe) == 0, finish == nil,
+                  let delta = choice["delta"] as? [String: Any] else { throw invalidResponse(.sseChoiceDelta, observe) }
             let deltaShapeValid = correctionDeltaShape(delta)
             streamShapeAndUsageValid = streamShapeAndUsageValid && deltaShapeValid
             correctionEligible = correctionEligible && deltaShapeValid
             if !absent(choice["finish_reason"]), !(choice["finish_reason"] is String) { correctionEligible = false; streamShapeAndUsageValid = false }
-            if let value = delta["role"] as? String { guard value == "assistant", role == nil || role == value else { throw Failure.invalidResponse }; role = value }
-            if let value = delta["content"] as? String { text.append(value) } else if !absent(delta["content"]) { throw Failure.invalidResponse }
-            if let value = delta["reasoning"] as? String { reasoning += value } else if !absent(delta["reasoning"]) { throw Failure.invalidResponse }
+            if let value = delta["role"] as? String { guard value == "assistant", role == nil || role == value else { throw invalidResponse(.sseRole, observe) }; role = value }
+            if let value = delta["content"] as? String { text.append(value) } else if !absent(delta["content"]) { throw invalidResponse(.sseContentType, observe) }
+            if let value = delta["reasoning"] as? String { reasoning += value } else if !absent(delta["reasoning"]) { throw invalidResponse(.sseReasoningType, observe) }
             if let rows = delta["tool_calls"] as? [[String: Any]] {
                 for row in rows {
-                    let index = try integer(row["index"], default: -1, range: 0...127)
+                    let index = try responseInteger(row["index"], default: -1, range: 0...127, guardID: .sseToolIndex, observe: observe)
                     var call = calls[index] ?? (id: "", name: "", arguments: [])
-                    if let value = row["id"] as? String { guard call.id.isEmpty else { throw Failure.invalidResponse }; call.id = value }
+                    if let value = row["id"] as? String { guard call.id.isEmpty else { throw invalidResponse(.sseRepeatedCallID, observe) }; call.id = value }
                     if let type = row["type"] as? String { guard type == "function" else { throw Failure.invalidTool } }
                     if let function = row["function"] as? [String: Any] {
                         if let value = function["name"] as? String { call.name += value }
@@ -874,7 +942,7 @@ enum APIModelResponseCodec {
                     }
                     calls[index] = call
                 }
-            } else if !absent(delta["tool_calls"]) { throw Failure.invalidResponse }
+            } else if !absent(delta["tool_calls"]) { throw invalidResponse(.sseCallsType, observe) }
             if let value = choice["finish_reason"] as? String { finish = value }
         }
         guard done, let model, let id, let finish, role == "assistant", calls.keys.sorted() == Array(0..<calls.count) else { throw Failure.incompleteResponse }
@@ -1058,21 +1126,21 @@ enum APIModelResponseCodec {
         result.merge(["id": id, "object": "response", "created_at": Int(Date().timeIntervalSince1970), "completed_at": Int(Date().timeIntervalSince1970), "status": "completed", "model": request.localModelID, "output": output, "output_text": text, "error": NSNull(), "incomplete_details": NSNull(), "usage": usage, "end_turn": !output.contains { ["function_call", "custom_tool_call"].contains($0["type"] as? String ?? "") }]) { _, value in value }
         return result
     }
-    private static func usage(_ value: Any?, responses: Bool) throws -> Any {
+    private static func usage(_ value: Any?, responses: Bool, observe: InvalidResponseObserver? = nil) throws -> Any {
         if absent(value) { return NSNull() }
-        guard let usage = value as? [String: Any] else { throw Failure.invalidResponse }
-        let input = try integer(usage[responses ? "input_tokens" : "prompt_tokens"], default: -1, range: 0...100_000_000)
-        let output = try integer(usage[responses ? "output_tokens" : "completion_tokens"], default: -1, range: 0...100_000_000)
-        let total = try integer(usage["total_tokens"], default: input + output, range: 0...200_000_000)
-        guard total == input + output else { throw Failure.invalidResponse }
+        guard let usage = value as? [String: Any] else { throw invalidResponse(.usageObject, observe) }
+        let input = try responseInteger(usage[responses ? "input_tokens" : "prompt_tokens"], default: -1, range: 0...100_000_000, guardID: .usageInputTokens, observe: observe)
+        let output = try responseInteger(usage[responses ? "output_tokens" : "completion_tokens"], default: -1, range: 0...100_000_000, guardID: .usageOutputTokens, observe: observe)
+        let total = try responseInteger(usage["total_tokens"], default: input + output, range: 0...200_000_000, guardID: .usageTotalTokens, observe: observe)
+        guard total == input + output else { throw invalidResponse(.usageTotalConsistency, observe) }
         let outputDetailValue = usage[responses ? "output_tokens_details" : "completion_tokens_details"]
-        guard absent(outputDetailValue) || outputDetailValue is [String: Any] else { throw Failure.invalidResponse }
+        guard absent(outputDetailValue) || outputDetailValue is [String: Any] else { throw invalidResponse(.usageOutputDetails, observe) }
         let details = outputDetailValue as? [String: Any]
-        let reasoning = try integer(details?["reasoning_tokens"], default: 0, range: 0...output)
+        let reasoning = try responseInteger(details?["reasoning_tokens"], default: 0, range: 0...output, guardID: .usageReasoningTokens, observe: observe)
         let inputDetailValue = usage[responses ? "input_tokens_details" : "prompt_tokens_details"]
-        guard absent(inputDetailValue) || inputDetailValue is [String: Any] else { throw Failure.invalidResponse }
+        guard absent(inputDetailValue) || inputDetailValue is [String: Any] else { throw invalidResponse(.usageInputDetails, observe) }
         let inputDetails = inputDetailValue as? [String: Any]
-        let cached = try integer(inputDetails?["cached_tokens"], default: 0, range: 0...input)
+        let cached = try responseInteger(inputDetails?["cached_tokens"], default: 0, range: 0...input, guardID: .usageCachedTokens, observe: observe)
         return ["input_tokens": input, "output_tokens": output, "total_tokens": total, "input_tokens_details": ["cached_tokens": cached], "output_tokens_details": ["reasoning_tokens": reasoning]]
     }
     static func correctionUsage(_ normalized: Any?) -> APIModelCorrectionUsage? {

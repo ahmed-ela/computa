@@ -378,6 +378,93 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+
+    func testActualInvalidResponseGuardSurvivesFirstAndSecondDecodeWithoutExtraRequests() async throws {
+        for failSecond in [false, true] {
+            let requests = APIRequestRecorder(), diagnostics = APIFailureDiagnosticRecorder(), credentials = APICredentialCounter()
+            let root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appendingPathComponent("accounting")
+            let remote = try APILoopbackFixture { request in
+                await requests.record(request)
+                let ordinal = await requests.count()
+                let response = self.correctionResponse(request, invalid: true, usage: true)
+                if failSecond && ordinal == 1 { return response }
+                var object = try! JSONSerialization.jsonObject(with: response.body) as! [String: Any]
+                // A finite usage guard fails before argument-only classification.
+                object["usage"] = ["prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 6]
+                return .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: try! JSONSerialization.data(withJSONObject: object))
+            }
+            defer { remote.stop() }
+            let p = provider(try await remote.start())
+            let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
+            await server.setFailureDiagnosticsObserverForTesting { diagnostics.record($0) }
+            let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+            try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+            let (bytes, response) = try await URLSession.shared.data(for: correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+            let actualCount = await requests.count(); XCTAssertEqual(actualCount, failSecond ? 2 : 1)
+            XCTAssertEqual(credentials.counts().reads, 1); XCTAssertEqual(credentials.counts().writes, 0)
+            let emitted = diagnostics.snapshot(); XCTAssertEqual(emitted.count, 1)
+            let record = try XCTUnwrap(emitted.first), value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+            XCTAssertEqual(value["code"] as? String, "invalid_response"); XCTAssertEqual(value["stage"] as? String, "decode")
+            XCTAssertNil(value["argument_validation"])
+            let projected = try XCTUnwrap(value["response_validation"] as? [String: Any])
+            XCTAssertEqual(projected["attempt"] as? Int, failSecond ? 2 : 1)
+            let validation = try XCTUnwrap(projected["validation"] as? [String: Any])
+            XCTAssertEqual(validation["format"] as? String, "chat_json"); XCTAssertEqual(validation["guardID"] as? String, "usage_total_consistency")
+            let ids = try XCTUnwrap(value["native_context"] as? [String: String])
+            XCTAssertEqual(ids["taskID"]?.lowercased(), task); XCTAssertEqual(ids["threadID"]?.lowercased(), thread); XCTAssertEqual(ids["turnID"]?.lowercased(), turn)
+            for privateValue in ["PRIVATE", "fixture-secret", "exec_fixture", "cmd", "NEVER_EXECUTED", "http", "output_item.done"] {
+                XCTAssertFalse(record.contains(privateValue)); XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(privateValue))
+            }
+            if failSecond { XCTAssertEqual(try correctionRecords(directory).first { $0.phase == "finished" }?.outcome, .decodeFailed) }
+            else { XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path)) }
+            await server.shutdown()
+        }
+    }
+
+    func testInvalidResponseFailureProjectionIsFiniteBoundedAndOnlyDecodeScoped() throws {
+        let context = APIModelServer.FailureDiagnosticContext(taskID: UUID(), threadID: UUID(), turnID: UUID())
+        let diagnostic = APIModelServer.ResponseFailureDiagnostic(validation: .init(format: .chatSSE, guardID: .sseRepeatedCallID), attempt: 1)
+        for stage in APIModelServer.FailureStage.allCases {
+            let text = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidResponse,
+                stage: stage, responseDiagnostic: diagnostic, context: context))
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+            if stage == .decode {
+                XCTAssertEqual(Set(value.keys), ["kind", "stage", "code", "retryable", "response_validation", "native_context"])
+                let observed = try XCTUnwrap(value["response_validation"] as? [String: Any])
+                XCTAssertEqual(Set(observed.keys), ["validation", "attempt"])
+                let validation = try XCTUnwrap(observed["validation"] as? [String: Any])
+                XCTAssertEqual(Set(validation.keys), ["format", "guardID"])
+                XCTAssertEqual(validation["format"] as? String, "chat_sse"); XCTAssertEqual(validation["guardID"] as? String, "sse_repeated_call_id")
+                let ids = try XCTUnwrap(value["native_context"] as? [String: String])
+                XCTAssertEqual(ids, ["taskID": context.taskID.uuidString, "threadID": context.threadID.uuidString, "turnID": context.turnID.uuidString])
+                XCTAssertLessThanOrEqual(text.utf8.count, 1_024)
+            } else { XCTAssertNil(value["response_validation"]); XCTAssertNil(value["native_context"]) }
+            XCTAssertEqual(value["code"] as? String, "invalid_response"); XCTAssertEqual(value["retryable"] as? Bool, false)
+            XCTAssertNil(value["argument_validation"])
+        }
+        for error in [APIModelResponseCodec.Failure.invalidArguments, .invalidTool, .incompleteResponse, .modelMismatch] {
+            let text = try XCTUnwrap(APIModelServer.failureDiagnostic(error, stage: .decode, responseDiagnostic: diagnostic, context: context))
+            XCTAssertFalse(text.contains("response_validation")); XCTAssertFalse(text.contains("native_context"))
+        }
+        for invalid in [APIModelServer.ResponseFailureDiagnostic(validation: .init(format: .chatJSON, guardID: .sseRepeatedCallID), attempt: 1),
+                        .init(validation: .init(format: .chatSSE, guardID: .sseRepeatedCallID), attempt: 0),
+                        .init(validation: .init(format: .chatSSE, guardID: .sseRepeatedCallID), attempt: 3)] {
+            let text = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidResponse,
+                stage: .decode, responseDiagnostic: invalid, context: context))
+            XCTAssertFalse(text.contains("response_validation")); XCTAssertFalse(text.contains("native_context"))
+        }
+        // No observation remains unknown; it never invents a guard or UUIDs.
+        let absent = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidResponse, stage: .decode, context: context))
+        XCTAssertFalse(absent.contains("response_validation")); XCTAssertFalse(absent.contains("native_context"))
+        let publicError = try XCTUnwrap(JSONSerialization.jsonObject(with: APIModelServer.errorBody(APIModelResponseCodec.Failure.invalidResponse, stage: .decode)) as? [String: Any])
+        let publicFields = try XCTUnwrap(publicError["error"] as? [String: Any])
+        XCTAssertEqual(Set(publicFields.keys), ["type", "code", "message", "x-computa-retryable"])
+        XCTAssertEqual(publicFields["code"] as? String, "invalid_response"); XCTAssertEqual(publicFields["x-computa-retryable"] as? Bool, false)
+    }
+
     func testArgumentDecodeFailureProjectionIsBoundedTypedAndRestrictedToDecodeErrors() throws {
         let validation = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch, callCount: 2, rejectedCount: 1,
             envelopeShapeValid: true, unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: false, correctionEligible: false)

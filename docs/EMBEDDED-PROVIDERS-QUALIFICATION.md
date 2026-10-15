@@ -1,5 +1,69 @@
 # Embedded website provider qualification
 
+## Installed build121: current qualification
+
+Computa 0.7.0 (121), compiled from `cb912ae830e922edd1aa429160d3a5210adb7d86`,
+is installed. Its signed-build audit verified 613 frozen inputs, all 54 bundle
+files, 50 resources and the unchanged engine. Installed-file verification and
+the fresh running-process binding are retained separately.
+
+The fresh V38 matrix produced these results; earlier failures remain failed:
+
+| Provider and task | Native time | Result |
+| --- | ---: | --- |
+| Normal ChatGPT Instant: browser | 318.553 s | Failed: one successful browser open, then the second inference timed out. |
+| Normal ChatGPT Instant: code/terminal/browser | — | Held after the browser failure; never dispatched. |
+| Gemini 3.8 Flash: browser | 74.449 s | Passed: six clean tools, seven website inferences and the exact submitted result. |
+| Gemini 3.8 Flash: code/terminal/browser | 1.260 s | Blocked before tools on a settled Google verification route. |
+| Hosted Cerebras GPT-OSS 120B: browser | 4.245 s | Passed: six clean tools, zero corrections and the exact result. |
+| Hosted Cerebras GPT-OSS 120B: code/terminal/browser | 3.105 s | Failed before tools with decode-stage `invalid_response`. |
+
+Both successful browser cases have independently corroborated explicit tab
+cleanup. ChatGPT's failed task tab closed automatically; that does not supply a
+model close or a passing task. All three code workspaces retain their original
+incorrect helpers, unchanged tests and protected notes. No code task passed.
+The fixture received exactly two accepted form submissions and no rejected
+submissions. Its owned server exited normally, and its process and listening
+port were verified absent. Test evidence and the selected human tabs remain.
+
+Gemini's initial-navigation experiment waited 510 ms for native settlement,
+then rejected the committed, finished verification route. It did not expire its
+three-second budget. No challenge was completed or saved gate bypassed. This
+does not establish why Google selected that route or permanent CAPTCHA
+prevention. GPT-OSS's finite log identifies decoding, but the failed guard was
+not retained; no cause or repair can be inferred from that event.
+
+With separately approved temporary Inspector access, an ordinary build121
+ChatGPT test tab completed a short synthetic request: HTTP 200 in 1.98 seconds
+with its exact marker. Its second synthetic request used 55,370 observed
+composer characters and failed at `/backend-api/f/conversation` after 113 ms,
+with no HTTP status and a visible `bad URL` console error. The website remained
+busy until stopped. The actual upload body type/size and underlying native
+error were not measured. A large paste had first created an automatically
+uploaded synthetic text attachment; it was removed before Send. Text insertion
+used native AX value setting, so this is a website diagnostic, not equivalent
+harness qualification or proof of a request-size threshold. No third Send,
+Retry or reload was performed. The breakpoint was removed, Inspector windows
+closed, and both the tab permission and Safari developer-features setting were
+verified restored off. The Safari Start Page was preserved.
+
+## Build122 API decoder diagnostic candidate
+
+The V38 code failure exposed a diagnostic gap before argument validation.
+Build122 labels fatal response guards with finite format and guard enums,
+attempt number and typed current native context. It retains no response text,
+arguments, headers or remote identifiers. Parser conditions, public failures,
+atomic validation, request counts and correction limits remain unchanged.
+Missing observations stay unknown. Independent reversal of the added
+instrumentation reconstructs the prior codec byte for byte.
+
+All six focused native tests passed, including malformed JSON/SSE/Responses
+guards, privacy checks, unchanged successful/nonfatal paths, and loopback
+first/second-attempt failures without extra requests. These tests used the
+reviewed source before its build-number increment. The full API cohort,
+signed build, installation and new live diagnostic remain separate gates.
+This candidate does not yet repair or identify the V38 decoder failure.
+
 ## Candidate119 task-tab cleanup accounting
 
 The V35 GPT-OSS failure exposed a separate host bookkeeping gap: native turn
