@@ -31,9 +31,11 @@ released-key assertion now expects the earlier `handleMissing` rejection while
 retaining its no-dispatch and backend-counter checks. The failed test log remains
 preserved; it was not counted as a pass.
 
-Installed build118 remains running so the ordinary failed ChatGPT tab can be
-inspected if access is approved. No candidate119 installed-product or provider
-pass is claimed here.
+Signed Computa 0.7.0 (119), compiled source `6b11a6fd`, built successfully.
+Its 613-input source freeze, exact resources and signatures were verified;
+the bundled engine is unchanged. Installed build118 remains running so the
+ordinary failed ChatGPT tab can be inspected if access is approved. No
+candidate119 installed-product or provider pass is claimed here.
 
 ## Build118 V34 and V35 outcomes
 
