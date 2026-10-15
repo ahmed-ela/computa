@@ -1,5 +1,33 @@
 # Embedded website provider qualification
 
+## Build118 V33 workflow failure and ordinary-browser control
+
+V33 prepared twelve fresh cases and attempted one normal ChatGPT Instant
+browser task. It remains failed and unqualified; eleven cases were held.
+The first website inference completed and opened the controlled fixture tab.
+The second submission was verified, but no answer completed before the
+unchanged deadline. Native completion reported `provider_timeout` after
+317.337 seconds, with one successful tool call and no final task result.
+No ownership failure or first-failed-context sidecar was recorded.
+
+The second outbound body was 55,369 UTF-8 bytes, 1,146 bytes larger than the
+successful first body. That observation does not establish a size or network
+cause. A separate ordinary visible temporary ChatGPT tab, using native paste
+and Send rather than the model harness, showed `Load failed` on its first
+short marker prompt. Its power picker showed Instant; model family was not
+independently verified. No Retry or second message was sent. The hidden
+harness is therefore not necessary for this observed failure, while its
+underlying cause remains unknown.
+
+The failed workflow has no causally qualified final website closure or
+explicit task-tab close. A later automatic model-session cleanup was saved
+540 milliseconds after native completion; it does not qualify the failed
+inference. The fixture server stopped with exit zero and its process and
+listener gone. An empty browser pane corroborated task-tab removal, but
+there is no durable receipt proving that exact tab's physical disposal.
+The ordinary ChatGPT control tab is retained pending approval for inspection.
+No failed receipt was replayed or regraded.
+
 ## Build118 installed diagnostic health
 
 Signed Computa 0.7.0 (118), compiled source `2386e1de`, is installed and running.
@@ -50,10 +78,9 @@ the caller's first poll meant Send had not bound the body. The final fixture
 explicitly establishes a verified body before revocation and proves that failed
 cleanup retains its exact private view while preserving the human tab.
 
-These results qualify diagnostic capture, not a behavioral repair or an
-installed provider task. The build117 failed health check and its unconfirmed
-cleanup remain unchanged. A fresh, unarmed build118 diagnostic check will use
-its own marker and receipts after the signed build is verified.
+These results qualify diagnostic capture, not a behavioral repair. The
+separate installed health and V33 workflow outcomes are recorded above.
+The build117 failed health check and its unconfirmed cleanup remain unchanged.
 
 ## Build117 V32 installed outcomes
 
