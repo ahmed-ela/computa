@@ -1094,6 +1094,7 @@ describe('ChatGPT failed-page finite diagnostic', () => {
     expect(result.error).toBeUndefined();
     expect(result.failureDiagnostic).toEqual({ kind: 'chatgpt_failed_page_v1', route: 'root', errorCategory: 'none',
       outboundUTF16Count: null, outboundUTF8Count: null,
+      responseNoticeDiagnostic: { kind: 'chatgpt_response_notice_v1', retryCount: 0, observationsTruncated: false, observations: [] },
       modernUsers: { connected: 0, visible: 0 }, legacyUsers: { connected: 1, visible: 1 },
       modernAssistants: { connected: 1, visible: 1 }, legacyAssistants: { connected: 1, visible: 1 },
       stopPresent: false, composerPresent: true, composerEnabled: true, copyPresent: true, copyEnabled: true,
@@ -1941,5 +1942,326 @@ describe("embedded ChatGPT fixed adapter", () => {
     f.location.origin = "https://example.test";
     f.observers[0].callback([{ type: "attributes" }]);
     expect(f.posted).toHaveLength(2);
+  });
+});
+
+
+describe('finite response notice relationship diagnostics without error-policy changes', () => {
+  const addWidget = (f: ReturnType<typeof fixture>, options: { shared?: boolean; nested?: boolean; text?: string; dialog?: boolean } = {}) => {
+    const parent = new Element('DIV', options.dialog === false ? {} : { role: 'dialog' });
+    const notice = new Element('DIV', { role: 'status' });
+    const retry = new Element('BUTTON', {}, 'Retry');
+    const label = new Element('SPAN', {}, options.nested ? 'Load ' : options.text ?? 'Load failed');
+    if (options.nested) label.append(new Element('STRONG', {}, 'failed'));
+    notice.append(label);
+    if (options.shared) parent.append(notice, retry); else { notice.append(retry); parent.append(notice); }
+    f.body.querySelector('main')!.append(parent);
+    return { parent, notice, retry, label };
+  };
+  test('observes a shared status widget in a dialog and aborts without clicking', async () => {
+    const f = fixture({ response: false, userPrompt: 'Read the fixture' });
+    const widget = addWidget(f, { nested: true });
+    const inspection = await f.inspect();
+    expect(inspection.responseLoadFailed).toBe(true);
+    const notice = inspection.responseNoticeDiagnostic;
+    expect(notice).toEqual({ kind: 'chatgpt_response_notice_v1', retryCount: 1, observationsTruncated: false,
+      observations: [{ excludedAncestor: 'dialog', contentExcluded: false, retryEnabled: true,
+        noticeRole: 'status', pairing: 'ancestor', sameWidget: true, knownError: 'load_failed',
+        labelStructure: 'nested', labelScanTruncated: false }] });
+    expect((await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic).toEqual(notice);
+    expect(widget.retry.clicks).toBe(0); expect(widget.retry.events.length).toBe(0);
+  });
+  test('pairs only the single status and Retry in a small direct shared parent', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    const widget = addWidget(f, { shared: true });
+    let observation = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic.observations[0];
+    expect(observation.pairing).toBe('shared_parent'); expect(observation.sameWidget).toBe(true);
+    widget.parent.append(new Element('INPUT'));
+    observation = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic.observations[0];
+    expect(observation.pairing).toBe('none'); expect(observation.sameWidget).toBe(false);
+    expect(observation.knownError).toBe('none'); expect(widget.retry.clicks).toBe(0);
+  });
+  test('does not pair an unrelated page status with a Retry in another control', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    const main = f.body.querySelector('main')!;
+    const status = new Element('DIV', { role: 'status' }, 'Load failed');
+    const unrelated = new Element('DIV', { role: 'dialog' }); unrelated.append(new Element('BUTTON', {}, 'Retry'));
+    main.append(status, unrelated);
+    const observation = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic.observations[0];
+    expect(observation.noticeRole).toBe('none'); expect(observation.sameWidget).toBe(false);
+    expect(observation.knownError).toBe('none'); expect(observation.excludedAncestor).toBe('dialog');
+  });
+  test('preserves exclusions for quoted user/assistant/editor/code and menu/navigation widgets', async () => {
+    for (const kind of ['user', 'assistant', 'editor', 'code', 'menu', 'nav', 'aside']) {
+      const f = fixture({ userPrompt: 'Original fixture task' }); await f.inspect();
+      const widget = addWidget(f);
+      const originalParent = widget.parent.parentElement!;
+      originalParent.children = originalParent.children.filter(child => child !== widget.parent);
+      let wrapper: Element;
+      if (kind === 'user') wrapper = f.userBody!;
+      else if (kind === 'assistant') wrapper = f.answer;
+      else if (kind === 'editor') { wrapper = new Element('DIV', { contenteditable: 'true' }); f.body.querySelector('main')!.append(wrapper); }
+      else {
+        wrapper = new Element(kind === 'code' ? 'CODE' : kind.toUpperCase(), kind === 'menu' ? { role: 'menu' } : {});
+        f.body.querySelector('main')!.append(wrapper);
+      }
+      // A dialog nested inside quoted content still cannot become a status proof.
+      if (['menu', 'nav', 'aside'].includes(kind)) widget.parent.values.role = '';
+      wrapper.append(widget.parent);
+      const observation = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic.observations[0];
+      expect(observation.sameWidget).toBe(false); expect(observation.knownError).toBe('none');
+      if (['menu', 'nav', 'aside'].includes(kind)) expect(observation.excludedAncestor).toBe(kind);
+      else expect(observation.contentExcluded).toBe(true);
+      expect(widget.retry.clicks).toBe(0);
+    }
+  });
+  test('a paired status cannot promote known strings quoted inside protected label descendants', async () => {
+    for (const kind of ['pre', 'code', 'user', 'assistant', 'menu', 'nav', 'aside']) {
+      const f = fixture({ response: false }); await f.inspect(); const widget = addWidget(f);
+      widget.label.text = ''; widget.retry.text = ''; widget.retry.values['aria-label'] = 'Retry';
+      const quoted = new Element(['pre', 'code', 'nav', 'aside'].includes(kind) ? kind.toUpperCase() : 'DIV',
+        kind === 'user' || kind === 'assistant' ? { 'data-message-author-role': kind }
+          : kind === 'menu' ? { role: 'menu' } : {});
+      quoted.append(new Element('SPAN', {}, 'Load failed')); widget.notice.append(quoted);
+      const observation = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic.observations[0];
+      expect(observation.sameWidget).toBe(false); expect(observation.knownError).toBe('none');
+      expect(observation.labelStructure).toBe('none'); expect(widget.retry.clicks).toBe(0);
+    }
+  });
+  test('a main status container cannot pair unrelated label and Retry branches', async () => {
+    const f = fixture({ response: false }); await f.inspect(); const main = f.body.querySelector('main')!;
+    main.values.role = 'status';
+    const labelBranch = new Element('DIV'); labelBranch.append(new Element('SPAN', {}, 'Load failed'));
+    const controlBranch = new Element('DIV'); const retry = new Element('BUTTON', {}, 'Retry'); controlBranch.append(retry);
+    main.append(labelBranch, controlBranch);
+    const observation = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic.observations[0];
+    expect(observation.pairing).toBe('none'); expect(observation.sameWidget).toBe(false);
+    expect(observation.knownError).toBe('none'); expect(retry.clicks).toBe(0);
+  });
+  test('a non-main status with unrelated nested branches or form controls is not one widget', async () => {
+    for (const variant of ['separate-branches', 'form-control']) {
+      const f = fixture({ response: false }); await f.inspect(); const main = f.body.querySelector('main')!;
+      const status = new Element('DIV', { role: 'status' }), label = new Element('SPAN', {}, 'Load failed');
+      const retry = new Element('BUTTON', {}, 'Retry');
+      if (variant === 'separate-branches') {
+        const labelBranch = new Element('DIV'), controlBranch = new Element('DIV');
+        labelBranch.append(label); controlBranch.append(retry); status.append(labelBranch, controlBranch);
+      } else status.append(label, retry, new Element('INPUT'));
+      main.append(status);
+      const observation = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic.observations[0];
+      expect(observation.pairing).toBe('ambiguous'); expect(observation.sameWidget).toBe(false);
+      expect(observation.knownError).toBe('none'); expect(retry.clicks).toBe(0);
+    }
+  });
+  test('outer menu/navigation/aside ancestry wins over an inner status dialog', async () => {
+    for (const kind of ['menu', 'nav', 'aside']) {
+      const f = fixture({ response: false }); await f.inspect(); const widget = addWidget(f);
+      const main = f.body.querySelector('main')!;
+      main.children = main.children.filter(child => child !== widget.parent);
+      const outer = new Element(kind === 'menu' ? 'DIV' : kind.toUpperCase(), kind === 'menu' ? { role: 'menu' } : {});
+      outer.append(widget.parent); main.append(outer);
+      const observation = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic.observations[0];
+      expect(observation.excludedAncestor).toBe(kind); expect(observation.pairing).toBe('none');
+      expect(observation.sameWidget).toBe(false); expect(observation.knownError).toBe('none');
+      expect(widget.retry.clicks).toBe(0);
+    }
+  });
+  test('unknown status text remains an enum and cannot leak notice text or URLs', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    addWidget(f, { text: 'PRIVATE_NOTICE https://private.example/?token=PRIVATE_TOKEN' });
+    const diagnostic = (await f.diagnose()).failureDiagnostic;
+    const observation = diagnostic.responseNoticeDiagnostic.observations[0];
+    expect(observation.sameWidget).toBe(true); expect(observation.knownError).toBe('unknown');
+    expect(observation.labelStructure).toBe('none');
+    expect(JSON.stringify(diagnostic).includes('PRIVATE')).toBe(false);
+    expect(JSON.stringify(diagnostic).includes('https')).toBe(false);
+  });
+  test('ambiguous widgets, hidden Retry and disabled Retry retain separate finite facts', async () => {
+    const f = fixture({ response: false }); await f.inspect();
+    const widget = addWidget(f); const second = new Element('BUTTON', {}, 'Retry'); widget.notice.append(second);
+    let diagnostic = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic;
+    expect(diagnostic.retryCount).toBe(2); expect(diagnostic.observations[0].pairing).toBe('ambiguous');
+    expect(diagnostic.observations[0].sameWidget).toBe(false);
+    second.values.hidden = ''; widget.retry.disabled = true;
+    diagnostic = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic;
+    expect(diagnostic.retryCount).toBe(1); expect(diagnostic.observations[0].retryEnabled).toBe(false);
+    expect(diagnostic.observations[0].sameWidget).toBe(true); expect(widget.retry.clicks).toBe(0);
+  });
+  test('bounds retry observations and marks a truncated label scan as unknown', async () => {
+    const f = fixture({ response: false }); await f.inspect(); const widget = addWidget(f);
+    const labelWrapper = new Element('DIV'); widget.notice.append(labelWrapper);
+    for (let index = 0; index < 129; index++) labelWrapper.append(new Element('DIV', {}, 'PRIVATE_' + index));
+    let diagnostic = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic;
+    expect(diagnostic.observations[0].labelScanTruncated).toBe(true);
+    expect(diagnostic.observations[0].knownError).toBe('unknown');
+    for (let index = 0; index < 3; index++) f.body.querySelector('main')!.append(new Element('BUTTON', {}, 'Retry'));
+    diagnostic = (await f.diagnose()).failureDiagnostic.responseNoticeDiagnostic;
+    expect(diagnostic.retryCount).toBe(4); expect(diagnostic.observations.length).toBe(2);
+    expect(diagnostic.observationsTruncated).toBe(true); expect(JSON.stringify(diagnostic).includes('PRIVATE')).toBe(false);
+  });
+});
+
+
+describe('bounded abort-only response error widget', () => {
+  const widget = (f: ReturnType<typeof fixture>, variant: 'plain' | 'leaf' | 'nested' = 'leaf', role?: string) => {
+    const dialog = new Element('DIV', { role: 'dialog' });
+    const region = new Element('DIV', role ? { role } : {});
+    const retry = new Element('BUTTON', {}, 'Retry');
+    const label = new Element('SPAN', {}, variant === 'nested' ? 'Load ' : 'Load failed');
+    if (variant === 'nested') label.append(new Element('STRONG', {}, 'failed'));
+    if (variant === 'plain') region.text = 'Load failed'; else region.append(label);
+    region.append(retry); dialog.append(region); f.body.querySelector('main')!.append(dialog);
+    return { dialog, region, retry, label };
+  };
+  test('a generic direct text or single leaf/nested label fails promptly inside a dialog', async () => {
+    for (const variant of ['plain', 'leaf', 'nested'] as const) {
+      for (const role of [undefined, 'status', 'alert']) {
+        const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect();
+        const w = widget(f, variant, role), result = await f.inspect();
+        expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true);
+        expect(result.responseLoadFailed).toBe(true); expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
+      }
+    }
+  });
+  test('unknown text, multiple labels, disabled Retry and extra controls cannot become a known failure', async () => {
+    for (const variant of ['unknown', 'two-labels', 'disabled', 'extra-control', 'extra-button', 'wide', 'long-label']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = widget(f);
+      if (variant === 'unknown') w.label.text = 'PRIVATE_UNKNOWN_NOTICE';
+      if (variant === 'two-labels') w.region.append(new Element('SPAN', {}, 'Load failed'));
+      if (variant === 'disabled') w.retry.disabled = true;
+      if (variant === 'extra-control') w.region.append(new Element('INPUT'));
+      if (variant === 'extra-button') w.region.append(new Element('BUTTON', {}, 'Retry'));
+      if (variant === 'wide') for (let i = 0; i < 5; i++) w.region.append(new Element('DIV'));
+      if (variant === 'long-label') w.label.text = 'Load failed' + ' '.repeat(129);
+      const result = await f.inspect(); expect(result.responseLoadFailed).toBe(false); expect(w.retry.clicks).toBe(0);
+    }
+  });
+  test('main/status and non-main split branches stay unpaired even with a valid current user', async () => {
+    for (const variant of ['main', 'split-status', 'mixed-status']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect();
+      const main = f.body.querySelector('main')!, region = variant === 'main' ? main : new Element('DIV', { role: 'status' });
+      region.values.role = 'status'; const retry = new Element('BUTTON', {}, 'Retry'), label = new Element('SPAN', {}, 'Load failed');
+      if (variant === 'mixed-status') region.append(label, retry, new Element('INPUT'));
+      else { const a = new Element('DIV'), b = new Element('DIV'); a.append(label); b.append(retry); region.append(a, b); }
+      if (region !== main) main.append(region);
+      const result = await f.inspect(); expect(result.responseLoadFailed).toBe(false); expect(retry.clicks).toBe(0);
+    }
+  });
+  test('outer menu/nav/aside cannot hide behind a dialog or a generic widget', async () => {
+    for (const kind of ['menu', 'nav', 'aside']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = widget(f, 'plain');
+      const main = f.body.querySelector('main')!; main.children = main.children.filter(child => child !== w.dialog);
+      const blocked = new Element(kind === 'menu' ? 'DIV' : kind.toUpperCase(), kind === 'menu' ? { role: 'menu' } : {});
+      blocked.append(w.dialog); main.append(blocked);
+      const result = await f.inspect(); expect(result.responseLoadFailed).toBe(false); expect(w.retry.clicks).toBe(0);
+    }
+  });
+  test('only a small direct common parent can pair a status sibling with Retry', async () => {
+    const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect();
+    const main = f.body.querySelector('main')!, dialog = new Element('DIV', { role: 'dialog' });
+    const status = new Element('DIV', { role: 'status' }, 'Load failed'), retry = new Element('BUTTON', {}, 'Retry');
+    dialog.append(status, retry); main.append(dialog);
+    // It is a small direct widget despite the optional inner status role. No
+    // broad ancestor search or unrelated page status supplies this result.
+    expect((await f.inspect()).responseLoadFailed).toBe(true); expect(retry.clicks).toBe(0);
+    const unrelated = new Element('DIV'); dialog.children = dialog.children.filter(child => child !== retry);
+    unrelated.append(retry); dialog.append(unrelated);
+    expect((await f.inspect()).responseLoadFailed).toBe(false); expect(retry.clicks).toBe(0);
+  });
+  test('hidden nested label text and protected wrapper or label content cannot abort', async () => {
+    for (const kind of ['hidden-nested', 'user', 'assistant', 'editor', 'pre', 'code', 'markdown', 'nested-user', 'nested-editor']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = widget(f, 'nested');
+      if (kind === 'hidden-nested') w.label.children[0].values.hidden = '';
+      else if (kind.startsWith('nested-')) {
+        w.label.values[kind === 'nested-user' ? 'data-message-author-role' : 'contenteditable'] = kind === 'nested-user' ? 'user' : 'true';
+      } else {
+        const main = f.body.querySelector('main')!; main.children = main.children.filter(child => child !== w.dialog);
+        const protectedWrapper = new Element(['pre', 'code'].includes(kind) ? kind.toUpperCase() : 'DIV',
+          kind === 'user' || kind === 'assistant' ? { 'data-message-author-role': kind }
+            : kind === 'editor' ? { contenteditable: 'true' } : kind === 'markdown' ? { class: 'markdown' } : {});
+        protectedWrapper.append(w.dialog); main.append(protectedWrapper);
+      }
+      const result = await f.inspect();
+      if (kind === 'user' || kind === 'nested-user') {
+        // A newly added user-role region invalidates message identity before
+        // website error classification. Keep that stronger ownership rejection.
+        expect(result).toMatchObject({ error: 'conversation_changed', detail: 'user_count' });
+        expect(result.responseLoadFailed).toBeUndefined();
+      } else { expect(result.error).toBeUndefined(); expect(result.responseLoadFailed).toBe(false); }
+      expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
+    }
+  });
+  test('semantic navigation and any editable ancestry cannot hide behind a dialog', async () => {
+    for (const kind of ['navigation', 'complementary', 'menubar', 'editable-empty', 'editable-plaintext', 'editable-false']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = widget(f, 'plain');
+      const main = f.body.querySelector('main')!; main.children = main.children.filter(child => child !== w.dialog);
+      const blocked = new Element('DIV', kind.startsWith('editable-') ? { contenteditable:
+        kind === 'editable-empty' ? '' : kind === 'editable-plaintext' ? 'plaintext-only' : 'false' } : { role: kind });
+      blocked.append(w.dialog); main.append(blocked);
+      const result = await f.inspect(); expect(result.responseLoadFailed).toBe(false); expect(w.retry.clicks).toBe(0);
+      expect(w.retry.events.length).toBe(0);
+    }
+  });
+  test('ARIA controls and interactive semantics cannot supply the exact label or enclose the widget', async () => {
+    const roles = ['textbox', 'button', 'link', 'checkbox', 'combobox', 'grid', 'gridcell', 'listbox', 'menu', 'menubar',
+      'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'radiogroup', 'scrollbar', 'searchbox',
+      'slider', 'spinbutton', 'switch', 'tab', 'tablist', 'toolbar', 'tree', 'treegrid', 'treeitem', 'navigation', 'complementary'];
+    for (const role of roles) {
+      for (const placement of ['label', 'nested', 'region', 'outer']) {
+        const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = widget(f, 'nested');
+        if (placement === 'label') w.label.values.role = role;
+        if (placement === 'nested') w.label.children[0].values.role = role;
+        if (placement === 'region') w.region.values.role = role;
+        if (placement === 'outer') {
+          const main = f.body.querySelector('main')!; main.children = main.children.filter(child => child !== w.dialog);
+          const wrapper = new Element('DIV', { role }); wrapper.append(w.dialog); main.append(wrapper);
+        }
+        const result = await f.inspect(); expect(result.responseLoadFailed).toBe(false); expect(w.retry.clicks).toBe(0);
+        expect(w.retry.events.length).toBe(0);
+      }
+    }
+    for (const kind of ['tabindex', 'editable-empty', 'editable-plaintext', 'editable-false', 'link', 'label-for', 'details']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = widget(f);
+      if (kind === 'tabindex') w.label.values.tabindex = '-1';
+      if (kind.startsWith('editable-')) w.label.values.contenteditable = kind === 'editable-empty' ? '' : kind === 'editable-plaintext' ? 'plaintext-only' : 'false';
+      if (kind === 'link') { w.label.tagName = 'A'; w.label.values.href = '/private'; }
+      if (kind === 'label-for') { w.label.tagName = 'LABEL'; w.label.values.for = 'another-control'; }
+      if (kind === 'details') w.label.tagName = 'SUMMARY';
+      const result = await f.inspect(); expect(result.responseLoadFailed).toBe(false); expect(w.retry.clicks).toBe(0);
+      expect(w.retry.events.length).toBe(0);
+    }
+    // The actual Retry button may use its normal ARIA role, and a dialog can
+    // be focusable. Only label branches must be inert; controls cannot enclose it.
+    const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = widget(f);
+    w.retry.values.role = 'button'; w.dialog.values.tabindex = '-1';
+    expect((await f.inspect()).responseLoadFailed).toBe(true); expect(w.retry.clicks).toBe(0);
+  });
+  test('compound navigation and complementary role tokens retain their excluded boundary', async () => {
+    for (const role of ['navigation region', 'complementary region', 'region navigation', 'region complementary']) {
+      for (const placement of ['label', 'nested', 'region', 'outer']) {
+        const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = widget(f, 'nested');
+        if (placement === 'label') w.label.values.role = role;
+        if (placement === 'nested') w.label.children[0].values.role = role;
+        if (placement === 'region') w.region.values.role = role;
+        if (placement === 'outer') {
+          const main = f.body.querySelector('main')!; main.children = main.children.filter(child => child !== w.dialog);
+          const wrapper = new Element('DIV', { role }); wrapper.append(w.dialog); main.append(wrapper);
+        }
+        const result = await f.inspect(); expect(result.error).toBeUndefined(); expect(result.responseLoadFailed).toBe(false);
+        expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
+      }
+    }
+  });
+  test('an error widget cannot override changed ownership, message, product, origin or frame proof', async () => {
+    for (const drift of ['owner', 'user', 'work', 'origin', 'frame']) {
+      const f = fixture({ response: false, userPrompt: 'Read the controlled fixture' }); await f.inspect(); const w = widget(f, 'plain');
+      if (drift === 'owner') f.world.__computaModelOwner = 'FOREIGN_OWNER';
+      if (drift === 'user') f.userBody!.text = 'Changed user body\n\n' + markerLine;
+      if (drift === 'work') { f.workMode.values['aria-pressed'] = 'true'; f.chatMode.values['aria-pressed'] = 'false'; }
+      if (drift === 'origin') f.location.origin = 'https://foreign.example';
+      if (drift === 'frame') f.window.top = {};
+      const result = await f.inspect(); expect(result.error).toBeDefined(); expect(result.responseLoadFailed).toBeUndefined();
+      expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
+    }
   });
 });

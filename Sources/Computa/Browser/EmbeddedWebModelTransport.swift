@@ -293,6 +293,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let url: URL
         }
         var untouchedGoogleCheckpoint: UntouchedGoogleCheckpoint?
+        struct InitialCheckpointSettlement {
+            let deadline: ContinuousClock.Instant
+            var observations = 0
+            var finished = false
+        }
+        // One passive initial window; native navigation changes never renew it.
+        var initialCheckpointSettlement: InitialCheckpointSettlement?
         var submitted = false
         var temporary = false
         var temporaryRequested = false
@@ -352,6 +359,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let sequence: Int
             let generation: UUID
             let fields: [String: Any]
+            let responseNotice: String?
         }
         var responseProgressInspection: ResponseProgressInspection?
         var responseProgressEmitted = false
@@ -383,6 +391,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var preparationTimeout: Duration = .seconds(45)
     private var responseTimeout: Duration = .seconds(300)
     private var inspectionTimeout: Duration = .seconds(30)
+    private var initialCheckpointSettlementTimeout: Duration = .seconds(3)
     private static let inspectionLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
     private struct InspectionSignature: Equatable {
         let responses: Int, users: Int, sequence: Int, textBytes: Int
@@ -401,6 +410,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var failedPageDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var resourceTimingDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var responseProgressDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
+    private var initialCheckpointSettlementObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
     #endif
 
@@ -458,6 +468,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setFirstUserExpansionRouteCheckpointForTesting(_ hook: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?) {
         firstUserExpansionRouteCheckpointForTesting = hook
+    }
+
+    /// Shorten only before any checkpoint window starts; tests cannot renew one.
+    @discardableResult
+    func setInitialCheckpointSettlementTimeoutForTesting(_ timeout: Duration) -> Bool {
+        guard sessions.values.allSatisfy({ $0.initialCheckpointSettlement == nil }) else { return false }
+        initialCheckpointSettlementTimeout = max(.milliseconds(1), min(.seconds(3), timeout))
+        return true
+    }
+
+    func initialCheckpointSettlementDeadlineForTesting(sessionToken: String) -> ContinuousClock.Instant? {
+        sessions[sessionToken]?.initialCheckpointSettlement?.deadline
+    }
+
+    func setInitialCheckpointSettlementObserverForTesting(_ observer: (@MainActor ([String: Any]) -> Void)?) {
+        initialCheckpointSettlementObserverForTesting = observer
     }
 
     func setTimeoutsForTesting(preparation: Duration, response: Duration) {
@@ -795,6 +821,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             wake = min(wake, max(since, session.lastChanged) + .milliseconds(1_600))
         }
         if let retry = session.initialReadRetry { wake = min(wake, retry) }
+        if let settlement = session.initialCheckpointSettlement, !settlement.finished {
+            wake = min(wake, settlement.deadline)
+        }
         let changed = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: wake)
         try checkProviderGate(session)
         return changed
@@ -912,6 +941,50 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    /// Relationship observations only. No strings, identity or response authority.
+    static func sanitizedResponseNoticeDiagnostic(_ raw: Any?) -> String? {
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["kind", "retryCount", "observationsTruncated", "observations"],
+              value["kind"] as? String == "chatgpt_response_notice_v1" else { return nil }
+        func integer(_ raw: Any?, maximum: Int) -> Int? {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue.rounded(.towardZero) == number.doubleValue,
+                  (0...Double(maximum)).contains(number.doubleValue) else { return nil }
+            return number.intValue
+        }
+        guard let count = integer(value["retryCount"], maximum: 10_000),
+              let truncated = firstUserDiagnosticBool(value["observationsTruncated"]), truncated == (count > 2),
+              let observations = value["observations"] as? [[String: Any]], observations.count == min(count, 2) else { return nil }
+        let keys: Set<String> = ["excludedAncestor", "contentExcluded", "retryEnabled", "noticeRole", "pairing",
+                                 "sameWidget", "knownError", "labelStructure", "labelScanTruncated"]
+        var projected: [[String: Any]] = []
+        for observation in observations {
+            guard Set(observation.keys) == keys,
+                  let ancestor = observation["excludedAncestor"] as? String,
+                  ["none", "menu", "dialog", "nav", "aside"].contains(ancestor),
+                  let role = observation["noticeRole"] as? String, ["none", "alert", "status"].contains(role),
+                  let pairing = observation["pairing"] as? String, ["none", "ambiguous", "ancestor", "shared_parent"].contains(pairing),
+                  let known = observation["knownError"] as? String, ["none", "unknown", "load_failed"].contains(known),
+                  let structure = observation["labelStructure"] as? String, ["none", "leaf", "nested", "multiple"].contains(structure),
+                  let excluded = firstUserDiagnosticBool(observation["contentExcluded"]),
+                  let enabled = firstUserDiagnosticBool(observation["retryEnabled"]),
+                  let sameWidget = firstUserDiagnosticBool(observation["sameWidget"]),
+                  let scanTruncated = firstUserDiagnosticBool(observation["labelScanTruncated"]),
+                  sameWidget == ["ancestor", "shared_parent"].contains(pairing),
+                  sameWidget == (role != "none"), sameWidget == (known != "none"),
+                  (known == "load_failed") == (structure != "none"),
+                  !scanTruncated || (sameWidget && known == "unknown" && structure == "none"),
+                  !(excluded || ["menu", "nav", "aside"].contains(ancestor)) || pairing == "none" else { return nil }
+            projected.append(["excludedAncestor": ancestor, "contentExcluded": excluded, "retryEnabled": enabled,
+                              "noticeRole": role, "pairing": pairing, "sameWidget": sameWidget,
+                              "knownError": known, "labelStructure": structure, "labelScanTruncated": scanTruncated])
+        }
+        let safe: [String: Any] = ["kind": "chatgpt_response_notice_v1", "retryCount": count,
+                                   "observationsTruncated": truncated, "observations": projected]
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 768 else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     static func sanitizedFailedPageDiagnostic(_ value: [String: Any]) -> String? {
         guard value["kind"] as? String == "chatgpt_failed_page_v1",
               let route = value["route"] as? String, ["root", "local_conversation", "server_conversation", "other"].contains(route),
@@ -924,6 +997,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return number.intValue
         }
         var safe: [String: Any] = ["kind": "chatgpt_failed_page_v1", "route": route, "errorCategory": category]
+        if let rawNotice = value["responseNoticeDiagnostic"] {
+            guard let encoded = sanitizedResponseNoticeDiagnostic(rawNotice),
+                  let projected = try? JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any] else { return nil }
+            safe["responseNoticeDiagnostic"] = projected
+        }
         let sizeKeys = ["outboundUTF16Count", "outboundUTF8Count"]
         if sizeKeys.contains(where: { value[$0] != nil }) {
             if value[sizeKeys[0]] is NSNull, value[sizeKeys[1]] is NSNull {
@@ -1040,20 +1118,122 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    private enum InitialCheckpointPhase: String {
+        case waitStarted = "wait_started"
+        case providerRouteObserved = "provider_route_observed"
+        case nativeStateRejected = "native_state_rejected"
+        case foreignRouteObserved = "foreign_route_observed"
+        case authorityRejected = "authority_rejected"
+        case budgetExpired = "budget_expired"
+        case preparationExpired = "preparation_expired"
+        case cancelled, finished
+    }
+
+    private func initialCheckpointRoute(_ session: Session) -> String {
+        guard let url = session.view.url else { return "unknown" }
+        if session.provider.blockingFailure(for: url) == .humanVerificationRequired(.gemini) {
+            return "google_verification"
+        }
+        return session.provider.accepts(url.absoluteString) ? "provider" : "other"
+    }
+
+    /// Native observations only. No URL, document content, identity or input.
+    private func logInitialCheckpointSettlement(_ session: Session, phase: InitialCheckpointPhase) {
+        guard let window = session.initialCheckpointSettlement else { return }
+        let facts = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view)
+        let record: [String: Any] = [
+            "kind": "gemini_initial_checkpoint_settlement_v1", "phase": phase.rawValue,
+            "routeClass": initialCheckpointRoute(session), "observations": window.observations,
+            "maximumMilliseconds": 3_000, "originalPreparationDeadlineRetained": true,
+            "nativeFactsAvailable": facts != nil,
+            "committed": facts.map { $0.generationCommitted as Any } ?? NSNull(),
+            "finished": facts.map { $0.generationFinished as Any } ?? NSNull(),
+            "loading": facts.map { $0.viewLoading as Any } ?? NSNull(),
+            "navigationPending": facts.map { $0.navigationPending as Any } ?? NSNull(),
+            "navigationError": facts.map { $0.navigationError as Any } ?? NSNull(),
+            "geminiCommitObserved": facts.map { $0.geminiDocumentCommitObserved as Any } ?? NSNull(),
+            "serverRedirectObserved": facts.map { $0.serverRedirectObservedInCurrentNavigation as Any } ?? NSNull(),
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys), data.count <= 768 else { return }
+        #if DEBUG
+        initialCheckpointSettlementObserverForTesting?(record)
+        #endif
+        let safe = String(decoding: data, as: UTF8.self)
+        Self.inspectionLog.error("initialCheckpointSettlement provider=gemini \(safe, privacy: .public)")
+    }
+
+    private func finishInitialCheckpointSettlement(_ session: Session, phase: InitialCheckpointPhase) {
+        guard session.initialCheckpointSettlement?.finished == false else { return }
+        session.initialCheckpointSettlement?.finished = true
+        logInitialCheckpointSettlement(session, phase: phase)
+    }
+
+    /// Observe this existing initial navigation for at most three seconds.
+    /// A committed but unfinished Google checkpoint may finish naturally; no
+    /// provider adapter, prompt, refresh or challenge action is permitted here.
+    private func waitForInitialCheckpointSettlement(_ session: Session) throws -> Bool {
+        guard session.state == "loading", session.terminalFailure == nil, isUntouchedInference(session),
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view else {
+            finishInitialCheckpointSettlement(session, phase: .authorityRejected)
+            return false
+        }
+        guard session.initialCheckpointSettlement?.finished != true else { return false }
+        let route = initialCheckpointRoute(session)
+        // This experiment cannot postpone a gate saved by another session or
+        // human tab, including when a native navigation has changed the route.
+        if session.initialCheckpointSettlement != nil || route == "google_verification" {
+            do { try checkProviderGate(session) }
+            catch {
+                finishInitialCheckpointSettlement(session, phase: .authorityRejected)
+                throw error
+            }
+        }
+        let now = ContinuousClock.now
+        if session.initialCheckpointSettlement != nil, now >= session.created + preparationTimeout {
+            finishInitialCheckpointSettlement(session, phase: .preparationExpired)
+            throw preparationFailure(session)
+        }
+        if let window = session.initialCheckpointSettlement, now >= window.deadline {
+            finishInitialCheckpointSettlement(session, phase: .budgetExpired)
+            // A current Google route still takes the original blocker below.
+            // Do not label a late provider/foreign route as a Google checkpoint.
+            if route != "google_verification" { throw preparationFailure(session) }
+            return false
+        }
+        guard route == "google_verification" else {
+            finishInitialCheckpointSettlement(session,
+                phase: route == "provider" ? .providerRouteObserved : .foreignRouteObserved)
+            return false
+        }
+        guard let facts = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view),
+              facts.viewLoading, facts.tabLoading, facts.navigationPending,
+              !facts.generationFinished, !facts.navigationError, !facts.geminiDocumentCommitObserved else {
+            finishInitialCheckpointSettlement(session, phase: .nativeStateRejected)
+            return false
+        }
+        let first = session.initialCheckpointSettlement == nil
+        if first {
+            session.initialCheckpointSettlement = .init(deadline: min(now + initialCheckpointSettlementTimeout,
+                session.created + preparationTimeout))
+        }
+        if var window = session.initialCheckpointSettlement {
+            window.observations = min(10_000, window.observations + 1)
+            session.initialCheckpointSettlement = window
+        }
+        if now >= session.created + preparationTimeout {
+            finishInitialCheckpointSettlement(session, phase: .preparationExpired)
+            throw preparationFailure(session)
+        }
+        if first { logInitialCheckpointSettlement(session, phase: .waitStarted) }
+        return true
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
-        if session.state == "loading", session.terminalFailure == nil, isUntouchedInference(session),
-           session.provider.blockingFailure(for: session.view.url) == .humanVerificationRequired(.gemini),
-           browser.hasUncommittedModelNavigation(tabID: session.tabID, view: session.view) {
-            // WKWebView.url may expose a checkpoint during a provisional
-            // redirect. Do not inspect it or persist a settled checkpoint yet.
-            // Native navigation events wake the same poll under its original
-            // deadline; commit immediately restores the normal blocker path.
-            try checkProviderGate(session)
+        if try waitForInitialCheckpointSettlement(session) {
             session.initialReadRetry = nil
-            guard ContinuousClock.now - session.created < preparationTimeout else { throw preparationFailure(session) }
             return try snapshot(session)
         }
         try rejectWebsiteBlocker(session, action: "inspect", phase: "before")
@@ -1255,7 +1435,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // Cache only finite facts from an already completed native inspect.
             // No page text, URLs or IDs enter this diagnostic-only record.
             session.responseProgressInspection = Self.sanitizedResponseProgressInspection(observed).map {
-                .init(sequence: session.sequence, generation: generation, fields: $0)
+                .init(sequence: session.sequence, generation: generation, fields: $0,
+                      responseNotice: Self.sanitizedResponseNoticeDiagnostic(observed["responseNoticeDiagnostic"]))
             }
         }
         if let raw = observed["quotaDiagnostic"] as? String {
@@ -1354,6 +1535,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         responseProgressDiagnosticObserverForTesting?(safe)
         #endif
         Self.inspectionLog.error("responseProgressDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(safe, privacy: .public)")
+        // Same admitted read and exact current generation as the progress cache.
+        // Separate metadata keeps response-progress-v1 and error policy unchanged.
+        if inspectionCurrent, let notice = cached?.responseNotice {
+            Self.inspectionLog.error("responseNoticeDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(notice, privacy: .public)")
+        }
     }
 
     /// The fixed adapter's fresh quota receipt can pin an empty initial
@@ -2898,6 +3084,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func finish(_ session: Session, cancel: Bool) async -> Data {
+        finishInitialCheckpointSettlement(session, phase: cancel ? .cancelled : .finished)
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
         // The outer server can reach its deadline before another native poll
         // is scheduled. Observe only an already-expired running response;

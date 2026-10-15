@@ -36,12 +36,19 @@ final class EmbeddedGeminiInitialNavigationTests: XCTestCase {
         XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
     }
 
-    func testCommittedCheckpointStillBlocksWhileLoadingAndDisposesOnlyUntouchedView() async throws {
+    func testCommittedUnfinishedCheckpointWaitsThenSettledCheckpointBlocksAndDisposesOnlyUntouchedView() async throws {
         let fixture = try await Fixture.make()
         defer { fixture.shutdown() }
         _ = try await fixture.poll()
         fixture.delegate.webView?(fixture.view, didCommit: fixture.navigation)
         XCTAssertTrue(fixture.view.isLoading)
+        let waiting = try await fixture.poll()
+        XCTAssertEqual(waiting["state"] as? String, "loading")
+        XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty)
+        try await fixture.assertNoAdapterOrInput()
+        // Completion, rather than commit alone, ends this initial-only grace.
+        fixture.view.fixtureLoading = false
+        fixture.delegate.webView?(fixture.view, didFinish: fixture.navigation)
         await fixture.assertPollFailure(.humanVerificationRequired(.gemini))
         try await fixture.assertNoAdapterOrInput()
         let checkpoint = try XCTUnwrap(fixture.browser.savedHumanVerificationCheckpointIDs["gemini"])
@@ -123,8 +130,264 @@ final class EmbeddedGeminiInitialNavigationTests: XCTestCase {
         XCTAssertNil(waiting["modelProofContext"])
         XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty)
         fixture.delegate.webView?(fixture.view, didCommit: next)
+        let committedWaiting = try await fixture.poll()
+        XCTAssertEqual(committedWaiting["state"] as? String, "loading")
+        try await fixture.assertNoAdapterOrInput()
+        fixture.view.fixtureLoading = false
+        fixture.delegate.webView?(fixture.view, didFinish: next)
         await fixture.assertPollFailure(.humanVerificationRequired(.gemini))
         XCTAssertNotNil(fixture.browser.savedHumanVerificationCheckpointIDs["gemini"])
+        XCTAssertEqual(fixture.createdCount, 1)
+    }
+
+
+    func testCommittedInitialCheckpointCanReturnOnNewNativeNavigationWithoutGrantingReadiness() async throws {
+        let fixture = try await Fixture.make()
+        defer { fixture.shutdown() }
+        _ = try await fixture.poll()
+        let deadline = try XCTUnwrap(fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token))
+        fixture.delegate.webView?(fixture.view, didReceiveServerRedirectForProvisionalNavigation: fixture.navigation)
+        fixture.delegate.webView?(fixture.view, didCommit: fixture.navigation)
+        let waiting = try await fixture.poll()
+        XCTAssertEqual(waiting["state"] as? String, "loading")
+        try await fixture.assertNoAdapterOrInput()
+        XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty)
+        let checkpointGeneration = fixture.browser.documentGeneration(for: fixture.id)
+        try await fixture.beginLocalNavigation(url: Fixture.gemini)
+        XCTAssertNotEqual(fixture.browser.documentGeneration(for: fixture.id), checkpointGeneration)
+        fixture.settle(url: Fixture.gemini)
+        let normalRead = try await fixture.poll()
+        XCTAssertEqual(normalRead["state"] as? String, "loading", "Native return is not website readiness")
+        // The ordinary admitted inspect binds its current native generation.
+        // A binding alone is not selected-model, submission or response proof.
+        let context = try XCTUnwrap(normalRead["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(context["documentGeneration"] as? String, fixture.browser.documentGeneration(for: fixture.id)?.uuidString)
+        XCTAssertEqual(context["sequence"] as? Int, 0)
+        XCTAssertEqual(context["responseCount"] as? Int, 0)
+        XCTAssertEqual(context["baselineResponseCount"] as? Int, 0)
+        XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+        XCTAssertEqual(context["submittedPromptFingerprint"] as? String, "")
+        XCTAssertNil(normalRead["modelEvidence"])
+        XCTAssertNil(normalRead["productModeEvidence"])
+        XCTAssertNil(normalRead["completionEvidence"])
+        XCTAssertEqual(normalRead["text"] as? String, "")
+        XCTAssertEqual(fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token), deadline)
+        XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty)
+        let bound = try await fixture.evaluate("return typeof globalThis.__computaModelOwner === 'string';", isolated: true)
+        XCTAssertEqual(bound as? Bool, true)
+        do { _ = try await fixture.call("webProviderSend", ["sessionToken": fixture.token, "prompt": "Must not send"]); XCTFail("No readiness proof") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .invalidRequest) }
+        try await fixture.assertNoInput()
+        XCTAssertEqual(fixture.createdCount, 1, "No new provider tab or automatic navigation retry")
+        XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
+    }
+
+    func testSettlementDeadlineIsStickyAcrossPollsAndNativeGenerationsAndCannotBeRenewed() async throws {
+        let fixture = try await Fixture.make()
+        defer { fixture.shutdown() }
+        XCTAssertTrue(fixture.transport.setInitialCheckpointSettlementTimeoutForTesting(.seconds(20)))
+        let before = ContinuousClock.now
+        _ = try await fixture.poll()
+        let after = ContinuousClock.now
+        let deadline = try XCTUnwrap(fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token))
+        XCTAssertLessThanOrEqual(deadline - after, .seconds(3))
+        XCTAssertGreaterThan(deadline - before, .seconds(2))
+        XCTAssertFalse(fixture.transport.setInitialCheckpointSettlementTimeoutForTesting(.seconds(3)), "An active window cannot renew its timeout")
+        let generation = fixture.browser.documentGeneration(for: fixture.id)
+        try await fixture.beginLocalNavigation(url: Fixture.checkpoint)
+        XCTAssertNotEqual(fixture.browser.documentGeneration(for: fixture.id), generation)
+        for _ in 0..<3 {
+            _ = try await fixture.poll()
+            XCTAssertEqual(fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token), deadline)
+            fixture.browser.notifyModelSessionChange(tabID: fixture.id)
+        }
+        XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty)
+        try await fixture.assertNoAdapterOrInput()
+    }
+
+    func testNativeWaitWakesAtSingleSettlementBudgetAndLogsExpiryOnlyOnce() async throws {
+        let fixture = try await Fixture.make()
+        defer { fixture.shutdown() }
+        XCTAssertTrue(fixture.transport.setInitialCheckpointSettlementTimeoutForTesting(.milliseconds(40)))
+        var diagnostics: [[String: Any]] = []
+        fixture.transport.setInitialCheckpointSettlementObserverForTesting { diagnostics.append($0) }
+        fixture.delegate.webView?(fixture.view, didCommit: fixture.navigation)
+        _ = try await fixture.poll()
+        let deadline = try XCTUnwrap(fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token))
+        // Native KVO may wake a waiter sooner; every wake still keeps the same
+        // deadline. There is no network navigation or provider adapter work.
+        let outer = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < deadline, ContinuousClock.now < outer {
+            let revision = try fixture.browser.modelChangeRevision(for: fixture.id)
+            _ = try await fixture.transport.waitForChange(sessionToken: fixture.token, after: revision, until: .now + .seconds(5))
+        }
+        XCTAssertLessThan(ContinuousClock.now, outer, "The five-second caller wait must be capped by the settlement budget")
+        await fixture.assertPollFailure(.humanVerificationRequired(.gemini))
+        let gate = try XCTUnwrap(fixture.browser.savedHumanVerificationCheckpointIDs["gemini"])
+        await fixture.assertPollFailure(.humanVerificationRequired(.gemini))
+        XCTAssertEqual(fixture.browser.savedHumanVerificationCheckpointIDs["gemini"], gate)
+        XCTAssertEqual(diagnostics.compactMap { $0["phase"] as? String }, ["wait_started", "budget_expired"])
+        for record in diagnostics {
+            let bytes = try JSONSerialization.data(withJSONObject: record, options: .sortedKeys)
+            XCTAssertLessThanOrEqual(bytes.count, 768)
+            let encoded = String(decoding: bytes, as: UTF8.self)
+            XCTAssertFalse(encoded.contains("https://"))
+            XCTAssertFalse(encoded.contains(fixture.token))
+            XCTAssertFalse(encoded.contains(fixture.id.uuidString))
+            XCTAssertEqual(record["kind"] as? String, "gemini_initial_checkpoint_settlement_v1")
+            XCTAssertEqual(record["routeClass"] as? String, "google_verification")
+            XCTAssertEqual(record["maximumMilliseconds"] as? Int, 3_000)
+            XCTAssertEqual(record["originalPreparationDeadlineRetained"] as? Bool, true)
+            XCTAssertEqual(record["committed"] as? Bool, true)
+        }
+        try await fixture.assertNoAdapterOrInput()
+        XCTAssertEqual(fixture.createdCount, 1)
+    }
+
+    func testFailedFinishedNotLoadingAndTerminatedNativeStatesBlockWithoutWaiting() async throws {
+        for kind in ["failed", "finished", "not_loading", "terminated"] {
+            let fixture = try await Fixture.make()
+            defer { fixture.shutdown() }
+            fixture.delegate.webView?(fixture.view, didCommit: fixture.navigation)
+            switch kind {
+            case "failed":
+                fixture.delegate.webView?(fixture.view, didFail: fixture.navigation,
+                    withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost))
+            case "finished":
+                fixture.delegate.webView?(fixture.view, didFinish: fixture.navigation)
+            case "not_loading":
+                fixture.view.fixtureLoading = false
+            default:
+                fixture.delegate.webViewWebContentProcessDidTerminate?(fixture.view)
+            }
+            await fixture.assertPollFailure(.humanVerificationRequired(.gemini))
+            XCTAssertNil(fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token), "Ineligible native facts cannot start a window")
+            try await fixture.assertNoAdapterOrInput()
+            XCTAssertEqual(fixture.createdCount, 1)
+        }
+    }
+
+    func testAnyEarlierGeminiCommitOrOrdinaryAdapterReadForbidsCheckpointSettlement() async throws {
+        for inspect in [false, true] {
+            let fixture = try await Fixture.make()
+            defer { fixture.shutdown() }
+            // A prior real Gemini commit is sticky across later generations.
+            fixture.settle(url: Fixture.gemini)
+            if inspect { _ = try await fixture.poll() }
+            try await fixture.beginLocalNavigation(url: Fixture.checkpoint)
+            fixture.delegate.webView?(fixture.view, didCommit: fixture.navigation)
+            let facts = try XCTUnwrap(fixture.browser.modelNavigationDiagnostic(tabID: fixture.id, view: fixture.view))
+            XCTAssertTrue(facts.geminiDocumentCommitObserved)
+            XCTAssertTrue(facts.viewLoading && facts.navigationPending)
+            await fixture.assertPollFailure(.humanVerificationRequired(.gemini))
+            XCTAssertNil(fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token))
+            // The fresh checkpoint document must never acquire a model owner.
+            try await fixture.assertNoAdapterOrInput()
+            XCTAssertEqual(fixture.createdCount, 1)
+        }
+    }
+
+    func testSavedProviderGateWinsDuringSettlementAndDoesNotRenewCheckpointIdentity() async throws {
+        let fixture = try await Fixture.make()
+        defer { fixture.shutdown() }
+        var diagnostics: [[String: Any]] = []
+        fixture.transport.setInitialCheckpointSettlementObserverForTesting { diagnostics.append($0) }
+        _ = try await fixture.poll()
+        fixture.browser.recordHumanVerificationRequired(provider: "gemini")
+        let gate = try XCTUnwrap(fixture.browser.savedHumanVerificationCheckpointIDs["gemini"])
+        await fixture.assertPollFailure(.humanVerificationRequired(.gemini))
+        XCTAssertEqual(fixture.browser.savedHumanVerificationCheckpointIDs["gemini"], gate)
+        XCTAssertEqual(diagnostics.compactMap { $0["phase"] as? String }, ["wait_started", "authority_rejected"])
+        try await fixture.assertNoAdapterOrInput()
+    }
+
+    func testCancellationAndStaleViewCannotDispatchOrRenewInitialWindow() async throws {
+        for close in [false, true] {
+            let fixture = try await Fixture.make()
+            defer { fixture.shutdown() }
+            _ = try await fixture.poll()
+            let deadline = fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token)
+            if close {
+                fixture.browser.closeTab(fixture.id)
+                await fixture.assertPollFailure(.staleSession)
+            } else {
+                let revision = try fixture.browser.modelChangeRevision(for: fixture.id)
+                let task = Task { @MainActor in
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return try await fixture.transport.waitForChange(sessionToken: fixture.token, after: revision, until: .now + .seconds(5))
+                }
+                do { _ = try await task.value; XCTFail("Cancelled native wait must stop") }
+                catch { XCTAssertTrue(error is CancellationError) }
+                try await fixture.assertNoAdapterOrInput()
+            }
+            XCTAssertEqual(fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token), deadline)
+            XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty)
+            XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
+            XCTAssertEqual(fixture.createdCount, 1)
+        }
+    }
+
+
+    func testProvisionalProviderReturnPermanentlyEndsSingleWindowBeforeAnyGeminiCommit() async throws {
+        let fixture = try await Fixture.make()
+        defer { fixture.shutdown() }
+        var diagnostics: [[String: Any]] = []
+        fixture.transport.setInitialCheckpointSettlementObserverForTesting { diagnostics.append($0) }
+        _ = try await fixture.poll()
+        let deadline = fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token)
+        // Valid route observation is not a commit or readiness proof. Even so,
+        // this one initial checkpoint exception is retired permanently.
+        fixture.view.fixtureURL = Fixture.gemini
+        let waiting = try await fixture.poll()
+        XCTAssertEqual(waiting["state"] as? String, "loading")
+        let facts = try XCTUnwrap(fixture.browser.modelNavigationDiagnostic(tabID: fixture.id, view: fixture.view))
+        XCTAssertFalse(facts.geminiDocumentCommitObserved)
+        XCTAssertTrue(facts.viewLoading && facts.navigationPending)
+        try await fixture.assertNoAdapterOrInput()
+        fixture.view.fixtureURL = Fixture.checkpoint
+        await fixture.assertPollFailure(.humanVerificationRequired(.gemini))
+        XCTAssertEqual(fixture.transport.initialCheckpointSettlementDeadlineForTesting(sessionToken: fixture.token), deadline)
+        XCTAssertEqual(diagnostics.compactMap { $0["phase"] as? String }, ["wait_started", "provider_route_observed"])
+        try await fixture.assertNoAdapterOrInput()
+    }
+
+    func testUnknownRouteEndsGraceAndUsesExistingUnavailablePageChecksWithoutAdapter() async throws {
+        let fixture = try await Fixture.make()
+        defer { fixture.shutdown() }
+        var diagnostics: [[String: Any]] = []
+        fixture.transport.setInitialCheckpointSettlementObserverForTesting { diagnostics.append($0) }
+        _ = try await fixture.poll()
+        fixture.view.fixtureUnknownURL = true
+        fixture.view.fixtureLoading = false
+        fixture.delegate.webView?(fixture.view, didFinish: fixture.navigation)
+        // Preserve the pre-existing bounded initial-read failure policy; the
+        // settlement exception has ended and cannot be restarted on unknown.
+        for _ in 0..<3 {
+            let unchanged = try await fixture.poll()
+            XCTAssertEqual(unchanged["state"] as? String, "loading")
+            try await fixture.assertNoAdapterOrInput()
+        }
+        await fixture.assertPollFailure(.pageUnavailable)
+        XCTAssertEqual(diagnostics.compactMap { $0["phase"] as? String }, ["wait_started", "foreign_route_observed"])
+        XCTAssertEqual(diagnostics.last?["routeClass"] as? String, "unknown")
+        XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty, "Unknown is not Google verification proof")
+        try await fixture.assertNoAdapterOrInput()
+    }
+
+    func testExplicitCancelEndsGraceOnceAndClosesOnlyTheUntouchedOwnedView() async throws {
+        let fixture = try await Fixture.make()
+        defer { fixture.shutdown() }
+        var diagnostics: [[String: Any]] = []
+        fixture.transport.setInitialCheckpointSettlementObserverForTesting { diagnostics.append($0) }
+        _ = try await fixture.poll()
+        try await fixture.assertNoAdapterOrInput()
+        let result = try await fixture.call("webProviderCancel", ["sessionToken": fixture.token])
+        XCTAssertEqual(result["cleanup"] as? String, "not_created")
+        XCTAssertEqual(result["state"] as? String, "finished")
+        XCTAssertEqual(diagnostics.compactMap { $0["phase"] as? String }, ["wait_started", "cancelled"])
+        XCTAssertNil(fixture.browser.webView(for: fixture.id))
+        XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
+        XCTAssertNotNil(fixture.browser.savedHumanVerificationCheckpointIDs["gemini"], "Existing abort-only cleanup gate still applies")
         XCTAssertEqual(fixture.createdCount, 1)
     }
 
@@ -134,8 +397,10 @@ final class EmbeddedGeminiInitialNavigationTests: XCTestCase {
     @MainActor private final class NavigationView: WKWebView {
         var fixtureURL: URL?
         var fixtureLoading: Bool?
-        override var url: URL? { fixtureURL ?? super.url }
+        var fixtureUnknownURL = false
+        override var url: URL? { fixtureUnknownURL ? nil : fixtureURL ?? super.url }
         override var isLoading: Bool { fixtureLoading ?? super.isLoading }
+        var nativeLoading: Bool { super.isLoading }
     }
 
     @MainActor private final class Fixture {
@@ -204,6 +469,22 @@ final class EmbeddedGeminiInitialNavigationTests: XCTestCase {
             return fixture
         }
 
+        // A new local WebContent load supplies an actual WKNavigation identity.
+        // No external request, provider page, retry or app runtime is exercised.
+        func beginLocalNavigation(url: URL) async throws {
+            view.fixtureURL = url
+            view.fixtureLoading = true
+            navigation = try XCTUnwrap(view.loadHTMLString(Self.html, baseURL: Self.gemini))
+            delegate.webView?(view, didStartProvisionalNavigation: navigation)
+            let deadline = ContinuousClock.now + .seconds(10)
+            while view.nativeLoading, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertFalse(view.nativeLoading)
+            let ready = try await evaluate("return window.fixtureReady === true;")
+            XCTAssertEqual(ready as? Bool, true)
+        }
+
         func settle(url: URL) {
             view.fixtureURL = url
             delegate.webView?(view, didCommit: navigation)
@@ -236,6 +517,10 @@ final class EmbeddedGeminiInitialNavigationTests: XCTestCase {
         func assertNoAdapterOrInput(file: StaticString = #filePath, line: UInt = #line) async throws {
             let untouched = try await evaluate("return globalThis.__computaModelOwner === undefined;", isolated: true)
             XCTAssertEqual(untouched as? Bool, true, file: file, line: line)
+            try await assertNoInput(file: file, line: line)
+        }
+
+        func assertNoInput(file: StaticString = #filePath, line: UInt = #line) async throws {
             let input = try await evaluate("return [window.fixtureInputCount, window.fixtureClickCount];")
             XCTAssertEqual(input as? [Int], [0, 0], file: file, line: line)
         }

@@ -1,6 +1,24 @@
 import Foundation
 import Darwin
 
+private enum APICorrectionDiagnosticCoding {
+    private struct Key: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
+    }
+    static func keys(_ decoder: any Decoder) throws -> Set<String> {
+        Set(try decoder.container(keyedBy: Key.self).allKeys.map(\.stringValue))
+    }
+    static func requireKeys<K: CodingKey & CaseIterable>(_ decoder: any Decoder, _ keys: K.Type) throws {
+        guard try self.keys(decoder) == Set(K.allCases.map(\.stringValue)) else { throw invalid(decoder) }
+    }
+    static func invalid(_ decoder: any Decoder) -> DecodingError {
+        .dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid finite API correction diagnostic."))
+    }
+}
+
 /// Provider-reported billable counts. These are never the native context gauge.
 struct APIModelCorrectionUsage: Codable, Equatable, Sendable {
     let inputTokens: Int
@@ -26,6 +44,21 @@ struct APIModelCorrectionUsage: Codable, Equatable, Sendable {
     }
 }
 
+extension APIModelCorrectionUsage {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case inputTokens, outputTokens, totalTokens, cachedInputTokens, reasoningOutputTokens
+    }
+    init(from decoder: any Decoder) throws {
+        try APICorrectionDiagnosticCoding.requireKeys(decoder, CodingKeys.self)
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(inputTokens: try values.decode(Int.self, forKey: .inputTokens),
+            outputTokens: try values.decode(Int.self, forKey: .outputTokens),
+            totalTokens: try values.decode(Int.self, forKey: .totalTokens),
+            cachedInputTokens: try values.decode(Int.self, forKey: .cachedInputTokens),
+            reasoningOutputTokens: try values.decode(Int.self, forKey: .reasoningOutputTokens))
+    }
+}
+
 /// Three exclusive, fsynced finite records form one correction journal.
 /// The first known usage is durable before any corrective request can start.
 /// No prompt, arguments, reasoning, tool schema, URL or credential is stored.
@@ -36,12 +69,56 @@ struct APIModelCorrectionAccounting: Sendable {
         case transportFailed = "transport_failed", decodeFailed = "decode_failed"
         case cancelled, timedOut = "timed_out", budgetExhausted = "budget_exhausted"
     }
+    /// An observation of the first rejected response, never argument values or
+    /// authority to correct it. Existing decoder gates remain authoritative.
+    struct FirstValidation: Codable, Equatable, Sendable {
+        struct SchemaFailure: Codable, Equatable, Sendable {
+            let toolIndex: Int
+            let constraint: APIModelResponseCodec.SchemaConstraint
+            init(toolIndex: Int, constraint: APIModelResponseCodec.SchemaConstraint) {
+                self.toolIndex = toolIndex; self.constraint = constraint
+            }
+            private enum CodingKeys: String, CodingKey, CaseIterable { case toolIndex, constraint }
+            init(from decoder: any Decoder) throws {
+                try APICorrectionDiagnosticCoding.requireKeys(decoder, CodingKeys.self)
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                let index = try values.decode(Int.self, forKey: .toolIndex)
+                guard (0..<128).contains(index) else { throw APICorrectionDiagnosticCoding.invalid(decoder) }
+                self.init(toolIndex: index, constraint: try values.decode(APIModelResponseCodec.SchemaConstraint.self, forKey: .constraint))
+            }
+        }
+        let reason: APIModelResponseCodec.ArgumentValidationDiagnostic.Reason
+        let callCount: Int
+        let rejectedCount: Int
+        let schemaFailures: [SchemaFailure]
+
+        init?(_ diagnostic: APIModelResponseCodec.ArgumentValidationDiagnostic) {
+            let failures = diagnostic.schemaFailures ?? []
+            guard (1...128).contains(diagnostic.callCount), (1...diagnostic.callCount).contains(diagnostic.rejectedCount),
+                  failures.count <= 2, failures.allSatisfy({ (0..<128).contains($0.toolIndex) }) else { return nil }
+            reason = diagnostic.reason; callCount = diagnostic.callCount; rejectedCount = diagnostic.rejectedCount
+            schemaFailures = failures.map { .init(toolIndex: $0.toolIndex, constraint: $0.constraint) }
+        }
+        private enum CodingKeys: String, CodingKey, CaseIterable { case reason, callCount, rejectedCount, schemaFailures }
+        init(from decoder: any Decoder) throws {
+            try APICorrectionDiagnosticCoding.requireKeys(decoder, CodingKeys.self)
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            reason = try values.decode(APIModelResponseCodec.ArgumentValidationDiagnostic.Reason.self, forKey: .reason)
+            callCount = try values.decode(Int.self, forKey: .callCount)
+            rejectedCount = try values.decode(Int.self, forKey: .rejectedCount)
+            schemaFailures = try values.decode([SchemaFailure].self, forKey: .schemaFailures)
+            guard (1...128).contains(callCount), (1...callCount).contains(rejectedCount), schemaFailures.count <= 2 else {
+                throw APICorrectionDiagnosticCoding.invalid(decoder)
+            }
+        }
+    }
     struct Ticket: Sendable {
         let id: UUID
         let taskID: String
         let threadID: String
         let turnID: String
         let firstUsage: APIModelCorrectionUsage
+        var firstValidation: FirstValidation? = nil
     }
     struct Record: Codable, Sendable {
         let schemaVersion: Int
@@ -56,21 +133,62 @@ struct APIModelCorrectionAccounting: Sendable {
         let secondUsage: APIModelCorrectionUsage?
         let secondUsageUnknown: Bool
         let outcome: Outcome?
+        let firstValidation: FirstValidation?
+        init(schemaVersion: Int, scope: String, correctionID: UUID, taskID: String, threadID: String, turnID: String,
+             phase: String, secondRequestClaimed: Bool, firstUsage: APIModelCorrectionUsage,
+             secondUsage: APIModelCorrectionUsage?, secondUsageUnknown: Bool, outcome: Outcome?, firstValidation: FirstValidation?) {
+            self.schemaVersion = schemaVersion; self.scope = scope; self.correctionID = correctionID
+            self.taskID = taskID; self.threadID = threadID; self.turnID = turnID; self.phase = phase
+            self.secondRequestClaimed = secondRequestClaimed; self.firstUsage = firstUsage; self.secondUsage = secondUsage
+            self.secondUsageUnknown = secondUsageUnknown; self.outcome = outcome; self.firstValidation = firstValidation
+        }
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case schemaVersion, scope, correctionID, taskID, threadID, turnID, phase, secondRequestClaimed,
+                 firstUsage, secondUsage, secondUsageUnknown, outcome, firstValidation
+        }
+        init(from decoder: any Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            let version = try values.decode(Int.self, forKey: .schemaVersion)
+            let required: Set<String> = ["schemaVersion", "scope", "correctionID", "taskID", "threadID", "turnID", "phase",
+                                         "secondRequestClaimed", "firstUsage", "secondUsageUnknown"]
+            let optional: Set<String> = ["secondUsage", "outcome"]
+            let keys = try APICorrectionDiagnosticCoding.keys(decoder)
+            let allowed = required.union(optional).union(version == 2 ? ["firstValidation"] : [])
+            guard (version == 1 || version == 2), required.isSubset(of: keys), keys.isSubset(of: allowed),
+                  version != 2 || keys.contains("firstValidation") else { throw APICorrectionDiagnosticCoding.invalid(decoder) }
+            let validation = version == 2 ? try values.decode(FirstValidation.self, forKey: .firstValidation) : nil
+            self.init(schemaVersion: version, scope: try values.decode(String.self, forKey: .scope),
+                correctionID: try values.decode(UUID.self, forKey: .correctionID), taskID: try values.decode(String.self, forKey: .taskID),
+                threadID: try values.decode(String.self, forKey: .threadID), turnID: try values.decode(String.self, forKey: .turnID),
+                phase: try values.decode(String.self, forKey: .phase), secondRequestClaimed: try values.decode(Bool.self, forKey: .secondRequestClaimed),
+                firstUsage: try values.decode(APIModelCorrectionUsage.self, forKey: .firstUsage),
+                secondUsage: try values.decodeIfPresent(APIModelCorrectionUsage.self, forKey: .secondUsage),
+                secondUsageUnknown: try values.decode(Bool.self, forKey: .secondUsageUnknown),
+                outcome: try values.decodeIfPresent(Outcome.self, forKey: .outcome), firstValidation: validation)
+            guard scope == "provider_attempt_accounting_not_native_execution",
+                  ["first_received", "second_claimed", "finished"].contains(phase),
+                  [taskID, threadID, turnID].allSatisfy({ UUID(uuidString: $0)?.uuidString.lowercased() == $0 }),
+                  APIModelCorrectionAccounting.validUsage(firstUsage), secondUsage.map(APIModelCorrectionAccounting.validUsage) ?? true else {
+                throw APICorrectionDiagnosticCoding.invalid(decoder)
+            }
+        }
     }
     let directory: URL
 
-    private func validUsage(_ usage: APIModelCorrectionUsage) -> Bool {
+    private static func validUsage(_ usage: APIModelCorrectionUsage) -> Bool {
         (0...100_000_000).contains(usage.inputTokens) && (0...100_000_000).contains(usage.outputTokens)
             && usage.totalTokens == usage.inputTokens + usage.outputTokens
             && (0...usage.inputTokens).contains(usage.cachedInputTokens)
             && (0...usage.outputTokens).contains(usage.reasoningOutputTokens)
     }
-    func begin(taskID: String, threadID: String, turnID: String, firstUsage: APIModelCorrectionUsage) throws -> Ticket {
-        guard validUsage(firstUsage) else { throw Failure.unavailable }
+    func begin(taskID: String, threadID: String, turnID: String, firstUsage: APIModelCorrectionUsage,
+               firstValidation: FirstValidation? = nil) throws -> Ticket {
+        guard Self.validUsage(firstUsage) else { throw Failure.unavailable }
         for id in [taskID, threadID, turnID] {
             guard UUID(uuidString: id)?.uuidString.lowercased() == id else { throw Failure.unavailable }
         }
-        let ticket = Ticket(id: UUID(), taskID: taskID, threadID: threadID, turnID: turnID, firstUsage: firstUsage)
+        let ticket = Ticket(id: UUID(), taskID: taskID, threadID: threadID, turnID: turnID, firstUsage: firstUsage,
+                            firstValidation: firstValidation)
         try publish(record(ticket, phase: "first_received", claimed: false, usage: nil, unknown: false, outcome: nil), ticket: ticket)
         return ticket
     }
@@ -81,13 +199,13 @@ struct APIModelCorrectionAccounting: Sendable {
     func finish(_ ticket: Ticket, claimed: Bool, usage: APIModelCorrectionUsage?, outcome: Outcome) throws {
         try requireFirst(ticket)
         if claimed { try requireFirst(ticket, phase: "second_claimed", claimed: true) }
-        guard usage.map(validUsage) ?? true else { throw Failure.unavailable }
+        guard usage.map(Self.validUsage) ?? true else { throw Failure.unavailable }
         try publish(record(ticket, phase: "finished", claimed: claimed, usage: usage, unknown: claimed && usage == nil, outcome: outcome), ticket: ticket)
     }
     private func record(_ ticket: Ticket, phase: String, claimed: Bool, usage: APIModelCorrectionUsage?, unknown: Bool, outcome: Outcome?) -> Record {
-        .init(schemaVersion: 1, scope: "provider_attempt_accounting_not_native_execution", correctionID: ticket.id, taskID: ticket.taskID, threadID: ticket.threadID, turnID: ticket.turnID,
+        .init(schemaVersion: ticket.firstValidation == nil ? 1 : 2, scope: "provider_attempt_accounting_not_native_execution", correctionID: ticket.id, taskID: ticket.taskID, threadID: ticket.threadID, turnID: ticket.turnID,
               phase: phase, secondRequestClaimed: claimed, firstUsage: ticket.firstUsage,
-              secondUsage: usage, secondUsageUnknown: unknown, outcome: outcome)
+              secondUsage: usage, secondUsageUnknown: unknown, outcome: outcome, firstValidation: ticket.firstValidation)
     }
     private struct Handles {
         let parent: Int32

@@ -113,6 +113,70 @@ final class APIModelCorrectionTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: file), before)
         XCTAssertThrowsError(try usage.adding(.init(inputTokens: Int.max, outputTokens: 0, totalTokens: Int.max, cachedInputTokens: 0, reasoningOutputTokens: 0)))
     }
+    func testRecoveredFirstValidationIsDurableBeforeSecondClaimAndRetainedInAllPhases() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("journal"), store = APIModelCorrectionAccounting(directory: directory)
+        let observed = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch,
+            schemaFailures: [.init(toolIndex: 0, constraint: .typeMismatch)], callCount: 2, rejectedCount: 1,
+            envelopeShapeValid: true, unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        let finite = try XCTUnwrap(APIModelCorrectionAccounting.FirstValidation(observed))
+        let ticket = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: usage, firstValidation: finite)
+        let firstFile = directory.appendingPathComponent(ticket.id.uuidString.lowercased() + ".first_received.json")
+        let firstBytes = try Data(contentsOf: firstFile)
+        XCTAssertEqual(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: firstBytes).firstValidation, finite)
+        try store.claimed(ticket); try store.finish(ticket, claimed: true, usage: usage, outcome: .responseValidated)
+        let all = try records(directory)
+        XCTAssertEqual(all.count, 3); XCTAssertTrue(all.allSatisfy { $0.schemaVersion == 2 && $0.firstValidation == finite })
+        XCTAssertEqual(try Data(contentsOf: firstFile), firstBytes)
+        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            let raw = try Data(contentsOf: file), text = String(decoding: raw, as: UTF8.self)
+            XCTAssertLessThanOrEqual(raw.count, 2_048)
+            XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue, 0o400)
+            for forbidden in ["prompt", "arguments", "cmd", "PRIVATE", "schema_path", "wireName", "http"] { XCTAssertFalse(text.contains(forbidden)) }
+        }
+        let forged = APIModelCorrectionAccounting.Ticket(id: ticket.id, taskID: id, threadID: id, turnID: id, firstUsage: usage)
+        XCTAssertThrowsError(try store.claimed(forged), "Dropping observed diagnostic cannot match the original immutable first record")
+    }
+    func testFirstValidationRejectsPrivateFieldsUnknownValuesAndUnboundedCounts() throws {
+        let observed = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch,
+            schemaFailures: [.init(toolIndex: 0, constraint: .typeMismatch)], callCount: 2, rejectedCount: 1,
+            envelopeShapeValid: true, unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        let finite = try XCTUnwrap(APIModelCorrectionAccounting.FirstValidation(observed))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(finite)) as? [String: Any])
+        var variants: [[String: Any]] = []
+        var value = object; value["prompt"] = "PRIVATE_CANARY"; variants.append(value)
+        value = object; value["reason"] = "PRIVATE_CANARY"; variants.append(value)
+        value = object; value["callCount"] = 129; variants.append(value)
+        value = object; value["rejectedCount"] = 3; variants.append(value)
+        value = object; value["schemaFailures"] = Array(repeating: ["toolIndex": 0, "constraint": "type_mismatch"], count: 3); variants.append(value)
+        value = object; value["schemaFailures"] = [["toolIndex": 128, "constraint": "type_mismatch"]]; variants.append(value)
+        value = object; value["schemaFailures"] = [["toolIndex": 0, "constraint": "type_mismatch", "path": "PRIVATE_CANARY"]]; variants.append(value)
+        for variant in variants {
+            XCTAssertThrowsError(try JSONDecoder().decode(APIModelCorrectionAccounting.FirstValidation.self,
+                from: JSONSerialization.data(withJSONObject: variant)))
+        }
+        let invalid = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .invalidJSON, callCount: 129, rejectedCount: 1,
+            envelopeShapeValid: true, unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        XCTAssertNil(APIModelCorrectionAccounting.FirstValidation(invalid))
+    }
+    func testLegacyCorrectionRecordStaysVersionOneAndUnknownRecordFieldsFailClosed() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = APIModelCorrectionAccounting(directory: root.appendingPathComponent("journal"))
+        _ = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: usage)
+        let value = try XCTUnwrap(records(store.directory).first), raw = try JSONEncoder().encode(value)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        XCTAssertEqual(value.schemaVersion, 1); XCTAssertNil(value.firstValidation); XCTAssertNil(object["firstValidation"])
+        object["prompt"] = "PRIVATE_CANARY"
+        XCTAssertThrowsError(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self,
+            from: JSONSerialization.data(withJSONObject: object)))
+        object.removeValue(forKey: "prompt"); object["schemaVersion"] = 2
+        XCTAssertThrowsError(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self,
+            from: JSONSerialization.data(withJSONObject: object)), "Version2 requires its finite projection")
+        object["schemaVersion"] = 1
+        var usage = try XCTUnwrap(object["firstUsage"] as? [String: Any]); usage["prompt"] = "PRIVATE_CANARY"; object["firstUsage"] = usage
+        XCTAssertThrowsError(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self,
+            from: JSONSerialization.data(withJSONObject: object)), "Usage metadata cannot hide private extra fields")
+    }
     func testAccountingRejectsSymlinkDirectoryAncestorUnsafeModeAndNoncanonicalIdentity() throws {
         let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
         let real = root.appendingPathComponent("real")

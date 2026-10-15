@@ -231,6 +231,37 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         let records = try correctionRecords(accounting); XCTAssertEqual(records.count, 3)
         XCTAssertEqual(records.filter { $0.phase == "finished" }.first?.secondUsage?.totalTokens, 28)
         XCTAssertTrue(records.allSatisfy { $0.taskID == task && $0.threadID == thread && $0.turnID == turn })
+        XCTAssertTrue(records.allSatisfy { $0.schemaVersion == 2 })
+        for record in records {
+            let observed = try XCTUnwrap(record.firstValidation)
+            XCTAssertEqual(observed.reason, .schemaMismatch)
+            XCTAssertEqual(observed.callCount, 2); XCTAssertEqual(observed.rejectedCount, 1)
+            XCTAssertEqual(observed.schemaFailures, [.init(toolIndex: 0, constraint: .typeMismatch)])
+        }
+        await server.shutdown()
+    }
+    func testOrdinaryValidReplyCreatesNoCorrectionJournalOrAdditionalRequest() async throws {
+        let recorder = APIRequestRecorder(), credentials = APICredentialCounter(), root = try namingRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounting = root.appendingPathComponent("accounting")
+        let remote = try APILoopbackFixture { request in
+            await recorder.record(request); return self.correctionResponse(request, invalid: false)
+        }
+        defer { remote.stop() }
+        let endpoint = try await remote.start(), p = provider(endpoint)
+        let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: accounting)
+        let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+        try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+        let (bytes, response) = try await URLSession.shared.data(for: correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let completed = try completedResponse(bytes)
+        XCTAssertNil(completed["x_computa_correction"])
+        let requests = await recorder.snapshot(); XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(credentials.counts().reads, 1); XCTAssertEqual(credentials.counts().writes, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: accounting.path))
+        let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
+        XCTAssertEqual(output.first?["arguments"] as? String, "{\"cmd\":\"echo fixture\"}")
         await server.shutdown()
     }
     func testCorrectionPreservesValidSecondReplyWithUnknownUsageWithoutInventingZero() async throws {

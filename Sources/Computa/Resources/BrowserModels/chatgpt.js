@@ -2250,22 +2250,110 @@ function chatGPTStructure(visible) {
   return serialized;
 }
 function chatGPTResponseLoadFailed(visible) {
-  // Match the website's error beside its Retry control. Quoted errors in a
-  // prompt, answer, editor, menu or sidebar cannot become transport failures.
-  const users = chatGPTMessageRoots('user');
-  const content = node => users.some(user => user === node || user.contains(node))
-    || !!node.closest('[data-message-author-role="assistant"], article[data-turn="assistant"], [data-markdown-text-style="assistant-message"], .markdown, pre, code, #prompt-textarea, [contenteditable="true"], textarea, [role="menu"], [role="dialog"], nav, aside');
-  const retries = [...document.querySelectorAll('main button')].filter(node => visible(node) && !content(node)
+  // Abort-only website error evidence from this admitted read. A single small
+  // direct widget can use plain text or nested labels, including in a dialog.
+  // Never widen the search to main or another ancestor, accept an answer, or Retry.
+  const protectedContent = '[data-message-author-role], [data-markdown-text-style], article[data-turn], [data-user-message-bubble], .markdown, pre, code, #prompt-textarea, [contenteditable], textarea, [role="menu"], [role="menubar"], [role="navigation"], [role="complementary"], nav, aside';
+  const retries = [...document.querySelectorAll('main button')].filter(node => visible(node)
     && (node.getAttribute('aria-label') || node.innerText || '').trim() === 'Retry');
-  for (const retry of retries) {
-    for (let region = retry.parentElement, depth = 0; region && depth < 4; region = region.parentElement, depth++) {
-      if (!region.closest('main') || users.some(user => region === user || region.contains(user))
-        || region.querySelector('[data-markdown-text-style="assistant-message"], .markdown')) break;
-      if ([...region.querySelectorAll('span, p, div')].some(node => visible(node) && !content(node)
-        && node.childElementCount === 0 && (node.innerText || node.textContent || '').trim() === 'Load failed')) return true;
-    }
+  if (retries.length !== 1) return false;
+  const retry = retries[0], region = retry.parentElement, main = retry.closest('main');
+  if (retry.disabled || retry.getAttribute('aria-disabled') === 'true' || retry.closest(protectedContent)
+    || !region || !main || region === main || !visible(region)
+    || ['MAIN', 'BODY', 'HTML'].includes(region.tagName) || region.closest('main') !== main
+    || region.childElementCount > 4 || region.querySelectorAll('*').length > 128
+    || region.querySelector(protectedContent + ', input, select, a[href], [role="dialog"], dialog')) return false;
+  const buttons = [...region.querySelectorAll('button')].filter(visible);
+  if (buttons.length !== 1 || buttons[0] !== retry) return false;
+  const interactiveRoles = new Set(['button', 'checkbox', 'combobox', 'grid', 'gridcell', 'link', 'listbox',
+    'menu', 'menubar', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'radiogroup',
+    'scrollbar', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab', 'tablist', 'textbox', 'toolbar',
+    'tree', 'treegrid', 'treeitem', 'navigation', 'complementary']);
+  const nonLabelControl = (node, labelBranch = true) => (node.getAttribute('role') || '').trim().split(/\s+/).some(role => interactiveRoles.has(role))
+    || (labelBranch && node.getAttribute('tabindex') !== null) || node.getAttribute('contenteditable') !== null
+    || ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'DETAILS', 'AUDIO', 'VIDEO', 'IFRAME', 'OBJECT', 'EMBED'].includes(node.tagName)
+    || (['A', 'AREA'].includes(node.tagName) && node.getAttribute('href') !== null)
+    || (node.tagName === 'LABEL' && node.getAttribute('for') !== null);
+  for (let ancestor = region; ancestor; ancestor = ancestor.parentElement) {
+    if (nonLabelControl(ancestor, false)) return false;
+    if (ancestor === main) break;
   }
-  return false;
+  let knownLabels = 0;
+  for (const node of region.childNodes) {
+    if (node === retry || node.nodeType === 8) continue;
+    if (node.nodeType !== 1 && node.nodeType !== 3) return false;
+    if (node.nodeType === 1 && !visible(node)) continue;
+    if (node.nodeType === 1 && [node, ...node.querySelectorAll('*')].some(child => nonLabelControl(child))) return false;
+    if (node.nodeType === 1 && [...node.querySelectorAll('*')].some(child => !visible(child) && (child.textContent || '').trim())) return false;
+    const text = node.textContent || '';
+    if (text.length > 128) return false;
+    const label = text.replace(/\s+/g, ' ').trim();
+    if (!label) continue;
+    if (label !== 'Load failed') return false;
+    knownLabels += 1;
+  }
+  return knownLabels === 1;
+}
+// Diagnostic relationship facts only. This never classifies a response as failed,
+// changes readiness/ownership, clicks Retry or supplies completion evidence.
+function chatGPTResponseNoticeDiagnostic(visible) {
+  const contentSelector = '[data-message-author-role], [data-markdown-text-style], article[data-turn], [data-user-message-bubble], .markdown, pre, code, #prompt-textarea, [contenteditable="true"], textarea';
+  const contentExcluded = node => !!node.closest(contentSelector);
+  const labelExcluded = node => contentExcluded(node) || !!node.closest('[role="menu"], nav, aside')
+    || !!node.querySelector(contentSelector + ', [role="menu"], nav, aside');
+  const excludedAncestor = node => {
+    // An inner dialog cannot hide any enclosing navigation/menu boundary.
+    const blocked = node.closest('[role="menu"], nav, aside');
+    if (blocked) return blocked.getAttribute('role') === 'menu' ? 'menu' : blocked.tagName === 'NAV' ? 'nav' : 'aside';
+    return node.closest('[role="dialog"]') ? 'dialog' : 'none';
+  };
+  const smallWidget = (region, retry, main) => !!region && region !== main
+    && !['MAIN', 'BODY', 'HTML'].includes(region.tagName) && region.childElementCount <= 4
+    && region.closest('main') === main && visible(region)
+    && !region.querySelector(contentSelector + ', input, select, [role="menu"], nav, aside')
+    && [...region.querySelectorAll('button')].filter(visible).length === 1
+    && [...region.querySelectorAll('button')].filter(visible)[0] === retry;
+  const retries = [...document.querySelectorAll('main button')].filter(node => visible(node)
+    && (node.getAttribute('aria-label') || node.innerText || '').trim() === 'Retry').slice(0, 10_001);
+  const observations = retries.slice(0, 2).map(retry => {
+    const excluded = contentExcluded(retry), ancestor = excludedAncestor(retry), main = retry.closest('main');
+    const base = { excludedAncestor: ancestor, contentExcluded: excluded,
+      retryEnabled: !retry.disabled && retry.getAttribute('aria-disabled') !== 'true',
+      noticeRole: 'none', pairing: 'none', sameWidget: false,
+      knownError: 'none', labelStructure: 'none', labelScanTruncated: false };
+    // Payloads and navigation/menu controls cannot become provider-status facts.
+    // Dialog ancestry is observed only; it does not relax response error policy.
+    if (excluded || ['menu', 'nav', 'aside'].includes(ancestor) || !main) return base;
+    let notice = retry.closest('[role="alert"], [role="status"]');
+    if (notice && (!visible(notice) || contentExcluded(notice) || notice.closest('main') !== main)) notice = null;
+    if (notice) {
+      if (notice === main) return base;
+      // Semantic status ancestry alone does not bind two unrelated branches.
+      if (retry.parentElement !== notice || !smallWidget(notice, retry, main)
+        || notice.querySelector('[role="alert"], [role="status"]')) return { ...base, pairing: 'ambiguous' };
+      base.pairing = 'ancestor';
+    } else {
+      const parent = retry.parentElement;
+      if (!smallWidget(parent, retry, main)) return base;
+      const notices = [...parent.querySelectorAll('[role="alert"], [role="status"]')]
+        .filter(node => node.parentElement === parent && visible(node) && !contentExcluded(node));
+      if (notices.length > 1) return { ...base, pairing: 'ambiguous' };
+      if (notices.length !== 1) return base;
+      notice = notices[0]; base.pairing = 'shared_parent';
+    }
+    const candidates = [notice, ...notice.querySelectorAll('span, p, div')];
+    const scanned = candidates.slice(0, 128);
+    const matches = scanned.filter(node => visible(node) && !labelExcluded(node)
+      && (node.textContent || '').length <= 128 && (node.textContent || '').replace(/\s+/g, ' ').trim() === 'Load failed');
+    const physical = matches.filter(node => !matches.some(other => other !== node && node.contains(other)));
+    const truncated = candidates.length > 128;
+    return { ...base, noticeRole: notice.getAttribute('role'), sameWidget: true,
+      knownError: !truncated && physical.length ? 'load_failed' : 'unknown',
+      labelStructure: truncated || !physical.length ? 'none' : physical.length > 1 ? 'multiple'
+        : physical[0].childElementCount ? 'nested' : 'leaf', labelScanTruncated: truncated };
+  });
+  return { kind: 'chatgpt_response_notice_v1', retryCount: Math.min(10_000, retries.length),
+    observationsTruncated: retries.length > 2, observations };
 }
 function chatGPTResourceTimingDiagnostic(phase) {
   // Resource entries are observations of ended fetches, not upload sizes or
@@ -2379,6 +2467,7 @@ function chatGPTFailedPageDiagnostic() {
   return { kind: 'chatgpt_failed_page_v1', route,
     outboundUTF16Count: sizeCurrent ? size.utf16Count : null,
     outboundUTF8Count: sizeCurrent ? size.utf8Count : null,
+    responseNoticeDiagnostic: chatGPTResponseNoticeDiagnostic(visible),
     errorCategory: loadFailed ? 'load_failed' : signIn ? 'sign_in_required'
       : alertNodes.length || statusNodes.length ? 'unrecognized_notice' : 'none',
     modernUsers: roots('[data-markdown-text-style="user-message"]'),
@@ -2452,6 +2541,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   if (expectedConversationIdentity && conversationIdentity !== expectedConversationIdentity) return { error: "conversation_changed", detail: "conversation_identity" };
   const enabled = node => visible(node) && !node.disabled && node.getAttribute("aria-disabled") !== "true";
   const responseLoadFailed = action === 'inspect' && chatGPTResponseLoadFailed(visible);
+  const responseNoticeDiagnostic = action === 'inspect' ? chatGPTResponseNoticeDiagnostic(visible) : null;
   const find = selectors => selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(visible);
   const labelled = (nodes, expression) => [...nodes].filter(visible).find(node => expression.test(
     [node.getAttribute("aria-label"), node.getAttribute("data-testid"), node.getAttribute("title"), node.innerText].filter(Boolean).join(" ").trim()));
@@ -2544,7 +2634,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     : find(['button[aria-label="Temporary chat"]']));
   const state = { modelEvidence: modelState.evidence, url: document.URL, temporary, temporaryActionAvailable, conversationIdentity, composer: !!composer, responseCount: answers.length, userCount,
     firstUserIdentity, firstUserFingerprint, firstUserMarkerVerified,
-    busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
+    busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, responseNoticeDiagnostic, text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
   if (action === "inspect") {
     const signIn = !composer && !!labelled(document.querySelectorAll('a, button'), /^(?:Log in|Sign in)(?:\s|$)/i);
     const resourceTimingDiagnostic = answerComplete ? chatGPTResourceTimingDiagnostic('completion') : null;

@@ -6,6 +6,61 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testResponseNoticeProjectionAcceptsOnlyFinitePairedStatusFacts() throws {
+        let observation: [String: Any] = ["excludedAncestor": "dialog", "contentExcluded": false,
+            "retryEnabled": true, "noticeRole": "status", "pairing": "shared_parent", "sameWidget": true,
+            "knownError": "load_failed", "labelStructure": "nested", "labelScanTruncated": false]
+        let valid: [String: Any] = ["kind": "chatgpt_response_notice_v1", "retryCount": 1,
+            "observationsTruncated": false, "observations": [observation]]
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedResponseNoticeDiagnostic(valid))
+        let projected = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any])
+        XCTAssertEqual(projected["kind"] as? String, "chatgpt_response_notice_v1")
+        XCTAssertFalse(safe.contains("https")); XCTAssertFalse(safe.contains("PRIVATE"))
+        var extras = valid; extras["noticeText"] = "PRIVATE_NOTICE_CANARY"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedResponseNoticeDiagnostic(extras))
+        var privateObservation = observation; privateObservation["url"] = "https://PRIVATE_URL_CANARY"
+        var privatePayload = valid; privatePayload["observations"] = [privateObservation]
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedResponseNoticeDiagnostic(privatePayload))
+        for (key, value): (String, Any) in [("excludedAncestor", "PRIVATE_ANCESTOR"), ("excludedAncestor", "menu"),
+            ("excludedAncestor", "nav"), ("excludedAncestor", "aside"), ("noticeRole", "dialog"),
+            ("pairing", "PRIVATE_RELATION"), ("sameWidget", false), ("knownError", "PRIVATE_ERROR"),
+            ("labelStructure", "PRIVATE_MARKUP"), ("contentExcluded", true), ("retryEnabled", 1),
+            ("labelScanTruncated", true)] {
+            var badObservation = observation; badObservation[key] = value
+            var bad = valid; bad["observations"] = [badObservation]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedResponseNoticeDiagnostic(bad), key)
+        }
+    }
+
+    func testResponseNoticeCountsAndTruncationCannotImplyMissingObservations() throws {
+        let absent: [String: Any] = ["excludedAncestor": "none", "contentExcluded": false,
+            "retryEnabled": true, "noticeRole": "none", "pairing": "none", "sameWidget": false,
+            "knownError": "none", "labelStructure": "none", "labelScanTruncated": false]
+        for count in [0, 1, 2, 3, 10_000] {
+            let payload: [String: Any] = ["kind": "chatgpt_response_notice_v1", "retryCount": count,
+                "observationsTruncated": count > 2, "observations": Array(repeating: absent, count: min(count, 2))]
+            XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedResponseNoticeDiagnostic(payload))
+        }
+        for badCount: Any in [true, -1, 10_001, 1.5, Double.infinity, "PRIVATE_COUNT"] {
+            let bad: [String: Any] = ["kind": "chatgpt_response_notice_v1", "retryCount": badCount,
+                "observationsTruncated": false, "observations": []]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedResponseNoticeDiagnostic(bad))
+        }
+        let missing: [String: Any] = ["kind": "chatgpt_response_notice_v1", "retryCount": 1,
+            "observationsTruncated": false, "observations": []]
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedResponseNoticeDiagnostic(missing))
+    }
+
+    func testResponseNoticeDoesNotAlterExistingProgressOrResponseErrorEvidence() throws {
+        let input: [String: Any] = ["responseCount": 0, "userCount": 1, "busy": false,
+            "answerComplete": false, "responseLoadFailed": false, "text": "",
+            "responseNoticeDiagnostic": ["PRIVATE_ARBITRARY_FIELD": "PRIVATE_CONTENT"]]
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedResponseProgressInspection(input))
+        XCTAssertEqual(safe["responseLoadFailed"] as? Bool, false)
+        XCTAssertNil(safe["responseNoticeDiagnostic"])
+        XCTAssertFalse(String(describing: safe).contains("PRIVATE"))
+    }
+
     func testNativeInspectorHandoffRequiresReadyChatGPTAndFinishRevokesExactView() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt)); defer { fixture.shutdown() }
         let arm = try InspectorArmFixture(); defer { arm.remove() }; try arm.arm()
@@ -499,6 +554,88 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await waitForState("ready", fixture.transport, token: nextToken)
             _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": nextToken])
         }
+    }
+
+    func testChatGPTGenericLoadFailureAbortsOnceWithDirectOrNestedText() async throws {
+        for alreadyBound in [false, true] {
+            for nestedLabel in [false, true] {
+                let (fixture, token, view) = try await boundInspectionFixture(
+                    prompt: "Detect a small generic website error widget", bindFirstRead: alreadyBound)
+                defer { fixture.shutdown() }
+                _ = try await evaluate(view, """
+                    const main = document.createElement('main');
+                    const container = document.createElement('div');
+                    const error = document.createElement('div');
+                    if (\(nestedLabel ? "true" : "false")) {
+                        const label = document.createElement('span'); label.append(document.createTextNode('Load '));
+                        const nested = document.createElement('strong'); nested.textContent = 'failed';
+                        label.append(nested); error.append(label);
+                    } else error.append(document.createTextNode('Load failed'));
+                    const retry = document.createElement('button'); retry.textContent = 'Retry';
+                    window.fixtureRetryClicks = 0;
+                    retry.addEventListener('click', () => window.fixtureRetryClicks++);
+                    error.append(retry); container.append(error); main.append(container); document.body.append(main);
+                    return error.getAttribute('role') === null;
+                    """)
+                var evaluations: [String] = []
+                fixture.transport.setBeforePageResultValidationForTesting { evaluations.append($0) }
+                let began = ContinuousClock.now
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("A direct generic Load failed widget must abort before the response deadline")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFailed(.chatgpt)) }
+                XCTAssertLessThan(ContinuousClock.now - began, .seconds(3))
+                XCTAssertTrue(evaluations.contains("inspect"), "The error must come from an admitted current page read")
+                let evaluationsAtFailure = evaluations
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("A terminal website error must remain terminal")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFailed(.chatgpt)) }
+                XCTAssertEqual(evaluations, evaluationsAtFailure, "A repeated poll must not evaluate the adapter again")
+                fixture.transport.setBeforePageResultValidationForTesting(nil)
+                let failure = EmbeddedWebModelTransport.Failure.responseFailed(.chatgpt)
+                XCTAssertEqual(failure.diagnosticCode, "website_response_failed")
+                XCTAssertEqual(failure.requiredAction, "inspect_website")
+                XCTAssertFalse(failure.blocksProviderUntilRefresh)
+                let retryClicks = try await evaluate(view, "return window.fixtureRetryClicks;")
+                XCTAssertEqual(retryClicks as? Int, 0)
+                try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+                _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                try await assertHumanTabIntact(fixture)
+                let next = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+                let nextToken = try XCTUnwrap(next["sessionToken"] as? String)
+                _ = try await waitForState("ready", fixture.transport, token: nextToken)
+                _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": nextToken])
+            }
+        }
+    }
+
+    func testChatGPTModalLoadFailureCannotOverrideCurrentModelVerification() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "Keep current model proof ahead of a modal error")
+        defer { fixture.shutdown() }
+        _ = try await evaluate(view, """
+            const main = document.createElement('main');
+            const dialog = document.createElement('div'); dialog.setAttribute('role', 'dialog');
+            const error = document.createElement('div'); error.append(document.createTextNode('Load failed'));
+            const retry = document.createElement('button'); retry.textContent = 'Retry';
+            window.fixtureRetryClicks = 0;
+            retry.addEventListener('click', () => window.fixtureRetryClicks++);
+            error.append(retry); dialog.append(error); main.append(dialog); document.body.append(main);
+            return true;
+            """)
+        var evaluations: [String] = []
+        fixture.transport.setBeforePageResultValidationForTesting { evaluations.append($0) }
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("An unassociated modal must keep the earlier model guard closed")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+        XCTAssertTrue(evaluations.contains("inspect"))
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let retryClicks = try await evaluate(view, "return window.fixtureRetryClicks;")
+        XCTAssertEqual(retryClicks as? Int, 0)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
     }
 
     func testBoundInspectionTimeoutGetsOneFreshReadWithoutResending() async throws {

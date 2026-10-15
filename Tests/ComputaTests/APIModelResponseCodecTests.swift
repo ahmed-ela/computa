@@ -937,6 +937,28 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertFalse(encoded.contains("private thinking"))
         XCTAssertThrowsError(try APIModelResponseCodec.decode(.init(body: incomplete, contentType: "text/event-stream"), request: request()))
     }
+    func testSchemaValidCommandWithShellSyntaxErrorRemainsVerbatim() throws {
+        let command = #"sed -n '1,200p' "/fixture/helper.py"}"#
+        let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["cmd": command], options: [.sortedKeys]), as: UTF8.self)
+        let prepared = try request(["tools": [["type": "function", "name": "exec_fixture", "parameters": [
+            "type": "object", "properties": ["cmd": ["type": "string"]], "required": ["cmd"], "additionalProperties": false]]]])
+        let reply = try decode(["role": "assistant", "tool_calls": [["id": "literal-command", "type": "function",
+            "function": ["name": "computa_tool_0", "arguments": arguments]]]], finish: "tool_calls", request: prepared)
+        let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(item["arguments"] as? String, arguments)
+        let encoded = String(decoding: try APIModelResponseCodec.encode(reply, stream: true), as: UTF8.self)
+        let events = try encoded.components(separatedBy: "\n\n").compactMap { event -> [String: Any]? in
+            guard let line = event.components(separatedBy: "\n").first(where: { $0.hasPrefix("data: ") }) else { return nil }
+            let payload = String(line.dropFirst(6)); if payload == "[DONE]" { return nil }
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
+        }
+        XCTAssertEqual(events.filter { $0["type"] as? String == "response.function_call_arguments.delta" }
+            .compactMap { $0["delta"] as? String }.joined(), arguments)
+        let done = try XCTUnwrap(events.first { $0["type"] as? String == "response.function_call_arguments.done" })
+        XCTAssertEqual(done["arguments"] as? String, arguments)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any])
+        XCTAssertEqual(decoded["cmd"] as? String, command, "Schema validation does not repair or reinterpret shell strings")
+    }
     func testFinalTextBoundaryPreservesJSONEscapesAndEmitsOnlyFiniteMetadata() throws {
         let expected = "RAW-RESPONSE\u{2011}SENTINEL e\u{301}\n"
         let prepared = try request(["input": [["role": "user", "content": "PRIVATE_REQUEST_SENTINEL"]]])

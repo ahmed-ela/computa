@@ -409,8 +409,11 @@ actor APIModelServer {
             }
             let accounting = APIModelCorrectionAccounting(directory: directory)
             let ticket: APIModelCorrectionAccounting.Ticket
+            let finiteFirstValidation: APIModelCorrectionAccounting.FirstValidation? = firstDiagnostic.flatMap {
+                Self.finiteArgumentValidation($0) ? APIModelCorrectionAccounting.FirstValidation($0) : nil
+            }
             do { ticket = try accounting.begin(taskID: taskID, threadID: context.identity.threadID,
-                turnID: context.identity.turnID, firstUsage: firstUsage) }
+                turnID: context.identity.turnID, firstUsage: firstUsage, firstValidation: finiteFirstValidation) }
             catch {
                 Self.responseLog.error("argumentCorrection accounting_unavailable; no corrective request claimed")
                 throw StagedFailure(stage: .decode, cause: APIModelResponseCodec.Failure.invalidArguments,
@@ -534,7 +537,7 @@ actor APIModelServer {
         // prepare/transport failures and the public error schema remain unchanged.
         if stage == .decode, error as? APIModelResponseCodec.Failure == .invalidArguments, let argumentDiagnostic,
            (1...2).contains(argumentDiagnostic.attempt),
-           argumentDiagnostic.validation.map({ (0...128).contains($0.callCount) && (1...128).contains($0.rejectedCount) && $0.rejectedCount <= $0.callCount }) ?? true,
+           argumentDiagnostic.validation.map(finiteArgumentValidation) ?? true,
            let bytes = try? JSONEncoder().encode(argumentDiagnostic),
            let finite = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
             record["argument_validation"] = finite
@@ -544,6 +547,14 @@ actor APIModelServer {
         guard let data = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
               data.count <= (record["argument_validation"] == nil ? 256 : 1_024) else { return nil }
         return String(decoding: data, as: UTF8.self)
+    }
+    /// Shared by terminal failure logs and durable recovered-response metadata.
+    /// Values and paths are absent from this type; malformed observations cannot
+    /// affect admission, correction eligibility, or the request budget.
+    private static func finiteArgumentValidation(_ value: APIModelResponseCodec.ArgumentValidationDiagnostic) -> Bool {
+        (0...128).contains(value.callCount) && (1...128).contains(value.rejectedCount)
+            && value.rejectedCount <= value.callCount && (value.schemaFailures?.count ?? 0) <= 2
+            && (value.schemaFailures?.allSatisfy { (0..<128).contains($0.toolIndex) } ?? true)
     }
     struct HTTPRequest: Sendable { let method: String; let path: String; let headers: [String: String]; let body: Data }
     static func parseRequest(_ data: Data) throws -> HTTPRequest? {

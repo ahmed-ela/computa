@@ -33,9 +33,146 @@ preserved; it was not counted as a pass.
 
 Signed Computa 0.7.0 (119), compiled source `6b11a6fd`, built successfully.
 Its 613-input source freeze, exact resources and signatures were verified;
-the bundled engine is unchanged. Installed build118 remains running so the
-ordinary failed ChatGPT tab can be inspected if access is approved. No
-candidate119 installed-product or provider pass is claimed here.
+the bundled engine is unchanged. Build119 was installed on October 15 after
+normal shutdown of build118. All 54 installed files match the signed candidate,
+and its deep strict signature verifies. The new process is PID20978, started
+at 14:21:58 local time. Provider and cleanup behavior still require fresh live
+qualification; the installation alone is not a provider pass.
+
+## October 15 ordinary ChatGPT diagnostic
+
+With the user's approved, temporary Inspector access, the retained ordinary
+build118 ChatGPT tab was observed before any retry. The original failed Send's
+request was no longer in the timing buffer. A WebSocket connection-lost error
+was visible, but could not be attributed to that Send and is not its established
+cause.
+
+One controlled Retry restored the synthetic prompt into the composer rather
+than submitting it. One subsequent native Send completed with the exact marker
+and a visible Response complete state. Inspector recorded the conversation POST
+as HTTP200, 12.10 seconds and 5.59KB, followed by a successful conversation GET.
+No headers, bodies, credentials or HAR were retained. This demonstrates a
+successful ordinary-browser response, not repaired harness reliability or an
+explanation of the earlier failure. The original failed result remains failed.
+
+The remote Inspector window was closed, Safari's developer-features setting
+restored off, the per-tab inspection grant revoked, and the exact synthetic tab
+closed. The user's Safari Start Page was preserved. No challenge was completed.
+
+## Build120 repair candidate (not yet installed)
+
+The candidate adds one passive, native-only settlement window to the initial
+untouched Gemini navigation. A committed but unfinished Google checkpoint can
+finish under a single three-second deadline, clipped by the original preparation
+deadline. It does not inspect the foreign document, refresh, submit, solve a
+challenge or bypass an existing saved gate. Settled, failed and previously
+Gemini-committed documents retain the ordinary blocker. This is a controlled
+navigation experiment, not an established permanent CAPTCHA fix.
+
+ChatGPT now recognizes an exact Load failed label beside one enabled Retry in a
+small direct widget, including plain text and nested inert labels inside dialogs.
+It no longer requires the label to be a leaf span. This aborts an already failed
+owned response without waiting for the full response deadline. It never clicks
+Retry or accepts an answer. Quoted content, editable regions, custom ARIA controls,
+navigation/sidebar/menu ancestry, broad or split containers and unknown text
+cannot supply that failure. Repeated terminal polls do not evaluate the page again.
+An unrelated modal still triggers the existing model-verification rejection
+before error classification; the abort rule never bypasses that guard.
+
+Separately, bounded, finite Retry/status-widget observations supplement the
+existing response-progress diagnostic. They contain no page text, URL, prompt or
+reply and grant no ownership, response acceptance or retry authority.
+API correction journals additionally retain a
+finite first-validation reason and counts, preserving legacy schema1 when the
+new projection is absent. No command or argument is normalized or repaired.
+
+A fresh ordinary build119 ChatGPT short-message control completed with its exact
+marker. A separate native chunked-paste experiment visibly failed with Load failed,
+but its retained user text did not begin with the expected marker. Its actual
+transmitted length was not measured, so it is **not** a valid same-length control
+and does not establish a message-size threshold. The failed observation and its
+qualification correction are retained separately. Source inspection found no
+production pretty-print encoder; whitespace compaction may save nothing on the
+actual harness request and is not adopted as a speculative failure fix.
+
+A nonpersistent local WebKit control on macOS26.5.1 uploaded strings, Uint8Arrays
+and Blobs at both 32 and 70,000 bytes with exact server hashes. Direct
+ReadableStream uploads with duplex half and keepalive false failed with
+NotSupportedError before any POST. This is a platform capability result, not the
+ChatGPT root cause: the retained October13 failed request used a 69,917-byte
+string body with keepalive false, and its Blob control also failed. The current
+build119 website request shape remains unmeasured. No stream workaround, private
+WebKit preference, authentication change or network setting was adopted.
+
+The full native selection covered 82 API, 172 transport and 15 initial-navigation
+tests. Its only failure was a new test incorrectly expecting no document-binding
+context after an ordinary adapter read; the corrected test verifies the exact
+generation, zero/empty proof fields, absent readiness evidence and rejected Send.
+All 18 targeted tests then passed. The first new real-WebKit error fixture also
+incorrectly expected a modal to bypass model verification. A test-only correction
+separates generic-widget success from the modal guard's rejection. Original failed
+logs remain preserved. The final 21-test native run passed all 15 navigation tests
+and six focused response-error/diagnostic tests, including direct/nested labels,
+bound/unbound ownership, zero Retry clicks and no second terminal evaluation.
+The final adapter run passed 289 tests and 8,017 assertions with unchanged inputs.
+These are regression results; build120 still requires installation and live
+provider qualification. No earlier failed live receipt was regraded.
+
+## Build119 fresh provider observations
+
+The first fresh, unarmed normal ChatGPT Instant health check failed after
+304.996 seconds with `provider_timeout`, zero tools and zero completed
+inferences. The exact submission, selected model and ownership were verified,
+but the cached observation stayed at one user, zero responses and zero answer
+bytes. Automatic physical website disposal was saved 63 milliseconds after
+native engine completion; this is disposal evidence, not a qualified inference.
+
+The finite abort diagnostic found a Retry control inside an excluded
+menu/dialog/navigation region and a separate unrecognized status. Their shared
+widget and actual error literal are not established. Neither broadening the
+error classifier nor blaming the network is justified by those fields alone.
+No ended conversation timing entry was retained; absence is inconclusive.
+
+A separate cold ordinary Gemini tab loaded the canonical `/app` page normally.
+The existing prompt-free owned recovery then verified discovery and disposal,
+clearing the exact previously saved checkpoint. Finite before/after records
+link the recovery to that checkpoint. No challenge, refresh loop or model task
+was performed by this recovery observation. It demonstrates recovery at that
+moment, not permanent CAPTCHA prevention.
+
+The subsequent fresh build119 trials retained the original strict contracts:
+
+| Case | Native duration | Outcome |
+| --- | ---: | --- |
+| Hosted GPT-OSS browser | 4.828 seconds | Strict clean; seven successful calls, exact reference/result and explicit close |
+| Hosted GPT-OSS code/terminal/browser | 26.521 seconds | Functional patch, four unchanged tests, helper CLI and browser result passed; strict failure after two shell syntax errors |
+| Independent GPT-OSS automatic-cleanup probe | 2.595 seconds | Two browser calls and no model close; automatic host disposal corroborated separately |
+| Gemini 3.8 Flash browser | 55.378 seconds | Strict clean; six tools, seven verified website inferences and causal final website closure |
+| Gemini fresh code session | 0.575 seconds | Verification block before any tool or verified submission; code and tests untouched |
+
+The GPT-OSS code run generated two command strings with a stray closing brace;
+zsh returned a parse error each time. The model corrected them and completed the
+task. Separately, the adapter accepted one bounded corrective inference for
+invalid tool arguments; its exact initial validation defect was not retained.
+These are distinct failures. Neither successful repair nor final file/test
+verification regrades that strict receipt. Both remaining GPT-OSS repeat cases
+are held. V36 has two strict attempts, one clean and one failed, plus the
+independent host probe.
+
+All three V36 host receipts and the Gemini browser receipt were settled, with
+matching explicit or automatic provenance, preserved human control tab and a
+later completed app observation. The live checks do not independently expose
+the private runtime-generation UUID or measure first terminal publication;
+the native delayed-disposal tests cover that ordering barrier. Automatic
+cleanup supplies no model-close or answer-correctness credit.
+
+V37 Gemini has two attempts: one clean browser task and one verification-blocked
+code session. The block returned despite an absent checkpoint immediately before
+the second Send. This repeats the earlier successful-session/blocked-fresh-session
+pattern; the triggering cause remains under investigation. No challenge was
+completed and no blocked task was replayed. Both fixture servers stopped with
+exit zero, final stop events and absent processes/listeners; synthetic source,
+tests and failed evidence remain retained.
 
 ## Build118 V34 and V35 outcomes
 
