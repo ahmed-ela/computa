@@ -1,5 +1,49 @@
 # Embedded website provider qualification
 
+## Candidate144: terminal and file handoff clarification
+
+The closing website handoff already explains how Computa executes browser
+requests, while terminal/file relay guidance appeared only before the complete
+request body. Build144 adds a compact closing clarification: the website writes
+the permitted JSON request, and Computa runs it locally and returns matching
+output before any execution claim. It is present only for currently offered
+standard command/session tools or the custom patch tool. This addresses a
+framing asymmetry; its effect on the observed model refusal remains unproven.
+
+All 103 instruction/codec tests passed with unchanged inputs. Checks cover
+current tool kinds, withdrawn tools in retained history, fresh continuation
+handoffs, unchanged refusal and tool-choice enforcement, and the exact expanded
+prompt boundary. The parser and hard prompt limit are unchanged. Canonical
+version validation passed for 0.7.0 (144). Installed live qualification remains
+pending, with four fresh strict tasks planned in code/browser/code/browser order.
+No failed143 task is replayed or regraded.
+
+## Installed143: browser task passed; code task declined without tools
+
+Signed 0.7.0 (143), code source `37a6664272adfb729bdcfb8acc5bec6f683a0375`,
+passed independent build and installed verification: all 55 bundle files and
+51 resources matched, with the Gemini diagnostic compiler flag off.
+
+Its fresh normal ChatGPT Chat GPT-6/Instant browser task qualified in 154.537
+seconds. Six native calls opened, read, filled, submitted, read the result and
+explicitly closed the task tab without errors or retries. The final departure
+time, gate and receipt matched the single accepted synthetic form submission.
+Seven distinct website sessions each verified the submission, completion and
+release, with saved closed cleanup receipts and final model/product proofs.
+The blank human control tab remained open. Independent review confirmed the
+raw exact-turn evidence and result correlation. This qualifies this task; the
+receipts do not identify which Copy association branch accepted each answer.
+
+The subsequent fresh code/terminal/browser task completed after 17.782 seconds
+with zero tools. ChatGPT declined the external relay and truthfully reported
+that it had not inspected files, patched code, run tests or used the browser.
+Its single website inference verified and closed successfully, but the task
+failed qualification. The helper, protected tests and unused round-two fixtures
+remain byte-identical to their seeds. The matrix stopped, round two stayed held,
+and the owned server stopped with its PID absent and port refusing connections.
+The footer repair did not establish reliable code-task handoff or broader
+provider reliability. Earlier failures remain unchanged.
+
 ## Candidate143: current paired-turn answer footer
 
 The current public ChatGPT client places the user, assistant and assistant

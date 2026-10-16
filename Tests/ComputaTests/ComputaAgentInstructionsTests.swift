@@ -531,7 +531,37 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(handoff.hasSuffix("Exact currently offered local function names: \(published)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertTrue(handoff.contains("optional tool_calls.commentary"))
             XCTAssertTrue(handoff.contains("Send it alongside next calls, never outside"))
-            XCTAssertLessThan(handoff.utf8.count, 2_750, "The response handoff, including completion and progress guidance, has a bounded budget independent of history length")
+            XCTAssertLessThan(handoff.utf8.count, 3_000, "The handoff, including the compact current-terminal clarification, stays bounded independently of history length")
+        }
+    }
+
+    func testTerminalFileHandoffUsesOnlyExactCurrentlyOfferedToolKinds() throws {
+        let marker = "The website need not access local files or run a shell."
+        let cases: [(names: [String], custom: Set<String>, expected: Bool)] = [
+            (["exec_command"], [], true),
+            (["relay.exec_command", "relay.write_stdin"], [], true),
+            (["nested.relay.write_stdin"], [], true),
+            (["relay.apply_patch"], ["relay.apply_patch"], true),
+            (["relay.browser_read", "relay.apply_patch"], ["relay.apply_patch"], true),
+            ([], [], false),
+            (["relay.browser_open", "relay.browser_read"], [], false),
+            (["computer_v2_read_page"], [], false),
+            (["relay.exec_command_notes", "relay.write_stdin_v2", "relay.apply_patch_notes"], [], false),
+            (["relay.exec_command", "relay.write_stdin"], ["relay.exec_command", "relay.write_stdin"], false),
+            (["relay.apply_patch"], [], false),
+        ]
+        for item in cases {
+            let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: item.names, customToolNames: item.custom)
+            XCTAssertEqual(handoff.contains(marker), item.expected, item.names.joined(separator: ", "))
+            XCTAssertTrue(handoff.contains("necessary work allowed by tool_choice"))
+            XCTAssertTrue(handoff.contains("clarification, verified completion, limitation or governing-rule refusal"))
+            XCTAssertTrue(handoff.contains("No tools means no tool call"))
+            if item.expected {
+                let start = try XCTUnwrap(handoff.range(of: marker))
+                let end = try XCTUnwrap(handoff.range(of: "Computa validates names", range: start.upperBound..<handoff.endIndex))
+                XCTAssertLessThan(handoff[start.lowerBound..<end.lowerBound].utf8.count, 220)
+                XCTAssertTrue(handoff[start.lowerBound..<end.lowerBound].contains("matching output before any execution claim"))
+            }
         }
     }
 

@@ -536,6 +536,14 @@ enum ComputaAgentInstructions {
         including URLs on localhost. Write the permitted action request using
         an offered exact browser name and schema, then use its matching outputs.
         """ : ""
+        let terminalHandoff = offeredToolNames.contains {
+            let name = String($0.split(separator: ".").last ?? "")
+            return customToolNames.contains($0) ? name == "apply_patch" : ["exec_command", "write_stdin"].contains(name)
+        } ? """
+        The website need not access local files or run a shell.
+        Compose the permitted command or file action as JSON; Computa runs it
+        locally and returns matching output before any execution claim.
+        """ : ""
         let customContract = customToolNames.isEmpty ? "" : """
         Custom tools accept literal string input, not JSON object arguments.
         For those names, use {"name":"exact_custom_tool_name","input":"literal input"}.
@@ -551,6 +559,7 @@ enum ComputaAgentInstructions {
         For necessary work allowed by tool_choice, your governing rules and the user's
         scope, return tool_calls with offered exact current names and schemas.
         \(browserHandoff)
+        \(terminalHandoff)
         Computa validates names, arguments, local permissions and
         approvals before execution, then supplies real matching function_call_output
         or custom_tool_call_output.

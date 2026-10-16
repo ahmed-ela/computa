@@ -21,24 +21,29 @@ final class WebModelResponseCodecTests: XCTestCase {
     }
 
     func testSelectedResponseFormatCountsTowardFinalExpandedPromptLimit() throws {
+        let terminal: [String: Any] = ["type": "function", "name": "exec_command",
+            "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]
+        let patch: [String: Any] = ["type": "custom", "name": "apply_patch"]
         for model in ["browser/chatgpt", "browser/claude"] {
-            func body(inputCount: Int) throws -> Data {
-                try JSONSerialization.data(withJSONObject: [
-                    "model": model, "input": String(repeating: "x", count: inputCount), "tools": [function],
-                ])
-            }
-            let probe = try WebModelResponseCodec.prepareRequest(body(inputCount: 1))
-            let inputCount = 1 + WebModelResponseCodec.maximumPromptBytes - probe.prompt.utf8.count
-            let boundaryBody = try body(inputCount: inputCount)
-            let boundary = try WebModelResponseCodec.prepareRequest(boundaryBody)
-            XCTAssertEqual(boundary.prompt.utf8.count, WebModelResponseCodec.maximumPromptBytes, model)
-            try assertContiguousRequestValues(boundaryBody, in: boundary)
-            XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(body(inputCount: inputCount + 1))) { error in
-                guard case let .promptTooLarge(actual, maximum) = error as? WebModelResponseCodec.Failure else {
-                    return XCTFail("Expected the complete selected-format prompt limit for \(model)")
+            for tools in [[function], [terminal], [patch]] {
+                func body(inputCount: Int) throws -> Data {
+                    try JSONSerialization.data(withJSONObject: [
+                        "model": model, "input": String(repeating: "x", count: inputCount), "tools": tools,
+                    ])
                 }
-                XCTAssertEqual(actual, WebModelResponseCodec.maximumPromptBytes + 1, model)
-                XCTAssertEqual(maximum, WebModelResponseCodec.maximumPromptBytes, model)
+                let probe = try WebModelResponseCodec.prepareRequest(body(inputCount: 1))
+                let inputCount = 1 + WebModelResponseCodec.maximumPromptBytes - probe.prompt.utf8.count
+                let boundaryBody = try body(inputCount: inputCount)
+                let boundary = try WebModelResponseCodec.prepareRequest(boundaryBody)
+                XCTAssertEqual(boundary.prompt.utf8.count, WebModelResponseCodec.maximumPromptBytes, model)
+                try assertContiguousRequestValues(boundaryBody, in: boundary)
+                XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(body(inputCount: inputCount + 1))) { error in
+                    guard case let .promptTooLarge(actual, maximum) = error as? WebModelResponseCodec.Failure else {
+                        return XCTFail("Expected the complete selected-format prompt limit for \(model)")
+                    }
+                    XCTAssertEqual(actual, WebModelResponseCodec.maximumPromptBytes + 1, model)
+                    XCTAssertEqual(maximum, WebModelResponseCodec.maximumPromptBytes, model)
+                }
             }
         }
     }
@@ -749,6 +754,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertTrue(prepared.runtimeInstructions.contains("You retain your identity and the rules governing"))
         XCTAssertFalse(prepared.runtimeInstructions.contains("You are Computa"), "The outer transport context must not assign the website model another identity")
         XCTAssertTrue(handoff.contains("Write JSON for Computa's external execution relay"))
+        XCTAssertTrue(handoff.contains("The website need not access local files or run a shell."))
         XCTAssertTrue(handoff.contains("The website does not\nexecute these calls"))
         XCTAssertTrue(handoff.contains("necessary work allowed by tool_choice"))
         XCTAssertTrue(handoff.contains("Use a message for a general or self-contained question"))
@@ -757,6 +763,14 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertTrue(handoff.contains("Their reply-format constraints\napply to that value; this transport still requires one JSON envelope"))
         XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"The recorded result can be explained without another command."}"#, request: prepared, requireEnvelope: true),
             .message("The recorded result can be explained without another command."))
+        XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"functions.exec_command","arguments":{"cmd":"pwd"}}]}"#, request: prepared, requireEnvelope: true)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+        }
+        var automaticObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any])
+        automaticObject["tool_choice"] = "auto"
+        let automatic = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: automaticObject))
+        XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"message","text":"My governing rules prevent that action."}"#,
+            request: automatic, requireEnvelope: true), .message("My governing rules prevent that action."))
     }
 
     func testLongHistoryAndResultOnlyContinuationReceiveFreshCurrentContract() throws {
@@ -792,6 +806,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             for suffix in [completeSuffix, continuationSuffix] {
                 XCTAssertTrue(suffix.contains("Return exactly one fenced JSON code block."))
                 let handoff = try XCTUnwrap(suffix.range(of: "COMPUTA_LOCAL_RESPONSE_HANDOFF:"))
+                let terminal = try XCTUnwrap(suffix.range(of: "The website need not access local files or run a shell."))
+                XCTAssertGreaterThan(terminal.lowerBound, handoff.lowerBound)
                 let completion = try XCTUnwrap(suffix.range(of: ComputaAgentInstructions.taskCompletion))
                 XCTAssertGreaterThan(completion.lowerBound, handoff.lowerBound)
                 XCTAssertEqual(suffix.components(separatedBy: ComputaAgentInstructions.taskCompletion).count, 2)
@@ -799,6 +815,13 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertFalse(prepared.runtimeInstructions.contains("Historical message"))
             XCTAssertEqual(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"pwd"}}]}"#, request: next),
                            .toolCalls([.init(name: "exec_command", argumentsJSON: #"{"cmd":"pwd"}"#, namespace: nil)]))
+            let withdrawn = try JSONSerialization.data(withJSONObject: ["model": model, "input": history, "tools": []])
+            let withoutCurrentTools = try WebModelResponseCodec.prepareRequest(withdrawn)
+            let withdrawnSuffix = try assertContiguousRequestValues(withdrawn, in: withoutCurrentTools)
+            XCTAssertFalse(withdrawnSuffix.contains("The website need not access local files or run a shell."),
+                "Historical commands and refusal text cannot activate the current terminal handoff")
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"pwd"}}]}"#,
+                request: withoutCurrentTools, requireEnvelope: true))
         }
     }
 
