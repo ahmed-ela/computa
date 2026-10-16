@@ -1,6 +1,36 @@
 # Embedded website provider qualification
 
-## Candidate140: consistent answer scope and stale-read isolation
+## Installed140: guarded repairs verified, website response still empty
+
+Signed 0.7.0 (140), code source `a00760ab736cfe90663c63e9f7156db15039f9ad`,
+passed independent build and installed verification: all 55 bundle files and
+51 resources matched, with the Gemini diagnostic compiler flag off. The exact139
+backup is preserved. The code and offline checks below were committed and pushed.
+
+One fresh normal ChatGPT Instant browser task accepted the root/local/public
+route chain and verified the exact 54,291-character submitted body. The previous
+submission-state poisoning and false Copy completion did not recur in this run.
+Its assistant body nevertheless stayed empty until the configured five-minute
+deadline; it dispatched zero tools and failed `provider_timeout`. Website cleanup
+closed successfully. The original strict fixture receipt remains failed.
+
+The authorized Inspector attached to one owned view. At the observed point,
+the selected body and nearby assistant-only containers contained no answer text;
+the only nonempty assistant-only branch was a 13-character heading. No alternate
+populated answer was established. The native deadline cache independently retained
+zero root/body text and no scoped Copy, Stop, Retry or recognized error notice.
+The existing request-timing entries were absent, and Inspector did not retain
+the inference's HTTP status or response body. Backend dispatch and the underlying
+empty-output cause therefore remain unknown. This is not a completed website
+response missed by a demonstrated populated selection wrapper.
+
+No reload or prompt replay ran. Safari developer features were verified restored
+off, the Inspector closed, the one-use arm was absent, and the synthetic fixture
+server stopped with its listener absent. The blank human control tab remains.
+No Gemini prompt, CAPTCHA action or GPT-OSS repeat ran in140. Provider reliability
+and the goal remain incomplete; the historical results below remain unchanged.
+
+## Build140: consistent answer scope and stale-read isolation
 
 The normal completion check, final response snapshot and deadline diagnostic now
 share one bounded Copy-footer scope. They stop at page roots, any enclosing user
@@ -27,8 +57,8 @@ checkpoints, then passed with the candidate. All 24 selected native methods
 passed with no failures or skips, including four diagnostic projection methods
 and route, model, ownership, deadline and cleanup guards. All 582 three-provider
 adapter tests passed with 16,513 assertions. The new test file is also registered
-in the Xcode test target. Installed140 qualification is pending; the partial139
-results and original failures below remain unchanged.
+in the Xcode test target. The installed results above supersede the earlier
+pending state; the partial139 results and original failures remain unchanged.
 
 ## Installed139: partial repair, qualification remains open
 
