@@ -1,6 +1,59 @@
 # Embedded website provider qualification
 
-## Installed build122: current qualification
+## Installed build124: current qualification
+
+Computa 0.7.0 (124), compiled from
+`c4c973afd40453eedadeb7eb2580d5d68100eced`, is installed. All 54 installed
+bundle files match its signed candidate; the 614 frozen inputs, exact resources,
+signature and unchanged engine were checked separately. Its explicit diagnostic
+compiler flag was observed both in compilation and in the live enrollment below.
+The later cleanup source changes described below are versioned as build125 and
+are not installed.
+
+| Fresh installed124 case | Native time | Result |
+| --- | ---: | --- |
+| V42 normal ChatGPT Instant, browser | 5.440 s | `website_response_failed`, zero tools. Submission was verified; actual failed HTTP outcome is unknown. Code case held without Send. |
+| V42 Gemini 3.8 Flash, browser | 52 s displayed | Six clean tools, seven verified website inferences, exact fixture result, explicit tab closure corroborated by the native host receipt and fresh app observation. |
+| V42 Gemini 3.8 Flash, code/terminal/browser | 0.688 s | Google verification before tools. Seed and original tests unchanged; no code test result claimed. |
+| V43 hosted Cerebras GPT-OSS, code/terminal/browser | 8.439 s | Thirteen clean tools, intended one-line patch, four independently rerun original tests passed, exact browser result and explicit tab closure corroborated. Zero API correction records. |
+| V43 hosted Cerebras GPT-OSS, browser | 3.518 s | Correct exact result and five clean tools, but the model omitted the requested `browser_close`. Strict qualification failed. Native automatic disposal and fresh UI confirmed cleanup separately. |
+
+Both owned fixture servers stopped; their processes and listening ports were
+verified absent. Original human tabs and failed receipts were preserved. The
+GPT-OSS runs do not establish the historical V38 decoder failure's cause, and
+automatic disposal does not substitute for the requested model-issued close.
+
+The V42 Gemini checkpoint committed and finished after 255 ms, without a Gemini
+document commit. The five-second opt-in native diagnostic enrolled, then normal
+runtime error cleanup cancelled it after only 48 ms. This truncated observation
+does not establish whether that page would naturally navigate again. The source
+now separates ordinary failed-turn cleanup from user cancellation: only an
+already-enrolled diagnostic can retain its original deadline. Stop, shutdown and
+cancelled waiters still shorten it. A cancelled waiter's callback binds its
+original transport/token, so it cannot interrupt a newer session. Manual cleanup
+while busy remains a rejected no-op. All 90 selected native cleanup, server and
+terminal-contract tests passed with unchanged source before the build-number
+increment. Independent source review found no remaining blocker. No live repair
+is claimed.
+
+A subsequent prompt-free control loaded the canonical Gemini `/app` URL once in
+one fresh ordinary human tab, in the same profile. It also immediately showed
+Google's unusual-traffic CAPTCHA. No prompt, refresh, challenge action or Inspector
+access occurred; the disposable tab was closed. A background model view is
+therefore unnecessary to reproduce this checkpoint. The particular network or
+server-side risk trigger remains unknown; the saved verification gate remains.
+
+With separately approved Inspector access, a fresh ordinary ChatGPT temporary
+Instant tab completed one 55,369-unit synthetic first message. Its conversation
+POST returned HTTP 200, with 3.21 s shown in Network and the exact response marker.
+The fetch was paused for 126 s, so this is instrumented diagnostic evidence, not
+an uninstrumented harness pass or a request-size explanation. The prepared full
+request/header projections were not executed; actual serialized upload bytes and
+options remain unknown. Both Inspector settings were restored off, the
+breakpoint and Inspector removed, and the synthetic tab closed. The installed
+ChatGPT harness remains unqualified.
+
+## Historical installed build122 qualification
 
 Computa 0.7.0 (122), compiled from
 `c85cc35f7e295472cdbbcd82748dbdf2abbe1f54`, is installed and running.

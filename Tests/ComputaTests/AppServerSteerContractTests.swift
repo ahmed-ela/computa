@@ -98,6 +98,45 @@ final class AppServerSteerContractTests: XCTestCase {
         ]), .waiting)
     }
 
+    func testOrdinaryFailedTerminalSourcePreservesPostBlockObservation() {
+        let failedTurns: [[String: Any]] = [
+            ["status": "failed"],
+            ["status": "failed", "error": NSNull()],
+            ["status": "failed", "error": ["message": "website verification required"]],
+            ["status": "completed", "error": ["message": "provider failed"]],
+            ["status": "completed", "error": "provider failed"],
+        ]
+        for turn in failedTurns {
+            XCTAssertEqual(AppServerTurnCompletionContract.status(for: turn), .waiting)
+            XCTAssertEqual(AppServerTurnCompletionContract.cleanupCause(for: turn), .failedTurn)
+        }
+    }
+
+    func testInterruptedNativeAndContextStoppedSourcesAlwaysClipPostBlockObservation() {
+        let interruptedTurns: [[String: Any]] = [
+            ["status": "interrupted"],
+            ["status": "interrupted", "error": ["message": "interrupted while blocked"]],
+        ]
+        for turn in interruptedTurns {
+            XCTAssertEqual(AppServerTurnCompletionContract.cleanupCause(for: turn), .cancelled)
+        }
+        let failed: [String: Any] = ["status": "failed", "error": ["message": "terminal failure after stop"]]
+        XCTAssertEqual(AppServerTurnCompletionContract.cleanupCause(for: failed, wasNativeStopped: true), .cancelled)
+        XCTAssertEqual(AppServerTurnCompletionContract.cleanupCause(for: failed, wasContextStopped: true), .cancelled)
+        XCTAssertEqual(AppServerTurnCompletionContract.cleanupCause(for: failed,
+            wasNativeStopped: true, wasContextStopped: true), .cancelled)
+    }
+
+    func testAbsentOrUnknownTerminalSourceCannotGrantFailedTurnRetention() {
+        let turns: [[String: Any]?] = [
+            nil, [:], ["status": "unknown"], ["status": "inProgress"], ["status": ""],
+            ["status": "completed"], ["status": "completed", "error": NSNull()],
+        ]
+        for turn in turns {
+            XCTAssertEqual(AppServerTurnCompletionContract.cleanupCause(for: turn), .cancelled)
+        }
+    }
+
     func testUnsupportedAdapterDoesNotSubmitOrInterruptAsASteerFallback() async {
         let runtime = UnsupportedSteeringRuntime()
         do {

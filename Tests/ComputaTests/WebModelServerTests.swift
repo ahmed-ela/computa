@@ -1506,6 +1506,43 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertEqual(operations.filter { ["webProviderFinish", "webProviderCancel"].contains($0) }.count, 1)
     }
 
+    func testBoundPostBlockInterruptionCannotTargetReplacementSameTaskSession() async throws {
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        let oldTransport = InterruptionIdentityFixtureTransport()
+        await server.configureEmbeddedTransport(oldTransport)
+        let label = "bound-post-block-interruption"
+        let taskID = websiteInferenceFixtureTaskID(label)
+        do {
+            _ = try await server.fixtureInfer(request, taskID: taskID, turnID: "old-bound-turn")
+            XCTFail("The synthetic failed Send must leave an owned session")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.chatgpt)) }
+        let captured = await server.postBlockInterruptionForTesting(taskID: taskID)
+        let bound = try XCTUnwrap(captured)
+        let oldTokens = await oldTransport.startedTokens()
+        XCTAssertEqual(oldTokens.count, 1)
+        let oldToken = try XCTUnwrap(oldTokens.first)
+        let retired = await server.fixtureFinish(taskID: taskID)
+        XCTAssertTrue(retired.isEmpty)
+
+        let replacement = InterruptionIdentityFixtureTransport()
+        await server.configureEmbeddedTransport(replacement)
+        do {
+            _ = try await server.fixtureInfer(request, taskID: taskID, turnID: "replacement-bound-turn")
+            XCTFail("The replacement session is also held at the synthetic failure")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.chatgpt)) }
+        let replacementTokens = await replacement.startedTokens()
+        XCTAssertEqual(replacementTokens.count, 1)
+        let replacementToken = try XCTUnwrap(replacementTokens.first)
+        XCTAssertNotEqual(oldToken, replacementToken)
+        await bound()
+        let oldInterruptions = await oldTransport.interruptedTokens()
+        let replacementInterruptions = await replacement.interruptedTokens()
+        XCTAssertEqual(oldInterruptions, [oldToken], "A delayed callback retains its exact old transport and token")
+        XCTAssertTrue(replacementInterruptions.isEmpty)
+        let finished = await server.fixtureFinish(taskID: taskID)
+        XCTAssertTrue(finished.isEmpty)
+    }
+
     func testShutdownCancelsQueuedStartupAndAllowsExplicitRestart() async throws {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
         let gate = WebListenerStartupGate()
@@ -1534,6 +1571,27 @@ private actor FixtureReceiptAudit {
     private var values: [WebsiteSessionCleanupReceipt] = []
     func append(_ value: WebsiteSessionCleanupReceipt) { values.append(value) }
     func receipts() -> [WebsiteSessionCleanupReceipt] { values }
+}
+
+/// Identity-only synthetic protocol fixture; no browser or observation timer.
+private actor InterruptionIdentityFixtureTransport: WebModelTransport {
+    private let base = WebsiteInferenceFixtureTransport(FixtureWebModelTransport(), defaultChatChoice: syntheticChatGPTChoice)
+    private var tokens: [String] = []
+    private var interruptions: [String] = []
+
+    func startedTokens() -> [String] { tokens }
+    func interruptedTokens() -> [String] { interruptions }
+    func interruptPostBlockObservation(sessionToken: String) async { interruptions.append(sessionToken) }
+
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderSend" { throw EmbeddedWebModelTransport.Failure.humanVerificationRequired(.chatgpt) }
+        let reply = try await base.request(operation: operation, params: params)
+        if operation == "webProviderStart" {
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: reply) as? [String: Any])
+            tokens.append(try XCTUnwrap(value["sessionToken"] as? String))
+        }
+        return reply
+    }
 }
 
 private actor UnownedStartFixtureTransport: WebModelTransport {

@@ -2,6 +2,15 @@
 
 ## Current diagnosis
 
+On October 16 at 02:04 UTC, installed build124 reproduced the unusual-traffic
+CAPTCHA in one fresh ordinary human tab loading the canonical Gemini `/app`
+route. It sent no prompt and performed no refresh, challenge action or Inspector
+access. The disposable tab closed; the two original human tabs remained. This
+control establishes that a background inference view is unnecessary to trigger
+the current redirect. An existing healthy Gemini document does not establish
+that a new navigation is healthy. No engine, identity, cookie, profile or network
+change was made. The particular server-side risk signal remains unknown.
+
 Google's precise challenge trigger remains unknown. The real build104 CAPTCHA
 and later healthy Gemini tasks used the same system WebKit runtime and persistent
 profile. WebKit's [default user-agent version is frozen](https://bugs.webkit.org/show_bug.cgi?id=278284);

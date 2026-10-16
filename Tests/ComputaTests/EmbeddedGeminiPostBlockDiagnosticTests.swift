@@ -227,6 +227,226 @@ final class EmbeddedGeminiPostBlockDiagnosticTests: XCTestCase {
         }
     }
 
+    func testServerFailedTurnCleanupPreservesOriginalPostBlockDeadline() async throws {
+        let (f, server, transport, taskID) = try await blockedServerFixture(window: .seconds(1))
+        defer { f.shutdown() }
+        let deadline = try XCTUnwrap(f.transport.geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: f.token))
+        let checkpoint = f.browser.savedHumanVerificationCheckpointIDs["gemini"]
+        try await f.assertOriginalFailureAndNoInput()
+        let cause = AppServerTurnCompletionContract.cleanupCause(for: [
+            "status": "failed", "error": ["message": "Synthetic terminal failure"],
+        ])
+        let began = ContinuousClock.now
+        let issues = await server.cancel(taskID: taskID, cleanupCause: cause)
+        XCTAssertTrue(issues.isEmpty)
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now, deadline, "Ordinary failure cleanup must await the original bound")
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(3))
+        XCTAssertEqual(transport.cleanupCauses, [WebModelCleanupCause.failedTurn.rawValue])
+        XCTAssertEqual(transport.operations, ["webProviderStart", "webProviderPoll", "webProviderCancel"])
+        XCTAssertEqual(transport.interruptions, 0)
+        XCTAssertNil(f.browser.webView(for: f.id))
+        XCTAssertEqual(f.records.last?["taskFailed"] as? Bool, true)
+        XCTAssertEqual(f.records.last?["disposalCause"] as? String, "deadline")
+        XCTAssertEqual(f.records.last?["physicallyClosed"] as? Bool, true)
+        XCTAssertEqual(f.browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        try f.assertHumanUnchanged()
+    }
+
+    func testServerUserCancelAfterBlockClipsWithCancelledCause() async throws {
+        let (f, server, transport, taskID) = try await blockedServerFixture(window: .seconds(5))
+        defer { f.shutdown() }
+        let deadline = try XCTUnwrap(f.transport.geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: f.token))
+        let checkpoint = f.browser.savedHumanVerificationCheckpointIDs["gemini"]
+        try await f.assertOriginalFailureAndNoInput()
+        let began = ContinuousClock.now
+        let issues = await server.cancel(taskID: taskID)
+        XCTAssertTrue(issues.isEmpty)
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(2))
+        XCTAssertLessThan(ContinuousClock.now, deadline)
+        XCTAssertEqual(transport.cleanupCauses, [WebModelCleanupCause.cancelled.rawValue])
+        XCTAssertEqual(transport.operations, ["webProviderStart", "webProviderPoll", "webProviderCancel"])
+        XCTAssertNil(f.browser.webView(for: f.id))
+        XCTAssertEqual(f.records.last?["taskFailed"] as? Bool, true)
+        XCTAssertEqual(f.records.last?["physicallyClosed"] as? Bool, true)
+        XCTAssertEqual(f.browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        try f.assertHumanUnchanged()
+    }
+
+    func testServerPendingFailedTurnCleanupClipsOnUserCancelShutdownAndTaskCancellation() async throws {
+        for interruption in ["user_cancel", "shutdown", "task_cancel"] {
+            let (f, server, transport, taskID) = try await blockedServerFixture(window: .seconds(5))
+            defer { f.shutdown() }
+            let deadline = try XCTUnwrap(f.transport.geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: f.token))
+            let checkpoint = f.browser.savedHumanVerificationCheckpointIDs["gemini"]
+            try await f.assertOriginalFailureAndNoInput()
+            let cleanup = Task { await server.cancel(taskID: taskID, cleanupCause: .failedTurn) }
+            let dispatchedBy = ContinuousClock.now + .seconds(2)
+            while transport.cleanupCauses.isEmpty, ContinuousClock.now < dispatchedBy {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(transport.cleanupCauses, [WebModelCleanupCause.failedTurn.rawValue])
+            XCTAssertTrue(f.browser.webView(for: f.id) === f.view)
+            XCTAssertEqual(f.transport.geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: f.token), deadline)
+            let began = ContinuousClock.now
+            if interruption == "shutdown" {
+                let issues = await server.shutdown()
+                XCTAssertTrue(issues.isEmpty)
+            } else if interruption == "task_cancel" {
+                cleanup.cancel()
+            } else {
+                let issues = await server.cancel(taskID: taskID)
+                XCTAssertTrue(issues.isEmpty)
+            }
+            let issues = await cleanup.value
+            XCTAssertTrue(issues.isEmpty)
+            XCTAssertLessThan(ContinuousClock.now - began, .seconds(2), interruption)
+            XCTAssertLessThan(ContinuousClock.now, deadline, interruption)
+            XCTAssertGreaterThanOrEqual(transport.interruptions, 1, interruption)
+            XCTAssertEqual(transport.cleanupCauses, [WebModelCleanupCause.failedTurn.rawValue], "Join the original cleanup without dispatching another Cancel")
+            XCTAssertEqual(transport.operations, ["webProviderStart", "webProviderPoll", "webProviderCancel"])
+            XCTAssertNil(f.browser.webView(for: f.id))
+            XCTAssertEqual(f.records.filter { $0["event"] as? String == "disposed" }.count, 1)
+            XCTAssertEqual(f.records.last?["taskFailed"] as? Bool, true)
+            XCTAssertEqual(f.records.last?["physicallyClosed"] as? Bool, true)
+            XCTAssertEqual(f.browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+            try f.assertHumanUnchanged()
+        }
+    }
+
+    func testServerFailedTurnCauseCannotArmDisabledDiagnostic() async throws {
+        let (f, server, transport, taskID) = try await blockedServerFixture(window: .seconds(5), enabled: false)
+        defer { f.shutdown() }
+        XCTAssertNil(f.transport.geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: f.token))
+        let began = ContinuousClock.now
+        let issues = await server.cancel(taskID: taskID, cleanupCause: .failedTurn)
+        XCTAssertTrue(issues.isEmpty)
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(2))
+        XCTAssertEqual(transport.cleanupCauses, [WebModelCleanupCause.failedTurn.rawValue])
+        XCTAssertNil(f.browser.webView(for: f.id))
+        XCTAssertFalse(f.browser.hasConsumedGeminiPostBlockDiagnostic)
+        XCTAssertTrue(f.records.isEmpty)
+        XCTAssertNotNil(f.browser.savedHumanVerificationCheckpointIDs["gemini"])
+        try f.assertHumanUnchanged()
+    }
+
+    func testManualRetryWhileFailedTurnCleanupIsPendingStaysBusyWithoutInterrupting() async throws {
+        let (f, server, transport, taskID) = try await blockedServerFixture(window: .seconds(5))
+        defer { f.shutdown() }
+        let deadline = try XCTUnwrap(f.transport.geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: f.token))
+        let cleanup = Task { await server.cancel(taskID: taskID, cleanupCause: .failedTurn) }
+        defer { cleanup.cancel() }
+        let dispatchedBy = ContinuousClock.now + .seconds(2)
+        while transport.cleanupCauses.isEmpty, ContinuousClock.now < dispatchedBy {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(transport.cleanupCauses, [WebModelCleanupCause.failedTurn.rawValue])
+        let operations = transport.operations
+        let receipt = await server.retryWebsiteSessionCleanup(taskID: taskID, runtimeGeneration: websiteInferenceFixtureGeneration)
+        XCTAssertEqual(receipt.outcome, .unconfirmed)
+        XCTAssertEqual(receipt.reason, .busy)
+        XCTAssertEqual(receipt.trigger, .manual)
+        try await f.assertOriginalFailureAndNoInput()
+        XCTAssertEqual(transport.interruptions, 0)
+        XCTAssertEqual(transport.operations, operations)
+        XCTAssertTrue(f.browser.webView(for: f.id) === f.view)
+        XCTAssertEqual(f.transport.geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: f.token), deadline)
+        cleanup.cancel()
+        let issues = await cleanup.value
+        XCTAssertTrue(issues.isEmpty)
+        try f.assertHumanUnchanged()
+    }
+
+    func testUnknownCleanupCauseClipsAndFinishCannotCarryCause() async throws {
+        let f = try await Fixture.make(window: .seconds(5))
+        defer { f.shutdown() }
+        try await f.block()
+        let deadline = try XCTUnwrap(f.transport.geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: f.token))
+        let checkpoint = f.browser.savedHumanVerificationCheckpointIDs["gemini"]
+        do {
+            _ = try await f.call("webProviderFinish", ["sessionToken": f.token, "cleanupCause": WebModelCleanupCause.failedTurn.rawValue])
+            XCTFail("A cleanup cause belongs only to Cancel")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
+        XCTAssertTrue(f.browser.webView(for: f.id) === f.view)
+        XCTAssertEqual(f.transport.geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: f.token), deadline)
+        let began = ContinuousClock.now
+        let result = try await f.call("webProviderCancel", ["sessionToken": f.token, "cleanupCause": "unknown_cause"])
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(2))
+        XCTAssertLessThan(ContinuousClock.now, deadline)
+        XCTAssertEqual(result["state"] as? String, "failed")
+        XCTAssertEqual(result["cleanup"] as? String, "not_created")
+        XCTAssertNil(f.browser.webView(for: f.id))
+        XCTAssertEqual(f.browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        try f.assertHumanUnchanged()
+    }
+
+    private func blockedServerFixture(window: Duration, enabled: Bool = true) async throws
+        -> (Fixture, WebModelServer, ServerFixtureTransport, String) {
+        let f = try Fixture(enabled: enabled)
+        XCTAssertTrue(f.transport.setGeminiPostBlockDiagnosticWindowForTesting(window))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("gemini-post-block-server-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let server = WebModelServer()
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"),
+            runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }
+        addTeardownBlock {
+            _ = await server.shutdown()
+            try? FileManager.default.removeItem(at: root)
+        }
+        let transport = ServerFixtureTransport(fixture: f)
+        await server.configureEmbeddedTransport(transport)
+        let taskID = UUID().uuidString.lowercased()
+        let request = Data(#"{"model":"browser/gemini","input":[{"role":"user","content":"Local checkpoint cleanup fixture"}],"tools":[],"stream":true}"#.utf8)
+        do {
+            _ = try await server.fixtureInfer(request, taskID: taskID)
+            XCTFail("A settled local checkpoint must retain the original inference failure")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.gemini))
+        }
+        XCTAssertEqual(transport.operations, ["webProviderStart", "webProviderPoll"])
+        XCTAssertNotNil(f.browser.savedHumanVerificationCheckpointIDs["gemini"])
+        return (f, server, transport, taskID)
+    }
+
+    /// Forward unchanged requests to the real embedded transport. Only the
+    /// local HTML navigation/delegate fixture is driven after session creation.
+    @MainActor private final class ServerFixtureTransport: WebModelTransport {
+        let fixture: Fixture
+        var operations: [String] = []
+        var cleanupCauses: [String] = []
+        var interruptions = 0
+
+        init(fixture: Fixture) { self.fixture = fixture }
+
+        func request(operation: String, params: Data) async throws -> Data {
+            operations.append(operation)
+            if operation == "webProviderCancel" {
+                let values = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+                cleanupCauses.append(values["cleanupCause"] ?? "missing")
+            }
+            let reply = try await fixture.transport.request(operation: operation, params: params)
+            if operation == "webProviderStart" {
+                let value = try XCTUnwrap(JSONSerialization.jsonObject(with: reply) as? [String: Any])
+                fixture.token = try XCTUnwrap(value["sessionToken"] as? String)
+                try await fixture.prepareServerCheckpoint()
+            }
+            return reply
+        }
+
+        func changeRevision(sessionToken: String) async throws -> UInt64? {
+            try await fixture.transport.changeRevision(sessionToken: sessionToken)
+        }
+
+        func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+            try await fixture.transport.waitForChange(sessionToken: sessionToken, after: revision, until: deadline)
+        }
+
+        func interruptPostBlockObservation(sessionToken: String) async {
+            interruptions += 1
+            await fixture.transport.interruptPostBlockObservation(sessionToken: sessionToken)
+        }
+    }
+
     @MainActor private final class NavigationView: WKWebView {
         var fixtureURL: URL?
         var fixtureLoading: Bool?
@@ -313,6 +533,18 @@ final class EmbeddedGeminiPostBlockDiagnosticTests: XCTestCase {
             XCTAssertEqual(initial["state"] as? String, "loading")
             settle(Self.checkpoint)
             await assertPollFailure(.humanVerificationRequired(.gemini))
+        }
+
+        func prepareServerCheckpoint() async throws {
+            let deadline = ContinuousClock.now + .seconds(10)
+            while view.nativeLoading, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertFalse(view.nativeLoading)
+            let ready = try await evaluate("return window.fixtureReady===true;")
+            XCTAssertEqual(ready as? Bool, true)
+            view.fixtureURL = Self.checkpoint
+            view.fixtureLoading = true
+            delegate.webView?(view, didStartProvisionalNavigation: navigation)
+            settle(Self.checkpoint)
         }
 
         func settle(_ url: URL) {

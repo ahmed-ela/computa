@@ -122,6 +122,15 @@ enum AppServerTurnCompletionContract {
         }
         return .completed
     }
+
+    static func cleanupCause(for turn: [String: Any]?, wasNativeStopped: Bool = false,
+                             wasContextStopped: Bool = false) -> WebModelCleanupCause {
+        guard !wasNativeStopped, !wasContextStopped,
+              let turn, turn["status"] as? String != "interrupted" else { return .cancelled }
+        let failed = turn["status"] as? String == "failed"
+            || (turn["error"] != nil && !(turn["error"] is NSNull))
+        return failed ? .failedTurn : .cancelled
+    }
 }
 
 /// A completion only retires its exact active turn. The start token also
@@ -2453,7 +2462,8 @@ private extension CodexAppServerRuntime {
         }
 
         @discardableResult
-        private func scheduleInferenceCleanup(taskID: AgentTask.ID, cancelled: Bool) -> Task<[String], Never>? {
+        private func scheduleInferenceCleanup(taskID: AgentTask.ID, cancelled: Bool,
+                                              cleanupCause: WebModelCleanupCause = .cancelled) -> Task<[String], Never>? {
             if APIProviderCatalog.identity(for: modelForTask[taskID] ?? "") != nil {
                 if let existing = apiCleanupTasks[taskID] { return existing }
                 let preparation = inferencePreparations[taskID]
@@ -2467,21 +2477,26 @@ private extension CodexAppServerRuntime {
                 apiCleanupTasks[taskID] = cleanup
                 return cleanup
             }
-            return scheduleWebCleanup(taskID: taskID, cancelled: cancelled)
+            return scheduleWebCleanup(taskID: taskID, cancelled: cancelled, cleanupCause: cleanupCause)
         }
 
         @discardableResult
-        private func scheduleWebCleanup(taskID: AgentTask.ID, cancelled: Bool) -> Task<[String], Never>? {
+        private func scheduleWebCleanup(taskID: AgentTask.ID, cancelled: Bool,
+                                        cleanupCause: WebModelCleanupCause = .cancelled) -> Task<[String], Never>? {
             guard LocalModelCatalog.isWebBrowser(modelForTask[taskID] ?? "")
                     || inferencePreparations[taskID] != nil else { return nil }
-            if let existing = webCleanupTasks[taskID] { return existing }
+            if let existing = webCleanupTasks[taskID] {
+                if cancelled, cleanupCause == .cancelled { existing.cancel() }
+                return existing
+            }
             let generation = websiteSessionRuntimeGeneration
             let threadID = threadForTask[taskID]
             let turnID = turnIdentity.latestTurnID(for: taskID)
             let preparationID = inferencePreparations[taskID]
             let cleanup = Task<[String], Never> {
                 await webModelServer.registerCleanupTurn(taskID: taskID, threadID: threadID, turnID: turnID)
-                let issues = cancelled ? await webModelServer.cancel(taskID: taskID, runtimeGeneration: generation)
+                let issues = cancelled ? await webModelServer.cancel(taskID: taskID, runtimeGeneration: generation,
+                    cleanupCause: cleanupCause)
                     : await webModelServer.finish(taskID: taskID, runtimeGeneration: generation)
                 if !issues.isEmpty {
                     childCleanupIssues.append(contentsOf: issues)
@@ -2500,12 +2515,13 @@ private extension CodexAppServerRuntime {
             return cleanup
         }
 
-        private func publishTerminalStatus(taskID: AgentTask.ID, status: TaskStatus, cancelled: Bool) {
+        private func publishTerminalStatus(taskID: AgentTask.ID, status: TaskStatus, cancelled: Bool,
+                                           cleanupCause: WebModelCleanupCause = .cancelled) {
             let generation = serverGeneration
             let turnID = turnIdentity.latestTurnID(for: taskID)
             let submission = latestSubmissionClaims[taskID]
             let browserCleanup = embeddedBrowserTaskCleanups[taskID].flatMap { $0.turnID == turnID ? $0.task : nil }
-            let inferenceCleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: cancelled)
+            let inferenceCleanup = scheduleInferenceCleanup(taskID: taskID, cancelled: cancelled, cleanupCause: cleanupCause)
             guard browserCleanup != nil || inferenceCleanup != nil else {
                 events.yield(.taskStatusChanged(taskID: taskID, status: status))
                 return
@@ -3335,7 +3351,9 @@ private extension CodexAppServerRuntime {
                 pendingAssistantItems.removeValue(forKey: taskID)
                 discardReasoningDrafts(taskID: taskID)
                 publishTerminalStatus(taskID: taskID, status: completionStatus,
-                    cancelled: completionStatus != .completed)
+                    cancelled: completionStatus != .completed,
+                    cleanupCause: AppServerTurnCompletionContract.cleanupCause(for: turn,
+                        wasNativeStopped: wasNativeStopped, wasContextStopped: wasContextStopped))
 
             case "thread/tokenUsage/updated":
                 if observeResumingContext(taskID: taskID, params: params) { return }
@@ -3640,7 +3658,9 @@ private extension CodexAppServerRuntime {
                     compactionReservations.remove(taskID)
                 }
                 publishAgentError(taskID: taskID, turnID: failedTurnID, message: message)
-                publishTerminalStatus(taskID: taskID, status: .waiting, cancelled: true)
+                publishTerminalStatus(taskID: taskID, status: .waiting, cancelled: true,
+                    cleanupCause: nativeStoppedTurns[taskID] == failedTurnID || contextStoppedTurns[taskID] == failedTurnID
+                        ? .cancelled : .failedTurn)
 
             default:
                 break

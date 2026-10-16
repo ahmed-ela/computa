@@ -15,6 +15,14 @@ protocol WebModelTransport: Sendable {
     func changeRevision(sessionToken: String) async throws -> UInt64?
     func waitForChange(sessionToken: String, after revision: UInt64,
                        until deadline: ContinuousClock.Instant) async throws -> UInt64?
+    func interruptPostBlockObservation(sessionToken: String) async
+}
+
+/// Stopping inference and disposing its session remain cancellation operations.
+/// Only an ordinary failed turn may retain an already-enrolled passive probe.
+enum WebModelCleanupCause: String, Sendable {
+    case failedTurn = "failed_turn"
+    case cancelled
 }
 
 extension WebModelTransport {
@@ -27,6 +35,7 @@ extension WebModelTransport {
     func changeRevision(sessionToken: String) async throws -> UInt64? { nil }
     func waitForChange(sessionToken: String, after revision: UInt64,
                        until deadline: ContinuousClock.Instant) async throws -> UInt64? { nil }
+    func interruptPostBlockObservation(sessionToken: String) async {}
 }
 
 private struct ChromeWebModelTransport: WebModelTransport {
@@ -524,7 +533,8 @@ actor WebModelServer {
         return await cleanup(taskID: taskID, cancel: false, runtimeGeneration: runtimeGeneration ?? cleanupRuntimeGeneration, trigger: .automatic).issues
     }
 
-    func cancel(taskID: String, runtimeGeneration: UUID? = nil) async -> [String] {
+    func cancel(taskID: String, runtimeGeneration: UUID? = nil,
+                cleanupCause: WebModelCleanupCause = .cancelled) async -> [String] {
         let taskID = UUID(uuidString: taskID)?.uuidString.lowercased() ?? taskID
         failureDiagnostics.clear(taskID: taskID)
         retiringTaskIDs.insert(taskID)
@@ -532,12 +542,14 @@ actor WebModelServer {
         closedTurns.removeValue(forKey: taskID)
         revokeInferenceContext(taskID: taskID)
         defer { retiringTaskIDs.remove(taskID) }
+        let cause: WebModelCleanupCause = shuttingDown ? .cancelled : cleanupCause
         let request = active[taskID]
         request?.operation.cancel()
+        if cause == .cancelled { await interruptPostBlockObservation(taskID: taskID) }
         if let request { _ = try? await request.operation.value }
         if active[taskID]?.id == request?.id { active.removeValue(forKey: taskID) }
         return await cleanup(taskID: taskID, cancel: true, runtimeGeneration: runtimeGeneration ?? cleanupRuntimeGeneration,
-            trigger: shuttingDown ? .shutdown : .automatic).issues
+            trigger: shuttingDown ? .shutdown : .automatic, cleanupCause: cause).issues
     }
 
     func shutdown() async -> [String] {
@@ -558,9 +570,10 @@ actor WebModelServer {
     }
 
     private func cleanup(taskID: String, cancel: Bool, runtimeGeneration: UUID,
-                         trigger: WebsiteSessionCleanupReceipt.Trigger) async -> CleanupResult {
+                         trigger: WebsiteSessionCleanupReceipt.Trigger,
+                         cleanupCause: WebModelCleanupCause = .cancelled) async -> CleanupResult {
         yieldedTurns.removeValue(forKey: taskID)
-        if let existing = cleanupTasks[taskID] { return await existing.value }
+        if let existing = cleanupTasks[taskID] { return await waitForCleanup(existing, taskID: taskID) }
         if let attempt = unresolvedStartAttempts[taskID] {
             var receipt = unresolvedStartReceipts[taskID] ?? WebsiteSessionCleanupReceipt(taskID: taskID,
                 threadID: attempt.context.threadID, turnID: attempt.context.turnID,
@@ -594,23 +607,54 @@ actor WebModelServer {
             return CleanupResult(receipt: receipt, issues: receipt.receiptSaved ? [] : [Failure.persistenceRequired.localizedDescription])
         }
         let cleanup = Task { await self.performCleanup(taskID: taskID, session: session, cancel: cancel,
-            runtimeGeneration: runtimeGeneration, trigger: trigger) }
+            runtimeGeneration: runtimeGeneration, trigger: trigger, cleanupCause: cleanupCause) }
         cleanupTasks[taskID] = cleanup
-        let receipt = await cleanup.value
+        let receipt = await waitForCleanup(cleanup, taskID: taskID)
         cleanupTasks.removeValue(forKey: taskID)
         return receipt
     }
 
+    private func waitForCleanup(_ cleanup: Task<CleanupResult, Never>, taskID: String) async -> CleanupResult {
+        let interruption = postBlockInterruption(taskID: taskID)
+        return await withTaskCancellationHandler(operation: { await cleanup.value }, onCancel: {
+            // Cancelling a waiter must not abandon ordinary session cleanup.
+            // Bind its exact old session before launching work that could run
+            // after a newer session is admitted for this task ID.
+            guard let interruption else { return }
+            Task { await interruption() }
+        })
+    }
+
+    private func postBlockInterruption(taskID: String) -> (@Sendable () async -> Void)? {
+        guard let session = sessions[taskID] else { return nil }
+        let transport = session.transport, token = session.token
+        return { await transport.interruptPostBlockObservation(sessionToken: token) }
+    }
+
+    #if DEBUG
+    func postBlockInterruptionForTesting(taskID: String) -> (@Sendable () async -> Void)? {
+        postBlockInterruption(taskID: taskID)
+    }
+    #endif
+
+    private func interruptPostBlockObservation(taskID: String) async {
+        guard let interruption = postBlockInterruption(taskID: taskID) else { return }
+        await interruption()
+    }
+
     private func performCleanup(taskID: String, session: Session, cancel: Bool, runtimeGeneration: UUID,
-                                trigger: WebsiteSessionCleanupReceipt.Trigger) async -> CleanupResult {
+                                trigger: WebsiteSessionCleanupReceipt.Trigger,
+                                cleanupCause: WebModelCleanupCause) async -> CleanupResult {
         if let authorization = inspectorAuthorizations.removeValue(forKey: taskID) {
             authorization.revoke()
             await session.transport.revokeInspectorDiagnostic(sessionToken: session.token)
         }
         do {
+            var params = ["sessionToken": session.token]
+            if cancel, session.route == .embedded { params["cleanupCause"] = cleanupCause.rawValue }
             let reply = try await call(session.transport,
                 operation: cancel ? "webProviderCancel" : "webProviderFinish",
-                params: ["sessionToken": session.token])
+                params: params)
             guard ["deleted", "not_created"].contains(reply["cleanup"] as? String ?? "") else {
                 throw Self.snapshotFailure(reply, fallback: .cleanupFailed)
             }

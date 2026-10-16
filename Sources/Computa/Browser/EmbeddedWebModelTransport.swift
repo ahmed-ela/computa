@@ -625,8 +625,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let session = try createSession(provider: provider, choice: choice, isDiscovery: false)
             return try snapshot(session)
         }
+        let expectedKeys: Set<String> = operation == "webProviderSend" ? ["sessionToken", "prompt"] : ["sessionToken"]
+        let cancellationKeys: Set<String> = ["sessionToken", "cleanupCause"]
         guard ["webProviderPoll", "webProviderSend", "webProviderFinish", "webProviderCancel"].contains(operation),
-              Set(values.keys) == (operation == "webProviderSend" ? ["sessionToken", "prompt"] : ["sessionToken"]),
+              Set(values.keys) == expectedKeys || operation == "webProviderCancel" && Set(values.keys) == cancellationKeys,
               let token = values["sessionToken"], let session = sessions[token] else { throw Failure.staleSession }
         if !["webProviderFinish", "webProviderCancel"].contains(operation), let failure = session.terminalFailure {
             throw failure
@@ -634,7 +636,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         do {
             switch operation {
             case "webProviderFinish", "webProviderCancel":
-                return await finish(session, cancel: operation == "webProviderCancel")
+                let cause = values["cleanupCause"].flatMap(WebModelCleanupCause.init(rawValue:)) ?? .cancelled
+                return await finish(session, cancel: operation == "webProviderCancel", cleanupCause: cause)
             case "webProviderSend":
                 guard !session.isDiscovery else { throw Failure.invalidRequest }
                 try Task.checkCancellation()
@@ -3299,11 +3302,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
-    private func finish(_ session: Session, cancel: Bool) async -> Data {
+    func interruptPostBlockObservation(sessionToken: String) async {
+        sessions[sessionToken]?.postBlockDiagnostic?.task?.cancel()
+    }
+
+    private func finish(_ session: Session, cancel: Bool,
+                        cleanupCause: WebModelCleanupCause = .cancelled) async -> Data {
         finishInitialCheckpointSettlement(session, phase: cancel ? .cancelled : .finished)
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
         if let capture = session.postBlockDiagnostic, let task = capture.task {
-            if cancel || Task.isCancelled { task.cancel() }
+            if cancel && cleanupCause != .failedTurn || Task.isCancelled { task.cancel() }
             let result = await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
             if capture.physicallyClosed, sessions[session.token] === session { sessions.removeValue(forKey: session.token) }
             return result
