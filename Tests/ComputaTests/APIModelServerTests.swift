@@ -465,6 +465,68 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
     }
 
 
+
+    func testMalformedSSEJSONKeepsTypedGuardAndNativeContextOnFirstAndCorrectiveAttemptsWithoutReplay() async throws {
+        for failSecond in [false, true] {
+            let requests = APIRequestRecorder(), diagnostics = APIFailureDiagnosticRecorder(), credentials = APICredentialCounter()
+            let root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appendingPathComponent("accounting")
+            let remote = try APILoopbackFixture { request in
+                await requests.record(request)
+                let ordinal = await requests.count()
+                if failSecond && ordinal == 1 { return self.correctionResponse(request, invalid: true, usage: true) }
+                let response = self.correctionResponse(request, invalid: false, usage: true)
+                let object = try! JSONSerialization.jsonObject(with: response.body) as! [String: Any]
+                let choices = object["choices"] as! [[String: Any]], message = choices[0]["message"] as! [String: Any]
+                let calls = message["tool_calls"] as! [[String: Any]], function = calls[0]["function"] as! [String: Any]
+                let partial: [String: Any] = ["id": "PRIVATE_STREAM", "model": "fixture-model", "choices": [["index": 0,
+                    "delta": ["role": "assistant", "tool_calls": [["index": 0, "id": "PRIVATE_CALL", "type": "function",
+                        "function": ["name": function["name"]!, "arguments": "{\"cmd\":\"PRIVATE_PARTIAL"]]]], "finish_reason": NSNull()]]]
+                let body = Data("data: ".utf8) + (try! JSONSerialization.data(withJSONObject: partial))
+                    + Data("\n\ndata: {\"PRIVATE_JSON_PARSE_CANARY\":\n\ndata: [DONE]\n\n".utf8)
+                return .init(status: "200 OK", headers: ["Content-Type": "text/event-stream"], body: body)
+            }
+            defer { remote.stop() }
+            let p = provider(try await remote.start())
+            let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
+            await server.setFailureDiagnosticsObserverForTesting { diagnostics.record($0) }
+            let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+            try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+            let (bytes, response) = try await URLSession.shared.data(for: correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+            let count = await requests.count(); XCTAssertEqual(count, failSecond ? 2 : 1)
+            XCTAssertEqual(credentials.counts().reads, 1); XCTAssertEqual(credentials.counts().writes, 0)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let error = try XCTUnwrap(body["error"] as? [String: Any]); XCTAssertEqual(error["code"] as? String, "invalid_response")
+            let emitted = diagnostics.snapshot(); XCTAssertEqual(emitted.count, 1)
+            let record = try XCTUnwrap(emitted.first), event = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+            XCTAssertEqual(event["stage"] as? String, "decode"); XCTAssertEqual(event["code"] as? String, "invalid_response")
+            XCTAssertNil(event["argument_validation"])
+            let projected = event["response_validation"] as? [String: Any]
+            XCTAssertNotNil(projected)
+            XCTAssertEqual(projected?["attempt"] as? Int, failSecond ? 2 : 1)
+            let validation = projected?["validation"] as? [String: Any]
+            XCTAssertNotNil(validation)
+            XCTAssertEqual(validation?["format"] as? String, "chat_sse"); XCTAssertEqual(validation?["guardID"] as? String, "json_parse")
+            let ids = event["native_context"] as? [String: String]
+            XCTAssertNotNil(ids)
+            XCTAssertEqual(ids?["taskID"]?.lowercased(), task); XCTAssertEqual(ids?["threadID"]?.lowercased(), thread); XCTAssertEqual(ids?["turnID"]?.lowercased(), turn)
+            let publicText = String(decoding: bytes, as: UTF8.self)
+            for forbidden in ["PRIVATE", "fixture-secret", "output_item", "function_call", "x_computa_correction"] {
+                XCTAssertFalse(publicText.contains(forbidden)); XCTAssertFalse(record.contains(forbidden))
+            }
+            if failSecond {
+                let accounting = try correctionRecords(directory)
+                XCTAssertEqual(accounting.count, 3)
+                let final = try XCTUnwrap(accounting.first { $0.phase == "finished" })
+                XCTAssertEqual(final.outcome, .decodeFailed); XCTAssertTrue(final.secondRequestClaimed)
+                XCTAssertNil(final.secondUsage); XCTAssertTrue(final.secondUsageUnknown)
+            } else { XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path)) }
+            await server.shutdown()
+        }
+    }
+
     func testActualInvalidResponseGuardSurvivesFirstAndSecondDecodeWithoutExtraRequests() async throws {
         for failSecond in [false, true] {
             let requests = APIRequestRecorder(), diagnostics = APIFailureDiagnosticRecorder(), credentials = APICredentialCounter()

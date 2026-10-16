@@ -35,6 +35,7 @@ enum APIModelResponseCodec {
             case chatJSON = "chat_json", chatSSE = "chat_sse", responsesJSON = "responses_json"
         }
         enum Guard: String, Codable, Sendable, CaseIterable {
+            case jsonParse = "json_parse"
             case chatRootObject = "chat_root_object", chatChoiceEnvelope = "chat_choice_envelope"
             case chatChoiceIndex = "chat_choice_index", chatContentType = "chat_content_type"
             case chatUnsupportedMessageFields = "chat_unsupported_message_fields", chatCallsType = "chat_calls_type"
@@ -58,6 +59,7 @@ enum APIModelResponseCodec {
         let guardID: Guard
         var isConsistent: Bool {
             switch guardID {
+            case .jsonParse: return true
             case .chatRootObject: return format == .chatJSON
             case .chatChoiceEnvelope, .chatChoiceIndex, .chatContentType, .chatUnsupportedMessageFields,
                  .chatCallsType, .chatCallFinishConsistency, .chatReasoningType, .chatRetainedReasoningType, .chatEmptyOutput:
@@ -78,6 +80,12 @@ enum APIModelResponseCodec {
                                         _ observe: InvalidResponseObserver?) -> Failure {
         observe?(guardID)
         return .invalidResponse
+    }
+    /// Preserve the exact Foundation parser/options. Only parser failure is
+    /// reclassified; parsed nonobject/root-shape guards remain at their callers.
+    private static func responseJSONValue(_ data: Data, observe: InvalidResponseObserver?) throws -> Any {
+        do { return try JSONSerialization.jsonObject(with: data) }
+        catch { throw invalidResponse(.jsonParse, observe) }
     }
     /// Preserve the shared integer validator and its exact Failure. Only fatal
     /// response-field callers label the guard; request validation is untouched.
@@ -686,7 +694,7 @@ enum APIModelResponseCodec {
             envelopeRejection = assembled.envelopeRejection; jsonRejection = assembled.jsonRejection
             streamShapeAndUsageValid = assembled.streamShapeAndUsageValid
         } else {
-            guard let object = try JSONSerialization.jsonObject(with: result.body) as? [String: Any] else { throw invalidResponse(.chatRootObject, observeResponseGuard) }
+            guard let object = try responseJSONValue(result.body, observe: observeResponseGuard) as? [String: Any] else { throw invalidResponse(.chatRootObject, observeResponseGuard) }
             envelope = object; textDeltas = []; argumentDeltas = []
             envelopeShapeValid = correctionEnvelopeShape(object, streaming: false)
             envelopeRejection = envelopeShapeValid ? nil : correctionEnvelopeRejection(object, streaming: false)
@@ -793,7 +801,7 @@ enum APIModelResponseCodec {
     }
 
     private static func decodeResponses(_ data: Data, request: Request, observe: InvalidResponseObserver?) throws -> Reply {
-        guard let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any], raw["object"] as? String == "response",
+        guard let raw = try responseJSONValue(data, observe: observe) as? [String: Any], raw["object"] as? String == "response",
               raw["status"] as? String == "completed", absent(raw["error"]), absent(raw["incomplete_details"]),
               let original = raw["output"] as? [[String: Any]], !original.isEmpty else { throw Failure.incompleteResponse }
         guard raw["model"] as? String == request.model.id else { throw Failure.modelMismatch }
@@ -924,7 +932,7 @@ enum APIModelResponseCodec {
             if payload.isEmpty { continue }
             guard !done else { throw invalidResponse(.sseAfterDone, observe) }
             if payload == "[DONE]" { done = true; continue }
-            guard let chunkData = payload.data(using: .utf8), let chunk = try JSONSerialization.jsonObject(with: chunkData) as? [String: Any] else {
+            guard let chunkData = payload.data(using: .utf8), let chunk = try responseJSONValue(chunkData, observe: observe) as? [String: Any] else {
                 throw invalidResponse(.sseChunkEnvelope, observe)
             }
             // Cerebras documents errors inside an HTTP-200 SSE stream. Classify

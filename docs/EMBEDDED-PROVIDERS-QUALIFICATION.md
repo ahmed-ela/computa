@@ -1,5 +1,26 @@
 # Embedded website provider qualification
 
+## Candidate127: API JSON parser failures
+
+Foundation parser errors in Chat JSON, Chat SSE and Responses JSON previously
+escaped the typed decoder failure and appeared as generic `unavailable` errors.
+They now retain `invalid_response`, the finite `json_parse` guard, wire format,
+native context and attempt number. The existing parser options also reject
+scalar roots; this label describes the parser failure without claiming its cause.
+Parsed root-shape, UTF-8, truncation, atomic tool validation and correction rules
+remain unchanged.
+
+The new tests reproduced the defect against the unchanged codec. All three
+focused regressions and all 94 API codec/server/correction tests then passed.
+Loopback cases verified one request on an initial parser failure and two when
+the permitted argument-correction attempt returned malformed JSON, with no tool
+output or private payload in the failure. The cohort source and diff remained
+unchanged; its log SHA is
+`fdc70e96699b6ae76ba6ed0daf76d094fce5ecc5c2d9945119d5ce413c1884fc`.
+Independent source review was clear. Signed packaging and live qualification
+remain pending. This fixes a reproduced classification defect, not the
+unattributed historical V38 response failure or the website providers' blockers.
+
 ## Candidate126: deferred ChatGPT verification
 
 The source candidate defers model-picker verification during running ChatGPT

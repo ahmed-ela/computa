@@ -157,6 +157,68 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(guards.first?.guardID, .sseAfterDone)
     }
 
+
+    func testJSONParserFailuresUseOneFiniteGuardAcrossAllFormatsWithoutPublishingPartialTools() throws {
+        let chat = try request()
+        let responseProvider = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+            wireAPI: .responses, models: provider.models)
+        let responses = try request(provider: responseProvider)
+        let malformed = Data("{\"PRIVATE_JSON_PARSE_CANARY\":".utf8)
+        let partial: [String: Any] = ["id": "PRIVATE_STREAM", "model": "fixture-model", "choices": [["index": 0,
+            "delta": ["role": "assistant", "tool_calls": [["index": 0, "id": "PRIVATE_CALL", "type": "function",
+                "function": ["name": chat.tools[0].wireName, "arguments": "{\"path\":\"PRIVATE_PARTIAL"]]]],
+            "finish_reason": NSNull()]]]
+        let scalar = Data("true".utf8)
+        let scalarEvent = Data("data: true\n\ndata: [DONE]\n\n".utf8)
+        let badEvent = Data("data: ".utf8) + malformed + Data("\n\ndata: [DONE]\n\n".utf8)
+        let partialEvent = Data("data: ".utf8) + (try JSONSerialization.data(withJSONObject: partial)) + Data("\n\n".utf8)
+        let cases: [(APIModelResponseCodec.Request, Data, String, APIModelResponseCodec.InvalidResponseDiagnostic.Format)] = [
+            (chat, malformed, "application/json", .chatJSON), (responses, malformed, "application/json", .responsesJSON),
+            (chat, badEvent, "text/event-stream", .chatSSE), (chat, partialEvent + badEvent, "text/event-stream", .chatSSE),
+            (chat, scalar, "application/json", .chatJSON), (responses, scalar, "application/json", .responsesJSON),
+            (chat, scalarEvent, "text/event-stream", .chatSSE)]
+        for (prepared, body, contentType, format) in cases {
+            var guards: [APIModelResponseCodec.InvalidResponseDiagnostic] = []
+            var argumentRejections: [APIModelResponseCodec.ArgumentValidationDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: body, contentType: contentType), request: prepared,
+                onArgumentRejection: { argumentRejections.append($0) }, onInvalidResponse: { guards.append($0) })) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidResponse)
+            }
+            XCTAssertEqual(guards.count, 1)
+            XCTAssertEqual(guards.first?.format, format)
+            XCTAssertEqual(guards.first?.guardID.rawValue, "json_parse")
+            if let diagnostic = guards.first { XCTAssertTrue(diagnostic.isConsistent) }
+            XCTAssertTrue(argumentRejections.isEmpty)
+            let encoded = try JSONEncoder().encode(guards)
+            XCTAssertLessThan(encoded.count, 128); XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("PRIVATE"))
+        }
+    }
+
+    func testJSONParseClassificationPreservesNonobjectUTF8AndTruncatedStreamFailures() throws {
+        let chat = try request()
+        let responseProvider = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+            wireAPI: .responses, models: provider.models)
+        let responses = try request(provider: responseProvider)
+        let partial: [String: Any] = ["id": "r", "model": "fixture-model", "choices": [["index": 0,
+            "delta": ["role": "assistant", "tool_calls": [["index": 0, "id": "c", "type": "function",
+                "function": ["name": chat.tools[0].wireName, "arguments": "{\"path\":\"partial"]]]], "finish_reason": NSNull()]]]
+        let truncated = Data("data: ".utf8) + (try JSONSerialization.data(withJSONObject: partial)) + Data("\n\n".utf8)
+        typealias Guard = APIModelResponseCodec.InvalidResponseDiagnostic.Guard
+        let cases: [(APIModelResponseCodec.Request, Data, String, APIModelResponseCodec.Failure, Guard?)] = [
+            (chat, Data("[]".utf8), "application/json", .invalidResponse, .chatRootObject),
+            (responses, Data("[]".utf8), "application/json", .incompleteResponse, nil),
+            (responses, Data("{\"object\":\"other\"}".utf8), "application/json", .incompleteResponse, nil),
+            (chat, Data([0xff]), "text/event-stream", .invalidResponse, .sseUTF8),
+            (chat, truncated, "text/event-stream", .incompleteResponse, nil),
+            (chat, Data("data: []\n\ndata: [DONE]\n\n".utf8), "text/event-stream", .invalidResponse, .sseChunkEnvelope)]
+        for (prepared, body, contentType, expected, guardID) in cases {
+            var guards: [APIModelResponseCodec.InvalidResponseDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: body, contentType: contentType), request: prepared,
+                onInvalidResponse: { guards.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, expected) }
+            XCTAssertEqual(guards.map(\.guardID), guardID.map { [$0] } ?? [])
+        }
+    }
+
     func testFatalJSONResponseGuardsRetainExactFailuresAndEmitOnlyOneFiniteLabel() throws {
         let prepared = try request()
         typealias Guard = APIModelResponseCodec.InvalidResponseDiagnostic.Guard
