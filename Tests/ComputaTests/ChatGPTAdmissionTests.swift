@@ -68,14 +68,14 @@ final class ChatGPTAdmissionTests: XCTestCase {
         }
     }
 
-    func testNewInferenceResolvesLatestAgainWithoutUpgradingSelectionEvidence() async throws {
+    func testNewNativeTurnResolvesLatestAgainWithoutUpgradingSelectionEvidence() async throws {
         let pro = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/pro", label: "GPT-6 Pro")
         for preset in [medium, pro] {
             let transport = ChatPresetAdmissionTransport(advanceBetweenInferences: true)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
             for family in ["GPT-6", "GPT-6.1"] {
-                let bytes = try await server.fixtureInfer(request(preset.modelID), taskID: "new-family")
+                let bytes = try await server.fixtureInfer(request(preset.modelID), taskID: "new-family", turnID: "new-family-" + family)
                 let text = String(decoding: bytes, as: UTF8.self)
                 XCTAssertTrue(text.contains(family))
                 XCTAssertTrue(text.contains("website_selection"))

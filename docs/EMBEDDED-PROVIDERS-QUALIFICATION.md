@@ -1,6 +1,41 @@
 # Embedded website provider qualification
 
-## Build136 candidate: raw ChatGPT envelopes and empty layout handling
+## Build137 candidate: fresh physical ChatGPT pages
+
+Installed136 failed the controlled browser task after three successful tools
+and four verified normal Chat/Instant inferences. The first three responses
+used raw JSON without code blocks; the fourth displayed the same inline
+renderer error. Raw JSON did not resolve that failure. The bounded classifier
+declined interactive metadata before reaching its exact error label. Website
+and host task-tab cleanup closed; the human control tab remained.
+
+A separate, single-send first-message diagnostic on a fresh136 page also failed
+at its five-minute deadline. Its outbound claim measured 69,986 UTF8 bytes and
+UTF16 units. It dispatched no tools. This keeps a payload-sensitive failure
+plausible and prevents attributing the problem solely to retained website
+history. The actual upload, backend acceptance, exact size limit and underlying
+website exception are unestablished. Safari's developer setting was restored
+after scoped inspection; no exception was captured.
+
+Build137 replaces the physical ChatGPT page after every inference while keeping
+the complete request, mandatory submission proof, native continuation, model
+pin, transport generation and cumulative budgets. It requires durable exact
+closure before releasing output. A failed issued Send quarantines its native
+context, including after later manual cleanup, so it cannot authorize replay.
+Gemini's retained-page policy is unchanged. This architecture is independently
+reviewed and offline-validated; it is not yet an installed reliability result.
+
+All **190 affected native methods passed with zero failures or skips** against
+318 unchanged Swift source/test inputs. Regressions first reproduced shared
+physical leases and uncertain-handoff replay. Coverage includes seven distinct
+physical sessions across six tool rounds, exact per-inference journal phases,
+carried model/budgets, context and HTTP-handoff invalidation, ownership,
+cancellation, diagnostic lifetime and cleanup persistence. The positive pinned
+official HTTP acceptance suite passed all six independent requests through a
+bounded test relay with six separately authenticated native contexts; bodies,
+actual responses and the official assertions remain unchanged.
+
+## Historical build136: raw ChatGPT envelopes and empty layout handling
 
 Installed135 repeated the same controlled failure in 71.312 seconds after three
 successful browser tools and four verified ChatGPT Instant inferences. The new

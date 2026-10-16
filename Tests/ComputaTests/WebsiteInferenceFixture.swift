@@ -148,7 +148,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
         }
         // This synthetic transport explicitly attests only its own serialized
         // Send bytes. Real WebKit must independently verify the rendered body.
-        if let token, providers[token] == "gemini", snapshot["turnContinuationCapability"] == nil {
+        if let token, ["gemini", "chatgpt"].contains(providers[token] ?? ""), snapshot["turnContinuationCapability"] == nil {
             snapshot["turnContinuationCapability"] = "per_submission_ownership_v1"
         }
         if ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? ""),
@@ -174,7 +174,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
                     "sequence": sequences[token, default: 1], "baselineResponseCount": baselines[token, default: 0],
                     "responseCount": snapshot["state"] as? String == "complete" ? completedCounts[token, default: 1] : baselines[token, default: 0],
                     "firstUserFingerprint": fingerprint]
-                if providers[token] == "gemini" {
+                if providers[token] == "gemini" || providers[token] == "chatgpt" {
                     var context = snapshot["modelProofContext"] as! [String: Any]
                     context["submittedPromptFingerprint"] = submittedFingerprints[token, default: ""]
                     snapshot["modelProofContext"] = context

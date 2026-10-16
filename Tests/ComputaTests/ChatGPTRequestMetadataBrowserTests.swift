@@ -197,6 +197,7 @@ final class ChatGPTRequestMetadataServerTests: XCTestCase {
             let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }; try arm.arm()
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
                 rejectedReplyDirectory: arm.root.appendingPathComponent("WebsiteReplyDiagnostics-v1"))
+            await server.retainChatGPTConversationForTesting()
             let transport = MetadataIntegrationTransport(failsOnSequence: fails ? 2 : nil, toolFirst: true)
             await server.configureEmbeddedTransport(transport)
             var input: [[String: Any]] = [["role": "user", "content": "Say OK"]]
@@ -225,6 +226,39 @@ final class ChatGPTRequestMetadataServerTests: XCTestCase {
             XCTAssertFalse(finalCaptureIsCurrent)
             let sidecars = try FileManager.default.contentsOfDirectory(atPath: arm.directory.path).filter { $0.hasPrefix("request-metadata-") }
             XCTAssertEqual(sidecars.count, 2, "Each inference retains an immutable finite snapshot of this one turn-scoped capture")
+        }
+    }
+
+    func testFreshToolHandoffsStopCaptureBeforeClosureAndNeverReuseTheSingleArm() async throws {
+        for fails in [false, true] {
+            let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }; try arm.arm()
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: arm.root.appendingPathComponent("WebsiteReplyDiagnostics-v1"))
+            let transport = MetadataIntegrationTransport(failsOnSequence: fails ? 2 : nil, toolFirst: true)
+            await server.configureEmbeddedTransport(transport)
+            var input: [[String: Any]] = [["role": "user", "content": "Say OK"]]
+            let first = try await server.fixtureInfer(arm.request(input: input, tools: true), taskID: arm.task.uuidString,
+                threadID: arm.thread.uuidString, turnID: arm.turn.uuidString, preparationID: arm.preparation)
+            let output = try XCTUnwrap((JSONSerialization.jsonObject(with: first) as? [String: Any])?["output"] as? [[String: Any]])
+            let current = await transport.captureIsCurrent()
+            XCTAssertFalse(current, "A closed physical page cannot retain diagnostic authority through a pending tool result")
+            input += output + [["type": "function_call_output", "call_id": try XCTUnwrap(output.first?["call_id"] as? String), "output": "Observed fixture result"]]
+            do {
+                _ = try await server.fixtureInfer(arm.request(input: input, tools: true), taskID: arm.task.uuidString,
+                    threadID: arm.thread.uuidString, turnID: arm.turn.uuidString, preparationID: arm.preparation)
+                XCTAssertFalse(fails)
+            } catch { XCTAssertTrue(fails); XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFailed(.chatgpt)) }
+            _ = await server.fixtureFinish(taskID: arm.task.uuidString)
+            let events = await transport.events()
+            XCTAssertEqual(events.filter { $0 == "metadata_start" }.count, 1)
+            XCTAssertEqual(events.filter { $0 == "metadata_activate" }.count, 1)
+            XCTAssertEqual(events.filter { $0 == "metadata_snapshot" }.count, 0)
+            XCTAssertEqual(events.filter { $0 == "metadata_stop" }.count, 1)
+            XCTAssertEqual(events.filter { $0 == "webProviderStart" }.count, 2)
+            XCTAssertEqual(events.filter { $0 == "webProviderSend" }.count, 2)
+            XCTAssertLessThan(try XCTUnwrap(events.firstIndex(of: "metadata_stop")), try XCTUnwrap(events.firstIndex(of: "webProviderFinish")))
+            let sidecars = try FileManager.default.contentsOfDirectory(atPath: arm.directory.path).filter { $0.hasPrefix("request-metadata-") }
+            XCTAssertEqual(sidecars.count, 1, "The single-use grant cannot observe the later replacement page")
         }
     }
 
@@ -356,14 +390,16 @@ private actor MetadataIntegrationTransport: WebModelTransport {
 }
 
 private actor MetadataWireTransport: WebModelTransport {
-    let token = UUID().uuidString
+    private var token = ""
     let toolFirst: Bool
     private var sends = 0
     init(toolFirst: Bool = false) { self.toolFirst = toolFirst }
     func request(operation: String, params: Data) throws -> Data {
         let value: [String: Any]
         switch operation {
-        case "webProviderStart": value = ["sessionToken": token, "state": "ready"]
+        case "webProviderStart":
+            token = UUID().uuidString
+            value = ["sessionToken": token, "state": "ready"]
         case "webProviderSend": sends += 1; value = ["state": "running"]
         case "webProviderPoll": value = ["state": "complete", "text": toolFirst && sends == 1
             ? "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"fixture\"}}]}"

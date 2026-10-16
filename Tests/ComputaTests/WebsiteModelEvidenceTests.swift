@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import Computa
@@ -200,7 +201,8 @@ final class WebsiteModelEvidenceTests: XCTestCase {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
         await server.configureEmbeddedTransport(transport)
         await server.configureEvidenceDirectory(directory)
-        for _ in 0..<2 { _ = try await server.fixtureInfer(preparedData(choice), taskID: taskID) }
+        var previous: Data?
+        for _ in 0..<2 { previous = try await server.fixtureInfer(preparedData(choice, after: previous), taskID: taskID) }
         let file = evidenceFile(directory: directory, taskID: taskID)
         let data = try Data(contentsOf: file)
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(Self.privateCanary))
@@ -275,7 +277,8 @@ final class WebsiteModelEvidenceTests: XCTestCase {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
         await server.configureEmbeddedTransport(EvidenceExportTransport(context: .fastResponseAtAcknowledgment))
         await server.configureEvidenceDirectory(directory)
-        for _ in 0..<2 { _ = try await server.fixtureInfer(preparedData(choice), taskID: taskID) }
+        var previous: Data?
+        for _ in 0..<2 { previous = try await server.fixtureInfer(preparedData(choice, after: previous), taskID: taskID) }
         let rows = try jsonLines(Data(contentsOf: evidenceFile(directory: directory, taskID: taskID)))
             .filter { ["submission_verified", "complete"].contains($0["phase"] as? String ?? "") }
         XCTAssertEqual(rows.count, 4)
@@ -352,13 +355,13 @@ final class WebsiteModelEvidenceTests: XCTestCase {
         let transport = EvidenceExportTransport()
         await server.configureEmbeddedTransport(transport)
         await server.configureEvidenceDirectory(directory)
-        _ = try await server.fixtureInfer(preparedData(choice), taskID: taskID)
+        let first = try await server.fixtureInfer(preparedData(choice), taskID: taskID)
         XCTAssertEqual(try permissions(directory), 0o700, "An existing directory must not leave private sidecar files publicly traversable")
         let file = evidenceFile(directory: directory, taskID: taskID)
         let full = Data(repeating: 0x78, count: 33_554_432)
         try full.write(to: file)
         do {
-            _ = try await server.fixtureInfer(preparedData(choice), taskID: taskID)
+            _ = try await server.fixtureInfer(preparedData(choice, after: first), taskID: taskID)
             XCTFail("A full journal must reject admission before opening another website session")
         } catch WebModelServer.Failure.persistenceRequired { }
         let starts = await transport.startCount()
@@ -423,8 +426,15 @@ final class WebsiteModelEvidenceTests: XCTestCase {
         } catch { XCTFail("Unexpected evidence error", file: file, line: line) }
     }
 
-    private func preparedData(_ choice: WebsiteModelChoice) throws -> Data {
-        try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "input": Self.privateCanary, "tools": [], "stream": true])
+    private func preparedData(_ choice: WebsiteModelChoice, after previous: Data? = nil) throws -> Data {
+        var input: [[String: Any]] = [["type": "message", "role": "user",
+            "content": [["type": "input_text", "text": Self.privateCanary]]]]
+        if let previous {
+            let completed = try XCTUnwrap(responses(previous).last)
+            input += try XCTUnwrap(completed["output"] as? [[String: Any]])
+            input += [["type": "message", "role": "user", "content": [["type": "input_text", "text": Self.privateCanary]]]]
+        }
+        return try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "input": input, "tools": [], "stream": true])
     }
 
     private func prepared(_ choice: WebsiteModelChoice) throws -> WebModelResponseCodec.Request {
@@ -469,6 +479,7 @@ private actor EvidenceExportTransport: WebModelTransport {
     private var choice: WebsiteModelChoice?
     private var sequence = 0
     private var starts = 0
+    private var submittedFingerprint = ""
 
     init(context: EvidenceExportContext = .valid) { self.context = context }
     func startCount() -> Int { starts }
@@ -480,13 +491,17 @@ private actor EvidenceExportTransport: WebModelTransport {
             token = UUID().uuidString.lowercased()
             generation = UUID().uuidString.lowercased()
             sequence = 0
+            submittedFingerprint = ""
             starts += 1
             choice = try XCTUnwrap(WebsiteModelChoice.parse(try XCTUnwrap(object["modelChoice"])))
             response = snapshot("ready").merging(["sessionToken": token]) { _, value in value }
         } else {
             XCTAssertEqual(object["sessionToken"], token)
             switch operation {
-            case "webProviderSend": sequence += 1; response = snapshot("running")
+            case "webProviderSend":
+                sequence += 1
+                submittedFingerprint = SHA256.hash(data: Data(try XCTUnwrap(object["prompt"]).utf8)).map { String(format: "%02x", $0) }.joined()
+                response = snapshot("running")
             case "webProviderPoll":
                 response = snapshot("complete").merging(["text": #"{"type":"message","text":"PRIVATE_RAW_PROMPT_TOOL_AND_RESPONSE_CANARY"}"#]) { _, value in value }
             case "webProviderFinish", "webProviderCancel": response = ["cleanup": "not_created"]
@@ -501,7 +516,7 @@ private actor EvidenceExportTransport: WebModelTransport {
         var receipt: [String: Any] = ["documentGeneration": generation, "sequence": sequence,
                                      "responseCount": state == "complete" ? sequence : max(0, sequence - 1),
                                      "baselineResponseCount": max(0, sequence - 1),
-                                     "firstUserFingerprint": "", "private": "PRIVATE_RAW_PROMPT_TOOL_AND_RESPONSE_CANARY"]
+                                     "firstUserFingerprint": "", "submittedPromptFingerprint": submittedFingerprint, "private": "PRIVATE_RAW_PROMPT_TOOL_AND_RESPONSE_CANARY"]
         if state == "complete" || sequence > 1 { receipt["firstUserFingerprint"] = String(repeating: "a", count: 64) }
         var exposedSequence: Any = sequence
         switch context {
@@ -529,6 +544,7 @@ private actor EvidenceExportTransport: WebModelTransport {
             evidence["source"] = "selected_model_indicator"; evidence["chatSelection"] = context
         }
         return ["state": state, "sessionToken": token, "sequence": exposedSequence,
+                "turnContinuationCapability": "per_submission_ownership_v1",
                 "modelEvidence": evidence,
                 "modelProofContext": receipt,
                 "productModeEvidence": ["product": "chatgpt", "mode": "chat", "source": "composer_mode_control", "temporaryTransition": "acknowledged"]]

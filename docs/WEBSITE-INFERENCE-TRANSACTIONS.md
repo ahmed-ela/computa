@@ -3,11 +3,12 @@
 Computa keeps canonical conversation history, terminal sessions, browser-tool
 tabs and file diffs locally. The Responses bridge sends the full current
 request, including offered tools and their outputs, to a website. Gemini uses
-one owned temporary conversation per native user turn. The ChatGPT candidate
-uses the same policy only after negotiating `per_submission_ownership_v1`.
-Claude and transports without this capability use a new owned temporary
-conversation per inference. Retained pages still receive the full canonical
-request; their website history duplicates earlier requests and is bounded.
+one owned temporary conversation per native user turn. ChatGPT and Claude use
+a new owned temporary conversation per inference. Embedded ChatGPT still
+requires `per_submission_ownership_v1`: physical page replacement does not
+remove native continuation or submission proof. Retained pages still receive
+the full canonical request; their website history duplicates earlier requests
+and is bounded.
 
 An inference conversation is distinct from a native user turn. A turn may need
 many inference conversations while retaining one native thread, turn, command
@@ -49,7 +50,7 @@ or turn a completed task into a server failure.
    one and response baseline zero. Retained conversations require a contiguous
    submission sequence and the exact prior response baseline.
 4. Require current model, document generation, immutable first-user-message
-   proof and, on retained pages, the current full submission fingerprint;
+   proof and, for native continuation, the current full submission fingerprint;
    parse the strict response envelope and save `complete`.
 5. For a retained-page tool continuation, save the verified yield and keep the
    same lease. For a final response or per-inference page, close only that owned
@@ -65,6 +66,16 @@ unresolved start attempt and blocks further inference rather than guessing a
 token or borrowing an earlier closure. Public finish/cancel revokes prepared
 context before cleanup; private inference cleanup preserves native context for
 the next tool continuation.
+
+ChatGPT carries the validated native continuation, resolved model, transport
+generation and cumulative inference/byte budgets across physical leases. It
+validates the complete next request before Start and rechecks the prior HTTP
+handoff before Send after page preparation. Every replacement has a new lease,
+sequence one and response baseline zero; the native turn and history remain
+the same. Any issued Send whose output fails quarantines that native context.
+Later manual cleanup cannot authorize replay or another inference in it.
+Request-metadata observation ends with its physical page and does not migrate
+to the next view.
 
 Build 38 lets a native-approved same-document first route, followed by its
 local-to-public promotion, continue one already-clicked ChatGPT display

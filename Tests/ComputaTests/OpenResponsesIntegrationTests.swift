@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import XCTest
 @testable import Computa
 
@@ -56,28 +57,53 @@ final class OpenResponsesIntegrationTests: XCTestCase {
 
     func testUpstreamAcceptanceTemplatesAgainstRealHTTPListener() async throws {
         let transport = OpenResponsesFixtureTransport()
-        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
-        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
-        let base = try await server.start()
+        var servers: [WebModelServer] = []
+        var relay: OpenResponsesOfficialRelay?
         do {
-            let taskID = UUID().uuidString.lowercased()
-            _ = try await bindWebsiteInferenceFixtureTurn(server, taskID: taskID)
+            // The six upstream HTTP cases are independent requests, including
+            // multi-turn's complete history in one body. Each needs its own
+            // native task/turn rather than an unrelated same-turn continuation.
+            var targets: [OpenResponsesOfficialRoutes.Target] = []
+            for _ in 0..<6 {
+                let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+                servers.append(server)
+                await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
+                let taskID = UUID().uuidString.lowercased()
+                _ = try await bindWebsiteInferenceFixtureTurn(server, taskID: taskID)
+                targets.append(.init(base: try await server.start(), token: server.bearerToken,
+                    taskID: taskID, metadata: try websiteInferenceFixtureMetadata(taskID: taskID)))
+            }
+            let taskID = UUID().uuidString.lowercased(), token = UUID().uuidString
+            let metadata = try websiteInferenceFixtureMetadata(taskID: taskID)
+            let routes = OpenResponsesOfficialRoutes(targets: targets, token: token, taskID: taskID, metadata: metadata)
+            let listener = try OpenResponsesOfficialRelay(routes: routes)
+            relay = listener
+            let base = try await listener.start()
             let contextRoot = try artifactRoot()
             let contextURL = contextRoot.appendingPathComponent("official-fixture-headers.json")
             try JSONSerialization.data(withJSONObject: ["x-computa-task-id": taskID,
-                "x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: taskID)], options: [.sortedKeys])
+                "x-codex-turn-metadata": metadata], options: [.sortedKeys])
                 .write(to: contextURL, options: [.atomic])
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: contextURL.path)
             defer { try? FileManager.default.removeItem(at: contextURL) }
             let result = try await runConformance(["--official", "--base-url", base.absoluteString, "--model", syntheticChatGPTModelID,
-                "--fixture-headers", contextURL.path], token: server.bearerToken)
+                "--fixture-headers", contextURL.path], token: token)
             XCTAssertEqual(result.status, 0, result.output)
             print(result.output)
             let sends = await transport.sendCount()
             // One upstream case is a local schema fixture and sends no HTTP.
             XCTAssertEqual(sends, 6)
-            _ = await server.shutdown()
-        } catch { _ = await server.shutdown(); throw error }
+            let forwarded = await routes.forwardedCount()
+            let starts = await transport.startCount()
+            XCTAssertEqual(forwarded, 6)
+            XCTAssertEqual(starts, 6)
+            listener.stop()
+            for server in servers { _ = await server.shutdown() }
+        } catch {
+            relay?.stop()
+            for server in servers { _ = await server.shutdown() }
+            throw error
+        }
     }
 
     func testUnsupportedRequestsAndSecurityFailBeforeTransport() async throws {
@@ -185,6 +211,163 @@ final class OpenResponsesIntegrationTests: XCTestCase {
             process.waitUntilExit()
             return (process.terminationStatus, String(decoding: data, as: UTF8.self))
         }.value
+    }
+}
+
+/// Supplies native context outside the pinned upstream request body. It never
+/// manufactures a response: status, Content-Type and bytes come from the real
+/// authenticated WebModelServer listener for that independent fixture case.
+private actor OpenResponsesOfficialRoutes {
+    struct Target: Sendable {
+        let base: URL
+        let token: String
+        let taskID: String
+        let metadata: String
+    }
+    struct Response: Sendable {
+        let status: Int
+        let contentType: String
+        let body: Data
+    }
+    private let targets: [Target]
+    private let token: String
+    private let taskID: String
+    private let metadata: String
+    private var forwarded = 0
+
+    init(targets: [Target], token: String, taskID: String, metadata: String) {
+        self.targets = targets; self.token = token; self.taskID = taskID; self.metadata = metadata
+    }
+    func forwardedCount() -> Int { forwarded }
+
+    func forward(_ incoming: APIModelServer.HTTPRequest) async throws -> Response {
+        guard incoming.method == "POST", incoming.path == "/v1/responses",
+              incoming.headers["authorization"] == "Bearer " + token,
+              incoming.headers["x-computa-task-id"] == taskID,
+              incoming.headers["x-codex-turn-metadata"] == metadata,
+              forwarded < targets.count else { throw URLError(.badServerResponse) }
+        let target = targets[forwarded]
+        forwarded += 1
+        var request = URLRequest(url: target.base.appendingPathComponent("responses"))
+        request.httpMethod = incoming.method; request.timeoutInterval = 20
+        request.httpBody = incoming.body
+        let replaced = Set(["host", "content-length", "connection", "authorization", "x-computa-task-id", "x-codex-turn-metadata"])
+        for (name, value) in incoming.headers where !replaced.contains(name) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        // Each fixture listener has its own immutable bearer credential. Both
+        // the relay credential and the actual native listener credential are
+        // checked; only the request's transport identity changes here.
+        request.setValue("Bearer " + target.token, forHTTPHeaderField: "Authorization")
+        request.setValue(target.taskID, forHTTPHeaderField: "X-Computa-Task-ID")
+        request.setValue(target.metadata, forHTTPHeaderField: "X-Codex-Turn-Metadata")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard data.count <= 2_097_152, let response = response as? HTTPURLResponse,
+              response.url == request.url,
+              let contentType = response.value(forHTTPHeaderField: "Content-Type") else {
+            throw URLError(.badServerResponse)
+        }
+        return .init(status: response.statusCode, contentType: contentType, body: data)
+    }
+}
+
+/// A bounded loopback-only test relay. SSE is buffered because this acceptance
+/// suite validates the full wire contract rather than first-event latency.
+private final class OpenResponsesOfficialRelay: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "ComputaTests.OpenResponses.official")
+    private let lock = NSLock()
+    private var connections: [NWConnection] = []
+
+    init(routes: OpenResponsesOfficialRoutes) throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        listener = try NWListener(using: parameters)
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self, self.retain(connection) else { connection.cancel(); return }
+            connection.start(queue: self.queue)
+            Task {
+                let deadline = Task {
+                    do { try await Task.sleep(for: .seconds(25)); connection.cancel() } catch { }
+                }
+                defer { deadline.cancel(); connection.cancel() }
+                do {
+                    let request = try await Self.read(connection)
+                    let response = try await routes.forward(request)
+                    try await Self.send(response, on: connection)
+                } catch {
+                    // Any fixture routing/parsing failure remains a failing
+                    // upstream HTTP result rather than a synthetic success.
+                    try? await Self.send(.init(status: 502, contentType: "text/plain", body: Data("Fixture relay failed".utf8)), on: connection)
+                }
+            }
+        }
+    }
+
+    private func retain(_ connection: NWConnection) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard connections.count < 8 else { return false }
+        connections.append(connection); return true
+    }
+
+    func start() async throws -> URL {
+        let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
+            let ready = OpenResponsesOfficialReady(continuation)
+            listener.stateUpdateHandler = { [listener] state in
+                switch state {
+                case .ready: if let port = listener.port { ready.finish(.success(port.rawValue)) }
+                case .failed(let error): ready.finish(.failure(error))
+                case .cancelled: ready.finish(.failure(CancellationError()))
+                default: break
+                }
+            }
+            listener.start(queue: queue)
+        }
+        return URL(string: "http://127.0.0.1:\(port)/v1")!
+    }
+
+    func stop() {
+        listener.cancel()
+        lock.lock(); let values = connections; lock.unlock()
+        values.forEach { $0.cancel() }
+    }
+
+    private static func read(_ connection: NWConnection) async throws -> APIModelServer.HTTPRequest {
+        var buffer = Data()
+        while true {
+            let data: Data = try await withCheckedThrowingContinuation { continuation in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, _, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else if let data, !data.isEmpty { continuation.resume(returning: data) }
+                    else { continuation.resume(throwing: CancellationError()) }
+                }
+            }
+            buffer.append(data)
+            // Reuse the strict finite parser (16 KiB headers, 2 MiB request,
+            // exact Content-Length, no transfer encoding or duplicate headers).
+            if let request = try APIModelServer.parseRequest(buffer) { return request }
+        }
+    }
+
+    private static func send(_ response: OpenResponsesOfficialRoutes.Response, on connection: NWConnection) async throws {
+        let reason = HTTPURLResponse.localizedString(forStatusCode: response.status)
+        let head = "HTTP/1.1 \(response.status) \(reason)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n\r\n"
+        var output = Data(head.utf8); output.append(response.body)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: output, completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            })
+        }
+    }
+}
+
+private final class OpenResponsesOfficialReady: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<UInt16, Error>?
+    init(_ continuation: CheckedContinuation<UInt16, Error>) { self.continuation = continuation }
+    func finish(_ result: Result<UInt16, Error>) {
+        lock.lock(); let value = continuation; continuation = nil; lock.unlock()
+        value?.resume(with: result)
     }
 }
 
