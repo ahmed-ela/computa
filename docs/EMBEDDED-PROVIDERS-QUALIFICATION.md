@@ -1,5 +1,33 @@
 # Embedded website provider qualification
 
+## Candidate126: deferred ChatGPT verification
+
+The source candidate defers model-picker verification during running ChatGPT
+responses and requires full current proof before exposing a stable answer or
+executing tools. Pending results remain empty; current-header contradictions,
+submission lineage, route ownership and revocation checks remain enforced.
+This changes observation sequencing; it does not establish the cause of the
+website's earlier `Load failed` or native `bad URL` failures.
+
+All 555 adapter tests and 298 selected native tests passed. The native cohort
+covers the transport, server, continuation, model evidence, bounded Gemini
+diagnostic and runtime cleanup contract. Source, HEAD and working diff remained
+unchanged during each run; the final native log SHA is
+`d0d99aafcefd482b9a596201fd274c2b6f5d1e85cb5f1b09a4cdf5b461740606`.
+The adapter log SHA is
+`ce9048ce40db27caf98255824154324fe87231c4f7787335360a81dd2ca55906`;
+the later native-only fixture corrections did not change those adapter inputs.
+Signed packaging, installation and live ChatGPT browser/code qualification
+remain pending. Installed124 and pushed cleanup source125 are separate states.
+
+An additional ordinary, unpaused ChatGPT Instant control sent one synthetic
+55,369-unit message and returned its exact marker. Completion was observed
+27.482 seconds after Send; actual completion latency and HTTP/request details
+were not measured. This control does not qualify the harness. Its disposable
+tab closed, and the prior approved Inspector settings remain restored off.
+Google's fresh ordinary-tab CAPTCHA control below remains an unresolved
+external blocker; no permanent CAPTCHA or ChatGPT request-path fix is claimed.
+
 ## Installed build124: current qualification
 
 Computa 0.7.0 (124), compiled from

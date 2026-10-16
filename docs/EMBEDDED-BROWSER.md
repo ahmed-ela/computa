@@ -60,6 +60,14 @@ retain their [separate qualification gates](../TODO.md#embedded-browser-agent-co
   Closing the last human tab shows the empty browser while model work continues;
   model loading, errors and teardown do not replace the human browser's errors.
 
+ChatGPT observations defer fresh model verification while a response is running.
+Pending snapshots expose no answer, tool instruction or fresh model proof, and
+these reads do not open the model picker. Current visible header contradictions
+still reject the session. Before publishing a stable answer or tool request,
+Computa rechecks the complete current model, product mode and owned submission.
+The existing first owned SPA transition can follow its acknowledged first Send;
+it cannot replay that Send or authorize a later unrelated conversation route.
+
 Sign in through a regular human browser tab. Both use the same persistent WebKit
 profile; inference never takes over the sign-in tab. Saved model catalogs are
 reused on startup; only missing catalogs are discovered once. **Refresh website

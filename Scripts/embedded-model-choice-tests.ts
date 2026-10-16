@@ -2016,8 +2016,19 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         completed: 'PRIVATE_COMPLETE_VALUE', arbitrary: 'PRIVATE_UNRECOGNIZED_FIELD' };
       picker.trigger.onClick = () => {};
       const observing = f.run('verifyModel', { expectedModelChoice: choice(initial) });
-      for (let tick = 0; tick < 10; tick++) await Promise.resolve();
-      f.flush();
+      if (provider === 'chatgpt') {
+        // Its bootstrap and final guard settle before the inert fixture timer
+        // is registered. Expire that one existing 1,800ms deadline explicitly.
+        for (let tick = 0; tick < 40; tick++) await Promise.resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        for (let tick = 0; tick < 40; tick++) await Promise.resolve();
+        f.advanceTime(1_801); f.flush();
+        for (let tick = 0; tick < 40; tick++) await Promise.resolve();
+        f.flush();
+      } else {
+        for (let tick = 0; tick < 10; tick++) await Promise.resolve();
+        f.flush();
+      }
       const result = await observing;
       expect(result).toMatchObject({ error: 'model_unverified', modelDiagnostic: { readContext: {
         scope: provider === 'chatgpt' ? 'action_final_guard' : 'action_precheck', action: 'verifyModel', selectionAttemptPresent: true,

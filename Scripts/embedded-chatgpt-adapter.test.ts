@@ -248,8 +248,9 @@ defineWebsiteModelChoiceTests('chatgpt', (owned = false) => {
 async function chatTurnFixture(modelChoice?: { key: string; label: string }, initialMarker = firstMarker) {
   const f = fixture({ response: false });
   await f.inspect({ expectedUserCounts: [0], expectedFirstUserMarker: initialMarker });
+  let picker: ReturnType<typeof installObservedModelPicker> | undefined;
   if (modelChoice) {
-    installObservedModelPicker(f, 'chatgpt', Element, { genericHeader: true });
+    picker = installObservedModelPicker(f, 'chatgpt', Element, { genericHeader: true });
     const model = await f.inspect({ action: 'verifyModel', expectedUserCounts: [0], expectedModelChoice: modelChoice });
     expect(model.error).toBeUndefined();
   }
@@ -272,9 +273,9 @@ async function chatTurnFixture(modelChoice?: { key: string; label: string }, ini
     new TextEncoder().encode(text.replace(/\r\n?/g, '\n').normalize('NFC').trim())))].map(byte => byte.toString(16).padStart(2, '0')).join('');
   const values = (record: typeof records[number], current = proofs) => ({ submissionSequence: record.sequence,
     submissionMarker: record.marker, expectedFirstUserMarker: initialMarker, expectedSubmissionProofs: current.slice(-2), ...(modelChoice ? { expectedModelChoice: modelChoice } : {}) });
-  return { f, send, records, proofs, values,
+  return { f, send, records, proofs, values, picker,
     addBody(value: boolean) { addBody = value; },
-    async dispatch(text: string) {
+    async dispatch(text: string, submitOverrides: Record<string, unknown> = {}, beforeSubmit?: () => void) {
       const sequence = records.length + 1, marker = sequence === 1 ? initialMarker
         : `00000000-0000-4000-8000-${sequence.toString(16).padStart(12, '0')}`;
       const outbound = text + '\n\nComputa session marker: ' + marker;
@@ -284,7 +285,8 @@ async function chatTurnFixture(modelChoice?: { key: string; label: string }, ini
       const ready = await f.rawRun({ action: 'sendReady', prompt: outbound, expectedUserCounts: [sequence - 1], ...values(record) });
       expect(ready.sendReady).toBe(true);
       outgoing = outbound; proofs.push({ sequence, fingerprint: record.fingerprint }); records.push(record);
-      const ack = await f.rawRun({ action: 'submit', prompt: outbound, expectedUserCounts: [sequence - 1], ...values(record) });
+      beforeSubmit?.();
+      const ack = await f.rawRun({ action: 'submit', prompt: outbound, expectedUserCounts: [sequence - 1], ...values(record), ...submitOverrides });
       expect(ack.error).toBeUndefined(); expect(ack.submitted).toBe(true); expect(ack.submissionPending).toBe(true);
       expect(ack.text).toBe(''); expect(ack.answerComplete).toBe(false); expect(ack).not.toHaveProperty('submissionProof');
       return record;
@@ -298,6 +300,252 @@ async function chatTurnFixture(modelChoice?: { key: string; label: string }, ini
         new Element('BUTTON', { 'aria-label': 'Copy' })); f.messages.append(root); return root;
     } };
 }
+
+describe('ChatGPT bounded in-flight model proof deferral', () => {
+  const choice = { key: 'chat/latest/medium', label: 'Medium' };
+
+  test('Send retains a full precheck and its post-Send guard opens no picker', async () => {
+    const x = await chatTurnFixture(choice), picker: any = x.picker;
+    let beforeSubmit = 0, atSend = 0;
+    const send = x.send.onClick!;
+    x.send.onClick = () => { atSend = picker.trigger.clicks; send(); };
+    const record = await x.dispatch('Owned deferred submission', { deferModelVerification: true }, () => { beforeSubmit = picker.trigger.clicks; });
+    expect(atSend).toBeGreaterThan(beforeSubmit);
+    expect(picker.trigger.clicks).toBe(atSend); expect(x.send.clicks).toBe(1);
+    x.answer('Final owned answer');
+    for (const action of ['inspect', 'verifyModel', 'verifyProductMode']) {
+      const observed = await x.observe(record, { action, deferModelVerification: true });
+      expect(observed.error).toBeUndefined(); expect(observed.modelVerificationPending).toBe(true);
+      expect(observed).not.toHaveProperty('modelEvidence'); expect(picker.trigger.clicks).toBe(atSend);
+    }
+    const complete = await x.observe(record, { deferModelVerification: false });
+    expect(complete.error).toBeUndefined(); expect(complete.modelEvidence.selected).toEqual(choice);
+    expect(complete).not.toHaveProperty('modelVerificationPending'); expect(complete.answerComplete).toBe(true);
+    expect(complete.submissionProof).toEqual({ sequence: 1, fingerprint: record.fingerprint });
+    expect(picker.trigger.clicks).toBeGreaterThan(atSend); expect(x.send.clicks).toBe(1);
+  });
+
+  test('deferred reads require an enabled closed recognized header without opening the picker', async () => {
+    for (const mutation of ['disabled', 'open', 'unknown_power']) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      const record = await x.dispatch('Owned passive header observation'); x.answer('Owned answer');
+      const before = picker.trigger.clicks;
+      const healthy = await x.observe(record, { deferModelVerification: true });
+      expect(healthy.error).toBeUndefined(); expect(healthy.modelVerificationPending).toBe(true);
+      expect(healthy).not.toHaveProperty('modelEvidence'); expect(picker.trigger.clicks).toBe(before);
+      if (mutation === 'disabled') picker.trigger.disabled = true;
+      if (mutation === 'open') picker.trigger.values['aria-expanded'] = 'true';
+      if (mutation === 'unknown_power') picker.trigger.text = 'Thinking effort';
+      const rejected = await x.observe(record, { deferModelVerification: true });
+      expect(rejected.error).toBeDefined(); expect(rejected).not.toHaveProperty('modelVerificationPending');
+      expect(rejected).not.toHaveProperty('modelEvidence'); expect(picker.trigger.clicks).toBe(before);
+      expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('an initial model read cannot defer before any Send', async () => {
+    const x = await chatTurnFixture(choice), picker: any = x.picker, before = picker.trigger.clicks;
+    const observed = await x.f.inspect({ action: 'verifyModel', expectedUserCounts: [0], expectedModelChoice: choice,
+      deferModelVerification: true });
+    expect(observed.error).toBeUndefined(); expect(observed.modelEvidence.selected).toEqual(choice);
+    expect(observed).not.toHaveProperty('modelVerificationPending'); expect(picker.trigger.clicks).toBeGreaterThan(before);
+  });
+
+  test('only a first claimed root-to-local or public route Send can acknowledge pending without body authority', async () => {
+    for (const path of ['/c/local-chatgpt%3Afixture', '/c/public-fixture']) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      const raw = x.f.rawRun; let ack: any, atSend = 0;
+      x.f.rawRun = async request => { const result = await raw(request); if (request.action === 'submit') ack = result; return result; };
+      const click = x.send.onClick!;
+      x.send.onClick = () => { atSend = picker.trigger.clicks; click();
+        x.f.document.URL = 'https://chatgpt.com' + path + '?temporary-chat=true'; x.f.location.pathname = path; };
+      const first = await x.dispatch('Exact first deferred route transition', { deferModelVerification: true });
+      expect(ack).toMatchObject({ submitted: true, modelVerificationPending: true, submissionPending: true, text: '', answerComplete: false });
+      expect(ack).not.toHaveProperty('modelEvidence'); expect(ack).not.toHaveProperty('submissionProof');
+      expect(ack.firstUserFingerprint == null).toBe(true); expect(picker.trigger.clicks).toBe(atSend);
+      x.answer('Fresh URL answer');
+      const current = await x.observe(first, { deferModelVerification: false });
+      expect(current.error).toBeUndefined(); expect(current.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(current.answerComplete).toBe(true); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('a deferred route acknowledgment rejects foreign later stale marker and document witnesses', async () => {
+    for (const mutation of ['foreign', 'later', 'stale', 'marker', 'document']) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      if (mutation === 'later') { const first = await x.dispatch('Exact first'); x.answer('First'); await x.observe(first); }
+      const sequence = mutation === 'later' ? 2 : 1;
+      const marker = sequence === 1 ? firstMarker : '00000000-0000-4000-8000-000000000002';
+      const outbound = 'Exact rejected route request\n\nComputa session marker: ' + marker;
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(outbound));
+      const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      const values = { submissionSequence: sequence, submissionMarker: marker, expectedUserCounts: [sequence - 1],
+        expectedModelChoice: choice, expectedSubmissionProofs: [...x.proofs.slice(-1)] };
+      expect((await x.f.rawRun({ action: 'insert', prompt: outbound, ...values })).inserted).toBe(true);
+      expect((await x.f.rawRun({ action: 'sendReady', prompt: outbound, ...values })).sendReady).toBe(true);
+      let atSend = 0;
+      x.send.onClick = () => { atSend = picker.trigger.clicks; x.f.appendUser(outbound); x.f.composer.text = '';
+        x.f.document.URL = mutation === 'foreign' ? 'https://foreign.test/c/fixture' : 'https://chatgpt.com/c/new-fixture?temporary-chat=true';
+        const state: any = x.f.world.__computaChatSubmissionState;
+        if (mutation === 'stale') x.f.world.__computaChatActiveInvocation = {};
+        if (mutation === 'marker') state.pending.marker = '00000000-0000-4000-8000-000000000099';
+        if (mutation === 'document') state.document = {};
+      };
+      const ack = await x.f.rawRun({ action: 'submit', prompt: outbound, ...values, deferModelVerification: true,
+        expectedSubmissionProofs: [...x.proofs.slice(-1), { sequence, fingerprint }] });
+      expect(ack.error).toBeDefined(); expect(ack).not.toHaveProperty('modelVerificationPending');
+      expect(ack).not.toHaveProperty('modelEvidence'); expect(ack).not.toHaveProperty('submissionProof');
+      expect(ack).not.toHaveProperty('answerComplete', true); expect(picker.trigger.clicks).toBe(atSend);
+      expect(x.send.clicks).toBe(sequence);
+    }
+  });
+
+  test('deferred reads drain switch-and-restore negatives without opening the picker', async () => {
+    for (const field of ['power', 'header']) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      const record = await x.dispatch('Owned negative observation'); x.answer('Owned answer');
+      const before = picker.trigger.clicks, pin: any = x.f.world.__computaChatPresetPin;
+      let records: any[];
+      if (field === 'power') {
+        picker.selected('High'); picker.selected('Medium');
+        records = [{ type: 'attributes', target: picker.slider, attributeName: 'aria-valuenow', oldValue: '2' }];
+        pin.semanticObserver.takeRecords = () => { const result = records; records = []; return result; };
+      } else {
+        const leaf: any = { nodeType: 3, textContent: 'Medium', parentElement: picker.trigger };
+        records = [{ type: 'characterData', target: leaf, oldValue: 'High' }];
+        pin.headerObserver.takeRecords = () => { const result = records; records = []; return result; };
+      }
+      const observed = await x.observe(record, { deferModelVerification: true });
+      expect(observed.error).toBe('model_mismatch'); expect(observed).not.toHaveProperty('modelEvidence');
+      expect(pin.invalidated).toBe(true); expect(picker.trigger.clicks).toBe(before);
+    }
+  });
+
+  test('one healthy provisional header stays pending with zero opens until full original remount proof transfers its pin', async () => {
+    const x = await chatTurnFixture(choice), picker: any = x.picker;
+    const record = await x.dispatch('Owned header remount'); x.answer('Owned answer');
+    const pin: any = x.f.world.__computaChatPresetPin, old = picker.replaceTrigger(), before = picker.trigger.clicks;
+    const deferred = await x.observe(record, { deferModelVerification: true });
+    expect(deferred.error).toBeUndefined(); expect(deferred.modelVerificationPending).toBe(true);
+    expect(deferred).not.toHaveProperty('modelEvidence');
+    expect(pin.headerTrigger).toBe(old); expect(picker.trigger.clicks).toBe(before);
+    const provisional = pin.provisionalHeader; let disconnected = 0;
+    provisional.observer.disconnect = () => { disconnected++; };
+    expect(provisional.header).toBe(picker.trigger); expect(provisional.previous).toBe(old);
+    expect(provisional.completed).toBe(false);
+    const full = await x.observe(record, { deferModelVerification: false });
+    expect(full.error).toBeUndefined(); expect(full.modelEvidence.selected).toEqual(choice);
+    expect(pin.headerTrigger).toBe(picker.trigger); expect(picker.trigger.clicks).toBeGreaterThan(before);
+    expect(pin.provisionalHeader).toBe(provisional); expect(provisional.completed).toBe(true); expect(disconnected).toBe(1);
+  });
+
+  test('provisional header negative history cannot be restored replaced rearmed or borrowed by a stale owner', async () => {
+    for (const mutation of ['flip_restore', 'unknown_restore', 'detached_flip_restore', 'second_replacement', 'old_reconnect',
+      'foreign_owner', 'foreign_url', 'queued_before_full']) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      const record = await x.dispatch('Owned provisional header history'); x.answer('Owned answer');
+      const pin: any = x.f.world.__computaChatPresetPin, old = picker.replaceTrigger();
+      expect((await x.observe(record, { deferModelVerification: true })).modelVerificationPending).toBe(true);
+      const provisional = pin.provisionalHeader, before = picker.trigger.clicks;
+      const leaf: any = { nodeType: 3, textContent: 'Medium', parentElement: picker.trigger };
+      const records: any[] = [{ type: 'characterData', target: leaf,
+        oldValue: mutation === 'unknown_restore' ? 'PRIVATE_UNKNOWN_HEADER' : 'High' }];
+      if (mutation === 'detached_flip_restore') {
+        leaf.parentElement = null;
+        records.unshift({ type: 'childList', target: picker.trigger, addedNodes: [], removedNodes: [leaf] });
+      }
+      if (['flip_restore', 'unknown_restore', 'detached_flip_restore'].includes(mutation)) provisional.observer.callback(records);
+      if (mutation === 'queued_before_full') provisional.observer.takeRecords = () => records.splice(0);
+      if (mutation === 'second_replacement') picker.replaceTrigger();
+      if (mutation === 'old_reconnect') old.connected = true;
+      if (mutation === 'foreign_owner') x.f.world.__computaModelOwner = 'fc109e52-2192-45c7-8f63-4ab8ea137999';
+      const overrides: any = { deferModelVerification: mutation !== 'queued_before_full' };
+      if (mutation === 'foreign_url') overrides.expectedURL = 'https://chatgpt.com/c/stale-certified-route';
+      const observed = await x.observe(record, overrides);
+      expect(observed.error).toBeDefined(); expect(observed).not.toHaveProperty('modelEvidence');
+      expect(observed).not.toHaveProperty('modelVerificationPending'); expect(picker.trigger.clicks).toBe(before);
+      expect(pin.headerTrigger).toBe(old); expect(pin.provisionalHeader).toBe(provisional); expect(provisional.completed).toBe(false);
+      expect(JSON.stringify(observed)).not.toContain('PRIVATE_UNKNOWN_HEADER');
+    }
+  });
+
+  test('foreign ownership and another expected preset cannot become pending model authority', async () => {
+    for (const foreign of [true, false]) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      const record = await x.dispatch('Owned native choice'); x.answer('Owned answer');
+      const before = picker.trigger.clicks;
+      const observed = await x.observe(record, { deferModelVerification: true, ...(foreign
+        ? { ownerToken: 'fc109e52-2192-45c7-8f63-4ab8ea137999', bindOwner: false }
+        : { expectedModelChoice: { key: 'chat/latest/high', label: 'High' } }) });
+      expect(observed.error).toBeDefined(); expect(observed).not.toHaveProperty('modelEvidence');
+      expect(observed).not.toHaveProperty('modelVerificationPending'); expect(picker.trigger.clicks).toBe(before);
+    }
+  });
+
+  test('first and later owned submission expansion use pending guards with zero picker opens', async () => {
+    for (const sequence of [1, 2]) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      if (sequence === 2) { const first = await x.dispatch('First exact request'); x.answer('First'); await x.observe(first); }
+      const record = await x.dispatch('Owned expansion ' + 'A'.repeat(11_000), { deferModelVerification: true });
+      x.answer('Expanded owned answer');
+      const root = x.f.document.querySelectorAll('article[data-turn="user"]')[sequence - 1], body = root.children[0];
+      body.text = record.outbound.slice(0, 40);
+      const more = new Element('BUTTON', { 'aria-label': 'Show more' });
+      more.onClick = () => { body.text = record.outbound; }; root.append(more);
+      const before = picker.trigger.clicks;
+      const observed = await x.observe(record, { deferModelVerification: true, allowFirstUserExpansion: true,
+        firstUserExpansionModelChoice: choice, allowSubmissionExpansion: true });
+      expect(observed.error).toBeUndefined(); expect(observed.modelVerificationPending).toBe(true);
+      expect(observed).not.toHaveProperty('modelEvidence'); expect(more.clicks).toBe(1);
+      expect(picker.trigger.clicks).toBe(before); expect(x.send.clicks).toBe(sequence);
+    }
+  });
+
+  test('full final proof rejects answer body text count busy or footer drift across the picker await', async () => {
+    for (const mutation of ['text', 'body', 'count', 'busy', 'footer']) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      const record = await x.dispatch('Exact final response snapshot'), answer = x.answer('Original');
+      await x.observe(record, { deferModelVerification: true });
+      let opens = 0; const open = picker.trigger.onClick;
+      picker.trigger.onClick = () => {
+        open(); if (++opens !== 2) return;
+        if (mutation === 'text') answer.children[0].text += ' changed';
+        if (mutation === 'body') {
+          const old = answer.children[0], replacement = new Element(old.tagName, { ...old.values }, old.text);
+          replacement.parentElement = answer; answer.children[0] = replacement; old.connected = false;
+        }
+        if (mutation === 'count') x.answer('Unowned extra answer');
+        if (mutation === 'busy') x.f.body.append(new Element('BUTTON', { 'aria-label': 'Stop streaming' }));
+        if (mutation === 'footer') answer.children[1].disabled = true;
+      };
+      const observed = await x.observe(record, { deferModelVerification: false });
+      expect(opens).toBe(2); expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'response_changed' });
+      expect(observed).not.toHaveProperty('modelEvidence'); expect(observed).not.toHaveProperty('submissionProof'); expect(x.send.clicks).toBe(1);
+    }
+  });
+
+  test('the last submission digest cannot publish stale answer or authority after final model proof', async () => {
+    for (const mutation of ['answer', 'owner', 'product', 'header']) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      const record = await x.dispatch('Exact final digest snapshot'), answer = x.answer('Original');
+      await x.observe(record, { deferModelVerification: true });
+      let closes = 0, mutated = false; const close = picker.menu.onDispatch;
+      picker.menu.onDispatch = (event: any) => {
+        close(event); if (++closes !== 2) return;
+        x.f.onDigest(() => {
+          mutated = true;
+          if (mutation === 'answer') answer.children[0].text += ' changed after proof';
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'fc109e52-2192-45c7-8f63-4ab8ea137999';
+          if (mutation === 'product') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+          if (mutation === 'header') picker.replaceTrigger();
+        }, record.outbound);
+      };
+      const observed = await x.observe(record, { deferModelVerification: false });
+      expect(mutated).toBe(true); expect(observed.error).toBeDefined();
+      expect(observed).not.toHaveProperty('modelEvidence'); expect(observed).not.toHaveProperty('submissionProof'); expect(x.send.clicks).toBe(1);
+    }
+  });
+});
 
 describe('ChatGPT per-round canonical submission ownership', () => {
   const replaceRoot = (x: Awaited<ReturnType<typeof chatTurnFixture>>, ordinal = 0, changed = false) => {

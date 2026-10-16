@@ -3,6 +3,60 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testChatGPTRunningModelVerificationDefersJournalUntilFullFinalProof() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-pending-proof-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport()
+        let task = websiteInferenceFixtureTaskID("pending-proof")
+        let turn = websiteInferenceFixtureTaskID("pending-proof:turn")
+        let transport = PendingChatModelFixtureTransport(base: base, beforeRunningPoll: {
+            let journal = try Data(contentsOf: root.appendingPathComponent("evidence/transactions/" + task + "/" + turn + ".jsonl"))
+                .split(separator: 0x0A).map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]) }
+            XCTAssertEqual(journal.compactMap { $0["phase"] as? String }, ["start_requested", "started"])
+            XCTAssertFalse(journal.contains { $0["phase"] as? String == "submission_verified" })
+        })
+        await server.configureEmbeddedTransport(transport)
+        let response = try await server.fixtureInfer(request, taskID: "pending-proof")
+        XCTAssertTrue(String(decoding: response, as: UTF8.self).contains("OK"))
+        let journal = try turnJournal(root: root, task: "pending-proof")
+        XCTAssertEqual(journal.compactMap { $0["phase"] as? String },
+            ["start_requested", "started", "submission_verified", "complete", "release_verified"])
+        XCTAssertNotNil(journal.first { $0["phase"] as? String == "submission_verified" }?["modelEvidence"])
+        let operations = await base.operations()
+        XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+        XCTAssertFalse(String(decoding: response, as: UTF8.self).contains("modelVerificationPending"))
+    }
+
+    func testPendingModelSnapshotCannotAdmitTextFreshEvidenceOrCompletionAndIsChatOnly() async throws {
+        for mutation in PendingChatModelMutation.allCases where mutation != .none {
+            let base = FixtureWebModelTransport()
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            await server.configureEmbeddedTransport(PendingChatModelFixtureTransport(base: base, mutation: mutation))
+            do {
+                _ = try await server.fixtureInfer(request, taskID: "pending-negative-" + mutation.rawValue)
+                XCTFail("An invalid pending/final snapshot must not publish a reply: \(mutation)")
+            } catch { }
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, mutation == .ready ? 0 : 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count, mutation == .missingFinalModel || mutation == .complete ? 1 : 0)
+        }
+        for provider in ["gemini", "claude"] {
+            let base = FixtureWebModelTransport()
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            await server.configureEmbeddedTransport(PendingChatModelFixtureTransport(base: base))
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+            object["model"] = syntheticWebsiteModelID(provider)
+            do {
+                _ = try await server.fixtureInfer(JSONSerialization.data(withJSONObject: object), taskID: "pending-" + provider)
+                XCTFail("Another provider cannot use ChatGPT's pending proof contract")
+            } catch { }
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count, 0)
+        }
+    }
+
     func testInspectorArmIsNativeContextBoundChatGPTOnlyAndDoesNotEnterResponseOrOperations() async throws {
         for provider in ["chatgpt", "gemini"] {
             let arm = try InspectorArmFixture(); defer { arm.remove() }; try arm.arm()
@@ -2225,5 +2279,58 @@ private actor ChatContextSidecarFixtureTransport: WebModelTransport {
             throw EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptSubmission)
         }
         return try await base.request(operation: operation, params: params)
+    }
+}
+
+private enum PendingChatModelMutation: String, CaseIterable, Sendable {
+    case none, ready, evidence, proofContext, text, completionEvidence, falseFlag, missingContext, wrongSequence, complete, missingFinalModel
+}
+
+/// The fixture first emits dispatch-only observations, then an independently
+/// proved final answer. It never manufactures final model proof from pending.
+private actor PendingChatModelFixtureTransport: WebModelTransport {
+    private let base: ChatContinuationFixtureTransport
+    private let mutation: PendingChatModelMutation
+    private let beforeRunningPoll: (@Sendable () async throws -> Void)?
+    private var running: Data?
+    init(base: FixtureWebModelTransport, mutation: PendingChatModelMutation = .none,
+         beforeRunningPoll: (@Sendable () async throws -> Void)? = nil) {
+        self.base = ChatContinuationFixtureTransport(base: base)
+        self.mutation = mutation; self.beforeRunningPoll = beforeRunningPoll
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderPoll", let running {
+            self.running = nil
+            try await beforeRunningPoll?()
+            return running
+        }
+        let bytes = try await base.request(operation: operation, params: params)
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        let isComplete = value["state"] as? String == "complete"
+        let makePending = operation == "webProviderSend" || mutation == .ready && operation == "webProviderStart"
+            || mutation == .complete && isComplete
+        if makePending {
+            let model = value.removeValue(forKey: "modelEvidence")
+            let context = value.removeValue(forKey: "modelProofContext")
+            value["modelVerificationPending"] = mutation == .falseFlag ? false : true
+            value["pendingSubmissionContext"] = context
+            value["text"] = ""
+            switch mutation {
+            case .evidence: value["modelEvidence"] = model
+            case .proofContext: value["modelProofContext"] = context
+            case .text: value["text"] = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"must never execute"}}]}"#
+            case .completionEvidence: value["completionEvidence"] = ["codeStructure": [:]]
+            case .missingContext: value.removeValue(forKey: "pendingSubmissionContext")
+            case .wrongSequence:
+                var changed = context as? [String: Any] ?? [:]; changed["sequence"] = 2
+                value["pendingSubmissionContext"] = changed
+            default: break
+            }
+            if operation == "webProviderSend", mutation == .none {
+                running = try JSONSerialization.data(withJSONObject: value)
+            }
+        }
+        if mutation == .missingFinalModel, isComplete { value.removeValue(forKey: "modelEvidence") }
+        return try JSONSerialization.data(withJSONObject: value)
     }
 }

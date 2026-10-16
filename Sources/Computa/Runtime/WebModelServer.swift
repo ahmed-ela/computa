@@ -919,10 +919,13 @@ actor WebModelServer {
             try requireCurrentContext()
             guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
             try Self.verifyInferenceSnapshot(sent, session: &session)
-            let submittedEvidence = try verifiedModelEvidence(sent, session: &session)
+            var submissionModelVerificationPending = sent["modelVerificationPending"] as? Bool == true
+            if !submissionModelVerificationPending {
+                let submittedEvidence = try verifiedModelEvidence(sent, session: &session)
+                try recordEvidence(submittedEvidence, snapshot: sent, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
+            }
             sessions[taskID] = session
             lease = session
-            try recordEvidence(submittedEvidence, snapshot: sent, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
             let end = ContinuousClock.now + responseTimeout
             while ContinuousClock.now < end {
                 try requireCurrentContext()
@@ -936,6 +939,13 @@ actor WebModelServer {
                 case "complete":
                     try Self.verifyInferenceSnapshot(value, session: &session)
                     let evidence = try verifiedModelEvidence(value, session: &session)
+                    if submissionModelVerificationPending {
+                        // Dispatch-only observations never assert fresh model
+                        // selection. The owned final answer establishes both
+                        // submission and completion before any text/tool parse.
+                        try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
+                        submissionModelVerificationPending = false
+                    }
                     guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
                     let reply: WebModelResponseCodec.Reply
                     do {
@@ -993,7 +1003,9 @@ actor WebModelServer {
                     return InferenceResult(data: encoded, inferenceID: inferenceID)
                 case "running":
                     try Self.verifyInferenceSnapshot(value, session: &session)
-                    _ = try verifiedModelEvidence(value, session: &session)
+                    if value["modelVerificationPending"] as? Bool != true {
+                        _ = try verifiedModelEvidence(value, session: &session)
+                    }
                     sessions[taskID] = session
                     lease = session
                     try await waitForNextPoll(session, after: revision, until: end)
@@ -1056,6 +1068,9 @@ actor WebModelServer {
     }
 
     private static func modelEvidence(_ snapshot: [String: Any], session: Session) throws -> WebsiteModelEvidence? {
+        guard snapshot["modelVerificationPending"] == nil, snapshot["pendingSubmissionContext"] == nil else {
+            throw Failure.modelUnverified
+        }
         if session.route == .embedded, session.provider == "chatgpt" {
             guard (try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true)) != nil else {
                 throw Failure.productModeUnverified
@@ -1155,10 +1170,24 @@ actor WebModelServer {
     }
 
     private static func verifyInferenceSnapshot(_ snapshot: [String: Any], session: inout Session) throws {
+        let pendingModel = snapshot["modelVerificationPending"] != nil
+        if pendingModel {
+            guard let flag = snapshot["modelVerificationPending"] as? NSNumber,
+                  CFGetTypeID(flag) == CFBooleanGetTypeID(), flag.boolValue,
+                  session.route == .embedded, session.provider == "chatgpt",
+                  session.modelChoice?.chatGPTPower != nil, session.resolvedModel != nil,
+                  !session.submittedPromptFingerprint.isEmpty,
+                  snapshot["state"] as? String == "running",
+                  snapshot["text"] as? String == "", snapshot["modelEvidence"] == nil,
+                  snapshot["modelProofContext"] == nil, snapshot["completionEvidence"] == nil,
+                  (try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true)) != nil else {
+                throw Failure.invalidRequest
+            }
+        } else if snapshot["pendingSubmissionContext"] != nil { throw Failure.invalidRequest }
         guard let token = snapshot["sessionToken"] as? String,
               UUID(uuidString: token) == UUID(uuidString: session.token),
               receiptInteger(snapshot["sequence"], range: 1...1_024) == session.sequence,
-              let context = snapshot["modelProofContext"] as? [String: Any],
+              let context = snapshot[pendingModel ? "pendingSubmissionContext" : "modelProofContext"] as? [String: Any],
               receiptInteger(context["sequence"], range: 1...1_024) == session.sequence,
               let rawGeneration = context["documentGeneration"] as? String, let generation = UUID(uuidString: rawGeneration),
               receiptInteger(context["baselineResponseCount"], range: 0...10_000) == session.baselineResponseCount,

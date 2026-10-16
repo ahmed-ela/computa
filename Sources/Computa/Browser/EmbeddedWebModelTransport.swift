@@ -347,6 +347,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var lastQuotaDiagnostic: [String]?
         var modelSelectionRequested = false
         var modelSelectionVerified = false
+        // Running observations retain negative pins, but never claim a fresh picker proof.
+        var modelVerificationPending = false
+        var loggedPendingModelVerification = false
         var modelEvidence: WebsiteModelEvidence?
         var lastModelDiagnostic: String?
         var lastProductModeDiagnostic: String?
@@ -727,6 +730,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.currentSubmissionVerified = false
                 }
                 session.pendingSubmission = true
+                session.modelVerificationPending = session.provider == .chatgpt
+                    && session.modelSelectionVerified && session.modelChoice != nil
+                session.loggedPendingModelVerification = false
                 session.state = "running"
                 let sent = try await page(session, action: "submit", prompt: outbound)
                 guard sent["submitted"] as? Bool == true else { throw Failure.editorFailure("submission_unconfirmed") }
@@ -1479,7 +1485,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         throw Failure.ownershipFailure(.javaScriptSubmission)
                     }
                 }
-                if session.response != response {
+                let responseChanged = session.modelVerificationPending
+                    ? !session.response.utf8.elementsEqual(response.utf8) : session.response != response
+                if responseChanged {
                     session.response = response; session.lastChanged = .now; session.candidateSince = nil
                 }
                 if observed["busy"] as? Bool == false, observed["answerComplete"] as? Bool == true {
@@ -1496,8 +1504,47 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.completionCandidate = true
                     if let since = session.candidateSince,
                        ContinuousClock.now - max(since, session.lastChanged) >= .milliseconds(1_600) {
-                        logResourceTimingDiagnostic(observed["resourceTimingDiagnostic"], session: session, phase: "completion")
-                        session.state = "complete"
+                        var completionObservation = observed
+                        var currentAnswerVerified = true
+                        if session.modelVerificationPending {
+                            // One full picker proof is permitted only for this
+                            // owned completed-answer candidate. The adapter
+                            // rechecks the exact answer after its last await;
+                            // native generation/route/lineage checks still run.
+                            let final = try await page(session, action: "inspect",
+                                recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                                allowPendingChatGPTModelVerification: false,
+                                maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
+                            currentAnswerVerified = final["modelVerificationPending"] == nil
+                                && final["temporary"] as? Bool == true
+                                && final["interrupted"] as? Bool != true
+                                && final["responseLoadFailed"] as? Bool != true
+                                && final["busy"] as? Bool == false && final["answerComplete"] as? Bool == true
+                                && (final["text"] as? String).map({ $0.utf8.elementsEqual(response.utf8) }) == true
+                                && count(final, "responseCount") == count(observed, "responseCount")
+                                && count(final, "userCount") == session.sequence
+                                && session.currentSubmissionVerified && !session.pendingSubmission
+                            completionObservation = final
+                            if currentAnswerVerified {
+                                session.modelVerificationPending = false
+                                Self.inspectionLog.info("modelVerification provider=chatgpt sequence=\(session.sequence) phase=final_verified")
+                                session.responseCodeStructure = nil
+                                if let completion = final["completionEvidence"] as? [String: Any],
+                                   let structure = completion["codeStructure"] as? [String: Any],
+                                   let safe = Self.sanitizedCodeStructure(structure),
+                                   let projected = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] {
+                                    session.responseCodeStructure = projected
+                                }
+                            } else {
+                                session.completionCandidate = false
+                                session.candidateSince = nil
+                            }
+                        }
+                        if currentAnswerVerified {
+                            guard ContinuousClock.now - session.turnStarted < responseTimeout else { throw Failure.deadline }
+                            logResourceTimingDiagnostic(completionObservation["resourceTimingDiagnostic"], session: session, phase: "completion")
+                            session.state = "complete"
+                        }
                     }
                 }
             }
@@ -2626,6 +2673,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true, recheckProductAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
+                      allowPendingChatGPTModelVerification: Bool = true,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         guard maximumWait > .zero else { throw Failure.pageUnavailable }
@@ -2694,6 +2742,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        // Only a claimed current Send may defer positive model proof. The
+        // adapter still performs submit's full precheck before the actual click.
+        let deferModelVerification = allowPendingChatGPTModelVerification && !allowBlockedProvider && provider == .chatgpt
+            && session.state == "running" && session.submitted && session.modelVerificationPending
+            && ["inspect", "submit", "verifyModel", "verifyProductMode"].contains(action)
+        if provider == .chatgpt { input["deferModelVerification"] = deferModelVerification }
         if session.usesSubmissionOwnership {
             // Only already-dispatched bindings authorize a detached-message
             // inspection. A prepared, unsent body cannot supply this pin.
@@ -2717,7 +2771,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 input["firstUserExpansionModelChoice"] = ["key": choice.key, "label": choice.label]
             }
             if action == "selectModel" { input["modelChoice"] = ["key": choice.key, "label": choice.label] }
-            if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
+            if enforceModel || deferModelVerification, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
                 input["expectedModelChoice"] = ["key": choice.key, "label": choice.label]
             }
         } else if provider == .gemini, session.modelSelectionVerified, let evidence = session.modelEvidence,
@@ -2860,6 +2914,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
                                       allowBlockedProvider: allowBlockedProvider,
+                                      allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       firstUserExpansionRouteContinuation: nextContinuation,
                                       maximumWait: evaluationDeadline - .now)
             }
@@ -2909,6 +2964,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
+                                      allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       maximumWait: evaluationDeadline - .now)
             case "submission_observation_replaced":
                 let bindings = [session.currentSubmission, session.previousSubmission].compactMap { $0 }
@@ -2926,6 +2982,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait,
                                       recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
+                                      allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       maximumWait: evaluationDeadline - .now)
             case "first_user_observation_replaced":
                 // Provider frameworks can replace an unchanged message while
@@ -2942,6 +2999,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try await page(session, action: "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
+                                      allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
                 if session.usesSubmissionOwnership, observed["detail"] as? String == "submission_message" {
@@ -3007,14 +3065,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let combinedContextRecheck = provider == .chatgpt && action == "inspect"
             && session.state == "running" && session.firstUserFingerprint != nil && !session.pendingSubmission
             && refreshReadOnlyObservation && routeContinuation.isEmpty
-            && enforceModel && session.modelSelectionVerified && recheckModelAfterAwait
+            && enforceModel && session.modelSelectionVerified && recheckModelAfterAwait && !deferModelVerification
         try await verifyProductModeAfterAwait(observed, session: session, action: action,
                                              recheck: recheckProductAfterAwait && !combinedContextRecheck,
                                              refreshChangedRoute: routeRefreshAvailable,
                                              refreshReadOnlyObservation: refreshReadOnlyObservation,
                                              maximumWait: evaluationDeadline - .now,
                                              allowBlockedProvider: allowBlockedProvider,
-                                             allowPendingModelTemporary: allowPendingModelTemporary)
+                                             allowPendingModelTemporary: allowPendingModelTemporary,
+                                             allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification)
         // Submit returns only its acknowledgment; observations carry ownership state.
         if let observedURL = observed["url"] as? String {
             guard provider.accepts(observedURL), provider.routeContext(observedURL) == currentContext else { throw Failure.documentChanged }
@@ -3082,6 +3141,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                        refreshChangedRoute: routeRefreshAvailable,
                                                        refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                        combinedContextRecheck: combinedContextRecheck,
+                                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                                        maximumWait: evaluationDeadline - .now)
                 if !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
@@ -3094,7 +3154,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         "userCount": 0, "responseCount": session.baseline, "text": "", "busy": true,
                         "answerComplete": false, "ownershipPending": true,
                         "debugStructure": observed["debugStructure"] as? String ?? ""]
-                if let evidence = session.modelEvidence { pending["modelEvidence"] = evidence.dictionary }
+                if observed["modelVerificationPending"] as? Bool == true { pending["modelVerificationPending"] = true }
+                else if let evidence = session.modelEvidence { pending["modelEvidence"] = evidence.dictionary }
                 if let evidence = session.productModeEvidence { pending["productModeEvidence"] = evidence.dictionary }
                 return pending
             }
@@ -3133,6 +3194,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                refreshChangedRoute: routeRefreshAvailable,
                                                refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                combinedContextRecheck: combinedContextRecheck,
+                                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                                maximumWait: evaluationDeadline - .now)
         if session.usesSubmissionOwnership, ["insert", "sendReady", "submit"].contains(action) {
             guard observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability else {
@@ -3150,7 +3212,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func verifyProductModeAfterAwait(_ observed: [String: Any], session: Session, action: String,
                                             recheck: Bool, refreshChangedRoute: Bool,
                                             refreshReadOnlyObservation: Bool, maximumWait: Duration,
-                                            allowBlockedProvider: Bool, allowPendingModelTemporary: Bool) async throws {
+                                            allowBlockedProvider: Bool, allowPendingModelTemporary: Bool,
+                                            allowPendingChatGPTModelVerification: Bool) async throws {
         guard session.provider == .chatgpt else { return }
         // Before hydration or the explicitly claimed Chat click, an untouched
         // root can report pending readiness. That never authorizes temporary
@@ -3188,6 +3251,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                        recheckModelAfterAwait: false, recheckProductAfterAwait: false,
                                        refreshReadOnlyObservation: refreshReadOnlyObservation,
                                        allowBlockedProvider: allowBlockedProvider, allowPendingModelTemporary: pendingPicker,
+                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                        maximumWait: maximumWait)
             let current: WebsiteProductModeEvidence
             do { current = try WebsiteProductModeEvidence.parse(fresh["productModeEvidence"],
@@ -3204,7 +3268,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                               enforceModel: Bool, recheck: Bool, refreshChangedRoute: Bool,
                                               refreshReadOnlyObservation: Bool,
                                               combinedContextRecheck: Bool,
+                                              allowPendingChatGPTModelVerification: Bool,
                                               maximumWait: Duration) async throws {
+        if observed["modelVerificationPending"] != nil {
+            guard observed["modelVerificationPending"] as? Bool == true,
+                  allowPendingChatGPTModelVerification, session.provider == .chatgpt,
+                  session.state == "running", session.submitted, session.modelVerificationPending,
+                  ["inspect", "submit", "verifyModel", "verifyProductMode"].contains(action),
+                  observed["modelEvidence"] == nil else { throw Failure.modelUnverified }
+            // These are negative continuity checks, not fresh selection evidence.
+            if action == "inspect", !session.loggedPendingModelVerification {
+                session.loggedPendingModelVerification = true
+                Self.inspectionLog.info("modelVerification provider=chatgpt sequence=\(session.sequence) phase=pending_read")
+            }
+            return
+        }
         if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
             let evidence = try validatedModelEvidence(observed, session: session)
             // A native await can cross a model change without navigation. Read
@@ -3218,6 +3296,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                            refreshChangedRoute: refreshChangedRoute, recheckModelAfterAwait: false,
                                            recheckProductAfterAwait: !combinedContextRecheck,
                                            refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                           allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                            maximumWait: maximumWait)
                 let currentEvidence = try validatedModelEvidence(fresh, session: session)
                 guard evidence.isSameResolvedSelection(as: currentEvidence) else { throw Failure.modelMismatch }
@@ -3394,9 +3473,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func snapshot(_ session: Session, cleanup: String? = nil) throws -> Data {
+        let pendingModel = session.provider == .chatgpt && session.state == "running" && session.modelVerificationPending
         var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
-                                  "state": session.state, "text": session.response, "sequence": session.sequence]
-        if let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
+                                  "state": session.state, "text": pendingModel ? "" : session.response, "sequence": session.sequence]
+        if pendingModel { value["modelVerificationPending"] = true }
+        if !pendingModel, let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
         if let evidence = session.productModeEvidence { value["productModeEvidence"] = evidence.dictionary }
         if session.usesSubmissionOwnership {
             value["turnContinuationCapability"] = Self.turnContinuationCapability
@@ -3405,15 +3486,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             value["completionEvidence"] = ["codeStructure": structure]
         }
         if let generation = session.documentGeneration {
-            value["modelProofContext"] = ["documentGeneration": generation.uuidString, "sequence": session.sequence,
+            let contextKey = pendingModel ? "pendingSubmissionContext" : "modelProofContext"
+            value[contextKey] = ["documentGeneration": generation.uuidString, "sequence": session.sequence,
                                             "firstUserFingerprint": session.firstUserFingerprint ?? "",
                                             "responseCount": session.observedResponseCount,
                                             "baselineResponseCount": session.baseline]
             if session.usesSubmissionOwnership,
-               var context = value["modelProofContext"] as? [String: Any] {
+               var context = value[contextKey] as? [String: Any] {
                 context["submittedPromptFingerprint"] = session.currentSubmissionVerified
                     ? session.currentSubmission?.promptFingerprint ?? "" : ""
-                value["modelProofContext"] = context
+                value[contextKey] = context
             }
         }
         if let cleanup { value["cleanup"] = cleanup }

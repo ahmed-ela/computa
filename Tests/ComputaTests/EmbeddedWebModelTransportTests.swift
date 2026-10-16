@@ -518,6 +518,45 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(altered))
     }
 
+    func testChatGPTRunningReadsKeepPickerClosedAndWithholdAnswerUntilFinalProof() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await evaluate(view, """
+            window.fixturePickerOpensAfterSend = 0; window.fixtureHasSent = false;
+            document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+              window.fixtureHasSent = true;
+              const stop = document.createElement('button'); stop.id = 'fixture-running-stop';
+              stop.setAttribute('data-testid', 'stop-button'); stop.textContent = 'Stop generating'; document.body.append(stop);
+            });
+            document.getElementById('fixture-model-trigger').addEventListener('click', () => {
+              if (window.fixtureHasSent) window.fixturePickerOpensAfterSend++;
+            }); return true;
+            """)
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Read this owned answer without disturbing its running model"])
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
+        for _ in 0..<2 {
+            let running = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(running["state"] as? String, "running")
+            try assertRunningOrVerifiedChoice(running, choice: choice)
+            let opens = try await evaluate(view, "return window.fixturePickerOpensAfterSend;")
+            XCTAssertEqual(opens as? Int, 0, "No post-Send model picker interaction is allowed while proof is pending")
+        }
+        _ = try await evaluate(view, "document.getElementById('fixture-running-stop').remove(); return true;")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        let opens = try await evaluate(view, "return window.fixturePickerOpensAfterSend;")
+        XCTAssertGreaterThan(try XCTUnwrap(opens as? Int), 0, "Only a completed owned answer may reacquire full positive picker proof")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testChatGPTLoadFailureIsTypedTerminalAndDoesNotReplayOrBlockOtherSessions() async throws {
         for alreadyBound in [false, true] {
             let (fixture, token, view) = try await boundInspectionFixture(prompt: "Detect the website's actual load failure", bindFirstRead: alreadyBound)
@@ -780,12 +819,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     : "document.getElementById('fixture-composer-mode').hidden = false; document.getElementById('fixture-chat-mode').setAttribute('aria-pressed','false'); document.getElementById('fixture-work-mode').setAttribute('aria-pressed','true'); return true;"
                 _ = try? await self.evaluate(view, script)
             }
-            do {
-                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-                XCTFail("Recovery must reject current \(drift) drift")
-            } catch {
-                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
-                               drift == "work" ? .productModeUnverified : .modelMismatch)
+            if drift == "model" {
+                try await assertModelMismatchBeforePublication(fixture.transport, token: token, choice: Self.fixtureChoice(.chatgpt))
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("Recovery must reject current Work-mode drift")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .productModeUnverified) }
             }
             XCTAssertTrue(changed)
             XCTAssertEqual(timeouts.count, 1)
@@ -876,13 +916,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             if bindFirstRead {
                 let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
                 XCTAssertEqual(first["state"] as? String, "running")
-                XCTAssertFalse((first["text"] as? String ?? "").isEmpty)
+                try assertRunningOrVerifiedChoice(first, choice: Self.fixtureChoice(.chatgpt))
             }
             return (fixture, token, view)
         } catch { fixture.shutdown(); throw error }
     }
 
-    func testConcreteChatGPTRechecksCurrentModelAndProductInOneFreshRead() async throws {
+    func testConcreteChatGPTDefersPickerReadsUntilFullCompletedAnswerProof() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
         defer { fixture.shutdown() }
         let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
@@ -892,7 +932,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Prove the current model and Chat mode together"])
         let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
         XCTAssertEqual(first["state"] as? String, "running")
-        XCTAssertFalse((first["text"] as? String ?? "").isEmpty, "The first owned observation must establish response lineage")
+        try assertRunningOrVerifiedChoice(first, choice: Self.fixtureChoice(.chatgpt))
         fixture.transport.setInspectionTimeoutForTesting(.seconds(2))
         var actions: [String] = []
         var timeouts: [String] = []
@@ -919,9 +959,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(timeouts, [])
         XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
         XCTAssertFalse(actions.isEmpty)
-        XCTAssertTrue(actions.allSatisfy { ["inspect", "verifyModel"].contains($0) }, actions.description)
-        XCTAssertEqual(actions.filter { $0 == "verifyModel" }.count, actions.filter { $0 == "inspect" }.count,
-                       "Each native await retains one fresh combined model/product/lineage proof")
+        XCTAssertTrue(actions.allSatisfy { ["inspect", "verifyProductMode"].contains($0) }, actions.description)
+        XCTAssertEqual(actions.filter { $0 == "verifyModel" }.count, 0,
+                       "Running reads must not reopen the model picker; the final inspect proves the completed answer")
         try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
@@ -939,7 +979,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await waitForState("ready", fixture.transport, token: token)
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never admit a stale model or Work response"])
             let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-            XCTAssertFalse((first["text"] as? String ?? "").isEmpty)
+            try assertRunningOrVerifiedChoice(first, choice: Self.fixtureChoice(.chatgpt))
             var changed = false
             fixture.transport.setBeforePageResultValidationForTesting { action in
                 guard action == "inspect", !changed else { return }
@@ -949,12 +989,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     : "document.getElementById('fixture-composer-mode').hidden = false; document.getElementById('fixture-chat-mode').setAttribute('aria-pressed','false'); document.getElementById('fixture-work-mode').setAttribute('aria-pressed','true'); return true;"
                 _ = try? await self.evaluate(view, script)
             }
-            do {
-                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-                XCTFail("The fresh combined context must reject \(drift) drift")
-            } catch {
-                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
-                               drift == "work" ? .productModeUnverified : .modelMismatch)
+            if drift == "model" {
+                try await assertModelMismatchBeforePublication(fixture.transport, token: token, choice: Self.fixtureChoice(.chatgpt))
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("The current product controls must reject Work-mode drift")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .productModeUnverified) }
             }
             XCTAssertTrue(changed)
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
@@ -2131,7 +2172,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             for sequence in 1...2 {
                 let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic model choice inference \(sequence)"])
                 XCTAssertEqual(sent["state"] as? String, "running")
-                try assertChoiceEvidence(sent, choice: choice)
+                try assertRunningOrVerifiedChoice(sent, choice: choice)
                 let complete = try await waitForState("complete", fixture.transport, token: token)
                 XCTAssertEqual(complete["sequence"] as? Int, sequence)
                 XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
@@ -2178,7 +2219,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for sequence in 1...2 {
             let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Generic-header inference \(sequence)"])
             XCTAssertEqual(sent["state"] as? String, "running")
-            try assertChoiceEvidence(sent, choice: choice)
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
             if sequence == 2 {
                 // A genuine composer update can arrive after the old 100 ms
                 // baseline, followed by the native 100 ms burst batch. Observe
@@ -2198,14 +2239,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 for _ in 0..<3 {
                     let observed = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
                     XCTAssertEqual(observed["state"] as? String, "running")
-                    try assertChoiceEvidence(observed, choice: choice)
+                    try assertRunningOrVerifiedChoice(observed, choice: choice)
                     let after = try await waitForQuietRevision(fixture.transport, token: token)
-                    XCTAssertEqual(after, revision, "Read-only picker observations must not create a native DOM wake loop")
+                    XCTAssertEqual(after, revision, "Deferred observations must not create a native DOM wake loop")
                     let closed = try await evaluate(view, "return document.getElementById('fixture-model-menu') === null;") as? Bool
                     XCTAssertEqual(closed, true)
                 }
                 let triggerAfter = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
-                XCTAssertGreaterThan(try XCTUnwrap(triggerAfter), try XCTUnwrap(triggerBefore), "The polls must exercise actual portal reads")
+                XCTAssertEqual(try XCTUnwrap(triggerAfter), try XCTUnwrap(triggerBefore), "Running polls must leave the model picker closed")
                 let released = try await evaluate(view, "const stop = document.getElementById('fixture-held-response-stop'); if (!stop) return false; stop.remove(); return true;") as? Bool
                 XCTAssertEqual(released, true, "Completion is released only after the running-state observations")
             }
@@ -2333,7 +2374,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             if closure == "delayed" {
                 let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                     "prompt": "Send only after the same trigger acknowledges closed state"])
-                try assertChoiceEvidence(sent, choice: choice)
+                try assertRunningOrVerifiedChoice(sent, choice: choice)
                 let complete = try await waitForState("complete", fixture.transport, token: token)
                 try assertChoiceEvidence(complete, choice: choice)
                 XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
@@ -2409,7 +2450,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for sequence in 1...2 {
             let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                 "prompt": sequence == 1 ? "Read the local terminal fixture" : #"{"type":"tool_results","results":[{"name":"exec_command","output":"fixture output"}]}"#])
-            try assertChoiceEvidence(sent, choice: choice)
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
             let complete = try await waitForState("complete", fixture.transport, token: token)
             XCTAssertEqual(complete["sequence"] as? Int, sequence)
             XCTAssertEqual(complete["text"] as? String, sequence == 1 ? Self.fixtureToolReply : #"{"type":"message","text":"Fixture reply"}"#)
@@ -2483,7 +2524,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for sequence in 1...2 {
             let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                 "prompt": "Parent-return inference \(sequence)"])
-            try assertChoiceEvidence(sent, choice: choice)
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
             let complete = try await waitForState("complete", fixture.transport, token: token)
             XCTAssertEqual(complete["sequence"] as? Int, sequence)
             XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
@@ -2579,7 +2620,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
         let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
             "prompt": "Use the restored composer after exact parent closure"])
-        try assertChoiceEvidence(sent, choice: choice)
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
         let complete = try await waitForState("complete", fixture.transport, token: token)
         XCTAssertEqual(complete["sequence"] as? Int, 1)
         XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
@@ -2686,30 +2727,36 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(observation?["oldConnected"] as? Bool, condition == "connected_old")
             }
             let succeeds = ["unchanged", "promoted_route"].contains(condition)
+            let hiddenFamilyDrift = condition == "wrong_family"
             do {
                 let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                     "prompt": String(repeating: "Owned header remount fixture line.\n", count: 600)])
-                XCTAssertTrue(succeeds, "A contradictory or connected header cannot acquire proof: \(condition)")
+                XCTAssertTrue(succeeds || hiddenFamilyDrift, "A contradictory or connected header cannot acquire proof: \(condition)")
                 XCTAssertEqual(sent["state"] as? String, "running")
-                let complete = try await waitForState("complete", fixture.transport, token: token)
-                try assertChoiceEvidence(complete, choice: choice)
-                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
-                let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
-                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+                try assertRunningOrVerifiedChoice(sent, choice: choice)
+                if hiddenFamilyDrift {
+                    try await assertModelMismatchBeforePublication(fixture.transport, token: token, choice: choice)
+                } else {
+                    let complete = try await waitForState("complete", fixture.transport, token: token)
+                    try assertChoiceEvidence(complete, choice: choice)
+                    XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                    let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+                    XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+                }
             } catch {
-                if succeeds { throw error }
+                if succeeds || hiddenFamilyDrift { throw error }
                 XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser), condition)
             }
             XCTAssertTrue(applied, condition)
             let effects = try await evaluate(view, "return {expansions: window.fixtureExpansionClicks, freshFamilyReads: window.fixtureModelFamilyOpenCount - window.fixtureRemountFamilyOpens};") as? [String: Int]
-            XCTAssertEqual(effects?["expansions"], succeeds ? 1 : 0, condition)
+            XCTAssertEqual(effects?["expansions"], succeeds || hiddenFamilyDrift ? 1 : 0, condition)
             if succeeds { XCTAssertGreaterThanOrEqual(effects?["freshFamilyReads"] ?? 0, 1, "The replacement's text alone cannot supply family proof") }
             XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
-            XCTAssertEqual(finished["cleanup"] as? String, succeeds ? "not_created" : "failed", condition)
-            try await assertHumanTabIntact(fixture, retaining: succeeds ? nil : ownedID)
+            XCTAssertEqual(finished["cleanup"] as? String, succeeds || hiddenFamilyDrift ? "not_created" : "failed", condition)
+            try await assertHumanTabIntact(fixture, retaining: succeeds || hiddenFamilyDrift ? nil : ownedID)
         }
     }
 
@@ -2788,20 +2835,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let pickerRows = modelDiagnostics.compactMap {
                 try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
             }
-            let picker = try XCTUnwrap(pickerRows.first {
+            XCTAssertFalse(pickerRows.contains {
                 ($0["readContext"] as? [String: Any])?["scope"] as? String == "action_precheck"
                     && ($0["readContext"] as? [String: Any])?["action"] as? String == "inspect"
-            })
-            XCTAssertEqual(picker["readStage"] as? String, "initial_observation")
-            XCTAssertEqual((picker["trigger"] as? [String: Any])?["enabled"] as? Bool, condition != "unavailable")
-            let header = try XCTUnwrap(picker["chatHeader"] as? [String: Any])
-            XCTAssertEqual(header["canonicalRecognized"] as? Bool, condition != "unavailable")
-            if condition == "unavailable" { XCTAssertTrue(header["ordinal"] is NSNull) }
-            else { XCTAssertEqual(header["ordinal"] as? Int, 2) }
-            XCTAssertEqual(header["menuMode"] as? String, "closed")
-            let attempt = try XCTUnwrap(picker["readAttempt"] as? [String: Any])
-            XCTAssertEqual(attempt["primaryOpened"] as? Bool, false)
-            XCTAssertEqual(attempt["closeAttempted"] as? Bool, false)
+            }, "A passive negative check must not claim a fresh picker read")
             XCTAssertTrue(firstUserDiagnostics.allSatisfy { $0.utf8.count <= 960 && !$0.contains("Owned private model-precheck") })
             XCTAssertTrue(modelDiagnostics.allSatisfy { $0.utf8.count <= 16_384 && !$0.contains("Owned private model-precheck") })
 
@@ -3352,7 +3389,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await waitForState("ready", fixture.transport, token: token)
             let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                 "prompt": String(repeating: "Owned cleanup fixture line.\n", count: 600)])
-            let proof = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+            let proof = try XCTUnwrap(sent["pendingSubmissionContext"] as? [String: Any])
             XCTAssertEqual(proof["firstUserFingerprint"] as? String, "")
             _ = try await evaluate(view, """
                 document.getElementById('messages').appendChild(window.fixturePendingUser);
@@ -3461,7 +3498,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 "prompt": "A controlled delayed first bubble"])
             XCTAssertEqual(sent["state"] as? String, "running")
             if boundary == "after_send" {
-                let context = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+                let context = try XCTUnwrap(sent["pendingSubmissionContext"] as? [String: Any])
                 XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
                 XCTAssertNil(firstPrivateBindAction)
                 let renderedAfterSend = try await evaluate(view, renderPending) as? Bool
@@ -3501,7 +3538,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         _ = try await waitForState("ready", fixture.transport, token: token)
         let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
             "prompt": "Controlled private first pin before native admission"])
-        let context = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+        let context = try XCTUnwrap(sent["pendingSubmissionContext"] as? [String: Any])
         XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
         _ = try await evaluate(view, """
             document.getElementById('messages').appendChild(window.fixturePendingUser);
@@ -3553,7 +3590,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
-    func testAcknowledgedDelayedUserAppendDuringModelPickerReadRetainsChoiceAcrossToolContinuation() async throws {
+    func testAcknowledgedDelayedUserAppendRetainsDeferredChoiceAcrossToolContinuation() async throws {
         let choice = Self.fixtureChoice(.chatgpt)
         let fixture = try Fixture(page: Self.acknowledgedAppendRacePage())
         defer { fixture.shutdown() }
@@ -3588,10 +3625,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for sequence in 1...2 {
             let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompts[sequence - 1]])
             XCTAssertEqual(sent["state"] as? String, "running")
-            try assertChoiceEvidence(sent, choice: choice)
-            XCTAssertEqual(readActionsAfterLatestAcknowledgement.count, 2,
-                "A crossed acknowledged append must discard its stale read and take exactly one fresh read")
-            XCTAssertEqual(readActionsAfterLatestAcknowledgement.last, "inspect", "The retry must validate full owned lineage")
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+            XCTAssertFalse(readActionsAfterLatestAcknowledgement.contains("verifyModel"),
+                "An acknowledged asynchronous append must not reopen the picker while its answer is running")
             let complete = try await waitForState("complete", fixture.transport, token: token)
             XCTAssertEqual(complete["sequence"] as? Int, sequence)
             XCTAssertEqual(complete["text"] as? String, sequence == 1 ? Self.fixtureToolReply : #"{"type":"message","text":"Fixture reply"}"#)
@@ -3599,8 +3635,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             try await assertChoiceLedger(view, insertions: sequence, sends: sequence, selections: 1)
         }
         XCTAssertEqual(acknowledgements, 2)
-        let race = try await evaluate(view, "return {opens: window.fixtureDelayedPickerOpens, renderedCounts: window.fixtureRaceRenderedCounts};") as? [String: Any]
-        XCTAssertEqual(race?["opens"] as? Int, 2, "Both appends must cross asynchronous picker reads")
+        let race = try await evaluate(view, "return {opens: window.fixtureDelayedAppendCommits, renderedCounts: window.fixtureRaceRenderedCounts};") as? [String: Any]
+        XCTAssertEqual(race?["opens"] as? Int, 2, "Both acknowledged Sends must produce exactly one delayed append")
         XCTAssertEqual(race?["renderedCounts"] as? [Int], [1, 2])
         XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
         let captured = try await capturedUserPrompts(view)
@@ -3611,7 +3647,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
-    func testAcknowledgedAppendCannotRefreshChangedFirstBodyOrWrongMarkerDuringPickerRead() async throws {
+    func testAcknowledgedAppendCannotRefreshChangedFirstBodyOrWrongMarkerDuringDeferredRead() async throws {
         for corruption in ["changed_body", "wrong_marker"] {
             let choice = Self.fixtureChoice(.chatgpt)
             let fixture = try Fixture(page: Self.acknowledgedAppendRacePage())
@@ -3635,9 +3671,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await evaluate(view, "window.fixtureRaceCorruption = '\(corruption)'; return true;")
             do {
                 _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "This continuation crosses corrupted lineage"])
+                _ = try await waitForState("complete", fixture.transport, token: token)
                 XCTFail("A model read must reject \(corruption), even when the new user count matches an acknowledged Send")
             } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
-            let race = try await evaluate(view, "return {opens: window.fixtureDelayedPickerOpens, renderedCounts: window.fixtureRaceRenderedCounts};") as? [String: Any]
+            let race = try await evaluate(view, "return {opens: window.fixtureDelayedAppendCommits, renderedCounts: window.fixtureRaceRenderedCounts};") as? [String: Any]
             XCTAssertEqual(race?["opens"] as? Int, 2)
             XCTAssertEqual(race?["renderedCounts"] as? [Int], [1, 2])
             try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
@@ -3684,7 +3721,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                     "prompt": sequence == 1 ? "Create an owned conversation with a delayed route" : #"{"type":"tool_results","results":[{"name":"exec_command","output":"fixture output"}]}"#])
                 XCTAssertEqual(sent["state"] as? String, "running")
-                try assertChoiceEvidence(sent, choice: choice)
+                try assertRunningOrVerifiedChoice(sent, choice: choice)
                 let complete = try await waitForState("complete", fixture.transport, token: token)
                 XCTAssertEqual(complete["sequence"] as? Int, sequence)
                 XCTAssertEqual(complete["text"] as? String, sequence == 1 ? Self.fixtureToolReply : #"{"type":"message","text":"Fixture reply"}"#)
@@ -3698,7 +3735,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             }
             XCTAssertEqual(acknowledgedSends, 2)
             let observedRoutes = try await evaluate(view, "return window.fixtureRaceRenderedRoutes;") as? [String]
-            XCTAssertEqual(observedRoutes, routes, "Both first-route creation and local promotion must occur inside picker awaits")
+            XCTAssertEqual(observedRoutes, routes, "Both first-route creation and local promotion must arise from acknowledged delayed renders")
             let ownedURL = try XCTUnwrap(view.url?.absoluteString)
             fixture.transport.setBeforePageResultValidationForTesting(nil)
             _ = try await evaluate(view, "history.replaceState({}, '', '/c/unrelated-human-route?temporary-chat=true'); return true;")
@@ -3760,8 +3797,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(acknowledgedSends, 1)
         XCTAssertEqual(firstSendInspectionLocalRoutes, [false, true, false],
             "Empty, local and public reads must all occur before the first Send returns")
-        try assertChoiceEvidence(firstSent, choice: choice)
-        let firstContext = try XCTUnwrap(firstSent["modelProofContext"] as? [String: Any])
+        try assertRunningOrVerifiedChoice(firstSent, choice: choice)
+        let firstContext = try XCTUnwrap(firstSent["pendingSubmissionContext"] as? [String: Any])
         let firstFingerprint = try XCTUnwrap(firstContext["firstUserFingerprint"] as? String)
         XCTAssertEqual(firstFingerprint.count, 64)
         XCTAssertEqual(view.url?.path, "/c/public-unbound-first-read")
@@ -3771,7 +3808,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(firstComplete["text"] as? String, Self.fixtureToolReply)
         let secondSent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
             "prompt": #"{"type":"tool_results","results":[{"name":"exec_command","output":"fixture output"}]}"#])
-        try assertChoiceEvidence(secondSent, choice: choice)
+        try assertRunningOrVerifiedChoice(secondSent, choice: choice)
         let complete = try await waitForState("complete", fixture.transport, token: token)
         XCTAssertEqual(complete["sequence"] as? Int, 2)
         XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
@@ -3848,51 +3885,68 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    func testRepeatedAcknowledgedAppendSignalStopsAfterOneFreshInspectWithoutReplayingSend() async throws {
+    func testRepeatedVerifiedRenderRemovalRevokesWithoutReplayingSend() async throws {
         let choice = Self.fixtureChoice(.chatgpt)
         let fixture = try Fixture(page: Self.acknowledgedAppendRacePage())
         defer { fixture.shutdown() }
         let started = try await startChoice(choice, in: fixture)
         let token = try XCTUnwrap(started["sessionToken"] as? String)
-        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
         try await waitForFixture(view)
         _ = try await waitForState("ready", fixture.transport, token: token)
-        var acknowledged = false, rearmed = false
-        var readonlyInspections = 0
+        var acknowledged = false, rearmed = false, pageReads = 0, detachedVerifiedSequence = 0
         fixture.transport.setBeforePageResultValidationDetailedForTesting { action, enforceModel in
+            pageReads += 1
             if action == "submit" {
                 acknowledged = true
                 _ = try? await self.evaluate(view, "window.fixtureRaceArmed = true; return true;")
-            } else if action == "inspect", acknowledged, enforceModel {
-                readonlyInspections += 1
-                guard !rearmed else { return }
-                rearmed = true
+            } else if action == "inspect", acknowledged, enforceModel, !rearmed {
+                let proof = try? await self.evaluate(view, """
+                    const record = globalThis.__computaChatSubmissionState?.lastVerified;
+                    return { sequence: record?.sequence || 0, verified: record?.phase === 'verified' };
+                    """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+                guard proof?["sequence"] as? Int == 1, proof?["verified"] as? Bool == true else { return }
                 let removed = try? await self.evaluate(view, """
                     const user = document.querySelector('[data-message-author-role="user"]');
                     const turn = document.querySelector('[data-markdown-text-style="assistant-message"]')?.closest('section');
-                    if (!user || !turn || window.fixtureDelayedPickerOpens !== 1) return false;
+                    if (!user || !turn || window.fixtureDelayedAppendCommits !== 1) return false;
                     user.remove(); turn.remove();
                     window.fixturePendingUser = user; window.fixturePendingTurn = turn; window.fixtureRaceArmed = true;
                     return true;
                     """) as? Bool
-                XCTAssertEqual(removed, true, "Only the already acknowledged first append is re-rendered across the fresh read")
+                if removed == true { rearmed = true; detachedVerifiedSequence = 1 }
             }
         }
         defer { fixture.transport.setBeforePageResultValidationDetailedForTesting(nil) }
+        let sent = try await fixturePhaseProbe("repeated_render_send", trace: true) {
+            try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "One Send with a delayed acknowledged render"])
+        }
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
         do {
-            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "A single Send with a repeatedly flapping render"])
-            XCTFail("A second stale append signal must not start an unbounded read retry")
-        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptUserCount)) }
-        XCTAssertTrue(rearmed)
-        XCTAssertEqual(readonlyInspections, 2, "Only the original inspect and its one fresh retry may run")
-        let race = try await evaluate(view, "return {opens: window.fixtureDelayedPickerOpens, renderedCounts: window.fixtureRaceRenderedCounts};") as? [String: Any]
-        XCTAssertEqual(race?["opens"] as? Int, 2)
+            _ = try await waitForState("complete", fixture.transport, token: token)
+            XCTFail("A detached per-round body must not publish a completed answer")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+        XCTAssertTrue(rearmed, "The verified current body must be detached during an owned read")
+        XCTAssertEqual(detachedVerifiedSequence, 1, "Only an already digest-proved per-round body is detached")
+        let readsAtFailure = pageReads
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A revoked body claim must remain terminal")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+        XCTAssertEqual(pageReads, readsAtFailure, "Terminal polling must not dispatch another adapter read")
+        let race = try await evaluate(view, """
+            await new Promise(resolve => setTimeout(resolve, 40));
+            return {commits: window.fixtureDelayedAppendCommits, renderedCounts: window.fixtureRaceRenderedCounts};
+            """) as? [String: Any]
+        XCTAssertEqual(race?["commits"] as? Int, 2)
         XCTAssertEqual(race?["renderedCounts"] as? [Int], [1, 1])
         try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
         fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
-        XCTAssertEqual(finished["cleanup"] as? String, "not_created", "The current exact owned DOM can still authorize cleanup independently")
-        try await assertHumanTabIntact(fixture)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed", "A later render cannot revive a revoked body claim for cleanup")
+        XCTAssertTrue((finished["text"] as? String ?? "").isEmpty)
+        try await assertHumanTabIntact(fixture, retaining: ownedID)
     }
 
     func testGeminiFirstUserReplacementDuringPickerReadPreservesPinnedLineageThroughToolContinuation() async throws {
@@ -3931,7 +3985,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(first["text"] as? String, Self.fixtureToolReply)
         let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
             "prompt": #"{"type":"tool_results","results":[{"name":"exec_command","output":"fixture output"}]}"#])
-        try assertChoiceEvidence(sent, choice: choice)
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
         let final = try await waitForState("complete", fixture.transport, token: token)
         XCTAssertEqual(final["sequence"] as? Int, 2)
         XCTAssertEqual(final["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
@@ -4034,7 +4088,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         _ = try await waitForState("ready", fixture.transport, token: token)
         let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
             "prompt": "Keep the exact first prompt through two disconnected DOM replacements"])
-        let context = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+        let context = try XCTUnwrap(sent["pendingSubmissionContext"] as? [String: Any])
         XCTAssertEqual((context["firstUserFingerprint"] as? String)?.count, 64)
         let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
         _ = try await evaluate(view, """
@@ -4101,14 +4155,16 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         _ = try await evaluate(view, """
             window.fixturePendingUser = document.querySelector('[data-message-author-role="user"]').cloneNode(true);
             window.fixturePendingTurn = document.querySelector('[data-markdown-text-style="assistant-message"]').closest('section').cloneNode(true);
-            window.fixtureRaceArmed = true; return true;
+            window.fixtureRaceArmed = true;
+            await new Promise(resolve => setTimeout(resolve, 40));
+            return document.querySelectorAll('[data-message-author-role="user"]').length;
             """)
         do {
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must reject a user append without a pending Send"])
             XCTFail("A retained private submit claim cannot admit an unsolicited user count increment")
-        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser)) }
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptUserCount)) }
         try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
-        let race = try await evaluate(view, "return {opens: window.fixtureDelayedPickerOpens, renderedCounts: window.fixtureRaceRenderedCounts};") as? [String: Any]
+        let race = try await evaluate(view, "return {opens: window.fixtureDelayedAppendCommits, renderedCounts: window.fixtureRaceRenderedCounts};") as? [String: Any]
         XCTAssertEqual(race?["opens"] as? Int, 2)
         XCTAssertEqual(race?["renderedCounts"] as? [Int], [1, 2])
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
@@ -4363,7 +4419,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             } else {
                 let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                     "prompt": "Continue after a same-power header remount"])
-                try assertChoiceEvidence(sent, choice: choice)
+                try assertRunningOrVerifiedChoice(sent, choice: choice)
                 let complete = try await waitForState("complete", fixture.transport, token: token)
                 try assertChoiceEvidence(complete, choice: choice)
                 XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
@@ -4408,10 +4464,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await waitForState("ready", fixture.transport, token: token)
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Reject a response after model drift"])
             _ = try await evaluate(view, "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;")
-            do {
-                let response = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-                XCTFail("A substituted model must not publish \(response)")
-            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelMismatch) }
+            if provider == .chatgpt {
+                try await assertModelMismatchBeforePublication(fixture.transport, token: token, choice: Self.fixtureChoice(provider))
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("A substituted model must not publish a response")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelMismatch) }
+            }
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             let finished = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
             XCTAssertEqual(finished["cleanup"] as? String, "not_created")
@@ -6798,7 +6858,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let prompt = "Complete second canonical request\n" + String(repeating: "A", count: 512)
             if changedExpandedBody {
                 do {
-                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                    let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                    try assertRunningOrVerifiedChoice(sent, choice: Self.fixtureChoice(.chatgpt))
+                    _ = try await waitForState("complete", fixture.transport, token: token)
                     XCTFail("A pending product result cannot authorize changed expanded body bytes")
                 } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
             } else {
@@ -7309,21 +7371,32 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testChangingFirstPromptRejectsConversationPromotionAndRetainsTab() async throws {
+        print("WKFixturePhase test=changing_first_prompt phase=fixture boundary=begin")
         let fixture = try Fixture()
+        fixture.traceLifecycle = true
+        print("WKFixturePhase test=changing_first_prompt phase=fixture boundary=end")
         defer { fixture.shutdown() }
-        let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let started = try await fixturePhaseProbe("changing_start", trace: true) {
+            try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        }
         let token = try XCTUnwrap(started["sessionToken"] as? String)
         let ownedID = try XCTUnwrap(fixture.createdTabs.last)
         let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
-        try await waitForFixture(view)
+        try await fixturePhaseProbe("changing_fixture_ready", trace: true) { try await waitForFixture(view) }
         _ = try await evaluate(view, """
             document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
                 history.pushState({}, '', '/c/local-chatgpt%3Afixture?temporary-chat=true');
             }); return true;
             """)
-        _ = try await waitForState("ready", fixture.transport, token: token)
-        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Original owned prompt"])
-        _ = try await waitForState("complete", fixture.transport, token: token)
+        _ = try await fixturePhaseProbe("changing_provider_ready", trace: true) {
+            try await waitForState("ready", fixture.transport, token: token)
+        }
+        _ = try await fixturePhaseProbe("changing_send", trace: true) {
+            try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Original owned prompt"])
+        }
+        _ = try await fixturePhaseProbe("changing_complete", trace: true) {
+            try await waitForState("complete", fixture.transport, token: token)
+        }
         let generation = fixture.browser.documentGeneration(for: ownedID)
         _ = try await evaluate(view, """
             document.querySelector('[data-message-author-role="user"]').textContent = 'A changed human prompt';
@@ -7340,7 +7413,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(generation, fixture.browser.documentGeneration(for: ownedID))
         let prompts = try await capturedUserPrompts(view)
         XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, ["Original owned prompt"])
-        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        let finished = try await fixturePhaseProbe("changing_finish", trace: true) {
+            try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        }
         XCTAssertEqual(finished["cleanup"] as? String, "failed")
         XCTAssertTrue(fixture.browser.webView(for: ownedID) === view)
         XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
@@ -7482,6 +7557,42 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     private func startChoice(_ choice: WebsiteModelChoice, in fixture: Fixture) async throws -> [String: Any] {
         try await call(fixture.transport, "webProviderStart", ["provider": choice.provider,
             "modelChoice": try XCTUnwrap(choice.canonicalJSONString)])
+    }
+
+    private func assertModelMismatchBeforePublication(_ transport: EmbeddedWebModelTransport, token: String,
+                                                      choice: WebsiteModelChoice, file: StaticString = #filePath,
+                                                      line: UInt = #line) async throws {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            let observedRevision = try await transport.changeRevision(sessionToken: token)
+            let revision = try XCTUnwrap(observedRevision)
+            let value: [String: Any]
+            do { value = try await call(transport, "webProviderPoll", ["sessionToken": token]) }
+            catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelMismatch, file: file, line: line)
+                return
+            }
+            XCTAssertEqual(value["state"] as? String, "running", "A mismatched model must never complete", file: file, line: line)
+            try assertRunningOrVerifiedChoice(value, choice: choice, file: file, line: line)
+            if value["state"] as? String != "running" { return }
+            _ = try await transport.waitForChange(sessionToken: token, after: revision, until: deadline)
+        }
+        XCTFail("Full final model proof must reject drift before publication", file: file, line: line)
+    }
+
+    private func assertRunningOrVerifiedChoice(_ snapshot: [String: Any], choice: WebsiteModelChoice,
+                                               file: StaticString = #filePath, line: UInt = #line) throws {
+        if choice.chatGPTPower != nil, snapshot["state"] as? String == "running" {
+            XCTAssertEqual(snapshot["modelVerificationPending"] as? Bool, true, file: file, line: line)
+            XCTAssertNil(snapshot["modelEvidence"], file: file, line: line)
+            XCTAssertNil(snapshot["modelProofContext"], file: file, line: line)
+            XCTAssertNil(snapshot["completionEvidence"], file: file, line: line)
+            XCTAssertEqual(snapshot["text"] as? String, "", file: file, line: line)
+            XCTAssertNotNil(snapshot["pendingSubmissionContext"], file: file, line: line)
+            return
+        }
+        XCTAssertNil(snapshot["modelVerificationPending"], file: file, line: line)
+        try assertChoiceEvidence(snapshot, choice: choice, file: file, line: line)
     }
 
     private func assertChoiceEvidence(_ snapshot: [String: Any], choice: WebsiteModelChoice,
@@ -7702,14 +7813,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     /// Send still inserts and clicks once. Its user/answer DOM is committed
-    /// only inside an asynchronous picker-open read after native sees the
-    /// submit acknowledgment, making the count-snapshot race deterministic.
+    /// asynchronously after native sees the submit acknowledgment. Its render
+    /// does not depend on a model picker being opened during the response.
     private static func acknowledgedAppendRacePage() -> String {
         modelChoicePage(.chatgpt, genericHeader: true, unmountClosedMenu: true)
             .replacingOccurrences(of: "window.fixturePrompts = [];", with: """
                 window.fixturePrompts = [];
                 window.fixtureRaceArmed = false; window.fixtureRaceCorruption = 'none';
-                window.fixtureDelayedPickerOpens = 0; window.fixtureRaceRenderedCounts = [];
+                window.fixtureDelayedAppendCommits = 0; window.fixtureRaceRenderedCounts = [];
                 window.fixtureRaceRoutes = []; window.fixtureRaceRenderedRoutes = [];
                 window.fixturePendingUser = null; window.fixturePendingTurn = null;
                 """)
@@ -7719,30 +7830,38 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 with: "window.fixturePendingTurn = turn;")
             .replacingOccurrences(of: "answerBody.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';",
                 with: "answerBody.textContent = window.fixturePrompts.length === 1 ? '\(fixtureToolReply)' : '{\"type\":\"message\",\"text\":\"Fixture reply\"}';")
-            .replacingOccurrences(of: "if (open && !modelMenu.isConnected) document.body.appendChild(modelMenu);", with: """
-                if (open && window.fixtureRaceArmed && window.fixturePendingUser) {
-                  window.fixtureRaceArmed = false; window.fixtureDelayedPickerOpens++;
-                  const pendingUser = window.fixturePendingUser, pendingTurn = window.fixturePendingTurn;
-                  window.fixturePendingUser = null; window.fixturePendingTurn = null;
-                  setTimeout(() => {
-                    document.body.appendChild(modelMenu); modelMenu.style.display = 'block';
-                    modelTrigger.setAttribute('aria-expanded', 'true');
-                    window.fixtureModelUpdateHeader();
-                    const route = window.fixtureRaceRoutes.shift();
-                    if (route) { history.pushState({}, '', route); window.fixtureRaceRenderedRoutes.push(route); }
-                    const firstBody = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
-                    if (firstBody && window.fixtureRaceCorruption === 'changed_body')
-                      firstBody.textContent = 'Changed first prompt' + firstBody.textContent.slice(firstBody.textContent.indexOf('\\n\\nComputa session marker: '));
-                    if (firstBody && window.fixtureRaceCorruption === 'wrong_marker')
-                      firstBody.textContent = firstBody.textContent.replace(/Computa session marker: [a-f0-9-]{36}/i,
-                        'Computa session marker: 00000000-0000-0000-0000-000000000000');
-                    document.getElementById('messages').appendChild(pendingUser);
-                    if (pendingTurn) document.getElementById('messages').appendChild(pendingTurn);
-                    window.fixtureRaceRenderedCounts.push(document.querySelectorAll('[data-message-author-role="user"]').length);
-                  }, 25);
-                  return;
-                }
-                if (open && !modelMenu.isConnected) document.body.appendChild(modelMenu);
+            .replacingOccurrences(of: "window.fixturePendingUser = null; window.fixturePendingTurn = null;", with: """
+                window.fixturePendingUser = null; window.fixturePendingTurn = null;
+                // A normal asynchronous render is independent of model-picker
+                // interaction. Arming after the native Send acknowledgement
+                // preserves delayed append/route and corruption boundaries.
+                let raceArmed = false, renderQueued = false;
+                Object.defineProperty(window, 'fixtureRaceArmed', {
+                  get: () => raceArmed,
+                  set: value => {
+                    raceArmed = value;
+                    if (!value || !window.fixturePendingUser || renderQueued) return;
+                    renderQueued = true;
+                    const pendingUser = window.fixturePendingUser, pendingTurn = window.fixturePendingTurn;
+                    setTimeout(() => {
+                      renderQueued = false;
+                      if (!raceArmed || window.fixturePendingUser !== pendingUser) return;
+                      raceArmed = false; window.fixtureDelayedAppendCommits++;
+                      window.fixturePendingUser = null; window.fixturePendingTurn = null;
+                      const route = window.fixtureRaceRoutes.shift();
+                      if (route) { history.pushState({}, '', route); window.fixtureRaceRenderedRoutes.push(route); }
+                      const firstBody = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
+                      if (firstBody && window.fixtureRaceCorruption === 'changed_body')
+                        firstBody.textContent = 'Changed first prompt' + firstBody.textContent.slice(firstBody.textContent.indexOf('\\n\\nComputa session marker: '));
+                      if (firstBody && window.fixtureRaceCorruption === 'wrong_marker')
+                        firstBody.textContent = firstBody.textContent.replace(/Computa session marker: [a-f0-9-]{36}/i,
+                          'Computa session marker: 00000000-0000-0000-0000-000000000000');
+                      document.getElementById('messages').appendChild(pendingUser);
+                      if (pendingTurn) document.getElementById('messages').appendChild(pendingTurn);
+                      window.fixtureRaceRenderedCounts.push(document.querySelectorAll('[data-message-author-role="user"]').length);
+                    }, 25);
+                  }
+                });
                 """)
     }
 
@@ -8038,8 +8157,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     /// Finite local-fixture errors are captured before the
     /// caller's defer disposes WebKit and can obscure the original phase.
-    private func fixturePhaseProbe<T>(_ phase: String, _ operation: @MainActor () async throws -> T) async throws -> T {
-        do { return try await operation() }
+    private func fixturePhaseProbe<T>(_ phase: String, trace: Bool = false,
+                                      _ operation: @MainActor () async throws -> T) async throws -> T {
+        if trace { print("WKFixturePhase phase=\(phase) boundary=begin") }
+        do {
+            let result = try await operation()
+            if trace { print("WKFixturePhase phase=\(phase) boundary=end") }
+            return result
+        }
         catch {
             let value = error as NSError
             let failure = (error as? EmbeddedWebModelTransport.Failure).map { String(describing: $0) } ?? "other"
@@ -8273,6 +8398,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         var page: String
         var initialURL: URL?
         private(set) var transport: EmbeddedWebModelTransport!
+        var traceLifecycle = false
 
         init(page: String = EmbeddedWebModelTransportTests.page, initialURL: URL? = nil,
              browser: EmbeddedBrowserSession = EmbeddedBrowserSession(persistent: false)) throws {
@@ -8317,10 +8443,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
 
         func shutdown() {
+            if traceLifecycle { print("WKFixturePhase phase=shutdown_browser boundary=begin") }
             browser.shutdown()
+            if traceLifecycle { print("WKFixturePhase phase=shutdown_browser boundary=end") }
             renderHost.detach()
+            if traceLifecycle { print("WKFixturePhase phase=shutdown_host_detached boundary=end") }
             renderWindow.orderOut(nil)
+            if traceLifecycle { print("WKFixturePhase phase=shutdown_window_ordered_out boundary=end") }
             renderWindow.close()
+            if traceLifecycle { print("WKFixturePhase phase=shutdown_window_closed boundary=end") }
         }
     }
 

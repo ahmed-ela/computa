@@ -1455,6 +1455,219 @@ async function websiteModelFinalGuard(provider, request, observed, currentTempor
     ? { modelDiagnostic: websiteModelDiagnostic(websiteModelPickerState(provider)) } : {}) };
 }
 
+function websiteChatProvisionalHeaderRecords(pin, pending, records) {
+  if (pending.completed || pin.invalidated === true) return;
+  const proving = pending.proofLease != null && globalThis.__computaChatActiveInvocation === pending.proofLease;
+  const allowed = value => typeof value === 'string' && value.length <= 128
+    && ['', pending.power.label, ...(proving ? ['Thinking effort'] : [])].includes(websiteModelNormalize(value));
+  const changed = records.length > 512 || websiteChatHeaderMutationMismatch(records, pending.header, pending.power)
+    || records.some(record => record.type === 'characterData'
+      ? !allowed(record.oldValue) || !allowed(record.target?.textContent)
+      : record.type === 'childList' && ([...(record.addedNodes || []), ...(record.removedNodes || [])].length > 128
+        || [...(record.addedNodes || []), ...(record.removedNodes || [])].some(node => !allowed(node.textContent || ''))));
+  if (changed) websiteChatInvalidatePin(pin, 'header_mutation');
+}
+function websiteChatDrainProvisionalHeader(pin) {
+  const pending = pin?.provisionalHeader;
+  if (!pending || pending.completed) return;
+  websiteChatProvisionalHeaderRecords(pin, pending, pending.observer.takeRecords?.() || []);
+  if (pin.invalidated === true) return;
+  const current = websiteChatPickerState();
+  const proving = pending.proofLease != null && globalThis.__computaChatActiveInvocation === pending.proofLease;
+  if (globalThis.__computaChatPresetPin !== pin || pin.owner !== pending.owner || pin.document !== pending.document
+    || globalThis.__computaModelOwner !== pending.owner || document !== pending.document
+    || window !== window.top || location.origin !== 'https://chatgpt.com'
+    || pin.selection !== pending.selection || pin.selection?.family?.key !== pending.family
+    || pin.selection?.power?.key !== pending.power.key || pending.previous.isConnected !== false
+    || pin.headerTrigger !== pending.previous && !(proving && pin.headerTrigger === pending.header)
+    || current.triggerCount !== 1 || current.trigger !== pending.header || !current.enabled(pending.header)
+    || !proving && !current.closedPresentation || current.headerPower && current.headerPower.key !== pending.power.key
+    || !current.headerPower && !(proving && current.headerPresentation)
+    || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous || current.navigationAmbiguous
+    || current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
+      !== String(websiteChatPowers.findIndex(power => power.key === pending.power.key))
+    || current.checkedFamily && current.checkedFamily.key !== pending.family) websiteChatInvalidatePin(pin, 'header_replaced');
+}
+function websiteChatClaimProvisionalHeader(pin, current) {
+  const pending = pin.provisionalHeader;
+  if (pending) {
+    websiteChatDrainProvisionalHeader(pin);
+    return !pending.completed && pending.header === current.trigger && pin.invalidated !== true;
+  }
+  if (!pin.headerTrigger || pin.headerTrigger.isConnected !== false || current.triggerCount !== 1
+    || !current.trigger || !current.enabled(current.trigger) || !current.closedPresentation
+    || current.headerPower?.key !== pin.selection.power.key || !chatGPTProductModeProof() || !chatGPTTemporaryVerified()) return false;
+  const candidate = { owner: pin.owner, document, invocation: websiteChatInvocationLease,
+    previous: pin.headerTrigger, header: current.trigger, selection: pin.selection,
+    family: pin.selection.family.key, power: { ...pin.selection.power }, completed: false, proofLease: null, observer: null };
+  candidate.observer = new MutationObserver(records => websiteChatProvisionalHeaderRecords(pin, candidate, records));
+  candidate.observer.observe(candidate.header, { subtree: true, childList: true, characterData: true, characterDataOldValue: true });
+  pin.provisionalHeader = candidate;
+  websiteChatDrainProvisionalHeader(pin);
+  return pin.invalidated !== true;
+}
+function websiteChatDeferredModelRead(expected, context) {
+  if (input.deferModelVerification !== true || globalThis.__computaModelFirstSubmitted !== true
+    || !['inspect', 'verifyModel', 'verifyProductMode', 'submit'].includes(input.action)
+    || !['action_precheck', 'action_final_guard'].includes(context?.scope)
+    || input.action === 'submit' && context.scope === 'action_precheck') return null;
+  if (!websiteChatInvocationLease || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease
+    || websiteChatInvocationLease.document !== document || window !== window.top
+    || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL
+      && !(input.action === 'submit' && context?.scope === 'action_final_guard' && context.action === 'submit'
+        && chatGPTSubmissionContext(globalThis.__computaChatSubmissionState, true))
+    || globalThis.__computaModelOwner !== input.ownerToken) return { error: 'document_changed' };
+  const pin = globalThis.__computaChatPresetPin;
+  if (!websiteChatPresetIntentValid(expected) || !pin || pin.owner !== input.ownerToken || pin.document !== document
+    || !pin.headerTrigger || !websiteChatFamilyValid(pin.selection?.family) || !websiteChatPowerValid(pin.selection?.power))
+    return { error: 'model_unverified' };
+  websiteChatDrainPinnedMutations(pin);
+  const pinnedChoice = websiteChatPresetChoice(pin.selection.family, pin.selection.power);
+  if (pin.invalidated === true || !pinnedChoice || expected.key !== pinnedChoice.key
+    || expected.label !== pinnedChoice.label && !(pin.selection.power.key === 'pro' && expected.label === 'Pro'))
+    return { error: 'model_mismatch' };
+  const current = websiteChatPickerState();
+  if (current.triggerCount !== 1 || !current.trigger || !current.enabled(current.trigger)
+    || !current.closedPresentation || !current.headerPower || current.duplicate || current.conflicting || current.indicatorInvalid
+    || current.selectionAmbiguous || current.navigationAmbiguous) return { error: 'model_unverified' };
+  // One replacement may retain negative history while pending. Its observer
+  // never transfers the original pin or creates positive model evidence.
+  if (current.trigger !== pin.headerTrigger && !websiteChatClaimProvisionalHeader(pin, current))
+    return { error: 'model_mismatch' };
+  if (current.headerPower && current.headerPower.key !== pin.selection.power.key
+    || current.semanticSlider && current.semanticSlider.getAttribute('aria-valuenow')
+      !== String(websiteChatPowers.findIndex(power => power.key === pin.selection.power.key))
+    || current.checkedFamily && current.checkedFamily.key !== pin.selection.family.key) {
+    websiteChatInvalidatePin(pin, 'semantic_mutation');
+    return { error: 'model_mismatch' };
+  }
+  return { modelVerificationPending: true };
+}
+function chatGPTResponseReadSnapshot() {
+  const visible = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
+  const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+  const roots = chatGPTMessageRoots('assistant');
+  const nodes = roots.map(node => node.getAttribute('data-markdown-text-style') === 'assistant-message' ? node
+    : node.querySelector('[data-markdown-text-style="assistant-message"]') || node.querySelector('.markdown')
+      || node.querySelector('[data-message-author-role="assistant"]')
+      || (node.getAttribute('data-message-author-role') === 'assistant' ? node : null)).filter(visible);
+  const answers = nodes.filter(node => !nodes.some(other => other !== node && other.contains(node)));
+  const answer = answers.at(-1);
+  let footer = null, copies = [];
+  for (let node = answer, depth = 0; node && depth < 10; node = node.parentElement, depth++) {
+    if (answers.filter(other => node === other || node.contains(other)).length > 1) break;
+    const scoped = [...node.querySelectorAll('.turn-action-controls button[aria-label="Copy"], button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]')];
+    if (scoped.some(enabled)) { footer = node; copies = scoped.map(node => ({ node, enabled: enabled(node) })); break; }
+  }
+  return { roots, answers, answer, footer, copies,
+    text: modelResponseText(answer, modelResponseExtraction(answer)).slice(0, 220_001),
+    busy: [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]')].some(visible),
+    users: chatGPTMessageRoots('user').map(root => {
+      const body = chatGPTUserBody(root);
+      return { root, body, text: normalizedFirstBody(body) };
+    }) };
+}
+function chatGPTResponseSnapshotMatches(captured, observed) {
+  const current = chatGPTResponseReadSnapshot();
+  const same = (left, right) => left.length === right.length && left.every((value, index) => value === right[index]);
+  return observed.busy === false && observed.answerComplete === true && observed.text === captured.text
+    && observed.responseCount === captured.answers.length && observed.userCount === captured.users.length
+    && captured.busy === false && current.busy === false && !!captured.answer && captured.answer.isConnected
+    && !!captured.footer && captured.footer.isConnected && current.answer === captured.answer && current.footer === captured.footer
+    && current.text === captured.text && same(current.roots, captured.roots) && same(current.answers, captured.answers)
+    && current.copies.length === captured.copies.length && captured.copies.some(copy => copy.enabled)
+    && current.copies.every((copy, index) => copy.node === captured.copies[index].node && copy.enabled === captured.copies[index].enabled)
+    && current.users.length === captured.users.length && current.users.every((user, index) => {
+      const previous = captured.users[index];
+      return user.root === previous.root && user.body === previous.body && user.body?.isConnected && user.text === previous.text;
+    });
+}
+function chatGPTFinalizeResponseRead(observed) {
+  if (observed.error || !chatGPTFinalResponseSnapshot) return observed;
+  if (!websiteChatInvocationLease || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease
+    || websiteChatInvocationLease.document !== document || window !== window.top
+    || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL
+    || globalThis.__computaModelOwner !== input.ownerToken) return { error: 'document_changed' };
+  const pin = globalThis.__computaChatPresetPin;
+  websiteChatDrainPinnedMutations(pin);
+  const picker = websiteChatPickerState();
+  const proof = chatGPTFinalResponseSnapshot;
+  if (!pin || pin !== proof.pin || pin.headerTrigger !== proof.header || pin.selection !== proof.selection
+    || pin.owner !== input.ownerToken || pin.document !== document || pin.invalidated === true
+    || pin.selection?.family?.key !== proof.family || pin.selection?.power?.key !== proof.power
+    || picker.trigger !== proof.header || !picker.closedPresentation || picker.headerPower?.key !== proof.power
+    || !websiteModelChoiceEqual(input.expectedModelChoice, proof.expected))
+    return { error: 'model_mismatch' };
+  if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
+  if (!chatGPTTemporaryVerified()) return { error: 'temporary_mode_unverified' };
+  const first = globalThis.__computaModelFirstProof;
+  if (proof.users.length > 0 && (!first || first.marker !== input.expectedFirstUserMarker
+    || first.fingerprint !== proof.fingerprint || observed.firstUserFingerprint !== proof.fingerprint
+    || input.expectedFirstUserFingerprint != null && input.expectedFirstUserFingerprint !== proof.fingerprint))
+    return { error: 'conversation_changed', detail: 'first_user_message' };
+  return chatGPTResponseSnapshotMatches(chatGPTFinalResponseSnapshot, observed)
+    ? observed : { error: 'conversation_changed', detail: 'response_changed' };
+}
+// ChatGPT alone can defer in-flight reads. Keep the shared full-proof control
+// layer byte-identical; every nondeferred read still executes that original path.
+const websiteChatFullDrainPinnedMutations = websiteChatDrainPinnedMutations;
+websiteChatDrainPinnedMutations = function(pin) {
+  websiteChatFullDrainPinnedMutations(pin);
+  websiteChatDrainProvisionalHeader(pin);
+};
+const websiteModelFullReadEvidence = websiteModelReadEvidence;
+websiteModelReadEvidence = async function(provider, expected, openingRecovery = null, context = null) {
+  if (provider === 'chatgpt') {
+    const deferred = websiteChatDeferredModelRead(expected, context);
+    if (deferred) return deferred;
+  }
+  const pin = provider === 'chatgpt' ? globalThis.__computaChatPresetPin : null;
+  const pending = pin?.provisionalHeader;
+  if (pending && !pending.completed) {
+    websiteChatDrainPinnedMutations(pin);
+    if (pin.invalidated === true) return { error: 'model_mismatch' };
+    pending.proofLease = websiteChatInvocationLease;
+  }
+  try {
+    const result = await websiteModelFullReadEvidence(provider, expected, openingRecovery, context);
+    if (pending && !pending.completed) {
+      websiteChatDrainPinnedMutations(pin);
+      if (pin.invalidated === true) return { error: 'model_mismatch' };
+      if (!result.error && result.modelEvidence && globalThis.__computaChatPresetPin === pin
+        && pin.headerTrigger === pending.header) {
+        pending.completed = true;
+        pending.observer.disconnect?.();
+      }
+    }
+    return result;
+  } finally { if (pending) pending.proofLease = null; }
+};
+const websiteModelFullFinalGuard = websiteModelFinalGuard;
+websiteModelFinalGuard = async function(provider, request, observed, currentTemporary = null) {
+  const candidate = provider === 'chatgpt' && !observed.error && request.action === 'inspect'
+    && request.expectedModelChoice != null && request.deferModelVerification !== true
+    && observed.answerComplete && observed.busy === false && observed.responseCount > 0
+    ? chatGPTResponseReadSnapshot() : null;
+  if (candidate && !chatGPTResponseSnapshotMatches(candidate, observed))
+    return { error: 'conversation_changed', detail: 'response_changed' };
+  const result = await websiteModelFullFinalGuard(provider, request, observed, currentTemporary);
+  if (result.error) return result;
+  if (result.modelVerificationPending === true) {
+    delete result.modelEvidence;
+    return result;
+  }
+  if (candidate) {
+    if (!chatGPTResponseSnapshotMatches(candidate, result))
+      return { error: 'conversation_changed', detail: 'response_changed' };
+    const pin = globalThis.__computaChatPresetPin;
+    chatGPTFinalResponseSnapshot = { ...candidate, pin, header: pin?.headerTrigger,
+      selection: pin?.selection, family: pin?.selection?.family?.key, power: pin?.selection?.power?.key,
+      expected: result.modelEvidence?.selected, fingerprint: firstUserFingerprint };
+  }
+  return result;
+};
+
 // A fenced envelope keeps JSON escapes out of the website's Markdown parser.
 // Admit only one literal code body with no author prose elsewhere in this answer.
 function modelResponseExtraction(answer) {
@@ -1895,11 +2108,12 @@ async function chatGPTSubmissionResult(request, observed) {
     ? chatGPTSubmissionReplacement(state, record, root, body, roots) : null;
   if (!root?.isConnected || !body?.isConnected || record.phase === 'verified' && (root !== record.root || body !== record.body) && !replacement)
     return chatGPTSubmissionFailure(state, 'observe_body', record);
-  let rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || '');
+  let rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || ''), expanded = false;
   if (rendered !== record.canonical && record === pending && record.sequence > 1) {
     if (chatGPTPendingProductSubmission(state, record, roots, root, body, rendered, observed))
       return { ...observed, ...capability, submissionPending: true, text: '', answerComplete: false };
     if (!await chatGPTExpandSubmission(state, record, root, body, rendered)) return chatGPTSubmissionFailure(state, 'observe_expansion', record);
+    expanded = true;
     rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || '');
   }
   const markerLine = `Computa session marker: ${record.marker}`;
@@ -1921,6 +2135,18 @@ async function chatGPTSubmissionResult(request, observed) {
   if (replacement) { record.root = root; record.body = body; record.replacement = null; }
   if (input.expectedFirstUserFingerprint === record.fingerprint) record.nativeFirstPinned = true;
   if (record === pending) { record.root = root; record.body = body; record.phase = 'verified'; state.lastVerified = record; state.pending = null; }
+  if (expanded && chatGPTFinalResponseSnapshot) {
+    // Only this invocation's authorized expansion can advance the current
+    // body's strict prefix to its now digest-proven exact canonical bytes.
+    // Preserve physical identity, every prior user, and the assistant snapshot.
+    const captured = chatGPTFinalResponseSnapshot.users[record.sequence - 1];
+    if (chatGPTFinalResponseSnapshot.users.length !== record.sequence || !captured
+      || captured.root !== root || captured.body !== body || !captured.text
+      || captured.text.length >= rendered.length || !rendered.startsWith(captured.text)
+      || captured.text.includes(markerLine)) return chatGPTSubmissionFailure(state, 'observe_expansion_snapshot', record);
+    chatGPTFinalResponseSnapshot.users = chatGPTFinalResponseSnapshot.users.map((user, index) =>
+      index === record.sequence - 1 ? { ...user, text: rendered } : user);
+  }
   const nowAssistants = chatGPTMessageRoots('assistant');
   const responseChanged = nowAssistants.length !== capturedAssistants.length
     || nowAssistants.some((node, index) => node !== capturedAssistants[index]);
@@ -2569,8 +2795,10 @@ async function providerPageAction(input, readLineageFingerprint = null) {
         identity: () => null, temporary: chatGPTTemporaryVerified })
       || chatGPTFirstUserFailure('snapshot_after_action', 'model_precheck', {}, false, readLineageFingerprint);
     modelState.evidence = proof.modelEvidence;
+    modelState.modelVerificationPending = proof.modelVerificationPending === true;
   }
-  if (input.action === 'verifyModel') return { modelEvidence: modelState.evidence };
+  if (input.action === 'verifyModel') return modelState.modelVerificationPending
+    ? { modelVerificationPending: true } : { modelEvidence: modelState.evidence };
 
   const { provider, action, expectedConversation, expectedConversationIdentity, expectedUserCounts, expectedFirstUserMarker,
     expectedFirstUserIdentity, expectedFirstUserFingerprint, expectedURL, prompt } = input;
@@ -2680,7 +2908,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
         && ["Just stopping by?", "Temporary Chat"].includes((node.textContent || "").trim()));
   const temporaryActionAvailable = enabled(provider === "claude" ? find(['button[aria-label="Use incognito"]'])
     : find(['button[aria-label="Temporary chat"]']));
-  const state = { modelEvidence: modelState.evidence, url: document.URL, temporary, temporaryActionAvailable, conversationIdentity, composer: !!composer, responseCount: answers.length, userCount,
+  const state = { ...(modelState.modelVerificationPending ? { modelVerificationPending: true } : { modelEvidence: modelState.evidence }), url: document.URL, temporary, temporaryActionAvailable, conversationIdentity, composer: !!composer, responseCount: answers.length, userCount,
     firstUserIdentity, firstUserFingerprint, firstUserMarkerVerified,
     busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, responseNoticeDiagnostic, text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
   if (action === "inspect") {
@@ -2863,6 +3091,7 @@ let firstUserVerified = false;
 let firstUserFingerprint = null;
 let firstSnapshot = null;
 let firstUserRejectionDiagnostic;
+let chatGPTFinalResponseSnapshot = null;
 const normalizedFirstBody = node => (node.innerText || node.textContent || "")
   .replace(/\r\n?/g, "\n").normalize("NFC").trim();
 function chatGPTFirstUserExpandControls(root, roots, maxDepth = 3) {
@@ -3527,7 +3756,7 @@ if (ownedUserCount > 0) {
       ? chatGPTFirstUserStructure('first_bound', 'binding') : undefined;
   const result = { ...observed, firstUserVerified, firstUserFingerprint, firstUserMarkerVerified: true,
     ...(firstUserDebugStructure ? { firstUserDebugStructure } : {}) };
-  return globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result;
+  return chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
 }
 if (input.expectedFirstUserFingerprint != null)
   return chatGPTFirstUserFailure('first_missing', 'first_missing');
@@ -3539,4 +3768,4 @@ if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && ch
   return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length, null, chatGPTTemporaryVerified())
     || { error: 'conversation_changed', detail: 'user_count' };
 const result = { ...observed, firstUserVerified, firstUserFingerprint };
-return globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result;
+return chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
