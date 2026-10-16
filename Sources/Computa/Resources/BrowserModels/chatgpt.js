@@ -1617,12 +1617,9 @@ function chatGPTResponseReadSnapshot() {
       || (node.getAttribute('data-message-author-role') === 'assistant' ? node : null)).filter(visible);
   const answers = nodes.filter(node => !nodes.some(other => other !== node && other.contains(node)));
   const answer = answers.at(-1);
-  let footer = null, copies = [];
-  for (let node = answer, depth = 0; node && depth < 10; node = node.parentElement, depth++) {
-    if (answers.filter(other => node === other || node.contains(other)).length > 1) break;
-    const scoped = [...node.querySelectorAll('.turn-action-controls button[aria-label="Copy"], button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]')];
-    if (scoped.some(enabled)) { footer = node; copies = scoped.map(node => ({ node, enabled: enabled(node) })); break; }
-  }
+  const scope = chatGPTAnswerCopyScope(answer, answers, chatGPTMessageRoots('user'), visible, enabled);
+  const footer = scope.footer;
+  const copies = footer ? scope.copies.map(node => ({ node, enabled: enabled(node) })) : [];
   return { roots, answers, answer, footer, copies,
     text: modelResponseText(answer, modelResponseExtraction(answer)).slice(0, 220_001),
     busy: [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]')].some(visible),
@@ -1884,6 +1881,32 @@ function chatGPTMessageRoots(role) {
   const nodes = [...document.querySelectorAll(selector)];
   return nodes.filter(node => !nodes.some(other => other !== node && other.contains(node)));
 }
+// The footer may be a sibling of nested answer markers. Never widen that
+// relationship to the page, another answer, or an enclosing user turn. Keep
+// ordinary completion and deadline diagnostics on the same physical scope.
+function chatGPTAnswerCopyScope(answer, answers, users, visible, enabled) {
+  let copies = [], enabledCopies = [], depth = -1, footer = null;
+  for (let node = answer, currentDepth = 0; node && currentDepth < 10; node = node.parentElement, currentDepth++) {
+    if (['MAIN', 'BODY', 'HTML'].includes(node.tagName)
+      || users.some(user => node === user || node.contains(user))
+      || answers.filter(other => node === other || node.contains(other)).length > 1) break;
+    copies = [...node.querySelectorAll('.turn-action-controls button[aria-label="Copy"], button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]')].filter(visible);
+    enabledCopies = copies.filter(enabled); depth = currentDepth;
+    if (enabledCopies.length) { footer = node; break; }
+  }
+  return { copies, enabledCopies, depth, footer };
+}
+// Counts from the selected body and its physical assistant root distinguish an
+// empty selection wrapper from an empty turn. No response text or identifiers
+// enter this diagnostic, and it never changes extraction or completion.
+function chatGPTAnswerScopeDiagnostic(answer) {
+  const root = answer && chatGPTMessageRoots('assistant').find(node => node === answer || node.contains(answer));
+  return { kind: 'chatgpt_answer_scope_v1', rootPresent: !!root, bodyPresent: !!answer,
+    rootTextLength: Math.min((root?.textContent || '').length, 220_001),
+    bodyTextLength: Math.min((answer?.textContent || '').length, 220_001),
+    rootChildren: Math.min(root?.childElementCount || 0, 1_000),
+    bodyChildren: Math.min(answer?.childElementCount || 0, 1_000) };
+}
 function chatGPTUserBody(root) {
   return root.querySelector('[data-markdown-text-style="user-message"]')
     || root.querySelector('.whitespace-pre-wrap') || root.querySelector('[data-message-author-role="user"]') || root;
@@ -1930,6 +1953,18 @@ function chatGPTSubmissionDiagnostic(state, stage, selectedRecord = null) {
 function chatGPTSubmissionFailure(state, stage = 'missing_state', record = null) {
   if (websiteChatInvocationLease == null || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease)
     return { error: 'document_changed', detail: 'model_read_context' };
+  const context = chatGPTSubmissionContextFailure;
+  if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action)
+    && ['observe_context', 'observe_digest'].includes(stage) && context?.state === state
+    && context.checks.urlMatches === false && document.URL !== input.expectedURL
+    && chatGPTSubmissionContextCheckKeys.slice(0, chatGPTSubmissionContextCheckKeys.indexOf('urlMatches'))
+      .every(key => context.checks[key] === true)) {
+    // A URL-bound read that crossed an SPA transition supplies no authority.
+    // Native must certify the existing route edge and issue a fresh inspect;
+    // do not let this discarded read revoke that inspect's unchanged claim.
+    // Body/pin/owner failures at the current URL still permanently revoke.
+    return { error: 'document_changed', detail: 'model_read_context' };
+  }
   const submissionDiagnostic = chatGPTSubmissionDiagnostic(state, stage, record);
   if (state) state.revoked = true;
   return { error: 'conversation_changed', detail: 'submission_message', ...(submissionDiagnostic ? { submissionDiagnostic } : {}) };
@@ -2950,15 +2985,8 @@ function chatGPTFailedPageDiagnostic() {
     && (node.getAttribute('aria-label') || node.innerText || '').trim() === 'Retry');
   const answers = chatGPTMessageRoots('assistant').filter(visible);
   const answer = answers.at(-1);
-  let copyPresent = false, copyEnabled = false;
-  for (let node = answer, depth = 0; node && depth < 10; node = node.parentElement, depth++) {
-    if (['MAIN', 'BODY', 'HTML'].includes(node.tagName)
-      || node !== answer && chatGPTMessageRoots('user').some(user => node === user || node.contains(user))) break;
-    if (answers.filter(other => node === other || node.contains(other)).length > 1) break;
-    const copies = [...node.querySelectorAll('.turn-action-controls button[aria-label="Copy"], button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]')].filter(visible);
-    copyPresent ||= copies.length > 0; copyEnabled ||= copies.some(enabled);
-    if (copyEnabled) break;
-  }
+  const copyScope = chatGPTAnswerCopyScope(answer, answers, chatGPTMessageRoots('user'), visible, enabled);
+  const copyPresent = copyScope.copies.length > 0, copyEnabled = copyScope.enabledCopies.length > 0;
   const signIn = !composer && nodes('a, button').some(node => visible(node) && !content(node)
     && /^(?:Log in|Sign in)(?:\s|$)/i.test((node.getAttribute('aria-label') || node.innerText || '').trim()));
   const loadFailed = chatGPTResponseLoadFailed(visible);
@@ -3118,18 +3146,11 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   const completionEvidence = { codeStructure: modelResponseStructure(answer, responseExtraction), modernMarkers: modernChatGPTAnswers.length, logicalAnswers: answers.length,
     scopedCopies: 0, enabledCopies: 0, depth: -1 };
   if (provider === "chatgpt" && answer) {
-    // The current Copy footer is a sibling of the selection wrapper. Keep the
-    // search inside an ancestor containing only this one physical answer;
-    // nested marker wrappers do not create another message.
-    for (let node = answer, depth = 0; node && depth < 10; node = node.parentElement, depth++) {
-      if (answers.filter(other => node === other || node.contains(other)).length > 1) break;
-      const copies = [...node.querySelectorAll('.turn-action-controls button[aria-label="Copy"], button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]')];
-      completionEvidence.scopedCopies = copies.length;
-      const enabledCopies = copies.filter(enabled);
-      completionEvidence.enabledCopies = enabledCopies.length;
-      completionEvidence.depth = depth;
-      if (completionEvidence.enabledCopies) { rendererScopedCopies = enabledCopies; answerComplete = true; break; }
-    }
+    const scope = chatGPTAnswerCopyScope(answer, answers, chatGPTMessageRoots('user'), visible, enabled);
+    completionEvidence.scopedCopies = scope.copies.length;
+    completionEvidence.enabledCopies = scope.enabledCopies.length;
+    completionEvidence.depth = scope.depth;
+    rendererScopedCopies = scope.enabledCopies; answerComplete = scope.enabledCopies.length > 0;
   } else if (provider === "claude" && answer) {
     const message = answer.closest('[data-testid="assistant-message"]');
     const article = answer.closest('[role="article"]');
@@ -3155,7 +3176,9 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     : find(['button[aria-label="Temporary chat"]']));
   const state = { ...(modelState.modelVerificationPending ? { modelVerificationPending: true } : { modelEvidence: modelState.evidence }), url: document.URL, temporary, temporaryActionAvailable, conversationIdentity, composer: !!composer, responseCount: answers.length, userCount,
     firstUserIdentity, firstUserFingerprint, firstUserMarkerVerified,
-    busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, responseNoticeDiagnostic, text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
+    busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, responseNoticeDiagnostic,
+    ...(provider === 'chatgpt' ? { answerScopeDiagnostic: chatGPTAnswerScopeDiagnostic(answer) } : {}),
+    text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
   if (action === "inspect") {
     const signIn = !composer && !!labelled(document.querySelectorAll('a, button'), /^(?:Log in|Sign in)(?:\s|$)/i);
     const resourceTimingDiagnostic = answerComplete ? chatGPTResourceTimingDiagnostic('completion') : null;

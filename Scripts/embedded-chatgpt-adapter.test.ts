@@ -925,6 +925,57 @@ describe('ChatGPT per-round canonical submission ownership', () => {
     }
   });
 
+  test('a URL-crossed submission digest is discarded without poisoning the fresh native read', async () => {
+    const choice = { key: 'chat/latest/medium', label: 'Medium' };
+    const x = await chatTurnFixture(choice);
+    const click = x.send.onClick!;
+    x.send.onClick = () => { click(); x.f.document.URL = 'https://chatgpt.com/c/local-chatgpt%3Afixture?temporary-chat=true';
+      x.f.location.pathname = '/c/local-chatgpt%3Afixture'; };
+    const record = await x.dispatch('Exact route-bound request', { deferModelVerification: true }); x.answer('Owned answer');
+    let promoted = false;
+    const promoteAtSubmissionDigest = () => {
+      if (!x.f.world.__computaModelFirstProof) { x.f.onDigest(promoteAtSubmissionDigest, record.outbound); return; }
+      promoted = true; x.f.document.URL = 'https://chatgpt.com/c/public-fixture?temporary-chat=true';
+      x.f.location.pathname = '/c/public-fixture';
+    };
+    x.f.onDigest(promoteAtSubmissionDigest, record.outbound);
+    const crossed = await x.observe(record, { deferModelVerification: true });
+    const state: any = x.f.world.__computaChatSubmissionState;
+    expect(promoted).toBe(true); expect(state.pending.phase).toBe('send_claimed');
+    expect(state.pending.root).toBeNull(); expect(state.revoked).toBe(false);
+    expect(crossed).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+    expect(crossed).not.toHaveProperty('submissionProof'); expect(crossed).not.toHaveProperty('text');
+    // Only Native can authorize a fresh invocation for the new URL. This
+    // fixture supplies that next structured input; no crossed read succeeds.
+    const fresh = await x.observe(record);
+    expect(fresh.error).toBeUndefined();
+    expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: record.fingerprint });
+    expect(fresh.modelEvidence.selected).toEqual(choice);
+    expect(fresh.answerComplete).toBe(true); expect(x.send.clicks).toBe(1);
+  });
+
+  test('a discarded URL-crossed digest cannot excuse changed body, owner or native pin on the fresh read', async () => {
+    for (const mutation of ['body', 'owner', 'pin']) {
+      const x = await chatTurnFixture();
+      const record = await x.dispatch('Exact request requiring independent fresh proof'); x.answer('Owned answer');
+      let crossed = false;
+      const mutateAtSubmissionDigest = () => {
+        if (!x.f.world.__computaModelFirstProof) { x.f.onDigest(mutateAtSubmissionDigest, record.outbound); return; }
+        crossed = true; x.f.document.URL = 'https://chatgpt.com/c/public-fixture?temporary-chat=true';
+        x.f.location.pathname = '/c/public-fixture';
+        if (mutation === 'body') x.f.document.querySelectorAll('article[data-turn="user"]')[0].children[0].text += '!';
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'pin') (x.f.world.__computaChatSubmissionState as any).pending.fingerprint = '0'.repeat(64);
+      };
+      x.f.onDigest(mutateAtSubmissionDigest, record.outbound);
+      const discarded = await x.observe(record); expect(crossed).toBe(true);
+      expect(discarded.error).toBeDefined(); expect(discarded).not.toHaveProperty('submissionProof');
+      const fresh = await x.observe(record);
+      expect(fresh.error).toBeDefined(); expect(fresh).not.toHaveProperty('submissionProof');
+      expect(fresh).not.toHaveProperty('answerComplete', true); expect(x.send.clicks).toBe(1);
+    }
+  });
+
   test('a replacement readonly invocation owns proof while a timed-out digest cannot revoke or bind', async () => {
     const x = await chatTurnFixture(); const first = await x.dispatch('Exact first'); x.answer('First'); await x.observe(first);
     const second = await x.dispatch('Exact second'); x.answer('Second');
@@ -2610,6 +2661,52 @@ describe("embedded ChatGPT fixed adapter", () => {
     expect(result.responseCount).toBe(2);
     expect(result.answerComplete).toBe(false);
     expect(result.completionEvidence.enabledCopies).toBe(0);
+  });
+
+  test("a lone answer cannot borrow Copy from the page or a user-containing ancestor", async () => {
+    for (const boundary of ['MAIN', 'BODY', 'HTML', 'user-container']) {
+      const f = fixture({ userPrompt: 'Owned request' });
+      const article = f.answer.parentElement!;
+      const controls = article.children.find(node => node.values.class === 'turn-action-controls')!;
+      article.children = article.children.filter(node => node !== controls);
+      let target = boundary === 'MAIN' ? f.messages : boundary === 'BODY' ? f.body : f.body.parentElement!;
+      if (boundary === 'user-container') {
+        const conversation = new Element('DIV');
+        const children = [...f.messages.children]; f.messages.children = [];
+        conversation.append(...children); f.messages.append(conversation); target = conversation;
+      }
+      target.append(controls);
+      const result = await f.inspect();
+      expect(result.responseCount).toBe(1);
+      expect(result.answerComplete).toBe(false);
+      expect(result.completionEvidence.enabledCopies).toBe(0);
+      expect(await f.diagnose()).toMatchObject({ failureDiagnostic: { copyPresent: false, copyEnabled: false } });
+    }
+  });
+
+  test("hidden Copy controls cannot complete a lone answer", async () => {
+    const f = fixture();
+    const copy = f.answer.parentElement!.querySelector('button[aria-label="Copy"]')!;
+    copy.cssVisibility = 'hidden';
+    const result = await f.inspect();
+    expect(result.answerComplete).toBe(false);
+    expect(result.completionEvidence.scopedCopies).toBe(0);
+    expect(await f.diagnose()).toMatchObject({ failureDiagnostic: { copyPresent: false, copyEnabled: false } });
+  });
+
+  test("answer scope counts distinguish empty selected content from content elsewhere in its physical turn", async () => {
+    const f = fixture(); f.answer.children = []; f.answer.text = '';
+    const payload = 'PRIVATE_RESPONSE_CANARY';
+    f.answer.parentElement!.append(new Element('DIV', {}, payload));
+    const result = await f.inspect();
+    expect(result.text).toBe('');
+    expect(result.answerScopeDiagnostic).toMatchObject({ kind: 'chatgpt_answer_scope_v1', rootPresent: true,
+      bodyPresent: true, bodyTextLength: 0, bodyChildren: 0, rootChildren: 3 });
+    expect(result.answerScopeDiagnostic.rootTextLength).toBe(payload.length + 'Copy'.length);
+    expect(JSON.stringify(result.answerScopeDiagnostic)).not.toContain(payload);
+    const absent = await fixture({ response: false }).inspect();
+    expect(absent.answerScopeDiagnostic).toEqual({ kind: 'chatgpt_answer_scope_v1', rootPresent: false,
+      bodyPresent: false, bodyTextLength: 0, bodyChildren: 0, rootTextLength: 0, rootChildren: 0 });
   });
 
   test("the observed user-bubble marker proves exactly its preserved body", async () => {

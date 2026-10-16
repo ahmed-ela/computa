@@ -366,6 +366,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let generation: UUID
             let fields: [String: Any]
             let responseNotice: String?
+            let answerScope: String?
         }
         var responseProgressInspection: ResponseProgressInspection?
         var responseProgressEmitted = false
@@ -1164,6 +1165,28 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return String(decoding: bytes, as: UTF8.self)
     }
 
+    /// Fixed rendering counts only. This projection cannot establish answer
+    /// ownership, completion or content, and never retains page strings.
+    static func sanitizedAnswerScopeDiagnostic(_ raw: Any?) -> String? {
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["kind", "rootPresent", "bodyPresent", "rootTextLength", "bodyTextLength",
+                                  "rootChildren", "bodyChildren"],
+              value["kind"] as? String == "chatgpt_answer_scope_v1",
+              let rootPresent = firstUserDiagnosticBool(value["rootPresent"]),
+              let bodyPresent = firstUserDiagnosticBool(value["bodyPresent"]) else { return nil }
+        var safe: [String: Any] = ["kind": "chatgpt_answer_scope_v1",
+                                   "rootPresent": rootPresent, "bodyPresent": bodyPresent]
+        for (key, maximum): (String, Int64) in [("rootTextLength", 220_001), ("bodyTextLength", 220_001),
+                                              ("rootChildren", 1_000), ("bodyChildren", 1_000)] {
+            guard let count = ComputerToolArgumentContract.exactInt64(value[key]),
+                  (0...maximum).contains(count) else { return nil }
+            safe[key] = count
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys),
+              bytes.count <= 512 else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     static func sanitizedFailedPageDiagnostic(_ value: [String: Any]) -> String? {
         guard value["kind"] as? String == "chatgpt_failed_page_v1",
               let route = value["route"] as? String, ["root", "local_conversation", "server_conversation", "other"].contains(route),
@@ -1656,7 +1679,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // No page text, URLs or IDs enter this diagnostic-only record.
             session.responseProgressInspection = Self.sanitizedResponseProgressInspection(observed).map {
                 .init(sequence: session.sequence, generation: generation, fields: $0,
-                      responseNotice: Self.sanitizedResponseNoticeDiagnostic(observed["responseNoticeDiagnostic"]))
+                      responseNotice: Self.sanitizedResponseNoticeDiagnostic(observed["responseNoticeDiagnostic"]),
+                      answerScope: Self.sanitizedAnswerScopeDiagnostic(observed["answerScopeDiagnostic"]))
             }
         }
         if let raw = observed["quotaDiagnostic"] as? String {
@@ -1759,6 +1783,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Separate metadata keeps response-progress-v1 and error policy unchanged.
         if inspectionCurrent, let notice = cached?.responseNotice {
             Self.inspectionLog.error("responseNoticeDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(notice, privacy: .public)")
+        }
+        if inspectionCurrent, let scope = cached?.answerScope {
+            Self.inspectionLog.error("answerScopeDiagnostic provider=chatgpt sequence=\(session.sequence) phase=failure \(scope, privacy: .public)")
         }
     }
 

@@ -1,5 +1,35 @@
 # Embedded website provider qualification
 
+## Candidate140: consistent answer scope and stale-read isolation
+
+The normal completion check, final response snapshot and deadline diagnostic now
+share one bounded Copy-footer scope. They stop at page roots, any enclosing user
+turn and another physical assistant answer, and exclude hidden controls. A
+single answer can no longer borrow a page-level Copy button as completion proof.
+
+A separate real WebKit reproducer promotes a local conversation to its public
+route during the later per-submission SHA await. The old adapter revoked the
+pending submission before native code discarded the crossed read. The repair
+discards only a read-only invocation whose context witness reaches a URL
+mismatch with all preceding checks intact. Native must still certify the route
+and independently verify the exact body, fingerprint and selected model. Body,
+owner, pin, extra-route and deadline negatives remain rejected; no Send repeats.
+This reproduces a concrete poisoning path; the earlier139 log retained only the
+already-revoked state and cannot uniquely identify its original predicate.
+
+Finite answer-scope diagnostics also compare selected-body and physical-root
+text lengths on the same admitted read. They contain no response text and grant
+no extraction, completion or retry authority. Root counts include UI chrome;
+they are not proof that model content exists outside the selected body.
+
+Both native regressions failed against the exact139 adapter at their intended
+checkpoints, then passed with the candidate. All 24 selected native methods
+passed with no failures or skips, including four diagnostic projection methods
+and route, model, ownership, deadline and cleanup guards. All 582 three-provider
+adapter tests passed with 16,513 assertions. The new test file is also registered
+in the Xcode test target. Installed140 qualification is pending; the partial139
+results and original failures below remain unchanged.
+
 ## Installed139: partial repair, qualification remains open
 
 Signed 0.7.0 (139), code source `26f2ce20708a01890306408bcce932b8fe3e4e5a`,
