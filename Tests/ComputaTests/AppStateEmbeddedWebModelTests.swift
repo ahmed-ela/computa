@@ -4,6 +4,46 @@ import XCTest
 
 @MainActor
 final class AppStateEmbeddedWebModelTests: XCTestCase {
+    func testMaintenanceLaunchCannotStartRuntimeOrIndependentWebsiteDiscovery() async {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        let runtime = EmbeddedConfigurationRuntime(browser: browser)
+        var discovered: [String] = []
+        var maintenanceRuns = 0
+        let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences(), browserSession: browser,
+            websiteModelDiscovery: { provider in discovered.append(provider); return Self.choices(provider) },
+            cookieMaintenanceOnlyLaunch: true,
+            cookieMaintenanceRunner: { _ in maintenanceRuns += 1 })
+        state.refreshWebsiteModelsIfNeeded()
+        await state.refreshWebsiteModels()
+        await state.startRuntime()
+        XCTAssertTrue(runtime.operations.isEmpty)
+        XCTAssertEqual(maintenanceRuns, 1)
+        XCTAssertTrue(discovered.isEmpty)
+        XCTAssertTrue(browser.tabs.isEmpty)
+        XCTAssertFalse(state.canRefreshWebsiteModels)
+        XCTAssertEqual(state.connectionState,
+            .failed(message: "Browser maintenance launch finished. Restart Computa to connect the runtime."))
+    }
+
+    func testMaintenanceLaunchWithNoRuntimeStillCannotStartWebsiteDiscovery() async {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        var discovered: [String] = []
+        var maintenanceRuns = 0
+        let state = AppState(tasks: [], runtime: nil, preferences: isolatedTestPreferences(), browserSession: browser,
+            websiteModelDiscovery: { provider in discovered.append(provider); return Self.choices(provider) },
+            cookieMaintenanceOnlyLaunch: true,
+            cookieMaintenanceRunner: { _ in maintenanceRuns += 1 })
+        state.refreshWebsiteModelsIfNeeded()
+        await state.refreshWebsiteModels()
+        await state.startRuntime()
+        XCTAssertTrue(discovered.isEmpty)
+        XCTAssertEqual(maintenanceRuns, 0)
+        XCTAssertTrue(browser.tabs.isEmpty)
+        XCTAssertFalse(state.canRefreshWebsiteModels)
+    }
+
     func testEmbeddedTransportIsConfiguredBeforeLoadingSavedTasksWithoutChrome() async {
         let browser = EmbeddedBrowserSession(persistent: false)
         let runtime = EmbeddedConfigurationRuntime(browser: browser)

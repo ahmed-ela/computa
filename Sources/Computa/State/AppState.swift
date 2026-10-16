@@ -22,6 +22,8 @@ final class AppState {
     @ObservationIgnored private var chromePreferenceGeneration: UInt64 = 0
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
     @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored private let cookieMaintenanceOnlyLaunch: Bool
+    @ObservationIgnored private let cookieMaintenanceRunner: @MainActor (EmbeddedBrowserSession) async -> Void
     @ObservationIgnored private var embeddedModelTransport: EmbeddedWebModelTransport?
     @ObservationIgnored private let websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])?
     @ObservationIgnored private var websiteModelRefreshTask: Task<Void, Never>?
@@ -132,6 +134,10 @@ final class AppState {
         browserSession: EmbeddedBrowserSession? = nil,
         enableChromeExtensionBridge: Bool = false,
         websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])? = nil,
+        cookieMaintenanceOnlyLaunch: Bool? = nil,
+        cookieMaintenanceRunner: @escaping @MainActor (EmbeddedBrowserSession) async -> Void = { browser in
+            _ = await ChatGPTCookieMaintenanceDiagnostic.runAtStartupIfArmed(in: browser)
+        },
         chromeTargetProvider: @escaping @MainActor () throws -> NativeChromeConnectionTarget = {
             try NativeChromeConnectionTarget.prepare()
         }
@@ -139,6 +145,10 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        let maintenanceHome = URL(fileURLWithPath: CodexAppServerRuntime.Configuration.localQwen.codexHomePath, isDirectory: true)
+        self.cookieMaintenanceOnlyLaunch = cookieMaintenanceOnlyLaunch
+            ?? ChatGPTCookieMaintenanceDiagnostic.hasArm(codexHome: maintenanceHome)
+        self.cookieMaintenanceRunner = cookieMaintenanceRunner
         self.websiteModelDiscovery = websiteModelDiscovery
         self.browserSession = browserSession ?? EmbeddedBrowserSession(defaults: preferences)
         self.chromeTargetProvider = chromeTargetProvider
@@ -270,7 +280,8 @@ final class AppState {
     /// no saved choices need startup discovery. An explicit refresh can replace
     /// the saved catalog without adding provider page loads on every launch.
     func refreshWebsiteModelsIfNeeded() {
-        guard !didStartWebsiteModelDiscovery, runtime != nil || websiteModelDiscovery != nil else { return }
+        guard !cookieMaintenanceOnlyLaunch, !didStartWebsiteModelDiscovery,
+              runtime != nil || websiteModelDiscovery != nil else { return }
         didStartWebsiteModelDiscovery = true
         let missing = WebsiteModelCatalog.providers.filter { provider in
             !websiteModelChoices.contains { $0.provider == provider }
@@ -283,7 +294,7 @@ final class AppState {
 
     /// Manual discovery shares recovery's idle boundary. A blocked request is
     /// dropped, not queued for automatic retry after the native turn ends.
-    var canRefreshWebsiteModels: Bool { humanWebsiteRecoveryIsIdle }
+    var canRefreshWebsiteModels: Bool { !cookieMaintenanceOnlyLaunch && humanWebsiteRecoveryIsIdle }
 
     func refreshWebsiteModels() async {
         guard canRefreshWebsiteModels else { return }
@@ -291,7 +302,7 @@ final class AppState {
     }
 
     private var humanWebsiteRecoveryIsIdle: Bool {
-        !isShuttingDown && !approvalGateBlocksInteraction && activeTurnTaskIDs.isEmpty
+        !cookieMaintenanceOnlyLaunch && !isShuttingDown && !approvalGateBlocksInteraction && activeTurnTaskIDs.isEmpty
             && !tasks.contains(where: { $0.status == .running })
             && steeringTaskIDs.isEmpty && dispatchingQueueTaskIDs.isEmpty
             && !compactionStateByTask.values.contains(where: { $0 == .running })
@@ -1328,6 +1339,12 @@ final class AppState {
     func startRuntime() async {
         guard !isShuttingDown, let runtime else { return }
         connectionState = .connecting
+        if cookieMaintenanceOnlyLaunch {
+            await cookieMaintenanceRunner(browserSession)
+            guard !isShuttingDown else { return }
+            connectionState = .failed(message: "Browser maintenance launch finished. Restart Computa to connect the runtime.")
+            return
+        }
 
         do {
             try await runtime.configureAPIProviders(apiProviders)

@@ -186,7 +186,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     enum Failure: Error, LocalizedError, Equatable {
-        case invalidRequest, unsupportedProvider, capacity, staleSession, documentChanged, turnLimit
+        case invalidRequest, unsupportedProvider, capacity, staleSession, documentChanged, turnLimit, cookieMaintenancePending
         case signInRequired, temporaryUnverified, notFresh, composerUnavailable
         case pageUnavailable, responseTooLarge, responseInterrupted, preparationDeadline, deadline
         case submissionObservationPending
@@ -239,6 +239,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .turnLimit: "The bounded website conversation limit was reached. No prompt was replayed; start a new task."
             case .unsupportedProvider: "That model provider is not supported in the built-in browser."
             case .capacity: "Finish an existing website-model task before opening another session. If failed sessions remain retained, restart Computa to free local capacity; their website cleanup remains unconfirmed."
+            case .cookieMaintenancePending: "ChatGPT's previous browser session is still closing. Wait briefly before starting another task."
             case .staleSession: "The owned browser model session is no longer available."
             case .documentChanged: "The owned model page or conversation changed. No prompt was replayed."
             case .ownershipFailure(let reason): "The owned model page or conversation changed (\(reason.rawValue)). No prompt was replayed."
@@ -331,6 +332,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var conversation: String?
         var routeContext: String?
         var conversationIdentity: String?
+        var temporaryCookieRoutes = ChatGPTTemporaryConversationRoutes()
         var firstUserFingerprint: String?
         var promoted = false
         var documentGeneration: UUID?
@@ -418,6 +420,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private let createTab: @MainActor (URL) throws -> UUID
     private let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
     private var sessions: [String: Session] = [:]
+    private var finishingTasks: [String: Task<Data, Never>] = [:]
+    private var closedSessions: [String: (created: ContinuousClock.Instant, receipt: Data)] = [:]
     private struct ProviderGate {
         let id = UUID()
         let failure: Failure
@@ -608,7 +612,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data {
         guard let values = try JSONSerialization.jsonObject(with: params) as? [String: String],
               values["provider"] == "chatgpt" else { authorization.revoke(); throw Failure.invalidRequest }
-        return try start(values, requestMetadata: authorization)
+        return try await start(values, requestMetadata: authorization)
     }
 
     func activateRequestMetadata(sessionToken: String) async -> Bool {
@@ -637,7 +641,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         browser.revokeModelRequestMetadata(tabID: session.tabID, ownerToken: session.token)
     }
 
-    private func start(_ values: [String: String], requestMetadata: ChatGPTRequestMetadataLease? = nil) throws -> Data {
+    private func start(_ values: [String: String], requestMetadata: ChatGPTRequestMetadataLease? = nil) async throws -> Data {
         try Task.checkCancellation()
         guard Set(values.keys) == ["provider"] || Set(values.keys) == ["provider", "modelChoice"] else { throw Failure.invalidRequest }
         guard let raw = values["provider"], let provider = Provider(rawValue: raw) else { throw Failure.unsupportedProvider }
@@ -648,6 +652,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             choice = parsed
         } else { choice = nil }
         guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
+        if provider == .chatgpt {
+            guard await browser.admitChatGPTAfterCookieCallbacks(until: .now + .seconds(2)) else { throw Failure.cookieMaintenancePending }
+            try Task.checkCancellation()
+        }
         let session = try createSession(provider: provider, choice: choice, isDiscovery: false,
             requestMetadata: requestMetadata)
         return try snapshot(session)
@@ -663,13 +671,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             throw Failure.invalidRequest
         }
         if operation == "webProviderStart" {
-            return try start(values)
+            return try await start(values)
         }
         let expectedKeys: Set<String> = operation == "webProviderSend" ? ["sessionToken", "prompt"] : ["sessionToken"]
         let cancellationKeys: Set<String> = ["sessionToken", "cleanupCause"]
         guard ["webProviderPoll", "webProviderSend", "webProviderFinish", "webProviderCancel"].contains(operation),
               Set(values.keys) == expectedKeys || operation == "webProviderCancel" && Set(values.keys) == cancellationKeys,
-              let token = values["sessionToken"], let session = sessions[token] else { throw Failure.staleSession }
+              let token = values["sessionToken"] else { throw Failure.staleSession }
+        if ["webProviderFinish", "webProviderCancel"].contains(operation) {
+            if let task = finishingTasks[token] { return await task.value }
+            if let closed = closedSessions[token], ContinuousClock.now - closed.created < .seconds(3_600) { return closed.receipt }
+        }
+        guard let session = sessions[token] else { throw Failure.staleSession }
         if !["webProviderFinish", "webProviderCancel"].contains(operation), let failure = session.terminalFailure {
             throw failure
         }
@@ -847,6 +860,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func createSession(provider: Provider, choice: WebsiteModelChoice?, isDiscovery: Bool,
                                isRecoveryProbe: Bool = false, requestMetadata: ChatGPTRequestMetadataLease? = nil) throws -> Session {
+        closedSessions = closedSessions.filter { ContinuousClock.now - $0.value.created < .seconds(3_600) }
         synchronizeProviderGate(provider)
         if !isRecoveryProbe, let gate = providerGates[provider] { throw gate.failure }
         let admitted = sessions.values.filter { $0.isDiscovery == isDiscovery }.count
@@ -876,6 +890,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         synchronizeProviderGate(provider)
         let previousGateID = providerGates[provider]?.id
         let previousVerificationID = browser.savedHumanVerificationCheckpointIDs[provider.rawValue]
+        if provider == .chatgpt {
+            guard await browser.admitChatGPTAfterCookieCallbacks(until: .now + .seconds(2)) else { throw Failure.cookieMaintenancePending }
+            try Task.checkCancellation()
+        }
         let session = try createSession(provider: provider, choice: nil, isDiscovery: true, isRecoveryProbe: retryBlocked)
         let token = session.token
         var closed = false
@@ -2947,6 +2965,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     && provider.isLocalConversation(nextConversation)
                 let nextContinuation = allowFirstUserExpansion
                     ? try Self.appendingFirstUserExpansionRoute(routeContinuation, from: url, to: currentURL) : []
+                if provider == .chatgpt, !nextContinuation.isEmpty {
+                    for edge in nextContinuation {
+                        session.temporaryCookieRoutes.observe(edge.fromURL)
+                        session.temporaryCookieRoutes.observe(edge.toURL)
+                    }
+                }
                 #if DEBUG
                 if !nextContinuation.isEmpty { await firstUserExpansionRouteCheckpointForTesting?(.routeAccepted) }
                 #endif
@@ -3187,6 +3211,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     // Preserve the initial route pin while waiting for render;
                     // a later promotion still requires the first-message proof.
                     session.conversation = conversation
+                    if provider == .chatgpt, session.view.url == currentURL,
+                       browser.documentGeneration(for: session.tabID) == generation { session.temporaryCookieRoutes.observe(currentURL) }
                 }
                 // Neither answers nor cleanup can be admitted before the
                 // submitted first message has established owned lineage.
@@ -3245,6 +3271,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard ContinuousClock.now < evaluationDeadline else { throw Failure.pageUnavailable }
         if provider == .chatgpt, action == "submit" {
             logResourceTimingDiagnostic(observed["resourceTimingDiagnostic"], session: session, phase: "send")
+        }
+        if provider == .chatgpt, session.submitted, session.temporary,
+           browser.webView(for: session.tabID) === session.view, session.view.url == currentURL,
+           browser.documentGeneration(for: session.tabID) == generation {
+            session.temporaryCookieRoutes.observe(currentURL)
+            if let generation = session.documentGeneration, let fingerprint = session.firstUserFingerprint,
+               session.confirmedUsers > 0, session.currentSubmissionVerified,
+               observed["temporary"] as? Bool == true, observed["ownershipPending"] as? Bool != true {
+                browser.recordOwnedTemporaryChatGPTRoutes(session.temporaryCookieRoutes.candidates,
+                    tabID: session.tabID, view: session.view, ownerToken: session.token,
+                    generation: generation, firstUserFingerprint: fingerprint)
+            }
         }
         return observed
     }
@@ -3427,6 +3465,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func finish(_ session: Session, cancel: Bool,
                         cleanupCause: WebModelCleanupCause = .cancelled) async -> Data {
+        guard session.provider == .chatgpt else { return await performFinish(session, cancel: cancel, cleanupCause: cleanupCause) }
+        if let task = finishingTasks[session.token] { return await task.value }
+        if let closed = closedSessions[session.token] { return closed.receipt }
+        let work = Task { @MainActor in await self.performFinish(session, cancel: cancel, cleanupCause: cleanupCause) }
+        finishingTasks[session.token] = work
+        let result = await work.value
+        finishingTasks.removeValue(forKey: session.token)
+        if session.state == "finished" {
+            while closedSessions.count >= 16 || closedSessions.values.reduce(0, { $0 + $1.receipt.count }) + result.count > 16 * 1_024 * 1_024 {
+                guard let oldest = closedSessions.min(by: { $0.value.created < $1.value.created })?.key else { break }
+                closedSessions.removeValue(forKey: oldest)
+            }
+            closedSessions[session.token] = (.now, result)
+        }
+        return result
+    }
+
+    private func performFinish(_ session: Session, cancel: Bool,
+                               cleanupCause: WebModelCleanupCause) async -> Data {
         finishInitialCheckpointSettlement(session, phase: cancel ? .cancelled : .finished)
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
         if let capture = session.postBlockDiagnostic, let task = capture.task {
@@ -3505,6 +3562,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             browser.closeTab(session.tabID)
             sessions.removeValue(forKey: session.token)
             session.state = "finished"
+            if session.provider == .chatgpt {
+                // Physical website closure is already verified. Local cookie
+                // maintenance has its own durable state and cannot reopen or
+                // invalidate that receipt when a callback remains pending.
+                _ = await browser.settleChatGPTTemporaryCookieRetirement(until: .now + .seconds(2))
+            }
             return try snapshot(session, cleanup: "not_created")
         } catch {
             // Retain the exact owned tab for inspection/retry; never erase a human chat.

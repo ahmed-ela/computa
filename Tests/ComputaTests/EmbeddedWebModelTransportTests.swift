@@ -6,6 +6,34 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testRepeatedChatGPTFinishAndCancelPreserveTheExactVerifiedReceipt() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Receipt preservation fixture"])
+        let completed = try await waitForState("complete", fixture.transport, token: token)
+        let params = try JSONSerialization.data(withJSONObject: ["sessionToken": token])
+        let finish = Task { @MainActor in
+            try await fixture.transport.request(operation: "webProviderFinish", params: params)
+        }
+        await Task.yield()
+        let cancellation = try await fixture.transport.request(operation: "webProviderCancel", params: params)
+        let original = try await finish.value
+        let repeated = try await fixture.transport.request(operation: "webProviderFinish", params: params)
+        XCTAssertEqual(cancellation, original)
+        XCTAssertEqual(repeated, original)
+        let receipt = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        XCTAssertEqual(receipt["cleanup"] as? String, "not_created")
+        XCTAssertEqual(receipt["text"] as? String, completed["text"] as? String)
+        XCTAssertNotNil(receipt["modelEvidence"])
+        XCTAssertNotNil(receipt["modelProofContext"])
+        XCTAssertNil(fixture.browser.webView(for: ownedID))
+        XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
+    }
+
     func testResponseNoticeProjectionAcceptsOnlyFinitePairedStatusFacts() throws {
         let observation: [String: Any] = ["excludedAncestor": "dialog", "contentExcluded": false,
             "retryEnabled": true, "noticeRole": "status", "pairing": "shared_parent", "sameWidget": true,

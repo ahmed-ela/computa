@@ -1,6 +1,42 @@
 # Embedded website provider qualification
 
-## Candidate130: finite request-header and profile-cookie estimates
+## Build131: owned temporary-cookie retirement and reversible maintenance
+
+Completed temporary ChatGPT sessions now retire only the exact conversation IDs
+established by native first-user ownership and route-promotion evidence. A private,
+bounded registry retains those IDs across restarts so late cookie writers can be
+handled. Human/tool ChatGPT views and reserved resume IDs protect conversations;
+unknown ownership defers cleanup. Storage failure preserves cookies and permits
+normal provider admission once already-issued callbacks settle. Repeated finish
+and cancel calls preserve the original verified receipt and response evidence.
+
+A separate, explicitly armed startup diagnostic operates on the actual cached
+browser store under exclusive admission. An inspection performs only reads and
+does not start the runtime or provider discovery. Quarantine requires a separate
+arm matching a fresh positive inspection, archives selected paired temporary
+keys privately before deletion, and verifies all nonselected state is unchanged.
+Restoration refuses conflicting newer keys and preserves current authentication
+state. Callback deadlines and cancellation never release an issued write early.
+
+**54 distinct selected native methods passed** across retained runs: 12 retirement,
+four selection, three startup, nine maintenance and 26 affected lifecycle methods.
+The lifecycle cohort includes exact repeated finish/cancel receipts, first-user
+promotion, model drift, owned cleanup, browser navigation/shutdown and diagnostic
+cleanup. Earlier failed runs are retained: one test compilation error, filesystem
+alias rejection, and synthetic timestamp precision issues were resolved. No
+production future-clock tolerance or symlink protection was relaxed.
+
+Installed-profile inspection, quarantine and fresh provider qualification remain
+pending. These tests do not establish that the ChatGPT request failure is fixed.
+
+## Current installed build130: finite header and profile-cookie estimates
+
+Computa **0.7.0 (130)** from pushed commit
+`9fbe7d59986577061c00fe5e2f6d9e1c551a8545` is installed. Independent checks
+matched all 55 signed and installed bundle files, 51 resources, 2,139 frozen
+inputs and the unchanged engine. All three actual Computa compiler invocations
+confirmed the Gemini diagnostic flag off. The exact installed129 bundle is
+preserved as a verified backup.
 
 The focused observer now records only supplied-header representation, counts,
 UTF-8 totals, largest value and finite character-validity flags. Unknown or
@@ -23,11 +59,54 @@ cookie-budget and three server cases. The first run retained one fixture-setup
 failure because Foundation rejected an oversized synthetic cookie before the
 aggregator received it. A test-only subclass corrected that fixture, and all
 seven methods in the second run passed without skips. Production source stayed
-unchanged between runs. Independent source review was clear. Signed packaging
-and the focused installed130 capture are pending; this is diagnostic support,
-not an established website repair.
+unchanged between runs. Independent source review was clear.
 
-## Current installed build129: focused request metadata
+The installed130 capture still failed with `website_response_failed`. Its
+maintenance stage failed before the pending user prompt was sent; the unused
+arm was removed and the synthetic queued item deleted. A separately planned
+explicit user submission in the loaded chat consumed its new arm and saved a
+sidecar matching the exact native identities. Normal cleanup closed both
+website sessions and preserved the blank control tab; no arm or queued prompt
+remained. This is diagnostic support, not a qualification pass or website repair.
+
+The user capture retained three relevant rows without reaching its cap. A
+66,590-byte String preparation POST resolved HTTP 200 headers. The 66,949-byte
+conversation POST rejected TypeError after 87 ms without headers; a later
+419-byte preparation POST resolved 200. The conversation's 16 supplied header
+entries contained 313 name and 7,968 value UTF-8 bytes, largest value 2,744, with
+all character-validity flags false. Native profile estimation found **540
+matching cookies and 47,970 estimated header bytes**. These remain separate
+observations rather than a complete transmitted-header measurement.
+
+The independently attributed app networking process again reported native
+invalid-frame error -522, invalid argument 22 and URL error -1000 in the failure
+window. A bounded read-only examination of the exact persistent profile found
+536 eligible stored cookies, 306 `conv_key_` UUID-suffixed keys and 208
+`history_off_` UUID-suffixed markers. All 208 markers had the fixed temporary
+flag `1` and a corresponding key; 98 keys were unpaired. All those family cookies
+were HttpOnly, host-only `chatgpt.com`, and root-path. The four-cookie difference
+between disk and live snapshots is unclassified. Values, UUID suffixes, full
+cookie names and their hashes were not retained in diagnostic output.
+
+Temporary-conversation cookie accumulation is now the strongest causal lead.
+Oracle independently implements stale `conv_key_` cleanup for header failures,
+protecting open and explicitly resumed conversation IDs. Its current
+[implementation](https://github.com/steipete/oracle/blob/f204bef8fb1c67a9597a11b7f337cce198ecc247/src/browser/cookies.ts#L8-L71)
+is supporting precedent rather than proof of our repair or permission to clear
+unrelated state. Two standalone native read-only checks, including one with the
+same linked SDK 26.5 as Computa, returned an empty store despite matching bundle
+and profile identifiers. Neither check qualified access to the real profile;
+neither made a cookie write. The linked SDK difference did not explain that
+result, and the remaining launch-context difference is unproven.
+
+Candidate131 moves the separately armed inspection into Computa's actual cached
+browser store, before runtime startup and under exclusive tab admission. Only a
+positive inspection can authorize a subsequent matching cleanup arm. That
+experiment will privately archive selected paired temporary keys before removing
+them through public WebKit APIs. Authentication, unpaired keys and history-off
+markers remain. No live cookie write or successful repaired task has occurred yet.
+
+## Historical installed build129: focused request metadata
 
 Computa **0.7.0 (129)** from pushed commit
 `d379193654909691ebfa1a25dd7eba749b9aa6b2` is installed. All 55 bundle files,

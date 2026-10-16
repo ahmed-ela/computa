@@ -36,7 +36,7 @@ final class EmbeddedBrowserSession {
         case modelPopupUnsupported
         case toolPopupUnsupported
         case popupProfileMismatch
-        case inspectionUnavailable
+        case inspectionUnavailable, cookieMaintenancePending
 
         var errorDescription: String? {
             switch self {
@@ -48,6 +48,7 @@ final class EmbeddedBrowserSession {
             case .toolPopupUnsupported: "This task tab cannot open an unowned pop-up. Open the observed destination with the browser tools."
             case .popupProfileMismatch: "The requested pop-up did not preserve this browser's sign-in profile."
             case .inspectionUnavailable: "Web Inspector is unavailable for this tab while a task owns or uses it."
+            case .cookieMaintenancePending: "The browser profile is completing a local maintenance operation."
             }
         }
     }
@@ -64,6 +65,14 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private let persistent: Bool
     @ObservationIgnored private let profileID: UUID?
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let cookieRetirementDirectory: URL?
+    @ObservationIgnored private var temporaryCookieRetirement: ChatGPTTemporaryCookieRetirement?
+    @ObservationIgnored private var chatGPTResumeProtections: [UUID: Set<UUID>] = [:]
+    @ObservationIgnored private var uncertainChatGPTResumeProtections: Set<UUID> = []
+    @ObservationIgnored private var chatGPTResumeProtectionOverflow = false
+    @ObservationIgnored private var exclusiveCookieMaintenance: UUID?
+    @ObservationIgnored private var chatGPTResumeProtectionRevision: UInt64 = 0
+    @ObservationIgnored private let transientProfileID = UUID()
     @ObservationIgnored private var resolvedProfileID: UUID?
     @ObservationIgnored private var transientHumanVerificationCheckpoints: [String: UUID] = [:]
     @ObservationIgnored private var transientRecoveryReports: [String: EmbeddedHumanVerificationStore.RecoveryReport] = [:]
@@ -111,6 +120,9 @@ final class EmbeddedBrowserSession {
         var serverRedirectObservedInCurrentNavigation = false
         var inspectorDiagnostic: (id: UUID, binding: ChatGPTInspectorLease.Binding, expiry: Task<Void, Never>)?
         var requestMetadataDiagnostic: RequestMetadataDiagnostic?
+        var ownedTemporaryChatGPTRoutes: Set<UUID> = []
+        var pendingConversationURL: URL?
+        var pendingConversationAdmission: (id: UUID, generation: UUID)?
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
@@ -156,11 +168,13 @@ final class EmbeddedBrowserSession {
 
     /// `persistent: false` makes an isolated, nonpersistent test/private session.
     /// An explicit profile ID avoids reading or writing the production preference in tests.
-    init(persistent: Bool = true, maximumTabs: Int = 8, profileID: UUID? = nil, defaults: UserDefaults = .standard) {
+    init(persistent: Bool = true, maximumTabs: Int = 8, profileID: UUID? = nil, defaults: UserDefaults = .standard,
+         cookieRetirementDirectory: URL? = nil) {
         self.maximumTabs = max(1, min(maximumTabs, 32))
         self.persistent = persistent
         self.profileID = profileID
         self.defaults = defaults
+        self.cookieRetirementDirectory = cookieRetirementDirectory
     }
 
     /// Resolve once for both WebKit and saved checkpoints, even if preferences
@@ -281,7 +295,127 @@ final class EmbeddedBrowserSession {
             store = .nonPersistent()
         }
         websiteDataStore = store
+        let registry: ChatGPTTemporaryCookieRegistry?
+        if persistent {
+            let profile = persistentProfileIdentifier()
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+            let directory = cookieRetirementDirectory ?? support
+                .appendingPathComponent("Computa/BrowserCookieRetirement-v1/" + profile.uuidString.lowercased(), isDirectory: true)
+            registry = ChatGPTTemporaryCookieRegistry(directory: directory, profileID: profile)
+        } else { registry = nil }
+        temporaryCookieRetirement = ChatGPTTemporaryCookieRetirement(store: ChatGPTWKTemporaryCookieStore(store.httpCookieStore),
+            registry: registry, initiallySuspended: exclusiveCookieMaintenance != nil,
+            protection: { [weak self] in self?.protectedChatGPTConversationIDs() })
         return store
+    }
+
+    /// Only admitted native temporary first-message lineage may call this.
+    /// Page selection IDs and cookie-name deltas never enter this path.
+    func recordOwnedTemporaryChatGPTRoutes(_ ids: Set<UUID>, tabID: UUID, view: WKWebView,
+                                         ownerToken: String, generation: UUID, firstUserFingerprint: String) {
+        guard !isShutdown, !ids.isEmpty, ids.count <= 2, let entry = entries[tabID], entry.isModelOwned,
+              entry.view === view, entry.modelChanges?.ownerToken == ownerToken,
+              entry.tab.documentGeneration == generation, Self.inspectorOriginAllowed(view.url),
+              firstUserFingerprint.utf8.count == 64,
+              firstUserFingerprint.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              entry.ownedTemporaryChatGPTRoutes.union(ids).count <= 2 else { return }
+        entry.ownedTemporaryChatGPTRoutes.formUnion(ids)
+    }
+
+    func settleChatGPTTemporaryCookieRetirement(until deadline: ContinuousClock.Instant) async -> Bool {
+        guard !isShutdown else { return false }
+        _ = dataStore()
+        return await temporaryCookieRetirement?.settle(until: deadline) ?? false
+    }
+
+    func admitChatGPTAfterCookieCallbacks(until deadline: ContinuousClock.Instant) async -> Bool {
+        guard !isShutdown, exclusiveCookieMaintenance == nil else { return false }
+        _ = dataStore()
+        _ = await temporaryCookieRetirement?.settle(until: deadline)
+        return temporaryCookieRetirement?.canAdmit == true
+    }
+
+    /// Startup-only native maintenance. The operation must await every issued
+    /// store callback before returning, including cancellation/timeout paths.
+    /// The lease cannot be granted while any tab or retirement callback exists.
+    func withExclusiveCookieMaintenance<Result>(
+        _ operation: @MainActor (WKHTTPCookieStore, UUID, @escaping @MainActor () -> Bool) async -> Result
+    ) async -> Result? {
+        guard !isShutdown, entries.isEmpty, exclusiveCookieMaintenance == nil else { return nil }
+        let lease = UUID(), revision = chatGPTResumeProtectionRevision
+        exclusiveCookieMaintenance = lease
+        var suspended = false
+        defer {
+            if exclusiveCookieMaintenance == lease { exclusiveCookieMaintenance = nil }
+            if suspended { _ = temporaryCookieRetirement?.setSuspended(false) }
+        }
+        let store = dataStore()
+        guard temporaryCookieRetirement?.setSuspended(true) == true else { return nil }
+        suspended = true
+        _ = await temporaryCookieRetirement?.settle(until: .now + .seconds(2))
+        guard !isShutdown, entries.isEmpty, exclusiveCookieMaintenance == lease,
+              temporaryCookieRetirement?.hasPendingCallback == false else { return nil }
+        let profile = persistent ? persistentProfileIdentifier() : (profileID ?? transientProfileID)
+        return await operation(store.httpCookieStore, profile, { [weak self] in
+            guard let self else { return false }
+            return !self.isShutdown && self.entries.isEmpty && self.exclusiveCookieMaintenance == lease
+                && self.websiteDataStore === store && self.chatGPTResumeProtectionRevision == revision
+        })
+    }
+
+    func cookieMaintenanceProtectedIDs() -> Set<UUID>? {
+        guard entries.isEmpty, exclusiveCookieMaintenance != nil else { return nil }
+        return protectedChatGPTConversationIDs()
+    }
+
+    /// Native future resume owners reserve IDs before allowing an admission.
+    /// Unknown or over-bound inventories conservatively defer maintenance.
+    func holdChatGPTConversationResumeIDs(_ ids: Set<UUID>?, owner: UUID) {
+        chatGPTResumeProtectionRevision &+= 1
+        guard chatGPTResumeProtections[owner] != nil || uncertainChatGPTResumeProtections.contains(owner)
+                || chatGPTResumeProtections.count + uncertainChatGPTResumeProtections.count < 32 else {
+            chatGPTResumeProtectionOverflow = true; return
+        }
+        if let ids, ids.count <= 512, chatGPTResumeProtections.count < 32 || chatGPTResumeProtections[owner] != nil {
+            chatGPTResumeProtections[owner] = ids; uncertainChatGPTResumeProtections.remove(owner)
+        } else { uncertainChatGPTResumeProtections.insert(owner) }
+    }
+
+    func releaseChatGPTConversationResumeIDs(owner: UUID) {
+        chatGPTResumeProtectionRevision &+= 1
+        chatGPTResumeProtections.removeValue(forKey: owner); uncertainChatGPTResumeProtections.remove(owner)
+        temporaryCookieRetirement?.requestSweep()
+    }
+
+    private func protectedChatGPTConversationIDs() -> Set<UUID>? {
+        guard !isShutdown, !chatGPTResumeProtectionOverflow, uncertainChatGPTResumeProtections.isEmpty else { return nil }
+        var ids = chatGPTResumeProtections.values.reduce(into: Set<UUID>()) { $0.formUnion($1) }
+        guard ids.count <= 512 else { return nil }
+        func add(_ url: URL?) -> Bool {
+            if let id = ChatGPTTemporaryConversationRoutes.id(from: url) { ids.insert(id) }
+            else if let url, EmbeddedWebModelTransport.Provider.chatgpt.conversationURL(url.absoluteString) != nil { return false }
+            return ids.count <= 512
+        }
+        for entry in entries.values {
+            ids.formUnion(entry.ownedTemporaryChatGPTRoutes)
+            let history = entry.view.backForwardList
+            let back = history.backList, forward = history.forwardList
+            guard back.count <= 256, forward.count <= 256 else { return nil }
+            // A human/tool SPA can switch routes without a navigation delegate.
+            // History may restore that writer. Defer maintenance for its whole
+            // ChatGPT lifetime; never guess which IDs it might use next.
+            let humanURLs = [entry.view.url, entry.tab.url, entry.pendingConversationURL, history.currentItem?.url]
+                + back.map { Optional($0.url) } + forward.map { Optional($0.url) }
+            if !entry.isModelOwned, humanURLs.contains(where: { $0?.host?.lowercased() == "chatgpt.com" }) { return nil }
+            if (entry.view.isLoading || entry.tab.isLoading), entry.view.url == nil || entry.pendingConversationURL?.host == "chatgpt.com"
+                || entry.view.url?.host == "chatgpt.com" { return nil }
+            if entry.view.url?.host == "chatgpt.com", ChatGPTTemporaryConversationRoutes.id(from: entry.view.url) == nil { return nil }
+            guard add(entry.view.url), add(entry.tab.url), add(entry.pendingConversationURL), add(history.currentItem?.url) else { return nil }
+            for item in back + forward { guard add(item.url) else { return nil } }
+            guard ids.count <= 512 else { return nil }
+        }
+        return ids
     }
 
     @discardableResult
@@ -317,6 +451,7 @@ final class EmbeddedBrowserSession {
     private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
                              popupOpenerTabID: UUID? = nil) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
+        guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
         guard tabs.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil)
         let view: WKWebView
@@ -431,6 +566,9 @@ final class EmbeddedBrowserSession {
             observation.lease.exactViewClosed = true
             observation.callback(.closed)
         }
+        if entry.isModelOwned, !entry.ownedTemporaryChatGPTRoutes.isEmpty {
+            _ = temporaryCookieRetirement?.registerClosedOwnedIDs(entry.ownedTemporaryChatGPTRoutes)
+        } else { temporaryCookieRetirement?.requestSweep() }
     }
 
     func navigate(tabID: UUID, to url: URL) throws {
@@ -438,6 +576,7 @@ final class EmbeddedBrowserSession {
             let entry = try entry(tabID)
             try EmbeddedBrowserURLPolicy.validate(url)
             prepareNavigation(entry, replacesDocument: true)
+            entry.pendingConversationURL = url
             (entry.view as? EmbeddedModelWebView)?.captureNativeFocus()
             entry.navigation = entry.view.load(URLRequest(url: url))
         } catch {
@@ -449,18 +588,21 @@ final class EmbeddedBrowserSession {
     func goBack(tabID: UUID) {
         guard let entry = entries[tabID], entry.view.canGoBack else { return }
         prepareNavigation(entry)
+        entry.pendingConversationURL = entry.view.backForwardList.backItem?.url
         entry.navigation = entry.view.goBack()
     }
 
     func goForward(tabID: UUID) {
         guard let entry = entries[tabID], entry.view.canGoForward else { return }
         prepareNavigation(entry)
+        entry.pendingConversationURL = entry.view.backForwardList.forwardItem?.url
         entry.navigation = entry.view.goForward()
     }
 
     func reload(tabID: UUID) {
         guard let entry = entries[tabID], entry.view.url != nil else { return }
         prepareNavigation(entry, replacesDocument: true)
+        entry.pendingConversationURL = entry.view.url
         entry.navigation = entry.view.reload()
     }
 
@@ -1204,6 +1346,7 @@ final class EmbeddedBrowserSession {
         isShutdown = true
         onHumanVerificationRecoveryCandidate = nil
         for id in tabs.map(\.id) { closeTab(id) }
+        temporaryCookieRetirement?.stop()
         modelRenderHost = nil
         modelRenderHosts.removeAll()
         websiteDataStore = nil
@@ -1216,6 +1359,7 @@ final class EmbeddedBrowserSession {
     }
 
     private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
+        entry.pendingConversationAdmission = nil
         if entry.requestMetadataDiagnostic?.generation != nil { revokeRequestMetadata(entry) }
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
@@ -1274,6 +1418,7 @@ final class EmbeddedBrowserSession {
         }
         signalModelChange(entry)
         emitGeminiPostBlockNativeEvent(entry, .changed)
+        temporaryCookieRetirement?.requestSweep()
     }
 
     private func observeHumanVerificationCheckpoint(_ entry: Entry) {
@@ -1290,6 +1435,28 @@ final class EmbeddedBrowserSession {
     }
 
     fileprivate func owns(_ view: WKWebView, tabID: UUID) -> Bool { entries[tabID]?.view === view }
+
+    fileprivate func protectPendingConversation(_ view: WKWebView, tabID: UUID, url: URL) {
+        guard let entry = entries[tabID], entry.view === view else { return }
+        entry.pendingConversationURL = url
+        entry.pendingConversationAdmission = nil
+    }
+
+    fileprivate func beginChatGPTNavigationAdmission(_ view: WKWebView, tabID: UUID, url: URL) -> UUID? {
+        guard let entry = entries[tabID], entry.view === view else { return nil }
+        let id = UUID()
+        entry.pendingConversationURL = url
+        entry.pendingConversationAdmission = (id, entry.tab.documentGeneration)
+        return id
+    }
+
+    fileprivate func admitChatGPTNavigation(_ view: WKWebView, tabID: UUID, url: URL, admission: UUID) async -> Bool {
+        guard let entry = entries[tabID], entry.view === view, let pending = entry.pendingConversationAdmission,
+              pending.id == admission else { return false }
+        let permitted = await admitChatGPTAfterCookieCallbacks(until: .now + .seconds(2))
+        return permitted && entries[tabID] === entry && entry.view === view && entry.pendingConversationURL == url
+            && entry.pendingConversationAdmission?.id == admission && entry.tab.documentGeneration == pending.generation
+    }
 
     fileprivate func report(_ message: String, tabID: UUID) {
         guard let entry = entries[tabID] else { return }
@@ -1333,6 +1500,7 @@ final class EmbeddedBrowserSession {
             }
         }
         entry.navigation = nil
+        entry.pendingConversationURL = nil
         entry.preparedDocumentNavigation = false
         refresh(tabID, view: view)
         entry.tab.isLoading = false
@@ -1642,6 +1810,20 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
         session?.report(message, tabID: tabID)
     }
 
+    private func admitChatGPT(_ url: URL, view: WKWebView,
+                             completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        guard url.host?.lowercased() == "chatgpt.com" else { completion(true); return }
+        guard let session, let ticket = session.beginChatGPTNavigationAdmission(view, tabID: tabID, url: url) else {
+            completion(false); return
+        }
+        Task { @MainActor [weak self, weak view] in
+            guard let self, let view, let session = self.session else { completion(false); return }
+            let permitted = await session.admitChatGPTNavigation(view, tabID: self.tabID, url: url, admission: ticket)
+            if !permitted { self.deny("The previous ChatGPT browser operation is still closing. No navigation was replayed.", view: view) }
+            completion(permitted)
+        }
+    }
+
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         guard session?.owns(webView, tabID: tabID) == true else { decisionHandler(.cancel); return }
@@ -1654,7 +1836,12 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             guard let url = navigationAction.request.url else { throw EmbeddedBrowserURLPolicy.Rejection.invalidAddress }
             try EmbeddedBrowserURLPolicy.validateNavigation(url,
                 isMainFrame: navigationAction.targetFrame?.isMainFrame ?? true, mainDocumentURL: webView.url)
-            decisionHandler(.allow)
+            if navigationAction.targetFrame?.isMainFrame ?? true {
+                session?.protectPendingConversation(webView, tabID: tabID, url: url)
+            }
+            if navigationAction.targetFrame?.isMainFrame ?? true {
+                admitChatGPT(url, view: webView) { decisionHandler($0 ? .allow : .cancel) }
+            } else { decisionHandler(.allow) }
         } catch {
             let kind = EmbeddedBrowserURLPolicy.diagnosticAddressKind(navigationAction.request.url)
             let target = navigationAction.targetFrame.map { $0.isMainFrame ? "main" : "subframe" } ?? "new_window"
@@ -1671,6 +1858,7 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             guard let url = navigationResponse.response.url else { throw EmbeddedBrowserURLPolicy.Rejection.invalidAddress }
             try EmbeddedBrowserURLPolicy.validateNavigation(url,
                 isMainFrame: navigationResponse.isForMainFrame, mainDocumentURL: webView.url)
+            if navigationResponse.isForMainFrame { session?.protectPendingConversation(webView, tabID: tabID, url: url) }
         } catch {
             deny(error.localizedDescription, view: webView)
             decisionHandler(.cancel)
@@ -1682,7 +1870,9 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             decisionHandler(.cancel)
             return
         }
-        decisionHandler(.allow)
+        if navigationResponse.isForMainFrame, let url = navigationResponse.response.url {
+            admitChatGPT(url, view: webView) { decisionHandler($0 ? .allow : .cancel) }
+        } else { decisionHandler(.allow) }
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
