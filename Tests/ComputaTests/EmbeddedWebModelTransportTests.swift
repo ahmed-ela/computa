@@ -1160,6 +1160,113 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testChatGPTNamedPairedFooterUsesRealDOMOrderAndRejectsAuthoredRowText() async throws {
+        for authoredRowText in [false, true] {
+            let prompt = "Read the exact owned answer from its paired turn"
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: prompt)
+            defer { fixture.shutdown() }
+            let shape = try await evaluate(view, """
+                const messages = document.getElementById('messages');
+                const user = messages.querySelector('[data-message-author-role="user"]');
+                const section = messages.querySelector('section');
+                const answer = section.querySelector('[data-markdown-text-style="assistant-message"]');
+                const oldFooter = section.querySelector('.turn-action-controls');
+                const copy = oldFooter.querySelector('button[aria-label="Copy"]');
+                oldFooter.remove();
+                const outer = document.createElement('div');
+                outer.setAttribute('data-content-search-turn-key', 'fixture-owned-paired-turn');
+                const pair = document.createElement('div');
+                pair.setAttribute('data-talvt-turn-state', 'complete');
+                const row = document.createElement('div');
+                row.append(copy, document.createTextNode('\\n'));
+                for (const label of ['Rate response', 'Read aloud', 'Regenerate response']) {
+                  const button = document.createElement('button');
+                  button.setAttribute('aria-label', label); button.textContent = label;
+                  row.append(button);
+                }
+                if (\(authoredRowText)) row.append(document.createTextNode('Unrelated authored fixture prose'));
+                window.fixturePairedFooterClicks = 0;
+                row.querySelectorAll('button').forEach(button => button.addEventListener('click', () => {
+                  window.fixturePairedFooterClicks++;
+                }));
+                pair.append(user, section, row); outer.append(pair); messages.append(outer);
+                const roots = [...document.querySelectorAll('[data-markdown-text-style="assistant-message"]')];
+                const answers = roots.filter(node => !roots.some(other => other !== node && other.contains(node)));
+                return {users: document.querySelectorAll('[data-message-author-role="user"]').length,
+                  answers: answers.length, pairedTurns: outer.querySelectorAll('[data-talvt-turn-state]').length,
+                  userAndAnswerBound: user.closest('[data-talvt-turn-state]') === pair
+                    && answer.closest('[data-talvt-turn-state]') === pair,
+                  copyOutsideMessages: !user.contains(copy) && !answer.contains(copy),
+                  oldAssistantScopeHasCopy: section.querySelector('button[aria-label="Copy"]') !== null,
+                  userBeforeAnswer: (user.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+                  answerBeforeRow: (answer.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+                  copyVisible: copy.getClientRects().length > 0 && getComputedStyle(copy).visibility !== 'hidden',
+                  copies: pair.querySelectorAll('button[aria-label="Copy"]').length,
+                  companions: row.querySelectorAll('button').length - 1,
+                  authoredTextNodes: [...row.childNodes].filter(node => node.nodeType === Node.TEXT_NODE
+                    && node.textContent.trim()).length};
+                """) as? [String: Any]
+            let actualShape = try XCTUnwrap(shape)
+            for key in ["users", "answers", "pairedTurns", "copies"] {
+                XCTAssertEqual(actualShape[key] as? Int, 1, key)
+            }
+            for key in ["userAndAnswerBound", "copyOutsideMessages", "userBeforeAnswer", "answerBeforeRow", "copyVisible"] {
+                XCTAssertEqual(actualShape[key] as? Bool, true, key)
+            }
+            XCTAssertEqual(actualShape["oldAssistantScopeHasCopy"] as? Bool, false)
+            XCTAssertEqual(actualShape["companions"] as? Int, 3)
+            XCTAssertEqual(actualShape["authoredTextNodes"] as? Int, authoredRowText ? 1 : 0)
+
+            var progressRecords: [String] = [], failureRecords: [String] = []
+            if authoredRowText {
+                fixture.transport.setResponseProgressDiagnosticObserverForTesting { progressRecords.append($0) }
+                fixture.transport.setFailedPageDiagnosticObserverForTesting { failureRecords.append($0) }
+                let running = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(running["state"] as? String, "running")
+                try assertRunningOrVerifiedChoice(running, choice: Self.fixtureChoice(.chatgpt))
+                fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .milliseconds(1))
+                try await Task.sleep(for: .milliseconds(2))
+                do {
+                    _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTFail("Authored footer-row text must withhold completion")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+                XCTAssertEqual(progressRecords.count, 1)
+                XCTAssertEqual(failureRecords.count, 0,
+                    "The independent deadline page read runs during Finish, not the expired poll")
+                let progress = try XCTUnwrap(JSONSerialization.jsonObject(
+                    with: Data(try XCTUnwrap(progressRecords.first).utf8)) as? [String: Any])
+                let inspected = try XCTUnwrap(progress["lastInspection"] as? [String: Any])
+                XCTAssertEqual(inspected["responseCount"] as? Int, 1)
+                XCTAssertEqual(inspected["userCount"] as? Int, 1)
+                XCTAssertEqual(inspected["busy"] as? Bool, false)
+                XCTAssertEqual(inspected["answerComplete"] as? Bool, false)
+            } else {
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+                XCTAssertEqual(complete["sequence"] as? Int, 1)
+                try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+                XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true))
+                let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+                XCTAssertEqual(proof["submittedPromptFingerprint"] as? String,
+                    EmbeddedWebModelTransport.promptFingerprint(prompt))
+            }
+            let clicks = try await evaluate(view, "return window.fixturePairedFooterClicks;")
+            XCTAssertEqual(clicks as? Int, 0)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            if authoredRowText {
+                XCTAssertEqual(failureRecords.count, 1)
+                let failedPage = try XCTUnwrap(JSONSerialization.jsonObject(
+                    with: Data(try XCTUnwrap(failureRecords.first).utf8)) as? [String: Any])
+                XCTAssertEqual(failedPage["copyPresent"] as? Bool, false,
+                    "The deadline read has no native submission pins and cannot prove paired Copy")
+                XCTAssertEqual(failedPage["copyEnabled"] as? Bool, false)
+            }
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testChatGPTLoadFailureIsTypedTerminalAndDoesNotReplayOrBlockOtherSessions() async throws {
         for alreadyBound in [false, true] {
             let (fixture, token, view) = try await boundInspectionFixture(prompt: "Detect the website's actual load failure", bindFirstRead: alreadyBound)

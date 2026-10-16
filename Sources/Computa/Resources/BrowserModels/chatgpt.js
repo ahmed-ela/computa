@@ -1620,7 +1620,7 @@ function chatGPTResponseReadSnapshot() {
   const scope = chatGPTAnswerCopyScope(answer, answers, chatGPTMessageRoots('user'), visible, enabled);
   const footer = scope.footer;
   const copies = footer ? scope.copies.map(node => ({ node, enabled: enabled(node) })) : [];
-  return { roots, answers, answer, footer, copies,
+  return { roots, answers, answer, footer, copies, association: scope.association || null,
     text: modelResponseText(answer, modelResponseExtraction(answer)).slice(0, 220_001),
     busy: [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]')].some(visible),
     users: chatGPTMessageRoots('user').map(root => {
@@ -1635,6 +1635,7 @@ function chatGPTResponseSnapshotMatches(captured, observed) {
     && observed.responseCount === captured.answers.length && observed.userCount === captured.users.length
     && captured.busy === false && current.busy === false && !!captured.answer && captured.answer.isConnected
     && !!captured.footer && captured.footer.isConnected && current.answer === captured.answer && current.footer === captured.footer
+    && chatGPTCopyAssociationMatches(current.association, captured.association)
     && current.text === captured.text && same(current.roots, captured.roots) && same(current.answers, captured.answers)
     && current.copies.length === captured.copies.length && captured.copies.some(copy => copy.enabled)
     && current.copies.every((copy, index) => copy.node === captured.copies[index].node && copy.enabled === captured.copies[index].enabled)
@@ -1881,9 +1882,101 @@ function chatGPTMessageRoots(role) {
   const nodes = [...document.querySelectorAll(selector)];
   return nodes.filter(node => !nodes.some(other => other !== node && other.contains(node)));
 }
-// The footer may be a sibling of nested answer markers. Never widen that
-// relationship to the page, another answer, or an enclosing user turn. Keep
-// ordinary completion and deadline diagnostics on the same physical scope.
+// The generic footer search stays within assistant-only ancestors. The named
+// paired-turn layout below needs a separately verified current submission and
+// a content-free assistant action row; its state alone never proves completion.
+function chatGPTPairedTurnCopyScope(answer, answers, users, visible, enabled) {
+  if (!answer || answers.at(-1) !== answer || users.length > 64 || answers.length > 64) return null;
+  if (!websiteChatInvocationLease || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease
+    || websiteChatInvocationLease.document !== document || window !== window.top
+    || input.provider !== 'chatgpt' || location.origin !== 'https://chatgpt.com') return null;
+  const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+  if (!state || state.revoked || state.pending != null || state.document !== document
+    || state.owner !== input.ownerToken || globalThis.__computaModelOwner !== state.owner
+    || !record || record.phase !== 'verified' || !Number.isInteger(record.sequence)
+    || record.sequence !== users.length || record.document !== document || record.owner !== state.owner
+    || record.sequence !== input.submissionSequence || record.marker !== input.submissionMarker
+    || document.URL !== input.expectedURL
+    || !chatGPTSubmissionPins(record) || !chatGPTSubmissionBodyIntact(record, users)) return null;
+  const turn = answer.closest('div[data-talvt-turn-state]');
+  if (!turn || turn.getAttribute('data-talvt-turn-state') !== 'complete' || !visible(turn)) return null;
+  const outer = turn.closest('div[data-content-search-turn-key]');
+  const turnKey = outer?.getAttribute('data-content-search-turn-key');
+  if (!outer || outer === turn || !visible(outer) || typeof turnKey !== 'string'
+    || !turnKey.length || turnKey.length > 256 || /[\x00-\x20\x7f]/.test(turnKey)
+    || outer.closest('div[data-talvt-turn-state]')
+    || outer.parentElement?.closest('div[data-content-search-turn-key]')) return null;
+  const namedTurns = [...outer.querySelectorAll('div[data-talvt-turn-state]')];
+  if (namedTurns.length !== 1 || namedTurns[0] !== turn) return null;
+  const physicalAssistants = chatGPTMessageRoots('assistant');
+  if (physicalAssistants.length > 64) return null;
+  const pairUsers = users.filter(node => turn.contains(node));
+  const pairAssistants = physicalAssistants.filter(node => turn.contains(node));
+  if (pairUsers.length !== 1 || pairAssistants.length !== 1) return null;
+  const user = pairUsers[0], assistant = pairAssistants[0];
+  if (user !== record.root || user !== users.at(-1) || assistant !== physicalAssistants.at(-1)
+    || users.filter(node => outer.contains(node)).length !== 1
+    || physicalAssistants.filter(node => outer.contains(node)).length !== 1
+    || answers.filter(node => outer.contains(node)).length !== 1
+    || !(assistant === answer || assistant.contains(answer)) || !visible(user) || !visible(assistant)
+    || [...users, ...physicalAssistants].some(node => node === turn || node.contains(turn))) return null;
+  const precedes = (left, right) => left !== right && !left.contains(right) && !right.contains(left)
+    && typeof left.compareDocumentPosition === 'function' && (left.compareDocumentPosition(right) & 4) !== 0;
+  if (!precedes(user, assistant)) return null;
+  const content = 'pre, code, blockquote, .markdown, [data-turn], form, input, textarea, select, option, '
+    + '[contenteditable], [role="textbox"], [role="menu"], [role="dialog"], [role="listbox"], [data-chatgpt-selection-message-id], '
+    + '[data-message-author-role], [data-markdown-text-style], [data-user-message-bubble], article[data-turn], '
+    + '[data-testid="tool-message"], [data-testid="tool-response"], [data-tool-call-id]';
+  const outsideContent = node => node && node.closest('div[data-talvt-turn-state]') === turn
+    && !node.closest(content) && ![...users, ...physicalAssistants].some(root => root.contains(node));
+  const allCopies = [...turn.querySelectorAll('button[aria-label="Copy"]')];
+  if (allCopies.length > 64) return null;
+  const copies = allCopies.filter(outsideContent);
+  if (copies.length !== 1 || !enabled(copies[0])) return null;
+  const copy = copies[0], names = ['Rate response', 'Read aloud', 'Regenerate response'];
+  const buttons = [...turn.querySelectorAll('button, [role="button"]')];
+  if (buttons.length > 128) return null;
+  const companions = [];
+  for (const name of names) {
+    const matches = buttons.filter(node => node.getAttribute('aria-label') === name && outsideContent(node));
+    if (matches.length > 1) return null;
+    if (matches.length === 1 && enabled(matches[0])) companions.push(matches[0]);
+  }
+  if (companions.length < 2) return null;
+  const contentFree = row => {
+    const pending = [...row.childNodes];
+    let visited = 0;
+    while (pending.length) {
+      if (++visited > 256) return false;
+      const node = pending.pop();
+      if (node.nodeType === 3) { if ((node.textContent || '').trim()) return false; }
+      else if (node.nodeType === 1) {
+        if (['SCRIPT', 'STYLE', 'TEMPLATE', 'IFRAME'].includes(node.tagName)) return false;
+        if (node.tagName !== 'BUTTON' && node.getAttribute('role') !== 'button') pending.push(...node.childNodes);
+      }
+    }
+    return true;
+  };
+  // A footer is a content-free, bounded common ancestor, never the paired turn
+  // or its outer conversation wrapper. Copy remains the completion signal.
+  for (let row = copy.parentElement, depth = 0; row && row !== turn && depth < 6; row = row.parentElement, depth++) {
+    if (!companions.every(node => row.contains(node))) continue;
+    if (!outsideContent(row) || !visible(row) || !precedes(assistant, row)
+      || row.querySelector(content) || row.querySelectorAll('*').length > 256
+      || [...users, ...physicalAssistants].some(node => row.contains(node)) || !contentFree(row)) return null;
+    return { copies: [copy], enabledCopies: [copy], depth, footer: row,
+      association: { turn, outer, turnKey, user, assistant, record, row, companions } };
+  }
+  return null;
+}
+
+function chatGPTCopyAssociationMatches(left, right) {
+  if (left == null || right == null) return left == null && right == null;
+  return ['turn', 'outer', 'turnKey', 'user', 'assistant', 'record', 'row'].every(key => left[key] === right[key])
+    && left.companions.length === right.companions.length
+    && left.companions.every((node, index) => node === right.companions[index]);
+}
+
 function chatGPTAnswerCopyScope(answer, answers, users, visible, enabled) {
   let copies = [], enabledCopies = [], depth = -1, footer = null;
   for (let node = answer, currentDepth = 0; node && currentDepth < 10; node = node.parentElement, currentDepth++) {
@@ -1894,7 +1987,8 @@ function chatGPTAnswerCopyScope(answer, answers, users, visible, enabled) {
     enabledCopies = copies.filter(enabled); depth = currentDepth;
     if (enabledCopies.length) { footer = node; break; }
   }
-  return { copies, enabledCopies, depth, footer };
+  return (footer ? null : chatGPTPairedTurnCopyScope(answer, answers, users, visible, enabled))
+    || { copies, enabledCopies, depth, footer };
 }
 // Counts from the selected body and its physical assistant root distinguish an
 // empty selection wrapper from an empty turn. No response text or identifiers
@@ -3150,6 +3244,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     completionEvidence.scopedCopies = scope.copies.length;
     completionEvidence.enabledCopies = scope.enabledCopies.length;
     completionEvidence.depth = scope.depth;
+    completionEvidence.footerAssociation = scope.association ? 'paired_turn' : scope.footer ? 'assistant_ancestor' : 'none';
     rendererScopedCopies = scope.enabledCopies; answerComplete = scope.enabledCopies.length > 0;
   } else if (provider === "claude" && answer) {
     const message = answer.closest('[data-testid="assistant-message"]');
@@ -3347,7 +3442,8 @@ if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
     attributeFilter: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style",
       "aria-checked", "aria-pressed", "aria-selected", "aria-valuenow", "aria-valuemin", "aria-valuemax", "aria-controls", "aria-labelledby", "aria-expanded", "title", "hidden", "inert", "contenteditable", "data-testid", "data-is-streaming",
       "data-message-author-role", "data-markdown-text-style", "data-chatgpt-selection-conversation-id", "data-turn",
-      "data-user-message-bubble"]
+      "data-user-message-bubble", "data-talvt-turn-state", "data-content-search-turn-key",
+      "data-chatgpt-selection-message-id", "data-tool-call-id", "role"]
   });
   globalThis.__computaModelSignal = signal;
 }

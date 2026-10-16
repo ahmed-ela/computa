@@ -41,6 +41,15 @@ class Element {
   getBoundingClientRect() { return { left: 0, top: this.rect * 40, width: 100, height: 30 }; }
   append(...children: Element[]) { children.forEach(child => { child.parentElement = this; this.children.push(child); }); }
   contains(node: Element | null): boolean { return node === this || !!node && this.children.some(child => child.contains(node)); }
+  compareDocumentPosition(other: Element): number {
+    if (other === this) return 0;
+    const root = (node: Element) => { while (node.parentElement) node = node.parentElement; return node; };
+    const mine = root(this), theirs = root(other);
+    if (mine !== theirs) return 1 | 32; // DISCONNECTED | IMPLEMENTATION_SPECIFIC
+    const order = [mine, ...mine.descendants()];
+    return (order.indexOf(this) < order.indexOf(other) ? 4 : 2)
+      | (this.contains(other) ? 16 : 0) | (other.contains(this) ? 8 : 0);
+  }
   closest(selector: string): Element | null {
     for (let node: Element | null = this; node; node = node.parentElement)
       if (selector.split(",").some(part => matches(node!, part.trim()))) return node;
@@ -306,6 +315,212 @@ async function chatTurnFixture(modelChoice?: { key: string; label: string }, ini
         new Element('BUTTON', { 'aria-label': 'Copy' })); f.messages.append(root); return root;
     } };
 }
+
+function moveFixtureElement(node: Element, parent: Element) {
+  if (node.parentElement) node.parentElement.children = node.parentElement.children.filter(child => child !== node);
+  parent.append(node);
+}
+
+async function pairedChatGPTFooterFixture() {
+  const choice = { key: 'chat/latest/medium', label: 'Medium' };
+  const x = await chatTurnFixture(choice);
+  const record = await x.dispatch('Exact owned paired-turn footer request', { deferModelVerification: true });
+  // Establish the real production first-user and per-submission bindings before
+  // staging the completed response. This fixture never manufactures proof state.
+  const bound = await x.observe(record, { deferModelVerification: true });
+  expect(bound.error).toBeUndefined(); expect(bound.firstUserVerified).toBe(true);
+  expect(bound.submissionProof).toEqual({ sequence: record.sequence, fingerprint: record.fingerprint });
+  const user = x.f.document.querySelectorAll('article[data-turn="user"]')[0], userBody = user.children[0];
+  const state: any = x.f.world.__computaChatSubmissionState;
+  expect(state.pending).toBeNull(); expect(state.lastVerified.phase).toBe('verified');
+  expect(state.lastVerified.root).toBe(user); expect(state.lastVerified.body).toBe(userBody);
+  expect(state.lastVerified.canonical).toBe(record.outbound);
+  expect(state.lastVerified.fingerprint).toBe(record.fingerprint);
+
+  const assistant = x.answer('Exact paired response');
+  const oldCopy = assistant.children[1]; assistant.children = assistant.children.slice(0, 1);
+  oldCopy.parentElement = null; oldCopy.connected = false;
+  const outer = new Element('DIV', { 'data-content-search-turn-key': 'synthetic-owned-turn-key' });
+  const pair = new Element('DIV', { 'data-talvt-turn-state': 'complete' });
+  const row = new Element('DIV');
+  const copy = new Element('BUTTON', { 'aria-label': 'Copy' });
+  const companions = ['Rate response', 'Read aloud', 'Regenerate response'].map(label =>
+    new Element('BUTTON', { 'aria-label': label }));
+  row.append(copy, ...companions);
+  outer.append(pair); x.f.messages.append(outer);
+  moveFixtureElement(user, pair); moveFixtureElement(assistant, pair); pair.append(row);
+  expect(user.compareDocumentPosition(assistant) & 4).toBe(4);
+  expect(assistant.compareDocumentPosition(user) & 2).toBe(2);
+  expect(assistant.compareDocumentPosition(row) & 4).toBe(4);
+  expect(pair.compareDocumentPosition(user)).toBe(4 | 16);
+  expect(user.compareDocumentPosition(pair)).toBe(2 | 8);
+  return { x, record, choice, user, userBody, assistant, outer, pair, row, copy, companions };
+}
+
+describe('ChatGPT named paired-turn Copy association', () => {
+  test('a named completed paired turn admits its owned sibling Copy row after real submission binding', async () => {
+    const p = await pairedChatGPTFooterFixture();
+    const observed = await p.x.observe(p.record, { deferModelVerification: false });
+    expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+    expect(observed.submissionProof).toEqual({ sequence: 1, fingerprint: p.record.fingerprint });
+    expect(observed.modelEvidence.selected).toEqual(p.choice);
+    expect(observed.text).toBe(JSON.stringify({ type: 'message', text: 'Exact paired response' }));
+    expect({ answerComplete: observed.answerComplete, responseCount: observed.responseCount,
+      userCount: observed.userCount, scopedCopies: observed.completionEvidence.scopedCopies,
+      enabledCopies: observed.completionEvidence.enabledCopies }).toEqual({ answerComplete: true,
+      responseCount: 1, userCount: 1, scopedCopies: 1, enabledCopies: 1 });
+    expect(observed.completionEvidence.footerAssociation).toBe('paired_turn');
+    expect(p.x.send.clicks).toBe(1); expect(p.copy.clicks).toBe(0);
+    expect(p.companions.every(button => button.clicks === 0)).toBe(true);
+    // Native's deadline-only diagnostic deliberately omits submission proof
+    // inputs. False here means no proved scope, not that no Copy exists in DOM.
+    expect(await p.x.f.diagnose()).toMatchObject({ failureDiagnostic: { copyPresent: false, copyEnabled: false } });
+  });
+
+  test('paired Copy never uses incomplete cancelled generic or ambiguous named turns', async () => {
+    for (const mutation of ['in_progress', 'cancelled', 'unknown', 'missing_state', 'generic', 'missing_key',
+      'empty_key', 'oversized_key', 'comparison', 'second_assistant', 'hidden_assistant', 'outer_assistant',
+      'hidden_outer_assistant', 'named_ancestor', 'nested_outer']) {
+      const p = await pairedChatGPTFooterFixture();
+      if (['in_progress', 'cancelled', 'unknown'].includes(mutation)) p.pair.values['data-talvt-turn-state'] = mutation;
+      if (['missing_state', 'generic'].includes(mutation)) delete p.pair.values['data-talvt-turn-state'];
+      if (['missing_key', 'generic'].includes(mutation)) delete p.outer.values['data-content-search-turn-key'];
+      if (mutation === 'empty_key') p.outer.values['data-content-search-turn-key'] = '';
+      if (mutation === 'oversized_key') p.outer.values['data-content-search-turn-key'] = 'K'.repeat(1025);
+      if (mutation === 'comparison') p.outer.append(new Element('DIV', { 'data-talvt-turn-state': 'complete' }));
+      if (['second_assistant', 'hidden_assistant', 'outer_assistant', 'hidden_outer_assistant'].includes(mutation)) {
+        const other = new Element('ARTICLE', { 'data-turn': 'assistant' });
+        other.append(new Element('DIV', { 'data-markdown-text-style': 'assistant-message' }, 'Foreign response'));
+        if (mutation.includes('hidden')) other.cssVisibility = 'hidden';
+        (mutation.includes('outer') ? p.outer : p.pair).append(other);
+      }
+      if (['named_ancestor', 'nested_outer'].includes(mutation)) {
+        const wrapper = new Element('DIV', mutation === 'named_ancestor' ? { 'data-talvt-turn-state': 'complete' }
+          : { 'data-content-search-turn-key': 'foreign-enclosing-turn-key' });
+        p.x.f.messages.append(wrapper); moveFixtureElement(p.outer, wrapper);
+      }
+      const observed = await p.x.observe(p.record, { deferModelVerification: true });
+      expect(observed.error).toBeUndefined(); expect(observed.answerComplete).toBe(false);
+      expect(observed.completionEvidence.scopedCopies).toBe(0);
+      expect(observed).not.toHaveProperty('modelEvidence'); expect(p.x.send.clicks).toBe(1);
+    }
+  });
+
+  test('paired Copy refuses foreign page content and split semantic footer controls', async () => {
+    for (const mutation of ['outer', 'main', 'body', 'foreign_pair', 'user', 'pre', 'code', 'quote', 'tool', 'tool_turn', 'markdown',
+      'editable', 'form', 'input', 'textarea', 'select', 'before_answer', 'split_companions', 'duplicate_labels',
+      'hidden_companions', 'duplicate_copy', 'prose']) {
+      const p = await pairedChatGPTFooterFixture();
+      if (mutation === 'outer') moveFixtureElement(p.row, p.outer);
+      if (mutation === 'main') moveFixtureElement(p.row, p.x.f.messages);
+      if (mutation === 'body') moveFixtureElement(p.row, p.x.f.body);
+      if (mutation === 'foreign_pair') {
+        const foreign = new Element('DIV', { 'data-talvt-turn-state': 'complete' });
+        p.outer.append(foreign); moveFixtureElement(p.row, foreign);
+      }
+      if (mutation === 'user') moveFixtureElement(p.row, p.user);
+      if (['pre', 'code', 'quote', 'tool', 'tool_turn', 'markdown', 'editable'].includes(mutation)) {
+        const content = new Element(mutation === 'pre' ? 'PRE' : mutation === 'code' ? 'CODE'
+          : mutation === 'quote' ? 'BLOCKQUOTE' : 'DIV', mutation === 'tool' ? { 'data-message-author-role': 'tool' }
+            : mutation === 'tool_turn' ? { 'data-turn': 'tool' } : mutation === 'markdown' ? { class: 'markdown' }
+            : mutation === 'editable' ? { contenteditable: 'true' } : {});
+        p.pair.append(content); moveFixtureElement(p.row, content);
+      }
+      if (mutation === 'form') {
+        const form = new Element('FORM'); p.pair.append(form); moveFixtureElement(p.row, form);
+      }
+      if (['input', 'textarea', 'select'].includes(mutation)) p.row.append(new Element(mutation.toUpperCase()));
+      if (mutation === 'before_answer') p.pair.children = [p.user, p.row, p.assistant];
+      if (mutation === 'split_companions') {
+        const other = new Element('DIV'); p.pair.children.unshift(other); other.parentElement = p.pair;
+        moveFixtureElement(p.companions[1], other); moveFixtureElement(p.companions[2], other);
+      }
+      if (mutation === 'duplicate_labels') p.companions.forEach(button => { button.values['aria-label'] = 'Rate response'; });
+      if (mutation === 'hidden_companions') p.companions.slice(1).forEach(button => { button.cssVisibility = 'hidden'; });
+      if (mutation === 'duplicate_copy') p.row.append(new Element('BUTTON', { 'aria-label': 'Copy' }));
+      if (mutation === 'prose') p.row.append(new Element('P', {}, 'Unrelated authored content'));
+      const observed = await p.x.observe(p.record, { deferModelVerification: true });
+      expect(observed.error).toBeUndefined(); expect(observed.answerComplete).toBe(false);
+      expect(observed.completionEvidence.scopedCopies).toBe(0);
+      expect(observed).not.toHaveProperty('modelEvidence'); expect(p.x.send.clicks).toBe(1);
+    }
+  });
+
+  test('paired Copy cannot replace the verified current user or its canonical body', async () => {
+    for (const mutation of ['foreign_user', 'canonical_body']) {
+      const p = await pairedChatGPTFooterFixture();
+      if (mutation === 'foreign_user') {
+        moveFixtureElement(p.user, p.x.f.messages);
+        const foreign = new Element('ARTICLE', { 'data-turn': 'user' });
+        foreign.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, 'Foreign request')); p.pair.children.unshift(foreign);
+        foreign.parentElement = p.pair;
+      } else p.userBody.text += ' changed after binding';
+      const observed = await p.x.observe(p.record, { deferModelVerification: false });
+      expect(observed.error).toBe('conversation_changed'); expect(observed).not.toHaveProperty('modelEvidence');
+      expect(observed).not.toHaveProperty('submissionProof'); expect(p.x.send.clicks).toBe(1);
+    }
+    for (const mutation of ['sequence', 'marker', 'url']) {
+      const p = await pairedChatGPTFooterFixture();
+      const observed = await p.x.observe(p.record, { deferModelVerification: false, ...(mutation === 'sequence'
+        ? { submissionSequence: 2 } : mutation === 'marker' ? { submissionMarker: '00000000-0000-4000-8000-000000000009' }
+          : { expectedURL: 'https://chatgpt.com/c/foreign-document' }) });
+      expect(observed.error).toBeDefined(); expect(observed).not.toHaveProperty('modelEvidence');
+      expect(observed).not.toHaveProperty('submissionProof'); expect(p.x.send.clicks).toBe(1);
+    }
+    const p = await pairedChatGPTFooterFixture();
+    const second = await p.x.dispatch('Second exact native submission', { deferModelVerification: true });
+    const bound = await p.x.observe(second, { deferModelVerification: true });
+    expect(bound.error).toBeUndefined(); expect(bound.submissionProof).toEqual({ sequence: 2, fingerprint: second.fingerprint });
+    const secondUser = p.x.f.document.querySelectorAll('article[data-turn="user"]')[1];
+    expect((p.x.f.world.__computaChatSubmissionState as any).lastVerified.root).toBe(secondUser);
+    // Keep a structurally convincing old footer with user1, but make its answer
+    // the latest response to user2. Global user count and native proofs stay valid.
+    moveFixtureElement(p.assistant, p.x.f.messages);
+    p.x.f.messages.children = [p.assistant, ...p.x.f.messages.children.filter(node => node !== p.assistant)];
+    const assistant = p.x.answer('Second response beside stale first-user footer'), oldCopy = assistant.children[1];
+    assistant.children = assistant.children.slice(0, 1); oldCopy.connected = false; oldCopy.parentElement = null;
+    moveFixtureElement(assistant, p.pair); p.pair.children = [p.user, assistant, p.row];
+    const observed = await p.x.observe(second, { deferModelVerification: true });
+    expect(observed.error).toBeUndefined(); expect(observed.submissionProof).toEqual({ sequence: 2, fingerprint: second.fingerprint });
+    expect(observed.userCount).toBe(2); expect(observed.responseCount).toBe(2);
+    expect(observed.answerComplete).toBe(false); expect(observed.completionEvidence.scopedCopies).toBe(0);
+    expect(observed).not.toHaveProperty('modelEvidence'); expect(p.x.send.clicks).toBe(2); expect(p.copy.clicks).toBe(0);
+  });
+
+  test('paired Copy row pair state key and companion identities are revalidated after the final picker await', async () => {
+    for (const mutation of ['replace_row', 'move_row', 'replace_pair', 'outer_key', 'cancelled', 'move_copy', 'hide_companion', 'replace_companion']) {
+      const p = await pairedChatGPTFooterFixture(), picker: any = p.x.picker;
+      let opens = 0; const open = picker.trigger.onClick;
+      picker.trigger.onClick = () => {
+        open(); if (++opens !== 2) return;
+        if (mutation === 'replace_row') {
+          const replacement = new Element('DIV'); p.pair.children = p.pair.children.filter(node => node !== p.row);
+          p.pair.append(replacement); for (const child of [...p.row.children]) moveFixtureElement(child, replacement);
+          p.row.parentElement = null; p.row.connected = false;
+        }
+        if (mutation === 'move_row') moveFixtureElement(p.row, p.outer);
+        if (mutation === 'replace_pair') {
+          const replacement = new Element('DIV', { ...p.pair.values }); p.outer.children = [replacement]; replacement.parentElement = p.outer;
+          for (const child of [...p.pair.children]) moveFixtureElement(child, replacement);
+          p.pair.parentElement = null; p.pair.connected = false;
+        }
+        if (mutation === 'outer_key') p.outer.values['data-content-search-turn-key'] = 'different-owned-turn-key';
+        if (mutation === 'cancelled') p.pair.values['data-talvt-turn-state'] = 'cancelled';
+        if (mutation === 'move_copy') { const other = new Element('DIV'); p.pair.append(other); moveFixtureElement(p.copy, other); }
+        if (mutation === 'hide_companion') p.companions[0].cssVisibility = 'hidden';
+        if (mutation === 'replace_companion') {
+          const old = p.companions[0], replacement = new Element('BUTTON', { ...old.values });
+          p.row.children[p.row.children.indexOf(old)] = replacement; replacement.parentElement = p.row;
+          old.parentElement = null; old.connected = false;
+        }
+      };
+      const observed = await p.x.observe(p.record, { deferModelVerification: false });
+      expect(opens).toBe(2); expect(observed).toMatchObject({ error: 'conversation_changed', detail: 'response_changed' });
+      expect(observed).not.toHaveProperty('modelEvidence'); expect(observed).not.toHaveProperty('submissionProof');
+      expect(p.x.send.clicks).toBe(1); expect(p.copy.clicks).toBe(0);
+    }
+  });
+});
 
 describe('ChatGPT bounded in-flight model proof deferral', () => {
   const choice = { key: 'chat/latest/medium', label: 'Medium' };
@@ -2795,6 +3010,9 @@ describe("embedded ChatGPT fixed adapter", () => {
     expect(f.observers[0].options?.attributeFilter).toContain("aria-hidden");
     expect(f.observers[0].options?.attributeFilter).toContain("data-turn");
     expect(f.observers[0].options?.attributeFilter).toContain("data-user-message-bubble");
+    for (const attribute of ['data-talvt-turn-state', 'data-content-search-turn-key',
+      'data-chatgpt-selection-message-id', 'data-tool-call-id', 'role'])
+      expect(f.observers[0].options?.attributeFilter).toContain(attribute);
     // Do not flush parked page timers; delivery is an actual mutation event.
     f.observers[0].callback([{ type: "childList" }]);
     f.observers[0].callback([{ type: "characterData" }]);

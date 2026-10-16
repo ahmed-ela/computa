@@ -1,5 +1,38 @@
 # Embedded website provider qualification
 
+## Candidate143: current paired-turn answer footer
+
+The current public ChatGPT client places the user, assistant and assistant
+action row in a named paired-turn container. Computa's existing Copy search
+stops before an ancestor containing a user, so it can miss that legitimate
+footer. The separate visible142 marker check retained the `Copy` label; it did
+not establish the DOM relationship. Public client source supplies the named
+inner and outer containers, but its turn `complete` state can precede actual
+assistant completion and is insufficient by itself.
+
+Build143 adds a fallback for that named layout after the existing search fails.
+It requires the current native-pinned submission, exact user body and sequence,
+one physical assistant in the pair and outer entry, and an enabled Copy in a
+bounded, content-free action row after the assistant. At least two distinct
+recognized assistant footer controls must share that row. Message/code content,
+extra or hidden answers, authored row prose, duplicate controls and ambiguous
+wrappers remain refused. All association and control identities are checked
+again after awaited reads. Selected-model, product mode, response stability,
+ownership and cleanup checks remain in force; decoded diagnostics grant no
+completion authority.
+
+The original142 code failed the genuine-submission paired-footer regression.
+The candidate passed five focused tests with 1,533 assertions and the full
+ChatGPT adapter/request-metadata cohort: 361 tests, 11,557 assertions. Seven
+selected native methods passed with unchanged inputs, including real WebKit DOM
+ordering, positive paired-footer completion and negative authored-text rejection.
+Each new native case checked one insertion, one Send, zero footer clicks,
+owned cleanup and preservation of the human tab. An initial native filter
+selected zero tests and was not counted; a subsequent test-only diagnostic
+ordering error was corrected to assert the expired-page observation after
+Finish. Canonical version validation passed for 0.7.0 (143). Signed installation
+and live provider task qualification remain pending at this source checkpoint.
+
 ## Installed142: decoded observation captured, completion remains unqualified
 
 Signed 0.7.0 (142), code source `43d0a5d001de362b49bb1fc228e354573c4c5644`,
