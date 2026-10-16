@@ -5,13 +5,15 @@
 Computa owns a native WKWebView tab pane beside the chat. People can browse in
 the pane; fresh agent chats receive the nine typed
 [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md) for bounded page observation
-and actions. The Swift app's ChatGPT, Gemini and Claude adapters use separate
-owned Temporary Chat or Incognito pages in the same profile. Gemini retains one
-owned page for a native turn; the ChatGPT candidate does the same only after
-negotiating per-submission ownership. Claude and transports without that
-capability use a fresh page for each
-[inference transaction](WEBSITE-INFERENCE-TRANSACTIONS.md). Neither path
-requires Chrome. Existing Chrome/native tools remain available independently.
+and actions. The Swift app's adapters use separate owned Temporary Chat or
+Incognito pages. ChatGPT creates a fresh private store for each inference,
+seeded with the signed-in profile's eligible ChatGPT cookies while excluding
+canonical conversation-key and history-off cookie families. Gemini and Claude
+use the shared profile. Gemini retains one owned page for a native turn;
+ChatGPT and Claude use a fresh page for each
+[inference transaction](WEBSITE-INFERENCE-TRANSACTIONS.md). Embedded ChatGPT
+still requires per-submission ownership. These paths work without Chrome;
+Chrome browser tools are hidden from model catalogs.
 Installed Qwen tasks, arbitrary public sites and sustained concurrent human use
 retain their [separate qualification gates](../TODO.md#embedded-browser-agent-control).
 

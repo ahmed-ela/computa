@@ -2710,17 +2710,14 @@ function chatGPTInlineRendererLoadFailed(visible) {
         try { content = getComputedStyle(node, pseudo).content; } catch { return finish(false, 'node_not_visible', node); }
         if (!['none', 'normal', '""', "''"].includes(content)) return finish(false, 'node_not_visible', node);
       }
-      let attributes = 0;
-      for (const attribute of node.attributes) {
-        if (++attributes > 5 || !['class', 'style', 'hidden', 'aria-hidden', 'inert'].includes(attribute.name))
-          return finish(false, 'interactive_metadata', node);
-      }
+      // This abort-only check never interprets DIV annotations as response,
+      // ownership or action authority. Unknown metadata cannot hide its error.
     }
-    if (node.getAttribute('role') !== null || node.getAttribute('tabindex') !== null
-      || node.getAttribute('contenteditable') !== null) return finish(false, 'interactive_metadata', node);
+    if (node.getAttribute('contenteditable') !== null) return finish(false, 'interactive_metadata', node);
     if (node.classList.contains('markdown')) return finish(false, 'markdown_content', node);
     if (node !== body && (node.getAttribute('data-markdown-text-style') !== null
-      || node.getAttribute('data-message-author-role') !== null || node.getAttribute('data-user-message-bubble') !== null))
+      || node.getAttribute('data-message-author-role') !== null || node.getAttribute('data-turn') !== null
+      || node.getAttribute('data-user-message-bubble') !== null))
       return finish(false, 'nested_message', node);
     const classes = [];
     for (const name of node.classList) {

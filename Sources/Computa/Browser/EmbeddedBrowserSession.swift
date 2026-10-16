@@ -60,6 +60,10 @@ final class EmbeddedBrowserSession {
     private(set) var selectedTabID: UUID?
     private(set) var errorMessage: String?
     let maximumTabs: Int
+    var pendingChatGPTInferenceCookiePreparationCount: Int { inferenceCookieSeeds.count }
+    var failedChatGPTInferenceCookiePreparationCount: Int {
+        inferenceCookieSeeds.values.filter(\.hasFailedCallerAwaitingCallback).count
+    }
 
     @ObservationIgnored private var websiteDataStore: WKWebsiteDataStore?
     @ObservationIgnored private let persistent: Bool
@@ -67,6 +71,7 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let cookieRetirementDirectory: URL?
     @ObservationIgnored private var temporaryCookieRetirement: ChatGPTTemporaryCookieRetirement?
+    @ObservationIgnored private var inferenceCookieSeeds: [UUID: ChatGPTInferenceCookieSeed] = [:]
     @ObservationIgnored private var chatGPTResumeProtections: [UUID: Set<UUID>] = [:]
     @ObservationIgnored private var uncertainChatGPTResumeProtections: Set<UUID> = []
     @ObservationIgnored private var chatGPTResumeProtectionOverflow = false
@@ -101,6 +106,7 @@ final class EmbeddedBrowserSession {
         let delegate: EmbeddedBrowserDelegate
         let isModelOwned: Bool
         let isToolOwned: Bool
+        let usesIsolatedChatGPTProfile: Bool
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
         weak var presentationHost: NSView?
@@ -121,6 +127,7 @@ final class EmbeddedBrowserSession {
         var inspectorDiagnostic: (id: UUID, binding: ChatGPTInspectorLease.Binding, expiry: Task<Void, Never>)?
         var requestMetadataDiagnostic: RequestMetadataDiagnostic?
         var ownedTemporaryChatGPTRoutes: Set<UUID> = []
+        var inferenceCookieSummary: ChatGPTInferenceCookieSeed.Summary?
         var pendingConversationURL: URL?
         var pendingConversationAdmission: (id: UUID, generation: UUID)?
         var modelChanges: EmbeddedModelChangeChannel?
@@ -156,12 +163,13 @@ final class EmbeddedBrowserSession {
         var humanCheckpointURL: URL?
 
         init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate, isModelOwned: Bool, isToolOwned: Bool = false,
-             popupOpenerTabID: UUID? = nil) {
+             popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false) {
             self.tab = tab
             self.view = view
             self.delegate = delegate
             self.isModelOwned = isModelOwned
             self.isToolOwned = isToolOwned
+            self.usesIsolatedChatGPTProfile = usesIsolatedChatGPTProfile
             self.popupOpenerTabID = popupOpenerTabID
         }
     }
@@ -342,7 +350,7 @@ final class EmbeddedBrowserSession {
     func withExclusiveCookieMaintenance<Result>(
         _ operation: @MainActor (WKHTTPCookieStore, UUID, @escaping @MainActor () -> Bool) async -> Result
     ) async -> Result? {
-        guard !isShutdown, entries.isEmpty, exclusiveCookieMaintenance == nil else { return nil }
+        guard !isShutdown, entries.isEmpty, inferenceCookieSeeds.isEmpty, exclusiveCookieMaintenance == nil else { return nil }
         let lease = UUID(), revision = chatGPTResumeProtectionRevision
         exclusiveCookieMaintenance = lease
         var suspended = false
@@ -423,13 +431,14 @@ final class EmbeddedBrowserSession {
         try createTab(url: url, select: select, modelOwned: false)
     }
 
-    private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool, toolOwned: Bool = false) throws -> UUID {
+    private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
+                           isolatedChatGPTStore: WKWebsiteDataStore? = nil) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
-            guard tabs.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+            guard tabs.count + inferenceCookieSeeds.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
             if let url { try EmbeddedBrowserURLPolicy.validate(url) }
             let configuration = WKWebViewConfiguration()
-            configuration.websiteDataStore = dataStore()
+            configuration.websiteDataStore = isolatedChatGPTStore ?? dataStore()
             // This fresh controller has no native script handlers, scripts, or UI resource scheme.
             configuration.userContentController = WKUserContentController()
             // OAuth can open a window after an asynchronous response, beyond
@@ -437,7 +446,8 @@ final class EmbeddedBrowserSession {
             // and navigation policy; inference-owned pages cannot open them.
             configuration.preferences.javaScriptCanOpenWindowsAutomatically = !modelOwned && !toolOwned
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-            let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned)
+            let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned,
+                                        usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil)
             if toolOwned { mountModelView(entry) }
             // Empty tabs intentionally do not load a homepage or trigger any network request.
             if let url { try navigate(tabID: entry.tab.id, to: url) }
@@ -449,10 +459,10 @@ final class EmbeddedBrowserSession {
     }
 
     private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
-                             popupOpenerTabID: UUID? = nil) throws -> Entry {
+                             popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
-        guard tabs.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        guard tabs.count + inferenceCookieSeeds.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil)
         let view: WKWebView
         #if DEBUG
@@ -474,7 +484,7 @@ final class EmbeddedBrowserSession {
         view.uiDelegate = delegate
         view.allowsBackForwardNavigationGestures = true
         let entry = Entry(tab: tab, view: view, delegate: delegate, isModelOwned: modelOwned, isToolOwned: toolOwned,
-                          popupOpenerTabID: popupOpenerTabID)
+                          popupOpenerTabID: popupOpenerTabID, usesIsolatedChatGPTProfile: usesIsolatedChatGPTProfile)
         entries[tab.id] = entry
         tabs.append(tab)
         // Inactive creation stays inactive, including the first inference tab.
@@ -566,7 +576,10 @@ final class EmbeddedBrowserSession {
             observation.lease.exactViewClosed = true
             observation.callback(.closed)
         }
-        if entry.isModelOwned, !entry.ownedTemporaryChatGPTRoutes.isEmpty {
+        if entry.usesIsolatedChatGPTProfile {
+            // Its cookies never belonged to the human store; closing it grants
+            // no authority to retire an ID in that separate profile.
+        } else if entry.isModelOwned, !entry.ownedTemporaryChatGPTRoutes.isEmpty {
             _ = temporaryCookieRetirement?.registerClosedOwnedIDs(entry.ownedTemporaryChatGPTRoutes)
         } else { temporaryCookieRetirement?.requestSweep() }
     }
@@ -1315,8 +1328,77 @@ final class EmbeddedBrowserSession {
         try createModelTab(initialURL: url)
     }
 
+    /// Independent inference pages need authentication, not the human profile's
+    /// accumulated conversation keys. Publication/navigation follows complete
+    /// seeding; failure never falls back to the shared store.
+    func createChatGPTInferenceTab(requestMetadata: ChatGPTRequestMetadataLease? = nil,
+                                   until deadline: ContinuousClock.Instant = .now + .seconds(10),
+                                   admit: @MainActor () throws -> Void) async throws -> UUID {
+        try Task.checkCancellation()
+        guard !isShutdown else { throw Failure.sessionClosed }
+        guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
+        guard tabs.count + inferenceCookieSeeds.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        let source = dataStore(), isolated = WKWebsiteDataStore.nonPersistent(), reservation = UUID()
+        let seed: ChatGPTInferenceCookieSeed
+        #if DEBUG
+        seed = cookieSeedFactoryForTesting?(source, isolated)
+            ?? ChatGPTInferenceCookieSeed(source: ChatGPTWKInferenceCookieStore(source), destination: ChatGPTWKInferenceCookieStore(isolated))
+        #else
+        seed = ChatGPTInferenceCookieSeed(source: ChatGPTWKInferenceCookieStore(source), destination: ChatGPTWKInferenceCookieStore(isolated))
+        #endif
+        inferenceCookieSeeds[reservation] = seed
+        try await seed.run(until: deadline, isCurrent: { [weak self, weak seed] in
+            guard let self, let seed else { return false }
+            return !self.isShutdown && self.exclusiveCookieMaintenance == nil && self.websiteDataStore === source
+                && self.inferenceCookieSeeds[reservation] === seed
+        }, onDrained: { [weak self, weak seed] in
+            guard let self, let seed, self.inferenceCookieSeeds[reservation] === seed else { return }
+            self.inferenceCookieSeeds.removeValue(forKey: reservation)
+        })
+        #if DEBUG
+        if let afterCookieSeedForTesting { await afterCookieSeedForTesting() }
+        #endif
+        try Task.checkCancellation()
+        guard !isShutdown, exclusiveCookieMaintenance == nil, websiteDataStore === source else {
+            throw ChatGPTInferenceCookieSeed.Failure.unavailable
+        }
+        // The consumer's provider gate may have changed while native cookie
+        // callbacks ran. It must pass before publication or any provider load.
+        try admit()
+        let id = try createModelTab(initialURL: nil, isolatedChatGPTStore: isolated)
+        do {
+            guard let summary = seed.verifiedSummary, let entry = entries[id], entry.usesIsolatedChatGPTProfile,
+                  entry.view.configuration.websiteDataStore === isolated, isolated !== source, !isolated.isPersistent else {
+                throw ChatGPTInferenceCookieSeed.Failure.verificationFailed
+            }
+            entry.inferenceCookieSummary = summary
+            if let requestMetadata { _ = installModelRequestMetadata(requestMetadata, tabID: id) }
+            try navigate(tabID: id, to: URL(string: "https://chatgpt.com/")!)
+            return id
+        } catch { closeTab(id); requestMetadata?.revoke(); throw error }
+    }
+
+    func chatGPTInferenceCookieSummary(tabID: UUID, view: WKWebView) -> ChatGPTInferenceCookieSeed.Summary? {
+        guard let entry = entries[tabID], entry.isModelOwned, entry.usesIsolatedChatGPTProfile, entry.view === view,
+              entry.view.configuration.websiteDataStore !== websiteDataStore else { return nil }
+        return entry.inferenceCookieSummary
+    }
+
     #if DEBUG
     private var modelViewFactoryForTesting: (@MainActor (WKWebViewConfiguration) -> WKWebView)?
+    private var cookieSeedFactoryForTesting: (@MainActor (WKWebsiteDataStore, WKWebsiteDataStore) -> ChatGPTInferenceCookieSeed)?
+    private var afterCookieSeedForTesting: (@MainActor () async -> Void)?
+
+    func setAfterCookieSeedForTesting(_ hook: (@MainActor () async -> Void)?) { afterCookieSeedForTesting = hook }
+
+    var pendingInferenceCookieSeedsForTesting: Int { inferenceCookieSeeds.count }
+    func setCookieSeedFactoryForTesting(_ factory: (@MainActor (WKWebsiteDataStore, WKWebsiteDataStore) -> ChatGPTInferenceCookieSeed)?) {
+        cookieSeedFactoryForTesting = factory
+    }
+
+    func setModelViewFactoryForTesting(_ factory: (@MainActor (WKWebViewConfiguration) -> WKWebView)?) {
+        modelViewFactoryForTesting = factory
+    }
 
     /// Fixtures load one local document themselves. Starting about:blank first
     /// would leave two competing provisional navigations in the same WebView.
@@ -1327,8 +1409,8 @@ final class EmbeddedBrowserSession {
     }
     #endif
 
-    private func createModelTab(initialURL: URL?) throws -> UUID {
-        let id = try createTab(select: false, modelOwned: true)
+    private func createModelTab(initialURL: URL?, isolatedChatGPTStore: WKWebsiteDataStore? = nil) throws -> UUID {
+        let id = try createTab(select: false, modelOwned: true, isolatedChatGPTStore: isolatedChatGPTStore)
         do {
             guard let view = webView(for: id) else { throw Failure.tabClosed }
             view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
@@ -1344,6 +1426,7 @@ final class EmbeddedBrowserSession {
     func shutdown() {
         guard !isShutdown else { return }
         isShutdown = true
+        for seed in Array(inferenceCookieSeeds.values) { seed.cancel() }
         onHumanVerificationRecoveryCandidate = nil
         for id in tabs.map(\.id) { closeTab(id) }
         temporaryCookieRetirement?.stop()

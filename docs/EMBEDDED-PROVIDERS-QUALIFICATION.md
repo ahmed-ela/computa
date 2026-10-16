@@ -1,6 +1,48 @@
 # Embedded website provider qualification
 
-## Build137 candidate: fresh physical ChatGPT pages
+## Build138 candidate: isolate ChatGPT conversation cookies
+
+Two separate fresh136 first-message diagnostics timed out after five minutes,
+at outbound claims of 69,986 and 53,849 UTF8 bytes. A tiny human message in the
+signed-in137 browser then returned its exact marker. These observations do not
+establish a precise payload limit or the underlying website exception.
+
+An actual cached-profile inspection on137 found 395 cookies, 98 unpaired
+conversation keys and 328 cookies eligible for the fixed ChatGPT conversation
+path. Its estimated cookie header was **28,490 bytes**. The earlier131 cleanup
+had removed 208 paired keys but retained their history markers and the unpaired
+keys; it had not measured the remaining header. The new inspection issued zero
+cookie writes, started no provider request, consumed its arm and normally quit.
+Ordinary owned-session retirement remains separately authorized. These are
+profile estimates, not measured wire headers or proof of a CFNetwork mechanism.
+
+Build138 seeds each ChatGPT inference's fresh private store with eligible
+ChatGPT authentication and policy cookies, excluding canonical root
+conversation-key and history-off families from the copy. It preserves the
+original profile, copies native cookie objects in memory, verifies their
+attributes before loading, and retains callback reservations through failure.
+No partial setup falls back to the shared profile. Provider gates, model and
+submission proof, native continuation and durable cleanup remain mandatory.
+
+The inline renderer detector also tolerates arbitrary DIV annotations for its
+abort-only result. It still requires the current scoped assistant body, exact
+visible error label and direct unique DIL/Portal structure, with unchanged
+visibility, quote/editor, ownership and traversal guards. It grants no answer,
+tool, retry or cleanup authority. A regression reproduced the prior
+`interactive_metadata` decline at node seven before the label was examined;
+the actual live annotation remains unknown.
+
+Independent static review cleared both changes. The final **587 adapter and
+metadata tests passed with 16,292 assertions**, with all 31 relevant inputs
+unchanged. Native validation passed **362 methods** against the earlier frozen
+isolation implementation, then **119 final methods** against the final view-store
+guard and copied updated adapter. The final scope includes 20 cookie-factory,
+56 browser, 19 metadata, two startup and 22 transport-boundary methods, with no
+failures or skips. Meaningful cookie-isolation, deadline, capacity and metadata
+classifier REDs are preserved. Main-target registration covers 104 Swift files.
+Installed task qualification of138 remains pending.
+
+## Historical build137: fresh physical ChatGPT pages
 
 Installed136 failed the controlled browser task after three successful tools
 and four verified normal Chat/Instant inferences. The first three responses

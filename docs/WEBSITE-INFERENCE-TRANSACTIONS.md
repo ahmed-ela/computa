@@ -77,6 +77,22 @@ Later manual cleanup cannot authorize replay or another inference in it.
 Request-metadata observation ends with its physical page and does not migrate
 to the next view.
 
+ChatGPT's physical page uses a fresh nonpersistent data store. Before any
+provider navigation, a bounded native operation copies eligible ChatGPT cookies
+in memory from the signed-in profile, excluding only canonical root
+conversation-key and history-off families. Original cookie objects retain their
+authentication and policy attributes; readback verifies those attributes.
+The source interface cannot mutate cookies, and nothing synchronizes back.
+Cookie names, values and hashes are absent from diagnostics; counts and a
+profile header estimate remain distinct from transmitted headers.
+
+Partial seeding never publishes a view or falls back to the shared profile.
+Cancellation and deadlines stop further operations while reservations retain
+already-issued callbacks until they settle. Both browser and inference capacity
+include those reservations. Maintenance and shutdown preserve this ownership.
+The provider gate is checked again after seeding and before navigation. Closing
+an isolated page grants no authority to retire cookies in the human profile.
+
 Build 38 lets a native-approved same-document first route, followed by its
 local-to-public promotion, continue one already-clicked ChatGPT display
 expansion. Each edge must match the candidate's previous URL and the current

@@ -418,6 +418,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private let geminiPostBlockDiagnosticEnabled: Bool
     private var geminiPostBlockDiagnosticDuration: Duration = .seconds(5)
     private let createTab: @MainActor (URL) throws -> UUID
+    private let isolatesChatGPTInference: Bool
+    private var pendingInferenceStarts = 0
     private let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
     private var sessions: [String: Session] = [:]
     private var finishingTasks: [String: Task<Data, Never>] = [:]
@@ -461,6 +463,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         self.geminiPostBlockDiagnosticEnabled = geminiPostBlockDiagnostic ?? Self.compiledPostBlockDiagnostic
         self.browser = browser
         self.createTab = { try browser.createModelTab(url: $0) }
+        self.isolatesChatGPTInference = true
     }
 
     #if DEBUG
@@ -469,6 +472,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         self.geminiPostBlockDiagnosticEnabled = geminiPostBlockDiagnostic ?? Self.compiledPostBlockDiagnostic
         self.browser = browser
         self.createTab = createTabForTesting
+        self.isolatesChatGPTInference = false
     }
 
 
@@ -656,8 +660,30 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard await browser.admitChatGPTAfterCookieCallbacks(until: .now + .seconds(2)) else { throw Failure.cookieMaintenancePending }
             try Task.checkCancellation()
         }
-        let session = try createSession(provider: provider, choice: choice, isDiscovery: false,
-            requestMetadata: requestMetadata)
+        synchronizeProviderGate(provider)
+        if let gate = providerGates[provider] { throw gate.failure }
+        let pending = pendingInferenceStarts + browser.failedChatGPTInferenceCookiePreparationCount
+        guard sessions.values.filter({ !$0.isDiscovery }).count + pending < 4 else { throw Failure.capacity }
+        guard script(for: provider) != nil else { throw Failure.pageUnavailable }
+        pendingInferenceStarts += 1
+        defer { pendingInferenceStarts -= 1 }
+        let preparedTab: UUID?
+        if provider == .chatgpt, isolatesChatGPTInference {
+            preparedTab = try await browser.createChatGPTInferenceTab(requestMetadata: requestMetadata, admit: {
+                self.synchronizeProviderGate(provider)
+                if let gate = self.providerGates[provider] { throw gate.failure }
+                try Task.checkCancellation()
+            })
+        } else { preparedTab = nil }
+        let session: Session
+        do {
+            try Task.checkCancellation()
+            session = try createSession(provider: provider, choice: choice, isDiscovery: false,
+                requestMetadata: requestMetadata, preparedTab: preparedTab, reservedStart: true)
+        } catch {
+            if let preparedTab { browser.closeTab(preparedTab) }
+            throw error
+        }
         return try snapshot(session)
     }
 
@@ -859,15 +885,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func createSession(provider: Provider, choice: WebsiteModelChoice?, isDiscovery: Bool,
-                               isRecoveryProbe: Bool = false, requestMetadata: ChatGPTRequestMetadataLease? = nil) throws -> Session {
+                               isRecoveryProbe: Bool = false, requestMetadata: ChatGPTRequestMetadataLease? = nil,
+                               preparedTab: UUID? = nil, reservedStart: Bool = false) throws -> Session {
         closedSessions = closedSessions.filter { ContinuousClock.now - $0.value.created < .seconds(3_600) }
         synchronizeProviderGate(provider)
         if !isRecoveryProbe, let gate = providerGates[provider] { throw gate.failure }
         let admitted = sessions.values.filter { $0.isDiscovery == isDiscovery }.count
-        guard admitted < (isDiscovery ? 1 : 4) else { throw Failure.capacity }
+        let pending = pendingInferenceStarts + browser.failedChatGPTInferenceCookiePreparationCount
+        let capacity = admitted + (isDiscovery ? 0 : pending)
+        guard capacity < (isDiscovery ? 1 : 4) || reservedStart && !isDiscovery && capacity <= 4 else { throw Failure.capacity }
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
         let id: UUID
-        if let requestMetadata, provider == .chatgpt, !isDiscovery, !isRecoveryProbe {
+        if let preparedTab { id = preparedTab }
+        else if let requestMetadata, provider == .chatgpt, !isDiscovery, !isRecoveryProbe {
             id = try browser.createModelTab(url: provider.startURL, requestMetadata: requestMetadata)
         } else { id = try createTab(provider.startURL) }
         guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else { throw Failure.staleSession }
@@ -876,6 +906,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         do { try browser.installModelChangeSignal(tabID: id, ownerToken: session.token, world: world, originHost: provider.host) }
         catch { browser.closeTab(id); throw error }
         sessions[session.token] = session
+        if let proof = browser.chatGPTInferenceCookieSummary(tabID: id, view: view) {
+            Self.inspectionLog.info("inferenceCookieSeed policyVersion=1 isolatedStoreVerified=true destinationVerified=true sourceMutations=0 sequence=0 sourceCookieCount=\(proof.sourceCookieCount) eligibleCookieCount=\(proof.eligibleCookieCount) excludedConversationCookieCount=\(proof.excludedConversationCookieCount) seededCookieCount=\(proof.seededCookieCount) profileEstimateAvailable=\(proof.estimatedCookieHeaderUTF8Bytes != nil) estimatedCookieHeaderUTF8Bytes=\(proof.estimatedCookieHeaderUTF8Bytes ?? -1)")
+        }
         return session
     }
 

@@ -1489,9 +1489,85 @@ describe('ChatGPT inline DIL renderer failure', () => {
     }
   });
 
+  test('recognizes metadata before the exact DIL error in a large owned request', async () => {
+    // The metadata is synthetic. It reproduces the observed first-decline
+    // shape without claiming which annotation the live page used.
+    const f = fixture({ userPrompt: 'Large owned request: ' + 'x'.repeat(69_986) }), e = rendererError();
+    await f.inspect();
+    const temporaryClicks = f.temporary.clicks;
+    const layout = new Element('DIV'), inner = new Element('DIV');
+    const decoration = new Element('DIV', { hidden: '' }), child = new Element('DIV');
+    const grandchild = new Element('DIV'), metadata = new Element('DIV', { role: 'status' });
+    decoration.append(child); child.append(grandchild); grandchild.append(metadata);
+    replaceAnswer(f, layout); layout.append(inner); inner.append(decoration, e.portal);
+    const observed = await f.inspect();
+    expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+    expect({ responseLoadFailed: observed.responseLoadFailed, ...observed.completionEvidence.codeStructure.rendererGuard })
+      .toMatchObject({ responseLoadFailed: true, reason: 'matched', rawKnownLabel: true, trimmedKnownLabel: true,
+        guardBodyIsExtractedAnswer: true });
+    expect(observed.text).toBe('This response couldn’t load');
+    expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0);
+    expect(f.temporary.clicks).toBe(temporaryClicks); expect(f.composer.events).toEqual([]);
+  });
+
+  test('uses DIV annotations only to recognize the exact abort-only renderer error', async () => {
+    for (const variant of ['hidden-role', 'hidden-tabindex', 'hidden-data', 'hidden-many-attributes', 'hidden-onclick',
+      'hidden-aria', 'portal-role', 'root-tabindex', 'leaf-role', 'leaf-tabindex']) {
+      const f = fixture({ userPrompt: 'Observe the scoped error without interacting' }), e = rendererError();
+      await f.inspect();
+      const temporaryClicks = f.temporary.clicks;
+      replaceAnswer(f, e.portal);
+      const decoration = new Element('DIV', { hidden: '' });
+      f.answer.children.unshift(decoration); decoration.parentElement = f.answer;
+      if (variant === 'hidden-role') decoration.values.role = 'status';
+      if (variant === 'hidden-tabindex') decoration.values.tabindex = '-1';
+      if (variant === 'hidden-data') decoration.values['data-fixture-annotation'] = 'opaque';
+      if (variant === 'hidden-many-attributes') for (let index = 0; index < 8; index++)
+        decoration.values[`data-fixture-${index}`] = 'opaque';
+      if (variant === 'hidden-onclick') decoration.values.onclick = 'untrusted()';
+      if (variant === 'hidden-aria') decoration.values['aria-live'] = 'polite';
+      if (variant === 'portal-role') e.portal.values.role = 'group';
+      if (variant === 'root-tabindex') e.root.values.tabindex = '0';
+      if (variant === 'leaf-role') e.leaf.values.role = 'status';
+      if (variant === 'leaf-tabindex') e.leaf.values.tabindex = '-1';
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+      expect(observed.responseLoadFailed).toBe(true);
+      expect(observed.completionEvidence.codeStructure.rendererGuard).toMatchObject({ reason: 'matched', rawKnownLabel: true,
+        guardBodyIsExtractedAnswer: true });
+      expect(observed.text).toBe('This response couldn’t load');
+      expect([decoration, e.portal, e.root, e.leaf].every(node => node.clicks === 0 && node.events.length === 0)).toBe(true);
+      expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0);
+      expect(f.temporary.clicks).toBe(temporaryClicks); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('preserves a requested literal phrase without structural renderer error evidence', async () => {
+    for (const kind of ['plain', 'paragraph', 'markdown', 'blockquote', 'pre', 'code']) {
+      const f = fixture({ userPrompt: 'Return exactly: This response couldn’t load' });
+      const wrapper = new Element(kind === 'plain' || kind === 'markdown' ? 'DIV' : kind === 'paragraph' ? 'P' : kind.toUpperCase(),
+        { ...(kind === 'markdown' ? { class: 'markdown' } : {}), role: 'status', tabindex: '-1' }, 'This response couldn’t load');
+      replaceAnswer(f, wrapper);
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+      expect(observed.responseLoadFailed).toBe(false); expect(observed.text).toBe('This response couldn’t load');
+      expect(observed.answerComplete).toBe(true); expect(wrapper.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('never interacts with an active Stop while classifying annotated error metadata', async () => {
+    const f = fixture({ userPrompt: 'Do not interact with page controls' }), e = rendererError();
+    await f.inspect(); replaceAnswer(f, e.portal); e.leaf.values.role = 'status';
+    const stop = new Element('BUTTON', { 'aria-label': 'Stop generating' }); f.body.append(stop);
+    const observed = await f.inspect();
+    expect(observed.error).toBeUndefined(); expect(observed.busy).toBe(true);
+    expect(observed.responseLoadFailed).toBe(true); expect(stop.clicks).toBe(0);
+    expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+  });
+
   test('never exempts hidden text, controls, message markers or display-contents descendants', async () => {
-    const variants = ['text', 'whitespace', 'known-label', 'button', 'link', 'quote', 'markdown', 'role', 'tabindex',
-      'editable', 'author', 'turn', 'user-bubble', 'unknown-attribute', 'onclick', 'hidden-component',
+    const variants = ['text', 'whitespace', 'known-label', 'button', 'link', 'quote', 'markdown',
+      'editable', 'author', 'turn', 'assistant-turn', 'user-bubble', 'hidden-component',
       'contents-root', 'contents-child', 'visible-child-text', 'css-before', 'css-after', 'unknown-css'];
     for (const variant of variants) {
       const f = fixture({ userPrompt: 'Preserve hidden-content and status boundaries' }), e = rendererError();
@@ -1506,14 +1582,11 @@ describe('ChatGPT inline DIL renderer failure', () => {
       if (variant === 'link') child.append(new Element('A', { href: 'https://example.test/' }));
       if (variant === 'quote') child.append(new Element('BLOCKQUOTE'));
       if (variant === 'markdown') child.values.class = 'markdown';
-      if (variant === 'role') child.values.role = 'status';
-      if (variant === 'tabindex') child.values.tabindex = '-1';
       if (variant === 'editable') child.values.contenteditable = 'false';
       if (variant === 'author') child.values['data-message-author-role'] = 'tool';
       if (variant === 'turn') child.values['data-turn'] = 'tool';
+      if (variant === 'assistant-turn') child.values['data-turn'] = 'assistant';
       if (variant === 'user-bubble') child.values['data-user-message-bubble'] = '';
-      if (variant === 'unknown-attribute') child.values['data-unmeasured-content'] = '';
-      if (variant === 'onclick') child.values.onclick = 'untrusted()';
       if (variant === 'hidden-component') child.values.class = 'DilRenderer-Other DilResponseRoot-Other';
       if (variant === 'contents-root') decoration.values['data-fixture-display'] = 'contents';
       if (variant === 'contents-child') child.values['data-fixture-display'] = 'contents';
@@ -1642,6 +1715,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
       const prefix = kind === 'tool-result' ? 'Recorded tool output: ' : '';
       const f = fixture({ userPrompt: ['user', 'tool-result'].includes(kind) ? prefix + 'This response couldn’t load' : 'Read the current answer' });
       const e = rendererError();
+      e.root.values.role = 'status';
       if (['user', 'tool-result'].includes(kind)) {
         f.userBody!.text = prefix; f.userBody!.append(e.portal, new Element('SPAN', {}, '\n\n' + markerLine));
       } else if (kind === 'old-answer') {
@@ -1695,7 +1769,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
     const variants = ['missing-renderer', 'missing-response-root', 'missing-portal', 'missing-parent-renderer', 'empty-suffix',
       'counterfeit-prefix', 'split-root-pair', 'indirect-root', 'indirect-leaf', 'styled-leaf', 'span-leaf', 'nested-label',
       'different-label', 'padded-label', 'extra-text', 'second-leaf', 'second-root', 'second-portal', 'hidden-leaf', 'hidden-root',
-      'hidden-portal', 'detached', 'role', 'tabindex', 'editable', 'button', 'link', 'svg',
+      'hidden-portal', 'detached', 'editable', 'button', 'link', 'svg',
       'long-text', 'long-class', 'many-classes', 'many-nodes', 'many-children', 'deep-tree', 'nested-author'];
     for (const variant of variants) {
       const f = fixture({ userPrompt: 'Observe only a proven renderer error' }), e = rendererError();
@@ -1722,8 +1796,6 @@ describe('ChatGPT inline DIL renderer failure', () => {
       if (variant === 'hidden-root') e.root.values['aria-hidden'] = 'true';
       if (variant === 'hidden-portal') e.portal.values.inert = '';
       if (variant === 'detached') e.portal.connected = false;
-      if (variant === 'role') e.leaf.values.role = 'status';
-      if (variant === 'tabindex') e.leaf.values.tabindex = '-1';
       if (variant === 'editable') e.leaf.values.contenteditable = 'false';
       if (variant === 'button') e.portal.append(new Element('BUTTON', {}, 'Retry'));
       if (variant === 'link') e.portal.append(new Element('A', { href: 'https://example.test/' }));
@@ -1746,6 +1818,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
     for (const drift of ['user', 'work', 'owner', 'url']) {
       const f = fixture({ userPrompt: 'Preserve the owned message' }), e = rendererError();
       await f.inspect(); replaceAnswer(f, e.portal);
+      e.leaf.values.role = 'status';
       f.onDigest(() => {
         if (drift === 'user') f.userBody!.text = 'Changed user\n\n' + markerLine;
         if (drift === 'work') { f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true'; }
