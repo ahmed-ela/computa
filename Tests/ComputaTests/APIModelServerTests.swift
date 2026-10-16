@@ -97,6 +97,36 @@ private final class APIFixtureReady: @unchecked Sendable {
     func finish(_ result: Result<UInt16, Error>) { lock.lock(); let value = continuation; continuation = nil; lock.unlock(); value?.resume(with: result) }
 }
 
+
+/// Intercepts this test-only client's entire URLSession. No request can fall
+/// through to the real Cerebras endpoint, even when its URL is unexpected.
+private final class CerebrasStreamErrorURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class State: @unchecked Sendable {
+        private let lock = NSLock()
+        private var bodies: [Data] = []
+        private var requests = 0
+        func reset(_ values: [Data]) { lock.lock(); defer { lock.unlock() }; bodies = values; requests = 0 }
+        func take() -> Data? { lock.lock(); defer { lock.unlock() }; requests += 1; return requests <= bodies.count ? bodies[requests - 1] : nil }
+        func count() -> Int { lock.lock(); defer { lock.unlock() }; return requests }
+    }
+    private static let state = State()
+    static func reset(_ bodies: [Data]) { state.reset(bodies) }
+    static func requestCount() -> Int { state.count() }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let body = Self.state.take(), let url = request.url,
+              url.absoluteString == "https://api.cerebras.ai/v1/chat/completions", request.httpMethod == "POST",
+              let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                  headerFields: ["Content-Type": "text/event-stream", "Content-Length": "\(body.count)"]) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL)); return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body); client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() { }
+}
+
 final class APIModelServerTests: XCTestCase, @unchecked Sendable {
     private func provider(_ url: URL) -> APIProviderDefinition { .init(id: "fixture", name: "Fixture", baseURL: url, wireAPI: .chatCompletions, models: [.init(id: "fixture-model", name: "Fixture")]) }
     private func response(_ content: String = "done") -> APILoopbackFixture.Response {
@@ -179,6 +209,62 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: Data(contentsOf: $0)) }
     }
+
+    func testCerebrasStreamErrorsPropagateAtomicallyOnFirstAndCorrectiveAttemptsWithoutReplay() async throws {
+        defer { CerebrasStreamErrorURLProtocol.reset([]) }
+        for secondAttempt in [false, true] {
+            for (status, event, busy) in [(401, false, false), (429, false, false), (429, true, true), (503, true, false)] {
+                let directory = try namingRoot(); defer { try? FileManager.default.removeItem(at: directory) }
+                let credentials = APICredentialCounter()
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [CerebrasStreamErrorURLProtocol.self]
+                let p = APIProviderDefinition(id: "cerebras-test", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!,
+                    wireAPI: .chatCompletions, models: [.init(id: "fixture-model", name: "Fixture")])
+                let first: [String: Any] = ["id": "PRIVATE_FIRST", "model": "fixture-model", "choices": [["index": 0,
+                    "delta": ["role": "assistant", "tool_calls": [["index": 0, "id": "PRIVATE_REJECTED_CALL", "type": "function",
+                        "function": ["name": "computa_tool_0", "arguments": "{\"cmd\":42}"]]]], "finish_reason": "tool_calls"]],
+                    "usage": ["prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14]]
+                let firstWire = Data("data: ".utf8) + (try JSONSerialization.data(withJSONObject: first)) + Data("\n\ndata: [DONE]\n\n".utf8)
+                let partial: [String: Any] = ["id": "PRIVATE_PARTIAL", "model": "fixture-model", "choices": [["index": 0,
+                    "delta": ["role": "assistant", "content": "PRIVATE_PARTIAL_TEXT", "tool_calls": [["index": 0, "id": "PRIVATE_PARTIAL_CALL", "type": "function",
+                        "function": ["name": "computa_tool_0", "arguments": "{\"cmd\":\"PRIVATE_PARTIAL_CMD"]]]], "finish_reason": NSNull()]]]
+                var failure = Data("data: ".utf8); failure.append(try JSONSerialization.data(withJSONObject: partial)); failure.append(Data("\n\n".utf8))
+                if event { failure.append(Data("event: error\n".utf8)) }
+                failure.append(Data("data: ".utf8)); failure.append(try JSONSerialization.data(withJSONObject: ["status_code": status,
+                    "error": ["message": busy ? "We're experiencing high traffic right now! Please try again soon." : "PRIVATE_DETAIL fixture-secret"]]))
+                failure.append(Data("\n\ndata: [DONE]\n\n".utf8))
+                CerebrasStreamErrorURLProtocol.reset(secondAttempt ? [firstWire, failure] : [failure])
+                let server = APIModelServer(credentials: credentials, client: APIProviderHTTPClient(configuration: configuration),
+                    capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
+                try await server.updateProviders([p]); let url = try await server.start()
+                let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString, preparation = UUID()
+                try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: preparation)
+                try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: preparation)
+                let (bytes, response) = try await URLSession.shared.data(for: correctionRequest(base: url, server: server, task: task, thread: thread, turn: turn, provider: p))
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, status == 429 ? 200 : status == 401 ? 401 : 400)
+                let text = String(decoding: bytes, as: UTF8.self)
+                XCTAssertEqual(text.contains("response.failed"), status == 429)
+                XCTAssertFalse(text.contains("response.completed")); XCTAssertFalse(text.contains("output_item")); XCTAssertFalse(text.contains("function_call"))
+                for upstreamCanary in ["PRIVATE_DETAIL", "PRIVATE_PARTIAL_TEXT", "PRIVATE_PARTIAL_CMD", "PRIVATE_PARTIAL_CALL", "PRIVATE_REJECTED_CALL", "PRIVATE_FIRST", "fixture-secret"] {
+                    XCTAssertFalse(text.contains(upstreamCanary), "Upstream error or partial output escaped: \(upstreamCanary)")
+                }
+                XCTAssertFalse(text.contains("x_computa_correction"))
+                let expected: APIProviderHTTPClient.Failure = status == 401 ? .unauthorized : status == 429 ? (busy ? .providerBusy : .rateLimited) : .unavailable
+                XCTAssertTrue(text.contains(expected.localizedDescription))
+                XCTAssertEqual(CerebrasStreamErrorURLProtocol.requestCount(), secondAttempt ? 2 : 1)
+                XCTAssertEqual(credentials.counts().reads, 1); XCTAssertEqual(credentials.counts().writes, 0)
+                let records = try correctionRecords(directory)
+                XCTAssertEqual(records.count, secondAttempt ? 3 : 0)
+                if secondAttempt {
+                    let final = try XCTUnwrap(records.first { $0.phase == "finished" })
+                    XCTAssertEqual(final.outcome, .decodeFailed); XCTAssertTrue(final.secondRequestClaimed)
+                    XCTAssertNil(final.secondUsage); XCTAssertTrue(final.secondUsageUnknown)
+                }
+                await server.finish(taskID: task); await server.shutdown()
+            }
+        }
+    }
+
     func testActualLoopbackCorrectsOneFullyReceivedBadBatchWithoutPublishingItsValidHalf() async throws {
         try await assertOneAtomicCorrection(timingMetadata: false)
     }

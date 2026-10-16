@@ -48,6 +48,115 @@ final class APIModelResponseCodecTests: XCTestCase {
         return (try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [[String: Any]], json)
     }
 
+
+    private func cerebrasStreamRequest() throws -> APIModelResponseCodec.Request {
+        try request(provider: .init(id: "cerebras-fixture", name: "Cerebras Fixture", baseURL: URL(string: "https://api.cerebras.ai/v1")!,
+            wireAPI: .chatCompletions, models: [.init(id: "fixture-model", name: "Fixture")]))
+    }
+    private func cerebrasErrorWire(_ envelope: Any, event: String? = nil, prefix: Data = Data()) throws -> Data {
+        var result = prefix
+        if let event { result.append(Data("event: \(event)\n".utf8)) }
+        result.append(Data("data: ".utf8)); result.append(try JSONSerialization.data(withJSONObject: envelope))
+        result.append(Data("\n\ndata: [DONE]\n\n".utf8)); return result
+    }
+    func testDocumentedCerebrasErrorChunksClassifyAtomicallyBeforeAndAfterPartialTools() throws {
+        let prepared = try cerebrasStreamRequest()
+        let partial: [String: Any] = ["id": "remote", "model": "fixture-model", "choices": [["index": 0,
+            "delta": ["role": "assistant", "content": "PRIVATE_PARTIAL_TEXT", "tool_calls": [["index": 0, "id": "PRIVATE_CALL", "type": "function",
+                "function": ["name": prepared.tools[0].wireName, "arguments": "{\"path\":\"PRIVATE_PARTIAL_ARG"]]]], "finish_reason": NSNull()]]]
+        var prefix = Data("data: ".utf8); prefix.append(try JSONSerialization.data(withJSONObject: partial)); prefix.append(Data("\n\n".utf8))
+        let cases: [(Int, [String: Any], APIProviderHTTPClient.Failure)] = [
+            (400, ["message": "PRIVATE_CANARY"], .invalidRequest), (401, [:], .unauthorized), (403, [:], .unauthorized),
+            (404, [:], .modelNotFound), (408, [:], .unavailable), (413, [:], .contextLimit),
+            (422, ["param": "messages[0].content", "message": "PRIVATE_CANARY"], .invalidMessages),
+            (400, ["code": "context_length_exceeded"], .contextLimit), (429, ["message": "PRIVATE_CANARY"], .rateLimited),
+            (429, ["message": "We're experiencing high traffic right now! Please try again soon."], .providerBusy),
+            (429, ["code": "model_overloaded"], .providerBusy),
+            (429, ["message": "We're experiencing high traffic right now! Please try again soon. PRIVATE_CANARY"], .rateLimited),
+            (500, ["id": NSNull(), "code": NSNull(), "message": NSNull(), "param": NSNull(), "type": NSNull()], .unavailable),
+            (599, ["type": "PRIVATE_CANARY"], .unavailable)]
+        for (status, fields, expected) in cases {
+            for event in [nil, "error"] as [String?] {
+                for before in [Data(), prefix] {
+                    var guards: [APIModelResponseCodec.InvalidResponseDiagnostic] = [], argumentsObserved = false
+                    let body = try cerebrasErrorWire(["error": fields, "status_code": status], event: event, prefix: before)
+                    XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: body, contentType: "text/event-stream"), request: prepared,
+                        onArgumentRejection: { _ in argumentsObserved = true }, onInvalidResponse: { guards.append($0) })) {
+                        XCTAssertEqual($0 as? APIProviderHTTPClient.Failure, expected)
+                        XCTAssertFalse($0.localizedDescription.contains("PRIVATE"))
+                        let projected = try? APIModelServer.errorBody($0, stage: .decode)
+                        XCTAssertFalse(String(decoding: projected ?? Data(), as: UTF8.self).contains("PRIVATE"))
+                    }
+                    XCTAssertTrue(guards.isEmpty); XCTAssertFalse(argumentsObserved)
+                }
+            }
+        }
+    }
+    func testCerebrasMalformedErrorChunksOtherProvidersAndDoneOrderingKeepOriginalGuards() throws {
+        let prepared = try cerebrasStreamRequest(), valid: [String: Any] = ["error": ["message": "PRIVATE_CANARY"], "status_code": 429]
+        var invalid: [[String: Any]] = []
+        for status: Any in [true, false, "429", 429.5, 399, 600, NSNull()] {
+            var row = valid; row["status_code"] = status; invalid.append(row)
+        }
+        invalid += [["error": [:]], ["status_code": 429], ["error": NSNull(), "status_code": 429],
+            ["error": "PRIVATE_CANARY", "status_code": 429], ["error": [], "status_code": 429],
+            ["error": ["message": true], "status_code": 429], ["error": ["detail": "PRIVATE_CANARY"], "status_code": 429],
+            valid.merging(["choices": []]) { _, new in new },
+            ["error": ["message": String(repeating: "x", count: 16_384)], "status_code": 429]]
+        var wires = try invalid.map { try cerebrasErrorWire($0) }
+        wires += [try cerebrasErrorWire(valid, event: "unknown"), try cerebrasErrorWire(valid, event: "error\nevent: error")]
+        wires += [Data("data: {\"error\":{},\"status_code\":401,\"status_code\":429}\n\ndata: [DONE]\n\n".utf8),
+                  Data("data: {\"error\":{\"message\":\"a\",\"message\":\"b\"},\"status_code\":429}\n\ndata: [DONE]\n\n".utf8)]
+        let successLooking: [String: Any] = ["id": "remote", "model": "fixture-model", "choices": [["index": 0,
+            "delta": ["role": "assistant", "content": "PRIVATE_FAKE_SUCCESS"], "finish_reason": "stop"]]]
+        for event in ["error", "error\nevent: error", "unknown\nevent: error"] {
+            wires.append(try cerebrasErrorWire(successLooking, event: event))
+        }
+        for body in wires {
+            var guards: [APIModelResponseCodec.InvalidResponseDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: body, contentType: "text/event-stream"), request: prepared,
+                onInvalidResponse: { guards.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidResponse) }
+            XCTAssertEqual(guards, [.init(format: .chatSSE, guardID: .sseChunkEnvelope)])
+        }
+        for p in [provider, APIProviderDefinition(id: "cerebras", name: "Not the Cerebras endpoint", baseURL: provider.baseURL, wireAPI: .chatCompletions, models: provider.models)] {
+            var guards: [APIModelResponseCodec.InvalidResponseDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: try cerebrasErrorWire(valid), contentType: "text/event-stream"),
+                request: request(provider: p), onInvalidResponse: { guards.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidResponse) }
+            XCTAssertEqual(guards.first?.guardID, .sseChunkEnvelope)
+        }
+        // Positive control: ordinary Cerebras streams still use the same
+        // content/tool fragment assembly, identities, arguments and final usage.
+        let normalText = try APIModelResponseCodec.decode(.init(body: try cerebrasErrorWire(successLooking), contentType: "text/event-stream"), request: prepared)
+        XCTAssertEqual(normalText.textDeltas, ["PRIVATE_FAKE_SUCCESS"])
+        let deltas: [[String: Any]] = [["role": "assistant", "tool_calls": [["index": 0, "id": "ordinary-call", "type": "function",
+            "function": ["name": prepared.tools[0].wireName, "arguments": "{\"path\":"]]]],
+            ["tool_calls": [["index": 0, "function": ["arguments": "\"ok\"}"]]]], [:]]
+        var normalTools = Data()
+        for (index, delta) in deltas.enumerated() {
+            let row: [String: Any] = ["id": "ordinary-stream", "model": "fixture-model", "choices": [["index": 0, "delta": delta,
+                "finish_reason": index == 2 ? "tool_calls" : NSNull()]]]
+            normalTools.append(Data("data: ".utf8)); normalTools.append(try JSONSerialization.data(withJSONObject: row)); normalTools.append(Data("\n\n".utf8))
+        }
+        normalTools.append(Data("data: ".utf8)); normalTools.append(try JSONSerialization.data(withJSONObject: ["id": "ordinary-stream", "model": "fixture-model", "choices": [],
+            "usage": ["prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5]])); normalTools.append(Data("\n\ndata: [DONE]\n\n".utf8))
+        let normalReply = try APIModelResponseCodec.decode(.init(body: normalTools, contentType: "text/event-stream"), request: prepared)
+        XCTAssertEqual(normalReply.argumentDeltas, [["{\"path\":", "\"ok\"}"]])
+        let normalCall = try XCTUnwrap((normalReply.response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(normalCall["call_id"] as? String, "ordinary-call"); XCTAssertEqual(normalCall["arguments"] as? String, "{\"path\":\"ok\"}")
+        XCTAssertEqual((normalReply.response["usage"] as? [String: Any])?["total_tokens"] as? Int, 5)
+        // The new event-error failure fence is endpoint scoped. Other
+        // providers retain their existing treatment of successful SSE payloads.
+        let unchanged = try APIModelResponseCodec.decode(.init(body: try cerebrasErrorWire(successLooking, event: "error"),
+            contentType: "text/event-stream"), request: request())
+        XCTAssertEqual(unchanged.textDeltas, ["PRIVATE_FAKE_SUCCESS"])
+        var guards: [APIModelResponseCodec.InvalidResponseDiagnostic] = []
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: try cerebrasErrorWire(valid, prefix: Data("data: [DONE]\n\n".utf8)),
+            contentType: "text/event-stream"), request: prepared, onInvalidResponse: { guards.append($0) })) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidResponse)
+        }
+        XCTAssertEqual(guards.first?.guardID, .sseAfterDone)
+    }
+
     func testFatalJSONResponseGuardsRetainExactFailuresAndEmitOnlyOneFiniteLabel() throws {
         let prepared = try request()
         typealias Guard = APIModelResponseCodec.InvalidResponseDiagnostic.Guard

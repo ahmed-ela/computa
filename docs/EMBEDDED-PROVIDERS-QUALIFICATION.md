@@ -1,9 +1,75 @@
 # Embedded website provider qualification
 
-## Installed build121: current qualification
+## Installed build122: current qualification
+
+Computa 0.7.0 (122), compiled from
+`c85cc35f7e295472cdbbcd82748dbdf2abbe1f54`, is installed and running.
+The signed candidate and installed app matched all 54 bundle files. The frozen
+613 inputs, resources, signatures and unchanged engine were checked separately.
+All 88 API tests passed on that source.
+
+Fresh hosted Cerebras GPT-OSS code/terminal/browser repetitions used the same
+off-by-one bug, four unchanged tests and browser form, with new isolated values:
+
+| Case | Native time | Result |
+| --- | ---: | --- |
+| V39 code/terminal/browser | 15.878 s | Functional recovery: two shell commands failed before corrected commands, patch, tests and exact lookup succeeded. |
+| V40 first code/terminal/browser | 8.375 s | Native tools passed; one rejected API call required a validated correction. Recovered completion. |
+| V40 second code/terminal/browser | 6.785 s | Clean native and API completion, with no correction. |
+
+Independent file checks passed for both V40 tasks, with existing tests and the
+unrelated note preserved. Model-issued tab closure was corroborated by each
+native host receipt and a later app observation. The fixture server stopped;
+its process and listener were verified absent. No fatal response-guard failure
+recurred, so these runs do not identify V38's decoding cause. A Swift String
+equality check is not a UTF8-byte equality claim.
+
+An ordinary human Gemini tab loaded the canonical app route without a challenge
+and showed 3.8 Flash selected. The saved recovery record was verified and its
+checkpoint absent; the precise clearance timing was not independently captured.
+No refresh, challenge interaction or preference edit was performed. V41 then
+tested the actual background harness:
+
+| Gemini 3.8 Flash task | Native time | Result |
+| --- | ---: | --- |
+| Browser lookup | 49.607 s | Passed: six clean tools, seven verified website inferences, exact result, confirmed temporary-session and explicit task-tab closure. |
+| Code/terminal/browser | 1.047 s | Verification-blocked before any tool. The original helper and tests remain unchanged. |
+
+The failed code task was not retried, and its tests were not executed as a model
+result. Native events show a new Google checkpoint settling after 331.475 ms,
+then being rejected with no prior Gemini document commit. The three-second
+settlement budget did not expire. PID/time correlation supplies this evidence;
+these log events do not carry a task/turn identifier. Its private website session
+closed. The server received only the browser
+case's accepted form submission, then stopped with process and port absence
+verified. Both original human tabs were preserved. These results do not qualify
+permanent CAPTCHA prevention. Human and model views share the persistent store,
+configuration, URL loading and navigation policy; background geometry, focus,
+popup handling and view lifetime differ. Their causal relevance remains unproven.
+The passive post-block observation proposal remains private and unapplied.
+
+ChatGPT's ordinary-tab `bad URL` failure below remains unresolved. It is not
+qualified by the GPT-OSS or Gemini results.
+
+## Build123 Cerebras stream-error classification
+
+Cerebras documents an error envelope inside an HTTP-200 SSE response. Previously
+this reached the generic malformed-response guard. The codec now classifies
+only the exact bounded, unambiguous Cerebras error shape through the existing
+sanitized HTTP failure types. Malformed or unknown envelopes still fail closed.
+Errors after partial tool fragments publish no tool, and errors after `[DONE]`
+retain the original ordering failure. Request counts, correction limits and
+successful-response validation are unchanged. This is a documented classification
+repair, not an established explanation of V38's failure.
+
+All 91 native API tests passed, including the new first/second-attempt stream
+error cases, finite error privacy, normal success controls and no extra request.
+This source change has not been installed; the running app remains build122.
+
+## Historical build121 qualification
 
 Computa 0.7.0 (121), compiled from `cb912ae830e922edd1aa429160d3a5210adb7d86`,
-is installed. Its signed-build audit verified 613 frozen inputs, all 54 bundle
+was installed for V38. Its signed-build audit verified 613 frozen inputs, all 54 bundle
 files, 50 resources and the unchanged engine. Installed-file verification and
 the fresh running-process binding are retained separately.
 
@@ -47,7 +113,7 @@ Retry or reload was performed. The breakpoint was removed, Inspector windows
 closed, and both the tab permission and Safari developer-features setting were
 verified restored off. The Safari Start Page was preserved.
 
-## Build122 API decoder diagnostic candidate
+## Build122 API decoder diagnostic
 
 The V38 code failure exposed a diagnostic gap before argument validation.
 Build122 labels fatal response guards with finite format and guard enums,
@@ -60,9 +126,10 @@ instrumentation reconstructs the prior codec byte for byte.
 All six focused native tests passed, including malformed JSON/SSE/Responses
 guards, privacy checks, unchanged successful/nonfatal paths, and loopback
 first/second-attempt failures without extra requests. These tests used the
-reviewed source before its build-number increment. The full API cohort,
-signed build, installation and new live diagnostic remain separate gates.
-This candidate does not yet repair or identify the V38 decoder failure.
+reviewed source before its build-number increment. The full 88-test API cohort,
+signed build, installation and fresh live diagnostic were subsequently verified
+separately, as recorded above. This diagnostic does not repair or identify the
+V38 decoder failure.
 
 ## Candidate119 task-tab cleanup accounting
 

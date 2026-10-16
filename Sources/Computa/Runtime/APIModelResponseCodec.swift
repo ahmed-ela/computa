@@ -679,7 +679,7 @@ enum APIModelResponseCodec {
         let envelopeRejection: ArgumentValidationDiagnostic.EnvelopeRejection?
         let jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic?
         if result.contentType.contains("text/event-stream") {
-            let assembled = try assembleChatStream(result.body, diagnostics: onArgumentRejection != nil, observe: observeResponseGuard)
+            let assembled = try assembleChatStream(result.body, cerebras: request.provider.isCerebrasInference, diagnostics: onArgumentRejection != nil, observe: observeResponseGuard)
             envelope = assembled.object; textDeltas = assembled.text; argumentDeltas = assembled.arguments
             rawCorrectionEligible = assembled.correctionEligible
             envelopeShapeValid = assembled.envelopeShapeValid; unambiguousJSON = assembled.unambiguousJSON
@@ -890,7 +890,28 @@ enum APIModelResponseCodec {
         } else if !absent(delta["tool_calls"]) { return false }
         return true
     }
-    private static func assembleChatStream(_ data: Data, diagnostics: Bool = false, observe: InvalidResponseObserver?) throws -> ChatStream {
+    /// The documented Cerebras ErrorChunkResponse is a failure, not a partial
+    /// ChatChunkResponse. Unknown fields, types, statuses and ambiguous JSON keep
+    /// the existing invalid-response path. No provider text escapes classification.
+    private static func cerebrasStreamFailure(_ chunk: [String: Any], data: Data) -> APIProviderHTTPClient.Failure? {
+        guard data.count <= 16_384, APIModelCorrectionJSON.isUnambiguous(data),
+              Set(chunk.keys) == ["error", "status_code"],
+              let error = chunk["error"] as? [String: Any],
+              Set(error.keys).isSubset(of: ["id", "code", "message", "param", "type"]),
+              error.values.allSatisfy({ absent($0) || $0 is String }),
+              let number = chunk["status_code"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite, number.doubleValue == Double(number.intValue),
+              (400...599).contains(number.intValue) else { return nil }
+        switch number.intValue {
+        case 401, 403: return .unauthorized
+        case 404: return .modelNotFound
+        case 429: return APIProviderHTTPClient.rateLimitFailure(body: data)
+        case 400, 413, 422: return APIProviderHTTPClient.rejectedRequest(status: number.intValue, body: data)
+        default: return .unavailable
+        }
+    }
+
+    private static func assembleChatStream(_ data: Data, cerebras: Bool, diagnostics: Bool = false, observe: InvalidResponseObserver?) throws -> ChatStream {
         guard let string = String(data: data, encoding: .utf8) else { throw invalidResponse(.sseUTF8, observe) }
         var done = false, model: String?, id: String?, role: String?, finish: String?, usage: Any?
         var text: [String] = [], reasoning = "", calls: [Int: (id: String, name: String, arguments: [String])] = [:]
@@ -903,8 +924,22 @@ enum APIModelResponseCodec {
             if payload.isEmpty { continue }
             guard !done else { throw invalidResponse(.sseAfterDone, observe) }
             if payload == "[DONE]" { done = true; continue }
-            guard let chunkData = payload.data(using: .utf8), let chunk = try JSONSerialization.jsonObject(with: chunkData) as? [String: Any],
-                  chunk["error"] == nil, let chunkModel = chunk["model"] as? String, let chunkID = chunk["id"] as? String,
+            guard let chunkData = payload.data(using: .utf8), let chunk = try JSONSerialization.jsonObject(with: chunkData) as? [String: Any] else {
+                throw invalidResponse(.sseChunkEnvelope, observe)
+            }
+            // Cerebras documents errors inside an HTTP-200 SSE stream. Classify
+            // only its exact bounded error envelope; never publish partial output,
+            // authorize a tool, or turn a provider failure into a correction.
+            let eventNames = event.components(separatedBy: "\n").filter { $0.hasPrefix("event:") }
+                .map { String($0.dropFirst(6)).trimmingCharacters(in: .whitespaces) }
+            if cerebras, eventNames.contains("error") {
+                guard eventNames == ["error"], let failure = cerebrasStreamFailure(chunk, data: chunkData) else {
+                    throw invalidResponse(.sseChunkEnvelope, observe)
+                }
+                throw failure
+            }
+            if cerebras, eventNames.isEmpty, let failure = cerebrasStreamFailure(chunk, data: chunkData) { throw failure }
+            guard chunk["error"] == nil, let chunkModel = chunk["model"] as? String, let chunkID = chunk["id"] as? String,
                   let choices = chunk["choices"] as? [[String: Any]], choices.count <= 1 else { throw invalidResponse(.sseChunkEnvelope, observe) }
             let shapeValid = correctionEnvelopeShape(chunk, streaming: true), unambiguous = APIModelCorrectionJSON.isUnambiguous(chunkData)
             envelopeShapeValid = envelopeShapeValid && shapeValid; unambiguousJSON = unambiguousJSON && unambiguous
