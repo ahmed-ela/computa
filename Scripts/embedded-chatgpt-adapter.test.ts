@@ -1422,6 +1422,188 @@ describe('ChatGPT failed-page finite diagnostic', () => {
   });
 });
 
+describe('ChatGPT inline DIL renderer failure', () => {
+  function rendererError() {
+    const portal = new Element('DIV', { class: 'relative PortalBoundary-TFj9W2 Renderer-ojZscX' });
+    const root = new Element('DIV', { class: 'DilRenderer-tB76Jj DilResponseRoot-HfQrEh Reveal-k2IWvM' });
+    const leaf = new Element('DIV', {}, 'This response couldn’t load');
+    root.append(leaf); portal.append(root);
+    return { portal, root, leaf };
+  }
+  function replaceAnswer(f: ReturnType<typeof fixture>, node: Element) {
+    f.answer.children.forEach(child => { child.connected = false; child.parentElement = null; });
+    f.answer.text = ''; f.answer.children = []; f.answer.append(node);
+  }
+
+  test('recognizes the measured inline DIL renderer error before answer acceptance', async () => {
+    const f = fixture({ userPrompt: 'Read the fixture and close its tab' }), e = rendererError();
+    await f.inspect();
+    const temporaryClicks = f.temporary.clicks;
+    replaceAnswer(f, e.portal);
+    const observed = await f.inspect();
+    expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+    expect(observed.text).toBe('This response couldn’t load');
+    expect(observed.answerComplete).toBe(true);
+    expect(observed.responseLoadFailed).toBe(true);
+    expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0);
+    expect(f.temporary.clicks).toBe(temporaryClicks); expect(f.composer.events).toEqual([]);
+  });
+
+  test('uses component prefix pairs without depending on Copy or the measured hash suffixes', async () => {
+    const f = fixture({ userPrompt: 'Observe the current renderer failure' }), e = rendererError();
+    e.root.values.class = 'DilRenderer-NewHash DilResponseRoot-OtherHash';
+    e.portal.values.class = 'PortalBoundary-NewHash Renderer-OtherHash';
+    replaceAnswer(f, e.portal);
+    const copy = f.messages.querySelector('button[aria-label="Copy"]')!;
+    copy.connected = false;
+    const observed = await f.inspect();
+    expect(observed.responseLoadFailed).toBe(true); expect(observed.answerComplete).toBe(false);
+    expect(observed.text).toBe('This response couldn’t load'); expect(copy.clicks).toBe(0);
+    expect(f.composer.events).toEqual([]);
+  });
+
+  test('does not classify ordinary prose, markdown, code or quoted renderer text as a website failure', async () => {
+    for (const kind of ['plain', 'paragraph', 'markdown', 'blockquote', 'pre', 'code', 'legitimate-sibling']) {
+      const f = fixture({ userPrompt: 'Explain the recorded response text' }), e = rendererError();
+      if (kind === 'plain') replaceAnswer(f, new Element('DIV', {}, 'This response couldn’t load'));
+      else if (kind === 'paragraph') replaceAnswer(f, new Element('P', {}, 'This response couldn’t load'));
+      else if (kind === 'legitimate-sibling') {
+        replaceAnswer(f, e.portal); f.answer.append(new Element('DIV', {}, 'Quoted renderer status, with an explanation.'));
+      } else {
+        const wrapper = new Element(kind === 'markdown' ? 'DIV' : kind.toUpperCase(), kind === 'markdown' ? { class: 'markdown' } : {});
+        wrapper.append(e.portal); replaceAnswer(f, wrapper);
+      }
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+      expect(observed.text).toContain('This response couldn’t load'); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('does not import renderer-shaped user, tool-result, old-answer or outside-body content', async () => {
+    for (const kind of ['user', 'tool-result', 'old-answer', 'outside-body']) {
+      const prefix = kind === 'tool-result' ? 'Recorded tool output: ' : '';
+      const f = fixture({ userPrompt: ['user', 'tool-result'].includes(kind) ? prefix + 'This response couldn’t load' : 'Read the current answer' });
+      const e = rendererError();
+      if (['user', 'tool-result'].includes(kind)) {
+        f.userBody!.text = prefix; f.userBody!.append(e.portal, new Element('SPAN', {}, '\n\n' + markerLine));
+      } else if (kind === 'old-answer') {
+        const earlier = new Element('ARTICLE', { 'data-turn': 'assistant' });
+        const body = new Element('DIV', { 'data-markdown-text-style': 'assistant-message' }); body.append(e.portal); earlier.append(body);
+        f.messages.children.unshift(earlier); earlier.parentElement = f.messages;
+      } else {
+        // The familiar classes above a selected leaf cannot confer renderer
+        // provenance on that body. Both component boundaries must be inside it.
+        const article = f.answer.parentElement!;
+        article.children = article.children.filter(child => child !== f.answer);
+        e.root.children = []; e.root.append(f.answer); article.append(e.portal);
+        replaceAnswer(f, new Element('DIV', {}, 'This response couldn’t load'));
+      }
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+      expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('does not classify an assistant-looking renderer nested in a modern user or tool body', async () => {
+    for (const boundary of ['modern-user', 'tool']) {
+      const f = fixture({ userPrompt: 'Keep user and tool content outside assistant status' }), e = rendererError();
+      await f.inspect();
+      const container = new Element('DIV', boundary === 'modern-user'
+        ? { 'data-markdown-text-style': 'user-message' } : { 'data-message-author-role': 'tool' });
+      const counterfeit = new Element('DIV', { 'data-markdown-text-style': 'assistant-message' });
+      counterfeit.append(e.portal); container.append(counterfeit); f.messages.append(container);
+      // A pending append can legitimately expose either count. The status
+      // detector must still exclude the enclosing user/tool provenance.
+      const observed = await f.inspect({ expectedUserCounts: [1, 2] });
+      expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+      expect(observed.text).toBe('This response couldn’t load');
+      expect(observed.responseLoadFailed).toBe(false); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('does not classify a selected assistant body with conflicting author or turn markers', async () => {
+    for (const attribute of ['data-message-author-role', 'data-turn']) {
+      const f = fixture({ userPrompt: 'Reject conflicting body provenance' }), e = rendererError();
+      await f.inspect(); replaceAnswer(f, e.portal);
+      f.answer.values[attribute] = 'tool';
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+      expect(observed.text).toBe('This response couldn’t load');
+      expect(observed.responseLoadFailed).toBe(false); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('rejects counterfeit, ambiguous, hidden, interactive and over-budget renderer shapes', async () => {
+    const variants = ['missing-renderer', 'missing-response-root', 'missing-portal', 'missing-parent-renderer', 'empty-suffix',
+      'counterfeit-prefix', 'split-root-pair', 'indirect-root', 'indirect-leaf', 'styled-leaf', 'span-leaf', 'nested-label',
+      'different-label', 'padded-label', 'extra-text', 'second-leaf', 'second-root', 'second-portal', 'hidden-leaf', 'hidden-root',
+      'hidden-portal', 'detached', 'hidden-empty-branch', 'role', 'tabindex', 'editable', 'button', 'link', 'svg',
+      'long-text', 'long-class', 'many-classes', 'many-nodes', 'many-children', 'deep-tree', 'nested-author'];
+    for (const variant of variants) {
+      const f = fixture({ userPrompt: 'Observe only a proven renderer error' }), e = rendererError();
+      replaceAnswer(f, e.portal);
+      if (variant === 'missing-renderer') e.root.values.class = 'DilResponseRoot-HfQrEh';
+      if (variant === 'missing-response-root') e.root.values.class = 'DilRenderer-tB76Jj';
+      if (variant === 'missing-portal') e.portal.values.class = 'Renderer-ojZscX';
+      if (variant === 'missing-parent-renderer') e.portal.values.class = 'PortalBoundary-TFj9W2';
+      if (variant === 'empty-suffix') e.root.values.class = 'DilRenderer- DilResponseRoot-';
+      if (variant === 'counterfeit-prefix') e.root.values.class = 'NotDilRenderer-tB76Jj NotDilResponseRoot-HfQrEh';
+      if (variant === 'split-root-pair') { e.root.values.class = 'DilRenderer-tB76Jj'; e.leaf.values.class = 'DilResponseRoot-HfQrEh'; }
+      if (variant === 'indirect-root') { const wrapper = new Element('DIV'); e.portal.children = []; wrapper.append(e.root); e.portal.append(wrapper); }
+      if (variant === 'indirect-leaf') { const wrapper = new Element('DIV'); e.root.children = []; wrapper.append(e.leaf); e.root.append(wrapper); }
+      if (variant === 'styled-leaf') e.leaf.values.class = 'markdown';
+      if (variant === 'span-leaf') e.leaf.tagName = 'SPAN';
+      if (variant === 'nested-label') { e.leaf.text = ''; e.leaf.append(new Element('SPAN', {}, 'This response couldn’t load')); }
+      if (variant === 'different-label') e.leaf.text = "This response couldn't load";
+      if (variant === 'padded-label') e.leaf.text = ' This response couldn’t load ';
+      if (variant === 'extra-text') e.portal.append(new Element('DIV', {}, 'Additional readable answer'));
+      if (variant === 'second-leaf') e.root.append(new Element('DIV', {}, 'This response couldn’t load'));
+      if (variant === 'second-root') { const duplicate = rendererError(); duplicate.leaf.text = ''; e.portal.append(duplicate.root); }
+      if (variant === 'second-portal') { const duplicate = rendererError(); duplicate.leaf.text = ''; f.answer.append(duplicate.portal); }
+      if (variant === 'hidden-leaf') e.leaf.values.hidden = '';
+      if (variant === 'hidden-root') e.root.values['aria-hidden'] = 'true';
+      if (variant === 'hidden-portal') e.portal.values.inert = '';
+      if (variant === 'detached') e.portal.connected = false;
+      if (variant === 'hidden-empty-branch') e.portal.append(new Element('DIV', { hidden: '' }));
+      if (variant === 'role') e.leaf.values.role = 'status';
+      if (variant === 'tabindex') e.leaf.values.tabindex = '-1';
+      if (variant === 'editable') e.leaf.values.contenteditable = 'false';
+      if (variant === 'button') e.portal.append(new Element('BUTTON', {}, 'Retry'));
+      if (variant === 'link') e.portal.append(new Element('A', { href: 'https://example.test/' }));
+      if (variant === 'svg') e.portal.append(new Element('SVG'));
+      if (variant === 'long-text') e.leaf.text += ' '.repeat(129);
+      if (variant === 'long-class') e.portal.values.class += ' ' + 'x'.repeat(65);
+      if (variant === 'many-classes') e.portal.values.class += ' ' + Array.from({ length: 17 }, (_, i) => `fixture${i}`).join(' ');
+      if (variant === 'many-nodes') for (let i = 0; i < 25; i++) { const wrapper = new Element('DIV'); wrapper.append(new Element('DIV'), new Element('DIV')); e.portal.append(wrapper); }
+      if (variant === 'many-children') for (let i = 0; i < 33; i++) e.portal.append(new Element('DIV'));
+      if (variant === 'deep-tree') { let node = new Element('DIV'); const top = node; for (let i = 0; i < 9; i++) { const child = new Element('DIV'); node.append(child); node = child; } e.portal.append(top); }
+      if (variant === 'nested-author') e.leaf.values['data-message-author-role'] = 'assistant';
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+      expect(f.composer.events).toEqual([]);
+      expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0);
+    }
+  });
+
+  test('cannot override owned first-message, product or native document-context rejection', async () => {
+    for (const drift of ['user', 'work', 'owner', 'url']) {
+      const f = fixture({ userPrompt: 'Preserve the owned message' }), e = rendererError();
+      await f.inspect(); replaceAnswer(f, e.portal);
+      f.onDigest(() => {
+        if (drift === 'user') f.userBody!.text = 'Changed user\n\n' + markerLine;
+        if (drift === 'work') { f.chatMode.values['aria-pressed'] = 'false'; f.workMode.values['aria-pressed'] = 'true'; }
+        if (drift === 'owner') f.world.__computaModelOwner = 'another-owner';
+        if (drift === 'url') f.document.URL = 'https://chatgpt.com/c/unrelated';
+      });
+      const observed = await f.inspect();
+      // The existing first-message digest guard rejects owner/URL crossings
+      // before later document-context checks. Preserve that error ordering.
+      expect(observed.error).toBe(drift === 'work' ? 'product_mode_unverified' : 'conversation_changed');
+      expect(observed.responseLoadFailed).toBeUndefined(); expect(f.composer.events).toEqual([]);
+    }
+  });
+});
+
 describe('ChatGPT response load failure', () => {
   const errorRegion = () => {
     const region = new Element('DIV'), error = new Element('SPAN', {}, 'Load failed');

@@ -2585,7 +2585,85 @@ function chatGPTAlertAsideLoadFailed(retry, main, visible) {
   return errorText.replace(/\s+/g, ' ').trim() === 'Load failed'
     && retryText.replace(/\s+/g, ' ').trim() === 'Retry';
 }
+function chatGPTInlineRendererLoadFailed(visible) {
+  // A measured inline renderer error can occupy the assistant body itself.
+  // Component prefixes alone are not status evidence: require the complete
+  // small, passive, single-leaf shape in this exact latest physical answer.
+  // Unknown/quoted/markdown/over-budget content remains ordinary content.
+  const root = chatGPTMessageRoots('assistant').at(-1);
+  if (!root || !visible(root)) return false;
+  const foreignMessage = node => {
+    const author = node.getAttribute('data-message-author-role'), turn = node.getAttribute('data-turn');
+    const style = node.getAttribute('data-markdown-text-style');
+    return author !== null && author !== 'assistant' || turn !== null && turn !== 'assistant'
+      || style !== null && style !== 'assistant-message';
+  };
+  let inConversation = false;
+  for (let node = root, depth = 0; node; node = node.parentElement) {
+    if (++depth > 64 || ['PRE', 'CODE', 'BLOCKQUOTE', 'NAV', 'ASIDE', 'TEXTAREA'].includes(node.tagName)
+      || ['menu', 'dialog'].includes(node.getAttribute('role')) || node.getAttribute('contenteditable') !== null
+      || node.getAttribute('id') === 'prompt-textarea' || node.getAttribute('data-user-message-bubble') !== null
+      || foreignMessage(node)) return false;
+    if (node.tagName === 'MAIN') { inConversation = true; break; }
+  }
+  if (!inConversation) return false;
+  const body = root.getAttribute('data-markdown-text-style') === 'assistant-message' ? root
+    : root.querySelector('[data-markdown-text-style="assistant-message"]') || root.querySelector('.markdown')
+      || root.querySelector('[data-message-author-role="assistant"]')
+      || (root.getAttribute('data-message-author-role') === 'assistant' ? root : null);
+  if (!body || !visible(body) || !root.contains(body)) return false;
+  for (let node = body, depth = 0; node; node = node.parentElement) {
+    if (++depth > 16 || ['PRE', 'CODE', 'BLOCKQUOTE'].includes(node.tagName) || node.classList.contains('markdown')
+      || foreignMessage(node)) return false;
+    if (node === root) break;
+  }
+  const pairs = { dil: [], portal: [] }, stack = [{ node: body, depth: 0 }];
+  let visited = 0, textParent = null;
+  while (stack.length) {
+    const { node, depth } = stack.pop();
+    if (++visited > 64 || depth > 8) return false;
+    if (node.nodeType === 8) continue;
+    if (node.nodeType === 3) {
+      const text = node.textContent || '';
+      if (text.length > 128) return false;
+      if (text.trim()) {
+        if (textParent || text !== 'This response couldn’t load' || !visible(node.parentElement)) return false;
+        textParent = node.parentElement;
+      }
+      continue;
+    }
+    if (node.nodeType !== 1 || node.tagName !== 'DIV' || !visible(node)
+      || node.getAttribute('role') !== null || node.getAttribute('tabindex') !== null
+      || node.getAttribute('contenteditable') !== null || node.classList.contains('markdown')
+      || node !== body && (node.getAttribute('data-markdown-text-style') !== null
+        || node.getAttribute('data-message-author-role') !== null || node.getAttribute('data-user-message-bubble') !== null)) return false;
+    const classes = [];
+    for (const name of node.classList) {
+      if (classes.length >= 16 || name.length > 64) return false;
+      classes.push(name);
+    }
+    const has = prefix => classes.some(name => name.startsWith(prefix) && /^[A-Za-z0-9_-]{1,48}$/.test(name.slice(prefix.length)));
+    if (classes.some(name => name.startsWith('DilRenderer-') || name.startsWith('DilResponseRoot-'))) {
+      if (!has('DilRenderer-') || !has('DilResponseRoot-') || pairs.dil.length) return false;
+      pairs.dil.push(node);
+    }
+    if (classes.some(name => name.startsWith('PortalBoundary-') || name.startsWith('Renderer-'))) {
+      if (!has('PortalBoundary-') || !has('Renderer-') || pairs.portal.length) return false;
+      pairs.portal.push(node);
+    }
+    const children = node.childNodes;
+    if (children.length > 32 || stack.length + children.length > 64) return false;
+    for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], depth: depth + 1 });
+  }
+  const dil = pairs.dil[0], portal = pairs.portal[0];
+  if (textParent) for (const _ of textParent.classList) return false;
+  return pairs.dil.length === 1 && pairs.portal.length === 1 && !!textParent
+    && dil.parentElement === portal && textParent.parentElement === dil
+    && textParent.childElementCount === 0
+    && dil.childElementCount === 1 && body.contains(portal) && portal.contains(dil);
+}
 function chatGPTResponseLoadFailed(visible) {
+  if (chatGPTInlineRendererLoadFailed(visible)) return true;
   // Abort-only website error evidence from this admitted read. A single small
   // direct widget can use plain text or nested labels, including in a dialog.
   // Never widen the search to main or another ancestor, accept an answer, or Retry.

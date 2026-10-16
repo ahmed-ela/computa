@@ -1,6 +1,38 @@
 # Embedded website provider qualification
 
-## Build133 candidate: acknowledge bound continuation dispatch before polling
+## Build134 candidate: reject the observed inline renderer error
+
+The installed133 browser task completed four verified normal Chat/GPT-6/Instant
+inferences and three successful browser tools without the earlier continuation
+timeout. Its final native message was literally “This response couldn’t load”.
+Finite response-structure logs place that single text leaf inside the website's
+DIL renderer/portal wrappers, with no code. The adapter accepted it as ordinary
+final prose. The underlying renderer failure is still unexplained.
+
+Build134 recognizes only that bounded, visible, passive component structure in
+the current assistant body and reports the existing website-response failure
+before accepting an answer. It neither clicks Retry nor sends another message.
+Unknown shapes remain unclassified. Quoted text, code, Markdown, ordinary prose,
+older responses, user/tool content, conflicting author markers, extra controls
+and oversized or hidden components are covered by negative tests.
+
+The original false completion and two author-boundary failures were reproduced
+before their fixes. The final three-adapter cohort passed **563 tests with
+15,818 assertions**, no failures or skips, and unchanged inputs. Eight focused
+methods passed with 229 assertions. The shared helper, other provider adapters,
+native transport and response codec are unchanged from installed133. Signed
+installation and controlled live qualification remain pending at this checkpoint.
+
+The installed133 task remains a failed task: it issued no `browser_close` and
+returned no useful final result. Host cleanup independently closed its one owned
+browser tab with no pending operation or failure; the human control tab remained.
+Its website session closed durably. The earlier132 unconfirmed website cleanup
+record is preserved separately. No Inspector grant or Google page load occurred.
+The next task uses the controlled local flight fixture; the public example.com
+read exposed no captured headings and is not a reproducible expected-heading
+fixture.
+
+## Historical installed build133: acknowledge bound continuation dispatch before polling
 
 Build132's fresh ChatGPT Instant browser task completed two verified inferences
 and two successful native tools. Its third message was sent once, then an extra
@@ -22,8 +54,11 @@ All **15 focused native methods passed**, including the reproduced third-Send
 failure, strict acknowledgment fields, cancellation without Send replay, route
 drift, delayed first-message binding, collapsed continuation expansion and exact
 repeated cleanup receipts. Sources stayed unchanged during the run. The earlier
-red regression and a test-only fixture failure are retained. Signed installation
-and fresh live qualification of build133 remain pending at this checkpoint.
+red regression and a test-only fixture failure are retained. Build133 from pushed
+commit `62dbf8a544305c0442df8617a19aefdb555e646a` was independently installed with
+all 55 bundle files, 51 resources and 2,145 frozen inputs matching. The engine
+stayed unchanged, the actual Gemini diagnostic compiler flag remained off, and
+the exact132 backup was preserved. Its fresh live result is recorded above.
 
 Build132's picker-opening correction separately passed **13 native methods and
 555 adapter tests**. It allows one bounded retry of an unacknowledged opening on
