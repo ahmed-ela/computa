@@ -2419,7 +2419,8 @@ private extension CodexAppServerRuntime {
         }
 
         private func prepareInferenceTurn(taskID: AgentTask.ID, threadID: String,
-                                                 modelID: String, isNewThread: Bool = false) async throws -> UUID? {
+                                                 modelID: String, isNewThread: Bool = false,
+                                                 isMaintenance: Bool = false) async throws -> UUID? {
             guard isRemoteInference(modelID) else {
                 inferencePreparations.removeValue(forKey: taskID)
                 return nil
@@ -2432,7 +2433,8 @@ private extension CodexAppServerRuntime {
                         preparationID: preparationID, isNewThread: isNewThread)
                 } else {
                     try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
-                        runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID)
+                        runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID,
+                        isMaintenance: isMaintenance)
                 }
                 return preparationID
             } catch {
@@ -2661,7 +2663,7 @@ private extension CodexAppServerRuntime {
                 }
             }
             do {
-                _ = try await prepareInferenceTurn(taskID: taskID, threadID: threadID, modelID: modelID)
+                _ = try await prepareInferenceTurn(taskID: taskID, threadID: threadID, modelID: modelID, isMaintenance: true)
                 try requireManagedCompaction(taskID: taskID, operationID: operationID, generation: generation)
                 let response = try await request(method: "thread/compact/start", params: ["threadId": threadID])
                 try requireResultObject(response)

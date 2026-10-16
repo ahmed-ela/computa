@@ -110,6 +110,7 @@ final class EmbeddedBrowserSession {
         var geminiDocumentCommitObserved = false
         var serverRedirectObservedInCurrentNavigation = false
         var inspectorDiagnostic: (id: UUID, binding: ChatGPTInspectorLease.Binding, expiry: Task<Void, Never>)?
+        var requestMetadataDiagnostic: RequestMetadataDiagnostic?
         var modelChanges: EmbeddedModelChangeChannel?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
@@ -391,6 +392,7 @@ final class EmbeddedBrowserSession {
 
     func closeTab(_ id: UUID) {
         guard let entry = entries.removeValue(forKey: id), let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        revokeRequestMetadata(entry)
         let postBlockObservation = entry.geminiPostBlockObservation
         entry.geminiPostBlockObservation = nil
         revokeModelInspector(entry, reason: isShutdown ? .shutdown : .closed)
@@ -495,6 +497,151 @@ final class EmbeddedBrowserSession {
         case navigation, origin, closed, shutdown, expired, nativeContext = "native_context", finished
     }
     private static let inspectorDiagnosticLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "ModelInspectorDiagnostic")
+
+    private final class RequestMetadataDiagnostic {
+        let authorization: ChatGPTRequestMetadataLease
+        let key: String
+        let script: WKUserScript
+        var generation: UUID?
+        var expiry: Task<Void, Never>?
+        init(authorization: ChatGPTRequestMetadataLease, key: String, script: WKUserScript) {
+            self.authorization = authorization; self.key = key; self.script = script
+        }
+    }
+
+    /// Only an explicitly armed native start takes this path. Ordinary model,
+    /// discovery, human and tool views receive no page-world fetch observer.
+    func createModelTab(url: URL, requestMetadata authorization: ChatGPTRequestMetadataLease) throws -> UUID {
+        let id = try createModelTab(initialURL: nil)
+        do {
+            // A missing/expired diagnostic cannot fail or replay the original
+            // inference. This is still its one newly created view/navigation.
+            if Self.inspectorOriginAllowed(url) { _ = installModelRequestMetadata(authorization, tabID: id) }
+            else { authorization.revoke() }
+            try navigate(tabID: id, to: url)
+            return id
+        } catch {
+            closeTab(id); authorization.revoke(); throw error
+        }
+    }
+
+    @discardableResult
+    func installModelRequestMetadata(_ authorization: ChatGPTRequestMetadataLease, tabID: UUID) -> Bool {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
+              entry.requestMetadataDiagnostic == nil, entry.view.url == nil, !entry.view.isLoading,
+              authorization.isCurrent, authorization.claim(view: ObjectIdentifier(entry.view)) else {
+            authorization.revoke(); return false
+        }
+        let key = "__computaRequestMetadata_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        let duration = authorization.remainingMilliseconds
+        guard duration > 0, let source = Self.requestMetadataSource(),
+              let config = try? JSONSerialization.data(withJSONObject: ["key": key, "durationMs": duration]),
+              let configText = String(data: config, encoding: .utf8) else { authorization.revoke(); return false }
+        let script = WKUserScript(source: source.replacingOccurrences(of: "__COMPUTA_REQUEST_METADATA_CONFIG__", with: configText),
+            injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        let diagnostic = RequestMetadataDiagnostic(authorization: authorization, key: key, script: script)
+        entry.requestMetadataDiagnostic = diagnostic
+        entry.view.configuration.userContentController.addUserScript(script)
+        diagnostic.expiry = Task { @MainActor [weak self, weak diagnostic] in
+            do { try await Task.sleep(for: .milliseconds(duration)) } catch { return }
+            guard let self, let diagnostic, let current = self.entries[tabID],
+                  current.requestMetadataDiagnostic === diagnostic else { return }
+            self.revokeRequestMetadata(current)
+        }
+        return true
+    }
+
+    func modelRequestMetadata(command: String, tabID: UUID, view: WKWebView, ownerToken: String) async -> ChatGPTRequestMetadataSnapshot? {
+        guard ["activate", "snapshot", "stop"].contains(command), !Task.isCancelled, !isShutdown,
+              let entry = entries[tabID], entry.view === view, entry.isModelOwned, !entry.isToolOwned,
+              entry.modelChanges?.ownerToken == ownerToken, entry.modelSignalOriginHost == "chatgpt.com",
+              Self.inspectorOriginAllowed(view.url), let expectedURL = view.url?.absoluteString,
+              let diagnostic = entry.requestMetadataDiagnostic,
+              diagnostic.authorization.isCurrent else { return nil }
+        let generation = entry.tab.documentGeneration
+        if command == "activate" {
+            guard diagnostic.generation == nil else { return nil }
+            diagnostic.generation = generation
+        } else { guard diagnostic.generation == generation else { return nil } }
+        let result = EmbeddedScriptResult()
+        let bytes: Data? = try? await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                result.install(continuation)
+                let timeout = Task {
+                    do { try await Task.sleep(for: .milliseconds(min(1_000, diagnostic.authorization.remainingMilliseconds))) }
+                    catch { return }
+                    result.complete(.failure(Failure.tabClosed))
+                }
+                result.setTimeout(timeout)
+                guard result.isPending, !Task.isCancelled else { return }
+                view.callAsyncJavaScript("""
+                    if (document.URL !== expectedURL || typeof window[key] !== 'function') return null;
+                    try {
+                      const text = JSON.stringify(window[key](command));
+                      return typeof text === 'string' && text.length <= 8192 ? text : null;
+                    } catch { return null; }
+                    """, arguments: ["key": diagnostic.key, "command": command, "expectedURL": expectedURL], in: nil, in: .page) { reply in
+                    switch reply {
+                    case .success(let value):
+                        if let text = value as? String, text.utf8.count <= 8_192 {
+                            let data = Data(text.utf8)
+                            result.complete(.success(data))
+                        } else { result.complete(.failure(Failure.tabClosed)) }
+                    case .failure: result.complete(.failure(Failure.tabClosed))
+                    }
+                }
+            }
+        } onCancel: { result.complete(.failure(CancellationError())) }
+        guard !Task.isCancelled, entries[tabID] === entry, entry.view === view,
+              entry.requestMetadataDiagnostic === diagnostic, diagnostic.authorization.isCurrent,
+              entry.tab.documentGeneration == generation, diagnostic.generation == generation,
+              entry.modelChanges?.ownerToken == ownerToken, Self.inspectorOriginAllowed(view.url),
+              view.url?.absoluteString == expectedURL,
+              let bytes, let snapshot = try? ChatGPTRequestMetadataSnapshot.parse(bytes) else { return nil }
+        if command == "stop" { removeRequestMetadata(entry, diagnostic: diagnostic) }
+        return snapshot
+    }
+
+    func revokeModelRequestMetadata(tabID: UUID, ownerToken: String) {
+        guard let entry = entries[tabID], entry.modelChanges?.ownerToken == ownerToken else { return }
+        revokeRequestMetadata(entry)
+    }
+
+    private func removeRequestMetadata(_ entry: Entry, diagnostic: RequestMetadataDiagnostic) {
+        guard entry.requestMetadataDiagnostic === diagnostic else { return }
+        entry.requestMetadataDiagnostic = nil
+        diagnostic.expiry?.cancel()
+        let controller = entry.view.configuration.userContentController
+        let surviving = controller.userScripts.filter { $0 !== diagnostic.script }
+        controller.removeAllUserScripts()
+        surviving.forEach(controller.addUserScript)
+    }
+
+    private func revokeRequestMetadata(_ entry: Entry) {
+        guard let diagnostic = entry.requestMetadataDiagnostic else { return }
+        removeRequestMetadata(entry, diagnostic: diagnostic)
+        diagnostic.authorization.revoke()
+        // Stop is best effort only. It returns no data, waits for nothing and
+        // cannot keep an inference or cleanup alive after the native deadline.
+        if let expectedURL = entry.view.url?.absoluteString {
+            entry.view.callAsyncJavaScript("if (document.URL === expectedURL && typeof window[key] === 'function') window[key]('stop'); return null;",
+                arguments: ["key": diagnostic.key, "expectedURL": expectedURL], in: nil, in: .page, completionHandler: nil)
+        }
+    }
+
+    private static func requestMetadataSource() -> String? {
+        #if SWIFT_PACKAGE
+        let bundles = [Bundle.module, Bundle.main]
+        #else
+        let bundles = [Bundle.main]
+        #endif
+        for bundle in bundles {
+            if let url = bundle.url(forResource: "chatgpt-request-metadata", withExtension: "js", subdirectory: "BrowserModels"),
+               let source = try? String(contentsOf: url, encoding: .utf8),
+               source.components(separatedBy: "__COMPUTA_REQUEST_METADATA_CONFIG__").count == 2 { return source }
+        }
+        return nil
+    }
 
     /// Native-only, one-use capability. Human inspector policy/flags stay unchanged.
     /// This toggles public WebKit inspection only; it does not open or capture it.
@@ -1028,6 +1175,7 @@ final class EmbeddedBrowserSession {
     }
 
     private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
+        if entry.requestMetadataDiagnostic?.generation != nil { revokeRequestMetadata(entry) }
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.recoverySettledGeneration = nil

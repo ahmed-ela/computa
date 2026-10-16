@@ -7,6 +7,11 @@ import Darwin
 /// Another website transport can replace the browser implementation without
 /// changing the desktop tools or local transcript.
 protocol WebModelTransport: Sendable {
+    func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data
+    func activateRequestMetadata(sessionToken: String) async -> Bool
+    func snapshotRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot?
+    func stopRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot?
+    func revokeRequestMetadata(sessionToken: String) async
     func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool
     func revokeInspectorDiagnostic(sessionToken: String) async
     func request(operation: String, params: Data) async throws -> Data
@@ -26,6 +31,14 @@ enum WebModelCleanupCause: String, Sendable {
 }
 
 extension WebModelTransport {
+    func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data {
+        authorization.revoke()
+        return try await request(operation: "webProviderStart", params: params)
+    }
+    func activateRequestMetadata(sessionToken: String) async -> Bool { false }
+    func snapshotRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot? { nil }
+    func stopRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot? { nil }
+    func revokeRequestMetadata(sessionToken: String) async {}
     func request(operation: String, params: Data,
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
         try await request(operation: operation, params: params)
@@ -118,6 +131,7 @@ actor WebModelServer {
         let transportGeneration: UUID
         let turnScoped: Bool
         let continuationPolicyEstablished: Bool
+        var requestMetadata: ChatGPTRequestMetadataLease?
         var submittedPromptFingerprint = ""
         var cumulativePromptUTF8Count = 0
         var usesBoundedTurn: Bool { turnScoped && provider == "chatgpt" }
@@ -153,12 +167,14 @@ actor WebModelServer {
         let turnID: String
         let runtimeGeneration: UUID
         let preparationID: UUID
+        let isMaintenance: Bool
     }
 
     private struct PreparedInferenceContext: Equatable, Sendable {
         let threadID: String
         let runtimeGeneration: UUID
         let preparationID: UUID
+        let isMaintenance: Bool
     }
 
     private struct ContextWaiter {
@@ -255,7 +271,8 @@ actor WebModelServer {
 
     /// Core calls this before turn/start, removing any preceding turn's
     /// identity before the native engine can open its first HTTP inference.
-    func prepareInferenceTurn(taskID: String, threadID: String, runtimeGeneration: UUID, preparationID: UUID) throws {
+    func prepareInferenceTurn(taskID: String, threadID: String, runtimeGeneration: UUID, preparationID: UUID,
+                              isMaintenance: Bool = false) throws {
         let task = try Self.canonicalID(taskID)
         let thread = try Self.canonicalID(threadID)
         guard !shuttingDown, active[task] == nil, cleanupTasks[task] == nil,
@@ -265,7 +282,7 @@ actor WebModelServer {
         guard cleanupReceiptStore != nil, evidenceDirectory != nil else { throw Failure.persistenceRequired }
         guard runtimeGeneration == cleanupRuntimeGeneration else { throw Failure.inferenceContextRequired }
         preparedInferenceContexts[task] = PreparedInferenceContext(threadID: thread,
-            runtimeGeneration: runtimeGeneration, preparationID: preparationID)
+            runtimeGeneration: runtimeGeneration, preparationID: preparationID, isMaintenance: isMaintenance)
         inspectorAuthorizations.removeValue(forKey: task)?.revoke()
         inferenceContexts.removeValue(forKey: task)
         if usedSessionTokens[task] == nil { usedSessionTokens[task] = [] }
@@ -280,13 +297,15 @@ actor WebModelServer {
     func registerInferenceTurn(taskID: String, threadID: String, turnID: String, runtimeGeneration: UUID, preparationID: UUID) throws {
         let task = try Self.canonicalID(taskID)
         let context = InferenceContext(threadID: try Self.canonicalID(threadID),
-            turnID: try Self.canonicalID(turnID), runtimeGeneration: runtimeGeneration, preparationID: preparationID)
+            turnID: try Self.canonicalID(turnID), runtimeGeneration: runtimeGeneration, preparationID: preparationID,
+            isMaintenance: preparedInferenceContexts[task]?.isMaintenance ?? false)
         if inferenceContexts[task] == context { return }
         guard !shuttingDown, !retiringTaskIDs.contains(task),
               sessions[task] == nil, pendingClosedTransactions[task] == nil,
               inferenceContexts[task] == nil,
               preparedInferenceContexts[task] == PreparedInferenceContext(threadID: context.threadID,
-                  runtimeGeneration: runtimeGeneration, preparationID: preparationID) else { throw Failure.inferenceContextRequired }
+                  runtimeGeneration: runtimeGeneration, preparationID: preparationID,
+                  isMaintenance: context.isMaintenance) else { throw Failure.inferenceContextRequired }
         inferenceContexts[task] = context
         cleanupTurns[task] = context.turnID
         if let waiter = contextWaiters.removeValue(forKey: task) { waiter.continuation.resume(returning: context) }
@@ -645,6 +664,8 @@ actor WebModelServer {
     private func performCleanup(taskID: String, session: Session, cancel: Bool, runtimeGeneration: UUID,
                                 trigger: WebsiteSessionCleanupReceipt.Trigger,
                                 cleanupCause: WebModelCleanupCause) async -> CleanupResult {
+        session.requestMetadata?.revoke()
+        if session.requestMetadata != nil { await session.transport.revokeRequestMetadata(sessionToken: session.token) }
         if let authorization = inspectorAuthorizations.removeValue(forKey: taskID) {
             authorization.revoke()
             await session.transport.revokeInspectorDiagnostic(sessionToken: session.token)
@@ -759,6 +780,7 @@ actor WebModelServer {
         let inferenceID = UUID()
         let submissionFailureSink = ChatSubmissionFailureDiagnosticSink()
         var lease = sessions[taskID]
+        var requestMetadata = lease?.requestMetadata
         // Claim this handoff before any suspension. A duplicate request cannot
         // reuse a claim, including after validation, Send or persistence fails.
         let yielded = yieldedTurns.removeValue(forKey: taskID)
@@ -840,7 +862,22 @@ actor WebModelServer {
                     provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested", route: route)
                 unresolvedStartAttempts[taskID] = UnresolvedStartAttempt(inferenceID: inferenceID, context: context,
                     provider: provider, modelID: request.model, route: route)
-                let reply = try await call(transport, operation: "webProviderStart", params: params)
+                if provider == "chatgpt", route == .embedded, !context.isMaintenance,
+                   let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
+                   let turn = UUID(uuidString: context.turnID),
+                   let directory = rejectedReplyDirectory?.deletingLastPathComponent()
+                    .appendingPathComponent("WebsiteRequestMetadataDiagnostics-v1") {
+                    requestMetadata = ChatGPTRequestMetadataLease.consume(directory: directory,
+                        taskID: task, threadID: thread, turnID: turn, preparationID: context.preparationID,
+                        isMaintenance: context.isMaintenance)
+                }
+                let reply: [String: Any]
+                if let requestMetadata {
+                    let data = try await transport.startWithRequestMetadata(
+                        params: JSONSerialization.data(withJSONObject: params), authorization: requestMetadata)
+                    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.invalidRequest }
+                    reply = object
+                } else { reply = try await call(transport, operation: "webProviderStart", params: params) }
                 guard let rawToken = reply["sessionToken"] as? String, let token = UUID(uuidString: rawToken) else {
                     throw Self.snapshotFailure(reply)
                 }
@@ -852,6 +889,7 @@ actor WebModelServer {
                     context: context, transportGeneration: transportGeneration, turnScoped: turnScoped,
                     continuationPolicyEstablished: provider != "chatgpt" || route != .embedded || advertised == nil
                         || advertised as? String == "per_submission_ownership_v1")
+                session.requestMetadata = requestMetadata
                 // Capture ownership before cancellation or validation can fail.
                 sessions[taskID] = session
                 closedTurns.removeValue(forKey: taskID)
@@ -888,6 +926,15 @@ actor WebModelServer {
                 guard ready else { throw Failure.preparationDeadline }
             }
             try requireCurrentContext()
+            if let requestMetadata, session.sequence == 1 {
+                if let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
+                      let turn = UUID(uuidString: context.turnID),
+                      requestMetadata.matches(taskID: task, threadID: thread, turnID: turn,
+                        preparationID: context.preparationID) {
+                    _ = await session.transport.activateRequestMetadata(sessionToken: session.token)
+                } else { requestMetadata.revoke() }
+                try requireCurrentContext()
+            }
             // No wire/model-tool grant. A same-UID manual arm scopes one current
             // native turn; it is not authentication of the person who wrote it.
             if provider == "chatgpt", route == .embedded, inspectorAuthorizations[taskID] == nil,
@@ -978,6 +1025,23 @@ actor WebModelServer {
                         ? WebModelResponseCodec.streamData(for: reply, request: request, responseID: responseID, websiteModelEvidence: evidence)
                         : WebModelResponseCodec.completedResponse(for: reply, request: request, responseID: responseID, websiteModelEvidence: evidence)
                     let continuation: WebsiteTurnContinuation? = try session.turnScoped ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
+                    if let requestMetadata {
+                        let retain = (continuation?.pendingToolCallCount ?? 0) > 0
+                        let diagnostic = retain
+                            ? await session.transport.snapshotRequestMetadata(sessionToken: session.token)
+                            : await session.transport.stopRequestMetadata(sessionToken: session.token)
+                        try requireCurrentContext()
+                        if let diagnostic, let token = UUID(uuidString: session.token), requestMetadata.isCurrent {
+                            _ = requestMetadata.persist(diagnostic, inferenceID: inferenceID, sessionToken: token)
+                        }
+                        if !retain {
+                            requestMetadata.revoke()
+                            await session.transport.revokeRequestMetadata(sessionToken: session.token)
+                            session.requestMetadata = nil
+                            sessions[taskID] = session
+                            lease = session
+                        }
+                    }
                     if let continuation, continuation.pendingToolCallCount > 0 {
                         try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
                             session: session, phase: "yield_verified")
@@ -1014,6 +1078,17 @@ actor WebModelServer {
             }
             throw Failure.deadline
         } catch {
+            if let requestMetadata {
+                if !Task.isCancelled, (try? requireCurrentContext()) != nil, let lease, lease.context == context {
+                    let diagnostic = await lease.transport.stopRequestMetadata(sessionToken: lease.token)
+                    if (try? requireCurrentContext()) != nil, let diagnostic, let token = UUID(uuidString: lease.token),
+                       requestMetadata.isCurrent {
+                        _ = requestMetadata.persist(diagnostic, inferenceID: inferenceID, sessionToken: token)
+                    }
+                }
+                requestMetadata.revoke()
+                if let lease { await lease.transport.revokeRequestMetadata(sessionToken: lease.token) }
+            }
             let submissionDiagnostic: ChatSubmissionFailureDiagnostic?
             if provider == "chatgpt", route == .embedded,
                (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(.javaScriptSubmission),

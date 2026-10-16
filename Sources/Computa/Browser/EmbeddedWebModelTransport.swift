@@ -605,6 +605,54 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
     }
 
+    func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data {
+        guard let values = try JSONSerialization.jsonObject(with: params) as? [String: String],
+              values["provider"] == "chatgpt" else { authorization.revoke(); throw Failure.invalidRequest }
+        return try start(values, requestMetadata: authorization)
+    }
+
+    func activateRequestMetadata(sessionToken: String) async -> Bool {
+        guard let session = sessions[sessionToken], session.provider == .chatgpt, !session.isDiscovery,
+              !session.isRecoveryProbe, session.state == "ready", !session.submitted,
+              session.temporary, session.modelSelectionVerified, session.modelEvidence != nil else { return false }
+        let snapshot = await browser.modelRequestMetadata(command: "activate", tabID: session.tabID,
+            view: session.view, ownerToken: session.token)
+        return snapshot?.active == true && snapshot?.expired == false
+    }
+
+    func stopRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot? {
+        guard let session = sessions[sessionToken], session.provider == .chatgpt else { return nil }
+        return await browser.modelRequestMetadata(command: "stop", tabID: session.tabID,
+            view: session.view, ownerToken: session.token)
+    }
+
+    func snapshotRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot? {
+        guard let session = sessions[sessionToken], session.provider == .chatgpt else { return nil }
+        return await browser.modelRequestMetadata(command: "snapshot", tabID: session.tabID,
+            view: session.view, ownerToken: session.token)
+    }
+
+    func revokeRequestMetadata(sessionToken: String) async {
+        guard let session = sessions[sessionToken] else { return }
+        browser.revokeModelRequestMetadata(tabID: session.tabID, ownerToken: session.token)
+    }
+
+    private func start(_ values: [String: String], requestMetadata: ChatGPTRequestMetadataLease? = nil) throws -> Data {
+        try Task.checkCancellation()
+        guard Set(values.keys) == ["provider"] || Set(values.keys) == ["provider", "modelChoice"] else { throw Failure.invalidRequest }
+        guard let raw = values["provider"], let provider = Provider(rawValue: raw) else { throw Failure.unsupportedProvider }
+        let choice: WebsiteModelChoice?
+        if let encoded = values["modelChoice"] {
+            guard let parsed = WebsiteModelChoice.parse(encoded), parsed.provider == raw,
+                  parsed.isSelectable else { throw Failure.invalidRequest }
+            choice = parsed
+        } else { choice = nil }
+        guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
+        let session = try createSession(provider: provider, choice: choice, isDiscovery: false,
+            requestMetadata: requestMetadata)
+        return try snapshot(session)
+    }
+
     func request(operation: String, params: Data) async throws -> Data {
         try await request(operation: operation, params: params, onChatSubmissionFailure: nil)
     }
@@ -615,18 +663,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             throw Failure.invalidRequest
         }
         if operation == "webProviderStart" {
-            try Task.checkCancellation()
-            guard Set(values.keys) == ["provider"] || Set(values.keys) == ["provider", "modelChoice"] else { throw Failure.invalidRequest }
-            guard let raw = values["provider"], let provider = Provider(rawValue: raw) else { throw Failure.unsupportedProvider }
-            let choice: WebsiteModelChoice?
-            if let encoded = values["modelChoice"] {
-                guard let parsed = WebsiteModelChoice.parse(encoded), parsed.provider == raw,
-                      parsed.isSelectable else { throw Failure.invalidRequest }
-                choice = parsed
-            } else { choice = nil }
-            guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
-            let session = try createSession(provider: provider, choice: choice, isDiscovery: false)
-            return try snapshot(session)
+            return try start(values)
         }
         let expectedKeys: Set<String> = operation == "webProviderSend" ? ["sessionToken", "prompt"] : ["sessionToken"]
         let cancellationKeys: Set<String> = ["sessionToken", "cleanupCause"]
@@ -809,13 +846,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func createSession(provider: Provider, choice: WebsiteModelChoice?, isDiscovery: Bool,
-                               isRecoveryProbe: Bool = false) throws -> Session {
+                               isRecoveryProbe: Bool = false, requestMetadata: ChatGPTRequestMetadataLease? = nil) throws -> Session {
         synchronizeProviderGate(provider)
         if !isRecoveryProbe, let gate = providerGates[provider] { throw gate.failure }
         let admitted = sessions.values.filter { $0.isDiscovery == isDiscovery }.count
         guard admitted < (isDiscovery ? 1 : 4) else { throw Failure.capacity }
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
-        let id = try createTab(provider.startURL)
+        let id: UUID
+        if let requestMetadata, provider == .chatgpt, !isDiscovery, !isRecoveryProbe {
+            id = try browser.createModelTab(url: provider.startURL, requestMetadata: requestMetadata)
+        } else { id = try createTab(provider.startURL) }
         guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else { throw Failure.staleSession }
         let session = Session(provider: provider, tabID: id, view: view, documentGeneration: generation,
                               modelChoice: choice, isDiscovery: isDiscovery, isRecoveryProbe: isRecoveryProbe)
@@ -3817,7 +3857,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
 /// WebKit can finish after timeout/cancellation. Only serialized bytes cross tasks,
 /// and a late callback never resumes a continuation twice or replays an action.
-private final class EmbeddedScriptResult: @unchecked Sendable {
+final class EmbeddedScriptResult: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Data, Error>?
     private var completed: Result<Data, Error>?

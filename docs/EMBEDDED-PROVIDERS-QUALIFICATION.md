@@ -1,5 +1,32 @@
 # Embedded website provider qualification
 
+## Candidate128: scoped request metadata
+
+An explicit private `request_metadata_v1` arm enables a document-start observer
+on one new private ChatGPT view. It records up to eight finite request rows:
+endpoint/origin classes, body type, bounded constructed-string byte count,
+selected option enums, header-settlement status/timing and rejection category.
+Request URLs, headers, cookies, content, response bodies and error messages are
+omitted. String byte counts describe JavaScript input, rather than wire size;
+header settlement leaves response-stream completion unknown.
+
+The native scope excludes maintenance compaction, survives tool continuations,
+and checks the actual task/thread/turn, preparation, view, owner and document.
+Unarmed views receive no observer. Navigation, expiry and cleanup revoke the
+capture. Fetch forwards its original arguments once and returns the original
+promise and response; its changed identity, rejection bookkeeping and possible
+Proxy observation effects make this an instrumented, untrusted page-world
+diagnostic. The original website result, error and response deadline remain.
+
+Eight JavaScript cases and 15 new native methods passed. The 333 affected
+existing cases passed across the main run and a separate 18-case compaction
+run: those 18 initially skipped because the interpreter resolver rejected the
+installed Bun alias, then passed with an existing fixture binary verified
+byte-identical to installed Bun. A strengthened in-memory WebKit case also
+verified actual header status and an unconsumed response body. Independent
+JavaScript and native reviews were clear. Signed packaging and installed
+capture remain pending; website failures remain unresolved.
+
 ## Current installed build127
 
 Computa **0.7.0 (127)**, compiled from pushed commit
