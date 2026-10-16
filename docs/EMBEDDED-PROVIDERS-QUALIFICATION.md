@@ -1,9 +1,19 @@
 # Embedded website provider qualification
 
-## Build142: opt-in observation before website presentation
+## Installed142: decoded observation captured, completion remains unqualified
 
-The next diagnostic targets the current website's existing decoded-message
-method before rendering. Only an explicit `request_and_decoded_metadata_v2`
+Signed 0.7.0 (142), code source `43d0a5d001de362b49bb1fc228e354573c4c5644`,
+passed independent build and installed verification: all 55 bundle files and
+51 resources matched, with the Gemini diagnostic compiler flag off. All 23
+focused JavaScript tests passed with 258 assertions, and all 31 selected native
+methods passed with unchanged inputs and no failures. The native cohort includes
+a real local WebKit ESM fixture using the production observer, with only the
+runtime import URL replaced by a local data module. It verifies activation,
+unchanged return and receiver, finite projection and exact restoration without
+a provider request.
+
+The diagnostic targets the current website's existing decoded-message method
+before rendering. Only an explicit `request_and_decoded_metadata_v2`
 one-use arm enables it; ordinary sessions and the earlier request-only purpose
 retain their behavior. Activation checks a fixed public runtime's already
 initialized module cache, exact export getter and method descriptor/source.
@@ -25,13 +35,57 @@ Send. Stop restores the exact method descriptor only while it remains ours;
 late imports cannot reinstall after cancellation or expiry. No Inspector or
 Safari setting is required for this diagnostic.
 
-All 23 focused JavaScript tests and 31 selected native methods passed with
-unchanged inputs and no failures. The native cohort includes a real local WebKit
-ESM fixture using the production observer, with only the runtime import URL
-replaced by a local data module. It verifies activation, unchanged return and
-receiver, finite projection and exact restoration without a provider request.
-Signed build/install verification and the live142 diagnostic remain pending.
-The installed141 failures below are unchanged.
+The first installed142 history-bearing attempt instead reached the cold-resume
+context-maintenance watchdog at 180 seconds and was interrupted before v2
+activation. After restart, its actual task ID was the restored thread ID,
+`01a14512-2225-7392-b41c-f06ddfe400e0`; inspecting the former local task namespace
+had incorrectly suggested that no inference start was recorded. Its journal
+records `start_requested`, `started` and `cancelled`, followed by a saved cleanup
+receipt with outcome `closed` and reason `not_created`. A transport start is not
+proof of website prompt submission. Maintenance was ineligible for the v2 arm,
+which also named the old task ID; the unused arm was removed. No decoded capture
+or qualification resulted. Safari developer features were verified off and the
+Inspector was closed.
+
+Two subsequent, distinct no-tool marker diagnostics ran in a fresh chat without
+a rebuild or process change. The unarmed setup turn timed out after 305.032
+seconds; a finite observation found 20 selected-body bytes and no recognized
+scoped Copy control. The armed second turn also failed `provider_timeout`, after
+323.527 seconds of native turn time. Its selected-body observations contained
+53 and 46 bytes, but no recognized scoped Copy or completed answer. Both turns
+dispatched zero native tools, produced no native final answer and saved closed
+website cleanup receipts. The two Send actions were distinct diagnostics, not
+prompt replays; the cleanup reason `not_created` does not mean no Send occurred.
+
+The exact task/thread/turn-bound second inference sidecar positively captured
+the existing decoded-message method before presentation: 21 completion calls,
+three program observations and zero recovered-null observations. Its latest
+message-carried program had 511 code characters, matched the document's
+conversation, reported `finished_successfully` and a nonempty Markdown fallback,
+and did not match the known null program. Recovery was `unknown`. The method was
+restored with the diagnostic inactive and not expired. These finite, untrusted
+observations lack unique request/message binding; neither exact fallback text
+nor raw-wire provenance was retained. They grant no response authority or final
+selected-model proof, and neither task qualified.
+
+An optional remote Inspector attempt briefly enabled Safari developer features,
+but both target selections failed `AXError.invalidUIElement`. No Inspector
+attachment, Console execution or additional DOM completion facts were verified.
+Developer features were verified restored off; both diagnostic arms were
+consumed and absent at closeout. This capture differs from the earlier null DIL
+observation and does not erase it. Server-wire content, website transformation
+and WebKit/native-host causation remain unproven. The installed141 failures below
+remain unchanged.
+
+A separate visible temporary ChatGPT Chat conversation, with GPT-6 and Instant
+selected, returned its exact synthetic marker. Its answer action was still
+labelled `Copy`; the accessibility tree placed that action beside the assistant
+container. Accessibility can flatten DOM wrappers, so this does not establish
+the physical DOM relationship or qualify the harness. Inspector attached to
+that exact conversation through the target chooser, but its Console did not
+execute the constant input. The Inspector, chooser and disposable tab were
+closed, Safari developer features were verified off, and the blank control tab
+remained. No completion selector was changed on this evidence alone.
 
 ## Installed141: fenced response framing did not restore browser tasks
 
