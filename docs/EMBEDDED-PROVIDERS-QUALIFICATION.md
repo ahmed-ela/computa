@@ -1,5 +1,41 @@
 # Embedded website provider qualification
 
+## Installed139: partial repair, qualification remains open
+
+Signed 0.7.0 (139), code source `26f2ce20708a01890306408bcce932b8fe3e4e5a`,
+passed independent build and installed verification: all 55 bundle files and
+51 resources matched, actual main-target compiler commands kept the Gemini
+diagnostic off, and the exact138 backup was preserved.
+
+One fresh normal ChatGPT Instant health request returned its exact marker and
+closed its website session in 16.387 seconds. The subsequent fresh browser task
+passed first-message ownership and route promotion, but timed out after five
+minutes with zero tools and confirmed website closure. Ordinary inspection
+reported one empty assistant and a Copy footer; the stricter failure diagnostic
+found no scoped Copy. The ordinary ancestor search can cross a user-containing
+ancestor, so its completion claim is not sufficient evidence of a completed
+empty website answer. Selected-wrapper mismatch versus genuinely empty rendered
+output remains unresolved. A separately armed Inspector attempt on a new turn
+of the health chat failed `submission_message` ownership before attachment;
+it ran zero tools and cleanup remained unconfirmed. Safari's developer features
+were verified restored off; the arm was consumed. Neither attempt is a pass.
+
+Cerebras GPT-OSS repeated all four synthetic tasks. Round-one browser and
+code/terminal/browser tasks passed their unchanged strict checks in 4.645 and
+6.768 seconds. Round two returned the correct browser result but omitted an
+explicit `browser_close`; its code task recovered from a relative patch path
+resolved against the task workspace, then completed the correct absolute patch,
+tests, browser result and explicit close in 10.095 seconds. Both round-two strict
+receipts remain failed. Both actual code edits passed four independently rerun
+original tests, with the unrelated note and tests preserved; exact reference
+source-byte equality was not required. Per-case API accounting found zero
+correction tickets or second claims in a stable nine-record namespace. That
+does not erase tool/model mistakes or establish complete billable usage.
+
+Gemini remains verification-blocked after the separate138 browser pass described
+below. No further Gemini prompt or CAPTCHA action ran. The PR remains draft;
+repeated clean qualification across the three selected models is incomplete.
+
 ## October 16: installed138 results and the next continuation repair
 
 Signed build138 matched all 55 installed bundle files and its independent source,
@@ -10,11 +46,14 @@ header was 7,808 bytes; this is not a wire measurement. The 53,853-byte outbound
 request failed first-message ownership before any tool call. Cookie isolation
 alone therefore does not establish a repaired request path.
 
-Finite native diagnostics found the exact expanded first body and unique marker.
-The expansion completed on a local conversation route, then the first awaited
-digest crossed the website's local-to-server route promotion. The continuation
-accepted only expansions interrupted by that transition, so it rejected this
-already-completed expansion. The engine's generic high-demand text was not proof
+Finite native diagnostics found the exact expanded first body and unique marker,
+followed by an expansion-continuation rejection after a local-to-server route
+promotion. The candidate's earlier outcome was not retained before that rejection.
+A real WebKit regression separately reproduced a concrete gap: an expansion that
+already completed can cross that same certified route during its awaited digest,
+while the continuation accepted only expansions interrupted by the transition.
+That reproducer identifies a repairable defect without uniquely proving the
+historical candidate's earlier state. The engine's generic high-demand text was not proof
 of a website capacity error. Automatic cleanup and one cleanup-only retry remained
 unconfirmed; the prompt was not replayed.
 
