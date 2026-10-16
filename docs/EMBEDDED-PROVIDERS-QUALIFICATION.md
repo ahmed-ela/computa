@@ -1,5 +1,58 @@
 # Embedded website provider qualification
 
+## October 16: installed138 results and the next continuation repair
+
+Signed build138 matched all 55 installed bundle files and its independent source,
+signature and compiler checks. A single fresh ChatGPT Instant health request
+verified its isolated store, seeded 23 authentication/policy cookies and excluded
+308 conversation cookies from a 396-cookie source. Its estimated eligible cookie
+header was 7,808 bytes; this is not a wire measurement. The 53,853-byte outbound
+request failed first-message ownership before any tool call. Cookie isolation
+alone therefore does not establish a repaired request path.
+
+Finite native diagnostics found the exact expanded first body and unique marker.
+The expansion completed on a local conversation route, then the first awaited
+digest crossed the website's local-to-server route promotion. The continuation
+accepted only expansions interrupted by that transition, so it rejected this
+already-completed expansion. The engine's generic high-demand text was not proof
+of a website capacity error. Automatic cleanup and one cleanup-only retry remained
+unconfirmed; the prompt was not replayed.
+
+The next adapter repair admits only this completed, exact physical body through
+the existing native-certified route chain. It retains the document, owner,
+temporary/product state, original deadline, one expansion click and model choice.
+It then requires ordinary hashing and fresh selected-model proof. It grants no
+Send, replay or cleanup authority. Altered routes, bodies, contexts and prior
+proofs remain rejected. Installed qualification is still required.
+
+The candidate passed 577 three-provider adapter tests (16,419 assertions) and
+nine real WebKit continuation/route/deadline/cleanup methods with no failures or
+skips. The completed-expansion regression first failed against the exact138
+adapter after its physical-body checkpoint passed. Eighteen altered-context
+variants remain rejected. A broader script invocation separately encountered an
+unchanged persistent-instructions integration helper failure before runtime
+execution; it is preserved and is not counted as passing. Eight native instruction,
+schema and browser-literal methods also passed. These checks establish guards
+and wiring, not website availability or model adherence.
+
+The first build138 Cerebras GPT-OSS browser task dispatched seven successful tool
+calls, but the model supplied `1443` instead of the requested `UA 1443`. The page
+truthfully returned no match and the model closed its tab. The strict task failed;
+the transport did not corrupt the argument. Existing literal-preservation policy
+was already present. Stronger generic complete-identifier and pre-submit field
+comparison guidance is a mitigation requiring a new live check. Exact-turn API
+accounting found zero correction tickets or second claims; that does not qualify
+the task or establish complete billable usage.
+
+Build138 Gemini 3.8 Flash passed its browser task in 53 seconds with seven verified
+website inferences, the exact result and receipt, explicit model-issued task-tab
+closure, and confirmed website-session cleanup. Its next code task was blocked
+before any prompt or tool dispatch. An ordinary human navigation then displayed
+Google's current unusual-traffic CAPTCHA. This was a fresh external challenge,
+not a stale local gate; permanent prevention remains unproven. Automated Gemini
+trials stopped. The finite fixture server was stopped and its listener verified
+absent; all fixture source files remain unchanged. Original failures are retained.
+
 ## Build138 candidate: isolate ChatGPT conversation cookies
 
 Two separate fresh136 first-message diagnostics timed out after five minutes,
@@ -40,7 +93,7 @@ guard and copied updated adapter. The final scope includes 20 cookie-factory,
 56 browser, 19 metadata, two startup and 22 transport-boundary methods, with no
 failures or skips. Meaningful cookie-isolation, deadline, capacity and metadata
 classifier REDs are preserved. Main-target registration covers 104 Swift files.
-Installed task qualification of138 remains pending.
+The installed results above supersede the earlier pending qualification state.
 
 ## Historical build137: fresh physical ChatGPT pages
 

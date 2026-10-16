@@ -320,8 +320,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("compare with the task; never guess variants or a homepage"))
             XCTAssertTrue(text.contains("At most one input action per tool-call batch"))
             XCTAssertTrue(text.contains("Never batch fill and click"))
-            XCTAssertTrue(text.contains("Copy field values and identifiers verbatim"))
-            XCTAssertTrue(text.contains("transform only when the task requires it"))
+            XCTAssertTrue(text.contains("Preserve complete requested identifiers"))
+            XCTAssertTrue(text.contains("Compare observed values before submit"))
+            XCTAssertTrue(text.contains("transform only as requested"))
             XCTAssertTrue(text.contains("browser_close and verify released=true and existing_user_tab_preserved=true"))
             XCTAssertTrue(text.contains("Automatic cleanup is not proof that your requested close occurred"))
         }

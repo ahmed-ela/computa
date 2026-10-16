@@ -985,6 +985,110 @@ describe('ChatGPT per-round canonical submission ownership', () => {
   });
 });
 
+describe('ChatGPT completed expansion route continuation', () => {
+  const choice = { key: 'chat/latest/medium', label: 'Medium' };
+  const localURL = 'https://chatgpt.com/c/local-chatgpt%3Acompleted-expansion?temporary-chat=true';
+  const publicURL = 'https://chatgpt.com/c/public-completed-expansion?temporary-chat=true';
+  const edge = { fromURL: localURL, toURL: publicURL };
+
+  // The first read completes its sole local display expansion, then the site
+  // promotes the route while the first-message hash is awaiting. Native must
+  // discard that read and certify the local-to-public edge before reinspection.
+  const crossedRead = async () => {
+    const prompt = 'Owned completed expansion line.\n'.repeat(600);
+    const f = fixture({ userPrompt: prompt });
+    const picker = installObservedModelPicker(f, 'chatgpt', Element);
+    expect((await f.inspect({ allowFirstUserBinding: false })).error).toBeDefined();
+    const outbound = prompt + '\n\n' + markerLine;
+    f.world.__computaModelLastSubmissionCount = 0;
+    f.document.URL = localURL; f.location.pathname = '/c/local-chatgpt%3Acompleted-expansion';
+    f.userBody!.text = outbound.slice(0, 10_240);
+    const more = new Element('BUTTON', { 'aria-label': 'Show more' });
+    const send = new Element('BUTTON', { 'aria-label': 'Send' });
+    f.userBody!.parentElement!.append(more); f.body.append(send);
+    more.onClick = () => { f.userBody!.text = outbound; more.connected = false; };
+    let expandedAtCrossing: unknown;
+    f.onDigest(() => {
+      expandedAtCrossing = (f.world.__computaModelFirstExpansion as any)?.outcome;
+      f.document.URL = publicURL; f.location.pathname = '/c/public-completed-expansion';
+    }, outbound);
+    const crossed = await f.inspect({ allowFirstUserExpansion: true,
+      firstUserExpansionModelChoice: choice, expectedModelChoice: choice }, false);
+    expect(crossed).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+    expect(expandedAtCrossing).toBe('expanded');
+    expect(f.world.__computaModelFirstProof).toBeUndefined();
+    const candidate: any = f.world.__computaModelFirstExpansion;
+    expect(candidate).toMatchObject({ clicked: true, outcome: 'expanded', routeURL: localURL, expandedText: outbound });
+    const deadline = candidate.deadline;
+    const resume = (overrides: Record<string, unknown> = {}) => f.inspect({ allowFirstUserExpansion: true,
+      firstUserExpansionModelChoice: choice, expectedModelChoice: choice,
+      firstUserExpansionRouteContinuation: [edge], ...overrides }, false);
+    return { f, picker, candidate, more, send, deadline, resume };
+  };
+
+  test('a native-certified local-to-public edge preserves a completed exact expansion without another click', async () => {
+    const x = await crossedRead(), reads = x.picker.trigger.clicks;
+    const result = await x.resume();
+    expect(result.error).toBeUndefined();
+    expect(result.firstUserVerified).toBe(true); expect(result.firstUserMarkerVerified).toBe(true);
+    expect(result.modelEvidence.selected).toEqual(choice);
+    expect(x.picker.trigger.clicks).toBeGreaterThan(reads);
+    expect(x.candidate).toMatchObject({ outcome: 'expanded', routeURL: publicURL, deadline: x.deadline });
+    expect(x.more.clicks).toBe(1); expect(x.send.clicks).toBe(0); expect(x.f.composer.events).toHaveLength(0);
+  });
+
+  test('only the unconsumed native edge is used and completed display work gets no new deadline', async () => {
+    const x = await crossedRead();
+    x.f.advanceTime(2_000);
+    const result = await x.resume({ firstUserExpansionRouteContinuation: [
+      { fromURL: 'https://chatgpt.com/?temporary-chat=true', toURL: localURL }, edge,
+    ] });
+    expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true);
+    expect(result.modelEvidence.selected).toEqual(choice);
+    expect(x.candidate.deadline).toBe(x.deadline); expect(x.more.clicks).toBe(1); expect(x.send.clicks).toBe(0);
+  });
+
+  test('completed display work cannot repair altered route, document, owner, body, model, or previous proof', async () => {
+    for (const mutation of ['wrong_from', 'wrong_to', 'second_navigation', 'document', 'owner', 'body', 'body_node',
+      'marker', 'native_fingerprint', 'private_fingerprint', 'model', 'model_choice', 'temporary', 'work',
+      'failed_expansion', 'failed_context', 'failed_text', 'cleanup']) {
+      const x = await crossedRead(), overrides: Record<string, unknown> = {};
+      if (mutation === 'wrong_from') overrides.firstUserExpansionRouteContinuation = [{ ...edge, fromURL: 'https://chatgpt.com/c/foreign' }];
+      if (mutation === 'wrong_to') overrides.firstUserExpansionRouteContinuation = [{ ...edge, toURL: 'https://chatgpt.com/c/foreign' }];
+      if (mutation === 'second_navigation') {
+        x.f.document.URL = 'https://chatgpt.com/c/second-public?temporary-chat=true';
+        x.f.location.pathname = '/c/second-public';
+      }
+      if (mutation === 'document') x.candidate.document = {};
+      if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign-owner';
+      if (mutation === 'body') x.f.userBody!.text = x.f.userBody!.text.replace('Owned', 'Other');
+      if (mutation === 'body_node') {
+        const body = x.f.userBody!, parent = body.parentElement!;
+        const replacement = new Element('DIV', { class: 'whitespace-pre-wrap' }, body.text);
+        replacement.parentElement = parent; parent.children[parent.children.indexOf(body)] = replacement; body.connected = false;
+      }
+      if (mutation === 'marker') overrides.expectedFirstUserMarker = '11111111-1111-4111-8111-111111111111';
+      if (mutation === 'native_fingerprint') overrides.expectedFirstUserFingerprint = 'a'.repeat(64);
+      if (mutation === 'private_fingerprint') x.f.world.__computaModelFirstProof = { marker: firstMarker, fingerprint: 'a'.repeat(64) };
+      if (mutation === 'model') x.picker.selected('High');
+      if (mutation === 'model_choice') overrides.firstUserExpansionModelChoice = { key: 'chat/latest/high', label: 'High' };
+      if (mutation === 'temporary') x.f.temporary.values['aria-label'] = 'Temporary chat';
+      if (mutation === 'work') x.f.workMode.values['aria-pressed'] = 'true';
+      if (mutation === 'failed_expansion') x.candidate.outcome = 'timeout';
+      if (mutation === 'failed_context') x.candidate.contextFailure = 'body';
+      if (mutation === 'failed_text') x.candidate.expandedText += '!';
+      if (mutation === 'cleanup') overrides.allowFirstUserExpansion = false;
+      const pinned = x.f.world.__computaModelFirstProof;
+      const result = await x.resume(overrides);
+      expect(result.error, mutation).toBeDefined(); expect(result, mutation).not.toHaveProperty('text');
+      expect(result, mutation).not.toHaveProperty('firstUserVerified');
+      expect(x.f.world.__computaModelFirstProof, mutation).toBe(pinned);
+      expect(x.more.clicks, mutation).toBe(1); expect(x.send.clicks, mutation).toBe(0);
+      expect(x.f.composer.events, mutation).toHaveLength(0); expect(x.candidate.deadline, mutation).toBe(x.deadline);
+    }
+  });
+});
+
 describe('ChatGPT literal DOM failure diagnostics', () => {
   const fields = ['literalDOMFailureNodeKind', 'literalDOMFailureTag', 'literalDOMFailureParentTag', 'literalDOMFailureRule'];
   const text = (data: any) => ({ nodeType: 3, data, parentElement: null });

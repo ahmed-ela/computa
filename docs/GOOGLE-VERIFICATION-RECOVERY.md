@@ -2,6 +2,14 @@
 
 ## Current diagnosis
 
+On October 16 at 11:58 UTC, installed138 completed a Gemini 3.8 Flash browser task
+with seven verified inferences, exact form/result evidence and confirmed website
+and task-tab cleanup. The following code task was blocked before dispatch. At
+12:02 UTC, one ordinary human navigation to Gemini displayed a current Google
+`/sorry/index` CAPTCHA. A healthy earlier document and a successful task therefore
+do not establish that the next navigation will remain clear. No challenge action,
+identity, cookie, profile or network change was made during this control.
+
 On October 16 at 02:04 UTC, installed build124 reproduced the unusual-traffic
 CAPTCHA in one fresh ordinary human tab loading the canonical Gemini `/app`
 route. It sent no prompt and performed no refresh, challenge action or Inspector

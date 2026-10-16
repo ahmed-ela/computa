@@ -3688,10 +3688,18 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
       && (index === 0 || edges[index - 1].toURL === edge.fromURL))
     && new Set([edges[0].fromURL, ...edges.map(edge => edge.toURL)]).size === edges.length + 1;
   const starts = validChain ? edges.flatMap((edge, index) => edge.fromURL === candidate.routeURL ? [index] : []) : [];
+  // The local display can finish before a later digest/model read crosses the
+  // route. Native still discards that read and certifies the same first-route
+  // edge. Preserve only its already-completed, exact physical body; a failed or
+  // still-pending expansion keeps its original bounded observation path below.
+  const completed = candidate.outcome === 'expanded' && candidate.contextFailure == null
+    && typeof candidate.expandedText === 'string' && candidate.expandedText === candidate.canonical
+    && normalizedFirstBody(candidate.body) === candidate.expandedText;
+  const interrupted = candidate.outcome === 'context_changed' && candidate.contextFailure === 'url';
   if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
     || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
     || !validChain || starts.length !== 1 || edges.at(-1).toURL !== input.expectedURL || edges.at(-1).toURL !== document.URL
-    || candidate.clicked !== true || candidate.outcome !== 'context_changed' || candidate.contextFailure !== 'url'
+    || candidate.clicked !== true || !completed && !interrupted
     || !websiteModelChoiceEqual(candidate.modelChoice, input.firstUserExpansionModelChoice))
     return chatGPTRejectFirstUserExpansion(candidate, 'context_changed', 'continuation');
   if (!chatGPTFirstUserExpansionContext(candidate)) return chatGPTRejectFirstUserExpansionContext(candidate);
@@ -3700,6 +3708,10 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
   // consumed its receipt. Neither the deadline nor click claim is reset.
   for (const edge of edges.slice(starts[0])) candidate.routeURL = edge.toURL;
   candidate.contextFailure = null;
+  // Display completion does not grant lineage. The caller must still hash the
+  // unchanged body and complete the ordinary current model/product/temporary
+  // guards before installing any first-user proof. Do not wait or click again.
+  if (completed) return true;
   candidate.outcome = 'claimed';
   try { return await chatGPTObserveFirstUserExpansion(candidate); }
   catch { return chatGPTRejectFirstUserExpansion(candidate, 'failed'); }

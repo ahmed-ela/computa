@@ -627,13 +627,35 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let schema = try XCTUnwrap(specification["inputSchema"] as? [String: Any])
         let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
         let text = try XCTUnwrap(properties["text"] as? [String: Any])
+        let description = try XCTUnwrap(specification["description"] as? String)
         XCTAssertEqual(text["type"] as? String, "string")
+        XCTAssertTrue((text["description"] as? String)?.contains("complete requested field value verbatim") == true)
         XCTAssertTrue((text["description"] as? String)?.contains("including prefixes, spaces and punctuation") == true)
-        XCTAssertTrue((text["description"] as? String)?.contains("unless the task explicitly requires a transformation") == true)
+        XCTAssertTrue((text["description"] as? String)?.contains("Do not infer a shorter identifier format") == true)
+        XCTAssertTrue((text["description"] as? String)?.contains("Transform only when the task explicitly requires it") == true)
+        XCTAssertTrue(description.contains("compare its field value with the complete requested value before submitting"))
+        // This checks the actual API schema boundary, not model adherence.
+        let provider = APIProviderDefinition(id: "field-fixture", name: "Field Fixture",
+            baseURL: URL(string: "https://example.invalid/v1")!, wireAPI: .chatCompletions,
+            models: [.init(id: "fixture-model", name: "Fixture")])
+        let instructions = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let prepared = try APIModelResponseCodec.prepare(JSONSerialization.data(withJSONObject: [
+            "model": APIProviderCatalog.appModelID(providerID: provider.id, modelID: provider.models[0].id),
+            "instructions": instructions, "input": [["role": "user", "content": "Fill the requested reference."]],
+            "tools": [["type": "function", "name": "browser_fill", "description": description, "parameters": schema]],
+            "store": false, "stream": true,
+        ]), selection: .init(provider: provider, model: provider.models[0]), threadID: UUID().uuidString,
+            capsules: APIReasoningCapsules(key: Data(repeating: 7, count: 32)))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+        let functions = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        let emitted = try XCTUnwrap(functions.first?["function"] as? [String: Any])
+        XCTAssertEqual(emitted["parameters"] as? NSDictionary, schema as NSDictionary)
+        XCTAssertTrue((emitted["description"] as? String)?.hasSuffix(description) == true)
+        XCTAssertEqual((body["messages"] as? [[String: Any]])?.first?["content"] as? String, instructions)
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
         let read = try await call(controller, "browser_read")
-        let value = "UA 4629-A_1 / return"
+        let value = "REF 0007-A_1 / return"
         _ = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(read), "element_index": 0, "text": value])
         let actualValue = await backend.fieldValue()
         XCTAssertEqual(actualValue, value)

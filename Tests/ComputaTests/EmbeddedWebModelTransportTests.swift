@@ -3622,6 +3622,89 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testCompletedFirstExpansionSurvivesNativeCertifiedPromotionDuringDigestWithoutReplay() async throws {
+        let localRoute = "/c/local-chatgpt%3Acompleted-native-expansion?temporary-chat=true"
+        let publicRoute = "/c/public-completed-native-expansion?temporary-chat=true"
+        let page = Self.collapsedFirstUserPage().replacingOccurrences(of: "window.fixturePrompts.push(prompt);", with: """
+            window.fixturePrompts.push(prompt);
+            if (window.fixturePrompts.length === 1) history.pushState({}, '', '\(localRoute)');
+            """)
+        let fixture = try Fixture(page: page)
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: ownedID)
+        let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        _ = try await evaluate(view, """
+            const original = crypto.subtle.digest.bind(crypto.subtle);
+            globalThis.__fixtureCompletedExpansionPromotion = null;
+            crypto.subtle.digest = async (...arguments_) => {
+              const result = await original(...arguments_);
+              const candidate = globalThis.__computaModelFirstExpansion;
+              if (!globalThis.__fixtureCompletedExpansionPromotion && candidate?.outcome === 'expanded'
+                && !globalThis.__computaModelFirstProof && location.pathname.startsWith('/c/local-chatgpt')) {
+                globalThis.__fixtureCompletedExpansionPromotion = {
+                  outcome: candidate.outcome, deadline: candidate.deadline, route: candidate.routeURL,
+                  exactBody: candidate.body.innerText.normalize('NFC').trim() === candidate.canonical,
+                  firstProofPresent: !!globalThis.__computaModelFirstProof, promotions: 1
+                };
+                history.pushState({}, '', '\(publicRoute)');
+              }
+              return result;
+            }; return true;
+            """, world: privateWorld)
+        var opensAtPromotion: Int?
+        fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { checkpoint in
+            guard checkpoint == .routeAccepted, view.url?.path == "/c/public-completed-native-expansion" else { return }
+            let state = try? await self.evaluate(view, """
+                const candidate = globalThis.__computaModelFirstExpansion;
+                return { outcome: candidate?.outcome, firstProofPresent: !!globalThis.__computaModelFirstProof,
+                  exactBody: candidate?.body.innerText.normalize('NFC').trim() === candidate?.canonical };
+                """, world: privateWorld) as? [String: Any]
+            XCTAssertEqual(state?["outcome"] as? String, "expanded")
+            XCTAssertEqual(state?["firstProofPresent"] as? Bool, false)
+            XCTAssertEqual(state?["exactBody"] as? Bool, true)
+            opensAtPromotion = try? await self.evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
+        }
+        defer { fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil) }
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": String(repeating: "Owned completed native expansion fixture line.\n", count: 600)])
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+        try assertChoiceEvidence(complete, choice: choice)
+        let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+        let state = try await evaluate(view, """
+            const candidate = globalThis.__computaModelFirstExpansion;
+            return { ...globalThis.__fixtureCompletedExpansionPromotion,
+              finalRoute: candidate.routeURL, finalDeadline: candidate.deadline, finalOutcome: candidate.outcome };
+            """, world: privateWorld) as? [String: Any]
+        XCTAssertEqual(state?["outcome"] as? String, "expanded")
+        XCTAssertEqual(state?["exactBody"] as? Bool, true)
+        XCTAssertEqual(state?["firstProofPresent"] as? Bool, false)
+        XCTAssertEqual(state?["promotions"] as? Int, 1)
+        XCTAssertEqual(state?["route"] as? String, "https://chatgpt.com" + localRoute)
+        XCTAssertEqual(state?["finalRoute"] as? String, "https://chatgpt.com" + publicRoute)
+        XCTAssertEqual(state?["finalOutcome"] as? String, "expanded")
+        XCTAssertEqual(state?["finalDeadline"] as? Double, state?["deadline"] as? Double)
+        let finalOpens = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
+        XCTAssertGreaterThan(try XCTUnwrap(finalOpens), try XCTUnwrap(opensAtPromotion),
+                             "The discarded read cannot supply selected-model proof")
+        let clicks = try await evaluate(view, "return window.fixtureExpansionClicks;") as? Int
+        XCTAssertEqual(clicks, 1)
+        XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testOneExpansionContinuesAcrossFirstLocalRouteAndItsPublicPromotionBeforeLineageBinding() async throws {
         let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionDelayMilliseconds: 2_300,
             earlyExpansionScript: """

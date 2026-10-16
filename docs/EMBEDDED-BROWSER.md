@@ -70,8 +70,9 @@ Computa rechecks the complete current model, product mode and owned submission.
 The existing first owned SPA transition can follow its acknowledged first Send;
 it cannot replay that Send or authorize a later unrelated conversation route.
 
-Sign in through a regular human browser tab. Both use the same persistent WebKit
-profile; inference never takes over the sign-in tab. Saved model catalogs are
+Sign in through a regular human browser tab. ChatGPT inference copies only its
+eligible sign-in and policy cookies into a private store; Gemini and Claude use
+the persistent profile. Inference never takes over the sign-in tab. Saved model catalogs are
 reused on startup; only missing catalogs are discovered once. **Refresh website
 models** explicitly reads all provider menus sequentially without sending a
 prompt.

@@ -77,8 +77,8 @@ enum EmbeddedBrowserTools {
                 mutation, ["snapshot_id", "element_index"]),
             specification(
                 "browser_fill",
-                "Replace one observed field with enabled=true and settable=true and dispatch input/change events. Use that field's own snapshot_id and element_index, never a label or parent. Uses one fresh snapshot capability; password fields are unavailable. Returns a fresh current_observation when available: verify the value and use its new references for a later submit. If unavailable, browser_read; the fill was still dispatched and must not be repeated.",
-                mutation.merging(["text": ["type": "string", "description": "Copy the requested field value verbatim, including prefixes, spaces and punctuation, unless the task explicitly requires a transformation."]], uniquingKeysWith: { _, right in right }),
+                "Replace one observed field with enabled=true and settable=true and dispatch input/change events. Use that field's own snapshot_id and element_index, never a label or parent. Uses one fresh snapshot capability; password fields are unavailable. Returns a fresh current_observation when available: compare its field value with the complete requested value before submitting, and use its new references. If unavailable, browser_read; the fill was still dispatched and must not be repeated.",
+                mutation.merging(["text": ["type": "string", "description": "Copy the complete requested field value verbatim, including prefixes, spaces and punctuation. Do not infer a shorter identifier format. Transform only when the task explicitly requires it."]], uniquingKeysWith: { _, right in right }),
                 ["snapshot_id", "element_index", "text"]),
             specification(
                 "browser_wait",
