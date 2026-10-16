@@ -3479,7 +3479,8 @@ function chatGPTFirstUserExpandControls(root, roots, maxDepth = 3) {
 }
 function chatGPTFirstUserExpansionCandidate(root, body, rendered) {
   const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
-  if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
+  if (input.suppressFirstUserExpansionClaim === true || input.action !== 'inspect'
+    || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
     || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
     || globalThis.__computaModelFirstExpansion != null || ownedUserCount !== 1
     || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0

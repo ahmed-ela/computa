@@ -601,6 +601,61 @@ private actor CleanupReceiptAudit {
 /// recovery must not issue another turn, model prompt, tool call or engine start.
 @MainActor
 final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
+    func testActualBundledEngineRestartPreservesPageInspectionFailureWithoutReplaying() async throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("ComputaInspectionRestart-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+        config.executable = .bundled; config.model = "browser/claude"
+        config.codexHomePath = root.appendingPathComponent("PrivateHome").path
+        config.workspacePath = root.appendingPathComponent("Workspace").path
+        config.protocolTracePath = root.appendingPathComponent("first-protocol.jsonl").path
+        let taskID = UUID().uuidString, first = CodexAppServerRuntime(configuration: config)
+        let transport = CleanupReceiptTransport(pageUnavailableOnPoll: true), audit = CleanupRuntimeAudit(taskID: taskID)
+        let observer = Task { for await event in first.events() { audit.receive(event) } }
+        defer { observer.cancel() }
+        await first.configureEmbeddedWebModelTransport(transport)
+        do {
+            _ = try await first.loadTasks()
+            try await first.submit(prompt: "Synthetic inspection failure. Do not use tools.", toTaskID: taskID, modelID: "browser/claude")
+            let deadline = ContinuousClock.now + .seconds(45)
+            while audit.status != .waiting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(audit.status, .waiting)
+            let original = try XCTUnwrap(audit.errors.last)
+            let originalObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any])
+            let originalError = try XCTUnwrap(originalObject["error"] as? [String: Any])
+            XCTAssertEqual(originalError["code"] as? String, "browser_model_error")
+            XCTAssertEqual(originalError["message"] as? String, EmbeddedWebModelTransport.Failure.pageUnavailable.localizedDescription)
+            XCTAssertNil(originalError["retryable"])
+            let automatic = try XCTUnwrap(audit.receipts.first { $0.trigger == .automatic && $0.outcome == .closed })
+            let threadID = try XCTUnwrap(automatic.threadID), turnID = try XCTUnwrap(automatic.turnID)
+            _ = await first.shutdown()
+            var reloadConfig = config; reloadConfig.protocolTracePath = root.appendingPathComponent("reload-protocol.jsonl").path
+            let reloadedRuntime = CodexAppServerRuntime(configuration: reloadConfig), inert = CleanupReceiptTransport()
+            await reloadedRuntime.configureEmbeddedWebModelTransport(inert)
+            do {
+                let tasks = try await reloadedRuntime.loadTasks()
+                let restored = try XCTUnwrap(tasks.first { $0.id == threadID })
+                XCTAssertEqual(restored.status, .waiting)
+                XCTAssertFalse(restored.entries.contains { $0.kind == .assistant })
+                let errors = restored.entries.filter { $0.title == "Agent error" }
+                XCTAssertEqual(errors.count, 1)
+                let error = try XCTUnwrap(errors.first); XCTAssertEqual(error.turnID, turnID)
+                let restoredObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(error.body.utf8)) as? [String: Any])
+                XCTAssertTrue(NSDictionary(dictionary: restoredObject).isEqual(to: originalObject))
+                XCTAssertFalse(error.body.contains("high demand"))
+                let saved = try WebsiteTurnFailureStore(directory: URL(fileURLWithPath: config.codexHomePath)
+                    .appendingPathComponent("WebsiteTurnFailureStore-v1")).load(threadID: threadID)
+                XCTAssertEqual(saved.count, 1); XCTAssertEqual(saved.first?.turnID, turnID)
+                let reloadedCalls = await inert.calls()
+                XCTAssertTrue(reloadedCalls.isEmpty, "Loading failed history cannot invoke any website operation")
+                _ = await reloadedRuntime.shutdown()
+            } catch { _ = await reloadedRuntime.shutdown(); throw error }
+            let calls = await transport.calls()
+            XCTAssertEqual(calls.filter { $0.0 == "webProviderSend" }.count, 1)
+        } catch { _ = await first.shutdown(); throw error }
+    }
+
     func testActualBundledEngineRestartRestoresTypedFailureThenHistoricalGenericFailureWithoutReplaying() async throws {
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("ComputaFailureRestart-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -817,8 +872,11 @@ private actor CleanupReceiptTransport: WebModelTransport {
     private var failFirstCleanup: Bool
     private let cleanupGate: CleanupReceiptGate?
     private let malformedReply: Bool
-    init(failFirstCleanup: Bool = false, cleanupGate: CleanupReceiptGate? = nil, malformedReply: Bool = false) {
+    private let pageUnavailableOnPoll: Bool
+    init(failFirstCleanup: Bool = false, cleanupGate: CleanupReceiptGate? = nil, malformedReply: Bool = false,
+         pageUnavailableOnPoll: Bool = false) {
         self.failFirstCleanup = failFirstCleanup; self.cleanupGate = cleanupGate; self.malformedReply = malformedReply
+        self.pageUnavailableOnPoll = pageUnavailableOnPoll
     }
     func token() -> String { ownedToken }
     func calls() -> [(String, String)] { operations }
@@ -831,7 +889,9 @@ private actor CleanupReceiptTransport: WebModelTransport {
             guard parameters["sessionToken"] == ownedToken else { throw WebModelServer.Failure.invalidRequest }
             switch operation {
             case "webProviderSend": result = ["state": "running"]
-            case "webProviderPoll": result = ["state": "complete", "text": malformedReply ? #"{"type":"tool_calls","calls":["# : "{\"type\":\"message\",\"text\":\"OK\"}"]
+            case "webProviderPoll":
+                if pageUnavailableOnPoll { throw EmbeddedWebModelTransport.Failure.pageUnavailable }
+                result = ["state": "complete", "text": malformedReply ? #"{"type":"tool_calls","calls":["# : "{\"type\":\"message\",\"text\":\"OK\"}"]
             case "webProviderFinish", "webProviderCancel":
                 if failFirstCleanup { failFirstCleanup = false; result = ["cleanup": "failed", "error": ["message": "PRIVATE_REPLY_CANARY"]] }
                 else { await cleanupGate?.pause(); result = ["cleanup": "deleted"] }

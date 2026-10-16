@@ -1435,6 +1435,133 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testPendingFirstBodyInspectionTimeoutGetsOneFreshReadWithoutResending() async throws {
+        let prompt = "Recover only the acknowledged pending first body"
+        let (fixture, token, view) = try await pendingFirstBodyInspectionFixture(prompt: prompt)
+        defer { fixture.shutdown() }
+        fixture.transport.setInspectionTimeoutForTesting(.milliseconds(800))
+        var timeouts: [String] = []
+        fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+        let blocker = FixtureWebContentWork(view: view)
+        defer { blocker.detach() }
+        try await blocker.start(milliseconds: 1_100)
+        var completed: [String: Any]?
+        var recoveryFailure: (any Error)?
+        do { completed = try await waitForState("complete", fixture.transport, token: token) }
+        catch { recoveryFailure = error }
+        try await blocker.waitForCompletion()
+        XCTAssertEqual(timeouts.count, 1)
+        XCTAssertTrue(timeouts.first?.contains("phases=not_started") == true)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+        if let recoveryFailure {
+            XCTFail("An acknowledged pending first-body timeout must get one fresh read: \(recoveryFailure)")
+            return
+        }
+        XCTAssertEqual(completed?["text"] as? String, Self.fixtureToolReply)
+        let proof = try XCTUnwrap(completed?["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(proof["sequence"] as? Int, 1)
+        XCTAssertFalse((proof["firstUserFingerprint"] as? String ?? "").isEmpty)
+        XCTAssertFalse((proof["submittedPromptFingerprint"] as? String ?? "").isEmpty)
+    }
+
+    func testPendingFirstBodyInspectionRecoveryStopsAfterSecondTimeout() async throws {
+        let (fixture, token, view) = try await pendingFirstBodyInspectionFixture(prompt: "Bound the first-body read recovery")
+        defer { fixture.shutdown() }
+        fixture.transport.setInspectionTimeoutForTesting(.milliseconds(600))
+        var timeouts: [String] = []
+        fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+        let blocker = FixtureWebContentWork(view: view)
+        defer { blocker.detach() }
+        try await blocker.start(milliseconds: 2_400)
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A second timeout cannot authorize another first-body read")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .pageUnavailable) }
+        XCTAssertEqual(timeouts.count, 2)
+        try await blocker.waitForCompletion()
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testPendingFirstBodyInspectionRecoveryKeepsOriginalResponseDeadline() async throws {
+        let (fixture, token, view) = try await pendingFirstBodyInspectionFixture(prompt: "Keep the original first-body deadline")
+        defer { fixture.shutdown() }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .milliseconds(1_200))
+        fixture.transport.setInspectionTimeoutForTesting(.milliseconds(800))
+        var timeouts: [String] = []
+        fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+        let blocker = FixtureWebContentWork(view: view)
+        defer { blocker.detach() }
+        try await blocker.start(milliseconds: 2_400)
+        let began = ContinuousClock.now
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("First-body recovery cannot renew the original response deadline")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+        XCTAssertLessThan(ContinuousClock.now - began, .milliseconds(1_500))
+        XCTAssertTrue((1...2).contains(timeouts.count))
+        try await blocker.waitForCompletion()
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testPendingFirstBodyInspectionRecoveryRejectsModelAndWorkModeDrift() async throws {
+        for drift in ["model", "work"] {
+            let (fixture, token, view) = try await pendingFirstBodyInspectionFixture(prompt: "Reject first-body \(drift) drift")
+            defer { fixture.shutdown() }
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            fixture.transport.setInspectionTimeoutForTesting(.milliseconds(800))
+            var timeouts: [String] = []
+            fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+            let blocker = FixtureWebContentWork(view: view)
+            defer { blocker.detach() }
+            let mutation = drift == "model"
+                ? "window.fixtureModelSelect('GPT-5.5');"
+                : "document.getElementById('fixture-composer-mode').hidden = false; document.getElementById('fixture-chat-mode').setAttribute('aria-pressed','false'); document.getElementById('fixture-work-mode').setAttribute('aria-pressed','true');"
+            try await blocker.start(milliseconds: 1_100, completionScript: mutation)
+            do {
+                _ = try await waitForState("complete", fixture.transport, token: token)
+                XCTFail("The fresh first-body read must not publish \(drift) drift")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, drift == "model" ? .modelMismatch : .productModeUnverified)
+            }
+            XCTAssertEqual(timeouts.count, 1)
+            try await blocker.waitForCompletion()
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, drift == "work" ? "failed" : "not_created")
+            try await assertHumanTabIntact(fixture, retaining: drift == "work" ? ownedID : nil)
+        }
+    }
+
+    func testPendingFirstBodyInspectionTimeoutWithoutSendReceiptDoesNotRecover() async throws {
+        let (fixture, token, view) = try await pendingFirstBodyInspectionFixture(prompt: "A Send claim alone cannot grant recovery")
+        defer { fixture.shutdown() }
+        XCTAssertTrue(fixture.transport.revokeAcknowledgedSendForTesting(sessionToken: token))
+        fixture.transport.setInspectionTimeoutForTesting(.milliseconds(800))
+        var timeouts: [String] = []
+        fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+        let blocker = FixtureWebContentWork(view: view)
+        defer { blocker.detach() }
+        try await blocker.start(milliseconds: 1_100)
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("The native pre-click Send claim cannot replace its validated callback")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .pageUnavailable) }
+        XCTAssertEqual(timeouts.count, 1)
+        try await blocker.waitForCompletion()
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testBoundInspectionTimeoutGetsOneFreshReadWithoutResending() async throws {
         let prompt = "Recover an owned read without resending"
         let (fixture, token, view) = try await boundInspectionFixture(prompt: prompt)
@@ -1613,6 +1740,36 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
         XCTAssertNil(sink.snapshot)
         try await assertHumanTabIntact(fixture)
+    }
+
+    private func pendingFirstBodyInspectionFixture(prompt: String) async throws -> (Fixture, String, WKWebView) {
+        let fixture = try Fixture(page: Self.acknowledgedAppendRacePage())
+        do {
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            let pending = try XCTUnwrap(sent["pendingSubmissionContext"] as? [String: Any])
+            XCTAssertEqual(sent["state"] as? String, "running")
+            XCTAssertEqual(pending["sequence"] as? Int, 1)
+            XCTAssertEqual(pending["firstUserFingerprint"] as? String, "")
+            XCTAssertEqual(pending["submittedPromptFingerprint"] as? String, "")
+            let privateState = try await evaluate(view, """
+                const state = globalThis.__computaChatSubmissionState;
+                return { firstProof: globalThis.__computaModelFirstProof != null,
+                  phase: state?.pending?.phase, bound: state?.pending?.root != null };
+                """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+            XCTAssertEqual(privateState?["firstProof"] as? Bool, false)
+            XCTAssertEqual(privateState?["phase"] as? String, "send_claimed")
+            XCTAssertEqual(privateState?["bound"] as? Bool, false)
+            _ = try await evaluate(view, """
+                document.getElementById('messages').appendChild(window.fixturePendingUser);
+                document.getElementById('messages').appendChild(window.fixturePendingTurn);
+                window.fixturePendingUser = null; window.fixturePendingTurn = null; return true;
+                """)
+            return (fixture, token, view)
+        } catch { fixture.shutdown(); throw error }
     }
 
     private func boundInspectionFixture(prompt: String, bindFirstRead: Bool = true) async throws -> (Fixture, String, WKWebView) {
@@ -9325,13 +9482,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             started.complete(.success(Data()))
         }
 
-        func start(milliseconds: Int) async throws {
+        func start(milliseconds: Int, completionScript: String = "") async throws {
             let view = try XCTUnwrap(view)
             _ = try await wait(started, maximumWait: .seconds(2)) {
                 view.callAsyncJavaScript("""
                     window.webkit.messageHandlers.computaFixtureWorkStarted.postMessage('started');
                     const until = performance.now() + milliseconds;
                     while (performance.now() < until) { }
+                    \(completionScript)
                     return true;
                     """, arguments: ["milliseconds": milliseconds], in: nil, in: .page) { [completed] result in
                     switch result {

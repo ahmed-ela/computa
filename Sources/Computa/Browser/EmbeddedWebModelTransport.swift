@@ -303,6 +303,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // One passive initial window; native navigation changes never renew it.
         var initialCheckpointSettlement: InitialCheckpointSettlement?
         var submitted = false
+        // A native Send claim precedes dispatch. Only the validated callback
+        // below acknowledges that sequence; a lost reply cannot grant recovery.
+        var acknowledgedSendSequence = 0
         var temporary = false
         var temporaryRequested = false
         var chatModeRequested = false
@@ -329,6 +332,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var turnStarted = ContinuousClock.now
         var readTimeoutCount = 0
         var responseReadRetryUsed = false
+        var firstBodyReadRecoveryActive = false
         var conversation: String?
         var routeContext: String?
         var conversationIdentity: String?
@@ -594,6 +598,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     func setInspectionTimeoutForTesting(_ timeout: Duration) {
         inspectionTimeout = max(.milliseconds(1), min(.seconds(30), timeout))
     }
+
+    /// Negative-only: removing a receipt cannot authorize a read or input.
+    func revokeAcknowledgedSendForTesting(sessionToken: String) -> Bool {
+        guard let session = sessions[sessionToken], session.acknowledgedSendSequence > 0 else { return false }
+        session.acknowledgedSendSequence = 0
+        return true
+    }
     #endif
 
     /// Called only through the native server's manually armed handoff, never request().
@@ -811,8 +822,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     && session.modelSelectionVerified && session.modelChoice != nil
                 session.loggedPendingModelVerification = false
                 session.state = "running"
+                let submittedSequence = session.sequence
                 let sent = try await page(session, action: "submit", prompt: outbound)
                 guard sent["submitted"] as? Bool == true else { throw Failure.editorFailure("submission_unconfirmed") }
+                session.acknowledgedSendSequence = submittedSequence
                 return try snapshot(session)
             default:
                 return try await poll(session)
@@ -1430,6 +1443,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return true
     }
 
+    private func canRecoverPendingFirstBodyRead(_ session: Session) -> Bool {
+        guard !Task.isCancelled, session.provider == .chatgpt, !session.isDiscovery, !session.isRecoveryProbe,
+              sessions[session.token] === session, session.terminalFailure == nil,
+              session.state == "running", session.submitted, session.sequence == 1,
+              session.acknowledgedSendSequence == 1, session.confirmedUsers == 0,
+              session.pendingSubmission, session.firstUserFingerprint == nil, !session.currentSubmissionVerified,
+              session.temporaryRequested, session.temporary,
+              session.productModeEvidence?.temporaryTransition == .acknowledged,
+              session.modelSelectionVerified, session.modelChoice != nil,
+              let prepared = session.preparedSubmission, let current = session.currentSubmission,
+              prepared.sequence == 1, current.sequence == 1,
+              prepared.marker == session.firstUserMarker, prepared.marker == current.marker,
+              !prepared.promptFingerprint.isEmpty, prepared.promptFingerprint == current.promptFingerprint,
+              !prepared.outboundFingerprint.isEmpty, prepared.outboundFingerprint == current.outboundFingerprint,
+              let generation = session.documentGeneration,
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation else { return false }
+        return true
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
@@ -1475,6 +1508,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // selection or expansion action may be replayed here.
                 session.responseReadRetryUsed = true
                 Self.inspectionLog.info("inspectionReadRecovery provider=\(session.provider.rawValue, privacy: .public) sequence=\(session.sequence) retry=1 reason=bound_read_timeout")
+                return try await poll(session)
+            }
+            if (error as? Failure) == .pageUnavailable,
+               session.readTimeoutCount > readTimeoutCount, !session.responseReadRetryUsed,
+               canRecoverPendingFirstBodyRead(session) {
+                // Observe once more after an acknowledged first Send. The new
+                // invocation cannot acquire a fresh display-expansion claim;
+                // every body, owner, model and route proof is still recomputed.
+                session.responseReadRetryUsed = true
+                session.firstBodyReadRecoveryActive = true
+                defer { session.firstBodyReadRecoveryActive = false }
+                Self.inspectionLog.info("inspectionReadRecovery provider=chatgpt sequence=1 retry=1 reason=pending_first_body_timeout")
                 return try await poll(session)
             }
             // Retry only the initial read, before any mode toggle or submission.
@@ -2910,6 +2955,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.state == "running" && session.submitted && session.modelVerificationPending
             && ["inspect", "submit", "verifyModel", "verifyProductMode"].contains(action)
         if provider == .chatgpt { input["deferModelVerification"] = deferModelVerification }
+        if provider == .chatgpt, session.firstBodyReadRecoveryActive {
+            input["suppressFirstUserExpansionClaim"] = true
+        }
         if session.usesSubmissionOwnership {
             // Only already-dispatched bindings authorize a detached-message
             // inspection. A prepared, unsent body cannot supply this pin.

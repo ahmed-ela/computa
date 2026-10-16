@@ -1294,7 +1294,7 @@ describe('ChatGPT completed expansion route continuation', () => {
 
   test('a native-certified local-to-public edge preserves a completed exact expansion without another click', async () => {
     const x = await crossedRead(), reads = x.picker.trigger.clicks;
-    const result = await x.resume();
+    const result = await x.resume({ suppressFirstUserExpansionClaim: true });
     expect(result.error).toBeUndefined();
     expect(result.firstUserVerified).toBe(true); expect(result.firstUserMarkerVerified).toBe(true);
     expect(result.modelEvidence.selected).toEqual(choice);

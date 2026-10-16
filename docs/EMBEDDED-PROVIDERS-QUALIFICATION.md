@@ -1,5 +1,69 @@
 # Embedded website provider qualification
 
+## Candidate145: bounded first-body inspection recovery and durable local errors
+
+The installed144 timeout exposed a gap in the existing read recovery: it only
+covered a message whose body was already bound. ChatGPT can now make one fresh
+read after a genuine inspection timeout while its first body is still pending.
+Eligibility requires a validated Send callback and the exact current first
+submission, temporary Chat mode, selected model, view and document generation.
+The recovery shares the existing one-retry limit and original response deadline.
+It rechecks all body, route, ownership, model and product evidence. It cannot
+insert, send again, select a model or acquire a new first-message expansion
+claim. Already issued JavaScript cannot be cancelled; its late native result is
+discarded, and an existing expansion claim retains its original checks and limit.
+This repairs the terminal recovery policy; the cause of the live WebKit stall
+itself remains unproven.
+
+The exact native local inspection-error envelope is also now persisted for new
+failures, so a restart retains it instead of falling back to the engine's generic
+high-demand text. Complete regenerated-envelope equality remains mandatory;
+other error types, HTTP responses, retry metadata and cleanup authority are
+unchanged. Historical tasks are not rewritten.
+
+Both changes have meaningful old-code regressions. Validation passed 590 adapter
+tests across ChatGPT, Claude and Gemini, nine real WebKit recovery tests and 20
+error-history/runtime tests. The native recovery tests cover the genuinely
+unbound first body, one insertion and Send, a second timeout, the original
+deadline, missing Send acknowledgement, model/Work-mode drift and preserved
+human tabs. The error-history cohort retained an initial missing-Bun fixture
+failure; its single affected method passed with the previously pinned test
+interpreter. These are offline results; signed installation and fresh live
+qualification are separate evidence.
+
+## Installed144: code work verified; local inspection timeout stopped the task
+
+Signed 0.7.0 (144), code source `e9193c71af927f98ed6dad68b88250706b36a339`,
+passed independent build and installed verification with all 55 bundle files
+and 51 resources matching and the Gemini diagnostic compiler flag off.
+
+The first fresh code task performed eight successful native calls: two commands,
+one patch and five browser actions through reading the submitted form's result.
+The one-line helper correction, protected tests and unrelated note passed
+independent verification; four native fixture tests and four independent tests
+passed. The exact form submission and observed result were verified. The task
+nevertheless failed after 198.357 seconds, without a model-issued browser close
+or final answer. Its first seven website inferences verified and closed; the
+eighth failed local browser inspection and its initial cleanup was unconfirmed.
+The app closed the task-created browser tab and preserved the blank control tab.
+
+Finite native logs identify inspection timeouts while the view was mounted and
+visible, followed by a separate cleanup inspection timeout. They do not establish
+why the evaluation stalled. One unclassified log row keeps that projection
+explicitly incomplete. The engine's recorded high-demand prose is a generic
+mapping of Computa's local HTTP500, not evidence of a ChatGPT service outage.
+The live UI correctly retained the local inspection error.
+
+All strict failures remain retained, including a conservative command-scope
+rejection for a cwd-correct semicolon-separated command containing git status;
+that parser result does not establish execution outside the isolated directory.
+The website grader rejected the failed terminal record. The matrix stopped,
+remaining cases stayed held, and the owned server stopped with its PID absent
+and port refusing connections. A single subsequent operator cleanup recovery
+reported the website session closed without sending a prompt or restarting the
+model; it does not qualify the failed task or erase the original unconfirmed
+cleanup. Broader reliability and the local timeout cause remain unresolved.
+
 ## Candidate144: terminal and file handoff clarification
 
 The closing website handoff already explains how Computa executes browser

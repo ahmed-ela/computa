@@ -34,11 +34,16 @@ struct WebsiteTurnFailureStore: Sendable {
             guard text.utf8.count <= 8_192, let provider = WebModelServer.provider(for: modelID),
                   let webProvider = EmbeddedWebModelTransport.Provider(rawValue: provider),
                   let supplied = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
-                  let error = supplied["error"] as? [String: Any], let code = error["code"] as? String,
-                  let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
-                  retryable.boolValue == false else { return nil }
+                  let error = supplied["error"] as? [String: Any], let code = error["code"] as? String else { return nil }
+            // The fixed local inspection error has no retry metadata. Only its
+            // exact generated envelope can pass the canonical equality below.
+            if code != "browser_model_error" {
+                guard let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
+                      retryable.boolValue == false else { return nil }
+            }
             let nativeError: any Error
             switch code {
+            case "browser_model_error": nativeError = EmbeddedWebModelTransport.Failure.pageUnavailable
             case "malformed_website_reply":
                 guard let rawReason = error["reason"] as? String,
                       let reason = WebModelResponseCodec.MalformedEnvelopeDiagnostic.Reason(rawValue: rawReason),

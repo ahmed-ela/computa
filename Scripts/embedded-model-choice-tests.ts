@@ -724,6 +724,67 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
         expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.debugStructure).not.toContain(firstMarker);
       };
+      test('a recovery-only inspect suppresses a fresh first-message expansion claim without changing ordinary inspection', async () => {
+        for (const suppress of [true, false, undefined]) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expand.onClick = () => { f.userBody.text = prompt; };
+          const result = await f.run('inspect', { ...expansionInput, suppressFirstUserExpansionClaim: suppress });
+          if (suppress === true) {
+            rejected(result); expect(expand.clicks).toBe(0);
+            expect(f.world.__computaModelFirstExpansion).toBeUndefined();
+            expect(f.world.__computaModelFirstProof).toBeUndefined();
+            expect(f.userBody.text).toBe(prompt.slice(0, 10_240));
+          } else {
+            expect(result.firstUserVerified).toBe(true); expect(expand.clicks).toBe(1);
+            expect(f.world.__computaModelFirstExpansion.outcome).toBe('expanded');
+          }
+          noSend(f, picker, send);
+        }
+      });
+
+      test('a suppressed recovery can bind a prior completed exact expansion without a new claim or click', async () => {
+        const { f, picker, expand, send, prompt } = await collapsed();
+        expand.onClick = () => { f.userBody.text = prompt; };
+        const first = await f.run('inspect', { ...expansionInput, expectedModelChoice: choice(target) });
+        expect(first.error).toBe('model_mismatch'); expect(f.world.__computaModelFirstProof).toBeUndefined();
+        const candidate = f.world.__computaModelFirstExpansion, deadline = candidate.deadline;
+        expect(candidate).toMatchObject({ outcome: 'expanded', expandedText: prompt, clicked: true });
+        const result = await f.run('inspect', { ...expansionInput, suppressFirstUserExpansionClaim: true,
+          expectedModelChoice: choice(initial) });
+        expect(result.firstUserVerified).toBe(true); expect(result.firstUserMarkerVerified).toBe(true);
+        expect(f.world.__computaModelFirstExpansion).toBe(candidate);
+        expect(candidate.deadline).toBe(deadline); expect(candidate.expandedText).toBe(prompt);
+        expect(expand.clicks).toBe(1); noSend(f, picker, send);
+      });
+
+      test('suppressed recovery preserves failed timed-out and still-pending expansion claims without binding or cleanup authority', async () => {
+        for (const state of ['failed', 'timeout', 'pending']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          let dispatched!: () => void; const click = new Promise<void>(resolve => { dispatched = resolve; });
+          expand.onClick = () => { dispatched(); if (state === 'failed') throw new Error('PRIVATE FAILED EXPANSION'); };
+          const pending = f.run('inspect', expansionInput); await click;
+          if (state === 'timeout') f.flush();
+          if (state !== 'pending') { rejected(await pending); f.userBody.text = prompt; }
+          const candidate = f.world.__computaModelFirstExpansion, deadline = candidate.deadline;
+          const outcome = state === 'pending' ? 'claimed' : state;
+          expect(candidate.outcome).toBe(outcome);
+          for (const action of ['inspect', 'cleanup']) {
+            const result = await f.run(action, { ...expansionInput, suppressFirstUserExpansionClaim: true });
+            rejected(result); expect(f.world.__computaModelFirstProof).toBeUndefined();
+            expect(f.world.__computaModelFirstExpansion).toBe(candidate);
+            expect(candidate.outcome).toBe(outcome); expect(candidate.deadline).toBe(deadline);
+            expect(expand.clicks).toBe(1); noSend(f, picker, send);
+          }
+          if (state === 'pending') {
+            // The recovery read has no mutation authority; the original bounded
+            // observation can still receive its own completion event.
+            f.userBody.text = prompt; notify(f);
+            expect((await pending).firstUserVerified).toBe(true);
+            expect(expand.clicks).toBe(1); noSend(f, picker, send);
+          }
+        }
+      });
+
       const rejectedFramedExpansion = async (expectedJSON: string, renderedJSON: string, frame = 'unique',
         decorate?: (f: any, prompt: string, rendered: string) => void) => {
         const { f, picker, expand, send } = await collapsed();
