@@ -28,8 +28,30 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         let human = try browser.createTab()
         let id = try browser.createUnloadedModelTabForTesting()
         let view = try XCTUnwrap(browser.webView(for: id))
+        // This fixture-only predecessor routes eligible URLs to WebKit's real
+        // native data fetch. It runs before the production observer, so the
+        // cached vendor fetch still returns an actual, unread WebKit Response
+        // without accessing ChatGPT or any external network endpoint.
+        let localFetch = WKUserScript(source: """
+            (() => {
+              const nativeFetch = window.fetch, call = Reflect.apply;
+              window.localNativeFetchCalls = 0;
+              window.fetch = function(input, init) {
+                window.localNativeFetchCalls++;
+                if (typeof input === 'string') {
+                  const url = new URL(input, location.href);
+                  if (url.origin === location.origin &&
+                      ['/backend-api/f/conversation/prepare', '/backend-api/f/conversation'].includes(url.pathname)) {
+                    return call(nativeFetch, this, ['data:text/plain,LOCAL_PRIVATE_RESPONSE']);
+                  }
+                }
+                return call(nativeFetch, this, arguments);
+              };
+            })();
+            """, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        view.configuration.userContentController.addUserScript(localFetch)
         XCTAssertTrue(browser.installModelRequestMetadata(lease, tabID: id))
-        let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first).source
+        let source = try XCTUnwrap(view.configuration.userContentController.userScripts.last).source
         for nativeID in [arm.task, arm.thread, arm.turn, arm.preparation] {
             XCTAssertFalse(source.contains(nativeID.uuidString.lowercased()))
         }
@@ -48,18 +70,36 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         let active = await browser.modelRequestMetadata(command: "activate", tabID: id, view: view, ownerToken: token)
         XCTAssertTrue(try XCTUnwrap(active).active)
         let fetchFacts = try await view.callAsyncJavaScript("""
-            await window.cachedFetch('data:text/plain,LOCAL_PRIVATE_URL', {method:'POST',body:'LOCAL_PRIVATE_BODY'}).catch(() => {});
-            const response = await window.cachedFetch('data:text/plain,LOCAL_PRIVATE_RESPONSE');
-            return {status: response.status, bodyUsed: response.bodyUsed};
+            let unrelatedUnread = true;
+            for (let i = 0; i < 10; i++) {
+              const response = await window.cachedFetch('data:text/plain,LOCAL_PRIVATE_URL' + i);
+              unrelatedUnread = unrelatedUnread && response.status === 200 && !response.bodyUsed;
+            }
+            const prepare = await window.cachedFetch('/backend-api/f/conversation/prepare',
+              {method:'POST',body:'LOCAL_PRIVATE_BODY'});
+            const response = await window.cachedFetch('/backend-api/f/conversation',
+              {method:'POST',body:'LOCAL_PRIVATE_BODY'});
+            return {status: response.status, bodyUsed: response.bodyUsed, prepareStatus: prepare.status,
+              prepareBodyUsed: prepare.bodyUsed, unrelatedUnread, calls: window.localNativeFetchCalls};
             """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
         XCTAssertEqual(fetchFacts?["status"] as? Int, 200)
         XCTAssertEqual(fetchFacts?["bodyUsed"] as? Bool, false)
+        XCTAssertEqual(fetchFacts?["prepareStatus"] as? Int, 200)
+        XCTAssertEqual(fetchFacts?["prepareBodyUsed"] as? Bool, false)
+        XCTAssertEqual(fetchFacts?["unrelatedUnread"] as? Bool, true)
+        XCTAssertEqual(fetchFacts?["calls"] as? Int, 12, "Every cached fetch reaches its predecessor exactly once")
         let snapshot = await browser.modelRequestMetadata(command: "snapshot", tabID: id, view: view, ownerToken: token)
         let captured = try XCTUnwrap(snapshot)
-        XCTAssertEqual(captured.rowCount, 2, "A page's cached document-start fetch is observed after activation")
+        XCTAssertEqual(captured.rowCount, 2, "Ten unrelated fetches must leave both submission capture slots available")
         let values = try XCTUnwrap(JSONSerialization.jsonObject(with: captured.encodedData) as? [String: Any])
         let rows = try XCTUnwrap(values["rows"] as? [[String: Any]])
+        XCTAssertEqual(rows[0]["ordinal"] as? Int, 1)
+        XCTAssertEqual(rows[0]["endpoint"] as? String, "preparation")
         XCTAssertEqual(rows[0]["bodyType"] as? String, "string")
+        XCTAssertEqual(rows[0]["outcome"] as? String, "headers")
+        XCTAssertEqual(rows[0]["status"] as? Int, 200)
+        XCTAssertEqual(rows[1]["ordinal"] as? Int, 2)
+        XCTAssertEqual(rows[1]["endpoint"] as? String, "conversation")
         XCTAssertEqual(rows[1]["outcome"] as? String, "headers")
         XCTAssertEqual(rows[1]["status"] as? Int, 200, "The observer uses WebKit's actual Response.status getter")
         let text = String(decoding: captured.encodedData, as: UTF8.self)
@@ -67,7 +107,9 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         XCTAssertFalse(text.contains("LOCAL_PRIVATE_RESPONSE"))
         let stopped = await browser.modelRequestMetadata(command: "stop", tabID: id, view: view, ownerToken: token)
         XCTAssertFalse(try XCTUnwrap(stopped).active)
-        XCTAssertTrue(view.configuration.userContentController.userScripts.isEmpty)
+        XCTAssertEqual(view.configuration.userContentController.userScripts.map(\.source), [localFetch.source],
+            "Stopping removes the production observer while preserving the unrelated fixture predecessor")
+        view.configuration.userContentController.removeAllUserScripts()
         let hooksRemain = try await view.evaluateJavaScript("Object.getOwnPropertyNames(window).some(key => /^__computaRequestMetadata_[a-f0-9]{32}$/.test(key))")
         XCTAssertEqual(hooksRemain as? Bool, false)
         XCTAssertEqual(browser.selectedTabID, human)

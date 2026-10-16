@@ -91,7 +91,7 @@ describe('one-view request metadata diagnostic', () => {
     expect(f.calls).toHaveLength(3);
     expect(f.calls[0].args[1]).toBe(init);
     expect(f.hook('snapshot').rows[0]).toMatchObject({ bodyType: 'unknown', bodyBytes: null, method: 'unknown', keepalive: 'unknown' });
-    expect(f.hook('snapshot').rows[1]).toMatchObject({ endpoint: 'unknown', origin: 'unknown', bodyType: 'unknown' });
+    expect(f.hook('snapshot').rows).toHaveLength(2);
   });
 
   test('opaque bodies and Request inputs are never read, cloned or consumed', () => {
@@ -107,20 +107,20 @@ describe('one-view request metadata diagnostic', () => {
     }
     const f = fixture(), request = new Request('https://chatgpt.com/backend-api/f/conversation', { method: 'POST', body: 'PRIVATE' });
     f.hook('activate'); f.window.fetch(request);
-    expect(f.hook('snapshot').rows[0]).toMatchObject({ endpoint: 'unknown', method: 'unknown', bodyType: 'unknown', bodyBytes: null,
-      keepalive: 'unknown', duplex: 'unknown' });
+    expect(f.hook('snapshot').rows).toEqual([]);
+    expect(f.calls[0].args[0]).toBe(request);
     expect(request.bodyUsed).toBe(false);
     expect(stream.locked).toBe(false); expect(pulls).toBe(0);
   });
 
   test('records only finite classes and bounds rows, payload counting and serialized output', () => {
     const f = fixture(); f.hook('activate');
-    for (let i = 0; i < 32; i++) f.window.fetch('https://private.example/PRIVATE?token=PRIVATE#PRIVATE', {
+    for (let i = 0; i < 32; i++) f.window.fetch('/backend-api/f/conversation?token=PRIVATE#PRIVATE', {
       method: 'PRIVATE', body: 'é'.repeat(600000), headers: { Authorization: 'PRIVATE' }, keepalive: true, duplex: 'PRIVATE',
     });
     const snapshot = f.hook('snapshot'), serialized = JSON.stringify(snapshot);
     expect(f.calls).toHaveLength(32); expect(snapshot.rows).toHaveLength(8);
-    expect(snapshot.rows[0]).toMatchObject({ endpoint: 'other', origin: 'other', method: 'other', bodyType: 'string',
+    expect(snapshot.rows[0]).toMatchObject({ endpoint: 'conversation', origin: 'same', method: 'other', bodyType: 'string',
       bodyBytes: null, duplex: 'other', keepalive: 'true' });
     expect(serialized.length).toBeLessThan(8192); expect(serialized).not.toContain('PRIVATE');
     expect(serialized).not.toContain('Authorization'); expect(serialized).not.toContain('private.example');
@@ -128,6 +128,56 @@ describe('one-view request metadata diagnostic', () => {
     g.window.fetch('/backend-api/sentinel/chat-requirements');
     g.window.fetch('/backend-api/f/conversation/prepare');
     expect(g.hook('snapshot').rows.map((row: any) => row.endpoint)).toEqual(['preparation', 'preparation']);
+  });
+
+  test('unrelated requests cannot exhaust capture capacity or acquire option/settlement observers', async () => {
+    const f = fixture(), cached = f.window.fetch;
+    f.hook('activate');
+    let inspected = 0;
+    let settlementObservers = 0;
+    Object.defineProperty(f.pending.promise, 'constructor', { get() { settlementObservers++; return Promise; } });
+    const opaque = { toString() { inspected++; throw new Error('PRIVATE'); } };
+    const unrelatedInit = new Proxy({}, { getOwnPropertyDescriptor() { inspected++; throw new Error('PRIVATE'); } });
+    const noise: unknown[] = ['/backend-api/me', '/backend-api/conversations', '/backend-api/f/conversation/other',
+      '/backend-api/f/conversation/prepare/other', '/backend-api/sentinel/chat-requirements/other',
+      'https://other.example/backend-api/f/conversation', 'https://other.example/backend-api/f/conversation/prepare',
+      'data:text/plain,PRIVATE', 'https://', opaque,
+      new Request('https://chatgpt.com/backend-api/f/conversation'), '/incidental'];
+    const receiver = {};
+    for (const input of noise) {
+      expect(cached.call(receiver, input, unrelatedInit)).toBe(f.pending.promise);
+      expect(f.calls.at(-1)).toEqual({ receiver, args: [input, unrelatedInit] });
+    }
+    expect(inspected).toBe(0);
+    expect(settlementObservers).toBe(0);
+    expect(f.hook('snapshot').rows).toEqual([]);
+    const prepareInit = { method: 'POST', body: 'PREPARE', keepalive: false };
+    const conversationInit = { method: 'POST', body: 'CONVERSATION', keepalive: false };
+    const prepare = cached.call(receiver, '/backend-api/f/conversation/prepare?private=TOKEN', prepareInit);
+    const conversation = cached.call(receiver, '/backend-api/f/conversation', conversationInit);
+    expect(prepare).toBe(f.pending.promise); expect(conversation).toBe(f.pending.promise);
+    expect(settlementObservers).toBe(2);
+    expect(f.calls).toHaveLength(noise.length + 2);
+    expect(f.calls.at(-2)).toEqual({ receiver, args: ['/backend-api/f/conversation/prepare?private=TOKEN', prepareInit] });
+    expect(f.calls.at(-1)).toEqual({ receiver, args: ['/backend-api/f/conversation', conversationInit] });
+    const response = new Response('PRIVATE_RESPONSE', { status: 202 });
+    f.pending.resolve(response);
+    expect(await prepare).toBe(response); expect(await conversation).toBe(response);
+    expect(response.bodyUsed).toBe(false);
+    expect(f.hook('snapshot').rows).toMatchObject([
+      { ordinal: 1, endpoint: 'preparation', origin: 'same', bodyBytes: 7, outcome: 'headers', status: 202 },
+      { ordinal: 2, endpoint: 'conversation', origin: 'same', bodyBytes: 12, outcome: 'headers', status: 202 },
+    ]);
+    expect(JSON.stringify(f.hook('snapshot'))).not.toContain('PRIVATE');
+
+    const reason = new TypeError('PRIVATE_UNRELATED'), rejected = fixture(); rejected.hook('activate');
+    const promise = rejected.window.fetch('/backend-api/me');
+    rejected.pending.reject(reason);
+    expect(await promise.catch((error: unknown) => error)).toBe(reason);
+    expect(rejected.calls).toHaveLength(1); expect(rejected.hook('snapshot').rows).toEqual([]);
+    const sync = fixture({ syncError: reason }); sync.hook('activate');
+    let caught: unknown; try { sync.window.fetch('/backend-api/me'); } catch (error) { caught = error; }
+    expect(caught).toBe(reason); expect(sync.calls).toHaveLength(1); expect(sync.hook('snapshot').rows).toEqual([]);
   });
 
   test('expiry stops recording and a native stop restores fetch without overwriting another wrapper', async () => {

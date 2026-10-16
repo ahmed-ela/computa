@@ -1,6 +1,34 @@
 # Embedded website provider qualification
 
-## Candidate128: scoped request metadata
+## Candidate129: focused request metadata
+
+The diagnostic reserves its eight rows for same-origin conversation and
+preparation requests with string URL inputs. Unrelated and opaque inputs are
+omitted before inspecting options or adding settlement observers. An absent
+row therefore cannot establish that no request occurred. Original forwarding,
+the finite native schema and diagnostic authorization remain unchanged.
+
+All nine JavaScript cases passed with 116 assertions, including more than eight
+unrelated requests before preparation and conversation requests. All three
+local WebKit browser cases passed without skips; a test-only predecessor maps
+eligible URLs to native data fetch and verifies real HTTP 200 headers and an
+unread response body. Source remained unchanged during testing, and independent
+review was clear. Signed packaging and a focused installed capture are pending.
+
+## Current installed build128: scoped request metadata
+
+Computa **0.7.0 (128)** from pushed commit
+`793a078704877d4305d743dc6111db337e3f3acf` is installed. The independently
+verified artifact has 55 bundle files, 51 resources and 2,137 frozen inputs;
+the engine is unchanged and the Gemini diagnostic compiler flag is off.
+The previous installed127 bundle is preserved as a verified backup.
+
+The native build succeeded. Its original producer verifier rejected three
+explicit AutomationCore source lists while checking the Computa module, so that
+original result remains failed. A separate independently reviewed supplemental
+audit preserved that failure and verified the exact exclusion, all three actual
+Computa compiler commands, immutable source-list snapshots, complete project
+source registration, frozen inputs, resources and signatures before installation.
 
 An explicit private `request_metadata_v1` arm enables a document-start observer
 on one new private ChatGPT view. It records up to eight finite request rows:
@@ -24,13 +52,29 @@ run: those 18 initially skipped because the interpreter resolver rejected the
 installed Bun alias, then passed with an existing fixture binary verified
 byte-identical to installed Bun. A strengthened in-memory WebKit case also
 verified actual header status and an unconsumed response body. Independent
-JavaScript and native reviews were clear. Signed packaging and installed
-capture remain pending; website failures remain unresolved.
+JavaScript and native reviews were clear.
 
-## Current installed build127
+The first installed128 diagnostic submission failed during cold-resume
+maintenance compaction. Its user prompt was not sent, the maintenance-excluded
+arm remained unused and was removed, and the paused synthetic prompt was deleted.
+The owned website session closed and the unrelated blank control tab remained.
+
+One subsequent explicit user submission in the same loaded chat consumed a new
+arm and saved a sidecar matching the exact native turn, preparation, inference
+and session identities. It still failed with `website_response_failed` on its
+first inference. Seven unrelated GETs and one preparation POST filled the eight
+rows; the preparation's 65,069-byte JavaScript string resolved HTTP 200 headers.
+No conversation row was retained, so its request shape, HTTP result and stream
+outcome remain unknown. This is an instrumented diagnostic, not a repair or
+qualification pass. The original deadline held, cleanup closed the website
+session, the control tab remained and the arm was absent. Inspector settings
+remain restored off. Candidate129 addresses this demonstrated capture limit;
+website failures remain unresolved.
+
+## Historical installed build127
 
 Computa **0.7.0 (127)**, compiled from pushed commit
-`88b5d1ea22cc5a4ccb8a3617bfb7d50105a3b261`, is installed. All 54 installed
+`88b5d1ea22cc5a4ccb8a3617bfb7d50105a3b261`, was installed. All 54 installed
 bundle files match the independently audited signed candidate; its 50 resources,
 2,132 frozen inputs, signatures and unchanged engine were checked separately.
 The Gemini diagnostic compiler flag is enabled in this diagnostic artifact;

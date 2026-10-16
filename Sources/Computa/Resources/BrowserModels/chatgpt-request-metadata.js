@@ -84,6 +84,9 @@
             ? 'preparation' : 'other';
       } catch { /* Never retain the URL, query, fragment, or parse error. */ }
     }
+    // Reserve this finite capture for model submission requests. Unrelated
+    // fetches keep their original behavior and receive no settlement observer.
+    if (origin !== 'same' || (endpoint !== 'conversation' && endpoint !== 'preparation')) return null;
     const method = data(init, 'method'), body = data(init, 'body');
     const keepalive = data(init, 'keepalive'), duplex = data(init, 'duplex');
     const type = bodyType(typeof input === 'string' ? body : unknown);
@@ -124,7 +127,7 @@
   function observer(...args) {
     let row = null;
     if (available() && rows.length < 8) {
-      try { row = requestRow(args); rows.push(row); } catch { /* Diagnosis cannot reject a fetch. */ }
+      try { row = requestRow(args); if (row) rows.push(row); } catch { /* Diagnosis cannot reject a fetch. */ }
     }
     let promise;
     try { promise = call(original, this, args); }
