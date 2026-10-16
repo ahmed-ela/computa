@@ -72,6 +72,7 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private weak var modelRenderHost: NSView?
     @ObservationIgnored private var modelRenderHosts: [ModelRenderHostReference] = []
     @ObservationIgnored private var isShutdown = false
+    @ObservationIgnored private var geminiPostBlockDiagnosticConsumed = false
     static let profileDefaultsKey = "Computa.EmbeddedBrowser.ProfileIdentifier.v1"
 
     private final class ModelRenderHostReference {
@@ -96,6 +97,7 @@ final class EmbeddedBrowserSession {
         weak var presentationHost: NSView?
         var observations: [NSKeyValueObservation] = []
         var navigation: WKNavigation?
+        var geminiPostBlockObservation: (lease: GeminiPostBlockNativeLease, callback: @MainActor (GeminiPostBlockNativeEvent) -> Void)?
         var preparedDocumentNavigation = false
         // Native lifecycle facts can defer an untouched initial inspection,
         // but never grant adapter, document, or recovery authority.
@@ -389,6 +391,8 @@ final class EmbeddedBrowserSession {
 
     func closeTab(_ id: UUID) {
         guard let entry = entries.removeValue(forKey: id), let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let postBlockObservation = entry.geminiPostBlockObservation
+        entry.geminiPostBlockObservation = nil
         revokeModelInspector(entry, reason: isShutdown ? .shutdown : .closed)
         let humanIndex = tabs.prefix(index).filter { entries[$0.id]?.isModelOwned == false }.count
         entry.view.isInspectable = false
@@ -421,6 +425,10 @@ final class EmbeddedBrowserSession {
             }
         }
         if !entry.isModelOwned { errorMessage = selectedTabID.flatMap { entries[$0]?.tab.error } }
+        if let observation = postBlockObservation {
+            observation.lease.exactViewClosed = true
+            observation.callback(.closed)
+        }
     }
 
     func navigate(tabID: UUID, to url: URL) throws {
@@ -627,6 +635,77 @@ final class EmbeddedBrowserSession {
     }
 
     func documentGeneration(for id: UUID) -> UUID? { entries[id]?.tab.documentGeneration }
+
+
+    /// Diagnostic-only native observation/disposal authority for one exact
+    /// private view. It never grants provider/page or conversation authority.
+    enum GeminiPostBlockNativeEvent: String {
+        case changed, started, redirected, committed, finished, failed, terminated, closed
+    }
+
+    @MainActor final class GeminiPostBlockNativeLease {
+        let id = UUID()
+        fileprivate let tabID: UUID
+        fileprivate let view: WKWebView
+        fileprivate let ownerToken: String
+        fileprivate(set) var exactViewClosed = false
+        fileprivate(set) var ended = false
+
+        fileprivate init(tabID: UUID, view: WKWebView, ownerToken: String) {
+            self.tabID = tabID; self.view = view; self.ownerToken = ownerToken
+        }
+    }
+
+    var hasConsumedGeminiPostBlockDiagnostic: Bool { geminiPostBlockDiagnosticConsumed }
+
+    /// Caller must already have latched its original checkpoint failure. No
+    /// setting/RPC or page script can arm this initializer-only diagnostic.
+    func beginGeminiPostBlockNativeObservation(tabID: UUID, view: WKWebView, ownerToken: String,
+        callback: @escaping @MainActor (GeminiPostBlockNativeEvent) -> Void) -> GeminiPostBlockNativeLease? {
+        guard !isShutdown, !geminiPostBlockDiagnosticConsumed,
+              let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
+              entry.view === view, entry.modelChanges?.ownerToken == ownerToken,
+              entry.geminiPostBlockObservation == nil else { return nil }
+        let lease = GeminiPostBlockNativeLease(tabID: tabID, view: view, ownerToken: ownerToken)
+        geminiPostBlockDiagnosticConsumed = true
+        entry.geminiPostBlockObservation = (lease, callback)
+        return lease
+    }
+
+    func isGeminiPostBlockNativeLeaseCurrent(_ lease: GeminiPostBlockNativeLease) -> Bool {
+        guard !isShutdown, !lease.ended, let entry = entries[lease.tabID], entry.isModelOwned,
+              !entry.isToolOwned, entry.view === lease.view,
+              entry.modelChanges?.ownerToken == lease.ownerToken,
+              entry.geminiPostBlockObservation?.lease === lease else { return false }
+        return true
+    }
+
+    func endGeminiPostBlockNativeObservation(_ lease: GeminiPostBlockNativeLease) {
+        if let entry = entries[lease.tabID], entry.view === lease.view,
+           entry.geminiPostBlockObservation?.lease === lease { entry.geminiPostBlockObservation = nil }
+        lease.ended = true
+    }
+
+    /// Separate from the unchanged checkpoint generation/URL receipt. This
+    /// closes only the originally leased, still-private physical view.
+    func disposeGeminiPostBlockDiagnosticView(_ lease: GeminiPostBlockNativeLease) -> Bool {
+        guard isGeminiPostBlockNativeLeaseCurrent(lease) else { return false }
+        closeTab(lease.tabID)
+        return lease.exactViewClosed && entries[lease.tabID] == nil
+    }
+
+    private func emitGeminiPostBlockNativeEvent(_ entry: Entry, _ event: GeminiPostBlockNativeEvent) {
+        guard entries[entry.tab.id] === entry, let observation = entry.geminiPostBlockObservation,
+              isGeminiPostBlockNativeLeaseCurrent(observation.lease) else { return }
+        observation.callback(event)
+    }
+
+    #if DEBUG
+    func emitGeminiPostBlockNativeEventForTesting(tabID: UUID, view: WKWebView, event: GeminiPostBlockNativeEvent) {
+        guard let entry = entries[tabID], entry.view === view else { return }
+        emitGeminiPostBlockNativeEvent(entry, event)
+    }
+    #endif
 
     struct ModelNavigationDiagnostic: Equatable {
         let viewLoading: Bool
@@ -1005,6 +1084,7 @@ final class EmbeddedBrowserSession {
             if entry.recoverySettledGeneration == entry.tab.documentGeneration { observeHumanVerificationRecovery(entry) }
         }
         signalModelChange(entry)
+        emitGeminiPostBlockNativeEvent(entry, .changed)
     }
 
     private func observeHumanVerificationCheckpoint(_ entry: Entry) {
@@ -1040,6 +1120,7 @@ final class EmbeddedBrowserSession {
             entry.modelNavigationGeneration = entry.tab.documentGeneration
         }
         refresh(tabID, view: view)
+        emitGeminiPostBlockNativeEvent(entry, .started)
     }
 
     fileprivate func serverRedirected(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
@@ -1050,6 +1131,7 @@ final class EmbeddedBrowserSession {
               entry.modelFinishedGeneration != entry.tab.documentGeneration,
               entry.modelFailedGeneration != entry.tab.documentGeneration else { return }
         entry.serverRedirectObservedInCurrentNavigation = true
+        emitGeminiPostBlockNativeEvent(entry, .redirected)
     }
 
     fileprivate func completed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID, error: Error? = nil) {
@@ -1073,6 +1155,7 @@ final class EmbeddedBrowserSession {
             entry.recoverySettledGeneration = entry.tab.documentGeneration
             observeHumanVerificationRecovery(entry)
         }
+        emitGeminiPostBlockNativeEvent(entry, error == nil ? .finished : .failed)
     }
 
     fileprivate func committed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
@@ -1093,6 +1176,7 @@ final class EmbeddedBrowserSession {
             entry.tab.isWebInspectorAvailable = !entry.isToolOwned
         }
         refresh(tabID, view: view, committedNavigation: true)
+        emitGeminiPostBlockNativeEvent(entry, .committed)
     }
 
     fileprivate func terminated(_ view: WKWebView, tabID: UUID) {
@@ -1106,6 +1190,7 @@ final class EmbeddedBrowserSession {
         entry.tab.isLoading = false
         report("The web content process stopped. Reload this tab to recover; no action was replayed.", tabID: tabID)
         signalModelChange(entry)
+        emitGeminiPostBlockNativeEvent(entry, .terminated)
     }
 }
 

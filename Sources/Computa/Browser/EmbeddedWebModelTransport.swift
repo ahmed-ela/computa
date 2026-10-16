@@ -293,6 +293,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let url: URL
         }
         var untouchedGoogleCheckpoint: UntouchedGoogleCheckpoint?
+        var postBlockDiagnostic: GeminiPostBlockDiagnostic?
         struct InitialCheckpointSettlement {
             let deadline: ContinuousClock.Instant
             var observations = 0
@@ -376,7 +377,41 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+
+    private final class GeminiPostBlockDiagnostic {
+        let id = UUID()
+        let started: ContinuousClock.Instant
+        let deadline: ContinuousClock.Instant
+        let checkpointID: UUID
+        var lease: EmbeddedBrowserSession.GeminiPostBlockNativeLease?
+        var task: Task<Data, Never>?
+        var generations: [UUID: Int] = [:]
+        var lastSignature: String?
+        var records = 0
+        var truncated = false
+        var completed = false
+        var physicallyClosed = false
+        var interruption: String?
+
+        init(duration: Duration, checkpointID: UUID) {
+            let started = ContinuousClock.now
+            self.started = started
+            deadline = started + duration
+            self.checkpointID = checkpointID
+        }
+    }
+
+    private static var compiledPostBlockDiagnostic: Bool {
+        #if COMPUTA_GEMINI_POST_BLOCK_DIAGNOSTIC
+        true
+        #else
+        false
+        #endif
+    }
+
     private let browser: EmbeddedBrowserSession
+    private let geminiPostBlockDiagnosticEnabled: Bool
+    private var geminiPostBlockDiagnosticDuration: Duration = .seconds(5)
     private let createTab: @MainActor (URL) throws -> UUID
     private let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
     private var sessions: [String: Session] = [:]
@@ -411,18 +446,62 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var resourceTimingDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var responseProgressDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var initialCheckpointSettlementObserverForTesting: (@MainActor ([String: Any]) -> Void)?
+    private var geminiPostBlockObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
     #endif
 
-    init(browser: EmbeddedBrowserSession) {
+    init(browser: EmbeddedBrowserSession, geminiPostBlockDiagnostic: Bool? = nil) {
+        self.geminiPostBlockDiagnosticEnabled = geminiPostBlockDiagnostic ?? Self.compiledPostBlockDiagnostic
         self.browser = browser
         self.createTab = { try browser.createModelTab(url: $0) }
     }
 
     #if DEBUG
-    init(browser: EmbeddedBrowserSession, createTabForTesting: @escaping @MainActor (URL) throws -> UUID) {
+    init(browser: EmbeddedBrowserSession, geminiPostBlockDiagnostic: Bool? = nil,
+         createTabForTesting: @escaping @MainActor (URL) throws -> UUID) {
+        self.geminiPostBlockDiagnosticEnabled = geminiPostBlockDiagnostic ?? Self.compiledPostBlockDiagnostic
         self.browser = browser
         self.createTab = createTabForTesting
+    }
+
+
+    @discardableResult
+    func setGeminiPostBlockDiagnosticWindowForTesting(_ duration: Duration) -> Bool {
+        guard !browser.hasConsumedGeminiPostBlockDiagnostic else { return false }
+        geminiPostBlockDiagnosticDuration = max(.milliseconds(1), min(.seconds(5), duration))
+        return true
+    }
+
+    func setGeminiPostBlockDiagnosticObserverForTesting(_ observer: (@MainActor ([String: Any]) -> Void)?) {
+        geminiPostBlockObserverForTesting = observer
+    }
+
+    func geminiPostBlockDiagnosticDeadlineForTesting(sessionToken: String) -> ContinuousClock.Instant? {
+        sessions[sessionToken]?.postBlockDiagnostic?.deadline
+    }
+
+    func canDisposeUntouchedGoogleCheckpointForTesting(sessionToken: String) -> Bool {
+        sessions[sessionToken].map(canDisposeUntouchedGoogleCheckpoint) ?? false
+    }
+
+    /// Negative fixtures can only remove eligibility, never create proof or input.
+    func invalidateGeminiPostBlockEligibilityForTesting(sessionToken: String, submitted: Bool, adapterDispatched: Bool) {
+        guard let session = sessions[sessionToken] else { return }
+        if submitted { session.submitted = true; session.sequence = max(1, session.sequence) }
+        if adapterDispatched { session.providerAdapterEverDispatched = true }
+    }
+
+    func revokeGeminiPostBlockObservationForTesting(sessionToken: String) {
+        guard let lease = sessions[sessionToken]?.postBlockDiagnostic?.lease else { return }
+        browser.endGeminiPostBlockNativeObservation(lease)
+    }
+
+    func createGeminiPostBlockRoleSessionForTesting(provider: Provider, isDiscovery: Bool, isRecoveryProbe: Bool) throws -> String {
+        guard providerGates[provider] == nil, !browser.savedHumanVerificationProviders.contains(provider.rawValue) else {
+            throw Failure.humanVerificationRequired(provider)
+        }
+        return try createSession(provider: provider, choice: nil, isDiscovery: isDiscovery,
+                                 isRecoveryProbe: isRecoveryProbe).token
     }
 
     func setBeforePageResultValidationForTesting(_ hook: (@MainActor (String) async -> Void)?) {
@@ -2350,7 +2429,144 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let navigation = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view)?.logDescription
             ?? EmbeddedBrowserSession.ModelNavigationDiagnostic.unknownLogDescription
         Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public) firstFailure=\(session.terminalFailure == nil) navigation={\(navigation, privacy: .public)}")
-        throw recordedWebsiteBlocker(failure, session: session)
+        let firstFailure = session.terminalFailure == nil
+        let recorded = recordedWebsiteBlocker(failure, session: session)
+        if action == "inspect", phase == "before", failure == .humanVerificationRequired(.gemini) {
+            enrollGeminiPostBlockDiagnostic(session, firstFailure: firstFailure)
+        }
+        throw recorded
+    }
+
+
+    /// Instrumentation only, after the original failure and saved gate exist.
+    private func enrollGeminiPostBlockDiagnostic(_ session: Session, firstFailure: Bool) {
+        guard geminiPostBlockDiagnosticEnabled, firstFailure, session.postBlockDiagnostic == nil,
+              isUntouchedInference(session), sessions[session.token] === session,
+              session.terminalFailure == .humanVerificationRequired(.gemini), session.state == "failed",
+              providerGates[.gemini]?.failure == .humanVerificationRequired(.gemini),
+              canDisposeUntouchedGoogleCheckpoint(session),
+              let checkpointID = browser.savedHumanVerificationCheckpointIDs["gemini"],
+              let facts = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view),
+              facts.settled, !facts.geminiDocumentCommitObserved else { return }
+        let capture = GeminiPostBlockDiagnostic(duration: geminiPostBlockDiagnosticDuration, checkpointID: checkpointID)
+        guard let lease = browser.beginGeminiPostBlockNativeObservation(tabID: session.tabID, view: session.view,
+            ownerToken: session.token, callback: { [weak self, weak session, weak capture] event in
+                guard let self, let session, let capture, session.postBlockDiagnostic === capture,
+                      !capture.completed else { return }
+                self.recordGeminiPostBlockDiagnostic(session, capture: capture, event: event.rawValue)
+                if event == .closed || event == .terminated {
+                    if event == .closed, capture.lease?.exactViewClosed == true,
+                       self.browser.webView(for: session.tabID) == nil { capture.physicallyClosed = true }
+                    capture.interruption = event.rawValue
+                    capture.task?.cancel()
+                } else if self.browser.savedHumanVerificationCheckpointIDs["gemini"] != capture.checkpointID {
+                    capture.interruption = "gate_changed"
+                    capture.task?.cancel()
+                }
+            }) else { return }
+        capture.lease = lease
+        session.postBlockDiagnostic = capture
+        recordGeminiPostBlockDiagnostic(session, capture: capture, event: "enrolled")
+        // The timer starts at the saved block, not at Finish, and is never
+        // replaced or renewed by a callback, poll or concurrent cleanup.
+        capture.task = Task { @MainActor [self, session, capture] in
+            do {
+                let snapshot = capture.started + .seconds(1)
+                if snapshot < capture.deadline {
+                    try await ContinuousClock().sleep(until: snapshot)
+                    recordGeminiPostBlockDiagnostic(session, capture: capture, event: "snapshot")
+                }
+                try await ContinuousClock().sleep(until: capture.deadline)
+            } catch {
+                if capture.interruption == nil { capture.interruption = "cancelled" }
+            }
+            return completeGeminiPostBlockDiagnostic(session, capture: capture)
+        }
+    }
+
+    private func recordGeminiPostBlockDiagnostic(_ session: Session, capture: GeminiPostBlockDiagnostic,
+                                                event: String, terminal: Bool = false,
+                                                ordinaryCleanupVerified: Bool = false) {
+        guard session.postBlockDiagnostic === capture, terminal || !capture.completed else { return }
+        guard capture.records < (terminal ? 32 : 31) else {
+            if !terminal { capture.truncated = true }
+            return
+        }
+        if !terminal, ContinuousClock.now >= capture.deadline {
+            capture.interruption = capture.interruption ?? "deadline"
+            capture.task?.cancel()
+            return
+        }
+        let present = browser.webView(for: session.tabID) === session.view
+        let facts = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view)
+        var ordinal: Any = NSNull()
+        if present, let generation = browser.documentGeneration(for: session.tabID) {
+            if capture.generations[generation] == nil, capture.generations.count < 32 {
+                capture.generations[generation] = capture.generations.count + 1
+            }
+            if let value = capture.generations[generation] { ordinal = value }
+        }
+        let route: String
+        if !present { route = "unknown" }
+        else if session.provider.blockingFailure(for: session.view.url) == .humanVerificationRequired(.gemini) { route = "google_verification" }
+        else if session.provider.blockingFailure(for: session.view.url) == .signInRequired { route = "signin" }
+        else if session.view.url.map({ session.provider.accepts($0.absoluteString) }) == true { route = "provider" }
+        else { route = session.view.url == nil ? "unknown" : "other" }
+        let elapsed = ContinuousClock.now - capture.started
+        let milliseconds = max(0, min(60_000, elapsed.components.seconds * 1_000 + elapsed.components.attoseconds / 1_000_000_000_000_000))
+        var record: [String: Any] = [
+            "kind": "gemini_post_block_native_v1", "captureID": capture.id.uuidString.lowercased(),
+            "event": event, "elapsedMs": milliseconds, "maximumMs": 5_000,
+            "exactViewPresent": present, "generationOrdinal": ordinal, "routeClass": route,
+            "known": facts != nil, "loading": facts.map { $0.viewLoading as Any } ?? NSNull(),
+            "pending": facts.map { $0.navigationPending as Any } ?? NSNull(),
+            "committed": facts.map { $0.generationCommitted as Any } ?? NSNull(),
+            "finished": facts.map { $0.generationFinished as Any } ?? NSNull(),
+            "navigationError": facts.map { $0.navigationError as Any } ?? NSNull(),
+            "checkpointUnchanged": browser.savedHumanVerificationCheckpointIDs["gemini"] == capture.checkpointID,
+            "adapterDispatched": session.providerAdapterEverDispatched, "sequence": session.sequence,
+            "taskFailed": session.terminalFailure == .humanVerificationRequired(.gemini),
+            "physicallyClosed": capture.physicallyClosed, "ordinaryCleanupVerified": ordinaryCleanupVerified,
+            "eventsTruncated": capture.truncated,
+        ]
+        // Ignore identical adjacent callbacks; truncation never prolongs life.
+        let signature = record.filter { !["captureID", "elapsedMs"].contains($0.key) }
+        guard let signatureData = try? JSONSerialization.data(withJSONObject: signature, options: .sortedKeys) else { return }
+        let signatureString = String(decoding: signatureData, as: UTF8.self)
+        guard terminal || signatureString != capture.lastSignature else { return }
+        capture.lastSignature = signatureString
+        capture.records += 1
+        record["record"] = capture.records
+        if terminal { record["disposalCause"] = capture.interruption ?? "deadline" }
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys), data.count <= 960 else { return }
+        #if DEBUG
+        geminiPostBlockObserverForTesting?(record)
+        #endif
+        Self.inspectionLog.error("geminiPostBlockDiagnostic \(String(decoding: data, as: UTF8.self), privacy: .public)")
+    }
+
+    private func completeGeminiPostBlockDiagnostic(_ session: Session, capture: GeminiPostBlockDiagnostic) -> Data {
+        capture.completed = true
+        let ordinary = canDisposeUntouchedGoogleCheckpoint(session)
+        let authority = sessions[session.token] === session && isUntouchedInference(session)
+        if let lease = capture.lease {
+            if lease.exactViewClosed, browser.webView(for: session.tabID) == nil {
+                capture.physicallyClosed = true
+            } else if authority {
+                // The diagnostic lease is separately scoped to this never-used
+                // private view, not to the now-possibly-stale checkpoint route.
+                capture.physicallyClosed = browser.disposeGeminiPostBlockDiagnosticView(lease)
+            }
+            browser.endGeminiPostBlockNativeObservation(lease)
+        }
+        if !authority { capture.interruption = "authority_lost" }
+        else if !capture.physicallyClosed { capture.interruption = "identity_lost" }
+        recordGeminiPostBlockDiagnostic(session, capture: capture, event: "disposed", terminal: true,
+                                       ordinaryCleanupVerified: ordinary && capture.physicallyClosed)
+        // Preserve the original failed task and saved gate. A changed-generation
+        // diagnostic close cannot forge the ordinary not_created receipt.
+        session.state = "failed"
+        return (try? snapshot(session, cleanup: ordinary && capture.physicallyClosed ? "not_created" : "failed")) ?? Data("{}".utf8)
     }
 
     private func isUntouchedInference(_ session: Session) -> Bool {
@@ -3086,6 +3302,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func finish(_ session: Session, cancel: Bool) async -> Data {
         finishInitialCheckpointSettlement(session, phase: cancel ? .cancelled : .finished)
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
+        if let capture = session.postBlockDiagnostic, let task = capture.task {
+            if cancel || Task.isCancelled { task.cancel() }
+            let result = await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+            if capture.physicallyClosed, sessions[session.token] === session { sessions.removeValue(forKey: session.token) }
+            return result
+        }
         // The outer server can reach its deadline before another native poll
         // is scheduled. Observe only an already-expired running response;
         // successful, preparing and early-cancelled sessions are untouched.

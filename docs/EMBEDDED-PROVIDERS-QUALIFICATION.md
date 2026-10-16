@@ -46,7 +46,7 @@ verified. Both original human tabs were preserved. These results do not qualify
 permanent CAPTCHA prevention. Human and model views share the persistent store,
 configuration, URL loading and navigation policy; background geometry, focus,
 popup handling and view lifetime differ. Their causal relevance remains unproven.
-The passive post-block observation proposal remains private and unapplied.
+The passive post-block diagnostic below remains disabled in normal builds.
 
 ChatGPT's ordinary-tab `bad URL` failure below remains unresolved. It is not
 qualified by the GPT-OSS or Gemini results.
@@ -65,6 +65,36 @@ repair, not an established explanation of V38's failure.
 All 91 native API tests passed, including the new first/second-attempt stream
 error cases, finite error privacy, normal success controls and no extra request.
 This source change has not been installed; the running app remains build122.
+
+## Build124 Gemini post-block diagnostic
+
+V38 and V41 both rejected a newly settled Google verification route, before any
+provider adapter or prompt dispatch. The next experiment asks whether the exact
+private view would naturally navigate again after that first `didFinish`.
+This remains a hypothesis, not a CAPTCHA fix.
+
+Normal builds leave the probe disabled. An explicit
+`COMPUTA_GEMINI_POST_BLOCK_DIAGNOSTIC` compilation condition enables one eligible
+capture per browser instance. Only the original inspect/before failure can
+enroll an untouched, settled, app-owned Gemini view after its failure and saved
+gate are latched. The initial three-second settlement policy is unchanged.
+
+The probe observes native lifecycle facts for at most five seconds, with one
+nonrenewable timer and at most 32 finite records. It does not evaluate page
+JavaScript, enter input, navigate, refresh, retry, clear a gate or grant adapter
+authority. Finish and cancellation await the same bounded task. A later route
+change cannot turn the failed task into success or reuse its old checkpoint
+cleanup receipt. Separate physical disposal retains its own exact-view proof.
+Closure means stop, detach and registry removal; a failed session can retain
+the stopped WK object until ordinary Finish. No deallocation claim is made.
+
+The integrated source passed all 115 selected native API and Gemini tests,
+including nine new diagnostic cases and 15 existing initial-navigation cases.
+These cover default-off behavior, no-Finish timing, changed generations,
+concurrent Finish, cancellation, revocation, privacy and bounded records.
+No live probe or new provider request was run, and the installed app remains
+build122. A diagnostic candidate requires a separately verified signed build
+with the explicit compilation condition before any installation or live trial.
 
 ## Historical build121 qualification
 
