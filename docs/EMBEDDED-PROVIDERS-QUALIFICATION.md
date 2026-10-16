@@ -1,6 +1,6 @@
 # Embedded website provider qualification
 
-## Build131: owned temporary-cookie retirement and reversible maintenance
+## Current installed build131: owned temporary-cookie retirement and reversible maintenance
 
 Completed temporary ChatGPT sessions now retire only the exact conversation IDs
 established by native first-user ownership and route-promotion evidence. A private,
@@ -26,13 +26,36 @@ cleanup. Earlier failed runs are retained: one test compilation error, filesyste
 alias rejection, and synthetic timestamp precision issues were resolved. No
 production future-clock tolerance or symlink protection was relaxed.
 
-Installed-profile inspection, quarantine and fresh provider qualification remain
-pending. These tests do not establish that the ChatGPT request failure is fixed.
+Computa **0.7.0 (131)** from pushed commit
+`86edb6fdba89b26bd199dd82cbe0f0d00da1010d` is installed. Independent checks
+matched all 55 signed/installed files, 51 resources, 2,145 frozen inputs and all
+103 registered Computa Swift sources. The retained engine is unchanged, actual
+compiler invocations leave the Gemini diagnostic flag off, and the exact signed
+130 bundle is preserved as a verified backup.
 
-## Current installed build130: finite header and profile-cookie estimates
+The actual-app inspection read 598 profile cookies, including the expected 208
+paired temporary keys and 98 unpaired keys, with no cookie writes. A separately
+armed quarantine archived and removed exactly those 208 keys. All 208 callbacks
+settled, all nonselected state remained identical, the 98 unpaired keys and
+history-off markers stayed, and the private recovery archive is preserved.
+No provider request ran during maintenance. Its unused arm is absent, and both
+maintenance launches normally quit before the next launch.
+
+One unarmed normal ChatGPT Instant user submission then exercised the same
+previously failing chat. Its cold compaction inference completed in about 15
+seconds, with verified normal Chat/GPT-6/Instant evidence and closed cleanup.
+The following user inference failed at the model-selection check in about 4.6
+seconds, before any browser task tool ran. Its finite existing diagnostic shows
+`prepare` / `action_final_guard` / `primary_open_requested`: the pinned canonical
+trigger stayed closed and no associated menu/proof appeared after opening was
+requested. Both website sessions closed and the blank human control tab remained.
+No prompt was retried. The complete browser task has **not** passed, and the
+new model-proof failure is being investigated before another provider attempt.
+
+## Historical installed build130: finite header and profile-cookie estimates
 
 Computa **0.7.0 (130)** from pushed commit
-`9fbe7d59986577061c00fe5e2f6d9e1c551a8545` is installed. Independent checks
+`9fbe7d59986577061c00fe5e2f6d9e1c551a8545` was installed. Independent checks
 matched all 55 signed and installed bundle files, 51 resources, 2,139 frozen
 inputs and the unchanged engine. All three actual Computa compiler invocations
 confirmed the Gemini diagnostic flag off. The exact installed129 bundle is
