@@ -1,6 +1,13 @@
 # Embedded website provider qualification
 
-## Candidate127: API JSON parser failures
+## Current installed build127
+
+Computa **0.7.0 (127)**, compiled from pushed commit
+`88b5d1ea22cc5a4ccb8a3617bfb7d50105a3b261`, is installed. All 54 installed
+bundle files match the independently audited signed candidate; its 50 resources,
+2,132 frozen inputs, signatures and unchanged engine were checked separately.
+The Gemini diagnostic compiler flag is enabled in this diagnostic artifact;
+normal source configuration remains off. V47 made no Gemini request.
 
 Foundation parser errors in Chat JSON, Chat SSE and Responses JSON previously
 escaped the typed decoder failure and appeared as generic `unavailable` errors.
@@ -17,9 +24,34 @@ the permitted argument-correction attempt returned malformed JSON, with no tool
 output or private payload in the failure. The cohort source and diff remained
 unchanged; its log SHA is
 `fdc70e96699b6ae76ba6ed0daf76d094fce5ecc5c2d9945119d5ce413c1884fc`.
-Independent source review was clear. Signed packaging and live qualification
-remain pending. This fixes a reproduced classification defect, not the
-unattributed historical V38 response failure or the website providers' blockers.
+Independent source review was clear. This fixes a reproduced classification
+defect, not the unattributed historical V38 response failure or the website
+providers' blockers.
+
+The fresh V47 hosted Cerebras GPT-OSS browser task **failed strict qualification**
+after 5.076 s. All eight native tool calls succeeded, but the model filled `5803`
+instead of the requested `UA 5803`. The server rejected that literal reference,
+and the model reported no matching flight. No response normalization or failure
+waiver was applied. Exact-turn API accounting found zero corrections; the empty
+fatal-guard capture does not establish a decoding repair or explain V38.
+
+The model's explicit `browser_close` succeeded. Its exact native cleanup receipt
+and fresh app observation confirmed the task tab was gone and the human tab
+preserved. The strict result-and-close check still failed because no verified
+result preceded that close; it is not evidence that physical closure failed.
+The code task remained held without release or Send. The owned fixture server
+stopped, with its exact process and port verified absent.
+
+Website qualification remains open: the [V44 ChatGPT task](#candidate126-deferred-chatgpt-verification)
+timed out on its second inference, while the [V42 Gemini code task and prompt-free
+ordinary-tab control](#historical-installed-build124-qualification) reached
+Google verification. Neither blocker is resolved by build127's API parser fix.
+
+Four subsequent ChatGPT diagnostic user turns on installed127 failed on their
+first owned submission with `website_response_failed`; their website sessions
+closed. The short inspection grants did not produce an attached Inspector or
+Network capture, so the HTTP cause remains unknown. Safari developer features
+were restored off and no diagnostic arm remains.
 
 ## Candidate126: deferred ChatGPT verification
 

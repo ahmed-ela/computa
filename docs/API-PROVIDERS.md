@@ -26,6 +26,8 @@ The adapter currently buffers a bounded provider response before forwarding Resp
 
 The API unit/contract suite covers both wire formats, actual pinned Open Responses schemas, SSE lifecycles, interleaved/custom/namespaced tools, schema references and unions, encrypted reasoning, stale native turns, cancellation, model discovery, redirects, credential admission races, unavailable selections, and secret-free metadata/error projections.
 
+Build127 preserves Foundation parser failures at the Chat JSON, Chat SSE and Responses JSON boundaries as typed `invalid_response` errors with the finite `json_parse` guard and native decode context. Previously these escaped as generic `unavailable` errors. Parser acceptance and correction eligibility are unchanged; no rejected batch can publish tools. The affected codec, server and correction cohort passed 94 tests. This reproduced classification fix does not attribute historical provider failures or establish live task reliability.
+
 The opt-in `APIProviderHarnessLiveTests` uses the pinned bundled native engine with a loopback synthetic API and in-memory credentials. It exercises a native patch, an actual command/file check, shutdown, and cold resume with the same encrypted continuation. Enable it with `TEST_RUNNER_COMPUTA_API_ENGINE_TEST=1` when running Swift tests. This fixture is distinct from a live Cerebras account test.
 
 Request rejections expose only fixed error categories by default. Local diagnosis can arm a single authenticated task/thread in a private `APIRequestDiagnostics-v1` directory; the consumed arm records a bounded, credential-redacted rejection description without headers, request prompts, or raw response bodies. It never sends another inference automatically.
