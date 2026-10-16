@@ -223,7 +223,7 @@ enum WebModelResponseCodec {
         \(currentUserInstructions)
 
         \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText, responseFormat: isChatGPT ? .rawJSON : .fencedJSON))
+            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON))
         """
         let bytes = prompt.utf8.count
         guard bytes <= maximumPromptBytes else {

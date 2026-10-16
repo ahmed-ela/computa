@@ -1,5 +1,30 @@
 # Embedded website provider qualification
 
+## Build141 candidate: literal response framing after DIL recovery
+
+Two history-bearing diagnostics on installed140 captured conversation requests
+of 59,244 and 59,919 bytes resolving with HTTP200. Both still timed out, with
+zero native tools and confirmed website cleanup. These are headers observations,
+not proof of successful response streams or fresh task qualification. The first
+selected body contained 54 characters; its contents were not established.
+
+A subsequent, explicitly cancelled synthetic diagnostic identified the empty
+renderer input as a content-reference directive. Its referenced DIL program
+explicitly returned null, with an empty Markdown fallback and a recovery record
+of `unterminated_braced_value`, `recovered_parse`, line 1/column 1. This explains
+that empty DOM without proving that native hosting or WebKit caused it. The
+Inspector closed, Safari developer features were verified restored off, both
+one-use arms were absent and owned website cleanup was confirmed. Cancellation
+does not qualify the task; the completed-turn collector correctly refused it.
+
+The candidate restores fenced JSON in ChatGPT's final response handoff. Request
+URL shielding, strict raw/fenced parsing, ownership, completion and permissions
+are unchanged. All 102 codec/instruction tests passed, including exact request
+values, current handoffs, prompt-size accounting and invalid tool envelopes.
+This remains a controlled candidate: earlier fenced replies also encountered a
+later DIL failure whose generated body was not established. Installed141 and
+multi-round task verification are pending; no prior failed receipt is regraded.
+
 ## Installed140: guarded repairs verified, website response still empty
 
 Signed 0.7.0 (140), code source `a00760ab736cfe90663c63e9f7156db15039f9ad`,

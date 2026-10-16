@@ -646,7 +646,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let suffix = String(decoding: prompt[end...], as: UTF8.self)
         let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
             customToolNames: request.customToolNames,
-            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "chatgpt" ? .rawJSON : .fencedJSON)
+            responseFormat: .fencedJSON)
         XCTAssertEqual(suffix, "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        handoff, file: file, line: line)
         return handoff
