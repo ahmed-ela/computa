@@ -1,6 +1,19 @@
 # Embedded website provider qualification
 
-## Build141 candidate: literal response framing after DIL recovery
+## Installed141: fenced response framing did not restore browser tasks
+
+Signed 0.7.0 (141), code source `4e1ae72ec9322480307efe98472556c0629d6b7c`,
+passed independent build and installed verification: all 55 bundle files and
+51 resources matched, with the Gemini diagnostic compiler flag off. It restores
+fenced JSON in ChatGPT's final response handoff. Request URL shielding, strict
+raw/fenced parsing, ownership, completion and permissions are unchanged. All 102
+codec/instruction tests passed, including exact request values, current handoffs,
+prompt-size accounting and invalid tool envelopes.
+
+The fresh normal ChatGPT Instant browser task issued one Send, dispatched zero
+tools and failed `provider_timeout` at the five-minute response deadline. Owned
+website cleanup closed successfully. The original strict fixture receipt remains
+failed; restoring fenced framing did not qualify this task.
 
 Two history-bearing diagnostics on installed140 captured conversation requests
 of 59,244 and 59,919 bytes resolving with HTTP200. Both still timed out, with
@@ -11,19 +24,27 @@ selected body contained 54 characters; its contents were not established.
 A subsequent, explicitly cancelled synthetic diagnostic identified the empty
 renderer input as a content-reference directive. Its referenced DIL program
 explicitly returned null, with an empty Markdown fallback and a recovery record
-of `unterminated_braced_value`, `recovered_parse`, line 1/column 1. This explains
-that empty DOM without proving that native hosting or WebKit caused it. The
-Inspector closed, Safari developer features were verified restored off, both
-one-use arms were absent and owned website cleanup was confirmed. Cancellation
-does not qualify the task; the completed-turn collector correctly refused it.
+of `unterminated_braced_value`, `recovered_parse`, line 1/column 1. This establishes
+the referenced renderer program and explains that observed empty DOM.
+It does not establish what arrived on the server wire, whether the website
+transformed it, or whether native hosting or WebKit caused the failure. DIL usage
+also does not establish ChatGPT Work routing; the selected provider remained
+normal ChatGPT Instant. Cancellation does not qualify that diagnostic; the
+completed-turn collector correctly refused it.
 
-The candidate restores fenced JSON in ChatGPT's final response handoff. Request
-URL shielding, strict raw/fenced parsing, ownership, completion and permissions
-are unchanged. All 102 codec/instruction tests passed, including exact request
-values, current handoffs, prompt-size accounting and invalid tool envelopes.
-This remains a controlled candidate: earlier fenced replies also encountered a
-later DIL failure whose generated body was not established. Installed141 and
-multi-round task verification are pending; no prior failed receipt is regraded.
+A separate history-bearing diagnostic on installed141 added explicit literal
+presentation guidance. Its 59,561-byte conversation request resolved with
+HTTP200 headers, but the turn still timed out with zero tools and confirmed
+website cleanup. Inspector attached, but no Console evaluation was verified and
+no new DIL facts were established. HTTP200 does not prove a successful response
+stream, rendered answer or task completion.
+
+All Inspectors and Safari settings windows were closed, Safari developer features
+were verified restored off, and all one-use diagnostic arms were absent. The
+owned fixture server stopped with its listener absent, and the blank human
+control tab was preserved. Earlier fenced replies also encountered a later DIL
+failure whose generated body was not established. Provider reliability and the
+goal remain incomplete; no historical failed receipt is regraded.
 
 ## Installed140: guarded repairs verified, website response still empty
 
