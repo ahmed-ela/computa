@@ -28,6 +28,17 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         let human = try browser.createTab()
         let id = try browser.createUnloadedModelTabForTesting()
         let view = try XCTUnwrap(browser.webView(for: id))
+        let cookieStore = view.configuration.websiteDataStore.httpCookieStore
+        let syntheticCookies = try [
+            cookie(name: "synthetic_a", value: "alpha"),
+            cookie(name: "synthetic_b", value: "beta", secure: true),
+            cookie(domain: "other.test", name: "synthetic_foreign", value: "excluded"),
+            cookie(path: "/backend-api/f/conversations", name: "synthetic_other_path", value: "excluded")
+        ]
+        for cookie in syntheticCookies {
+            await withCheckedContinuation { continuation in cookieStore.setCookie(cookie) { continuation.resume() } }
+        }
+        let cookiesBefore = await withCheckedContinuation { continuation in cookieStore.getAllCookies { continuation.resume(returning: $0) } }
         // This fixture-only predecessor routes eligible URLs to WebKit's real
         // native data fetch. It runs before the production observer, so the
         // cached vendor fetch still returns an actual, unread WebKit Response
@@ -69,6 +80,7 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         XCTAssertNil(wrongView)
         let active = await browser.modelRequestMetadata(command: "activate", tabID: id, view: view, ownerToken: token)
         XCTAssertTrue(try XCTUnwrap(active).active)
+        XCTAssertNil(active?.profileCookieBudget, "Activation must not collect a profile cookie estimate")
         let fetchFacts = try await view.callAsyncJavaScript("""
             let unrelatedUnread = true;
             for (let i = 0; i < 10; i++) {
@@ -90,6 +102,11 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         XCTAssertEqual(fetchFacts?["calls"] as? Int, 12, "Every cached fetch reaches its predecessor exactly once")
         let snapshot = await browser.modelRequestMetadata(command: "snapshot", tabID: id, view: view, ownerToken: token)
         let captured = try XCTUnwrap(snapshot)
+        let cookieBudget = try XCTUnwrap(captured.profileCookieBudget)
+        XCTAssertEqual(cookieBudget.cookieCount, 2)
+        XCTAssertEqual(cookieBudget.totalNameUTF8Bytes, 22)
+        XCTAssertEqual(cookieBudget.totalValueUTF8Bytes, 9)
+        XCTAssertEqual(cookieBudget.estimatedCookieHeaderUTF8Bytes, 35)
         XCTAssertEqual(captured.rowCount, 2, "Ten unrelated fetches must leave both submission capture slots available")
         let values = try XCTUnwrap(JSONSerialization.jsonObject(with: captured.encodedData) as? [String: Any])
         let rows = try XCTUnwrap(values["rows"] as? [[String: Any]])
@@ -107,6 +124,12 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         XCTAssertFalse(text.contains("LOCAL_PRIVATE_RESPONSE"))
         let stopped = await browser.modelRequestMetadata(command: "stop", tabID: id, view: view, ownerToken: token)
         XCTAssertFalse(try XCTUnwrap(stopped).active)
+        XCTAssertEqual(stopped?.profileCookieBudget, cookieBudget)
+        let cookiesAfter = await withCheckedContinuation { continuation in cookieStore.getAllCookies { continuation.resume(returning: $0) } }
+        func syntheticFacts(_ cookies: [HTTPCookie]) -> Set<String> {
+            Set(cookies.map { [$0.domain, $0.path, $0.name, $0.value].joined(separator: "|") })
+        }
+        XCTAssertEqual(syntheticFacts(cookiesAfter), syntheticFacts(cookiesBefore), "The diagnostic only reads this nonpersistent synthetic cookie store")
         XCTAssertEqual(view.configuration.userContentController.userScripts.map(\.source), [localFetch.source],
             "Stopping removes the production observer while preserving the unrelated fixture predecessor")
         view.configuration.userContentController.removeAllUserScripts()
@@ -158,6 +181,13 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(25))
         }
         XCTFail("The entirely in-memory WebKit fixture did not load")
+    }
+
+    private func cookie(domain: String = "chatgpt.com", path: String = "/", name: String, value: String,
+                        secure: Bool = false) throws -> HTTPCookie {
+        var properties: [HTTPCookiePropertyKey: Any] = [.domain: domain, .path: path, .name: name, .value: value]
+        if secure { properties[.secure] = "TRUE" }
+        return try XCTUnwrap(HTTPCookie(properties: properties))
     }
 }
 

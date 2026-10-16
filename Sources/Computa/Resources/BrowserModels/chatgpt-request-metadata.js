@@ -13,9 +13,13 @@
   const then = Promise.prototype.then;
   const hasInstance = Function.prototype[Symbol.hasInstance];
   const descriptor = Object.getOwnPropertyDescriptor;
+  const ownKeys = Reflect.ownKeys;
   const prototypeOf = Object.getPrototypeOf;
   const plainPrototype = Object.prototype;
+  const arrayPrototype = Array.prototype;
+  const isArray = Array.isArray;
   const charCodeAt = String.prototype.charCodeAt;
+  const headersForEach = window.Headers && descriptor(window.Headers.prototype, 'forEach')?.value;
   const NativeURL = window.URL;
   const types = { blob: window.Blob, buffer: window.ArrayBuffer, stream: window.ReadableStream,
     form_data: window.FormData, url_params: window.URLSearchParams, type_error: window.TypeError, dom: window.DOMException };
@@ -71,6 +75,79 @@
     if (instance(body, types.url_params)) return 'url_params';
     return 'unknown';
   }
+  function headerMetadata(headers) {
+    // These are supplied-header observations, not wire sizes: browser-added
+    // cookies and other headers are absent, and Headers has already normalized
+    // or combined its entries. Unknown/over-budget input stays wholly unknown.
+    if (headers == null || headers === unknown || (typeof headers !== 'object' && typeof headers !== 'function')) return null;
+    const aggregate = { representation: 'native_headers', count: 0, nameUTF8Bytes: 0, valueUTF8Bytes: 0,
+      maxValueUTF8Bytes: 0, invalidTokenName: false, hasNUL: false, hasCRLF: false, hasNonLatin1: false };
+    const limit = 1048576, stop = Symbol('header budget');
+    function measure(value, name) {
+      if (typeof value !== 'string' || value.length > limit) throw stop;
+      let bytes = 0;
+      if (name && value.length === 0) aggregate.invalidTokenName = true;
+      for (let i = 0; i < value.length; i++) {
+        const unit = call(charCodeAt, value, [i]);
+        if (unit === 0) aggregate.hasNUL = true;
+        if (unit === 10 || unit === 13) aggregate.hasCRLF = true;
+        if (unit > 255) aggregate.hasNonLatin1 = true;
+        if (name && !((unit >= 48 && unit <= 57) || (unit >= 65 && unit <= 90) || (unit >= 97 && unit <= 122)
+          || unit === 33 || (unit >= 35 && unit <= 39) || unit === 42 || unit === 43 || unit === 45 || unit === 46
+          || unit === 94 || unit === 95 || unit === 96 || unit === 124 || unit === 126)) aggregate.invalidTokenName = true;
+        if (unit < 0x80) bytes++;
+        else if (unit < 0x800) bytes += 2;
+        else if (unit >= 0xd800 && unit <= 0xdbff && i + 1 < value.length
+          && call(charCodeAt, value, [i + 1]) >= 0xdc00 && call(charCodeAt, value, [i + 1]) <= 0xdfff) {
+          bytes += 4; i++;
+        } else bytes += 3;
+        if (aggregate.nameUTF8Bytes + aggregate.valueUTF8Bytes + bytes > limit) throw stop;
+      }
+      return bytes;
+    }
+    function entry(value, name) {
+      if (++aggregate.count > 256) throw stop;
+      aggregate.nameUTF8Bytes += measure(name, true);
+      const bytes = measure(value, false);
+      aggregate.valueUTF8Bytes += bytes;
+      if (bytes > aggregate.maxValueUTF8Bytes) aggregate.maxValueUTF8Bytes = bytes;
+    }
+    if (typeof headersForEach === 'function') {
+      try { call(headersForEach, headers, [entry]); return aggregate; }
+      catch (reason) { if (reason === stop) return null; }
+    }
+    try {
+      // Inspect only own data properties; no conversion, iterator invocation,
+      // or accessor reads. Reflection can still encounter a page Proxy trap.
+      if (isArray(headers) && prototypeOf(headers) === arrayPrototype) {
+        aggregate.representation = 'pairs';
+        const length = descriptor(headers, 'length')?.value;
+        if (!Number.isInteger(length) || length < 0 || length > 256 || descriptor(headers, Symbol.iterator)) return null;
+        for (let i = 0; i < length; i++) {
+          const pair = data(headers, `${i}`);
+          if (!isArray(pair) || prototypeOf(pair) !== arrayPrototype || descriptor(pair, 'length')?.value !== 2
+            || descriptor(pair, Symbol.iterator)) return null;
+          entry(data(pair, '1'), data(pair, '0'));
+        }
+      } else {
+        const prototype = prototypeOf(headers);
+        if (prototype !== plainPrototype && prototype !== null) return null;
+        aggregate.representation = 'record';
+        // ownKeys itself can allocate for an oversized record or enter a Proxy
+        // trap; the limits bound subsequent scanning and retained metadata.
+        const keys = ownKeys(headers);
+        if (keys.length > 256) return null;
+        for (const key of keys) {
+          const property = descriptor(headers, key);
+          if (!property) return null;
+          if (!property.enumerable) continue;
+          if (typeof key !== 'string' || !('value' in property)) return null;
+          entry(property.value, key);
+        }
+      }
+      return aggregate;
+    } catch { return null; }
+  }
   function requestRow(args) {
     const input = args[0], init = args[1];
     let endpoint = 'unknown', origin = 'unknown';
@@ -94,6 +171,7 @@
       method: method === 'GET' || method === 'POST' ? method
         : method === undefined ? typeof input === 'string' ? 'GET' : 'unknown' : method === unknown ? 'unknown' : 'other',
       bodyType: type, bodyBytes: type === 'string' ? utf8Size(body) : type === 'none' ? 0 : null,
+      headerMetadata: headerMetadata(data(init, 'headers')),
       keepalive: keepalive === true ? 'true' : keepalive === false ? 'false'
         : keepalive === undefined && typeof input === 'string' ? 'absent' : 'unknown',
       duplex: duplex === 'half' ? 'half' : duplex === undefined ? typeof input === 'string' ? 'absent' : 'unknown'

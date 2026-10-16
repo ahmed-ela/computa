@@ -16,8 +16,8 @@ function fixture(options: { origin?: string; frame?: boolean; durationMs?: numbe
     if (options.syncError) throw options.syncError;
     return pending.promise;
   };
-  const window: any = { fetch: original, Blob, ArrayBuffer, ReadableStream, FormData, URLSearchParams, DOMException, TypeError, Response, URL };
-  const reflection = { apply: Reflect.apply };
+  const window: any = { fetch: original, Blob, ArrayBuffer, ReadableStream, FormData, URLSearchParams, DOMException, TypeError, Response, URL, Headers };
+  const reflection = { apply: Reflect.apply, ownKeys: Reflect.ownKeys };
   const stringType = { prototype: { charCodeAt: String.prototype.charCodeAt } };
   const objectType = { prototype: Object.prototype, getOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
     getPrototypeOf: Object.getPrototypeOf, defineProperty: Object.defineProperty };
@@ -50,7 +50,7 @@ describe('one-view request metadata diagnostic', () => {
     expect(await promise).toBe(response);
     expect(response.bodyUsed).toBe(false);
     expect(f.hook('snapshot').rows).toEqual([{ ordinal: 1, endpoint: 'conversation', origin: 'same', method: 'POST',
-      bodyType: 'string', bodyBytes: 10, keepalive: 'false', duplex: 'half', startedMs: 11, settledMs: 22,
+      bodyType: 'string', bodyBytes: 10, headerMetadata: null, keepalive: 'false', duplex: 'half', startedMs: 11, settledMs: 22,
       outcome: 'headers', status: 201, error: 'none' }]);
   });
 
@@ -128,6 +128,70 @@ describe('one-view request metadata diagnostic', () => {
     g.window.fetch('/backend-api/sentinel/chat-requirements');
     g.window.fetch('/backend-api/f/conversation/prepare');
     expect(g.hook('snapshot').rows.map((row: any) => row.endpoint)).toEqual(['preparation', 'preparation']);
+  });
+
+  test('counts oversized supplied header strings without retaining names or values, independently of body size', () => {
+    const f = fixture(); f.hook('activate');
+    const name = 'X-PRIVATE-AUTH', value = 'PRIVATE_VALUE_' + 'a'.repeat(70000);
+    const init = { method: 'POST', body: 'tiny', headers: { [name]: value } };
+    const promise = f.window.fetch('/backend-api/f/conversation', init);
+    expect(promise).toBe(f.pending.promise); expect(f.calls).toEqual([{ receiver: f.window, args: ['/backend-api/f/conversation', init] }]);
+    const snapshot = f.hook('snapshot');
+    expect(snapshot.rows[0]).toMatchObject({ bodyBytes: 4, headerMetadata: { representation: 'record', count: 1,
+      nameUTF8Bytes: name.length, valueUTF8Bytes: value.length, maxValueUTF8Bytes: value.length,
+      invalidTokenName: false, hasNUL: false, hasCRLF: false, hasNonLatin1: false } });
+    expect(JSON.stringify(snapshot)).not.toContain('PRIVATE');
+    expect(JSON.stringify(snapshot)).not.toContain(value);
+  });
+
+  test('captured native Headers iteration reports normalized aggregates and ignores later prototype overrides', () => {
+    const f = fixture(); f.hook('activate');
+    const headers = new Headers([['X-Private', 'PRIVATE'], ['x-private', 'VALUE'], ['Accept', 'text/plain']]);
+    let reads = 0;
+    Object.defineProperty(headers, 'forEach', { get() { reads++; throw new Error('PRIVATE'); } });
+    f.window.Headers = () => { reads++; throw new Error('PRIVATE'); };
+    f.window.fetch('/backend-api/f/conversation', { headers });
+    expect(reads).toBe(0);
+    expect(f.hook('snapshot').rows[0].headerMetadata).toEqual({ representation: 'native_headers', count: 2,
+      nameUTF8Bytes: 15, valueUTF8Bytes: 24, maxValueUTF8Bytes: 14,
+      invalidTokenName: false, hasNUL: false, hasCRLF: false, hasNonLatin1: false });
+    expect(JSON.stringify(f.hook('snapshot'))).not.toContain('PRIVATE');
+  });
+
+  test('plain pairs retain only validity flags and opaque or accessor headers remain unknown without reads', () => {
+    const f = fixture(); f.hook('activate');
+    let reads = 0;
+    const accessorInit = Object.defineProperty({}, 'headers', { get() { reads++; throw new Error('PRIVATE'); } });
+    const accessorRecord = Object.defineProperty({}, 'X-Private', { enumerable: true, get() { reads++; throw new Error('PRIVATE'); } });
+    const accessorPair = ['X-Private', 'PRIVATE'];
+    Object.defineProperty(accessorPair, '1', { get() { reads++; throw new Error('PRIVATE'); } });
+    const opaque = { toString() { reads++; throw new Error('PRIVATE'); }, [Symbol.iterator]() { reads++; throw new Error('PRIVATE'); } };
+    for (const init of [undefined, accessorInit, { headers: accessorRecord }, { headers: [accessorPair] }, { headers: opaque }])
+      f.window.fetch('/backend-api/f/conversation', init);
+    f.window.fetch('/backend-api/f/conversation', { headers: [['Bad Name', 'PRIVATE\0\r\n😀']] });
+    f.window.fetch('/backend-api/f/conversation', { headers: {} });
+    expect(reads).toBe(0);
+    expect(f.hook('snapshot').rows.slice(0, 5).map((row: any) => row.headerMetadata)).toEqual(Array(5).fill(null));
+    expect(f.hook('snapshot').rows[5].headerMetadata).toEqual({ representation: 'pairs', count: 1,
+      nameUTF8Bytes: 8, valueUTF8Bytes: 14, maxValueUTF8Bytes: 14,
+      invalidTokenName: true, hasNUL: true, hasCRLF: true, hasNonLatin1: true });
+    expect(f.hook('snapshot').rows[6].headerMetadata).toEqual({ representation: 'record', count: 0,
+      nameUTF8Bytes: 0, valueUTF8Bytes: 0, maxValueUTF8Bytes: 0,
+      invalidTokenName: false, hasNUL: false, hasCRLF: false, hasNonLatin1: false });
+    expect(JSON.stringify(f.hook('snapshot'))).not.toContain('PRIVATE');
+  });
+
+  test('header entry and combined byte caps return unknown rather than partial totals', () => {
+    const f = fixture(); f.hook('activate');
+    const tooMany = Array.from({ length: 257 }, () => ['x', 'PRIVATE']);
+    const max = { x: 'a'.repeat(1048575) };
+    const over = { x: 'a'.repeat(1048576) };
+    const nativeTooMany = new Headers(Array.from({ length: 257 }, (_, index) => [`x-${index}`, 'PRIVATE']));
+    for (const headers of [tooMany, over, nativeTooMany, max]) f.window.fetch('/backend-api/f/conversation', { headers });
+    const rows = f.hook('snapshot').rows;
+    expect(rows.slice(0, 3).map((row: any) => row.headerMetadata)).toEqual([null, null, null]);
+    expect(rows[3].headerMetadata).toMatchObject({ count: 1, nameUTF8Bytes: 1, valueUTF8Bytes: 1048575, maxValueUTF8Bytes: 1048575 });
+    expect(JSON.stringify(f.hook('snapshot')).length).toBeLessThan(8192);
   });
 
   test('unrelated requests cannot exhaust capture capacity or acquire option/settlement observers', async () => {
@@ -208,15 +272,17 @@ describe('one-view request metadata diagnostic', () => {
     let patchesCalled = 0;
     const patched = () => { patchesCalled++; throw new Error('PRIVATE_PATCH'); };
     f.reflection.apply = patched;
+    f.reflection.ownKeys = patched;
     f.stringType.prototype.charCodeAt = patched;
     f.objectType.getOwnPropertyDescriptor = patched;
     f.objectType.getPrototypeOf = patched;
-    for (const name of ['Blob', 'ArrayBuffer', 'ReadableStream', 'FormData', 'URLSearchParams', 'DOMException', 'TypeError', 'Response', 'URL'])
+    for (const name of ['Blob', 'ArrayBuffer', 'ReadableStream', 'FormData', 'URLSearchParams', 'DOMException', 'TypeError', 'Response', 'URL', 'Headers'])
       f.window[name] = patched;
-    const promise = f.window.fetch('/backend-api/f/conversation', { method: 'POST', body: 'é😀' });
+    const promise = f.window.fetch('/backend-api/f/conversation', { method: 'POST', body: 'é😀', headers: { 'X-Private': 'é😀' } });
     const response = new Response('PRIVATE_RESPONSE', { status: 202 });
     f.pending.resolve(response); expect(await promise).toBe(response);
     expect(f.calls).toHaveLength(1); expect(patchesCalled).toBe(0);
-    expect(f.hook('snapshot').rows[0]).toMatchObject({ endpoint: 'conversation', bodyType: 'string', bodyBytes: 6, outcome: 'headers', status: 202 });
+    expect(f.hook('snapshot').rows[0]).toMatchObject({ endpoint: 'conversation', bodyType: 'string', bodyBytes: 6, outcome: 'headers', status: 202,
+      headerMetadata: { representation: 'record', count: 1, nameUTF8Bytes: 9, valueUTF8Bytes: 6, hasNonLatin1: true } });
   });
 });

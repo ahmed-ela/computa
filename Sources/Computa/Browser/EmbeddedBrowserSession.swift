@@ -563,12 +563,18 @@ final class EmbeddedBrowserSession {
             guard diagnostic.generation == nil else { return nil }
             diagnostic.generation = generation
         } else { guard diagnostic.generation == generation else { return nil } }
+        // Both read-only observations share the existing diagnostic budget.
+        // Activation does not inspect cookies; an optional cookie-store timeout
+        // yields unknown without discarding a valid page observation.
+        let deadline = ContinuousClock.now + .milliseconds(min(1_000, diagnostic.authorization.remainingMilliseconds))
+        async let cookieBytes: Data? = command == "activate" ? Data() : requestProfileCookieBudget(
+            store: view.configuration.websiteDataStore.httpCookieStore, deadline: deadline)
         let result = EmbeddedScriptResult()
         let bytes: Data? = try? await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 result.install(continuation)
                 let timeout = Task {
-                    do { try await Task.sleep(for: .milliseconds(min(1_000, diagnostic.authorization.remainingMilliseconds))) }
+                    do { try await Task.sleep(until: deadline) }
                     catch { return }
                     result.complete(.failure(Failure.tabClosed))
                 }
@@ -592,14 +598,49 @@ final class EmbeddedBrowserSession {
                 }
             }
         } onCancel: { result.complete(.failure(CancellationError())) }
+        let nativeCookieBytes = await cookieBytes
         guard !Task.isCancelled, entries[tabID] === entry, entry.view === view,
               entry.requestMetadataDiagnostic === diagnostic, diagnostic.authorization.isCurrent,
               entry.tab.documentGeneration == generation, diagnostic.generation == generation,
               entry.modelChanges?.ownerToken == ownerToken, Self.inspectorOriginAllowed(view.url),
               view.url?.absoluteString == expectedURL,
               let bytes, let snapshot = try? ChatGPTRequestMetadataSnapshot.parse(bytes) else { return nil }
+        let cookieBudget = nativeCookieBytes.flatMap { try? JSONDecoder().decode(ChatGPTProfileCookieBudget.self, from: $0) }
         if command == "stop" { removeRequestMetadata(entry, diagnostic: diagnostic) }
-        return snapshot
+        return snapshot.attachingProfileCookieBudget(cookieBudget)
+    }
+
+    /// WKHTTPCookieStore offers a completion callback, not cancellation. Only a
+    /// bounded, secret-free aggregate crosses this callback; the one-shot result
+    /// ignores late completions after timeout/cancellation. Empty bytes mean a
+    /// completed read whose profile exceeded aggregation bounds (unknown).
+    private func requestProfileCookieBudget(store: WKHTTPCookieStore, deadline: ContinuousClock.Instant) async -> Data? {
+        let result = EmbeddedScriptResult()
+        return try? await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                result.install(continuation)
+                let timeout = Task {
+                    do { try await Task.sleep(until: deadline) } catch { return }
+                    result.complete(.failure(Failure.tabClosed))
+                }
+                result.setTimeout(timeout)
+                guard result.isPending, !Task.isCancelled, ContinuousClock.now < deadline else {
+                    result.complete(.failure(CancellationError())); return
+                }
+                store.getAllCookies { cookies in
+                    guard result.isPending else { return }
+                    guard ContinuousClock.now < deadline else {
+                        result.complete(.failure(Failure.tabClosed)); return
+                    }
+                    let budget = ChatGPTProfileCookieBudget.estimate(cookies: cookies)
+                    let bytes = budget.flatMap { try? JSONEncoder().encode($0) } ?? Data()
+                    guard result.isPending, ContinuousClock.now < deadline else {
+                        result.complete(.failure(Failure.tabClosed)); return
+                    }
+                    result.complete(.success(bytes))
+                }
+            }
+        } onCancel: { result.complete(.failure(CancellationError())) }
     }
 
     func revokeModelRequestMetadata(tabID: UUID, ownerToken: String) {

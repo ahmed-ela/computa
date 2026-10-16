@@ -1,6 +1,39 @@
 # Embedded website provider qualification
 
-## Candidate129: focused request metadata
+## Candidate130: finite request-header and profile-cookie estimates
+
+The focused observer now records only supplied-header representation, counts,
+UTF-8 totals, largest value and finite character-validity flags. Unknown or
+over-budget headers remain unknown. No header names, values or hashes survive.
+The aggregate is limited to 256 entries and 1 MiB; page-world reflection can
+still encounter Proxy traps or allocate an own-key list before those limits.
+
+A separate native, read-only cookie-store observation estimates matching
+`chatgpt.com/backend-api/f/conversation` cookies by host, path and expiry. It
+retains only counts, byte totals and duplicate-name count. It does not establish
+which cookies browser policy actually sends. Oversized profiles or a late
+callback produce an unknown estimate. Cookie and page observations share the
+existing one-second diagnostic budget and retain all native ownership,
+authorization, document, generation and cancellation checks. Activation does
+not inspect cookies; normal unarmed inference is unchanged.
+
+All 13 JavaScript tests passed with 132 assertions. Across two native runs,
+22 distinct methods passed: 12 parser/persistence, three local WebKit, four
+cookie-budget and three server cases. The first run retained one fixture-setup
+failure because Foundation rejected an oversized synthetic cookie before the
+aggregator received it. A test-only subclass corrected that fixture, and all
+seven methods in the second run passed without skips. Production source stayed
+unchanged between runs. Independent source review was clear. Signed packaging
+and the focused installed130 capture are pending; this is diagnostic support,
+not an established website repair.
+
+## Current installed build129: focused request metadata
+
+Computa **0.7.0 (129)** from pushed commit
+`d379193654909691ebfa1a25dd7eba749b9aa6b2` is installed. All 55 bundle files,
+51 resources and 2,137 frozen inputs matched the independently audited artifact.
+The engine is unchanged and actual Computa compiler invocations confirmed the
+Gemini diagnostic flag off. The exact installed128 bundle is backed up.
 
 The diagnostic reserves its eight rows for same-origin conversation and
 preparation requests with string URL inputs. Unrelated and opaque inputs are
@@ -13,9 +46,35 @@ unrelated requests before preparation and conversation requests. All three
 local WebKit browser cases passed without skips; a test-only predecessor maps
 eligible URLs to native data fetch and verifies real HTTP 200 headers and an
 unread response body. Source remained unchanged during testing, and independent
-review was clear. Signed packaging and a focused installed capture are pending.
+review was clear.
 
-## Current installed build128: scoped request metadata
+Cold-resume maintenance compaction failed before its pending user prompt was
+sent. The user-only arm remained unused and was removed, the synthetic queue
+item was deleted, normal website cleanup closed and the blank control tab stayed.
+One later explicit submission in the same loaded native chat consumed a new arm.
+Its saved sidecar matched the native turn, preparation, inference and session.
+
+That submission still failed on its first inference. The 65,829-byte preparation
+String POST resolved HTTP 200 headers; the 66,188-byte conversation String POST
+rejected with TypeError after 69 ms without headers. A subsequent 419-byte
+preparation POST resolved 200. The row cap was not reached. These are constructed
+JavaScript string sizes, not wire sizes or response-stream completion. Normal
+cleanup closed, the control tab remained and the arm was absent.
+
+The app-owned networking process was independently attributed to Computa before
+reading its bounded native logs. At the same failure, Network.framework reported
+error -522, "The length of the frame is invalid", for a HEADERS frame, followed
+by invalid-argument and URL error -1000. Upstream nghttp2 returns that error when
+its local outgoing header bound exceeds its configured limit before packing.
+This supports outgoing request-header preparation as the failure class; it does
+not establish Apple's precise limit/version, an offending header, cookie bloat
+or a universal POST-body cutoff. See the [upstream check](https://github.com/nghttp2/nghttp2/blob/v1.66.0/lib/nghttp2_session.c#L1938-L1947)
+and [bound calculation](https://github.com/nghttp2/nghttp2/blob/v1.66.0/lib/nghttp2_hd.c#L1506-L1528).
+Only fixed native error templates and finite numbers were retained. Candidate130
+measures header/cookie aggregates to narrow that cause. Inspector settings remain
+restored off; no further Inspector grant or live Gemini request was used.
+
+## Historical installed build128: scoped request metadata
 
 Computa **0.7.0 (128)** from pushed commit
 `793a078704877d4305d743dc6111db337e3f3acf` is installed. The independently

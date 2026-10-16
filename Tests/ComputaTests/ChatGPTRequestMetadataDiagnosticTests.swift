@@ -126,7 +126,7 @@ final class ChatGPTRequestMetadataDiagnosticTests: XCTestCase {
             var unsafeRoot = root(rows: []); unsafeRoot[field] = "PRIVATE_REQUEST_CONTENT"
             XCTAssertThrowsError(try parse(unsafeRoot))
         }
-        for field in ["bodyBytes", "keepalive", "settledMs", "error"] {
+        for field in ["bodyBytes", "headerMetadata", "keepalive", "settledMs", "error"] {
             var incomplete = row(); incomplete.removeValue(forKey: field)
             XCTAssertThrowsError(try parse(root(rows: [incomplete])), field)
         }
@@ -206,6 +206,107 @@ final class ChatGPTRequestMetadataDiagnosticTests: XCTestCase {
                        "Non-string bodies and bounded string counts preserve unknown size")
     }
 
+    func testHeaderAggregatesRoundTripOnlyFiniteObservedInputFieldsAndUnknownIsDistinctFromZero() throws {
+        var unknown = row(), observed = row(ordinal: 2), empty = row(ordinal: 3)
+        unknown["headerMetadata"] = NSNull()
+        observed["headerMetadata"] = header()
+        empty["headerMetadata"] = header().merging(["count": 0, "nameUTF8Bytes": 0, "valueUTF8Bytes": 0, "maxValueUTF8Bytes": 0],
+                                                   uniquingKeysWith: { _, value in value })
+        let snapshot = try parse(root(rows: [unknown, observed, empty]))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: snapshot.encodedData) as? [String: Any])
+        let rows = try XCTUnwrap(object["rows"] as? [[String: Any]])
+        XCTAssertTrue(rows[0]["headerMetadata"] is NSNull)
+        let finite = try XCTUnwrap(rows[1]["headerMetadata"] as? [String: Any])
+        XCTAssertEqual(Set(finite.keys), Set(header().keys))
+        XCTAssertEqual(finite["valueUTF8Bytes"] as? Int, 70_000)
+        XCTAssertEqual((rows[2]["headerMetadata"] as? [String: Any])?["count"] as? Int, 0)
+        XCTAssertNil(snapshot.profileCookieBudget)
+        XCTAssertLessThanOrEqual(snapshot.encodedData.count, 8_192)
+        var nativeHeaders = row(); nativeHeaders["headerMetadata"] = header().merging(["representation": "native_headers"],
+                                                                                     uniquingKeysWith: { _, value in value })
+        XCTAssertEqual(try parse(root(rows: [nativeHeaders])).rowCount, 1)
+    }
+
+    func testHeaderAggregateParserRejectsUnknownFieldsTypesBoundsAndContradictions() throws {
+        let badFields: [(String, Any)] = [
+            ("PRIVATE_HEADER_NAME", "PRIVATE_HEADER_VALUE"), ("representation", "wire"),
+            ("count", true), ("count", -1), ("count", 257), ("count", 0.5),
+            ("nameUTF8Bytes", true), ("nameUTF8Bytes", -1), ("nameUTF8Bytes", 1_048_577),
+            ("valueUTF8Bytes", true), ("valueUTF8Bytes", 1_048_577),
+            ("maxValueUTF8Bytes", true), ("maxValueUTF8Bytes", 70_001),
+            ("invalidTokenName", 0), ("hasNUL", "false"), ("hasCRLF", NSNull()), ("hasNonLatin1", 1),
+        ]
+        for (field, value) in badFields {
+            var invalid = row(); invalid["headerMetadata"] = header().merging([field: value], uniquingKeysWith: { _, value in value })
+            XCTAssertThrowsError(try parse(root(rows: [invalid])), field)
+        }
+        for field in header().keys {
+            var incomplete = header(); incomplete.removeValue(forKey: field)
+            var invalid = row(); invalid["headerMetadata"] = incomplete
+            XCTAssertThrowsError(try parse(root(rows: [invalid])), "missing " + field)
+        }
+        let contradictions: [[String: Any]] = [
+            ["count": 0], ["count": 2, "nameUTF8Bytes": 1],
+            ["valueUTF8Bytes": 70_001, "maxValueUTF8Bytes": 70_000], ["maxValueUTF8Bytes": 0],
+            ["nameUTF8Bytes": 1_000_000, "valueUTF8Bytes": 70_000],
+            ["count": 0, "nameUTF8Bytes": 0, "valueUTF8Bytes": 0, "maxValueUTF8Bytes": 0, "hasNUL": true],
+            ["count": 1, "nameUTF8Bytes": 0, "valueUTF8Bytes": 0, "maxValueUTF8Bytes": 0, "invalidTokenName": true, "hasCRLF": true],
+        ]
+        for changes in contradictions {
+            var invalid = row(); invalid["headerMetadata"] = header().merging(changes, uniquingKeysWith: { _, value in value })
+            XCTAssertThrowsError(try parse(root(rows: [invalid])), String(describing: changes.keys))
+        }
+        for flag in ["invalidTokenName", "hasNUL", "hasCRLF", "hasNonLatin1"] {
+            var invalid = row(); invalid["headerMetadata"] = header().merging(["representation": "native_headers", flag: true],
+                                                                            uniquingKeysWith: { _, value in value })
+            XCTAssertThrowsError(try parse(root(rows: [invalid])), "Native Headers cannot contain " + flag)
+        }
+        for value in ["PRIVATE", [], 0, false] as [Any] {
+            var invalid = row(); invalid["headerMetadata"] = value
+            XCTAssertThrowsError(try parse(root(rows: [invalid])))
+        }
+    }
+
+    func testCookieEstimateIsNativeOnlyAndPersistedSeparatelyWithExplicitUnknown() throws {
+        let fixture = try MetadataDiagnosticArmFixture(); defer { fixture.remove() }
+        try fixture.arm()
+        let lease = try XCTUnwrap(fixture.consume())
+        let snapshot = try parse(root(rows: [row()]))
+        XCTAssertNil(snapshot.profileCookieBudget)
+        for field in ["nativeCookieBudget", "profileCookieBudget"] {
+            var invalid = root(rows: []); invalid[field] = ["cookieCount": 0]
+            XCTAssertThrowsError(try parse(invalid), "Page JSON cannot supply native profile metadata")
+        }
+        let unknownID = UUID()
+        XCTAssertTrue(lease.persist(snapshot, inferenceID: unknownID, sessionToken: UUID()))
+        let unknown = try persisted(inferenceID: unknownID, fixture: fixture)
+        XCTAssertTrue(unknown["nativeCookieBudget"] is NSNull)
+        let budget = try XCTUnwrap(ChatGPTProfileCookieBudget.estimate(cookies: []))
+        let attached = snapshot.attachingProfileCookieBudget(budget)
+        XCTAssertNotNil(attached.profileCookieBudget)
+        XCTAssertEqual(attached.encodedData, snapshot.encodedData, "Native estimates never become page JSON")
+        let knownID = UUID()
+        XCTAssertTrue(lease.persist(attached, inferenceID: knownID, sessionToken: UUID()))
+        let known = try persisted(inferenceID: knownID, fixture: fixture)
+        XCTAssertEqual((known["nativeCookieBudget"] as? [String: Any])?["source"] as? String, "profile_estimate")
+        XCTAssertEqual((known["nativeCookieBudget"] as? [String: Any])?["cookieCount"] as? Int, 0)
+        XCTAssertNil((known["diagnostic"] as? [String: Any])?["nativeCookieBudget"])
+        XCTAssertFalse(lease.persist(attached, inferenceID: knownID, sessionToken: UUID()), "Sidecars cannot be overwritten")
+    }
+
+    private func persisted(inferenceID: UUID, fixture: MetadataDiagnosticArmFixture) throws -> [String: Any] {
+        let path = fixture.directory.appendingPathComponent("request-metadata-" + inferenceID.uuidString.lowercased() + ".json")
+        let data = try Data(contentsOf: path)
+        XCTAssertLessThanOrEqual(data.count, 9_216)
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: path.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func header() -> [String: Any] {
+        ["representation": "record", "count": 1, "nameUTF8Bytes": 13, "valueUTF8Bytes": 70_000, "maxValueUTF8Bytes": 70_000,
+         "invalidTokenName": false, "hasNUL": false, "hasCRLF": false, "hasNonLatin1": false]
+    }
+
     private func root(rows: [[String: Any]]) -> [String: Any] {
         ["schemaVersion": 1, "active": true, "expired": false, "rows": rows]
     }
@@ -213,6 +314,7 @@ final class ChatGPTRequestMetadataDiagnosticTests: XCTestCase {
     private func row(ordinal: Int = 1) -> [String: Any] {
         ["ordinal": ordinal, "endpoint": "conversation", "origin": "same", "method": "POST",
          "bodyType": "string", "bodyBytes": 55_369, "keepalive": "false", "duplex": "absent",
+         "headerMetadata": NSNull(),
          "startedMs": 10, "settledMs": NSNull(), "outcome": "pending", "status": NSNull(), "error": "none"]
     }
 

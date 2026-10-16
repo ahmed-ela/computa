@@ -158,6 +158,7 @@
 		7369FD468A3F06F643F6DFCB /* ExtensionChromeLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EDDC17D63A1CDA4E0182869 /* ExtensionChromeLink.swift */; };
 		736FE969BBACEE59E53C2DB2 /* ChatGPTRequestMetadataDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = A699A3A6EB07B6FF37616959 /* ChatGPTRequestMetadataDiagnostic.swift */; };
 		73F4D80442CBDC8FD7F72B88 /* NativeMessageEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADEC149AAF9CD8A873A8CD5A /* NativeMessageEvidenceTests.swift */; };
+		7475FE35CAC19E4FAD9A82A8 /* ChatGPTRequestCookieBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B550A55B732B67B8191A60D /* ChatGPTRequestCookieBudgetTests.swift */; };
 		77042D7793B2B0BB1344D766 /* LocalQwenLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D5940213BC9BEE73642860 /* LocalQwenLiveTests.swift */; };
 		773BF8CCCBC08F3D8F954A59 /* MLXServer in Resources */ = {isa = PBXBuildFile; fileRef = 75E11D2263CFAA62C4B5304B /* MLXServer */; };
 		77C799E19BA718F319E25194 /* NativeFailureRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24BCE024925D59165C4DF8F5 /* NativeFailureRuntimeTests.swift */; };
@@ -217,6 +218,7 @@
 		A093755CD825F593CFAD3A95 /* ComputerActionEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB02A6EE0B9ACF67057C7714 /* ComputerActionEvidence.swift */; };
 		A148B2C046EFCE5F49E131CA /* CalculatorVisualV2LiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7CCB79DE33143AD785C8706 /* CalculatorVisualV2LiveTests.swift */; };
 		A1519C75758443BF1D076149 /* AppStateActivityMetadataTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB4C454F06A1E556F1149BEB /* AppStateActivityMetadataTests.swift */; };
+		A21357F0F22FB799339D34DF /* ChatGPTRequestCookieBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA90CAC96AA68B16153FB98F /* ChatGPTRequestCookieBudget.swift */; };
 		A4F916644136DC9E30C5089B /* ChromeTabBrokerFreshLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BA21630EAFE54E766939408 /* ChromeTabBrokerFreshLaunchTests.swift */; };
 		A56032E09BE84A37282978EE /* NativeChromeConnectionControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8935252C57CF35E6AD5D55AC /* NativeChromeConnectionControl.swift */; };
 		A6E205E8E0A54324640B21B4 /* ComputerSearchEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D97FF14D5E6FECBB9609665 /* ComputerSearchEvidence.swift */; };
@@ -358,6 +360,7 @@
 		06BD1134FA0B69188B27C1E3 /* AppStateQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateQueueTests.swift; sourceTree = "<group>"; };
 		09CDC66BF09D5E0F6C3D18E0 /* AccessibilityElementController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityElementController.swift; sourceTree = "<group>"; };
 		0A281D7473D1AE2CA7434916 /* ComputerReadEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerReadEvidenceTests.swift; sourceTree = "<group>"; };
+		0B550A55B732B67B8191A60D /* ChatGPTRequestCookieBudgetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTRequestCookieBudgetTests.swift; sourceTree = "<group>"; };
 		0B885AEFB9988CEA7A42AE93 /* SemanticReadRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticReadRequest.swift; sourceTree = "<group>"; };
 		0CD9E79F30035E252EFA19DD /* NativeBackgroundAccessibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBackgroundAccessibilityTests.swift; sourceTree = "<group>"; };
 		0D2EDA3E7D9F4271CEE0D808 /* RememberedChromeConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RememberedChromeConnectionTests.swift; sourceTree = "<group>"; };
@@ -636,6 +639,7 @@
 		E9DE49CAF5BC59B362701A62 /* LocalModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalModelCatalog.swift; sourceTree = "<group>"; };
 		EA64B22EA9A3443F4EEC3CB7 /* EmbeddedBrowserURLPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedBrowserURLPolicy.swift; sourceTree = "<group>"; };
 		EA8321C2639D5357131F2CDD /* ChromeTabBrokerRetirementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChromeTabBrokerRetirementTests.swift; sourceTree = "<group>"; };
+		EA90CAC96AA68B16153FB98F /* ChatGPTRequestCookieBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTRequestCookieBudget.swift; sourceTree = "<group>"; };
 		EB2BBAA6201A0CE0623F36A2 /* WorkspaceReviewServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceReviewServiceTests.swift; sourceTree = "<group>"; };
 		EBFE2C6239BBF173522A83B3 /* BrowserPressBoundaryTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserPressBoundaryTestSupport.swift; sourceTree = "<group>"; };
 		EC6F9BC845A15225CEBDA973 /* NativeActionVerification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeActionVerification.swift; sourceTree = "<group>"; };
@@ -833,6 +837,7 @@
 				F8D5EB81770678E22E4A80F5 /* ChatGPTAdmissionTests.swift */,
 				E600FFFEA5C7E04351FAC91A /* ChatGPTChatSelectionTests.swift */,
 				211D7CF95637C40534241BA5 /* ChatGPTInspectorLeaseTests.swift */,
+				0B550A55B732B67B8191A60D /* ChatGPTRequestCookieBudgetTests.swift */,
 				E1530A956BB3D58E95736A72 /* ChatGPTRequestMetadataBrowserTests.swift */,
 				2BA15DBE75A5B5FB703458BC /* ChatGPTRequestMetadataDiagnosticTests.swift */,
 				2B7AF7E2FC3E2B748CA69E88 /* ChromeCaptureV2LiveTests.swift */,
@@ -1074,6 +1079,7 @@
 				963705A51F59E4EBC248173E /* BrowserExtensionCoordinator.swift */,
 				EFBF18A9769FF5483CFEA71A /* BrowserTabBroker.swift */,
 				F04A5BFBEC4DCAE8ACA8B9B4 /* ChatGPTInspectorLease.swift */,
+				EA90CAC96AA68B16153FB98F /* ChatGPTRequestCookieBudget.swift */,
 				A699A3A6EB07B6FF37616959 /* ChatGPTRequestMetadataDiagnostic.swift */,
 				1C9DE151DE49EFE8CC0AD48C /* ChromeBridgeIdentity.swift */,
 				36F20FD1C5E64FB71802ED6F /* ChromeBridgeIPC.swift */,
@@ -1429,6 +1435,7 @@
 				6DBC2FC886D9CEBE88725F1B /* BrowserExtensionCoordinator.swift in Sources */,
 				8847661FAB3DB0B5BEE7ADC1 /* BrowserTabBroker.swift in Sources */,
 				3A8A82E7E12917FE54B77857 /* ChatGPTInspectorLease.swift in Sources */,
+				A21357F0F22FB799339D34DF /* ChatGPTRequestCookieBudget.swift in Sources */,
 				736FE969BBACEE59E53C2DB2 /* ChatGPTRequestMetadataDiagnostic.swift in Sources */,
 				7B3B8DA67E255ABE711EBE24 /* ChromeBridgeIPC.swift in Sources */,
 				78D957DED107CA24A1C40A61 /* ChromeBridgeIdentity.swift in Sources */,
@@ -1566,6 +1573,7 @@
 				089944BC63CCB9830A92AE25 /* ChatGPTAdmissionTests.swift in Sources */,
 				1E9F45C04116CD240CA1395F /* ChatGPTChatSelectionTests.swift in Sources */,
 				86DA9BBB8476F732C35FD329 /* ChatGPTInspectorLeaseTests.swift in Sources */,
+				7475FE35CAC19E4FAD9A82A8 /* ChatGPTRequestCookieBudgetTests.swift in Sources */,
 				F20BB94E0EDB9591800BC6E7 /* ChatGPTRequestMetadataBrowserTests.swift in Sources */,
 				FD30F78C6A81803D14185CBE /* ChatGPTRequestMetadataDiagnosticTests.swift in Sources */,
 				D2E1226A8B82016355F61DC7 /* ChromeCaptureV2LiveTests.swift in Sources */,

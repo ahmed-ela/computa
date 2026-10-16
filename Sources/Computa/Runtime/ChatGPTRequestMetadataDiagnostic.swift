@@ -48,6 +48,7 @@ final class ChatGPTRequestMetadataLease: @unchecked Sendable {
                 "turnID": turnID.uuidString.lowercased(), "preparationID": preparationID.uuidString.lowercased(),
                 "inferenceID": inferenceID.uuidString.lowercased(), "sessionToken": sessionToken.uuidString.lowercased(),
                 "diagnostic": diagnostic,
+                "nativeCookieBudget": snapshot.profileCookieBudget.map { $0.dictionary as Any } ?? NSNull(),
               ], options: [.sortedKeys]), bytes.count <= 9_216 else { return false }
         let descriptor = Self.openDirectoryWithoutSymlinks(directory)
         guard descriptor >= 0 else { return false }
@@ -193,6 +194,13 @@ struct ChatGPTRequestMetadataSnapshot: Sendable {
     let active: Bool
     let expired: Bool
     let rowCount: Int
+    /// Native profile estimate only. It is never accepted from page JSON or
+    /// represented as the cookies actually attached to a particular request.
+    let profileCookieBudget: ChatGPTProfileCookieBudget?
+
+    func attachingProfileCookieBudget(_ budget: ChatGPTProfileCookieBudget?) -> Self {
+        Self(encodedData: encodedData, active: active, expired: expired, rowCount: rowCount, profileCookieBudget: budget)
+    }
 
     static func parse(_ data: Data) throws -> Self {
         guard data.count <= 8_192, APIModelCorrectionJSON.isUnambiguous(data),
@@ -202,7 +210,7 @@ struct ChatGPTRequestMetadataSnapshot: Sendable {
               let active = boolean(object["active"]), let expired = boolean(object["expired"]),
               !(active && expired), let rows = object["rows"] as? [[String: Any]], rows.count <= 8 else { throw Failure.invalid }
         let keys: Set<String> = ["ordinal", "endpoint", "origin", "method", "bodyType", "bodyBytes", "keepalive", "duplex",
-                                 "startedMs", "settledMs", "outcome", "status", "error"]
+                                 "headerMetadata", "startedMs", "settledMs", "outcome", "status", "error"]
         var lastOrdinal = 0
         var lastStarted = 0.0
         for row in rows {
@@ -212,6 +220,7 @@ struct ChatGPTRequestMetadataSnapshot: Sendable {
                   member(row["method"], ["GET", "POST", "other", "unknown"]),
                   member(row["bodyType"], ["string", "blob", "buffer", "view", "stream", "form_data", "url_params", "none", "unknown"]),
                   row["bodyBytes"] is NSNull || integer(row["bodyBytes"], in: 0...1_048_576) != nil,
+                  validHeaderMetadata(row["headerMetadata"]),
                   member(row["keepalive"], ["true", "false", "absent", "unknown"]),
                   member(row["duplex"], ["half", "absent", "other", "unknown"]),
                   let started = milliseconds(row["startedMs"]), started >= lastStarted,
@@ -238,7 +247,31 @@ struct ChatGPTRequestMetadataSnapshot: Sendable {
         }
         let encoded = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         guard encoded.count <= 8_192 else { throw Failure.invalid }
-        return Self(encodedData: encoded, active: active, expired: expired, rowCount: rows.count)
+        return Self(encodedData: encoded, active: active, expired: expired, rowCount: rows.count, profileCookieBudget: nil)
+    }
+    private static func validHeaderMetadata(_ value: Any?) -> Bool {
+        if value is NSNull { return true }
+        guard let object = value as? [String: Any],
+              Set(object.keys) == ["representation", "count", "nameUTF8Bytes", "valueUTF8Bytes", "maxValueUTF8Bytes",
+                                   "invalidTokenName", "hasNUL", "hasCRLF", "hasNonLatin1"],
+              member(object["representation"], ["native_headers", "record", "pairs"]),
+              let count = integer(object["count"], in: 0...256),
+              let names = integer(object["nameUTF8Bytes"], in: 0...1_048_576),
+              let values = integer(object["valueUTF8Bytes"], in: 0...1_048_576),
+              let maximum = integer(object["maxValueUTF8Bytes"], in: 0...1_048_576),
+              let invalidName = boolean(object["invalidTokenName"]), let nul = boolean(object["hasNUL"]),
+              let crlf = boolean(object["hasCRLF"]), let nonLatin1 = boolean(object["hasNonLatin1"]),
+              names + values <= 1_048_576, maximum <= values,
+              (count != 0 || (names == 0 && values == 0 && maximum == 0 && !invalidName && !nul && !crlf && !nonLatin1)),
+              (count == 0 || invalidName || names >= count),
+              (values == 0 || maximum > 0), maximum * count >= values,
+              (!(nul || crlf || nonLatin1) || names + values > 0) else { return false }
+        // A native Headers instance has validated token names and ByteString
+        // values already; record/pair observations precede that validation.
+        if object["representation"] as? String == "native_headers" {
+            return !invalidName && !nul && !crlf && !nonLatin1
+        }
+        return true
     }
     private static func boolean(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
