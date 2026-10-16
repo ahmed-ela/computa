@@ -18,6 +18,10 @@ class Element {
   get isConnected(): boolean { return this.connected && (!this.parentElement || this.parentElement.isConnected); }
   set isConnected(value: boolean) { this.connected = value; }
   disabled = false;
+  zeroRects = false;
+  cssVisibility = 'visible';
+  beforeContent = 'none';
+  afterContent = 'none';
   clicks = 0;
   onClick?: () => void;
   onDispatch?: (event: any) => void;
@@ -33,7 +37,7 @@ class Element {
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(""); }
   get innerText() { return this.textContent; }
   getAttribute(name: string) { return this.values[name] ?? null; }
-  getClientRects() { return this.isConnected && this.values['data-fixture-display'] !== 'contents' && !this.closest('[hidden]') ? [{}] : []; }
+  getClientRects() { return this.isConnected && !this.zeroRects && this.values['data-fixture-display'] !== 'contents' && !this.closest('[hidden]') ? [{}] : []; }
   getBoundingClientRect() { return { left: 0, top: this.rect * 40, width: 100, height: 30 }; }
   append(...children: Element[]) { children.forEach(child => { child.parentElement = this; this.children.push(child); }); }
   contains(node: Element | null): boolean { return node === this || !!node && this.children.some(child => child.contains(node)); }
@@ -166,7 +170,9 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     expectedURL: document.URL, expectedUserCounts: [options.userPrompt === undefined ? 0 : 1],
     expectedFirstUserMarker: firstMarker, expectedFirstUserFingerprint: nativeFingerprint,
     allowFirstUserBinding: nativeFingerprint === undefined, ...request },
-    document, window, location, (node: Element) => ({ visibility: 'visible', display: node.values['data-fixture-display'] ?? 'block' }), Observer, (callback: () => void, delay: number) => {
+    document, window, location, (node: Element, pseudo?: string) => ({ visibility: node.cssVisibility,
+      display: node.values['data-fixture-display'] ?? (node.getAttribute('hidden') !== null ? 'none' : 'block'),
+      content: pseudo === '::before' ? node.beforeContent : node.afterContent }), Observer, (callback: () => void, delay: number) => {
       timers.push(callback); scheduledDelays.push(delay);
     }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
       const digest = await crypto.subtle.digest(algorithm, data);
@@ -1462,6 +1468,93 @@ describe('ChatGPT inline DIL renderer failure', () => {
     expect(f.composer.events).toEqual([]);
   });
 
+  test('recognizes the exact visible renderer error after a fully empty hidden DIV subtree', async () => {
+    for (const bodyIsRoot of [false, true]) for (const layoutKind of ['hidden', 'zero-rect', 'visibility-hidden']) {
+      const f = fixture({ userPrompt: 'Classify only the current visible renderer error' }), e = rendererError();
+      await f.inspect();
+      if (bodyIsRoot) delete f.answer.parentElement!.values['data-turn'];
+      const decoration = new Element('DIV', layoutKind === 'hidden' ? { hidden: '' } : {});
+      if (layoutKind === 'zero-rect') decoration.zeroRects = true;
+      if (layoutKind === 'visibility-hidden') decoration.cssVisibility = 'hidden';
+      decoration.append(new Element('DIV'), new Element('DIV'));
+      const layout = new Element('DIV'), inner = new Element('DIV');
+      replaceAnswer(f, layout); layout.append(inner); inner.append(decoration, e.portal);
+      const observed = await f.inspect();
+      expect(observed.error).toBeUndefined(); expect(observed.firstUserVerified).toBe(true);
+      expect({ responseLoadFailed: observed.responseLoadFailed, ...observed.completionEvidence.codeStructure.rendererGuard })
+        .toMatchObject({ responseLoadFailed: true, reason: 'matched', guardBodyIsExtractedAnswer: true, bodyIsRoot });
+      expect(observed.answerComplete).toBe(true); expect(observed.text).toBe('This response couldn’t load');
+      expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0);
+      expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('never exempts hidden text, controls, message markers or display-contents descendants', async () => {
+    const variants = ['text', 'whitespace', 'known-label', 'button', 'link', 'quote', 'markdown', 'role', 'tabindex',
+      'editable', 'author', 'turn', 'user-bubble', 'unknown-attribute', 'onclick', 'hidden-component',
+      'contents-root', 'contents-child', 'visible-child-text', 'css-before', 'css-after', 'unknown-css'];
+    for (const variant of variants) {
+      const f = fixture({ userPrompt: 'Preserve hidden-content and status boundaries' }), e = rendererError();
+      await f.inspect();
+      replaceAnswer(f, e.portal);
+      const decoration = new Element('DIV', { hidden: '' }), child = new Element('DIV');
+      decoration.append(child); f.answer.children.unshift(decoration); decoration.parentElement = f.answer;
+      if (variant === 'text') child.text = 'Hidden author content';
+      if (variant === 'whitespace') child.text = '\n ';
+      if (variant === 'known-label') child.text = 'This response couldn’t load';
+      if (variant === 'button') child.append(new Element('BUTTON'));
+      if (variant === 'link') child.append(new Element('A', { href: 'https://example.test/' }));
+      if (variant === 'quote') child.append(new Element('BLOCKQUOTE'));
+      if (variant === 'markdown') child.values.class = 'markdown';
+      if (variant === 'role') child.values.role = 'status';
+      if (variant === 'tabindex') child.values.tabindex = '-1';
+      if (variant === 'editable') child.values.contenteditable = 'false';
+      if (variant === 'author') child.values['data-message-author-role'] = 'tool';
+      if (variant === 'turn') child.values['data-turn'] = 'tool';
+      if (variant === 'user-bubble') child.values['data-user-message-bubble'] = '';
+      if (variant === 'unknown-attribute') child.values['data-unmeasured-content'] = '';
+      if (variant === 'onclick') child.values.onclick = 'untrusted()';
+      if (variant === 'hidden-component') child.values.class = 'DilRenderer-Other DilResponseRoot-Other';
+      if (variant === 'contents-root') decoration.values['data-fixture-display'] = 'contents';
+      if (variant === 'contents-child') child.values['data-fixture-display'] = 'contents';
+      if (variant === 'visible-child-text') {
+        delete decoration.values.hidden; decoration.cssVisibility = 'hidden'; child.cssVisibility = 'visible'; child.text = 'Visible override';
+      }
+      if (variant === 'css-before') child.beforeContent = '"Generated author text"';
+      if (variant === 'css-after') child.afterContent = '"Generated author text"';
+      if (variant === 'unknown-css') child.beforeContent = '';
+      const observed = await f.inspect(variant === 'user-bubble' ? { expectedUserCounts: [1, 2] } : {});
+      expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+      expect(observed.completionEvidence.codeStructure.rendererGuard.rawKnownLabel).toBeNull();
+      expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('counts every hidden descendant against the existing shared renderer limits', async () => {
+    for (const variant of ['depth', 'nodes', 'children', 'classes', 'class-length']) {
+      const f = fixture({ userPrompt: 'Keep the original classifier work budget' }), e = rendererError();
+      replaceAnswer(f, e.portal);
+      const decoration = new Element('DIV', { hidden: '' });
+      f.answer.children.unshift(decoration); decoration.parentElement = f.answer;
+      if (variant === 'depth') {
+        let node = decoration;
+        for (let i = 0; i < 9; i++) { const child = new Element('DIV'); node.append(child); node = child; }
+      }
+      if (variant === 'nodes') for (let i = 0; i < 30; i++) {
+        const child = new Element('DIV'); child.append(new Element('DIV')); decoration.append(child);
+      }
+      if (variant === 'children') for (let i = 0; i < 33; i++) decoration.append(new Element('DIV'));
+      if (variant === 'classes') decoration.values.class = Array.from({ length: 17 }, (_, i) => `layout${i}`).join(' ');
+      if (variant === 'class-length') decoration.values.class = 'x'.repeat(65);
+      const observed = await f.inspect();
+      expect(observed.responseLoadFailed).toBe(false);
+      expect(observed.completionEvidence.codeStructure.rendererGuard.reason).toBe({ depth: 'tree_depth', nodes: 'node_budget',
+        children: 'children_budget', classes: 'class_budget', 'class-length': 'class_budget' }[variant]);
+      expect(observed.completionEvidence.codeStructure.rendererGuard.visitedNodeCount).toBeLessThanOrEqual(65);
+      expect(f.messages.querySelector('button[aria-label="Copy"]')!.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+    }
+  });
+
   test('projects only finite same-invocation renderer relationships without changing recognition', async () => {
     for (const bodyIsRoot of [false, true]) {
       const f = fixture({ userPrompt: 'Read the current renderer facts' }), e = rendererError();
@@ -1602,7 +1695,7 @@ describe('ChatGPT inline DIL renderer failure', () => {
     const variants = ['missing-renderer', 'missing-response-root', 'missing-portal', 'missing-parent-renderer', 'empty-suffix',
       'counterfeit-prefix', 'split-root-pair', 'indirect-root', 'indirect-leaf', 'styled-leaf', 'span-leaf', 'nested-label',
       'different-label', 'padded-label', 'extra-text', 'second-leaf', 'second-root', 'second-portal', 'hidden-leaf', 'hidden-root',
-      'hidden-portal', 'detached', 'hidden-empty-branch', 'role', 'tabindex', 'editable', 'button', 'link', 'svg',
+      'hidden-portal', 'detached', 'role', 'tabindex', 'editable', 'button', 'link', 'svg',
       'long-text', 'long-class', 'many-classes', 'many-nodes', 'many-children', 'deep-tree', 'nested-author'];
     for (const variant of variants) {
       const f = fixture({ userPrompt: 'Observe only a proven renderer error' }), e = rendererError();
@@ -1629,7 +1722,6 @@ describe('ChatGPT inline DIL renderer failure', () => {
       if (variant === 'hidden-root') e.root.values['aria-hidden'] = 'true';
       if (variant === 'hidden-portal') e.portal.values.inert = '';
       if (variant === 'detached') e.portal.connected = false;
-      if (variant === 'hidden-empty-branch') e.portal.append(new Element('DIV', { hidden: '' }));
       if (variant === 'role') e.leaf.values.role = 'status';
       if (variant === 'tabindex') e.leaf.values.tabindex = '-1';
       if (variant === 'editable') e.leaf.values.contenteditable = 'false';

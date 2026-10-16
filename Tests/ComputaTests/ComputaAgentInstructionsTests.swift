@@ -3,6 +3,37 @@ import XCTest
 @testable import Computa
 
 final class ComputaAgentInstructionsTests: XCTestCase {
+    func testWebsiteResponseFormatChangesOnlyPresentationInstructions() {
+        let fencedInstructions = """
+        Return exactly one fenced JSON code block. Open with three backtick
+        characters, json and a newline; close after a newline with three backticks.
+        """
+        let rawInstructions = """
+        Return exactly one raw JSON object. Do not use Markdown fences
+        or code blocks.
+        """
+        for includeTools in [false, true] {
+            let names = includeTools ? ["relay.browser_read", "relay.apply_patch"] : []
+            let customNames: Set<String> = includeTools ? ["relay.apply_patch"] : []
+            for included in [[], [ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)]] {
+                let defaultContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
+                    customToolNames: customNames, includedInstructionText: included)
+                let fenced = ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
+                    customToolNames: customNames, includedInstructionText: included, responseFormat: .fencedJSON)
+                let raw = ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
+                    customToolNames: customNames, includedInstructionText: included, responseFormat: .rawJSON)
+                XCTAssertEqual(defaultContract, fenced)
+                XCTAssertEqual(fenced.components(separatedBy: fencedInstructions).count, 2)
+                XCTAssertEqual(raw.components(separatedBy: rawInstructions).count, 2)
+                XCTAssertEqual(raw.replacingOccurrences(of: rawInstructions, with: fencedInstructions), fenced,
+                               "Only the presentation paragraph may differ; scope, schemas and tool/message semantics stay exact")
+                XCTAssertFalse(raw.contains("`"))
+                XCTAssertFalse(raw.contains(fencedInstructions))
+                XCTAssertFalse(fenced.contains(rawInstructions))
+            }
+        }
+    }
+
     func testWebsiteContractsDefaultToFullStandaloneGuidance() {
         let tools = ["functions.browser_open": "browser_open", "functions.apply_patch": "apply_patch"]
         let runtime = ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools, customToolNames: ["functions.apply_patch"])
@@ -612,10 +643,12 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertEqual(try JSONSerialization.jsonObject(with: prompt.subdata(in: start..<end)) as? NSDictionary,
                        try JSONSerialization.jsonObject(with: original) as? NSDictionary, file: file, line: line)
         let suffix = String(decoding: prompt[end...], as: UTF8.self)
+        let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
+            customToolNames: request.customToolNames,
+            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "chatgpt" ? .rawJSON : .fencedJSON)
         XCTAssertEqual(suffix, "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
-                       ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames),
-                       file: file, line: line)
-        return ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames)
+                       handoff, file: file, line: line)
+        return handoff
     }
 
     func testThreadConfigurationDoesNotWalkToCodexHomeOrParentProjects() {

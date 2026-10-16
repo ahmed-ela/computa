@@ -1,6 +1,37 @@
 # Embedded website provider qualification
 
-## Build135 candidate: identify the inline renderer guard mismatch
+## Build136 candidate: raw ChatGPT envelopes and empty layout handling
+
+Installed135 repeated the same controlled failure in 71.312 seconds after three
+successful browser tools and four verified ChatGPT Instant inferences. The new
+diagnostic identified the classifier's first decline: a nonvisible layout node,
+fourth in its walk, before the visible error leaf. The guard and extraction used
+the same current body. The hidden node's complete contents were not measured;
+this identifies the rejecting predicate, not the website's renderer exception.
+Website and host-owned tab cleanup closed; the human control tab remained.
+
+Build136 permits only entirely empty, passive hidden DIV subtrees under the
+original shared traversal limits. Hidden text, controls, author/component
+markers, display:contents and generated or unknown CSS text remain rejected.
+The exact visible DIL component and error label are still required. The original
+failure was reproduced before the correction. All three adapter suites passed
+**570 tests with 16,038 assertions**, with unchanged adapter inputs.
+
+Separately, only validated ChatGPT routes now request one raw JSON object rather
+than a fenced code block. The existing parser already accepts both formats;
+parsing and response acceptance are byte-identical to135. Claude and Gemini keep
+their existing fenced contract. All **102 affected native methods passed**,
+covering provider controls, complete/history-only handoffs, exact expanded prompt
+bounds and unchanged tool/custom/message validation. The six ChatGPT format
+assertions first failed against135; their negative provider controls passed.
+This is an unproven rendering mitigation until installed tasks pass. It does not
+establish the underlying DIL cause or repair duplicated website history.
+
+Independent static reviews cleared both changes and the held136 build recipes.
+Fresh controlled browser and code/terminal/browser cases are prepared for two
+repetitions per provider. No136 installed task or full matrix is qualified yet.
+
+## Historical build135: identify the inline renderer guard mismatch
 
 Installed134 repeated the controlled browser-task failure after four verified
 normal Chat/GPT-6/Instant inferences and three successful tools. It again accepted

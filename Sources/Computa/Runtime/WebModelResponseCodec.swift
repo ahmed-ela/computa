@@ -210,8 +210,8 @@ enum WebModelResponseCodec {
         let displaySource = toolDefinitionsChanged
             ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             : originalJSON
-        let displayJSON = displayStableJSON(displaySource,
-            shieldURLPunctuation: LocalModelCatalog.webProvider(for: model) == "chatgpt")
+        let isChatGPT = LocalModelCatalog.webProvider(for: model) == "chatgpt"
+        let displayJSON = displayStableJSON(displaySource, shieldURLPunctuation: isChatGPT)
         let prompt = """
         \(runtimeInstructions)
 
@@ -223,7 +223,7 @@ enum WebModelResponseCodec {
         \(currentUserInstructions)
 
         \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText))
+            includedInstructionText: includedInstructionText, responseFormat: isChatGPT ? .rawJSON : .fencedJSON))
         """
         let bytes = prompt.utf8.count
         guard bytes <= maximumPromptBytes else {

@@ -505,10 +505,29 @@ enum ComputaAgentInstructions {
         """
     }
 
+    enum WebResponseFormat {
+        case fencedJSON
+        case rawJSON
+    }
+
     /// Kept after the complete request so long histories cannot bury the local
     /// response handoff. Names come only from the current validated schemas.
     static func webResponseContract(offeredToolNames: [String], customToolNames: Set<String> = [],
-                                    includedInstructionText: [String] = []) -> String {
+                                    includedInstructionText: [String] = [],
+                                    responseFormat: WebResponseFormat = .fencedJSON) -> String {
+        let responseFormatInstructions: String
+        switch responseFormat {
+        case .fencedJSON:
+            responseFormatInstructions = """
+            Return exactly one fenced JSON code block. Open with three backtick
+            characters, json and a newline; close after a newline with three backticks.
+            """
+        case .rawJSON:
+            responseFormatInstructions = """
+            Return exactly one raw JSON object. Do not use Markdown fences
+            or code blocks.
+            """
+        }
         let browserHandoff = offeredToolNames.contains {
             !customToolNames.contains($0) && EmbeddedBrowserTools.names.contains(String($0.split(separator: ".").last ?? ""))
         } ? """
@@ -558,8 +577,7 @@ enum ComputaAgentInstructions {
         apply to that value; this transport still requires one JSON envelope.
         For file-only results, use message.text; put truthful limitations or refusals there too.
         \(literalIdentifiers)
-        Return exactly one fenced JSON code block. Open with three backtick
-        characters, json and a newline; close after a newline with three backticks.
+        \(responseFormatInstructions)
         One object; no outside text. Escape quotes, backslashes and
         newlines as valid JSON. Choose one envelope:
         {"type":"tool_calls","calls":[{"name":"offered_tool_name","arguments":{}}]}

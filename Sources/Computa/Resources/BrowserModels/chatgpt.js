@@ -2620,8 +2620,8 @@ function chatGPTInlineRendererLoadFailed(visible) {
     }
     return matched;
   };
-  // Recognition predicates are unchanged. These finite facts explain the
-  // first decline; they never grant error, answer, ownership or action proof.
+  // These finite facts explain the first decline. Only the exact visible
+  // component/label conjunction below can establish this abort-only status.
   const root = chatGPTMessageRoots('assistant').at(-1); state.root = root || null;
   if (!root) return finish(false, 'root_missing');
   if (!visible(root)) return finish(false, 'root_not_visible', root);
@@ -2660,13 +2660,22 @@ function chatGPTInlineRendererLoadFailed(visible) {
   const pairs = { dil: [], portal: [] }, stack = [{ node: body, depth: 0 }];
   let visited = 0, textParent = null;
   while (stack.length) {
-    const { node, depth } = stack.pop();
+    const { node, depth, emptyOnly = false } = stack.pop();
     report.visitedNodeCount = Math.min(++visited, 65);
     if (visited > 64) return finish(false, 'node_budget', node);
     if (depth > 8) return finish(false, 'tree_depth', node);
-    if (node.nodeType === 8) continue;
+    if (node.nodeType === 8) {
+      if (emptyOnly && (node.textContent || '') !== '') return finish(false, 'node_not_visible', node.parentElement);
+      continue;
+    }
     if (node.nodeType === 3) {
       const text = node.textContent || '';
+      // A hidden decoration is exempt only after its entire bounded subtree
+      // proves empty. Even whitespace or a hidden quoted label is unknown.
+      if (emptyOnly) {
+        if (text !== '') return finish(false, 'node_not_visible', node.parentElement);
+        continue;
+      }
       if (text.length > 128) {
         if (report.rawKnownLabel === null) report.rawKnownLabel = false;
         return finish(false, 'text_budget', node);
@@ -2687,7 +2696,26 @@ function chatGPTInlineRendererLoadFailed(visible) {
     }
     if (node.nodeType !== 1) return finish(false, 'non_element', node);
     if (node.tagName !== 'DIV') return finish(false, 'non_div_element', node);
-    if (!visible(node)) return finish(false, 'node_not_visible', node);
+    const nodeVisible = visible(node), emptySubtree = emptyOnly || !nodeVisible;
+    if (emptySubtree) {
+      // Missing layout boxes do not prove that descendants are empty.
+      // Inspect every child under the original shared limits, and refuse
+      // display:contents or generated CSS text rather than skipping either.
+      let display;
+      try { display = getComputedStyle(node).display; } catch { return finish(false, 'node_not_visible', node); }
+      if (!node.isConnected || typeof display !== 'string' || display === 'contents')
+        return finish(false, 'node_not_visible', node);
+      for (const pseudo of ['::before', '::after']) {
+        let content;
+        try { content = getComputedStyle(node, pseudo).content; } catch { return finish(false, 'node_not_visible', node); }
+        if (!['none', 'normal', '""', "''"].includes(content)) return finish(false, 'node_not_visible', node);
+      }
+      let attributes = 0;
+      for (const attribute of node.attributes) {
+        if (++attributes > 5 || !['class', 'style', 'hidden', 'aria-hidden', 'inert'].includes(attribute.name))
+          return finish(false, 'interactive_metadata', node);
+      }
+    }
     if (node.getAttribute('role') !== null || node.getAttribute('tabindex') !== null
       || node.getAttribute('contenteditable') !== null) return finish(false, 'interactive_metadata', node);
     if (node.classList.contains('markdown')) return finish(false, 'markdown_content', node);
@@ -2700,6 +2728,8 @@ function chatGPTInlineRendererLoadFailed(visible) {
       classes.push(name);
     }
     const has = prefix => classes.some(name => name.startsWith(prefix) && /^[A-Za-z0-9_-]{1,48}$/.test(name.slice(prefix.length)));
+    if (emptySubtree && classes.some(name => ['DilRenderer-', 'DilResponseRoot-', 'PortalBoundary-', 'Renderer-']
+      .some(prefix => name.startsWith(prefix)))) return finish(false, 'node_not_visible', node);
     if (classes.some(name => name.startsWith('DilRenderer-') || name.startsWith('DilResponseRoot-'))) {
       if (!has('DilRenderer-') || !has('DilResponseRoot-')) return finish(false, 'dil_pair_incomplete', node);
       if (pairs.dil.length) { state.dil = null; return finish(false, 'dil_pair_multiple', node); }
@@ -2712,7 +2742,8 @@ function chatGPTInlineRendererLoadFailed(visible) {
     }
     const children = node.childNodes;
     if (children.length > 32 || stack.length + children.length > 64) return finish(false, 'children_budget', node);
-    for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], depth: depth + 1 });
+    for (let index = children.length - 1; index >= 0; index--)
+      stack.push({ node: children[index], depth: depth + 1, emptyOnly: emptySubtree });
   }
   const dil = pairs.dil[0], portal = pairs.portal[0];
   if (textParent) for (const _ of textParent.classList) return finish(false, 'leaf_classed', textParent);
