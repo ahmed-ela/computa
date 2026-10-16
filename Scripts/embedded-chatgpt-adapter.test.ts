@@ -33,7 +33,7 @@ class Element {
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(""); }
   get innerText() { return this.textContent; }
   getAttribute(name: string) { return this.values[name] ?? null; }
-  getClientRects() { return this.isConnected && !this.closest('[hidden]') ? [{}] : []; }
+  getClientRects() { return this.isConnected && this.values['data-fixture-display'] !== 'contents' && !this.closest('[hidden]') ? [{}] : []; }
   getBoundingClientRect() { return { left: 0, top: this.rect * 40, width: 100, height: 30 }; }
   append(...children: Element[]) { children.forEach(child => { child.parentElement = this; this.children.push(child); }); }
   contains(node: Element | null): boolean { return node === this || !!node && this.children.some(child => child.contains(node)); }
@@ -166,7 +166,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     expectedURL: document.URL, expectedUserCounts: [options.userPrompt === undefined ? 0 : 1],
     expectedFirstUserMarker: firstMarker, expectedFirstUserFingerprint: nativeFingerprint,
     allowFirstUserBinding: nativeFingerprint === undefined, ...request },
-    document, window, location, () => ({ visibility: 'visible' }), Observer, (callback: () => void, delay: number) => {
+    document, window, location, (node: Element) => ({ visibility: 'visible', display: node.values['data-fixture-display'] ?? 'block' }), Observer, (callback: () => void, delay: number) => {
       timers.push(callback); scheduledDelays.push(delay);
     }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
       const digest = await crypto.subtle.digest(algorithm, data);
@@ -1459,6 +1459,71 @@ describe('ChatGPT inline DIL renderer failure', () => {
     const observed = await f.inspect();
     expect(observed.responseLoadFailed).toBe(true); expect(observed.answerComplete).toBe(false);
     expect(observed.text).toBe('This response couldn’t load'); expect(copy.clicks).toBe(0);
+    expect(f.composer.events).toEqual([]);
+  });
+
+  test('projects only finite same-invocation renderer relationships without changing recognition', async () => {
+    for (const bodyIsRoot of [false, true]) {
+      const f = fixture({ userPrompt: 'Read the current renderer facts' }), e = rendererError();
+      replaceAnswer(f, e.portal);
+      if (bodyIsRoot) delete f.answer.parentElement!.values['data-turn'];
+      const observed = await f.inspect();
+      expect(observed.responseLoadFailed).toBe(true);
+      const facts = observed.completionEvidence.codeStructure.rendererGuard;
+      expect(Object.keys(facts).sort()).toEqual(['reason', 'subject', 'visitedNodeCount', 'rawKnownLabel', 'trimmedKnownLabel',
+        'guardBodyIsExtractedAnswer', 'bodyIsRoot', 'knownScopedCopyOutsideDIL', 'rejectedDisplayContents'].sort());
+      expect(facts).toMatchObject({ reason: 'matched', subject: 'other', rawKnownLabel: true, trimmedKnownLabel: true,
+        guardBodyIsExtractedAnswer: true, bodyIsRoot, knownScopedCopyOutsideDIL: true, rejectedDisplayContents: null });
+      expect(facts.visitedNodeCount).toBeGreaterThan(0); expect(facts.visitedNodeCount).toBeLessThanOrEqual(65);
+      for (const excluded of ['This response', 'DilRenderer-', 'https:', firstMarker, 'owner', 'document'])
+        expect(JSON.stringify(facts)).not.toContain(excluded);
+      expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('distinguishes a raw label mismatch from a trimmed known label without accepting it', async () => {
+    const f = fixture({ userPrompt: 'Preserve the existing strict label predicate' }), e = rendererError();
+    e.leaf.text = ' This response couldn’t load\n'; replaceAnswer(f, e.portal);
+    const observed = await f.inspect();
+    expect(observed.responseLoadFailed).toBe(false);
+    expect(observed.completionEvidence.codeStructure.rendererGuard).toMatchObject({ reason: 'raw_label_differs',
+      subject: 'text_leaf', rawKnownLabel: false, trimmedKnownLabel: true, guardBodyIsExtractedAnswer: true,
+      bodyIsRoot: false, knownScopedCopyOutsideDIL: true, rejectedDisplayContents: null });
+    expect(f.composer.events).toEqual([]);
+  });
+
+  test('reports the first layout or boundary decline and leaves unexamined label facts unknown', async () => {
+    for (const variant of ['contents', 'hidden', 'no-main']) {
+      const f = fixture({ userPrompt: 'Observe the first structural decline' }), e = rendererError();
+      replaceAnswer(f, e.portal);
+      if (variant === 'contents') e.root.values['data-fixture-display'] = 'contents';
+      if (variant === 'hidden') e.root.values.hidden = '';
+      if (variant === 'no-main') f.messages.tagName = 'DIV';
+      // This later bad label must not replace the first rejected predicate.
+      e.leaf.text = 'A later mismatched label';
+      const observed = await f.inspect();
+      expect(observed.responseLoadFailed).toBe(false);
+      const facts = observed.completionEvidence.codeStructure.rendererGuard;
+      expect(facts).toMatchObject({ reason: variant === 'no-main' ? 'conversation_boundary_missing' : 'node_not_visible',
+        subject: variant === 'no-main' ? 'root' : 'dil_pair', rawKnownLabel: null, trimmedKnownLabel: null,
+        rejectedDisplayContents: variant === 'no-main' ? null : variant === 'contents' });
+      expect(facts.guardBodyIsExtractedAnswer).toBe(variant === 'no-main' ? null : true);
+      expect(facts.knownScopedCopyOutsideDIL).toBeNull(); expect(f.composer.events).toEqual([]);
+    }
+  });
+
+  test('compares the guard body to the body actually selected by extraction in the same invocation', async () => {
+    const f = fixture({ userPrompt: 'Preserve selected-answer identity facts' }), e = rendererError();
+    replaceAnswer(f, e.portal);
+    const laterRoot = new Element('ARTICLE', { 'data-turn': 'assistant' });
+    const hiddenBody = new Element('DIV', { 'data-markdown-text-style': 'assistant-message', hidden: '' }, 'Hidden unrelated answer');
+    laterRoot.append(hiddenBody); f.messages.append(laterRoot);
+    const observed = await f.inspect();
+    expect(observed.error).toBeUndefined(); expect(observed.responseLoadFailed).toBe(false);
+    expect(observed.text).toBe('This response couldn’t load');
+    expect(observed.completionEvidence.codeStructure.rendererGuard).toMatchObject({ reason: 'body_not_visible', subject: 'body',
+      guardBodyIsExtractedAnswer: false, bodyIsRoot: false, knownScopedCopyOutsideDIL: null,
+      rawKnownLabel: null, trimmedKnownLabel: null, rejectedDisplayContents: false });
     expect(f.composer.events).toEqual([]);
   });
 

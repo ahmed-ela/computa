@@ -6,6 +6,90 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testRendererGuardProjectionPreservesFiniteDeclinesAndUnknownFacts() throws {
+        let matched: [String: Any] = ["reason": "matched", "subject": "other", "visitedNodeCount": 5,
+            "rawKnownLabel": true, "trimmedKnownLabel": true, "guardBodyIsExtractedAnswer": true,
+            "bodyIsRoot": false, "knownScopedCopyOutsideDIL": true, "rejectedDisplayContents": NSNull()]
+        let early: [String: Any] = ["reason": "root_missing", "subject": "none", "visitedNodeCount": 0,
+            "rawKnownLabel": NSNull(), "trimmedKnownLabel": NSNull(), "guardBodyIsExtractedAnswer": NSNull(),
+            "bodyIsRoot": NSNull(), "knownScopedCopyOutsideDIL": NSNull(), "rejectedDisplayContents": NSNull()]
+        var whitespace = matched
+        whitespace["reason"] = "raw_label_differs"; whitespace["subject"] = "text_leaf"; whitespace["rawKnownLabel"] = false
+        var layout = early
+        layout["reason"] = "node_not_visible"; layout["subject"] = "dil_pair"; layout["visitedNodeCount"] = 3
+        layout["bodyIsRoot"] = false; layout["guardBodyIsExtractedAnswer"] = true; layout["rejectedDisplayContents"] = true
+        for input in [matched, early, whitespace, layout] {
+            let projected = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedRendererGuardDiagnostic(input))
+            XCTAssertEqual(Set(projected.keys), Set(input.keys))
+            let bytes = try JSONSerialization.data(withJSONObject: projected, options: .sortedKeys)
+            XCTAssertLessThanOrEqual(bytes.count, 768)
+            let structure: [String: Any] = ["preCount": 0, "codeCount": 0, "codeTextLength": 0,
+                "outsideTextLength": 27, "outsideTruncated": false, "preParentTags": [], "rendererGuard": input]
+            let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(structure))
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+            XCTAssertNotNil(decoded["rendererGuard"] as? [String: Any])
+            XCTAssertFalse(encoded.contains("This response")); XCTAssertFalse(encoded.contains("https://"))
+        }
+    }
+
+    func testRendererGuardProjectionRejectsUnknownFieldsTypesRangesAndImpossibleRelations() {
+        let valid: [String: Any] = ["reason": "matched", "subject": "other", "visitedNodeCount": 5,
+            "rawKnownLabel": true, "trimmedKnownLabel": true, "guardBodyIsExtractedAnswer": true,
+            "bodyIsRoot": false, "knownScopedCopyOutsideDIL": true, "rejectedDisplayContents": NSNull()]
+        func rejected(_ raw: Any, file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedRendererGuardDiagnostic(raw), file: file, line: line)
+            let structure: [String: Any] = ["preCount": 0, "codeCount": 0, "codeTextLength": 0,
+                "outsideTextLength": 27, "outsideTruncated": false, "preParentTags": [], "rendererGuard": raw]
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(structure), file: file, line: line)
+        }
+        rejected(NSNull()); rejected([])
+        for key in valid.keys { var bad = valid; bad.removeValue(forKey: key); rejected(bad) }
+        var bad = valid; bad["text"] = "PRIVATE_RENDERER_CANARY"; rejected(bad)
+        for key in ["reason", "subject"] { bad = valid; bad[key] = "PRIVATE_RENDERER_CANARY"; rejected(bad) }
+        let counts: [Any] = [-1, 66, 1.5, true, NSNull(), "5", Double.nan, Double.infinity]
+        for value in counts { bad = valid; bad["visitedNodeCount"] = value; rejected(bad) }
+        for key in ["rawKnownLabel", "trimmedKnownLabel", "guardBodyIsExtractedAnswer", "bodyIsRoot",
+                    "knownScopedCopyOutsideDIL", "rejectedDisplayContents"] {
+            let values: [Any] = [0, 1, "true", [], [:]]
+            for value in values { bad = valid; bad[key] = value; rejected(bad) }
+        }
+        let alterations: [[String: Any]] = [
+            ["trimmedKnownLabel": false], ["rawKnownLabel": NSNull()],
+            ["guardBodyIsExtractedAnswer": NSNull()], ["guardBodyIsExtractedAnswer": false], ["bodyIsRoot": NSNull()],
+            ["rejectedDisplayContents": true], ["visitedNodeCount": 0], ["visitedNodeCount": 65],
+            ["reason": "node_budget"], ["rawKnownLabel": false]]
+        for alteration in alterations { bad = valid; bad.merge(alteration) { _, new in new }; rejected(bad) }
+    }
+
+    func testRendererGuardFactsSurviveOwnedCompletionWithoutChangingTextOrInputs() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Read only the current completed response"])
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        let completion = try XCTUnwrap(complete["completionEvidence"] as? [String: Any])
+        let structure = try XCTUnwrap(completion["codeStructure"] as? [String: Any])
+        let facts = try XCTUnwrap(structure["rendererGuard"] as? [String: Any])
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedRendererGuardDiagnostic(facts))
+        // This fixture has a plain #messages DIV, without the MAIN boundary
+        // required by the unchanged classifier. Preserve that first decline;
+        // extraction later finding a body must not invent earlier guard facts.
+        XCTAssertEqual(facts["reason"] as? String, "conversation_boundary_missing")
+        XCTAssertEqual(facts["visitedNodeCount"] as? Int, 0)
+        XCTAssertTrue(facts["guardBodyIsExtractedAnswer"] is NSNull)
+        XCTAssertTrue(facts["bodyIsRoot"] is NSNull)
+        XCTAssertTrue(facts["rawKnownLabel"] is NSNull); XCTAssertTrue(facts["trimmedKnownLabel"] is NSNull)
+        XCTAssertTrue(facts["knownScopedCopyOutsideDIL"] is NSNull)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testChatGPTDispatchReceiptRequiresOnlyStrictEmptyContinuationFields() throws {
         let receipt: [String: Any] = ["submitted": true, "submissionPending": true, "modelVerificationPending": true,
             "temporary": true, "chatModeReady": true, "chatModeActionAvailable": false, "productModeEvidence": [:],

@@ -1,6 +1,30 @@
 # Embedded website provider qualification
 
-## Build134 candidate: reject the observed inline renderer error
+## Build135 candidate: identify the inline renderer guard mismatch
+
+Installed134 repeated the controlled browser-task failure after four verified
+normal Chat/GPT-6/Instant inferences and three successful tools. It again accepted
+the website's literal “This response couldn’t load” as final prose; the intended
+134 classifier did not match. The task did not submit the fixture form or issue
+a model-owned tab close. Its website and host-owned task tab closed, and the
+human control tab remained. This is a failed task, not renderer recovery.
+
+Build135 adds bounded first-decline facts to the existing response-structure
+diagnostic. They report the first rejecting predicate, visited node count and
+finite label, layout and body-identity facts. Recognition, output acceptance,
+ownership, deadlines and Send behavior remain unchanged. Strict native validation
+rejects unknown keys, types, ranges and inconsistent facts. The final cohort
+passed **567 adapter tests with 15,865 assertions** and **five focused native
+methods**, without failures, skips or source changes. Live diagnosis is pending.
+
+A separately authorized Web Inspector attempt attached only to a fresh Computa
+ChatGPT test view. The final renderer exception was not captured before the
+owned view closed. Earlier SVG/ResizeObserver warnings are not a root cause.
+Safari's developer setting was restored off; the one-use arm and local fixture
+server are gone. A prior failed setup is retained separately. These diagnostic
+attempts do not qualify the task or establish an underlying renderer repair.
+
+## Historical build134: attempted classification of the observed inline renderer error
 
 The installed133 browser task completed four verified normal Chat/GPT-6/Instant
 inferences and three successful browser tools without the earlier continuation
@@ -14,14 +38,16 @@ the current assistant body and reports the existing website-response failure
 before accepting an answer. It neither clicks Retry nor sends another message.
 Unknown shapes remain unclassified. Quoted text, code, Markdown, ordinary prose,
 older responses, user/tool content, conflicting author markers, extra controls
-and oversized or hidden components are covered by negative tests.
+and oversized or hidden components are covered by negative tests. The installed
+result above shows that the measured classifier was insufficient.
 
 The original false completion and two author-boundary failures were reproduced
 before their fixes. The final three-adapter cohort passed **563 tests with
 15,818 assertions**, no failures or skips, and unchanged inputs. Eight focused
 methods passed with 229 assertions. The shared helper, other provider adapters,
-native transport and response codec are unchanged from installed133. Signed
-installation and controlled live qualification remain pending at this checkpoint.
+native transport and response codec are unchanged from installed133. Build134
+from commit `4acacf687a1e17f6d531d671ba5b4effe3bb84b2` was independently signed,
+installed and verified before the failed controlled task recorded above.
 
 The installed133 task remains a failed task: it issued no `browser_close` and
 returned no useful final result. Host cleanup independently closed its one owned

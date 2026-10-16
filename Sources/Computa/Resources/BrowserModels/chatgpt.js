@@ -2585,13 +2585,46 @@ function chatGPTAlertAsideLoadFailed(retry, main, visible) {
   return errorText.replace(/\s+/g, ' ').trim() === 'Load failed'
     && retryText.replace(/\s+/g, ' ').trim() === 'Retry';
 }
+// One invocation only; DOM references never enter the diagnostic projection.
+let chatGPTInlineRendererState = null;
 function chatGPTInlineRendererLoadFailed(visible) {
-  // A measured inline renderer error can occupy the assistant body itself.
-  // Component prefixes alone are not status evidence: require the complete
-  // small, passive, single-leaf shape in this exact latest physical answer.
-  // Unknown/quoted/markdown/over-budget content remains ordinary content.
-  const root = chatGPTMessageRoots('assistant').at(-1);
-  if (!root || !visible(root)) return false;
+  const report = { reason: 'not_evaluated', subject: 'none', visitedNodeCount: 0,
+    rawKnownLabel: null, trimmedKnownLabel: null, guardBodyIsExtractedAnswer: null,
+    bodyIsRoot: null, knownScopedCopyOutsideDIL: null, rejectedDisplayContents: null };
+  const state = { report, root: null, body: null, dil: null, portal: null };
+  chatGPTInlineRendererState = state;
+  const subject = node => {
+    if (!node) return 'none';
+    if (node === state.body) return 'body';
+    if (node === state.root) return 'root';
+    if (node.nodeType === 3) return 'text_leaf';
+    try {
+      const names = [];
+      for (const name of node.classList || []) {
+        if (names.length >= 16 || name.length > 64) return 'other';
+        names.push(name);
+      }
+      const has = prefix => names.some(name => name.startsWith(prefix) && /^[A-Za-z0-9_-]{1,48}$/.test(name.slice(prefix.length)));
+      if (has('DilRenderer-') && has('DilResponseRoot-')) return 'dil_pair';
+      if (has('PortalBoundary-') && has('Renderer-')) return 'portal_pair';
+    } catch { /* Diagnostic classification cannot change the original result. */ }
+    return 'other';
+  };
+  const finish = (matched, reason, node = null) => {
+    report.reason = reason; report.subject = subject(node);
+    if (['root_not_visible', 'body_not_visible', 'node_not_visible', 'text_not_visible'].includes(reason)) {
+      try {
+        const style = getComputedStyle(node);
+        if (typeof style.display === 'string') report.rejectedDisplayContents = style.display === 'contents';
+      } catch { /* Unknown layout remains unknown. */ }
+    }
+    return matched;
+  };
+  // Recognition predicates are unchanged. These finite facts explain the
+  // first decline; they never grant error, answer, ownership or action proof.
+  const root = chatGPTMessageRoots('assistant').at(-1); state.root = root || null;
+  if (!root) return finish(false, 'root_missing');
+  if (!visible(root)) return finish(false, 'root_not_visible', root);
   const foreignMessage = node => {
     const author = node.getAttribute('data-message-author-role'), turn = node.getAttribute('data-turn');
     const style = node.getAttribute('data-markdown-text-style');
@@ -2600,67 +2633,106 @@ function chatGPTInlineRendererLoadFailed(visible) {
   };
   let inConversation = false;
   for (let node = root, depth = 0; node; node = node.parentElement) {
-    if (++depth > 64 || ['PRE', 'CODE', 'BLOCKQUOTE', 'NAV', 'ASIDE', 'TEXTAREA'].includes(node.tagName)
+    if (++depth > 64) return finish(false, 'ancestor_budget', node);
+    if (['PRE', 'CODE', 'BLOCKQUOTE', 'NAV', 'ASIDE', 'TEXTAREA'].includes(node.tagName)
       || ['menu', 'dialog'].includes(node.getAttribute('role')) || node.getAttribute('contenteditable') !== null
-      || node.getAttribute('id') === 'prompt-textarea' || node.getAttribute('data-user-message-bubble') !== null
-      || foreignMessage(node)) return false;
+      || node.getAttribute('id') === 'prompt-textarea' || node.getAttribute('data-user-message-bubble') !== null)
+      return finish(false, 'ancestor_excluded', node);
+    if (foreignMessage(node)) return finish(false, 'ancestor_foreign_message', node);
     if (node.tagName === 'MAIN') { inConversation = true; break; }
   }
-  if (!inConversation) return false;
+  if (!inConversation) return finish(false, 'conversation_boundary_missing', root);
   const body = root.getAttribute('data-markdown-text-style') === 'assistant-message' ? root
     : root.querySelector('[data-markdown-text-style="assistant-message"]') || root.querySelector('.markdown')
       || root.querySelector('[data-message-author-role="assistant"]')
       || (root.getAttribute('data-message-author-role') === 'assistant' ? root : null);
-  if (!body || !visible(body) || !root.contains(body)) return false;
+  state.body = body || null; report.bodyIsRoot = body ? body === root : null;
+  if (!body) return finish(false, 'body_missing');
+  if (!visible(body)) return finish(false, 'body_not_visible', body);
+  if (!root.contains(body)) return finish(false, 'body_outside_root', body);
   for (let node = body, depth = 0; node; node = node.parentElement) {
-    if (++depth > 16 || ['PRE', 'CODE', 'BLOCKQUOTE'].includes(node.tagName) || node.classList.contains('markdown')
-      || foreignMessage(node)) return false;
+    if (++depth > 16) return finish(false, 'body_ancestor_budget', node);
+    if (['PRE', 'CODE', 'BLOCKQUOTE'].includes(node.tagName) || node.classList.contains('markdown'))
+      return finish(false, 'body_quote_or_markdown', node);
+    if (foreignMessage(node)) return finish(false, 'body_foreign_message', node);
     if (node === root) break;
   }
   const pairs = { dil: [], portal: [] }, stack = [{ node: body, depth: 0 }];
   let visited = 0, textParent = null;
   while (stack.length) {
     const { node, depth } = stack.pop();
-    if (++visited > 64 || depth > 8) return false;
+    report.visitedNodeCount = Math.min(++visited, 65);
+    if (visited > 64) return finish(false, 'node_budget', node);
+    if (depth > 8) return finish(false, 'tree_depth', node);
     if (node.nodeType === 8) continue;
     if (node.nodeType === 3) {
       const text = node.textContent || '';
-      if (text.length > 128) return false;
+      if (text.length > 128) {
+        if (report.rawKnownLabel === null) report.rawKnownLabel = false;
+        return finish(false, 'text_budget', node);
+      }
       if (text.trim()) {
-        if (textParent || text !== 'This response couldn’t load' || !visible(node.parentElement)) return false;
+        // These flags describe the first examined nonempty leaf, not a scan
+        // of arbitrary response text. Unexamined values remain null.
+        if (report.rawKnownLabel === null) {
+          report.rawKnownLabel = text === 'This response couldn’t load';
+          report.trimmedKnownLabel = text.trim() === 'This response couldn’t load';
+        }
+        if (textParent) return finish(false, 'multiple_text_leaves', node);
+        if (text !== 'This response couldn’t load') return finish(false, 'raw_label_differs', node);
+        if (!visible(node.parentElement)) return finish(false, 'text_not_visible', node.parentElement);
         textParent = node.parentElement;
       }
       continue;
     }
-    if (node.nodeType !== 1 || node.tagName !== 'DIV' || !visible(node)
-      || node.getAttribute('role') !== null || node.getAttribute('tabindex') !== null
-      || node.getAttribute('contenteditable') !== null || node.classList.contains('markdown')
-      || node !== body && (node.getAttribute('data-markdown-text-style') !== null
-        || node.getAttribute('data-message-author-role') !== null || node.getAttribute('data-user-message-bubble') !== null)) return false;
+    if (node.nodeType !== 1) return finish(false, 'non_element', node);
+    if (node.tagName !== 'DIV') return finish(false, 'non_div_element', node);
+    if (!visible(node)) return finish(false, 'node_not_visible', node);
+    if (node.getAttribute('role') !== null || node.getAttribute('tabindex') !== null
+      || node.getAttribute('contenteditable') !== null) return finish(false, 'interactive_metadata', node);
+    if (node.classList.contains('markdown')) return finish(false, 'markdown_content', node);
+    if (node !== body && (node.getAttribute('data-markdown-text-style') !== null
+      || node.getAttribute('data-message-author-role') !== null || node.getAttribute('data-user-message-bubble') !== null))
+      return finish(false, 'nested_message', node);
     const classes = [];
     for (const name of node.classList) {
-      if (classes.length >= 16 || name.length > 64) return false;
+      if (classes.length >= 16 || name.length > 64) return finish(false, 'class_budget', node);
       classes.push(name);
     }
     const has = prefix => classes.some(name => name.startsWith(prefix) && /^[A-Za-z0-9_-]{1,48}$/.test(name.slice(prefix.length)));
     if (classes.some(name => name.startsWith('DilRenderer-') || name.startsWith('DilResponseRoot-'))) {
-      if (!has('DilRenderer-') || !has('DilResponseRoot-') || pairs.dil.length) return false;
-      pairs.dil.push(node);
+      if (!has('DilRenderer-') || !has('DilResponseRoot-')) return finish(false, 'dil_pair_incomplete', node);
+      if (pairs.dil.length) { state.dil = null; return finish(false, 'dil_pair_multiple', node); }
+      pairs.dil.push(node); state.dil = node;
     }
     if (classes.some(name => name.startsWith('PortalBoundary-') || name.startsWith('Renderer-'))) {
-      if (!has('PortalBoundary-') || !has('Renderer-') || pairs.portal.length) return false;
-      pairs.portal.push(node);
+      if (!has('PortalBoundary-') || !has('Renderer-')) return finish(false, 'portal_pair_incomplete', node);
+      if (pairs.portal.length) { state.portal = null; return finish(false, 'portal_pair_multiple', node); }
+      pairs.portal.push(node); state.portal = node;
     }
     const children = node.childNodes;
-    if (children.length > 32 || stack.length + children.length > 64) return false;
+    if (children.length > 32 || stack.length + children.length > 64) return finish(false, 'children_budget', node);
     for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], depth: depth + 1 });
   }
   const dil = pairs.dil[0], portal = pairs.portal[0];
-  if (textParent) for (const _ of textParent.classList) return false;
-  return pairs.dil.length === 1 && pairs.portal.length === 1 && !!textParent
-    && dil.parentElement === portal && textParent.parentElement === dil
-    && textParent.childElementCount === 0
-    && dil.childElementCount === 1 && body.contains(portal) && portal.contains(dil);
+  if (textParent) for (const _ of textParent.classList) return finish(false, 'leaf_classed', textParent);
+  if (pairs.dil.length !== 1 || pairs.portal.length !== 1) return finish(false, 'components_missing', body);
+  if (!textParent) return finish(false, 'label_missing', body);
+  if (dil.parentElement !== portal) return finish(false, 'portal_not_direct_parent', dil);
+  if (textParent.parentElement !== dil) return finish(false, 'leaf_not_direct_child', textParent);
+  if (textParent.childElementCount !== 0) return finish(false, 'leaf_has_elements', textParent);
+  if (dil.childElementCount !== 1) return finish(false, 'dil_has_other_children', dil);
+  if (!body.contains(portal) || !portal.contains(dil)) return finish(false, 'component_scope_changed', body);
+  return finish(true, 'matched', textParent);
+}
+function chatGPTInlineRendererGuardStructure(answer, enabledScopedCopies) {
+  const state = chatGPTInlineRendererState;
+  if (!state) return null;
+  const sameBody = state.body ? state.body === answer : null;
+  const knownDIL = sameBody === true && state.dil && state.portal && state.dil.parentElement === state.portal
+    && state.body.contains(state.portal) && state.portal.contains(state.dil);
+  return { ...state.report, guardBodyIsExtractedAnswer: sameBody,
+    knownScopedCopyOutsideDIL: knownDIL ? enabledScopedCopies.some(copy => !state.dil.contains(copy)) : null };
 }
 function chatGPTResponseLoadFailed(visible) {
   if (chatGPTInlineRendererLoadFailed(visible)) return true;
@@ -3014,6 +3086,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   const responseExtraction = modelResponseExtraction(answer);
   const answerText = modelResponseText(answer, responseExtraction);
   let answerComplete = false;
+  let rendererScopedCopies = [];
   const completionEvidence = { codeStructure: modelResponseStructure(answer, responseExtraction), modernMarkers: modernChatGPTAnswers.length, logicalAnswers: answers.length,
     scopedCopies: 0, enabledCopies: 0, depth: -1 };
   if (provider === "chatgpt" && answer) {
@@ -3024,9 +3097,10 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       if (answers.filter(other => node === other || node.contains(other)).length > 1) break;
       const copies = [...node.querySelectorAll('.turn-action-controls button[aria-label="Copy"], button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]')];
       completionEvidence.scopedCopies = copies.length;
-      completionEvidence.enabledCopies = copies.filter(enabled).length;
+      const enabledCopies = copies.filter(enabled);
+      completionEvidence.enabledCopies = enabledCopies.length;
       completionEvidence.depth = depth;
-      if (completionEvidence.enabledCopies) { answerComplete = true; break; }
+      if (completionEvidence.enabledCopies) { rendererScopedCopies = enabledCopies; answerComplete = true; break; }
     }
   } else if (provider === "claude" && answer) {
     const message = answer.closest('[data-testid="assistant-message"]');
@@ -3037,6 +3111,8 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   } else if (answer) {
     answerComplete = !!answer.closest("model-response")?.querySelector('button[aria-label*="Good response"], button[aria-label*="Copy"], button[data-test-id="copy-button"]');
   }
+  const rendererGuard = chatGPTInlineRendererGuardStructure(answer, rendererScopedCopies);
+  if (rendererGuard) completionEvidence.codeStructure.rendererGuard = rendererGuard;
   const claudeExit = provider === "claude" ? find(['button[aria-label="Exit incognito"]']) : null;
   const claudeIncognitoBadge = claudeExit && new URL(document.URL).searchParams.has("incognito")
     && [...document.querySelectorAll(".animate-incognito-header-in span")].find(node => visible(node)

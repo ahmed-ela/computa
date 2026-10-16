@@ -1919,6 +1919,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                    "outside_scan_limit", "accepted_literal_code"].contains(reason as? String ?? "") else { return nil }
             safe["extractionReason"] = reason
         }
+        if let raw = source["rendererGuard"] {
+            guard let guardDiagnostic = sanitizedRendererGuardDiagnostic(raw) else { return nil }
+            safe["rendererGuard"] = guardDiagnostic
+        }
         if let nodes = source["outsideNodes"] as? [[String: Any]] {
             guard nodes.count <= 4 else { return nil }
             var projected: [[String: Any]] = []
@@ -1942,6 +1946,46 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 8_192 else { return nil }
         return String(data: bytes, encoding: .utf8)
+    }
+
+    /// Fixed structural facts from the same already-admitted response read.
+    /// This projection has no role in response, error or ownership acceptance.
+    nonisolated static func sanitizedRendererGuardDiagnostic(_ raw: Any) -> [String: Any]? {
+        let flags = ["rawKnownLabel", "trimmedKnownLabel", "guardBodyIsExtractedAnswer", "bodyIsRoot",
+                     "knownScopedCopyOutsideDIL", "rejectedDisplayContents"]
+        let keys = Set(flags + ["reason", "subject", "visitedNodeCount"])
+        let reasons: Set<String> = ["root_missing", "root_not_visible", "ancestor_budget", "ancestor_excluded",
+            "ancestor_foreign_message", "conversation_boundary_missing", "body_missing", "body_not_visible",
+            "body_outside_root", "body_ancestor_budget", "body_quote_or_markdown", "body_foreign_message",
+            "node_budget", "tree_depth", "text_budget", "multiple_text_leaves", "raw_label_differs", "text_not_visible",
+            "non_element", "non_div_element", "node_not_visible", "interactive_metadata", "markdown_content",
+            "nested_message", "class_budget", "dil_pair_incomplete", "dil_pair_multiple", "portal_pair_incomplete",
+            "portal_pair_multiple", "children_budget", "leaf_classed", "components_missing", "label_missing",
+            "portal_not_direct_parent", "leaf_not_direct_child", "leaf_has_elements", "dil_has_other_children",
+            "component_scope_changed", "matched"]
+        guard let value = raw as? [String: Any], Set(value.keys) == keys,
+              let reason = value["reason"] as? String, reasons.contains(reason),
+              let subject = value["subject"] as? String,
+              ["none", "root", "body", "text_leaf", "dil_pair", "portal_pair", "other"].contains(subject),
+              let visited = value["visitedNodeCount"] as? NSNumber, CFGetTypeID(visited) != CFBooleanGetTypeID(),
+              let exactVisited = Int(exactly: visited.doubleValue), (0...65).contains(exactVisited) else { return nil }
+        var safe: [String: Any] = ["reason": reason, "subject": subject, "visitedNodeCount": exactVisited]
+        for flag in flags {
+            if value[flag] is NSNull { safe[flag] = NSNull(); continue }
+            guard let number = value[flag] as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+            safe[flag] = number.boolValue
+        }
+        guard !(safe["rawKnownLabel"] as? Bool == true) || safe["trimmedKnownLabel"] as? Bool == true,
+              safe["trimmedKnownLabel"] is NSNull || !(safe["rawKnownLabel"] is NSNull),
+              (safe["bodyIsRoot"] is NSNull) == (safe["guardBodyIsExtractedAnswer"] is NSNull),
+              safe["knownScopedCopyOutsideDIL"] is NSNull || safe["guardBodyIsExtractedAnswer"] as? Bool == true,
+              (exactVisited == 65) == (reason == "node_budget"),
+              safe["rejectedDisplayContents"] is NSNull
+                || ["root_not_visible", "body_not_visible", "node_not_visible", "text_not_visible"].contains(reason),
+              reason != "matched" || (exactVisited > 0 && safe["rawKnownLabel"] as? Bool == true
+                && safe["trimmedKnownLabel"] as? Bool == true && !(safe["bodyIsRoot"] is NSNull)) else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), data.count <= 768 else { return nil }
+        return safe
     }
 
     private static let firstUserDiagnosticActions: Set<String> = ["inspect", "prepare", "insert", "sendReady", "submit",
