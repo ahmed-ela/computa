@@ -2115,6 +2115,143 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const dismiss = picker.menu.onDispatch; let count = 0;
         picker.menu.onDispatch = (event: any) => { dismiss(event); if (event.key === 'Escape' && ++count === 1) callback(); };
       };
+      const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '') => {
+        const { f, picker } = setup(); picker.selected('Instant');
+        const expected = choice('Instant');
+        expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
+        expect((await f.run('prepare', { expectedModelChoice: expected })).prepared).toBe(true);
+        const prompt = 'Synthetic literal first insert opening request\n\n' + markerLine;
+        const selection: any = { anchorNode: f.composer, focusNode: f.composer, removeAllRanges() {}, addRange() {} };
+        f.window.getSelection = () => selection;
+        f.document.createRange = () => ({ selectNodeContents(node: any) { selection.anchorNode = node; selection.focusNode = node; }, collapse() {} });
+        let insertions = 0, openings = 0;
+        f.document.execCommand = (command: string, _ui: boolean, text: string) => {
+          expect(command).toBe('insertText'); expect(text).toBe(prompt); insertions++; f.composer.text = text + editorSuffix; return true;
+        };
+        const send = new Node('BUTTON', { 'aria-label': 'Send prompt' }); f.body.append(send);
+        const open = picker.trigger.onClick;
+        picker.trigger.onClick = () => {
+          if (!f.composer.textContent) { open(); return; }
+          openings++;
+          if (behavior === 'ignore_once' && openings > 1) open();
+        };
+        const request = { prompt, expectedModelChoice: expected, submissionSequence: 1, submissionMarker: firstMarker,
+          expectedSubmissionProofs: [] };
+        const inserting = f.run('insert', request);
+        for (let tick = 0; tick < 20 && openings === 0; tick++) {
+          await microtasks(); await new Promise(resolve => setImmediate(resolve));
+        }
+        expect(insertions).toBe(1); expect(openings).toBe(1); expect(f.composer.textContent).toBe(prompt + editorSuffix);
+        const state = f.world.__computaChatSubmissionState, pending = state.pending;
+        expect(pending).toMatchObject({ sequence: 1, marker: firstMarker, canonical: prompt, phase: 'prepared', root: null, body: null });
+        expect(state.revoked).toBe(false); expect(state.lastVerified).toBeNull();
+        expect(f.world.__computaModelFirstSubmitted).toBeUndefined(); expect(send.clicks).toBe(0);
+        return { f, picker, expected, prompt, request, inserting, state, pending, send, open,
+          counts: () => ({ insertions, openings }), powerBefore: arrows(picker).length,
+          familyBefore: picker.familyOptions.map((node: any) => node.clicks) };
+      };
+      const finishFirstInsertWait = async (x: any, milliseconds = 901) => {
+        x.f.advanceTime(milliseconds); x.f.flush(); await microtasks(); x.f.flush();
+      };
+      const noFirstInsertReplay = (x: any) => {
+        expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        expect(arrows(x.picker)).toHaveLength(x.powerBefore);
+        expect(x.picker.familyOptions.map((node: any) => node.clicks)).toEqual(x.familyBefore);
+        expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+      };
+      test('first insert final guard recovers one ignored opening after exactly one literal insertion', async () => {
+        const x = await firstInsertOpening();
+        await finishFirstInsertWait(x);
+        // Old policy spends the whole original budget on the ignored opening.
+        // Advancing the remaining budget makes that old-code failure terminal.
+        if (x.counts().openings === 1) await finishFirstInsertWait(x, 901);
+        const result = await x.inserting;
+        expect(result.error).toBeUndefined(); expect(result.inserted).toBe(true);
+        expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+        expect(x.counts().openings).toBe(2); expect(x.picker.trigger.values['aria-expanded']).toBe('false');
+        expect(x.state.pending).toBe(x.pending); expect(x.pending.phase).toBe('prepared'); noFirstInsertReplay(x);
+        const before = x.counts().openings;
+        const replay = await x.f.run('insert', x.request);
+        expect(replay.error).toBeDefined(); expect(x.counts().openings).toBe(before);
+        expect(x.state.pending).toBe(x.pending); noFirstInsertReplay(x);
+      });
+      test('first insert final guard preserves a captured canonical-equal terminal editor line break', async () => {
+        const x = await firstInsertOpening('ignore_once', '\n');
+        await finishFirstInsertWait(x);
+        if (x.counts().openings === 1) await finishFirstInsertWait(x, 901);
+        const result = await x.inserting;
+        expect(result.error).toBeUndefined(); expect(result.inserted).toBe(true);
+        expect(result.modelEvidence.selected).toEqual(x.expected); expect(x.counts().openings).toBe(2);
+        expect(x.f.composer.textContent).toBe(x.prompt + '\n'); noFirstInsertReplay(x);
+      });
+      test('first insert final guard accepts a late acknowledgement without toggling its opened picker', async () => {
+        const x = await firstInsertOpening('late');
+        x.open(); await finishFirstInsertWait(x);
+        const result = await x.inserting;
+        expect(result.error).toBeUndefined(); expect(result.inserted).toBe(true);
+        expect(result.modelEvidence.selected).toEqual(x.expected); expect(x.counts().openings).toBe(1);
+        expect(x.picker.trigger.values['aria-expanded']).toBe('false'); noFirstInsertReplay(x);
+      });
+      test('first insert final guard spends its recovery once and keeps the original deadline', async () => {
+        const x = await firstInsertOpening('never');
+        await finishFirstInsertWait(x); await finishFirstInsertWait(x, 901);
+        expect((await x.inserting).error).toBe('model_unverified'); expect(x.counts().openings).toBe(2);
+        const before = x.counts().openings;
+        const later = x.f.run('verifyModel', { expectedModelChoice: x.expected });
+        await finishFirstInsertWait(x, 1_801);
+        expect((await later).error).toBe('model_unverified'); expect(x.counts().openings).toBe(before + 1);
+        noFirstInsertReplay(x);
+      });
+      test('first insert final guard rejects context body state and model drift before an opening recovery', async () => {
+        for (const mutation of ['owner', 'route', 'invocation', 'composer_body', 'canonical_equal_body', 'composer_node', 'phase', 'sequence', 'marker',
+          'pending', 'revoked', 'pin', 'power', 'work', 'temporary', 'user', 'assistant']) {
+          const x = await firstInsertOpening();
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'different-owner';
+          if (mutation === 'route') x.f.document.URL = 'https://chatgpt.com/c/foreign';
+          if (mutation === 'invocation') x.f.world.__computaChatActiveInvocation = {};
+          if (mutation === 'composer_body') x.f.composer.text += 'changed';
+          if (mutation === 'canonical_equal_body') x.f.composer.text += '\n';
+          if (mutation === 'composer_node') {
+            const old = x.f.composer, replacement = new Node('DIV', { ...old.values }, x.prompt);
+            old.parentElement.children = old.parentElement.children.filter((node: any) => node !== old);
+            old.connected = false; x.f.body.append(replacement);
+          }
+          if (mutation === 'phase') x.pending.phase = 'send_claimed';
+          if (mutation === 'sequence') x.pending.sequence = 2;
+          if (mutation === 'marker') x.pending.marker = '00000000-0000-4000-8000-000000000009';
+          if (mutation === 'pending') x.state.pending = { ...x.pending };
+          if (mutation === 'revoked') x.state.revoked = true;
+          if (mutation === 'pin') x.f.world.__computaChatPresetPin.invalidated = true;
+          if (mutation === 'power') x.picker.selected('High');
+          if (mutation === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+          if (mutation === 'temporary') x.f.temporary.values['aria-label'] = 'Temporary chat';
+          if (mutation === 'user') x.f.appendUser(x.prompt);
+          if (mutation === 'assistant') x.f.messages.append(new Node('ARTICLE', { 'data-turn': 'assistant' }, 'Unexpected answer'));
+          await finishFirstInsertWait(x);
+          expect((await x.inserting).error).toBeDefined(); expect(x.counts().openings).toBe(1); noFirstInsertReplay(x);
+        }
+      });
+      test('first insert final guard never opens again after the original deadline or native clock rejection', async () => {
+        const expired = await firstInsertOpening(); await finishFirstInsertWait(expired, 1_801);
+        expect((await expired.inserting).error).toBe('model_unverified'); expect(expired.counts().openings).toBe(1); noFirstInsertReplay(expired);
+        const { f, picker } = setup(); picker.selected('Instant'); const expected = choice('Instant');
+        expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
+        expect((await f.run('prepare', { expectedModelChoice: expected })).prepared).toBe(true);
+        const prompt = 'Synthetic clock failure insert\n\n' + markerLine;
+        const selection: any = { anchorNode: f.composer, focusNode: f.composer, removeAllRanges() {}, addRange() {} };
+        f.window.getSelection = () => selection;
+        f.document.createRange = () => ({ selectNodeContents(node: any) { selection.anchorNode = node; selection.focusNode = node; }, collapse() {} });
+        let insertions = 0, openings = 0; const open = picker.trigger.onClick;
+        f.document.execCommand = (_command: string, _ui: boolean, text: string) => { insertions++; f.composer.text = text; return true; };
+        picker.trigger.onClick = () => { if (f.composer.textContent) openings++; else open(); };
+        f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => Promise.reject(new Error('synthetic native clock rejection')) };
+        const result = await f.run('insert', { prompt, expectedModelChoice: expected, submissionSequence: 1,
+          submissionMarker: firstMarker, expectedSubmissionProofs: [], operationID: 'a909845c-2857-4b22-a66b-261b22281513' });
+        expect(result.error).toBe('model_unverified'); expect(insertions).toBe(1); expect(openings).toBe(1);
+        expect(arrows(picker)).toHaveLength(0); expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
+        expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+      });
       test('all five stable intents use the enabled Power item and AX-hidden SPAN metadata with concrete family proof', async () => {
         for (const [index, label] of ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].entries()) {
           const { f, picker } = setup();

@@ -1,5 +1,88 @@
 # Embedded website provider qualification
 
+## Candidate146: bounded post-insert picker recovery
+
+The observed145 failure was a missing acknowledgement when the final guard
+opened ChatGPT's picker after inserting the prompt. Candidate146 permits one
+additional primary-picker opening for that exact first prepared submission.
+It captures the allowance on the private prepared record before the first
+opening, including when that opening succeeds. Existing submission admission
+prevents repeated insertion from replacing the pending record or renewing it.
+
+Recovery requires the same owner, invocation, document, URL, completed model
+selection, physical header and composer; zero user/assistant messages; no Send
+claim; exact marker, sequence, fingerprint and canonical prepared text; and
+unchanged actual editor text. Canonical-equivalent initial editor line endings
+are allowed, but any later raw-text change rejects recovery. Negative model,
+product and mutation evidence remains terminal. A delayed acknowledgement wins
+without another click, and a rejected native clock cannot grant recovery. The
+existing 1.8-second budget is split at 900 milliseconds rather than renewed.
+Fresh checked family/power proof and confirmed picker closure remain mandatory.
+No editor, selection, power or Send action is repeated.
+
+Meaningful old-source regressions reproduced the ignored-opening failure. A
+follow-up regression also reproduced an unnecessary failure for a valid terminal
+editor newline before the raw-text capture was corrected. Final production
+passed all 596 provider-adapter tests with 18,631 assertions; the six affected
+methods then passed 448 assertions after correcting one negative-test timing
+line. Those 17 drift cases now run inside the recovery window instead of being
+rejected solely by the original deadline. The remaining test inputs and all
+production bytes were unchanged between those final cohorts. Canonical version
+validation passed for 0.7.0 (146). Signed installation and live qualification
+remain pending; the original493-byte failure is not regraded or explained by
+this recovery.
+
+## Installed145: model-picker acknowledgement failure and recurring verification
+
+Signed 0.7.0 (145), source `68aa00ffb21e5a0476210be09645a1178aece8c1`,
+passed independent build and installed verification: all 55 bundle files and
+51 resources matched, and the Gemini diagnostic compiler flag was off. This
+commit was pushed to draft PR5; it is not a published release.
+
+| Provider and task | Duration | Observed outcome |
+| --- | --- | --- |
+| ChatGPT Instant, first code/browser qualification | 114.968 s | Eight successful tools, independently correct code/tests and verified form result; inference eight rejected a 493-byte invalid-JSON parser input before closure or final answer. Automatic cleanup was confirmed. |
+| ChatGPT Instant, separate instrumented code diagnostic | 119.178 s | Nine successful tools and nine verified website inferences, explicit tab closure, exact result and final answer. No rejected reply was captured; the original failure remains failed. |
+| Cerebras GPT-OSS, browser | 3.542 s | Strict task pass, exact result and explicit closure. Separate accounting found no correction tickets, second claims or correction events; total billable usage remains unknown. |
+| Cerebras GPT-OSS, code/browser | 9.493 s | Correct code/tests, exact result, explicit closure and final answer; strict failure because one shell command had an extra `}` before the model corrected it. Arguments were passed unchanged. |
+| Gemini 3.8 Flash, browser | 75.443 s | Exact result and explicit closure, eight successful tools and nine verified inferences in one temporary session; strict failure because the initial URL changed an underscore to a hyphen before navigation corrected it. The frozen grader also lacks navigation-tool coverage. |
+| Gemini 3.8 Flash, separate code diagnostic | 1.323 s | Verification blocked before prompt submission or tools. The seed was unchanged and cleanup was confirmed. |
+| ChatGPT Instant, second instrumented code diagnostic | 78.767 s | Six successful tools and six verified inferences; inference seven failed model verification after insertion, before Send. No final answer, explicit closure or rejected reply capture. All seven website cleanup receipts were saved. |
+
+The second ChatGPT diagnostic identifies a concrete failed step. During the
+insert action's final guard, its primary picker-opening click received no popup
+proof within the existing wait. The Instant header, completed selection and
+same physical pinned header remained valid; no mutation, duplicate controls,
+selection ambiguity or model mismatch was observed. This establishes the
+unacknowledged opening, not why the website ignored or failed to acknowledge it.
+The canonical next build is 146; its proposed recovery still requires fresh
+family/power proof and cannot repeat insertion or Send. It is not yet installed
+or qualified.
+
+The 493-byte rejection remains unexplained: neither its raw parser input nor
+extraction flags were retained. It occurred after reading the form result and
+before `browser_close`, so it is not established as a malformed final message.
+`json_fenced=false` describes selected parser input; successful raw-code
+extraction itself removes website fences. Later successful diagnostics do not
+prove whether the original website output or extraction caused the failure.
+
+Gemini's initially clear human landing triggered prompt-free model discovery
+and confirmed cleanup, clearing the saved checkpoint. Its browser task then
+completed, but the next private view received a committed, finished native
+server redirect to Google's trusted `/sorry` checkpoint before any Gemini
+document committed. A fresh normal human-page navigation showed the same
+visible unusual-traffic CAPTCHA. This is an actual Google challenge, rather
+than a DOM-keyword match, an admission-time stale gate or a private-view-only
+symptom. Google's redirect trigger and permanent prevention remain unproven.
+No challenge was completed or model prompt replayed; Gemini testing stopped.
+
+Finite log queries must use explicit UTC offsets in their input timestamps,
+such as `2026-10-16 18:37:05+0000`. The log CLI's `--timezone UTC` controls
+display and does not establish the interpretation of an offset-free input.
+Earlier empty, ambiguously timed projections remain retained as unavailable;
+the corrected bounded queries are separate evidence. Owned fixture servers and
+unused capture arms were removed; human browser tabs were preserved.
+
 ## Candidate145: bounded first-body inspection recovery and durable local errors
 
 The installed144 timeout exposed a gap in the existing read recovery: it only

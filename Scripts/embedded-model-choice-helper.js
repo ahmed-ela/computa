@@ -390,7 +390,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let primaryOpened = false, secondaryOpened = false, closeAttempted = false, observedProof = false;
   let headerExpected = null, proofLocked = false, headerObserved = false;
   let remount = null, remountClaimed = false;
-  let prepareOpening = null;
+  let prepareOpening = null, insertOpening = null;
   const tracked = new Map();
   const observeHeader = records => {
     if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) {
@@ -424,7 +424,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         selectionAttemptPresent: !!selection && typeof selection === 'object',
         selectionClicked: selection?.familyClicked === true || Number.isInteger(selection?.powerEvents) && selection.powerEvents > 0,
         selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
-        recoveryEligible: prepareOpening !== null },
+        recoveryEligible: prepareOpening !== null || insertOpening !== null },
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }) };
   };
@@ -497,13 +497,12 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       throw failure('model_unverified');
     attempt.familyCloseAcknowledged = true;
   };
-  const prepareOpeningIntact = current => {
-    const saved = prepareOpening, pin = globalThis.__computaChatPresetPin;
+  const readonlyOpeningSelectionIntact = (saved, current) => {
+    const pin = globalThis.__computaChatPresetPin;
     const choice = saved && websiteChatPresetChoice(saved.resolved.family, saved.resolved.power);
-    return saved !== null && !mutable && owned() && !selectionChanged && Date.now() < until
-      && request.action === 'prepare' && context?.action === 'prepare' && context.scope === 'action_final_guard'
+    return saved != null && !mutable && owned() && !selectionChanged && Date.now() < until
       && document.URL === request.expectedURL && location.pathname === '/'
-      && globalThis.__computaChatFirstPrepareOpening === saved && saved.owner === owner && saved.document === originalDocument
+      && saved.owner === owner && saved.document === originalDocument
       && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
       && saved.attempt.completed === true && saved.recoveryClaimed !== true
       && websiteModelChoiceEqual(saved.attempt.choice, expected)
@@ -517,8 +516,37 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1 && request.expectedUserCounts[0] === 0
       && request.expectedFirstUserFingerprint == null && request.expectedConversation == null
       && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof
-      && !globalThis.__computaChatSubmissionState && chatGPTMessageRoots('user').length === 0
-      && chatGPTMessageRoots('assistant').length === 0 && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
+      && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
+      && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
+  };
+  const prepareOpeningIntact = current => readonlyOpeningSelectionIntact(prepareOpening, current)
+    && request.action === 'prepare' && context?.action === 'prepare' && context.scope === 'action_final_guard'
+    && globalThis.__computaChatFirstPrepareOpening === prepareOpening && !globalThis.__computaChatSubmissionState;
+  const insertComposer = current => {
+    const candidates = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
+      + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))]
+      .filter(node => current.enabled(node));
+    return candidates.length === 1 ? candidates[0] : null;
+  };
+  const insertComposerValue = composer => composer instanceof HTMLTextAreaElement ? composer.value : composer?.innerText;
+  const insertOpeningIntact = current => {
+    const saved = insertOpening, state = saved?.state, record = saved?.record;
+    const composer = saved?.composer;
+    const value = insertComposerValue(composer);
+    return readonlyOpeningSelectionIntact(saved, current)
+      && request.action === 'insert' && context?.action === 'insert' && context.scope === 'action_final_guard'
+      && chatGPTSubmissionContext(state) && state.pending === record && state.lastVerified == null
+      && record.firstInsertOpening === saved && record.document === originalDocument && record.owner === owner
+      && record.sequence === 1 && request.submissionSequence === 1 && record.phase === 'prepared'
+      && record.marker === request.submissionMarker && record.marker === request.expectedFirstUserMarker
+      && record.root === null && record.body === null && record.expansionAttempted === false
+      && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
+      && typeof request.prompt === 'string' && request.prompt === saved.prompt
+      && record.canonical === saved.canonical && record.fingerprint === saved.fingerprint
+      && chatGPTSubmissionCanonical(request.prompt) === record.canonical
+      && globalThis.__computaModelFirstPrompt === request.prompt
+      && composer?.isConnected === true && insertComposer(current) === composer && current.enabled(composer)
+      && value === saved.editorValue && chatGPTSubmissionCanonical(value) === record.canonical;
   };
   const drainOpeningEvidence = () => {
     observeHeader(headerObserver.takeRecords?.() || []);
@@ -553,7 +581,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   const openPicker = async () => {
     let current = state();
     if (current.mode === 'power' || current.mode === 'family') return current;
-    if (!mutable && request.action === 'prepare' && context?.scope === 'action_final_guard' && primaryOpened)
+    if (!mutable && ['prepare', 'insert'].includes(request.action) && context?.scope === 'action_final_guard' && primaryOpened)
       throw failure('model_unverified');
     if (current.topMenu) { await close(); current = state(); }
     if (!current.enabled(trigger)) throw failure('model_unverified');
@@ -573,13 +601,28 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = drainOpeningEvidence();
       if (!prepareOpeningIntact(current)) prepareOpening = null;
     }
+    const submission = globalThis.__computaChatSubmissionState, prepared = submission?.pending;
+    if (!mutable && request.action === 'insert' && context?.scope === 'action_final_guard'
+      && completed?.completed === true && prepared?.phase === 'prepared' && prepared.firstInsertOpening == null) {
+      // The prepared record spends its first post-insert observation even when
+      // that opening succeeds. This never repeats editor input or Send.
+      const pin = globalThis.__computaChatPresetPin;
+      const composer = insertComposer(current);
+      insertOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
+        recoveryClaimed: false, state: submission, record: prepared, composer, editorValue: insertComposerValue(composer), prompt: request.prompt,
+        canonical: prepared.canonical, fingerprint: prepared.fingerprint,
+        resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
+      prepared.firstInsertOpening = insertOpening;
+      current = drainOpeningEvidence();
+      if (!insertOpeningIntact(current)) insertOpening = null;
+    }
     primaryOpened = true; readStage = 'primary_open_requested';
     trigger.click();
     const powerAcknowledged = () => {
       const observed = websiteChatPickerState();
       return observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
     };
-    if (prepareOpening !== null) {
+    if (prepareOpening !== null || insertOpening !== null) {
       const acknowledgementDeadline = Math.min(until, Date.now() + 900);
       let clockRejected = false;
       const acknowledged = await websiteModelWaitForChange(acknowledgementDeadline,
@@ -587,9 +630,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = drainOpeningEvidence();
       // A delayed acknowledgement wins; never toggle an already opened menu.
       if (!acknowledged && !powerAcknowledged()) {
-        if (clockRejected || Date.now() < acknowledgementDeadline || !prepareOpeningIntact(current)) throw failure('model_unverified');
-        prepareOpening.recoveryClaimed = true;
-        readStage = 'prepare_open_recovery_requested';
+        if (clockRejected || Date.now() < acknowledgementDeadline
+          || !(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) throw failure('model_unverified');
+        (prepareOpening || insertOpening).recoveryClaimed = true;
+        readStage = prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
         trigger.click();
         current = await wait(powerAcknowledged);
       }
