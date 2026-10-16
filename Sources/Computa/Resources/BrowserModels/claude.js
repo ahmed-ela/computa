@@ -390,6 +390,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let primaryOpened = false, secondaryOpened = false, closeAttempted = false, observedProof = false;
   let headerExpected = null, proofLocked = false, headerObserved = false;
   let remount = null, remountClaimed = false;
+  let prepareOpening = null;
   const tracked = new Map();
   const observeHeader = records => {
     if (websiteChatHeaderMutationMismatch(records, trigger, headerExpected)) {
@@ -422,7 +423,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           'selectModel', 'modelDiagnostic', 'verifyModel'].includes(context?.action) ? context.action : 'unknown',
         selectionAttemptPresent: !!selection && typeof selection === 'object',
         selectionClicked: selection?.familyClicked === true || Number.isInteger(selection?.powerEvents) && selection.powerEvents > 0,
-        selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true, recoveryEligible: false },
+        selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
+        recoveryEligible: prepareOpening !== null },
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }) };
   };
@@ -495,6 +497,35 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       throw failure('model_unverified');
     attempt.familyCloseAcknowledged = true;
   };
+  const prepareOpeningIntact = current => {
+    const saved = prepareOpening, pin = globalThis.__computaChatPresetPin;
+    const choice = saved && websiteChatPresetChoice(saved.resolved.family, saved.resolved.power);
+    return saved !== null && !mutable && owned() && !selectionChanged && Date.now() < until
+      && request.action === 'prepare' && context?.action === 'prepare' && context.scope === 'action_final_guard'
+      && document.URL === request.expectedURL && location.pathname === '/'
+      && globalThis.__computaChatFirstPrepareOpening === saved && saved.owner === owner && saved.document === originalDocument
+      && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
+      && saved.attempt.completed === true && saved.recoveryClaimed !== true
+      && websiteModelChoiceEqual(saved.attempt.choice, expected)
+      && pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
+      && pin.invalidated !== true && !pin.provisionalHeader && pin.selection === saved.selection
+      && websiteChatResolvedSelectionEqual(pin.selection, saved.resolved)
+      && websiteChatPresetIntentValid(expected) && choice && expected.key === choice.key
+      && (expected.label === choice.label || saved.resolved.power.key === 'pro' && expected.label === 'Pro')
+      && pin.headerTrigger === trigger && trigger === saved.header && trigger.isConnected === true
+      && pickerClosed(current) && current.headerPower?.key === saved.resolved.power.key
+      && Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1 && request.expectedUserCounts[0] === 0
+      && request.expectedFirstUserFingerprint == null && request.expectedConversation == null
+      && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof
+      && !globalThis.__computaChatSubmissionState && chatGPTMessageRoots('user').length === 0
+      && chatGPTMessageRoots('assistant').length === 0 && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
+  };
+  const drainOpeningEvidence = () => {
+    observeHeader(headerObserver.takeRecords?.() || []);
+    observeControls(observer.takeRecords?.() || []);
+    websiteChatDrainPinnedMutations(globalThis.__computaChatPresetPin);
+    return state();
+  };
   const close = async () => {
     const current = state();
     if (!current.topMenu) {
@@ -522,27 +553,57 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   const openPicker = async () => {
     let current = state();
     if (current.mode === 'power' || current.mode === 'family') return current;
+    if (!mutable && request.action === 'prepare' && context?.scope === 'action_final_guard' && primaryOpened)
+      throw failure('model_unverified');
     if (current.topMenu) { await close(); current = state(); }
     if (!current.enabled(trigger)) throw failure('model_unverified');
     const recoveryEligible = mutable && attempt.familyCloseAcknowledged === true
       && attempt.postFamilyOpeningClaimed !== true;
     if (recoveryEligible) attempt.postFamilyOpeningClaimed = true;
+    const completed = globalThis.__computaModelSelection;
+    if (!mutable && request.action === 'prepare' && context?.scope === 'action_final_guard'
+      && completed?.completed === true && globalThis.__computaChatFirstPrepareOpening == null) {
+      // Spend the first prepare observation even when its opening succeeds.
+      // Later prepares cannot acquire a new recovery allowance.
+      const pin = globalThis.__computaChatPresetPin;
+      prepareOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
+        recoveryClaimed: false,
+        resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
+      globalThis.__computaChatFirstPrepareOpening = prepareOpening;
+      current = drainOpeningEvidence();
+      if (!prepareOpeningIntact(current)) prepareOpening = null;
+    }
     primaryOpened = true; readStage = 'primary_open_requested';
     trigger.click();
     const powerAcknowledged = () => {
       const observed = websiteChatPickerState();
       return observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
     };
-    if (recoveryEligible) {
+    if (prepareOpening !== null) {
+      const acknowledgementDeadline = Math.min(until, Date.now() + 900);
+      let clockRejected = false;
+      const acknowledged = await websiteModelWaitForChange(acknowledgementDeadline,
+        () => !owned() || selectionChanged || powerAcknowledged(), 'model_wait', () => { clockRejected = true; });
+      current = drainOpeningEvidence();
+      // A delayed acknowledgement wins; never toggle an already opened menu.
+      if (!acknowledged && !powerAcknowledged()) {
+        if (clockRejected || Date.now() < acknowledgementDeadline || !prepareOpeningIntact(current)) throw failure('model_unverified');
+        prepareOpening.recoveryClaimed = true;
+        readStage = 'prepare_open_recovery_requested';
+        trigger.click();
+        current = await wait(powerAcknowledged);
+      }
+    } else if (recoveryEligible) {
       // Preserve the existing fresh post-family allowance within the original
       // deadline. A consumed opening grants only one new chrome action, never
       // selection proof, a family/power retry, or an established-read replay.
+      let clockRejected = false;
       const acknowledged = await websiteModelWaitForChange(Math.min(until, Date.now() + 900),
-        () => !owned() || powerAcknowledged());
+        () => !owned() || powerAcknowledged(), 'model_wait', () => { clockRejected = true; });
       if (!owned()) throw failure('document_changed');
       current = state();
       if (!acknowledged) {
-        if (Date.now() >= until || attempt.openingRecoveryAttempted === true || freshGuard() !== true
+        if (clockRejected || Date.now() >= until || attempt.openingRecoveryAttempted === true || freshGuard() !== true
           || current.trigger !== attempt.selectionTrigger || !current.enabled(trigger) || current.topMenu
           || current.allMenus.length || ![null, 'false'].includes(trigger.getAttribute('aria-expanded'))
           || ![null, 'closed'].includes(trigger.getAttribute('data-state'))) throw failure('model_unverified');
@@ -1014,7 +1075,7 @@ function websiteModelGuard(state, expected) {
   if (!websiteModelChoiceEqual(state.selected, expected)) return { error: 'model_mismatch', modelEvidence: state.evidence };
   return null;
 }
-function websiteModelWaitForChange(until, condition, phase = 'model_wait') {
+function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClockFailure = null) {
   if (condition()) return Promise.resolve(true);
   websiteModelDiagnosticPhase(phase);
   return new Promise(resolve => {
@@ -1038,8 +1099,10 @@ function websiteModelWaitForChange(until, condition, phase = 'model_wait') {
         // A native reply expires this wait only. All existing conditions and
         // model/owner guards must still supply their own positive proof.
         Promise.resolve(clock.postMessage({ ownerToken: input.ownerToken,
-          operationID: input.operationID, milliseconds })).then(() => finish(false), () => finish(false));
-      } catch { finish(false); }
+          operationID: input.operationID, milliseconds })).then(() => finish(false), () => {
+            if (!finished) { onClockFailure?.(); finish(false); }
+          });
+      } catch { onClockFailure?.(); finish(false); }
     } else {
       // Standalone fixtures and nonnative adapters retain the bounded fallback.
       timer = setTimeout(() => finish(false), milliseconds);

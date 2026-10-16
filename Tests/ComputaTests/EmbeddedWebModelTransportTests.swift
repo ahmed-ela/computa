@@ -6,6 +6,197 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testFirstInstantPrepareRecoversOneUnacknowledgedOpeningBeforeAnyEditorInput() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, initiallySelectTarget: true)
+            .replacingOccurrences(of: "aria-valuenow=\"1\"", with: "aria-valuenow=\"0\""))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let selection = try await evaluate(view, """
+            return {completed: globalThis.__computaModelSelection?.completed === true,
+              clicked: globalThis.__computaModelSelection?.familyClicked === true,
+              powerEvents: globalThis.__computaModelSelection?.powerEvents,
+              pin: globalThis.__computaChatPresetPin?.invalidated !== true && !!globalThis.__computaChatPresetPin};
+            """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+        XCTAssertEqual(selection?["completed"] as? Bool, true)
+        XCTAssertEqual(selection?["clicked"] as? Bool, false)
+        XCTAssertEqual(selection?["powerEvents"] as? Int, 0)
+        XCTAssertEqual(selection?["pin"] as? Bool, true)
+        try await armFirstPrepareOpening(view, behavior: "ignore_once")
+        do {
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": "Send after fresh checked Instant proof"])
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified)
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+            XCTFail("A single unacknowledged first-prepare opening must recover checked proof before input")
+            return
+        }
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        let attempts = try await evaluate(view, "return window.fixturePrepareOpeningAttempts;") as? Int
+        XCTAssertEqual(attempts, 2)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+        let powerEvents = try await evaluate(view, "return window.fixturePowerKeyEvents;") as? Int
+        XCTAssertEqual(powerEvents, 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testFirstInstantPrepareLateAcknowledgementDoesNotToggleTheOpenedPicker() async throws {
+        let (fixture, view, token, choice) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        try await armFirstPrepareOpening(view, behavior: "late")
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Wait for the delayed actual picker"])
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        let attempts = try await evaluate(view, "return window.fixturePrepareOpeningAttempts;") as? Int
+        XCTAssertEqual(attempts, 1)
+        let physical = try await evaluate(view, "return window.fixturePreparePhysicalClicks;") as? Int
+        XCTAssertEqual(physical, 1, "A delayed acknowledged menu must not receive another physical opening")
+        let claimed = try await evaluate(view, "return globalThis.__computaChatFirstPrepareOpening?.recoveryClaimed === true;",
+            world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+        XCTAssertEqual(claimed, false)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+    }
+
+    func testFirstInstantPreparePersistentFailureSpendsOneRecoveryAndCannotRenewFromBookkeeping() async throws {
+        let (fixture, view, token, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        try await armFirstPrepareOpening(view, behavior: "never")
+        let started = ContinuousClock.now
+        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never send without actual checked proof"])
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(4), "Recovery must retain the original 1.8-second proof budget")
+        let first = try await evaluate(view, "return window.fixturePrepareOpeningAttempts;") as? Int
+        XCTAssertEqual(first, 2)
+        let claimed = try await evaluate(view, "return globalThis.__computaChatFirstPrepareOpening?.recoveryClaimed === true;",
+            world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+        XCTAssertEqual(claimed, true)
+        _ = try await evaluate(view, "globalThis.__computaModelSelection = {...globalThis.__computaModelSelection}; return true;",
+            world: .world(name: "computa-chatgpt-model-v1"))
+        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Repeated preparation cannot renew opening permission"])
+        let repeated = try await evaluate(view, "return window.fixturePrepareOpeningAttempts;") as? Int
+        XCTAssertEqual(repeated, 3, "Repeated prepare gets its ordinary opening but no additional recovery")
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+    }
+
+    func testFirstInstantPrepareSuccessfulObservationCannotGrantALaterRecovery() async throws {
+        let (fixture, view, token, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        // Run the same production adapter's focus-only action without handing
+        // it editor input. This isolates the monotonic first-observation rule.
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/Computa/Resources/BrowserModels/chatgpt.js"), encoding: .utf8)
+        let prepared = try await evaluate(view, """
+            const input = {provider:'chatgpt', action:'prepare', ownerToken:globalThis.__computaModelOwner,
+              expectedURL:document.URL, expectedUserCounts:[0], expectedModelChoice:{key:'chat/latest/instant',label:'Instant'}};
+            \(source)
+            """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+        XCTAssertNil(prepared?["error"]); XCTAssertEqual(prepared?["prepared"] as? Bool, true)
+        try await armFirstPrepareOpening(view, behavior: "never")
+        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "A later prepare cannot acquire first-prepare recovery"])
+        let attempts = try await evaluate(view, "return window.fixturePrepareOpeningAttempts;") as? Int
+        XCTAssertEqual(attempts, 1)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+    }
+
+    func testFirstInstantPrepareContextOrNegativeHistoryCannotAuthorizeASecondOpening() async throws {
+        for behavior in ["header_restore", "unassociated", "route", "temporary", "user", "assistant", "owner"] {
+            let (fixture, view, token, _) = try await readyInstantPrepareFixture()
+            defer { fixture.shutdown() }
+            try await armFirstPrepareOpening(view, behavior: behavior)
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Unsafe context must preserve zero input"])
+            let attempts = try await evaluate(view, "return window.fixturePrepareOpeningAttempts;") as? Int
+            XCTAssertEqual(attempts, 1, behavior)
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+        }
+    }
+
+    func testFirstInstantPrepareCancellationCannotBecomeAnEarlySecondOpening() async throws {
+        let (fixture, view, token, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        try await armFirstPrepareOpening(view, behavior: "never")
+        let request = Task { @MainActor in
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Cancellation preserves zero input"])
+            return true
+        }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while (try await evaluate(view, "return window.fixturePrepareOpeningAttempts;") as? Int) == 0 {
+            guard ContinuousClock.now < deadline else { request.cancel(); XCTFail("First opening was not dispatched"); return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        request.cancel()
+        do { _ = try await request.value; XCTFail("A cancelled preparation cannot succeed") } catch {}
+        try await Task.sleep(for: .milliseconds(1_000))
+        let attempts = try await evaluate(view, "return window.fixturePrepareOpeningAttempts;") as? Int
+        XCTAssertEqual(attempts, 1)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+    }
+
+    func testFirstInstantPrepareTransientRecoveredMenuCannotDispatchAThirdOpening() async throws {
+        let (fixture, view, token, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        try await armFirstPrepareOpening(view, behavior: "transient_recovery")
+        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "A lost recovered popup cannot be reopened"])
+        let attempts = try await evaluate(view, "return window.fixturePrepareOpeningAttempts;") as? Int
+        XCTAssertEqual(attempts, 2)
+        let physical = try await evaluate(view, "return window.fixturePreparePhysicalClicks;") as? Int
+        XCTAssertEqual(physical, 2)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+    }
+
+    func testFirstInstantPrepareLateClockRejectionCannotAuthorizeRecovery() async throws {
+        let (fixture, view, token, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        try await armFirstPrepareOpening(view, behavior: "cancel_busy")
+        let request = Task { @MainActor in
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Late cancellation cannot authorize UI recovery"])
+            return true
+        }
+        // WebContent briefly blocks after issuing its native clock request.
+        // Cancel on MainActor while that reply cannot be delivered, then let
+        // rejection arrive after the nominal first-acknowledgement deadline.
+        try await Task.sleep(for: .milliseconds(300)); request.cancel()
+        do { _ = try await request.value; XCTFail("Cancelled preparation succeeded") } catch {}
+        try await Task.sleep(for: .milliseconds(1_600))
+        let observed = try await evaluate(view, "return {busy:window.fixturePrepareBusyFinished === true, attempts:window.fixturePrepareOpeningAttempts};") as? [String: Any]
+        XCTAssertEqual(observed?["busy"] as? Bool, true)
+        XCTAssertEqual(observed?["attempts"] as? Int, 1)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+    }
+
+    func testChatGPTPostFamilyCancellationCannotAuthorizeAnOpeningRecovery() async throws {
+        let fixture = try Fixture(page: Self.familyClosingTransitionPage())
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        let preparation = Task { @MainActor in
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            return true
+        }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while (try await evaluate(view, "return window.fixtureFirstPostFamilyOpenAttempts || 0;") as? Int) == 0 {
+            guard ContinuousClock.now < deadline else { preparation.cancel(); XCTFail("Post-family opening was not observed"); return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        preparation.cancel()
+        do { _ = try await preparation.value; XCTFail("Cancelled preparation succeeded") } catch {}
+        try await Task.sleep(for: .milliseconds(1_000))
+        let attempts = try await evaluate(view, "return window.fixtureFirstPostFamilyOpenAttempts;") as? Int
+        XCTAssertEqual(attempts, 1, "A rejected native clock is not an opening timeout")
+        let recovered = try await evaluate(view, "return globalThis.__computaModelSelection?.openingRecoveryAttempted === true;",
+            world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+        XCTAssertEqual(recovered, false)
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
+    }
+
     func testRepeatedChatGPTFinishAndCancelPreserveTheExactVerifiedReceipt() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
         defer { fixture.shutdown() }
@@ -7737,6 +7928,89 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         case .gemini: ["3.5 Flash-Lite", "3.8 Flash", "3.1 Pro"]
         case .claude: ["Sonnet 5.5", "Haiku 4.5", "Sonnet 5", "Sonnet 4.6"]
         }
+    }
+
+    private func readyInstantPrepareFixture() async throws -> (Fixture, WKWebView, String, WebsiteModelChoice) {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, initiallySelectTarget: true)
+            .replacingOccurrences(of: "aria-valuenow=\"1\"", with: "aria-valuenow=\"0\""))
+        do {
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            return (fixture, view, token, choice)
+        } catch { fixture.shutdown(); throw error }
+    }
+
+    private func armFirstPrepareOpening(_ view: WKWebView, behavior: String) async throws {
+        _ = try await evaluate(view, """
+            const trigger = document.getElementById('fixture-model-trigger');
+            const composer = document.getElementById('fixture-editor');
+            let armed = true;
+            let phaseEnded = false;
+            window.fixturePrepareOpeningAttempts = 0; window.fixturePreparePhysicalClicks = 0;
+            document.addEventListener('keydown', event => {
+              if (event.key === 'Escape' && window.fixturePreparePhysicalClicks > 0) phaseEnded = true;
+            }, true);
+            trigger.addEventListener('click', event => {
+              if (phaseEnded || composer.getAttribute('data-fixture-prepare-focus') !== 'true') return;
+              window.fixturePreparePhysicalClicks++;
+              if (!armed) return;
+              window.fixturePrepareOpeningAttempts++;
+              if ('\(behavior)' === 'ignore_once' && window.fixturePrepareOpeningAttempts > 1) { armed = false; return; }
+              if ('\(behavior)' === 'transient_recovery' && window.fixturePrepareOpeningAttempts === 2) {
+                armed = false;
+                queueMicrotask(() => {
+                  const menu = window.fixtureChatPowerItem.closest('[role="menu"]');
+                  menu.style.display = 'none'; menu.remove(); trigger.setAttribute('aria-expanded','false'); window.fixtureModelUpdateHeader();
+                });
+                return;
+              }
+              event.preventDefault(); event.stopImmediatePropagation();
+              if ('\(behavior)' === 'cancel_busy') {
+                setTimeout(() => {
+                  const until = Date.now() + 1_200;
+                  while (Date.now() < until) {}
+                  window.fixturePrepareBusyFinished = true;
+                }, 100);
+              } else if ('\(behavior)' === 'late') {
+                armed = false;
+                setTimeout(() => {
+                  const menu = window.fixtureChatPowerItem.closest('[role="menu"]');
+                  document.body.appendChild(menu); window.fixtureShowPowerView(); menu.style.display = 'block';
+                  trigger.setAttribute('aria-expanded', 'true'); window.fixtureModelUpdateHeader();
+                }, 80);
+              } else if ('\(behavior)' === 'header_restore') {
+                const header = document.getElementById('fixture-model-header');
+                header.textContent = 'High'; header.textContent = 'Instant';
+              } else if ('\(behavior)' === 'unassociated') {
+                const menu = document.createElement('div'); menu.setAttribute('role', 'menu'); menu.textContent = 'Foreign'; document.body.appendChild(menu);
+              } else if ('\(behavior)' === 'route') history.pushState({}, '', '/c/foreign-prepare?temporary-chat=true');
+              else if ('\(behavior)' === 'temporary') document.querySelector('[aria-label="Turn off temporary chat"]').setAttribute('aria-label','Temporary chat');
+              else if (['user','assistant'].includes('\(behavior)')) {
+                const message = document.createElement('article'); message.setAttribute('data-message-author-role','\(behavior)');
+                message.textContent = 'Foreign fixture message'; document.body.appendChild(message);
+              } else if ('\(behavior)' === 'owner') composer.setAttribute('data-fixture-owner-drift','true');
+            }, true);
+            return true;
+            """)
+        _ = try await evaluate(view, """
+            const composer = document.getElementById('fixture-editor');
+            globalThis.__fixturePrepareComposer = composer;
+            const originalFocus = composer.focus;
+            composer.focus = function(...args) {
+              composer.setAttribute('data-fixture-prepare-focus', 'true');
+              return originalFocus.apply(this, args);
+            };
+            if ('\(behavior)' === 'owner') {
+              globalThis.__fixturePrepareOwnerObserver = new MutationObserver(() => {
+                globalThis.__computaModelOwner = '00000000-0000-4000-8000-000000000001';
+              });
+              globalThis.__fixturePrepareOwnerObserver.observe(composer, {attributes:true, attributeFilter:['data-fixture-owner-drift']});
+            }
+            return true;
+            """, world: .world(name: "computa-chatgpt-model-v1"))
     }
 
     private static func fixtureChoice(_ provider: EmbeddedWebModelTransport.Provider) -> WebsiteModelChoice {
