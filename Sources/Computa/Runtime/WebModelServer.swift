@@ -802,15 +802,26 @@ actor WebModelServer {
                          route: Route, taskID: String, identity: NativeRequestIdentity,
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
-        let inferenceID = UUID()
+        var inferenceID = UUID()
         let submissionFailureSink = ChatSubmissionFailureDiagnosticSink()
         var lease = sessions[taskID]
-        let closedHandoff = closedTurns[taskID]
+        var closedHandoff = closedTurns[taskID]
         var requestMetadata = lease?.requestMetadata
         // Claim this handoff before any suspension. A duplicate request cannot
         // reuse a claim, including after validation, Send or persistence fails.
-        let yielded = yieldedTurns.removeValue(forKey: taskID)
-        func requireCurrentContext() throws {
+        var yielded = yieldedTurns.removeValue(forKey: taskID)
+        let correctionStore = evidenceDirectory.map {
+            WebsiteModelFormatCorrectionStore(directory: $0.appendingPathComponent("format-corrections-v1"))
+        }
+        var correctionTicket: WebsiteModelFormatCorrectionStore.Ticket?
+        var correctionSource: Session?
+        var correctionFinished = false
+        var rejectionRecordedID: UUID?
+        var responseDeadline: ContinuousClock.Instant?
+        // The original Request remains the only tool/policy/continuation
+        // authority. Only the website presentation gets a trusted format note.
+        let correctionPrompt = request.prompt + Self.formatCorrectionReminder
+        func requireCurrentContext(includeResponseDeadline: Bool = true) throws {
             try Task.checkCancellation()
             guard context.runtimeGeneration == cleanupRuntimeGeneration,
                   inferenceContexts[taskID] == context,
@@ -818,6 +829,8 @@ actor WebModelServer {
                   transportGeneration == embeddedTransportGeneration else {
                 throw Failure.inferenceContextRequired
             }
+            if includeResponseDeadline, correctionTicket != nil, let responseDeadline,
+               ContinuousClock.now >= responseDeadline { throw Failure.deadline }
         }
         func verifiedModelEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteModelEvidence? {
             let current = try Self.modelEvidence(snapshot, session: session)
@@ -827,354 +840,447 @@ actor WebModelServer {
             } else if let current { session.resolvedModel = current }
             return current
         }
-        do {
-            try requireCurrentContext()
-            guard let selection = WebsiteModelCatalog.inferenceSelection(for: request.model),
-                  selection.provider == provider else { throw Failure.invalidRequest }
-            let choice = selection.choice
-            var session: Session
-            let prompt: String
-            if var previous = lease {
-                guard let yielded, yielded.inferenceID == previous.inferenceID,
-                      previous.context == context, previous.provider == provider,
-                      previous.modelID == request.model, previous.modelChoice == choice, previous.route == route,
-                      previous.transportGeneration == transportGeneration,
-                      let completedCount = previous.completedResponseCount,
-                      let completedText = previous.completedText,
-                      previous.sequence < 1_024 else { throw Failure.invalidRequest }
-                try yielded.continuation.validate(next: request)
-                if previous.usesBoundedTurn {
-                    guard previous.turnInferenceCount < Self.maximumTurnInferences,
-                          request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - previous.cumulativePromptUTF8Count else {
-                        throw Failure.turnLimit
-                    }
-                }
-                prompt = request.prompt
-                try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
-                    provider: provider, modelID: request.model, sessionToken: previous.token, phase: "continuation_requested",
-                    sequence: previous.sequence + 1, baseline: completedCount, route: route, turnScoped: previous.retainsConversation)
-                let observed = try await call(previous.transport, operation: "webProviderPoll", params: ["sessionToken": previous.token])
+        attempts: while true {
+            do {
                 try requireCurrentContext()
-                guard observed["state"] as? String == "complete" else { throw Self.snapshotFailure(observed) }
-                try Self.verifyInferenceSnapshot(observed, session: &previous)
-                _ = try verifiedModelEvidence(observed, session: &previous)
-                guard (observed["modelProofContext"] as? [String: Any])?["responseCount"] as? Int == completedCount,
-                      observed["text"] as? String == completedText else { throw Failure.invalidRequest }
-                previous.inferenceID = inferenceID
-                previous.sequence += 1
-                previous.baselineResponseCount = completedCount
-                previous.completedResponseCount = nil
-                previous.completedText = nil
-                previous.completedSnapshot = nil
-                session = previous
-                sessions[taskID] = session
-                lease = session
-                try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
-                    provider: provider, modelID: request.model, sessionToken: session.token, phase: "continued",
-                    sequence: session.sequence, baseline: session.baselineResponseCount, route: route, turnScoped: session.retainsConversation)
-            } else {
-                guard yielded == nil else { throw Failure.invalidRequest }
-                let closed = closedHandoff
-                if let closed {
-                    guard closed.context == context, closed.transportGeneration == transportGeneration,
-                          !closed.ambiguousHandoff else { throw Failure.inferenceContextRequired }
-                    try closed.continuation.validate(next: request)
+                guard let selection = WebsiteModelCatalog.inferenceSelection(for: request.model),
+                      selection.provider == provider else { throw Failure.invalidRequest }
+                let choice = selection.choice
+                var session: Session
+                let prompt: String
+                if var previous = lease {
+                    guard let yielded, yielded.inferenceID == previous.inferenceID,
+                          previous.context == context, previous.provider == provider,
+                          previous.modelID == request.model, previous.modelChoice == choice, previous.route == route,
+                          previous.transportGeneration == transportGeneration,
+                          let completedCount = previous.completedResponseCount,
+                          let completedText = previous.completedText,
+                          previous.sequence < 1_024 else { throw Failure.invalidRequest }
+                    try yielded.continuation.validate(next: request)
+                    if previous.usesBoundedTurn {
+                        guard previous.turnInferenceCount < Self.maximumTurnInferences,
+                              request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - previous.cumulativePromptUTF8Count else {
+                            throw Failure.turnLimit
+                        }
+                    }
+                    prompt = request.prompt
+                    try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
+                        provider: provider, modelID: request.model, sessionToken: previous.token, phase: "continuation_requested",
+                        sequence: previous.sequence + 1, baseline: completedCount, route: route, turnScoped: previous.retainsConversation)
+                    let observed = try await call(previous.transport, operation: "webProviderPoll", params: ["sessionToken": previous.token])
+                    try requireCurrentContext()
+                    guard observed["state"] as? String == "complete" else { throw Self.snapshotFailure(observed) }
+                    try Self.verifyInferenceSnapshot(observed, session: &previous)
+                    _ = try verifiedModelEvidence(observed, session: &previous)
+                    guard (observed["modelProofContext"] as? [String: Any])?["responseCount"] as? Int == completedCount,
+                          observed["text"] as? String == completedText else { throw Failure.invalidRequest }
+                    previous.inferenceID = inferenceID
+                    previous.sequence += 1
+                    previous.baselineResponseCount = completedCount
+                    previous.completedResponseCount = nil
+                    previous.completedText = nil
+                    previous.completedSnapshot = nil
+                    session = previous
+                    sessions[taskID] = session
+                    lease = session
+                    try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
+                        provider: provider, modelID: request.model, sessionToken: session.token, phase: "continued",
+                        sequence: session.sequence, baseline: session.baselineResponseCount, route: route, turnScoped: session.retainsConversation)
+                } else {
+                    guard yielded == nil else { throw Failure.invalidRequest }
+                    let closed = closedHandoff
+                    if let closed {
+                        guard closed.context == context, closed.transportGeneration == transportGeneration,
+                              !closed.ambiguousHandoff else { throw Failure.inferenceContextRequired }
+                        try closed.continuation.validate(next: request)
+                    }
+                    let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider, route: route)
+                    if provesNativeContinuation { try WebsiteTurnContinuation.validateRequest(request) }
+                    if provider == "chatgpt", provesNativeContinuation {
+                        guard (closed?.turnInferenceCount ?? 0) < Self.maximumTurnInferences,
+                              request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - (closed?.cumulativePromptUTF8Count ?? 0)
+                        else { throw Failure.turnLimit }
+                    }
+                    prompt = correctionTicket == nil ? request.prompt : correctionPrompt
+                    var params = ["provider": provider]
+                    if let choice {
+                        guard let encoded = choice.canonicalJSONString else { throw Failure.invalidRequest }
+                        params["modelChoice"] = encoded
+                    }
+                    try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
+                        provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested", route: route,
+                        turnScoped: retainsConversation(provider: provider))
+                    unresolvedStartAttempts[taskID] = UnresolvedStartAttempt(inferenceID: inferenceID, context: context,
+                        provider: provider, modelID: request.model, route: route)
+                    if correctionTicket == nil, provider == "chatgpt", route == .embedded, !context.isMaintenance,
+                       let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
+                       let turn = UUID(uuidString: context.turnID),
+                       let directory = rejectedReplyDirectory?.deletingLastPathComponent()
+                        .appendingPathComponent("WebsiteRequestMetadataDiagnostics-v1") {
+                        requestMetadata = ChatGPTRequestMetadataLease.consume(directory: directory,
+                            taskID: task, threadID: thread, turnID: turn, preparationID: context.preparationID,
+                            isMaintenance: context.isMaintenance)
+                    }
+                    let reply: [String: Any]
+                    if let requestMetadata {
+                        let data = try await transport.startWithRequestMetadata(
+                            params: JSONSerialization.data(withJSONObject: params), authorization: requestMetadata)
+                        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.invalidRequest }
+                        reply = object
+                    } else { reply = try await call(transport, operation: "webProviderStart", params: params) }
+                    guard let rawToken = reply["sessionToken"] as? String, let token = UUID(uuidString: rawToken) else {
+                        throw Self.snapshotFailure(reply)
+                    }
+                    let advertised = reply["turnContinuationCapability"]
+                    session = Session(token: rawToken, provider: provider, modelID: request.model,
+                        modelChoice: choice, route: route, transport: transport, inferenceID: inferenceID,
+                        context: context, transportGeneration: transportGeneration,
+                        provesNativeContinuation: provesNativeContinuation,
+                        retainsConversation: retainsConversation(provider: provider))
+                    session.requestMetadata = requestMetadata
+                    session.resolvedModel = correctionSource?.resolvedModel ?? closed?.resolvedModel
+                    session.turnInferenceCount = correctionSource?.turnInferenceCount ?? closed?.turnInferenceCount ?? 0
+                    session.cumulativePromptUTF8Count = correctionSource?.cumulativePromptUTF8Count ?? closed?.cumulativePromptUTF8Count ?? 0
+                    // Capture ownership before cancellation or validation can fail.
+                    sessions[taskID] = session
+                    lease = session
+                    if unresolvedStartAttempts[taskID]?.inferenceID == inferenceID {
+                        unresolvedStartAttempts.removeValue(forKey: taskID)
+                    }
+                    try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
+                        provider: provider, modelID: request.model, sessionToken: session.token, phase: "started", route: route, turnScoped: session.retainsConversation)
+                    guard usedSessionTokens[taskID, default: []].insert(token.uuidString.lowercased()).inserted else { throw Failure.invalidRequest }
+                    try requireCurrentContext()
+                    if let closed {
+                        guard closedTurns[taskID]?.inferenceID == closed.inferenceID,
+                              closedTurns[taskID]?.ambiguousHandoff == false else { throw Failure.inferenceContextRequired }
+                    }
+                    guard ["ready", "loading"].contains(reply["state"] as? String ?? "") else { throw Self.snapshotFailure(reply) }
+                    if provider == "chatgpt", route == .embedded, advertised != nil,
+                       advertised as? String != "per_submission_ownership_v1" { throw Failure.invalidRequest }
+                    if session.provesNativeContinuation {
+                        guard reply["turnContinuationCapability"] as? String == "per_submission_ownership_v1" else { throw Failure.invalidRequest }
+                        try WebsiteTurnContinuation.validateRequest(request)
+                    }
+                    if reply["state"] as? String == "ready" { _ = try verifiedModelEvidence(reply, session: &session) }
+                    let stageDeadline = ContinuousClock.now + readinessTimeout
+                    let readinessDeadline = correctionTicket == nil ? stageDeadline : min(stageDeadline, responseDeadline ?? stageDeadline)
+                    var ready = reply["state"] as? String == "ready"
+                    while !ready, ContinuousClock.now < readinessDeadline {
+                        try requireCurrentContext()
+                        let revision = try await session.transport.changeRevision(sessionToken: session.token)
+                        guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
+                        let state = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token])
+                        try requireCurrentContext()
+                        guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
+                        if ["ready", "running"].contains(state["state"] as? String ?? "") { _ = try verifiedModelEvidence(state, session: &session) }
+                        if state["state"] as? String == "ready" { ready = true }
+                        else if !["loading", "running"].contains(state["state"] as? String ?? "") { throw Self.snapshotFailure(state) }
+                        if !ready { try await waitForNextPoll(session, after: revision, until: readinessDeadline) }
+                    }
+                    guard ready else { throw Failure.preparationDeadline }
                 }
-                let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider, route: route)
-                if provesNativeContinuation { try WebsiteTurnContinuation.validateRequest(request) }
-                if provider == "chatgpt", provesNativeContinuation {
-                    guard (closed?.turnInferenceCount ?? 0) < Self.maximumTurnInferences,
-                          request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - (closed?.cumulativePromptUTF8Count ?? 0)
-                    else { throw Failure.turnLimit }
+                try requireCurrentContext()
+                if let requestMetadata, session.sequence == 1 {
+                    var activated = false
+                    if let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
+                          let turn = UUID(uuidString: context.turnID),
+                          requestMetadata.matches(taskID: task, threadID: thread, turnID: turn,
+                            preparationID: context.preparationID) {
+                        activated = await session.transport.activateRequestMetadata(sessionToken: session.token)
+                    } else { requestMetadata.revoke() }
+                    try requireCurrentContext()
+                    if requestMetadata.capturesDecodedEvents && !activated { throw Failure.requestMetadataUnavailable }
                 }
-                prompt = request.prompt
-                var params = ["provider": provider]
-                if let choice {
-                    guard let encoded = choice.canonicalJSONString else { throw Failure.invalidRequest }
-                    params["modelChoice"] = encoded
-                }
-                try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
-                    provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested", route: route,
-                    turnScoped: retainsConversation(provider: provider))
-                unresolvedStartAttempts[taskID] = UnresolvedStartAttempt(inferenceID: inferenceID, context: context,
-                    provider: provider, modelID: request.model, route: route)
-                if provider == "chatgpt", route == .embedded, !context.isMaintenance,
+                // No wire/model-tool grant. A same-UID manual arm scopes one current
+                // native turn; it is not authentication of the person who wrote it.
+                if correctionTicket == nil, provider == "chatgpt", route == .embedded, inspectorAuthorizations[taskID] == nil,
                    let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
                    let turn = UUID(uuidString: context.turnID),
-                   let directory = rejectedReplyDirectory?.deletingLastPathComponent()
-                    .appendingPathComponent("WebsiteRequestMetadataDiagnostics-v1") {
-                    requestMetadata = ChatGPTRequestMetadataLease.consume(directory: directory,
-                        taskID: task, threadID: thread, turnID: turn, preparationID: context.preparationID,
-                        isMaintenance: context.isMaintenance)
+                   let directory = rejectedReplyDirectory?.deletingLastPathComponent().appendingPathComponent("WebsiteInspectorDiagnostics-v1"),
+                   let authorization = ChatGPTInspectorLease.consume(directory: directory, taskID: task, threadID: thread, turnID: turn) {
+                    inspectorAuthorizations[taskID] = authorization
+                    let granted = await session.transport.grantInspectorDiagnostic(authorization, sessionToken: session.token)
+                    try requireCurrentContext()
+                    if !granted || !authorization.matches(taskID: task, threadID: thread, turnID: turn) {
+                        authorization.revoke()
+                        if granted { await session.transport.revokeInspectorDiagnostic(sessionToken: session.token) }
+                    }
                 }
-                let reply: [String: Any]
-                if let requestMetadata {
-                    let data = try await transport.startWithRequestMetadata(
-                        params: JSONSerialization.data(withJSONObject: params), authorization: requestMetadata)
-                    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.invalidRequest }
-                    reply = object
-                } else { reply = try await call(transport, operation: "webProviderStart", params: params) }
-                guard let rawToken = reply["sessionToken"] as? String, let token = UUID(uuidString: rawToken) else {
-                    throw Self.snapshotFailure(reply)
+                if session.usesBoundedTurn {
+                    let bytes = prompt.utf8.count
+                    guard session.turnInferenceCount < Self.maximumTurnInferences,
+                          bytes <= Self.maximumTurnPromptUTF8Bytes - session.cumulativePromptUTF8Count else {
+                        throw Failure.turnLimit
+                    }
+                    session.cumulativePromptUTF8Count += bytes
+                    session.turnInferenceCount += 1
                 }
-                let advertised = reply["turnContinuationCapability"]
-                session = Session(token: rawToken, provider: provider, modelID: request.model,
-                    modelChoice: choice, route: route, transport: transport, inferenceID: inferenceID,
-                    context: context, transportGeneration: transportGeneration,
-                    provesNativeContinuation: provesNativeContinuation,
-                    retainsConversation: retainsConversation(provider: provider))
-                session.requestMetadata = requestMetadata
-                session.resolvedModel = closed?.resolvedModel
-                session.turnInferenceCount = closed?.turnInferenceCount ?? 0
-                session.cumulativePromptUTF8Count = closed?.cumulativePromptUTF8Count ?? 0
-                // Capture ownership before cancellation or validation can fail.
+                // An earlier HTTP output may fail while the new page prepares.
+                // Recheck its exact closed handoff after every preparation await.
+                if let closedHandoff {
+                    guard closedTurns[taskID]?.inferenceID == closedHandoff.inferenceID,
+                          closedTurns[taskID]?.ambiguousHandoff == false else { throw Failure.inferenceContextRequired }
+                    closedTurns.removeValue(forKey: taskID)
+                }
+                session.submittedPromptFingerprint = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
                 sessions[taskID] = session
                 lease = session
-                if unresolvedStartAttempts[taskID]?.inferenceID == inferenceID {
-                    unresolvedStartAttempts.removeValue(forKey: taskID)
+                if provider == "chatgpt", route == .embedded, responseDeadline == nil {
+                    // Include the first Send await in the one absolute correction
+                    // budget; a rejected reply never renews this deadline.
+                    responseDeadline = ContinuousClock.now + responseTimeout
                 }
-                try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
-                    provider: provider, modelID: request.model, sessionToken: session.token, phase: "started", route: route, turnScoped: session.retainsConversation)
-                guard usedSessionTokens[taskID, default: []].insert(token.uuidString.lowercased()).inserted else { throw Failure.invalidRequest }
+                let sent = try await call(session.transport, operation: "webProviderSend",
+                    params: ["sessionToken": session.token, "prompt": prompt], submissionFailureSink: submissionFailureSink)
                 try requireCurrentContext()
-                if let closed {
-                    guard closedTurns[taskID]?.inferenceID == closed.inferenceID,
-                          closedTurns[taskID]?.ambiguousHandoff == false else { throw Failure.inferenceContextRequired }
+                guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
+                try Self.verifyInferenceSnapshot(sent, session: &session)
+                var submissionModelVerificationPending = sent["modelVerificationPending"] as? Bool == true
+                if !submissionModelVerificationPending {
+                    let submittedEvidence = try verifiedModelEvidence(sent, session: &session)
+                    try recordEvidence(submittedEvidence, snapshot: sent, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
                 }
-                guard ["ready", "loading"].contains(reply["state"] as? String ?? "") else { throw Self.snapshotFailure(reply) }
-                if provider == "chatgpt", route == .embedded, advertised != nil,
-                   advertised as? String != "per_submission_ownership_v1" { throw Failure.invalidRequest }
-                if session.provesNativeContinuation {
-                    guard reply["turnContinuationCapability"] as? String == "per_submission_ownership_v1" else { throw Failure.invalidRequest }
-                    try WebsiteTurnContinuation.validateRequest(request)
-                }
-                if reply["state"] as? String == "ready" { _ = try verifiedModelEvidence(reply, session: &session) }
-                let readinessDeadline = ContinuousClock.now + readinessTimeout
-                var ready = reply["state"] as? String == "ready"
-                while !ready, ContinuousClock.now < readinessDeadline {
+                sessions[taskID] = session
+                lease = session
+                let end = responseDeadline ?? (ContinuousClock.now + responseTimeout)
+                while ContinuousClock.now < end {
                     try requireCurrentContext()
                     let revision = try await session.transport.changeRevision(sessionToken: session.token)
-                    guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
-                    let state = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token])
+                    guard ContinuousClock.now < end else { throw Failure.deadline }
+                    let value = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token],
+                        submissionFailureSink: submissionFailureSink)
                     try requireCurrentContext()
-                    guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
-                    if ["ready", "running"].contains(state["state"] as? String ?? "") { _ = try verifiedModelEvidence(state, session: &session) }
-                    if state["state"] as? String == "ready" { ready = true }
-                    else if !["loading", "running"].contains(state["state"] as? String ?? "") { throw Self.snapshotFailure(state) }
-                    if !ready { try await waitForNextPoll(session, after: revision, until: readinessDeadline) }
-                }
-                guard ready else { throw Failure.preparationDeadline }
-            }
-            try requireCurrentContext()
-            if let requestMetadata, session.sequence == 1 {
-                var activated = false
-                if let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
-                      let turn = UUID(uuidString: context.turnID),
-                      requestMetadata.matches(taskID: task, threadID: thread, turnID: turn,
-                        preparationID: context.preparationID) {
-                    activated = await session.transport.activateRequestMetadata(sessionToken: session.token)
-                } else { requestMetadata.revoke() }
-                try requireCurrentContext()
-                if requestMetadata.capturesDecodedEvents && !activated { throw Failure.requestMetadataUnavailable }
-            }
-            // No wire/model-tool grant. A same-UID manual arm scopes one current
-            // native turn; it is not authentication of the person who wrote it.
-            if provider == "chatgpt", route == .embedded, inspectorAuthorizations[taskID] == nil,
-               let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
-               let turn = UUID(uuidString: context.turnID),
-               let directory = rejectedReplyDirectory?.deletingLastPathComponent().appendingPathComponent("WebsiteInspectorDiagnostics-v1"),
-               let authorization = ChatGPTInspectorLease.consume(directory: directory, taskID: task, threadID: thread, turnID: turn) {
-                inspectorAuthorizations[taskID] = authorization
-                let granted = await session.transport.grantInspectorDiagnostic(authorization, sessionToken: session.token)
-                try requireCurrentContext()
-                if !granted || !authorization.matches(taskID: task, threadID: thread, turnID: turn) {
-                    authorization.revoke()
-                    if granted { await session.transport.revokeInspectorDiagnostic(sessionToken: session.token) }
-                }
-            }
-            if session.usesBoundedTurn {
-                let bytes = prompt.utf8.count
-                guard session.turnInferenceCount < Self.maximumTurnInferences,
-                      bytes <= Self.maximumTurnPromptUTF8Bytes - session.cumulativePromptUTF8Count else {
-                    throw Failure.turnLimit
-                }
-                session.cumulativePromptUTF8Count += bytes
-                session.turnInferenceCount += 1
-            }
-            // An earlier HTTP output may fail while the new page prepares.
-            // Recheck its exact closed handoff after every preparation await.
-            if let closedHandoff {
-                guard closedTurns[taskID]?.inferenceID == closedHandoff.inferenceID,
-                      closedTurns[taskID]?.ambiguousHandoff == false else { throw Failure.inferenceContextRequired }
-                closedTurns.removeValue(forKey: taskID)
-            }
-            session.submittedPromptFingerprint = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
-            sessions[taskID] = session
-            lease = session
-            let sent = try await call(session.transport, operation: "webProviderSend",
-                params: ["sessionToken": session.token, "prompt": prompt], submissionFailureSink: submissionFailureSink)
-            try requireCurrentContext()
-            guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
-            try Self.verifyInferenceSnapshot(sent, session: &session)
-            var submissionModelVerificationPending = sent["modelVerificationPending"] as? Bool == true
-            if !submissionModelVerificationPending {
-                let submittedEvidence = try verifiedModelEvidence(sent, session: &session)
-                try recordEvidence(submittedEvidence, snapshot: sent, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
-            }
-            sessions[taskID] = session
-            lease = session
-            let end = ContinuousClock.now + responseTimeout
-            while ContinuousClock.now < end {
-                try requireCurrentContext()
-                let revision = try await session.transport.changeRevision(sessionToken: session.token)
-                guard ContinuousClock.now < end else { throw Failure.deadline }
-                let value = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token],
-                    submissionFailureSink: submissionFailureSink)
-                try requireCurrentContext()
-                guard ContinuousClock.now < end else { throw Failure.deadline }
-                switch value["state"] as? String {
-                case "complete":
-                    try Self.verifyInferenceSnapshot(value, session: &session)
-                    let evidence = try verifiedModelEvidence(value, session: &session)
-                    if submissionModelVerificationPending {
-                        // Dispatch-only observations never assert fresh model
-                        // selection. The owned final answer establishes both
-                        // submission and completion before any text/tool parse.
-                        try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
-                        submissionModelVerificationPending = false
-                    }
-                    guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
-                    let reply: WebModelResponseCodec.Reply
-                    do {
-                        reply = try session.route == .embedded
-                            ? WebModelResponseCodec.parseEmbeddedReply(text, request: request)
-                            : WebModelResponseCodec.parseReply(text, request: request)
-                    } catch {
-                        let diagnostic = session.route == .embedded
-                            ? WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: request)
-                            : WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: request, requireEnvelope: false)
-                        if let diagnostic {
-                            captureRejectedReply(text, diagnostic: .malformed(diagnostic), taskID: taskID,
-                                inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
-                            throw Failure.malformedReply(diagnostic)
+                    guard ContinuousClock.now < end else { throw Failure.deadline }
+                    switch value["state"] as? String {
+                    case "complete":
+                        try Self.verifyInferenceSnapshot(value, session: &session)
+                        let evidence = try verifiedModelEvidence(value, session: &session)
+                        if submissionModelVerificationPending {
+                            // Dispatch-only observations never assert fresh model
+                            // selection. The owned final answer establishes both
+                            // submission and completion before any text/tool parse.
+                            try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
+                            submissionModelVerificationPending = false
                         }
-                        if case .unknownTool = error as? WebModelResponseCodec.Failure {
-                            captureRejectedReply(text, diagnostic: .unofferedTool, taskID: taskID,
-                                inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                        guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
+                        let reply: WebModelResponseCodec.Reply
+                        do {
+                            reply = try session.route == .embedded
+                                ? WebModelResponseCodec.parseEmbeddedReply(text, request: request)
+                                : WebModelResponseCodec.parseReply(text, request: request)
+                        } catch {
+                            let diagnostic = session.route == .embedded
+                                ? WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: request)
+                                : WebModelResponseCodec.malformedEnvelopeDiagnostic(text, request: request, requireEnvelope: false)
+                            if let diagnostic {
+                                captureRejectedReply(text, diagnostic: .malformed(diagnostic), taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                                if diagnostic.reason == .invalidJSON, correctionTicket == nil,
+                                   provider == "chatgpt", route == .embedded, !context.isMaintenance,
+                                   session.provesNativeContinuation, !session.retainsConversation,
+                                   session.sequence == 1, session.baselineResponseCount == 0,
+                                   session.resolvedModel != nil,
+                                   session.turnInferenceCount < Self.maximumTurnInferences,
+                                   correctionPrompt.utf8.count <= WebModelResponseCodec.maximumPromptBytes,
+                                   correctionPrompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - session.cumulativePromptUTF8Count,
+                                   ContinuousClock.now < end, let correctionStore,
+                                   let firstToken = UUID(uuidString: session.token),
+                                   let ticket = try? correctionStore.claim(taskID: taskID, threadID: context.threadID,
+                                       turnID: context.turnID, firstInferenceID: inferenceID,
+                                       firstSessionToken: firstToken, secondInferenceID: UUID()) {
+                                    // Claim is durable before any corrective await.
+                                    // The rejected bytes confer no output authority.
+                                    correctionTicket = ticket
+                                    correctionSource = session
+                                    try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
+                                        session: session, phase: "failed", errorCode: Self.errorPresentation(for: Failure.malformedReply(diagnostic)).code)
+                                    rejectionRecordedID = inferenceID
+                                    if let authorization = requestMetadata {
+                                        let snapshot = await session.transport.stopRequestMetadata(sessionToken: session.token)
+                                        if (try? requireCurrentContext(includeResponseDeadline: false)) != nil,
+                                           let snapshot, authorization.isCurrent {
+                                            _ = authorization.persist(snapshot, inferenceID: inferenceID, sessionToken: firstToken)
+                                        }
+                                        authorization.revoke()
+                                        await session.transport.revokeRequestMetadata(sessionToken: session.token)
+                                        requestMetadata = nil
+                                        session.requestMetadata = nil
+                                        sessions[taskID] = session
+                                        lease = session
+                                    }
+                                    // Cleanup always settles, even when cancellation
+                                    // or the original deadline expires in this await.
+                                    let closed = await cleanup(taskID: taskID, cancel: Task.isCancelled,
+                                        runtimeGeneration: context.runtimeGeneration, trigger: .inference)
+                                    guard closed.receipt.outcome == .closed,
+                                          closed.receipt.inferenceID == inferenceID.uuidString.lowercased(),
+                                          closed.receipt.sessionToken == session.token.lowercased() else { throw Failure.cleanupFailed }
+                                    guard closed.receipt.receiptSaved, closed.issues.isEmpty,
+                                          let cleanupID = UUID(uuidString: closed.receipt.attemptID) else { throw Failure.persistenceRequired }
+                                    do { try correctionStore.recordClosed(ticket, cleanupAttemptID: cleanupID) }
+                                    catch { throw Failure.persistenceRequired }
+                                    lease = nil
+                                    yielded = nil
+                                    closedHandoff = nil
+                                    try requireCurrentContext()
+                                    inferenceID = ticket.secondInferenceID
+                                    continue attempts
+                                }
+                                throw Failure.malformedReply(diagnostic)
+                            }
+                            if case .unknownTool = error as? WebModelResponseCodec.Failure {
+                                captureRejectedReply(text, diagnostic: .unofferedTool, taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            }
+                            throw error
                         }
-                        throw error
-                    }
-                    session.completedResponseCount = (value["modelProofContext"] as? [String: Any])?["responseCount"] as? Int
-                    session.completedText = text
-                    session.completedSnapshot = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
-                    sessions[taskID] = session
-                    lease = session
-                    try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "complete")
-                    let responseID = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-                    let encoded = try request.stream
-                        ? WebModelResponseCodec.streamData(for: reply, request: request, responseID: responseID, websiteModelEvidence: evidence)
-                        : WebModelResponseCodec.completedResponse(for: reply, request: request, responseID: responseID, websiteModelEvidence: evidence)
-                    let continuation: WebsiteTurnContinuation? = try session.provesNativeContinuation ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
-                    if let requestMetadata {
-                        let retain = session.retainsConversation && (continuation?.pendingToolCallCount ?? 0) > 0
-                        let diagnostic = retain
-                            ? await session.transport.snapshotRequestMetadata(sessionToken: session.token)
-                            : await session.transport.stopRequestMetadata(sessionToken: session.token)
+                        session.completedResponseCount = (value["modelProofContext"] as? [String: Any])?["responseCount"] as? Int
+                        session.completedText = text
+                        session.completedSnapshot = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+                        sessions[taskID] = session
+                        lease = session
+                        try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "complete")
+                        let responseID = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                        let encoded = try request.stream
+                            ? WebModelResponseCodec.streamData(for: reply, request: request, responseID: responseID, websiteModelEvidence: evidence)
+                            : WebModelResponseCodec.completedResponse(for: reply, request: request, responseID: responseID, websiteModelEvidence: evidence)
+                        let continuation: WebsiteTurnContinuation? = try session.provesNativeContinuation ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
+                        if let requestMetadata {
+                            let retain = session.retainsConversation && (continuation?.pendingToolCallCount ?? 0) > 0
+                            let diagnostic = retain
+                                ? await session.transport.snapshotRequestMetadata(sessionToken: session.token)
+                                : await session.transport.stopRequestMetadata(sessionToken: session.token)
+                            try requireCurrentContext()
+                            if let diagnostic, let token = UUID(uuidString: session.token), requestMetadata.isCurrent {
+                                _ = requestMetadata.persist(diagnostic, inferenceID: inferenceID, sessionToken: token)
+                            }
+                            if !retain {
+                                requestMetadata.revoke()
+                                await session.transport.revokeRequestMetadata(sessionToken: session.token)
+                                session.requestMetadata = nil
+                                sessions[taskID] = session
+                                lease = session
+                            }
+                        }
+                        if let continuation, continuation.pendingToolCallCount > 0, session.retainsConversation {
+                            try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
+                                session: session, phase: "yield_verified")
+                            try requireCurrentContext()
+                            yieldedTurns[taskID] = YieldedTurn(inferenceID: inferenceID, continuation: continuation)
+                        } else {
+                            let closed = await cleanup(taskID: taskID, cancel: Task.isCancelled,
+                                runtimeGeneration: context.runtimeGeneration, trigger: .inference)
+                            guard closed.receipt.outcome == .closed,
+                                  closed.receipt.inferenceID == inferenceID.uuidString.lowercased(),
+                                  closed.receipt.sessionToken == session.token.lowercased() else { throw Failure.cleanupFailed }
+                            guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
+                            try requireCurrentContext()
+                            if !session.provesNativeContinuation {
+                                try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
+                                    session: session, phase: "release_verified", cleanupAttemptID: closed.receipt.attemptID)
+                            }
+                            if let continuation {
+                                closedTurns[taskID] = ClosedTurn(inferenceID: inferenceID, context: context, continuation: continuation,
+                                    transportGeneration: session.transportGeneration, resolvedModel: session.resolvedModel,
+                                    turnInferenceCount: session.turnInferenceCount, cumulativePromptUTF8Count: session.cumulativePromptUTF8Count)
+                            }
+                        }
                         try requireCurrentContext()
-                        if let diagnostic, let token = UUID(uuidString: session.token), requestMetadata.isCurrent {
+                        if let correctionTicket, let correctionStore, let token = UUID(uuidString: session.token) {
+                            do { try correctionStore.finish(correctionTicket, secondInferenceID: inferenceID,
+                                secondSessionToken: token, outcome: .responseValidated) }
+                            catch { throw Failure.persistenceRequired }
+                            correctionFinished = true
+                        }
+                        try requireCurrentContext()
+                        return InferenceResult(data: encoded, inferenceID: inferenceID)
+                    case "running":
+                        try Self.verifyInferenceSnapshot(value, session: &session)
+                        if value["modelVerificationPending"] as? Bool != true {
+                            _ = try verifiedModelEvidence(value, session: &session)
+                        }
+                        sessions[taskID] = session
+                        lease = session
+                        try await waitForNextPoll(session, after: revision, until: end)
+                    default: throw Self.snapshotFailure(value)
+                    }
+                }
+                throw Failure.deadline
+            } catch {
+                if let correctionTicket, let correctionStore, !correctionFinished {
+                    let second = inferenceID == correctionTicket.secondInferenceID ? lease : nil
+                    let outcome: WebsiteModelFormatCorrectionStore.Outcome
+                    if error is CancellationError { outcome = .cancelled }
+                    else if let failure = error as? Failure {
+                        switch failure {
+                        case .deadline, .preparationDeadline: outcome = .timedOut
+                        case .turnLimit: outcome = .budgetExhausted
+                        case let .malformedReply(diagnostic) where diagnostic.reason == .invalidJSON: outcome = .invalidJSON
+                        default: outcome = .failed
+                        }
+                    } else { outcome = .failed }
+                    try? correctionStore.finish(correctionTicket,
+                        secondInferenceID: second == nil ? nil : inferenceID,
+                        secondSessionToken: second.flatMap { UUID(uuidString: $0.token) }, outcome: outcome)
+                    failedClosedHandoffs.insert(taskID)
+                }
+                if let lease, lease.provesNativeContinuation, !lease.retainsConversation,
+                   !lease.submittedPromptFingerprint.isEmpty {
+                    failedClosedHandoffs.insert(taskID)
+                }
+                if let requestMetadata {
+                    if !Task.isCancelled, (try? requireCurrentContext()) != nil, let lease, lease.context == context {
+                        let diagnostic = await lease.transport.stopRequestMetadata(sessionToken: lease.token)
+                        if (try? requireCurrentContext()) != nil, let diagnostic, let token = UUID(uuidString: lease.token),
+                           requestMetadata.isCurrent {
                             _ = requestMetadata.persist(diagnostic, inferenceID: inferenceID, sessionToken: token)
                         }
-                        if !retain {
-                            requestMetadata.revoke()
-                            await session.transport.revokeRequestMetadata(sessionToken: session.token)
-                            session.requestMetadata = nil
-                            sessions[taskID] = session
-                            lease = session
-                        }
                     }
-                    if let continuation, continuation.pendingToolCallCount > 0, session.retainsConversation {
-                        try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
-                            session: session, phase: "yield_verified")
-                        try requireCurrentContext()
-                        yieldedTurns[taskID] = YieldedTurn(inferenceID: inferenceID, continuation: continuation)
-                    } else {
-                        let closed = await cleanup(taskID: taskID, cancel: Task.isCancelled,
-                            runtimeGeneration: context.runtimeGeneration, trigger: .inference)
-                        guard closed.receipt.outcome == .closed,
-                              closed.receipt.inferenceID == inferenceID.uuidString.lowercased(),
-                              closed.receipt.sessionToken == session.token.lowercased() else { throw Failure.cleanupFailed }
-                        guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
-                        try requireCurrentContext()
-                        if !session.provesNativeContinuation {
-                            try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
-                                session: session, phase: "release_verified", cleanupAttemptID: closed.receipt.attemptID)
-                        }
-                        if let continuation {
-                            closedTurns[taskID] = ClosedTurn(inferenceID: inferenceID, context: context, continuation: continuation,
-                                transportGeneration: session.transportGeneration, resolvedModel: session.resolvedModel,
-                                turnInferenceCount: session.turnInferenceCount, cumulativePromptUTF8Count: session.cumulativePromptUTF8Count)
-                        }
-                    }
-                    try requireCurrentContext()
-                    return InferenceResult(data: encoded, inferenceID: inferenceID)
-                case "running":
-                    try Self.verifyInferenceSnapshot(value, session: &session)
-                    if value["modelVerificationPending"] as? Bool != true {
-                        _ = try verifiedModelEvidence(value, session: &session)
-                    }
-                    sessions[taskID] = session
-                    lease = session
-                    try await waitForNextPoll(session, after: revision, until: end)
-                default: throw Self.snapshotFailure(value)
+                    requestMetadata.revoke()
+                    if let lease { await lease.transport.revokeRequestMetadata(sessionToken: lease.token) }
                 }
-            }
-            throw Failure.deadline
-        } catch {
-            if let lease, lease.provesNativeContinuation, !lease.retainsConversation,
-               !lease.submittedPromptFingerprint.isEmpty {
-                failedClosedHandoffs.insert(taskID)
-            }
-            if let requestMetadata {
-                if !Task.isCancelled, (try? requireCurrentContext()) != nil, let lease, lease.context == context {
-                    let diagnostic = await lease.transport.stopRequestMetadata(sessionToken: lease.token)
-                    if (try? requireCurrentContext()) != nil, let diagnostic, let token = UUID(uuidString: lease.token),
-                       requestMetadata.isCurrent {
-                        _ = requestMetadata.persist(diagnostic, inferenceID: inferenceID, sessionToken: token)
-                    }
+                let submissionDiagnostic: ChatSubmissionFailureDiagnostic?
+                if provider == "chatgpt", route == .embedded,
+                   (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(.javaScriptSubmission),
+                   (try? requireCurrentContext()) != nil, let lease, lease.context == context,
+                   sessions[taskID]?.token == lease.token {
+                    submissionDiagnostic = submissionFailureSink.snapshot
+                } else { submissionDiagnostic = nil }
+                if let authorization = inspectorAuthorizations.removeValue(forKey: taskID) {
+                    authorization.revoke()
+                    if let lease { await lease.transport.revokeInspectorDiagnostic(sessionToken: lease.token) }
                 }
-                requestMetadata.revoke()
-                if let lease { await lease.transport.revokeRequestMetadata(sessionToken: lease.token) }
+                yieldedTurns.removeValue(forKey: taskID)
+                let turnLimit = (error as? EmbeddedWebModelTransport.Failure) == .turnLimit
+                    || { if let failure = error as? Failure, case .turnLimit = failure { return true }; return false }()
+                let decodedDiagnosticUnavailable = { if let failure = error as? Failure, case .requestMetadataUnavailable = failure { return true }; return false }()
+                if turnLimit || decodedDiagnosticUnavailable {
+                    let closed = await cleanup(taskID: taskID, cancel: true,
+                        runtimeGeneration: context.runtimeGeneration, trigger: .automatic)
+                    guard closed.receipt.outcome == .closed else { throw Failure.cleanupFailed }
+                    guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
+                }
+                if rejectionRecordedID != inferenceID {
+                    try? recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
+                        provider: provider, modelID: request.model, sessionToken: lease?.token,
+                        phase: error is CancellationError ? "cancelled" : "failed",
+                        errorCode: Self.errorPresentation(for: error).code,
+                        sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0, route: route, turnScoped: lease?.retainsConversation,
+                        submissionDiagnostic: (try? requireCurrentContext()) != nil ? submissionDiagnostic : nil)
+                }
+                throw error
             }
-            let submissionDiagnostic: ChatSubmissionFailureDiagnostic?
-            if provider == "chatgpt", route == .embedded,
-               (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(.javaScriptSubmission),
-               (try? requireCurrentContext()) != nil, let lease, lease.context == context,
-               sessions[taskID]?.token == lease.token {
-                submissionDiagnostic = submissionFailureSink.snapshot
-            } else { submissionDiagnostic = nil }
-            if let authorization = inspectorAuthorizations.removeValue(forKey: taskID) {
-                authorization.revoke()
-                if let lease { await lease.transport.revokeInspectorDiagnostic(sessionToken: lease.token) }
-            }
-            yieldedTurns.removeValue(forKey: taskID)
-            let turnLimit = (error as? EmbeddedWebModelTransport.Failure) == .turnLimit
-                || { if let failure = error as? Failure, case .turnLimit = failure { return true }; return false }()
-            let decodedDiagnosticUnavailable = { if let failure = error as? Failure, case .requestMetadataUnavailable = failure { return true }; return false }()
-            if turnLimit || decodedDiagnosticUnavailable {
-                let closed = await cleanup(taskID: taskID, cancel: true,
-                    runtimeGeneration: context.runtimeGeneration, trigger: .automatic)
-                guard closed.receipt.outcome == .closed else { throw Failure.cleanupFailed }
-                guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
-            }
-            try? recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
-                provider: provider, modelID: request.model, sessionToken: lease?.token,
-                phase: error is CancellationError ? "cancelled" : "failed",
-                errorCode: Self.errorPresentation(for: error).code,
-                sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0, route: route, turnScoped: lease?.retainsConversation,
-                submissionDiagnostic: (try? requireCurrentContext()) != nil ? submissionDiagnostic : nil)
-            throw error
         }
     }
+
+    private static let formatCorrectionReminder = """
+
+
+    COMPUTA FORMAT CORRECTION — ONE ATTEMPT
+    The entire previous website reply was rejected as invalid JSON. Fulfil the unchanged canonical request above using exactly one complete JSON response envelope inside one json code fence. Put every result or explanation inside the envelope; place no headings, prose, or summaries outside the fence. Keep the original offered tools, tool choice, permissions, arguments, and history authoritative. This corrects formatting only: do not invent results or repeat actions already completed in the canonical history.
+    """
+
 
     /// An unsuccessful HTTP write cannot make this particular handoff reusable.
     /// A later round that already reconciled the exact output has a distinct ID.
@@ -1381,7 +1487,7 @@ actor WebModelServer {
     }
 
     private func recordEvidence(_ evidence: WebsiteModelEvidence?, snapshot: [String: Any], taskID: String,
-                                inferenceID: UUID, session: Session, phase: String, cleanupAttemptID: String? = nil) throws {
+                                inferenceID: UUID, session: Session, phase: String, cleanupAttemptID: String? = nil, errorCode: String? = nil) throws {
         var checkedSession = session
         try Self.verifyInferenceSnapshot(snapshot, session: &checkedSession)
         guard let context = snapshot["modelProofContext"] as? [String: Any] else { throw Failure.invalidRequest }
@@ -1396,6 +1502,7 @@ actor WebModelServer {
         }
         record["sequence"] = session.sequence
         if let cleanupAttemptID { record["cleanupAttemptID"] = cleanupAttemptID }
+        if let errorCode { record["errorCode"] = errorCode }
         if let evidence { record["modelEvidence"] = evidence.dictionary }
         if session.provider == "chatgpt", session.route == .embedded,
            let product = try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true) {

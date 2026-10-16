@@ -1,5 +1,80 @@
 # Embedded website provider qualification
 
+## Current scope: ChatGPT only
+
+Gemini and Claude implementation and qualification are on hold at the user's
+request. The remaining remote API cases are also held while ChatGPT is the
+priority. Existing provider options were not removed by this scope change.
+
+## Candidate148: one bounded ChatGPT format correction
+
+A verified ChatGPT reply that fails strict JSON parsing can receive one fresh
+website inference with the original request and a fixed formatting reminder.
+The rejected reply dispatches no tools and is never copied into the reminder.
+The strict response decoder, offered tools, tool policy and canonical history
+remain authoritative. Other failure classes remain terminal.
+
+An exclusive private journal spends this allowance by native thread and turn
+before another asynchronous operation. Task remapping, preparation, HTTP retry
+and restart cannot renew it. The first session must have a saved closed receipt
+before the fresh session starts. Both inferences share the original absolute
+deadline and existing inference/prompt budgets. Model, normal Chat mode,
+ownership, cancellation and cleanup checks apply to the corrective response.
+Finite records link the failed final proof, first closure and corrective lease;
+recovered output is separate from a clean first pass, and website usage is
+unknown.
+
+The old production regression failed at the malformed reply before a second
+session could start. The final candidate passed all 32 selected native tests
+with zero failures or skips: 15 correction integration tests, 11 durable-store
+tests and six affected existing regressions. These cover restart/remapping,
+concurrent claims, unsafe journals, cleanup, deadline and budget boundaries,
+model/product/ownership changes, cancellation and ambiguous HTTP delivery.
+Independent source review and Xcode project lint passed. Installed live
+qualification remains separate from these offline results.
+
+## Installed147: captured mixed-format ChatGPT reply
+
+Signed 0.7.0 (147), source `fbc87ca77a0d4a8d650e3fe5e50e90231bf661ba`,
+passed independent build and installed verification: all 55 bundle files and
+51 resources matched; the Gemini diagnostic compiler flag was off. The commit
+is pushed to draft PR5. This is not a published release.
+
+The fresh ChatGPT Instant code/browser task completed in 116.620 seconds with
+nine tools and nine verified website inferences, all with saved closed cleanup.
+The helper matched the expected edit, all four independent tests passed, and
+the exact browser result, model-issued close and final answer were verified.
+Its strict benchmark still failed one command-scope gate: the model chained
+read commands with semicolons and also ran `git status` in a non-Git fixture.
+That probe printed a fatal error despite the command group's final exit0.
+The original strict failure is preserved, not regraded as a clean run.
+
+A separate browser diagnostic reproduced `malformed_website_reply` in 67.943
+seconds after five successful browser calls. The sixth inference returned a
+225-byte parser input containing meaningful flight-result text followed by one
+intact tool-call envelope for closing the tab. The input had 152 leading
+characters; the valid envelope occupied characters152 through223 with no
+trailing text. Scoped extraction found one PRE and two CODE elements and used
+its rendered fallback. Independent private inspection confirmed result content
+outside the protocol envelope, including known widget text, rather than JSON
+lexical damage. The strict parser correctly dispatched zero calls from this
+reply. All six website sessions closed with saved receipts; host cleanup closed
+the task tab, which is not a model-issued close or final answer.
+
+The one-shot capture was armed before the task's first pending inference. Its
+raw contents remain only in the owned private diagnostic file. Ordinary
+evidence contains hashes, finite structure and the content-free classification.
+This establishes this225-byte failure's mixed-format cause; it does not explain
+or regrade the older493-byte failure. Candidate148 adds the bounded format-only
+correction above; no suffix extraction or parser relaxation is accepted.
+
+The remote Cerebras GPT-OSS browser control completed in 2.985 seconds with a
+strict task pass and complete clean correction accounting: zero tickets, second
+claims or correction events; the safe namespace remained9 to9. Total billable
+usage remains unknown. Its three unused follow-up cases are held by user
+steering. Both owned fixture servers stopped and were reaped, and their
+listeners refused connections. Human browser tabs were preserved.
+
 ## Candidate147: dispose untouched ChatGPT sign-in views
 
 An initial ChatGPT sign-in redirect could fail before any provider JavaScript

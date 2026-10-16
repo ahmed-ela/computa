@@ -1404,8 +1404,8 @@ final class WebModelServerTests: XCTestCase {
             for response in ["\u{E056}\njson\n" + tool,
                              #"{"type":"message","text":"Observed "Fixture marker value""}"#,
                              "The command completed.\n{\"type\":\"tool_calls\",\"calls\":["] {
-                let transport = FixtureWebModelTransport(replyTexts: [response])
-                let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+                let transport = FixtureWebModelTransport(replyTexts: provider == "chatgpt" ? [response, response] : [response])
+                let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: try canonicalFormatCorrectionFixtureRoot())
                 await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
                 let input = try JSONSerialization.data(withJSONObject: ["model": syntheticWebsiteModelID(provider), "input": "Run the fixture",
                     "tools": [["type": "function", "name": "exec_command", "parameters": ["type": "object"]]], "stream": true])
@@ -1420,8 +1420,9 @@ final class WebModelServerTests: XCTestCase {
                     XCTAssertEqual(diagnostic.utf8Bytes, response.utf8.count)
                 }
                 let operations = await transport.operations()
-                XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1,
-                               "Rejected output must never trigger an automatic retry")
+                XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, provider == "chatgpt" ? 2 : 1,
+                               "Only ChatGPT may spend one durable format-only correction; both malformed replies remain rejected")
+                XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, provider == "chatgpt" ? 1 : 0)
                 let issues = await server.shutdown()
                 XCTAssertTrue(issues.isEmpty)
                 let finalOperations = await transport.operations()
