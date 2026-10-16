@@ -2585,6 +2585,123 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testUntouchedChatGPTSignInClosesOnlyExactPrivateViewWithoutAdapterOrSend() async throws {
+        let cases = [("https://chatgpt.com/auth/login", "webProviderFinish", true),
+                     ("https://chatgpt.com/auth/login", "webProviderCancel", false),
+                     ("https://chatgpt.com/login", "webProviderCancel", true),
+                     ("https://chatgpt.com/login", "webProviderFinish", false)]
+        for (rawURL, operation, inspectFirst) in cases {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), initialURL: URL(string: rawURL))
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            try await waitForFixture(view)
+            XCTAssertEqual(fixture.browser.modelNavigationDiagnostic(tabID: id, view: view)?.settled, true)
+            if inspectFirst {
+                do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Sign-in is terminal before provider JavaScript") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+            }
+            let untouched = try await evaluate(view, "return globalThis.__computaModelOwner === undefined;",
+                                              world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+            XCTAssertEqual(untouched, true)
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+            let closed = try await call(fixture.transport, operation, ["sessionToken": token])
+            XCTAssertEqual(closed["state"] as? String, "finished")
+            XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+            XCTAssertEqual(closed["sequence"] as? Int, 0)
+            XCTAssertNil(fixture.browser.webView(for: id))
+            XCTAssertFalse(fixture.browser.tabs.contains { $0.id == id })
+            // A repeated Finish/Cancel may return its cached closed receipt;
+            // it must never create another view or revive the signed-out lease.
+            let repeated = try await call(fixture.transport, operation, ["sessionToken": token])
+            XCTAssertEqual(repeated["cleanup"] as? String, "not_created")
+            do { _ = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"]); XCTFail("Disposal does not clear sign-in admission") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty)
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testUntouchedChatGPTSignInRejectsChangedDocumentURLClosedViewAndAdapterDispatch() async throws {
+        for change in ["same_url_new_document", "same_document_new_url", "closed_view", "adapter_dispatched"] {
+            let authURL = try XCTUnwrap(URL(string: "https://chatgpt.com/auth/login"))
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), initialURL: authURL)
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            try await waitForFixture(view)
+            do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Expected sign-in") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+            let generation = fixture.browser.documentGeneration(for: id)
+            if change == "same_url_new_document" {
+                view.loadHTMLString(Self.modelChoicePage(.chatgpt).replacingOccurrences(of: "'initial'", with: "'replacement'"), baseURL: authURL)
+                try await waitForFixture(view, generation: "replacement")
+                XCTAssertNotEqual(fixture.browser.documentGeneration(for: id), generation)
+            } else if change == "same_document_new_url" {
+                _ = try await evaluate(view, "history.replaceState(null, '', '/auth/login?changed=1'); return true;")
+                XCTAssertNotEqual(view.url, authURL)
+                XCTAssertEqual(fixture.browser.documentGeneration(for: id), generation)
+            } else if change == "closed_view" {
+                fixture.browser.closeTab(id)
+            } else {
+                // Existing negative-only hook can revoke eligibility; it cannot
+                // manufacture a dispatch acknowledgement or cleanup authority.
+                fixture.transport.invalidateGeminiPostBlockEligibilityForTesting(sessionToken: token, submitted: false, adapterDispatched: true)
+            }
+            let closed = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "failed")
+            if change != "closed_view" { XCTAssertTrue(fixture.browser.webView(for: id) === view) }
+            try await assertHumanTabIntact(fixture, retaining: change == "closed_view" ? nil : id)
+        }
+    }
+
+    func testUntouchedChatGPTSignInDoesNotAuthorizeExternalUnknownOrLookalikeRoutes() async throws {
+        for rawURL in ["https://accounts.google.com/v3/signin/identifier", "https://unexpected.example.test/auth/login",
+                       "https://chatgpt.com/authentication", "https://chatgpt.com.evil.test/auth/login"] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), initialURL: URL(string: rawURL))
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            try await waitForFixture(view)
+            let closed = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "failed")
+            XCTAssertTrue(fixture.browser.webView(for: id) === view)
+            let untouched = try await evaluate(view, "return globalThis.__computaModelOwner === undefined;",
+                                              world: .world(name: "computa-chatgpt-model-v1")) as? Bool
+            XCTAssertEqual(untouched, true)
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+            try await assertHumanTabIntact(fixture, retaining: id)
+        }
+    }
+
+    func testChatGPTSignInAfterProviderReadOrSendCannotClaimUntouchedDisposal() async throws {
+        for sendFirst in [false, true] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            if sendFirst {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic pre-sign-in submission"])
+            }
+            try await assertChoiceLedger(view, insertions: sendFirst ? 1 : 0, sends: sendFirst ? 1 : 0, selections: 1)
+            view.loadHTMLString(Self.modelChoicePage(.chatgpt).replacingOccurrences(of: "'initial'", with: "'signin'"),
+                                baseURL: URL(string: "https://chatgpt.com/auth/login"))
+            try await waitForFixture(view, generation: "signin")
+            let closed = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "failed")
+            XCTAssertEqual(closed["sequence"] as? Int, sendFirst ? 1 : 0)
+            XCTAssertTrue(fixture.browser.webView(for: id) === view)
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+            try await assertHumanTabIntact(fixture, retaining: id)
+        }
+    }
+
     func testUntouchedCheckpointDisposalRejectsChangedDocumentURLAndClosedView() async throws {
         for change in ["same_url_new_document", "different_checkpoint", "closed_view"] {
             let fixture = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"))
@@ -5696,8 +5813,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
         XCTAssertEqual(fixture.createdTabs.count, 5)
 
-        // Ordinary inference keeps its existing document/route authority; the
-        // new prompt-free discovery cleanup must not weaken that contract.
+        // Ordinary inference cannot use its same-origin untouched sign-in
+        // disposal receipt for an external Google identity-provider document.
         let inferenceFixture = try Fixture(page: Self.modelChoicePage(.chatgpt), initialURL: authURL)
         defer { inferenceFixture.shutdown() }
         let started = try await call(inferenceFixture.transport, "webProviderStart", ["provider": "chatgpt"])

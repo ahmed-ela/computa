@@ -141,6 +141,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return nil
         }
 
+        /// Disposal-only recognition for a never-used private ChatGPT view.
+        /// External identity-provider pages retain their existing cleanup policy.
+        func acceptsUntouchedSignIn(_ url: URL) -> Bool {
+            self == .chatgpt && url.host == host && blockingFailure(for: url) == .signInRequired
+        }
+
         private func originURL(_ raw: String) -> URL? {
             guard let url = URL(string: raw), url.scheme == "https", url.host == host,
                   url.port == nil || url.port == 443, url.user == nil, url.password == nil else { return nil }
@@ -289,11 +295,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Claimed before dispatch, including calls whose reply is lost. A
         // checkpoint can never turn an ambiguous adapter call into no input.
         var providerAdapterEverDispatched = false
-        struct UntouchedGoogleCheckpoint {
+        struct UntouchedCheckpoint {
             let documentGeneration: UUID
             let url: URL
         }
-        var untouchedGoogleCheckpoint: UntouchedGoogleCheckpoint?
+        var untouchedGoogleCheckpoint: UntouchedCheckpoint?
+        var untouchedChatGPTSignIn: UntouchedCheckpoint?
         var postBlockDiagnostic: GeminiPostBlockDiagnostic?
         struct InitialCheckpointSettlement {
             let deadline: ContinuousClock.Instant
@@ -2683,6 +2690,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // It never authorizes JavaScript on Google's checkpoint document.
             session.untouchedGoogleCheckpoint = .init(documentGeneration: generation, url: url)
         }
+        if failure == .signInRequired, session.provider == .chatgpt, session.terminalFailure == nil,
+           session.untouchedChatGPTSignIn == nil, hasUntouchedInferenceState(session),
+           sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+           let generation = browser.documentGeneration(for: session.tabID), let url,
+           session.provider.acceptsUntouchedSignIn(url),
+           browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view) != nil {
+            // Native identity only; do not evaluate the adapter on an auth page.
+            // A later document or URL cannot replace this first receipt.
+            session.untouchedChatGPTSignIn = .init(documentGeneration: generation, url: url)
+        }
         let navigation = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view)?.logDescription
             ?? EmbeddedBrowserSession.ModelNavigationDiagnostic.unknownLogDescription
         Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public) firstFailure=\(session.terminalFailure == nil) navigation={\(navigation, privacy: .public)}")
@@ -2827,7 +2844,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func isUntouchedInference(_ session: Session) -> Bool {
-        session.provider == .gemini && !session.isDiscovery && !session.isRecoveryProbe
+        session.provider == .gemini && hasUntouchedInferenceState(session)
+    }
+
+    private func hasUntouchedInferenceState(_ session: Session) -> Bool {
+        !session.isDiscovery && !session.isRecoveryProbe
             && !session.providerAdapterEverDispatched && session.sequence == 0
             && !session.submitted && !session.pendingSubmission && session.confirmedUsers == 0
             && !session.temporaryRequested && !session.temporary && !session.chatModeRequested
@@ -2846,6 +2867,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               browser.documentGeneration(for: session.tabID) == checkpoint.documentGeneration,
               session.view.url == checkpoint.url else { return false }
         return session.provider.blockingFailure(for: checkpoint.url) == .humanVerificationRequired(.gemini)
+    }
+
+    private func canDisposeUntouchedChatGPTSignIn(_ session: Session) -> Bool {
+        guard session.provider == .chatgpt, hasUntouchedInferenceState(session), sessions[session.token] === session,
+              browser.webView(for: session.tabID) === session.view,
+              let checkpoint = session.untouchedChatGPTSignIn,
+              browser.documentGeneration(for: session.tabID) == checkpoint.documentGeneration,
+              session.view.url == checkpoint.url, session.provider.acceptsUntouchedSignIn(checkpoint.url),
+              browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view)?.settled == true else { return false }
+        return true
     }
 
     private struct FirstUserExpansionRouteEdge {
@@ -3706,14 +3737,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // mode setup. Record it even when cleanup cannot own the page.
                 do { try rejectWebsiteBlocker(session, action: "cleanup", phase: "before") }
                 catch {
-                    guard (error as? Failure) == .humanVerificationRequired(.gemini),
-                          canDisposeUntouchedGoogleCheckpoint(session) else { throw error }
+                    let googleCheckpoint = (error as? Failure) == .humanVerificationRequired(.gemini)
+                        && canDisposeUntouchedGoogleCheckpoint(session)
+                    let chatGPTSignIn = (error as? Failure) == .signInRequired && canDisposeUntouchedChatGPTSignIn(session)
+                    guard googleCheckpoint || chatGPTSignIn else { throw error }
                     // No provider adapter could have focused an editor or sent
                     // anything. Keep the provider gate, but retire this exact
                     // app-created view without evaluating the checkpoint.
                     browser.closeTab(session.tabID)
+                    guard browser.webView(for: session.tabID) == nil,
+                          !browser.tabs.contains(where: { $0.id == session.tabID }), session.view.superview == nil else {
+                        throw Failure.staleSession
+                    }
                     sessions.removeValue(forKey: session.token)
                     session.state = "finished"
+                    if session.provider == .chatgpt {
+                        _ = await browser.settleChatGPTTemporaryCookieRetirement(until: .now + .seconds(2))
+                    }
                     return try snapshot(session, cleanup: "not_created")
                 }
             }

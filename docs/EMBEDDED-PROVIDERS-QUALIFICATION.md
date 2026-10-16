@@ -1,5 +1,52 @@
 # Embedded website provider qualification
 
+## Candidate147: dispose untouched ChatGPT sign-in views
+
+An initial ChatGPT sign-in redirect could fail before any provider JavaScript
+ran, but cleanup retained the private login view and reported unconfirmed.
+Candidate147 adds a separate native receipt for that untouched view. Disposal
+requires the exact current session, view, document generation and URL; a trusted
+same-origin `/auth` or `/login` route; settled navigation; and every existing
+zero-interaction condition. The first receipt cannot be renewed after a route
+or document change. External Google sign-in and unknown routes remain rejected.
+
+The original sign-in failure and provider admission gate remain intact.
+Cleanup verifies physical view and tab removal before returning `not_created`;
+it never evaluates the auth page, resumes the model, sends a prompt or grants
+submitted-session cleanup authority. Gemini retains its existing eligibility
+conditions and also checks physical removal before its cleanup receipt.
+
+The old source failed all four positive Finish/Cancel variants with 24 expected
+assertion failures. The final focused cohort passed ten native methods with no
+failures or skips. It covers zero adapter/insert/Send effects, retained human
+tabs and sign-in gate, cached repeated cleanup, changed document/URL/view,
+dispatched adapters, actual provider-read and Send negatives, foreign/lookalike
+routes and existing Gemini/discovery/error controls. Independent static review
+passed. Signed installation and live provider qualification remain separate.
+
+## Installed146: sign-in stopped the first live task
+
+Signed 0.7.0 (146), source `2838698c74ee591c6a02d69616a8b9e6b55da394`,
+passed independent build and installed verification: all 55 bundle files and
+51 resources matched, and the Gemini diagnostic compiler flag was off. The
+commit was pushed to draft PR5; this is not a published release.
+
+The first fresh ChatGPT Instant code/browser task stopped in 1.698 seconds
+with `sign_in_required`, before adapter dispatch, prompt submission or tools.
+The normal human ChatGPT page also redirected to login. Its existing Google
+sign-in restored the composer without sending a message. The original task's
+automatic cleanup and one explicit cleanup attempt after sign-in remained
+unconfirmed, so the task stays paused. The code seed was unchanged. Its strict
+failure remains immutable; the following browser case was held. The owned
+fixture server was stopped and reaped, and its unused diagnostic arm removed.
+This run did not exercise the picker recovery or reproduce the 493-byte reply.
+
+The normal Gemini page was clear after launch, and its durable verification
+checkpoint was absent. The latest recovery report recorded successful
+prompt-free recovery, but has no timestamp or build, so it cannot establish
+that this recovery happened specifically in build 146. No CAPTCHA was completed.
+Google's redirect trigger and permanent prevention remain unresolved.
+
 ## Candidate146: bounded post-insert picker recovery
 
 The observed145 failure was a missing acknowledgement when the final guard
@@ -28,9 +75,9 @@ methods then passed 448 assertions after correcting one negative-test timing
 line. Those 17 drift cases now run inside the recovery window instead of being
 rejected solely by the original deadline. The remaining test inputs and all
 production bytes were unchanged between those final cohorts. Canonical version
-validation passed for 0.7.0 (146). Signed installation and live qualification
-remain pending; the original493-byte failure is not regraded or explained by
-this recovery.
+validation passed for 0.7.0 (146). Signed installation passed; the first live
+run was blocked by sign-in as recorded above. The original 493-byte failure is
+not regraded or explained by this recovery.
 
 ## Installed145: model-picker acknowledgement failure and recurring verification
 
@@ -55,9 +102,9 @@ proof within the existing wait. The Instant header, completed selection and
 same physical pinned header remained valid; no mutation, duplicate controls,
 selection ambiguity or model mismatch was observed. This establishes the
 unacknowledged opening, not why the website ignored or failed to acknowledge it.
-The canonical next build is 146; its proposed recovery still requires fresh
-family/power proof and cannot repeat insertion or Send. It is not yet installed
-or qualified.
+Build 146's recovery still requires fresh family/power proof and cannot repeat
+insertion or Send. Its installed result is recorded above; provider
+qualification remains incomplete.
 
 The 493-byte rejection remains unexplained: neither its raw parser input nor
 extraction flags were retained. It occurred after reading the form result and
