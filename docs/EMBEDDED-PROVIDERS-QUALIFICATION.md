@@ -17,8 +17,31 @@ unchanged during each run; the final native log SHA is
 The adapter log SHA is
 `ce9048ce40db27caf98255824154324fe87231c4f7787335360a81dd2ca55906`;
 the later native-only fixture corrections did not change those adapter inputs.
-Signed packaging, installation and live ChatGPT browser/code qualification
-remain pending. Installed124 and pushed cleanup source125 are separate states.
+Signed build **0.7.0 (126)** from
+`de5c4726f54614a00d74d41d30b41986ce9c3165` was packaged and installed. All 54
+installed files, exact resources, signatures, unchanged engine and 2,132 frozen
+inputs matched the independently checked candidate. The explicit Gemini
+diagnostic compiler flag is enabled in this diagnostic artifact; no Gemini
+request or diagnostic enrollment occurred in this build's live test.
+
+The fresh V44 normal ChatGPT Instant browser task **failed** after 318.508 s.
+Its first website inference passed full model/ownership verification and issued
+one successful `browser_open`. The second inference remained pending until its
+original five-minute deadline. A fresh abort-only page read then found two user
+bodies, one assistant body and visible Stop, with no second answer or Retry.
+This establishes that the website itself still lacked a second answer at the
+deadline; a missed notification alone cannot explain the result. It does not
+establish the HTTP outcome, network cause or a repaired request path. Resource
+Timing contained no attributable conversation observations, whose absence is
+inconclusive. No Send, refresh or challenge action was repeated.
+
+The code task remained held without Send. The exact native receipt and fresh app
+observation confirmed automatic disposal of the one task-created browser tab;
+the existing human tab was preserved. The separate website cleanup receipt
+recorded closed. Automatic disposal is not the requested model-issued close and
+does not change the failed qualification. The fixture server stopped, with its
+exact process and port verified absent. The finite deadline diagnostic SHA is
+`08bc80f5fee2b1119506dc5cc4a8e7ef10cd646511b00b345aa41979b84c5e37`.
 
 An additional ordinary, unpaused ChatGPT Instant control sent one synthetic
 55,369-unit message and returned its exact marker. Completion was observed
@@ -28,15 +51,15 @@ tab closed, and the prior approved Inspector settings remain restored off.
 Google's fresh ordinary-tab CAPTCHA control below remains an unresolved
 external blocker; no permanent CAPTCHA or ChatGPT request-path fix is claimed.
 
-## Installed build124: current qualification
+## Historical installed build124 qualification
 
 Computa 0.7.0 (124), compiled from
-`c4c973afd40453eedadeb7eb2580d5d68100eced`, is installed. All 54 installed
+`c4c973afd40453eedadeb7eb2580d5d68100eced`, was installed. All 54 installed
 bundle files match its signed candidate; the 614 frozen inputs, exact resources,
 signature and unchanged engine were checked separately. Its explicit diagnostic
 compiler flag was observed both in compilation and in the live enrollment below.
-The later cleanup source changes described below are versioned as build125 and
-are not installed.
+The later cleanup source changes described below were versioned as build125;
+they are included in the installed126 artifact above.
 
 | Fresh installed124 case | Native time | Result |
 | --- | ---: | --- |
