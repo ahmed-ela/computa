@@ -18,6 +18,192 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }
         XCTAssertFalse(browser.installModelRequestMetadata(try arm.lease(), tabID: human))
         XCTAssertTrue(try XCTUnwrap(browser.webView(for: human)).configuration.userContentController.userScripts.isEmpty)
+        let decodedArm = try RequestMetadataIntegrationArm(); defer { decodedArm.remove() }
+        XCTAssertFalse(browser.installModelRequestMetadata(try decodedArm.lease(decoded: true), tabID: human))
+        XCTAssertTrue(try XCTUnwrap(browser.webView(for: human)).configuration.userContentController.userScripts.isEmpty)
+    }
+
+    func testOnlyExplicitDecodedPurposeAddsTheOptInConfigurationKey() throws {
+        for decoded in [false, true] {
+            let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }
+            let browser = EmbeddedBrowserSession(persistent: false); defer { browser.shutdown() }
+            let id = try browser.createUnloadedModelTabForTesting()
+            let view = try XCTUnwrap(browser.webView(for: id))
+            XCTAssertTrue(browser.installModelRequestMetadata(try arm.lease(decoded: decoded), tabID: id))
+            let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first).source
+            let config = try injectedConfiguration(source)
+            XCTAssertEqual(Set(config.keys), decoded ? ["key", "durationMs", "captureDecodedEvents"] : ["key", "durationMs"])
+            if decoded { XCTAssertEqual(config["captureDecodedEvents"] as? Bool, true) }
+            else { XCTAssertNil(config["captureDecodedEvents"]) }
+            for nativeID in [arm.task, arm.thread, arm.turn, arm.preparation] {
+                XCTAssertFalse(source.contains(nativeID.uuidString.lowercased()))
+            }
+        }
+    }
+
+    func testAsyncDiagnosticHookIsAwaitedButCannotUpgradeOrDowngradeTheLeaseMode() async throws {
+        for decoded in [false, true] {
+            let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }
+            let browser = EmbeddedBrowserSession(persistent: false); defer { browser.shutdown() }
+            let id = try browser.createUnloadedModelTabForTesting()
+            let view = try XCTUnwrap(browser.webView(for: id))
+            XCTAssertTrue(browser.installModelRequestMetadata(try arm.lease(decoded: decoded), tabID: id))
+            let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first).source
+            let key = try XCTUnwrap(injectedConfiguration(source)["key"] as? String)
+            let token = UUID().uuidString
+            try browser.installModelChangeSignal(tabID: id, ownerToken: token, world: .world(name: "metadata-browser-test"))
+            view.loadHTMLString("<!doctype html><title>Local metadata fixture</title>", baseURL: URL(string: "https://chatgpt.com/"))
+            try await ready(view)
+            func replaceHook(decodedMode: Bool) async throws {
+                var snapshot: [String: Any] = ["schemaVersion": decodedMode ? 2 : 1, "active": true, "expired": false, "rows": []]
+                if decodedMode {
+                    snapshot["decoder"] = ["state": "installed", "completionCalls": 0, "programObservations": 0,
+                                           "recoveredNullObservations": 0, "lastProgram": NSNull()]
+                }
+                _ = try await view.callAsyncJavaScript("""
+                    Object.defineProperty(window, key, {configurable:true, value:async function() {
+                      await Promise.resolve(); return snapshot;
+                    }}); return true;
+                    """, arguments: ["key": key, "snapshot": snapshot], in: nil, contentWorld: .page)
+            }
+            try await replaceHook(decodedMode: !decoded)
+            let crossed = await browser.modelRequestMetadata(command: "activate", tabID: id, view: view, ownerToken: token)
+            XCTAssertNil(crossed, "A finite page snapshot still cannot change the explicitly armed capture mode")
+            try await replaceHook(decodedMode: decoded)
+            let matching = await browser.modelRequestMetadata(command: "snapshot", tabID: id, view: view, ownerToken: token)
+            XCTAssertEqual(try XCTUnwrap(matching).schemaVersion, decoded ? 2 : 1)
+            XCTAssertTrue(try XCTUnwrap(matching).active, "The bridge must await an asynchronous hook before serialization")
+            browser.closeTab(id)
+        }
+    }
+
+    func testLateDecodedActivationIsUnknownAndDoesNotCloseTheOrdinaryOwnedView() async throws {
+        let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }
+        let lease = try arm.lease(decoded: true)
+        let browser = EmbeddedBrowserSession(persistent: false); defer { browser.shutdown() }
+        let human = try browser.createTab()
+        let id = try browser.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(browser.webView(for: id))
+        XCTAssertTrue(browser.installModelRequestMetadata(lease, tabID: id))
+        let source = try XCTUnwrap(view.configuration.userContentController.userScripts.first).source
+        let key = try XCTUnwrap(injectedConfiguration(source)["key"] as? String)
+        let token = UUID().uuidString
+        try browser.installModelChangeSignal(tabID: id, ownerToken: token, world: .world(name: "metadata-browser-test"))
+        view.loadHTMLString("<!doctype html><title>Local metadata fixture</title>", baseURL: URL(string: "https://chatgpt.com/"))
+        try await ready(view)
+        _ = try await view.callAsyncJavaScript("""
+            Object.defineProperty(window, key, {configurable:true, value:async function() {
+              await new Promise(resolve => setTimeout(resolve, 1100));
+              return {schemaVersion:2,active:true,expired:false,rows:[],decoder:{state:'installed',
+                completionCalls:0,programObservations:0,recoveredNullObservations:0,lastProgram:null}};
+            }}); return true;
+            """, arguments: ["key": key], in: nil, contentWorld: .page)
+        let late = await browser.modelRequestMetadata(command: "activate", tabID: id, view: view, ownerToken: token)
+        XCTAssertNil(late, "A late observation cannot establish activation within the existing one-second budget")
+        XCTAssertTrue(browser.webView(for: id) === view, "The diagnostic read itself cannot close or replay ordinary model work")
+        XCTAssertTrue(lease.isCurrent)
+        XCTAssertEqual(browser.selectedTabID, human)
+        browser.closeTab(id)
+    }
+
+    func testProductionDecodedObserverImportsLocalESMAndRestoresTheActualClassDescriptor() async throws {
+        let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }
+        let browser = EmbeddedBrowserSession(persistent: false); defer { browser.shutdown() }
+        let human = try browser.createTab()
+        let id = try browser.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(browser.webView(for: id))
+        XCTAssertTrue(browser.installModelRequestMetadata(try arm.lease(decoded: true), tabID: id))
+        let controller = view.configuration.userContentController
+        let installed = try XCTUnwrap(controller.userScripts.first)
+        // Match the version-pinned minified method and namespace getter in a
+        // real WebKit ESM namespace. Only the import URL changes in production JS.
+        let module = """
+            const T={safeParse(e){window.localOriginalCalls++;return{success:true,data:{type:"message_stream_complete"}}}};
+            class O{
+            recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}
+            }
+            const exports={};Object.defineProperty(exports,'c',{enumerable:true,get:()=>O});
+            function __webpack_require__(){window.localRequireCalls++;throw new Error('No fixture factory may run');}
+            __webpack_require__.c={dd:{exports}};
+            window.localOriginalCalls=0;window.localRequireCalls=0;window.localDecoder=O;
+            window.localOriginalDescriptor=Object.getOwnPropertyDescriptor(O.prototype,'recordCompletion');
+            export {__webpack_require__};
+            """
+        let runtimeURL = "https://chatgpt.com/cdn/assets/633146.1f9c264032.js"
+        XCTAssertEqual(installed.source.components(separatedBy: runtimeURL).count, 2)
+        let moduleURL = "data:text/javascript;base64," + Data(module.utf8).base64EncodedString()
+        let localSource = installed.source.replacingOccurrences(of: runtimeURL, with: moduleURL)
+        controller.removeAllUserScripts()
+        controller.addUserScript(WKUserScript(source: localSource, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))
+        let token = UUID().uuidString
+        try browser.installModelChangeSignal(tabID: id, ownerToken: token, world: .world(name: "metadata-browser-test"))
+        let conversation = "00000000-0000-4000-8000-000000000001"
+        view.loadHTMLString("<!doctype html><title>Local metadata fixture</title>",
+                            baseURL: URL(string: "https://chatgpt.com/c/" + conversation))
+        try await ready(view)
+        let importedBeforeActivation = try await view.evaluateJavaScript("typeof window.localDecoder !== 'undefined'")
+        XCTAssertEqual(importedBeforeActivation as? Bool, false, "Installation cannot import or initialize a decoder")
+        let activationResult = await browser.modelRequestMetadata(command: "activate", tabID: id, view: view, ownerToken: token)
+        let activated = try XCTUnwrap(activationResult)
+        XCTAssertTrue(activated.active, "The actual ESM import and prototype checks must finish before native activation succeeds")
+        XCTAssertEqual(activated.schemaVersion, 2)
+        let initial = try XCTUnwrap(JSONSerialization.jsonObject(with: activated.encodedData) as? [String: Any])
+        XCTAssertEqual((initial["decoder"] as? [String: Any])?["state"] as? String, "installed")
+        let knownNull = #"DIL.render(__dil.jsx(()=>{const __dilConstants=DIL.useConstants();const __dilModelDataBindings=DIL.useAppData((appData)=>appData.opGenui?.modelDataBindings??{});return null;},{"key":"body:0"}));"#
+        XCTAssertEqual(knownNull.utf16.count, 194)
+        let facts = try await view.callAsyncJavaScript("""
+            const payload={conversation_id:conversation,message:{author:{role:'assistant'},status:'finished_successfully',
+              content:{parts:['PRIVATE_MESSAGE']},metadata:{model_dil_v2:{code,
+                constants:{PRIVATE_CONSTANT:'PRIVATE'},appData:{PRIVATE_APP_DATA:'PRIVATE'},fallbackMarkdown:'',
+                recoveryDiagnostics:[{code:'unterminated_braced_value',action:'recovered_parse',line:1,column:1}]}}}};
+            const instance=new window.localDecoder();
+            const result=Reflect.apply(instance.recordCompletion,instance,[payload,'PRIVATE_ARGUMENT']);
+            const current=Object.getOwnPropertyDescriptor(window.localDecoder.prototype,'recordCompletion');
+            return {sameResult:result===payload,completed:instance.messageStreamCompleted===true,
+              calls:window.localOriginalCalls,requires:window.localRequireCalls,wrapped:current.value!==window.localOriginalDescriptor.value,
+              writable:current.writable,configurable:current.configurable,enumerable:current.enumerable};
+            """, arguments: ["code": knownNull, "conversation": conversation], in: nil, contentWorld: .page) as? [String: Any]
+        XCTAssertEqual(facts?["sameResult"] as? Bool, true)
+        XCTAssertEqual(facts?["completed"] as? Bool, true, "The original receiver and result are preserved")
+        XCTAssertEqual(facts?["calls"] as? Int, 1); XCTAssertEqual(facts?["requires"] as? Int, 0)
+        XCTAssertEqual(facts?["wrapped"] as? Bool, true)
+        XCTAssertEqual(facts?["writable"] as? Bool, true); XCTAssertEqual(facts?["configurable"] as? Bool, true)
+        XCTAssertEqual(facts?["enumerable"] as? Bool, false)
+        let snapshotResult = await browser.modelRequestMetadata(command: "snapshot", tabID: id, view: view, ownerToken: token)
+        let snapshot = try XCTUnwrap(snapshotResult)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: snapshot.encodedData) as? [String: Any])
+        let decoder = try XCTUnwrap(object["decoder"] as? [String: Any])
+        XCTAssertEqual(snapshot.rowCount, 0, "No fetch, provider request or native Send is involved")
+        XCTAssertEqual(decoder["completionCalls"] as? Int, 1)
+        XCTAssertEqual(decoder["programObservations"] as? Int, 1)
+        XCTAssertEqual(decoder["recoveredNullObservations"] as? Int, 1)
+        let program = try XCTUnwrap(decoder["lastProgram"] as? [String: Any])
+        XCTAssertEqual(program["carrier"] as? String, "message")
+        XCTAssertEqual(program["messageStatus"] as? String, "finished_successfully")
+        XCTAssertEqual(program["codeLength"] as? Int, 194)
+        XCTAssertEqual(program["knownNullProgram"] as? Bool, true)
+        XCTAssertEqual(program["emptyFallbackMarkdown"] as? Bool, true)
+        XCTAssertEqual(program["conversationMatchesDocument"] as? Bool, true)
+        XCTAssertEqual(program["recovery"] as? String, "unterminated_braced_value_recovered_parse")
+        XCTAssertEqual(program["recoveryLine"] as? Int, 1); XCTAssertEqual(program["recoveryColumn"] as? Int, 1)
+        let serialized = String(decoding: snapshot.encodedData, as: UTF8.self)
+        for privateValue in ["PRIVATE", knownNull, conversation] { XCTAssertFalse(serialized.contains(privateValue)) }
+        let stopResult = await browser.modelRequestMetadata(command: "stop", tabID: id, view: view, ownerToken: token)
+        let stopped = try XCTUnwrap(stopResult)
+        XCTAssertFalse(stopped.active)
+        let stoppedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: stopped.encodedData) as? [String: Any])
+        XCTAssertEqual((stoppedObject["decoder"] as? [String: Any])?["state"] as? String, "restored")
+        let restored = try await view.evaluateJavaScript("""
+            (()=>{const now=Object.getOwnPropertyDescriptor(window.localDecoder.prototype,'recordCompletion'),old=window.localOriginalDescriptor;
+              return now.value===old.value&&now.writable===old.writable&&now.configurable===old.configurable&&now.enumerable===old.enumerable
+                &&!Object.getOwnPropertyNames(window).some(key=>/^__computaRequestMetadata_[a-f0-9]{32}$/.test(key));})()
+            """)
+        XCTAssertEqual(restored as? Bool, true, "Stopping restores the exact original class descriptor and removes the hook")
+        // The fixture substituted a new WKUserScript identity, so remove that
+        // local clone explicitly after production stop has restored the class.
+        controller.removeAllUserScripts()
+        XCTAssertEqual(browser.selectedTabID, human)
+        browser.closeTab(id)
     }
 
     func testDocumentStartObserverActivatesOnlyByExactNativeViewOwnerAndStopsBeforeCleanup() async throws {
@@ -183,6 +369,12 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
         XCTFail("The entirely in-memory WebKit fixture did not load")
     }
 
+    private func injectedConfiguration(_ source: String) throws -> [String: Any] {
+        let start = try XCTUnwrap(source.range(of: "const config = ")).upperBound
+        let end = try XCTUnwrap(source[start...].firstIndex(of: ";"))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(source[start..<end].utf8)) as? [String: Any])
+    }
+
     private func cookie(domain: String = "chatgpt.com", path: String = "/", name: String, value: String,
                         secure: Bool = false) throws -> HTTPCookie {
         var properties: [HTTPCookiePropertyKey: Any] = [.domain: domain, .path: path, .name: name, .value: value]
@@ -192,6 +384,59 @@ final class ChatGPTRequestMetadataBrowserTests: XCTestCase {
 }
 
 final class ChatGPTRequestMetadataServerTests: XCTestCase {
+    func testUnavailableDecodedActivationStopsAndPersistsBeforeCleanupWithoutSendWhileV1Continues() async throws {
+        for decoded in [false, true] {
+            let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }; try arm.arm(decoded: decoded)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: arm.root.appendingPathComponent("WebsiteReplyDiagnostics-v1"))
+            let transport = MetadataIntegrationTransport(activationSucceeds: false)
+            await server.configureEmbeddedTransport(transport)
+            do {
+                _ = try await server.fixtureInfer(arm.request(), taskID: arm.task.uuidString,
+                    threadID: arm.thread.uuidString, turnID: arm.turn.uuidString, preparationID: arm.preparation)
+                XCTAssertFalse(decoded)
+            } catch {
+                XCTAssertTrue(decoded)
+                guard let failure = error as? WebModelServer.Failure, case .requestMetadataUnavailable = failure else {
+                    return XCTFail("Expected the explicitly armed diagnostic-unavailable error")
+                }
+                XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "request_metadata_unavailable")
+                XCTAssertTrue(error.localizedDescription.contains("not submitted"))
+            }
+            let beforeFinish = await transport.events()
+            XCTAssertEqual(beforeFinish.filter { $0 == "metadata_activate" }.count, 1)
+            XCTAssertEqual(beforeFinish.filter { $0 == "webProviderSend" }.count, decoded ? 0 : 1)
+            XCTAssertEqual(beforeFinish.filter { $0 == "metadata_stop" }.count, 1)
+            let cleanup = try XCTUnwrap(beforeFinish.firstIndex(where: { ["webProviderFinish", "webProviderCancel"].contains($0) }))
+            XCTAssertLessThan(try XCTUnwrap(beforeFinish.firstIndex(of: "metadata_stop")), cleanup)
+            XCTAssertEqual(beforeFinish.filter { ["webProviderFinish", "webProviderCancel"].contains($0) }.count, 1)
+            let sidecars = try FileManager.default.contentsOfDirectory(atPath: arm.directory.path).filter { $0.hasPrefix("request-metadata-") }
+            XCTAssertEqual(sidecars.count, 1)
+            let sidecar = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: arm.directory.appendingPathComponent(try XCTUnwrap(sidecars.first)))) as? [String: Any])
+            XCTAssertEqual(sidecar["purpose"] as? String, decoded ? "request_and_decoded_metadata_v2" : "request_metadata_v1")
+            if decoded {
+                let diagnostic = try XCTUnwrap(sidecar["diagnostic"] as? [String: Any])
+                XCTAssertEqual((diagnostic["decoder"] as? [String: Any])?["state"] as? String, "unavailable")
+            }
+            _ = await server.fixtureFinish(taskID: arm.task.uuidString)
+            let finalEvents = await transport.events()
+            XCTAssertEqual(finalEvents.filter { $0 == "webProviderSend" }.count, decoded ? 0 : 1, "Cleanup cannot replay the prompt")
+        }
+    }
+
+    func testDecodedActivationSucceedsBeforeTheOnlySendAndPersistsItsMode() async throws {
+        let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }; try arm.arm(decoded: true)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+            rejectedReplyDirectory: arm.root.appendingPathComponent("WebsiteReplyDiagnostics-v1"))
+        let transport = MetadataIntegrationTransport()
+        await server.configureEmbeddedTransport(transport)
+        _ = try await server.fixtureInfer(arm.request(), taskID: arm.task.uuidString,
+            threadID: arm.thread.uuidString, turnID: arm.turn.uuidString, preparationID: arm.preparation)
+        let events = await transport.events()
+        XCTAssertEqual(events.filter { $0 == "webProviderSend" }.count, 1)
+        XCTAssertLessThan(try XCTUnwrap(events.firstIndex(of: "metadata_activate")), try XCTUnwrap(events.firstIndex(of: "webProviderSend")))
+        XCTAssertLessThan(try XCTUnwrap(events.firstIndex(of: "metadata_stop")), try XCTUnwrap(events.firstIndex(of: "webProviderFinish")))
+    }
     func testSameTurnToolContinuationKeepsOneCaptureClockUntilFinalOrSecondRoundFailure() async throws {
         for fails in [false, true] {
             let arm = try RequestMetadataIntegrationArm(); defer { arm.remove() }; try arm.arm()
@@ -319,16 +564,16 @@ private final class RequestMetadataIntegrationArm {
         directory = root.appendingPathComponent("WebsiteRequestMetadataDiagnostics-v1")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
-    func arm(expiresIn: TimeInterval = 60) throws {
+    func arm(expiresIn: TimeInterval = 60, decoded: Bool = false) throws {
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
         let data = try JSONSerialization.data(withJSONObject: ["taskID": task.uuidString.lowercased(), "threadID": thread.uuidString.lowercased(),
-            "provider": "chatgpt", "purpose": "request_metadata_v1", "expiresAt": formatter.string(from: Date().addingTimeInterval(expiresIn))])
+            "provider": "chatgpt", "purpose": decoded ? "request_and_decoded_metadata_v2" : "request_metadata_v1", "expiresAt": formatter.string(from: Date().addingTimeInterval(expiresIn))])
         let path = directory.appendingPathComponent("arm.json"); try data.write(to: path)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
     }
-    func lease(expiresIn: TimeInterval = 60) throws -> ChatGPTRequestMetadataLease {
-        try arm(expiresIn: expiresIn)
+    func lease(expiresIn: TimeInterval = 60, decoded: Bool = false) throws -> ChatGPTRequestMetadataLease {
+        try arm(expiresIn: expiresIn, decoded: decoded)
         return try XCTUnwrap(ChatGPTRequestMetadataLease.consume(directory: directory, taskID: task, threadID: thread, turnID: turn, preparationID: preparation))
     }
     func request(input: [[String: Any]]? = nil, tools: Bool = false) throws -> Data {
@@ -346,12 +591,14 @@ private actor MetadataIntegrationTransport: WebModelTransport {
     let base: WebsiteInferenceFixtureTransport
     let failsOnSequence: Int?
     let turnScoped: Bool
+    let activationSucceeds: Bool
     private var sends = 0
     private var fingerprint = ""
     private var authorization: ChatGPTRequestMetadataLease?
     private var ledger: [String] = []
-    init(fails: Bool = false, failsOnSequence: Int? = nil, toolFirst: Bool = false) {
+    init(fails: Bool = false, failsOnSequence: Int? = nil, toolFirst: Bool = false, activationSucceeds: Bool = true) {
         self.failsOnSequence = failsOnSequence ?? (fails ? 1 : nil); turnScoped = toolFirst
+        self.activationSucceeds = activationSucceeds
         base = WebsiteInferenceFixtureTransport(MetadataWireTransport(toolFirst: toolFirst), defaultChatChoice: syntheticChatGPTChoice)
     }
     func events() -> [String] { ledger }
@@ -377,16 +624,25 @@ private actor MetadataIntegrationTransport: WebModelTransport {
         ledger.append("metadata_start"); XCTAssertTrue(authorization.isCurrent); self.authorization = authorization
         return try await request(operation: "webProviderStart", params: params)
     }
-    func activateRequestMetadata(sessionToken: String) async -> Bool { ledger.append("metadata_activate"); return true }
+    func activateRequestMetadata(sessionToken: String) async -> Bool { ledger.append("metadata_activate"); return activationSucceeds }
     func snapshotRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot? {
         ledger.append("metadata_snapshot")
-        return try? ChatGPTRequestMetadataSnapshot.parse(Data("{\"schemaVersion\":1,\"active\":true,\"expired\":false,\"rows\":[]}".utf8))
+        return metadataSnapshot(active: activationSucceeds)
     }
     func stopRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot? {
         ledger.append("metadata_stop")
-        return try? ChatGPTRequestMetadataSnapshot.parse(Data("{\"schemaVersion\":1,\"active\":false,\"expired\":false,\"rows\":[]}".utf8))
+        return metadataSnapshot(active: false)
     }
     func revokeRequestMetadata(sessionToken: String) async { ledger.append("metadata_revoke") }
+    private func metadataSnapshot(active: Bool) -> ChatGPTRequestMetadataSnapshot? {
+        let decoded = authorization?.capturesDecodedEvents == true
+        var value: [String: Any] = ["schemaVersion": decoded ? 2 : 1, "active": active, "expired": false, "rows": []]
+        if decoded {
+            value["decoder"] = ["state": activationSucceeds ? "restored" : "unavailable", "completionCalls": 0,
+                                "programObservations": 0, "recoveredNullObservations": 0, "lastProgram": NSNull()]
+        }
+        return (try? JSONSerialization.data(withJSONObject: value)).flatMap { try? ChatGPTRequestMetadataSnapshot.parse($0) }
+    }
 }
 
 private actor MetadataWireTransport: WebModelTransport {

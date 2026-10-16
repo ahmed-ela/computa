@@ -9,12 +9,15 @@ final class ChatGPTRequestMetadataLease: @unchecked Sendable {
     private let taskID: UUID, threadID: UUID, turnID: UUID, preparationID: UUID
     private let directory: URL
     private let deadline: ContinuousClock.Instant
+    let capturesDecodedEvents: Bool
     private var current = true
     private var claimedView: ObjectIdentifier?
 
-    private init(taskID: UUID, threadID: UUID, turnID: UUID, preparationID: UUID, directory: URL, deadline: ContinuousClock.Instant) {
+    private init(taskID: UUID, threadID: UUID, turnID: UUID, preparationID: UUID, directory: URL,
+                 deadline: ContinuousClock.Instant, capturesDecodedEvents: Bool) {
         self.taskID = taskID; self.threadID = threadID; self.turnID = turnID
         self.preparationID = preparationID; self.directory = directory; self.deadline = deadline
+        self.capturesDecodedEvents = capturesDecodedEvents
     }
     var isCurrent: Bool { lock.withLock { current && ContinuousClock.now < deadline } }
     var remainingMilliseconds: Int {
@@ -40,9 +43,11 @@ final class ChatGPTRequestMetadataLease: @unchecked Sendable {
     /// Its values cannot release a model
     /// response, qualify a request, grant an action, or change the original error.
     func persist(_ snapshot: ChatGPTRequestMetadataSnapshot, inferenceID: UUID, sessionToken: UUID) -> Bool {
-        guard isCurrent, let diagnostic = try? JSONSerialization.jsonObject(with: snapshot.encodedData),
+        guard isCurrent, snapshot.schemaVersion == (capturesDecodedEvents ? 2 : 1),
+              let diagnostic = try? JSONSerialization.jsonObject(with: snapshot.encodedData),
               let bytes = try? JSONSerialization.data(withJSONObject: [
-                "schemaVersion": 1, "purpose": "request_metadata_v1", "provider": "chatgpt",
+                "schemaVersion": 1,
+                "purpose": capturesDecodedEvents ? "request_and_decoded_metadata_v2" : "request_metadata_v1", "provider": "chatgpt",
                 "evidenceClass": "page_world_untrusted", "instrumented": true,
                 "taskID": taskID.uuidString.lowercased(), "threadID": threadID.uuidString.lowercased(),
                 "turnID": turnID.uuidString.lowercased(), "preparationID": preparationID.uuidString.lowercased(),
@@ -99,7 +104,9 @@ final class ChatGPTRequestMetadataLease: @unchecked Sendable {
               let value = try? JSONSerialization.jsonObject(with: bytes) as? [String: String],
               Set(value.keys) == ["taskID", "threadID", "provider", "purpose", "expiresAt"],
               value["taskID"] == taskID.uuidString.lowercased(), value["threadID"] == threadID.uuidString.lowercased(),
-              value["provider"] == "chatgpt", value["purpose"] == "request_metadata_v1", let text = value["expiresAt"], text.utf8.count == 24 else { return nil }
+              value["provider"] == "chatgpt", let purpose = value["purpose"],
+              ["request_metadata_v1", "request_and_decoded_metadata_v2"].contains(purpose),
+              let text = value["expiresAt"], text.utf8.count == 24 else { return nil }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.isLenient = false
@@ -129,7 +136,8 @@ final class ChatGPTRequestMetadataLease: @unchecked Sendable {
         // Preserve the original monotonic bound across all file operations.
         guard !Task.isCancelled, ContinuousClock.now < originalDeadline else { return nil }
         return ChatGPTRequestMetadataLease(taskID: taskID, threadID: threadID, turnID: turnID,
-            preparationID: preparationID, directory: directory, deadline: originalDeadline)
+            preparationID: preparationID, directory: directory, deadline: originalDeadline,
+            capturesDecodedEvents: purpose == "request_and_decoded_metadata_v2")
     }
 
     private static func openDirectoryWithoutSymlinks(_ url: URL) -> Int32 {
@@ -191,6 +199,7 @@ final class ChatGPTRequestMetadataLease: @unchecked Sendable {
 struct ChatGPTRequestMetadataSnapshot: Sendable {
     enum Failure: Error { case invalid }
     let encodedData: Data
+    let schemaVersion: Int
     let active: Bool
     let expired: Bool
     let rowCount: Int
@@ -199,14 +208,17 @@ struct ChatGPTRequestMetadataSnapshot: Sendable {
     let profileCookieBudget: ChatGPTProfileCookieBudget?
 
     func attachingProfileCookieBudget(_ budget: ChatGPTProfileCookieBudget?) -> Self {
-        Self(encodedData: encodedData, active: active, expired: expired, rowCount: rowCount, profileCookieBudget: budget)
+        Self(encodedData: encodedData, schemaVersion: schemaVersion, active: active, expired: expired,
+             rowCount: rowCount, profileCookieBudget: budget)
     }
 
     static func parse(_ data: Data) throws -> Self {
         guard data.count <= 8_192, APIModelCorrectionJSON.isUnambiguous(data),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys) == ["schemaVersion", "active", "expired", "rows"],
-              integer(object["schemaVersion"], in: 1...1) != nil,
+              let version = integer(object["schemaVersion"], in: 1...2),
+              Set(object.keys) == (version == 1 ? ["schemaVersion", "active", "expired", "rows"]
+                                  : ["schemaVersion", "active", "expired", "rows", "decoder"]),
+              (version == 1 || validDecoder(object["decoder"])),
               let active = boolean(object["active"]), let expired = boolean(object["expired"]),
               !(active && expired), let rows = object["rows"] as? [[String: Any]], rows.count <= 8 else { throw Failure.invalid }
         let keys: Set<String> = ["ordinal", "endpoint", "origin", "method", "bodyType", "bodyBytes", "keepalive", "duplex",
@@ -247,7 +259,36 @@ struct ChatGPTRequestMetadataSnapshot: Sendable {
         }
         let encoded = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         guard encoded.count <= 8_192 else { throw Failure.invalid }
-        return Self(encodedData: encoded, active: active, expired: expired, rowCount: rows.count, profileCookieBudget: nil)
+        return Self(encodedData: encoded, schemaVersion: version, active: active, expired: expired,
+                    rowCount: rows.count, profileCookieBudget: nil)
+    }
+    /// This is an untrusted decoder observation, never response/completion or
+    /// ownership evidence. Unknown content is rejected rather than retained.
+    private static func validDecoder(_ value: Any?) -> Bool {
+        guard let object = value as? [String: Any],
+              Set(object.keys) == ["state", "completionCalls", "programObservations", "recoveredNullObservations", "lastProgram"],
+              member(object["state"], ["pending", "unavailable", "installed", "restored", "superseded"]),
+              let calls = integer(object["completionCalls"], in: 0...65_535),
+              let programs = integer(object["programObservations"], in: 0...65_535),
+              let recovered = integer(object["recoveredNullObservations"], in: 0...65_535),
+              recovered <= programs, calls != 0 || programs == 0 else { return false }
+        if programs == 0 { return object["lastProgram"] is NSNull }
+        guard let program = object["lastProgram"] as? [String: Any],
+              Set(program.keys) == ["elapsedMs", "carrier", "messageStatus", "codeLength", "knownNullProgram",
+                                    "emptyFallbackMarkdown", "recovery", "recoveryLine", "recoveryColumn", "conversationMatchesDocument"],
+              milliseconds(program["elapsedMs"]) != nil,
+              member(program["carrier"], ["message", "reference", "reference_patch"]),
+              member(program["messageStatus"], ["in_progress", "finished_successfully", "finished_partial", "other", "unknown"]),
+              program["codeLength"] is NSNull || integer(program["codeLength"], in: 0...1_048_576) != nil,
+              let knownNull = boolean(program["knownNullProgram"]),
+              program["emptyFallbackMarkdown"] is NSNull || boolean(program["emptyFallbackMarkdown"]) != nil,
+              program["conversationMatchesDocument"] is NSNull || boolean(program["conversationMatchesDocument"]) != nil,
+              member(program["recovery"], ["none", "unterminated_braced_value_recovered_parse", "other", "unknown"]),
+              program["recoveryLine"] is NSNull || integer(program["recoveryLine"], in: 1...1_048_576) != nil,
+              program["recoveryColumn"] is NSNull || integer(program["recoveryColumn"], in: 1...1_048_576) != nil,
+              !knownNull || integer(program["codeLength"], in: 194...194) != nil else { return false }
+        return program["recovery"] as? String != "none"
+            || (program["recoveryLine"] is NSNull && program["recoveryColumn"] is NSNull)
     }
     private static func validHeaderMetadata(_ value: Any?) -> Bool {
         if value is NSNull { return true }

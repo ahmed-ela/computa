@@ -13,6 +13,8 @@
   const then = Promise.prototype.then;
   const hasInstance = Function.prototype[Symbol.hasInstance];
   const descriptor = Object.getOwnPropertyDescriptor;
+  const define = Object.defineProperty;
+  const functionSource = Function.prototype.toString;
   const ownKeys = Reflect.ownKeys;
   const prototypeOf = Object.getPrototypeOf;
   const plainPrototype = Object.prototype;
@@ -29,6 +31,13 @@
   const now = performance.now.bind(performance);
   const created = now();
   const rows = [];
+  // A different, explicit native purpose enables this version-pinned diagnostic.
+  // It observes the site's existing decoder, never a response stream or a reply
+  // accepted by Computa. No module factory or protected parser is replaced.
+  const captureDecodedEvents = config.captureDecodedEvents === true;
+  const decoder = { state: 'pending', completionCalls: 0, programObservations: 0,
+    recoveredNullObservations: 0, lastProgram: null };
+  let decoderTarget = null, decoderOriginal = null, decoderWrapper = null, decoderActivation = null;
   let active = false, stopped = false, began = 0;
   const expired = () => now() - created >= config.durationMs;
   const elapsed = () => Math.max(0, Math.min(config.durationMs, now() - began));
@@ -44,6 +53,124 @@
       const prototype = prototypeOf(object);
       return prototype === plainPrototype || prototype === null ? undefined : unknown;
     } catch { return unknown; }
+  }
+  const nullProgram = 'DIL.render(__dil.jsx(()=>{const __dilConstants=DIL.useConstants();const __dilModelDataBindings=DIL.useAppData((appData)=>appData.opGenui?.modelDataBindings??{});return null;},{"key":"body:0"}));';
+  const completionSource = 'recordCompletion(e){let t=T.safeParse(e);return t.success&&"message_stream_complete"===t.data.type&&(this.messageStreamCompleted=!0),e}';
+  const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+  const conversationID = new RegExp('^' + uuid + '$');
+  const conversationPath = new RegExp('^/c/(' + uuid + ')/?$');
+  function conversationMatchesDocument(payload) {
+    const id = data(payload, 'conversation_id');
+    if (typeof id !== 'string' || !conversationID.test(id)) return null;
+    try {
+      const url = new NativeURL(location.href), match = conversationPath.exec(url.pathname);
+      return url.origin === 'https://chatgpt.com' && match ? match[1] === id : null;
+    } catch { return null; }
+  }
+  function position(value) {
+    return Number.isInteger(value) && value >= 1 && value <= 1048576 ? value : null;
+  }
+  function observeProgram(program, carrier, status, association) {
+    if (program == null || typeof program !== 'object' || program === unknown) return;
+    const code = data(program, 'code'), fallback = data(program, 'fallbackMarkdown');
+    const diagnostics = data(program, 'recoveryDiagnostics');
+    let recovery = 'unknown', line = null, column = null;
+    if (isArray(diagnostics)) {
+      const length = data(diagnostics, 'length');
+      if (length === 0) recovery = 'none';
+      else if (Number.isInteger(length) && length > 0) {
+        recovery = 'other';
+        for (let i = 0; i < Math.min(length, 8); i++) {
+          const item = data(diagnostics, `${i}`);
+          if (data(item, 'code') === 'unterminated_braced_value' && data(item, 'action') === 'recovered_parse') {
+            recovery = 'unterminated_braced_value_recovered_parse';
+            line = position(data(item, 'line')); column = position(data(item, 'column')); break;
+          }
+        }
+      }
+    }
+    const knownNull = code === nullProgram;
+    decoder.programObservations = Math.min(65535, decoder.programObservations + 1);
+    if (knownNull && recovery === 'unterminated_braced_value_recovered_parse')
+      decoder.recoveredNullObservations = Math.min(65535, decoder.recoveredNullObservations + 1);
+    decoder.lastProgram = { elapsedMs: elapsed(), carrier, messageStatus: status,
+      conversationMatchesDocument: association,
+      codeLength: typeof code === 'string' && code.length <= 1048576 ? code.length : null,
+      knownNullProgram: knownNull, emptyFallbackMarkdown: typeof fallback === 'string' ? fallback.length === 0 : null,
+      recovery, recoveryLine: line, recoveryColumn: column };
+  }
+  function observeDecoded(payload) {
+    decoder.completionCalls = Math.min(65535, decoder.completionCalls + 1);
+    const message = data(payload, 'message'), metadata = data(message, 'metadata');
+    const rawStatus = data(message, 'status');
+    const status = ['in_progress', 'finished_successfully', 'finished_partial'].includes(rawStatus) ? rawStatus
+      : typeof rawStatus === 'string' ? 'other' : 'unknown';
+    const association = conversationMatchesDocument(payload);
+    if (data(data(message, 'author'), 'role') === 'assistant') {
+      observeProgram(data(metadata, 'model_dil_v2'), 'message', status, association);
+      const references = data(metadata, 'content_references');
+      if (isArray(references)) observeProgram(data(data(references, '0'), 'model_dil_v2'), 'reference', status, association);
+    }
+    if (data(payload, 'type') === 'content_references_patch') {
+      const patches = data(payload, 'content_references');
+      if (isArray(patches)) observeProgram(data(data(patches, '0'), 'model_dil_v2'), 'reference_patch', 'unknown', association);
+    }
+  }
+  function restoreDecoder() {
+    if (!decoderTarget) {
+      if (decoder.state === 'pending') decoder.state = 'restored';
+      return;
+    }
+    try {
+      const current = descriptor(decoderTarget, 'recordCompletion');
+      if (current && current.value === decoderWrapper && current.writable === true
+        && current.configurable === true && current.enumerable === false) {
+        define(decoderTarget, 'recordCompletion', decoderOriginal);
+        decoder.state = 'restored';
+      } else { decoder.state = 'superseded'; }
+    } catch { decoder.state = 'superseded'; }
+    decoderTarget = null; decoderOriginal = null; decoderWrapper = null;
+  }
+  function activateDecoder() {
+    if (active || stopped || expired()) return snapshot();
+    if (decoderActivation) return decoderActivation;
+    decoderActivation = (async () => {
+      try {
+        // This exact public runtime is already used by the current website.
+        // Read only its initialized cache; never call require or initialize dd.
+        const runtime = await import('https://chatgpt.com/cdn/assets/633146.1f9c264032.js');
+        if (stopped || expired() || descriptor(window, config.key)?.value !== hook) return snapshot();
+        const require = data(runtime, '__webpack_require__');
+        const cached = data(data(require, 'c'), 'dd'), exports = data(cached, 'exports');
+        const exported = exports && exports !== unknown ? descriptor(exports, 'c') : null;
+        if (!exported || typeof exported.get !== 'function' || exported.set !== undefined
+          || exported.enumerable !== true || exported.configurable !== false
+          || call(functionSource, exported.get, []) !== '()=>O') throw unknown;
+        const Decoder = call(exported.get, exports, []), prototype = data(Decoder, 'prototype');
+        const original = prototype && prototype !== unknown ? descriptor(prototype, 'recordCompletion') : null;
+        if (!original || typeof original.value !== 'function' || original.writable !== true
+          || original.configurable !== true || original.enumerable !== false
+          || data(original.value, 'name') !== 'recordCompletion' || data(original.value, 'length') !== 1
+          || call(functionSource, original.value, []) !== completionSource) throw unknown;
+        const wrapped = function (...args) {
+          const result = call(original.value, this, args);
+          try {
+            if (available()) observeDecoded(result);
+            else if (expired()) restoreDecoder();
+          } catch { /* Observations never change a decoded return or throw. */ }
+          return result;
+        };
+        // Cache/export inspection can enter page Proxy traps. Recheck after
+        // that work and immediately before changing the method descriptor.
+        const stillCurrent = descriptor(window, config.key)?.value === hook;
+        if (stopped || !stillCurrent || expired()) return snapshot();
+        define(prototype, 'recordCompletion', { ...original, value: wrapped });
+        decoderTarget = prototype; decoderOriginal = original; decoderWrapper = wrapped;
+        decoder.state = 'installed'; active = true; began = now();
+      } catch { decoder.state = 'unavailable'; }
+      return snapshot();
+    })();
+    return decoderActivation;
   }
   function utf8Size(value) {
     if (value.length > 1048576) return null;
@@ -223,20 +350,27 @@
     return promise;
   }
   function snapshot() {
-    return { schemaVersion: 1, active: available(), expired: expired(), rows: rows.map(row => ({ ...row })) };
+    if (captureDecodedEvents && expired()) restoreDecoder();
+    const value = { schemaVersion: captureDecodedEvents ? 2 : 1, active: available(), expired: expired(),
+      rows: rows.map(row => ({ ...row })) };
+    if (captureDecodedEvents) value.decoder = { ...decoder,
+      lastProgram: decoder.lastProgram ? { ...decoder.lastProgram } : null };
+    return value;
   }
   function hook(command) {
     if (command === 'activate' && !stopped && !expired()) {
+      if (captureDecodedEvents) return activateDecoder();
       if (!active) { active = true; began = now(); }
     } else if (command === 'stop') {
       active = false; stopped = true;
+      if (captureDecodedEvents) restoreDecoder();
       if (window.fetch === observer) window.fetch = original;
       delete window[config.key];
     } else if (command !== 'snapshot') return null;
     return snapshot();
   }
   try {
-    Object.defineProperty(window, config.key, { value: hook, configurable: true });
+    define(window, config.key, { value: hook, configurable: true });
     window.fetch = observer;
     if (window.fetch !== observer) delete window[config.key];
   } catch { if (window.fetch === observer) window.fetch = original; delete window[config.key]; }

@@ -15,6 +15,7 @@ final class ChatGPTRequestMetadataDiagnosticTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.armFile.path))
         XCTAssertNil(fixture.consume())
         XCTAssertTrue(lease.isCurrent)
+        XCTAssertFalse(lease.capturesDecodedEvents)
         XCTAssertGreaterThan(lease.remainingMilliseconds, 0)
         XCTAssertLessThanOrEqual(lease.remainingMilliseconds, 600_000)
         XCTAssertTrue(lease.matches(taskID: fixture.task, threadID: fixture.thread,
@@ -281,6 +282,7 @@ final class ChatGPTRequestMetadataDiagnosticTests: XCTestCase {
         XCTAssertTrue(lease.persist(snapshot, inferenceID: unknownID, sessionToken: UUID()))
         let unknown = try persisted(inferenceID: unknownID, fixture: fixture)
         XCTAssertTrue(unknown["nativeCookieBudget"] is NSNull)
+        XCTAssertEqual(unknown["purpose"] as? String, "request_metadata_v1")
         let budget = try XCTUnwrap(ChatGPTProfileCookieBudget.estimate(cookies: []))
         let attached = snapshot.attachingProfileCookieBudget(budget)
         XCTAssertNotNil(attached.profileCookieBudget)
@@ -292,6 +294,213 @@ final class ChatGPTRequestMetadataDiagnosticTests: XCTestCase {
         XCTAssertEqual((known["nativeCookieBudget"] as? [String: Any])?["cookieCount"] as? Int, 0)
         XCTAssertNil((known["diagnostic"] as? [String: Any])?["nativeCookieBudget"])
         XCTAssertFalse(lease.persist(attached, inferenceID: knownID, sessionToken: UUID()), "Sidecars cannot be overwritten")
+    }
+
+    func testDecodedCaptureRequiresItsExactExplicitPurposeAndCannotCrossPersistModes() throws {
+        let v1 = try MetadataDiagnosticArmFixture(); defer { v1.remove() }
+        try v1.arm()
+        let v1Lease = try XCTUnwrap(v1.consume())
+        let v2 = try MetadataDiagnosticArmFixture(purpose: "request_and_decoded_metadata_v2"); defer { v2.remove() }
+        XCTAssertNil(v2.consume())
+        try v2.arm()
+        XCTAssertNil(v2.consume(isMaintenance: true))
+        let v2Lease = try XCTUnwrap(v2.consume())
+        XCTAssertTrue(v2Lease.capturesDecodedEvents)
+        XCTAssertTrue(v2Lease.matches(taskID: v2.task, threadID: v2.thread, turnID: v2.turn, preparationID: v2.preparation))
+        XCTAssertFalse(v2Lease.matches(taskID: v2.task, threadID: v2.thread, turnID: UUID(), preparationID: v2.preparation))
+        XCTAssertFalse(v2Lease.matches(taskID: v2.task, threadID: v2.thread, turnID: v2.turn, preparationID: UUID()))
+        XCTAssertNil(v2.consume(), "The new purpose has the same one-use claim")
+        let old = try parse(root(rows: [])), decoded = try parse(decodedRoot())
+        XCTAssertFalse(v1Lease.persist(decoded, inferenceID: UUID(), sessionToken: UUID()))
+        XCTAssertFalse(v2Lease.persist(old, inferenceID: UUID(), sessionToken: UUID()))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: v1.directory.path).isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: v2.directory.path).isEmpty)
+        let inference = UUID()
+        XCTAssertTrue(v2Lease.persist(decoded, inferenceID: inference, sessionToken: UUID()))
+        let persisted = try persisted(inferenceID: inference, fixture: v2)
+        XCTAssertEqual(persisted["schemaVersion"] as? Int, 1, "The native wrapper schema remains unchanged")
+        XCTAssertEqual(persisted["purpose"] as? String, "request_and_decoded_metadata_v2")
+        XCTAssertEqual((persisted["diagnostic"] as? [String: Any])?["schemaVersion"] as? Int, 2)
+        XCTAssertTrue(persisted["nativeCookieBudget"] is NSNull)
+        v2Lease.revoke()
+        XCTAssertFalse(v2Lease.isCurrent)
+        XCTAssertFalse(v2Lease.persist(decoded, inferenceID: UUID(), sessionToken: UUID()))
+    }
+
+    func testDecodedPurposeReusesExactScopeExpiryAndPrivateArmGuards() throws {
+        let fixture = try MetadataDiagnosticArmFixture(purpose: "request_and_decoded_metadata_v2"); defer { fixture.remove() }
+        let invalid: [(String, String)] = [
+            ("purpose", "request_and_decoded_metadata_v1"), ("purpose", "request_and_decoded_metadata_v2 "),
+            ("taskID", UUID().uuidString.lowercased()), ("threadID", UUID().uuidString.lowercased()),
+            ("provider", "claude"), ("expiresAt", MetadataDiagnosticArmFixture.timestamp(fixture.now)),
+            ("expiresAt", MetadataDiagnosticArmFixture.timestamp(fixture.now.addingTimeInterval(601))),
+        ]
+        for (field, value) in invalid {
+            try fixture.write(JSONSerialization.data(withJSONObject: fixture.fields().merging([field: value], uniquingKeysWith: { _, v in v })))
+            XCTAssertNil(fixture.consume(), field)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.armFile.path))
+        }
+        let valid = String(decoding: try JSONSerialization.data(withJSONObject: fixture.fields()), as: UTF8.self)
+        try fixture.write(Data(("{\"purpose\":\"request_and_decoded_metadata_v2\"," + valid.dropFirst()).utf8))
+        XCTAssertNil(fixture.consume(), "The new purpose cannot bypass duplicate-key rejection")
+        try fixture.arm()
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.armFile.path)
+        XCTAssertNil(fixture.consume())
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fixture.armFile.path)
+        let linkedDirectory = fixture.root.appendingPathComponent("linked-directory")
+        try FileManager.default.createSymbolicLink(at: linkedDirectory, withDestinationURL: fixture.directory)
+        XCTAssertNil(fixture.consume(directory: linkedDirectory))
+        let hardlink = fixture.root.appendingPathComponent("hardlink")
+        XCTAssertEqual(link(fixture.armFile.path, hardlink.path), 0)
+        XCTAssertNil(fixture.consume())
+        try FileManager.default.removeItem(at: hardlink)
+        XCTAssertNotNil(fixture.consume())
+    }
+
+    func testDecodedLeaseCannotClaimOrPersistAfterItsOriginalDeadline() async throws {
+        let fixture = try MetadataDiagnosticArmFixture(purpose: "request_and_decoded_metadata_v2"); defer { fixture.remove() }
+        var fields = fixture.fields()
+        fields["expiresAt"] = MetadataDiagnosticArmFixture.timestamp(fixture.now.addingTimeInterval(1))
+        try fixture.write(JSONSerialization.data(withJSONObject: fields))
+        let lease = try XCTUnwrap(fixture.consume())
+        try await Task.sleep(for: .milliseconds(1_100))
+        XCTAssertFalse(lease.isCurrent)
+        XCTAssertEqual(lease.remainingMilliseconds, 0)
+        XCTAssertFalse(lease.claim(view: ObjectIdentifier(fixture)))
+        XCTAssertFalse(lease.matches(taskID: fixture.task, threadID: fixture.thread, turnID: fixture.turn, preparationID: fixture.preparation))
+        XCTAssertFalse(lease.persist(try parse(decodedRoot()), inferenceID: UUID(), sessionToken: UUID()))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).isEmpty)
+    }
+
+    func testDecodedSnapshotRoundTripsFiniteStatesProgramsAndExplicitUnknowns() throws {
+        for state in ["pending", "unavailable", "installed", "restored", "superseded"] {
+            let snapshot = try parse(decodedRoot(decoder: decoder().merging(["state": state], uniquingKeysWith: { _, v in v })))
+            XCTAssertEqual(snapshot.schemaVersion, 2)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: snapshot.encodedData) as? [String: Any])
+            XCTAssertEqual(Set(object.keys), ["schemaVersion", "active", "expired", "rows", "decoder"])
+            XCTAssertEqual((object["decoder"] as? [String: Any])?["state"] as? String, state)
+            XCTAssertLessThanOrEqual(snapshot.encodedData.count, 8_192)
+        }
+        for carrier in ["message", "reference", "reference_patch"] {
+            for status in ["in_progress", "finished_successfully", "finished_partial", "other", "unknown"] {
+                var program = lastProgram(); program["carrier"] = carrier; program["messageStatus"] = status
+                let snapshot = try parse(decodedRoot(decoder: decoder(program: program)))
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: snapshot.encodedData) as? [String: Any])
+                let observed = try XCTUnwrap((object["decoder"] as? [String: Any])?["lastProgram"] as? [String: Any])
+                XCTAssertEqual(observed["carrier"] as? String, carrier)
+                XCTAssertEqual(observed["messageStatus"] as? String, status)
+                XCTAssertEqual(observed["codeLength"] as? Int, 194)
+            }
+        }
+        var unknown = lastProgram()
+        unknown["codeLength"] = NSNull(); unknown["knownNullProgram"] = false
+        unknown["emptyFallbackMarkdown"] = NSNull(); unknown["recovery"] = "unknown"
+        unknown["recoveryLine"] = NSNull(); unknown["recoveryColumn"] = NSNull()
+        XCTAssertNoThrow(try parse(decodedRoot(decoder: decoder(program: unknown))))
+        for matches in [true, false] {
+            var program = lastProgram(); program["conversationMatchesDocument"] = matches
+            XCTAssertNoThrow(try parse(decodedRoot(decoder: decoder(program: program))))
+        }
+        var none = unknown; none["recovery"] = "none"
+        XCTAssertNoThrow(try parse(decodedRoot(decoder: decoder(program: none))))
+        XCTAssertEqual(try parse(root(rows: [])).schemaVersion, 1)
+        var v1WithDecoder = root(rows: []); v1WithDecoder["decoder"] = decoder()
+        XCTAssertThrowsError(try parse(v1WithDecoder), "v1 has exactly its original four keys")
+    }
+
+    func testDecodedSnapshotRejectsPrivateMissingDuplicateAndOversizedContent() throws {
+        for field in ["code", "fallback", "text", "messageID", "conversationID", "url", "headers", "responseBody"] {
+            for level in ["root", "decoder", "program"] {
+                var object = decodedRoot(), capture = decoder(program: lastProgram()), program = lastProgram()
+                if level == "root" { object[field] = "PRIVATE_DECODED_CONTENT" }
+                if level == "decoder" { capture[field] = "PRIVATE_DECODED_CONTENT" }
+                if level == "program" { program[field] = "PRIVATE_DECODED_CONTENT"; capture["lastProgram"] = program }
+                if level != "root" { object["decoder"] = capture }
+                do { _ = try parse(object); XCTFail("Unexpected decoded content accepted") }
+                catch { XCTAssertFalse(String(describing: error).contains("PRIVATE_DECODED_CONTENT")) }
+            }
+        }
+        for key in decoder().keys {
+            var value = decoder(); value.removeValue(forKey: key)
+            XCTAssertThrowsError(try parse(decodedRoot(decoder: value)), key)
+        }
+        for key in lastProgram().keys {
+            var value = lastProgram(); value.removeValue(forKey: key)
+            XCTAssertThrowsError(try parse(decodedRoot(decoder: decoder(program: value))), key)
+        }
+        let valid = String(decoding: try JSONSerialization.data(withJSONObject: decodedRoot(decoder: decoder(program: lastProgram())), options: [.sortedKeys]), as: UTF8.self)
+        for (needle, replacement) in [("\"state\":\"installed\"", "\"state\":\"installed\",\"state\":\"installed\""),
+                                      ("\"codeLength\":194", "\"codeLength\":194,\"codeLength\":194")] {
+            let duplicate = valid.replacingOccurrences(of: needle, with: replacement)
+            XCTAssertNotEqual(valid, duplicate)
+            XCTAssertThrowsError(try ChatGPTRequestMetadataSnapshot.parse(Data(duplicate.utf8)))
+        }
+        let bytes = Data(valid.utf8)
+        XCTAssertThrowsError(try ChatGPTRequestMetadataSnapshot.parse(bytes + Data(repeating: 32, count: 8_193 - bytes.count)))
+        var missing = decodedRoot(); missing.removeValue(forKey: "decoder")
+        XCTAssertThrowsError(try parse(missing))
+    }
+
+    func testDecodedSnapshotRejectsTypesBoundsEnumsAndContradictoryCardinality() throws {
+        for field in ["completionCalls", "programObservations", "recoveredNullObservations"] {
+            for value in [true, -1, 65_536, 0.5, "1", NSNull()] as [Any] {
+                var capture = decoder(); capture[field] = value
+                XCTAssertThrowsError(try parse(decodedRoot(decoder: capture)), field)
+            }
+        }
+        let badProgram: [(String, Any)] = [
+            ("elapsedMs", true), ("elapsedMs", -1), ("elapsedMs", 600_001), ("elapsedMs", NSNull()),
+            ("carrier", "PRIVATE_CARRIER"), ("messageStatus", "complete"),
+            ("codeLength", true), ("codeLength", -1), ("codeLength", 1_048_577), ("codeLength", 194.5),
+            ("knownNullProgram", 1), ("knownNullProgram", NSNull()),
+            ("emptyFallbackMarkdown", 0), ("emptyFallbackMarkdown", "true"),
+            ("conversationMatchesDocument", 1), ("conversationMatchesDocument", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            ("recovery", "PRIVATE_RECOVERY"), ("recoveryLine", true), ("recoveryLine", 0),
+            ("recoveryLine", 1_048_577), ("recoveryColumn", 1.5), ("recoveryColumn", 0), ("recoveryColumn", 1_048_577),
+        ]
+        for (field, value) in badProgram {
+            var program = lastProgram(); program[field] = value
+            XCTAssertThrowsError(try parse(decodedRoot(decoder: decoder(program: program))), field)
+        }
+        let contradictions: [[String: Any]] = [["completionCalls": 0], ["programObservations": 0], ["recoveredNullObservations": 2]]
+        for changes in contradictions {
+            let value = decoder(program: lastProgram()).merging(changes, uniquingKeysWith: { _, v in v })
+            XCTAssertThrowsError(try parse(decodedRoot(decoder: value)))
+        }
+        var noLast = decoder(); noLast["programObservations"] = 1; noLast["completionCalls"] = 1
+        XCTAssertThrowsError(try parse(decodedRoot(decoder: noLast)))
+        for length in [NSNull(), 193, 195] as [Any] {
+            var program = lastProgram(); program["codeLength"] = length
+            XCTAssertThrowsError(try parse(decodedRoot(decoder: decoder(program: program))))
+        }
+        var none = lastProgram(); none["recovery"] = "none"
+        XCTAssertThrowsError(try parse(decodedRoot(decoder: decoder(program: none))))
+        var state = decoder(); state["state"] = "complete"
+        XCTAssertThrowsError(try parse(decodedRoot(decoder: state)))
+        var version = decodedRoot(); version["schemaVersion"] = 3
+        XCTAssertThrowsError(try parse(version))
+        var maximum = lastProgram()
+        maximum["elapsedMs"] = 600_000; maximum["codeLength"] = 1_048_576; maximum["knownNullProgram"] = false
+        maximum["recoveryLine"] = 1_048_576; maximum["recoveryColumn"] = 1_048_576
+        let maximumCounts: [String: Any] = ["completionCalls": 65_535, "programObservations": 65_535, "recoveredNullObservations": 65_535]
+        XCTAssertNoThrow(try parse(decodedRoot(decoder: decoder(program: maximum).merging(maximumCounts, uniquingKeysWith: { _, v in v }))))
+    }
+
+    private func decodedRoot(decoder: [String: Any]? = nil) -> [String: Any] {
+        ["schemaVersion": 2, "active": true, "expired": false, "rows": [], "decoder": decoder ?? self.decoder()]
+    }
+
+    private func decoder(program: [String: Any]? = nil) -> [String: Any] {
+        ["state": "installed", "completionCalls": program == nil ? 0 : 1,
+         "programObservations": program == nil ? 0 : 1, "recoveredNullObservations": program == nil ? 0 : 1,
+         "lastProgram": program.map { $0 as Any } ?? NSNull()]
+    }
+
+    private func lastProgram() -> [String: Any] {
+        ["elapsedMs": 25.5, "carrier": "reference", "messageStatus": "finished_successfully", "codeLength": 194,
+         "knownNullProgram": true, "emptyFallbackMarkdown": true,
+         "conversationMatchesDocument": NSNull(),
+         "recovery": "unterminated_braced_value_recovered_parse", "recoveryLine": 1, "recoveryColumn": 1]
     }
 
     private func persisted(inferenceID: UUID, fixture: MetadataDiagnosticArmFixture) throws -> [String: Any] {
@@ -328,8 +537,10 @@ private final class MetadataDiagnosticArmFixture: @unchecked Sendable {
     let task = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
     let thread = UUID(), turn = UUID(), preparation = UUID()
     let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let purpose: String
 
-    init() throws {
+    init(purpose: String = "request_metadata_v1") throws {
+        self.purpose = purpose
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
         defer { free(resolved) }
         root = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
@@ -342,7 +553,7 @@ private final class MetadataDiagnosticArmFixture: @unchecked Sendable {
 
     func fields() -> [String: String] {
         ["taskID": task.uuidString.lowercased(), "threadID": thread.uuidString.lowercased(), "provider": "chatgpt",
-         "purpose": "request_metadata_v1", "expiresAt": Self.timestamp(now.addingTimeInterval(60))]
+         "purpose": purpose, "expiresAt": Self.timestamp(now.addingTimeInterval(60))]
     }
 
     static func timestamp(_ date: Date) -> String {

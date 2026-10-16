@@ -689,8 +689,10 @@ final class EmbeddedBrowserSession {
         }
         let key = "__computaRequestMetadata_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
         let duration = authorization.remainingMilliseconds
+        var configuration: [String: Any] = ["key": key, "durationMs": duration]
+        if authorization.capturesDecodedEvents { configuration["captureDecodedEvents"] = true }
         guard duration > 0, let source = Self.requestMetadataSource(),
-              let config = try? JSONSerialization.data(withJSONObject: ["key": key, "durationMs": duration]),
+              let config = try? JSONSerialization.data(withJSONObject: configuration),
               let configText = String(data: config, encoding: .utf8) else { authorization.revoke(); return false }
         let script = WKUserScript(source: source.replacingOccurrences(of: "__COMPUTA_REQUEST_METADATA_CONFIG__", with: configText),
             injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
@@ -738,7 +740,8 @@ final class EmbeddedBrowserSession {
                 view.callAsyncJavaScript("""
                     if (document.URL !== expectedURL || typeof window[key] !== 'function') return null;
                     try {
-                      const text = JSON.stringify(window[key](command));
+                      const snapshot = await window[key](command);
+                      const text = JSON.stringify(snapshot);
                       return typeof text === 'string' && text.length <= 8192 ? text : null;
                     } catch { return null; }
                     """, arguments: ["key": diagnostic.key, "command": command, "expectedURL": expectedURL], in: nil, in: .page) { reply in
@@ -754,12 +757,13 @@ final class EmbeddedBrowserSession {
             }
         } onCancel: { result.complete(.failure(CancellationError())) }
         let nativeCookieBytes = await cookieBytes
-        guard !Task.isCancelled, entries[tabID] === entry, entry.view === view,
+        guard !Task.isCancelled, ContinuousClock.now < deadline, entries[tabID] === entry, entry.view === view,
               entry.requestMetadataDiagnostic === diagnostic, diagnostic.authorization.isCurrent,
               entry.tab.documentGeneration == generation, diagnostic.generation == generation,
               entry.modelChanges?.ownerToken == ownerToken, Self.inspectorOriginAllowed(view.url),
               view.url?.absoluteString == expectedURL,
-              let bytes, let snapshot = try? ChatGPTRequestMetadataSnapshot.parse(bytes) else { return nil }
+              let bytes, let snapshot = try? ChatGPTRequestMetadataSnapshot.parse(bytes),
+              snapshot.schemaVersion == (diagnostic.authorization.capturesDecodedEvents ? 2 : 1) else { return nil }
         let cookieBudget = nativeCookieBytes.flatMap { try? JSONDecoder().decode(ChatGPTProfileCookieBudget.self, from: $0) }
         if command == "stop" { removeRequestMetadata(entry, diagnostic: diagnostic) }
         return snapshot.attachingProfileCookieBudget(cookieBudget)

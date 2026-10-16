@@ -1,5 +1,38 @@
 # Embedded website provider qualification
 
+## Build142: opt-in observation before website presentation
+
+The next diagnostic targets the current website's existing decoded-message
+method before rendering. Only an explicit `request_and_decoded_metadata_v2`
+one-use arm enables it; ordinary sessions and the earlier request-only purpose
+retain their behavior. Activation checks a fixed public runtime's already
+initialized module cache, exact export getter and method descriptor/source.
+It never invokes a module factory, replaces a parser, reads a response stream
+or changes the returned decoded object or original thrown error.
+
+The bounded projection retains counters and the latest program's fixed
+categories, length and equality to the previously observed null program.
+Direct message observations require an assistant author. A nullable Boolean
+compares canonical conversation IDs with the current document without retaining
+either ID; reference patches do not borrow an owner from earlier events.
+These are untrusted diagnostic observations, with no answer, ownership, tool,
+completion, retry or early-abort authority. A positive capture establishes
+decoded data in the owned view before presentation, not raw-wire provenance.
+
+Native code awaits activation within the existing one-second budget. An
+unavailable v2 probe stops, saves its finite diagnostic and cleans up before
+Send. Stop restores the exact method descriptor only while it remains ours;
+late imports cannot reinstall after cancellation or expiry. No Inspector or
+Safari setting is required for this diagnostic.
+
+All 23 focused JavaScript tests and 31 selected native methods passed with
+unchanged inputs and no failures. The native cohort includes a real local WebKit
+ESM fixture using the production observer, with only the runtime import URL
+replaced by a local data module. It verifies activation, unchanged return and
+receiver, finite projection and exact restoration without a provider request.
+Signed build/install verification and the live142 diagnostic remain pending.
+The installed141 failures below are unchanged.
+
 ## Installed141: fenced response framing did not restore browser tasks
 
 Signed 0.7.0 (141), code source `4e1ae72ec9322480307efe98472556c0629d6b7c`,

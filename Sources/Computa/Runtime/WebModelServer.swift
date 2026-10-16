@@ -81,7 +81,7 @@ actor WebModelServer {
     enum Failure: LocalizedError {
         case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
         case modelUnverified, modelMismatch, productModeUnverified
-        case modelNotFound, inferenceContextRequired, persistenceRequired, startOwnershipUnconfirmed, turnLimit
+        case modelNotFound, inferenceContextRequired, persistenceRequired, startOwnershipUnconfirmed, turnLimit, requestMetadataUnavailable
         case malformedReply(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         var errorDescription: String? {
             switch self {
@@ -101,6 +101,7 @@ actor WebModelServer {
             case .inferenceContextRequired: "The website inference could not be linked to its active local turn. No model response or tool calls were released."
             case .persistenceRequired: "The website inference evidence could not be saved locally. No model response or tool calls were released."
             case .startOwnershipUnconfirmed: "Website startup did not return a verifiable owned session. Cleanup remains unconfirmed and this task is paused."
+            case .requestMetadataUnavailable: "The explicitly armed decoded metadata diagnostic could not activate. This website inference was not submitted and no prompt was replayed."
             case let .malformedReply(diagnostic):
                 "The website returned a malformed model response envelope (\(diagnostic.reason.rawValue)). No tool calls from this reply were dispatched."
             }
@@ -966,13 +967,15 @@ actor WebModelServer {
             }
             try requireCurrentContext()
             if let requestMetadata, session.sequence == 1 {
+                var activated = false
                 if let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
                       let turn = UUID(uuidString: context.turnID),
                       requestMetadata.matches(taskID: task, threadID: thread, turnID: turn,
                         preparationID: context.preparationID) {
-                    _ = await session.transport.activateRequestMetadata(sessionToken: session.token)
+                    activated = await session.transport.activateRequestMetadata(sessionToken: session.token)
                 } else { requestMetadata.revoke() }
                 try requireCurrentContext()
+                if requestMetadata.capturesDecodedEvents && !activated { throw Failure.requestMetadataUnavailable }
             }
             // No wire/model-tool grant. A same-UID manual arm scopes one current
             // native turn; it is not authentication of the person who wrote it.
@@ -1156,7 +1159,8 @@ actor WebModelServer {
             yieldedTurns.removeValue(forKey: taskID)
             let turnLimit = (error as? EmbeddedWebModelTransport.Failure) == .turnLimit
                 || { if let failure = error as? Failure, case .turnLimit = failure { return true }; return false }()
-            if turnLimit {
+            let decodedDiagnosticUnavailable = { if let failure = error as? Failure, case .requestMetadataUnavailable = failure { return true }; return false }()
+            if turnLimit || decodedDiagnosticUnavailable {
                 let closed = await cleanup(taskID: taskID, cancel: true,
                     runtimeGeneration: context.runtimeGeneration, trigger: .automatic)
                 guard closed.receipt.outcome == .closed else { throw Failure.cleanupFailed }
@@ -1657,6 +1661,7 @@ actor WebModelServer {
             case .inferenceContextRequired: return .init(status: "409 Conflict", type: "invalid_request", code: "native_turn_mismatch")
             case .persistenceRequired: return .init(status: "503 Service Unavailable", type: "server_error", code: "inference_evidence_unsaved")
             case .startOwnershipUnconfirmed: return .init(status: "500 Internal Server Error", type: "model_error", code: "website_start_ownership_unconfirmed")
+            case .requestMetadataUnavailable: return .init(status: "503 Service Unavailable", type: "server_error", code: "request_metadata_unavailable")
             default: return .init(status: "500 Internal Server Error", type: "model_error", code: "browser_model_error")
             }
         }
