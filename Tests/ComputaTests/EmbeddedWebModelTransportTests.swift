@@ -6,6 +6,226 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testChatGPTDispatchReceiptRequiresOnlyStrictEmptyContinuationFields() throws {
+        let receipt: [String: Any] = ["submitted": true, "submissionPending": true, "modelVerificationPending": true,
+            "temporary": true, "chatModeReady": true, "chatModeActionAvailable": false, "productModeEvidence": [:],
+            "submissionOwnershipCapability": "per_submission_ownership_v1", "text": "", "answerComplete": false,
+            "firstUserVerified": true, "firstUserMarkerVerified": true, "firstUserFingerprint": String(repeating: "a", count: 64)]
+        XCTAssertTrue(EmbeddedWebModelTransport.isChatGPTDispatchOnlySubmissionAcknowledgement(receipt))
+        for key in receipt.keys {
+            var missing = receipt; missing.removeValue(forKey: key)
+            XCTAssertFalse(EmbeddedWebModelTransport.isChatGPTDispatchOnlySubmissionAcknowledgement(missing), key)
+        }
+        for key in ["submitted", "submissionPending", "modelVerificationPending", "temporary", "chatModeReady",
+                    "chatModeActionAvailable", "answerComplete", "firstUserVerified", "firstUserMarkerVerified"] {
+            let values: [Any] = [NSNull(), 0, 1, "true", !(receipt[key] as! Bool)]
+            for value in values {
+                var malformed = receipt; malformed[key] = value
+                XCTAssertFalse(EmbeddedWebModelTransport.isChatGPTDispatchOnlySubmissionAcknowledgement(malformed), key)
+            }
+        }
+        let alterations: [(String, Any)] = [("text", "unverified answer"), ("text", NSNull()),
+            ("firstUserFingerprint", String(repeating: "A", count: 64)), ("firstUserFingerprint", String(repeating: "a", count: 63)),
+            ("firstUserFingerprint", NSNull()), ("submissionOwnershipCapability", "legacy"), ("productModeEvidence", NSNull()),
+            ("url", "https://chatgpt.com/"), ("modelEvidence", [:]), ("submissionProof", [:]),
+            ("completionEvidence", [:]), ("userCount", 2), ("responseCount", 2), ("unknown", false)]
+        for (key, value) in alterations {
+            var malformed = receipt; malformed[key] = value
+            XCTAssertFalse(EmbeddedWebModelTransport.isChatGPTDispatchOnlySubmissionAcknowledgement(malformed), key)
+        }
+        var measured = receipt; measured["resourceTimingDiagnostic"] = [:]
+        XCTAssertTrue(EmbeddedWebModelTransport.isChatGPTDispatchOnlySubmissionAcknowledgement(measured))
+    }
+
+    func testChatGPTContinuationDispatchWithholdsOutputUntilFreshProductModelAndBodyProof() async throws {
+        for drift in ["work", "temporary", "model", "body"] {
+            let fixture = try Fixture()
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Complete the first verified round"])
+            _ = try await waitForState("complete", fixture.transport, token: token)
+            var crossed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "submit", !crossed else { return }
+                crossed = true
+                let mutation: String
+                switch drift {
+                case "work": mutation = """
+                    document.getElementById('fixture-composer-mode').hidden = false;
+                    document.getElementById('fixture-chat-mode').setAttribute('aria-pressed','false');
+                    document.getElementById('fixture-work-mode').setAttribute('aria-pressed','true');
+                    """
+                case "temporary": mutation = """
+                    const control = document.querySelector('[aria-label="Turn off temporary chat"]');
+                    if (!control) return false;
+                    control.remove();
+                    """
+                case "model": mutation = """
+                    const before = window.fixtureModelCurrentLabel;
+                    window.fixtureModelSelect(window.fixtureModelInitialLabel);
+                    if (before === window.fixtureModelCurrentLabel) return false;
+                    """
+                default: mutation = "document.querySelectorAll('[data-markdown-text-style=\"user-message\"]')[1].textContent = 'Unowned substituted body';"
+                }
+                let changed = try? await self.evaluate(view, mutation + " return true;") as? Bool
+                XCTAssertEqual(changed, true, "The \(drift) fixture must actually change the proved control/body")
+            }
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never accept an unverified continuation"])
+            XCTAssertTrue(crossed)
+            XCTAssertEqual(sent["state"] as? String, "running"); XCTAssertEqual(sent["text"] as? String, "")
+            XCTAssertEqual(sent["modelVerificationPending"] as? Bool, true)
+            XCTAssertNil(sent["modelEvidence"]); XCTAssertNil(sent["modelProofContext"]); XCTAssertNil(sent["completionEvidence"])
+            let pending = try XCTUnwrap(sent["pendingSubmissionContext"] as? [String: Any])
+            XCTAssertEqual(pending["sequence"] as? Int, 2); XCTAssertEqual(pending["submittedPromptFingerprint"] as? String, "")
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never replay a dispatched continuation"])
+            do {
+                let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(first["state"] as? String, "running")
+                XCTAssertEqual(first["text"] as? String, "")
+                XCTAssertNil(first["modelEvidence"]); XCTAssertNil(first["modelProofContext"])
+                _ = try await waitForState("complete", fixture.transport, token: token)
+                XCTFail("A dispatch acknowledgement cannot admit \(drift) drift as an answer")
+            } catch {
+                let expected: EmbeddedWebModelTransport.Failure = drift == "work" ? .productModeUnverified
+                    : drift == "temporary" ? .temporaryUnverified
+                    : drift == "model" ? .modelMismatch : .ownershipFailure(.javaScriptSubmission)
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expected, drift)
+            }
+            try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+        }
+    }
+
+    func testChatGPTContinuationDispatchCancellationCannotReturnAnAcknowledgementOrReplaySend() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "First complete round"])
+        _ = try await waitForState("complete", fixture.transport, token: token)
+        var crossed = false, release = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "submit" else { return }
+            crossed = true
+            while !release { await Task.yield() }
+        }
+        let request = Task<Bool, Error> {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Cancel after one actual Send"])
+            return true
+        }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !crossed, ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertTrue(crossed)
+        request.cancel(); release = true
+        do { _ = try await request.value; XCTFail("A cancelled post-await acknowledgement cannot return") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Do not replay a lost acknowledgement"])
+        try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["sequence"] as? Int, 2, "Only a later independent poll can prove the dispatched body")
+        try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+        try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+    }
+
+    func testChatGPTContinuationDispatchCannotCrossTheNativeConversationRoute() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Pin the initial round"])
+        _ = try await waitForState("complete", fixture.transport, token: token)
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "submit" else { return }
+            _ = try? await self.evaluate(view, "history.pushState({}, '', '/c/00000000-0000-0000-0000-000000000001'); return true;")
+        }
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "A crossed native route cannot acknowledge"])
+            XCTFail("Native route continuity remains mandatory after one Send")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.routeAfter)) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never replay across route drift"])
+        try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+    }
+
+    func testThirdChatGPTDispatchAcknowledgementDoesNotAwaitAnotherBodyRead() async throws {
+        let fixture = try Fixture()
+        defer { fixture.shutdown() }
+        let started = try await call(fixture.transport, "webProviderStart", ["provider": "chatgpt"])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        for sequence in 1...2 {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Complete owned round \(sequence)"])
+            _ = try await waitForState("complete", fixture.transport, token: token)
+        }
+        var intercepted = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "submit", !intercepted else { return }
+            intercepted = true
+            let facts = try? await self.evaluate(view, """
+                const state = globalThis.__computaChatSubmissionState;
+                globalThis.__fixtureOriginalDigest = crypto.subtle.digest;
+                globalThis.__fixturePostDispatchBodyReads = 0;
+                crypto.subtle.digest = () => {
+                  globalThis.__fixturePostDispatchBodyReads++;
+                  return new Promise(() => {});
+                };
+                return {pending: state?.pending?.sequence, confirmed: state?.lastVerified?.sequence,
+                  phase: state?.pending?.phase};
+                """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+            XCTAssertEqual(facts?["pending"] as? Int, 3)
+            XCTAssertEqual(facts?["confirmed"] as? Int, 2)
+            XCTAssertEqual(facts?["phase"] as? String, "send_claimed")
+        }
+        let began = ContinuousClock.now
+        do {
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": "A third Send returns dispatch only"])
+            XCTAssertEqual(sent["state"] as? String, "running")
+            XCTAssertEqual(sent["text"] as? String, "")
+            XCTAssertEqual(sent["modelVerificationPending"] as? Bool, true)
+            XCTAssertNil(sent["modelEvidence"]); XCTAssertNil(sent["completionEvidence"])
+            XCTAssertNil(sent["modelProofContext"])
+            let pending = try XCTUnwrap(sent["pendingSubmissionContext"] as? [String: Any])
+            XCTAssertEqual(pending["sequence"] as? Int, 3)
+            XCTAssertEqual(pending["submittedPromptFingerprint"] as? String, "")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .pageUnavailable)
+            try await assertChoiceLedger(view, insertions: 3, sends: 3, selections: 1)
+            let reads = try await evaluate(view, "return globalThis.__fixturePostDispatchBodyReads;",
+                world: .world(name: "computa-chatgpt-model-v1")) as? Int
+            XCTAssertEqual(reads, 1, "The original failure is the redundant post-Send ownership/body read")
+            XCTFail("A dispatch-only acknowledgement must not time out awaiting another body read after one Send")
+            return
+        }
+        XCTAssertTrue(intercepted)
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(5))
+        let reads = try await evaluate(view, """
+            crypto.subtle.digest = globalThis.__fixtureOriginalDigest;
+            return globalThis.__fixturePostDispatchBodyReads;
+            """, world: .world(name: "computa-chatgpt-model-v1")) as? Int
+        XCTAssertEqual(reads, 0)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["sequence"] as? Int, 3)
+        let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(proof["submittedPromptFingerprint"] as? String,
+            EmbeddedWebModelTransport.promptFingerprint("A third Send returns dispatch only"))
+        try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+        try await assertChoiceLedger(view, insertions: 3, sends: 3, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testFirstInstantPrepareRecoversOneUnacknowledgedOpeningBeforeAnyEditorInput() async throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, initiallySelectTarget: true)
@@ -7038,7 +7258,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
     }
 
-    func testChatCollapsedSecondSubmissionDefersProductReadUntilOneAuthorizedExpansion() async throws {
+    func testChatCollapsedSecondSubmissionWaitsForPollBeforeOneAuthorizedExpansion() async throws {
         for changedExpandedBody in [false, true] {
             let fixture = try Fixture(page: Self.collapsedSecondChatSubmissionPage(changedExpandedBody: changedExpandedBody))
             defer { fixture.shutdown() }
@@ -7075,15 +7295,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 }
             }
             let prompt = "Complete second canonical request\n" + String(repeating: "A", count: 512)
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            try assertRunningOrVerifiedChoice(sent, choice: Self.fixtureChoice(.chatgpt))
+            XCTAssertEqual(sent["text"] as? String, "")
+            XCTAssertEqual(pendingProductReads, 0, "A continuation dispatch receipt must not inspect the pending body")
+            let beforePollClicks = try await evaluate(view, "return window.fixtureCurrentExpansionClicks || 0;") as? Int
+            XCTAssertEqual(beforePollClicks, 0, "Only a later inspection can claim expansion")
             if changedExpandedBody {
                 do {
-                    let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
-                    try assertRunningOrVerifiedChoice(sent, choice: Self.fixtureChoice(.chatgpt))
                     _ = try await waitForState("complete", fixture.transport, token: token)
                     XCTFail("A pending product result cannot authorize changed expanded body bytes")
                 } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
             } else {
-                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
                 let complete = try await waitForState("complete", fixture.transport, token: token)
                 let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
                 XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
@@ -7091,10 +7314,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(proof["sequence"] as? Int, 2)
                 XCTAssertEqual(proof["responseCount"] as? Int, 2)
                 XCTAssertGreaterThan(expandedModelReads, 0)
-                XCTAssertEqual(order.first, "pending_product")
+                XCTAssertEqual(order.first, "expanded_model")
             }
             fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
-            XCTAssertGreaterThan(pendingProductReads, 0)
+            XCTAssertEqual(pendingProductReads, 0)
             let captured = try await capturedUserPrompts(view)
             XCTAssertEqual(captured?.map { $0.trimmingCharacters(in: .newlines) }, ["Exact first owned request", prompt])
             let inputs = try await evaluate(view, "return window.fixtureInputCount;") as? Int

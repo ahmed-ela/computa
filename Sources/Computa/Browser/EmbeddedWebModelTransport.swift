@@ -2989,6 +2989,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // acknowledgment returns. The next poll verifies its conversation.
             guard action == "submit" && firstConversation || temporaryToggle else { throw Failure.ownershipFailure(.routeAfter) }
         }
+        try Task.checkCancellation()
         guard let observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
         logModelDiagnostic(observed, session: session)
         if let safe = Self.sanitizedProductModeDiagnostic(observed["productModeDiagnostic"]),
@@ -3130,8 +3131,28 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.state == "running" && session.firstUserFingerprint != nil && !session.pendingSubmission
             && refreshReadOnlyObservation && routeContinuation.isEmpty
             && enforceModel && session.modelSelectionVerified && recheckModelAfterAwait && !deferModelVerification
+        // A continuation's fixed submit action has already checked product,
+        // editor and owned lineage before one Send. Its empty receipt grants no body,
+        // answer or fresh model proof. Leave that work to the ordinary poll;
+        // a second body read here can consume the remaining click deadline.
+        let dispatchOnlyAcknowledgement = provider == .chatgpt && action == "submit"
+            && enforceModel && deferModelVerification && session.usesSubmissionOwnership
+            && session.state == "running" && session.submitted && session.pendingSubmission
+            && session.modelVerificationPending && session.modelSelectionVerified && session.modelChoice != nil
+            && session.temporary && session.temporaryRequested
+            && session.documentGeneration == generation && currentURL == url
+            && session.confirmedUsers > 0 && session.sequence == session.confirmedUsers + 1 && !session.currentSubmissionVerified
+            && session.firstUserFingerprint.map { observed["firstUserFingerprint"] as? String == $0 } == true
+            && session.currentSubmission.map { current in
+                session.preparedSubmission.map { prepared in
+                    current.sequence == session.sequence && prepared.sequence == current.sequence
+                        && prepared.marker == current.marker && prepared.promptFingerprint == current.promptFingerprint
+                        && prepared.outboundFingerprint == current.outboundFingerprint
+                } ?? false
+            } == true
+            && Self.isChatGPTDispatchOnlySubmissionAcknowledgement(observed)
         try await verifyProductModeAfterAwait(observed, session: session, action: action,
-                                             recheck: recheckProductAfterAwait && !combinedContextRecheck,
+                                             recheck: recheckProductAfterAwait && !combinedContextRecheck && !dispatchOnlyAcknowledgement,
                                              refreshChangedRoute: routeRefreshAvailable,
                                              refreshReadOnlyObservation: refreshReadOnlyObservation,
                                              maximumWait: evaluationDeadline - .now,
@@ -3285,6 +3306,31 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
         }
         return observed
+    }
+
+    /// Recognize only the shipped adapter's empty dispatch receipt. This does
+    /// not validate product evidence or authorize a response; page() still
+    /// parses product proof and applies every native post-await fence. Unknown
+    /// future fields fall back to the complete recheck until reviewed here.
+    static func isChatGPTDispatchOnlySubmissionAcknowledgement(_ observed: [String: Any]) -> Bool {
+        let required: Set<String> = ["submitted", "submissionPending", "modelVerificationPending", "temporary",
+            "chatModeReady", "chatModeActionAvailable", "productModeEvidence", "submissionOwnershipCapability",
+            "text", "answerComplete", "firstUserVerified", "firstUserFingerprint", "firstUserMarkerVerified"]
+        let optional: Set<String> = ["resourceTimingDiagnostic"]
+        guard required.isSubset(of: Set(observed.keys)), Set(observed.keys).isSubset(of: required.union(optional)),
+              observed["submissionOwnershipCapability"] as? String == turnContinuationCapability,
+              observed["text"] as? String == "", observed["productModeEvidence"] is [String: Any] else { return false }
+        func boolean(_ key: String, _ expected: Bool) -> Bool {
+            guard let number = observed[key] as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
+            return number.boolValue == expected
+        }
+        guard ["submitted", "submissionPending", "modelVerificationPending", "temporary", "chatModeReady",
+               "firstUserVerified", "firstUserMarkerVerified"]
+                .allSatisfy({ boolean($0, true) }),
+              boolean("answerComplete", false), boolean("chatModeActionAvailable", false),
+              let fingerprint = observed["firstUserFingerprint"] as? String, fingerprint.utf8.count == 64,
+              fingerprint.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else { return false }
+        return true
     }
 
     private func verifyProductModeAfterAwait(_ observed: [String: Any], session: Session, action: String,

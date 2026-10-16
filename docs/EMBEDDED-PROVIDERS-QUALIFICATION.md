@@ -1,6 +1,38 @@
 # Embedded website provider qualification
 
-## Current installed build131: owned temporary-cookie retirement and reversible maintenance
+## Build133 candidate: acknowledge bound continuation dispatch before polling
+
+Build132's fresh ChatGPT Instant browser task completed two verified inferences
+and two successful native tools. Its third message was sent once, then an extra
+native product recheck consumed the remaining submission deadline. The task
+failed before a final answer or model-issued tab close. Host cleanup closed its
+task-created browser tab, but website cleanup remained unconfirmed; one explicit
+cleanup retry also failed because the earlier failure revoked that page's state.
+The original failed task and both cleanup outcomes remain preserved.
+
+Build133 skips that extra recheck only for a strict, empty dispatch acknowledgment
+from an already-bound ChatGPT continuation. The native first-message fingerprint,
+current/prepared submission identity, sequence, temporary mode, document, route
+and cancellation checks must still match. The receipt releases no response or
+tool call. Ordinary polling must verify the current message, model and Chat mode
+before accepting output. First-message submission keeps its original rechecks;
+malformed or unknown acknowledgment fields keep the complete recheck path.
+
+All **15 focused native methods passed**, including the reproduced third-Send
+failure, strict acknowledgment fields, cancellation without Send replay, route
+drift, delayed first-message binding, collapsed continuation expansion and exact
+repeated cleanup receipts. Sources stayed unchanged during the run. The earlier
+red regression and a test-only fixture failure are retained. Signed installation
+and fresh live qualification of build133 remain pending at this checkpoint.
+
+Build132's picker-opening correction separately passed **13 native methods and
+555 adapter tests**. It allows one bounded retry of an unacknowledged opening on
+the untouched owned page, without replaying prompt insertion, Send or selection.
+The installed132 task above confirms progress beyond that failure, not complete
+browser-task reliability. Gemini has not been revisited during this repair;
+its existing CAPTCHA gate remains. Previous GPT-OSS results remain separate.
+
+## Historical installed build131: owned temporary-cookie retirement and reversible maintenance
 
 Completed temporary ChatGPT sessions now retire only the exact conversation IDs
 established by native first-user ownership and route-promotion evidence. A private,
