@@ -1141,10 +1141,14 @@ actor WebModelServer {
                         sessions[taskID] = session
                         lease = session
                         try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "complete")
+                        // Parse and validate the entire proposal above before
+                        // selecting a native action. No unselected call is queued.
+                        let selection = try WebsiteToolCallSelection.select(validatedReply: reply,
+                            singleAction: request.singleActionRelay && provider == "chatgpt" && route == .embedded)
                         let responseID = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
                         let encoded = try request.stream
-                            ? WebModelResponseCodec.streamData(for: reply, request: request, responseID: responseID, websiteModelEvidence: evidence)
-                            : WebModelResponseCodec.completedResponse(for: reply, request: request, responseID: responseID, websiteModelEvidence: evidence)
+                            ? WebModelResponseCodec.streamData(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
+                            : WebModelResponseCodec.completedResponse(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
                         let continuation: WebsiteTurnContinuation? = try session.provesNativeContinuation ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
                         if let requestMetadata {
                             let retain = session.retainsConversation && (continuation?.pendingToolCallCount ?? 0) > 0

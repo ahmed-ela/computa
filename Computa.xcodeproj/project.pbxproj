@@ -338,6 +338,8 @@
 		FD30F78C6A81803D14185CBE /* ChatGPTRequestMetadataDiagnosticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BA15DBE75A5B5FB703458BC /* ChatGPTRequestMetadataDiagnosticTests.swift */; };
 		FEAA7BFF4DD806F22C24DC99 /* AccessibilitySnapshotTextFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFF775ABAA863BF70119CFEA /* AccessibilitySnapshotTextFormatter.swift */; };
 		FEEE1114F2F4CC48851B7EBA /* NativePostActionExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F0AFA7A69068EEAE9C87B2 /* NativePostActionExecution.swift */; };
+		FE0374F3D4B5C10435590ECD /* WebsiteToolCallSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 752A4CFA6EB4B04868B1117A /* WebsiteToolCallSelection.swift */; };
+		A08FD50E16B27697E66D0923 /* WebsiteToolCallSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F5EBAD946F6B9443743AC52 /* WebsiteToolCallSelectionTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -699,6 +701,8 @@
 		DD8B39272100B198A48551C9 /* WebsiteModelFormatCorrectionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteModelFormatCorrectionStore.swift; sourceTree = "<group>"; };
 		FFCFAECF642035999C6B2957 /* AgentRPCErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRPCErrorTests.swift; sourceTree = "<group>"; };
 		FFF775ABAA863BF70119CFEA /* AccessibilitySnapshotTextFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilitySnapshotTextFormatter.swift; sourceTree = "<group>"; };
+		752A4CFA6EB4B04868B1117A /* WebsiteToolCallSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteToolCallSelection.swift; sourceTree = "<group>"; };
+		3F5EBAD946F6B9443743AC52 /* WebsiteToolCallSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteToolCallSelectionTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -975,6 +979,7 @@
 				FDEBA7EA90C4A23E2B8E618B /* WebsiteModelEvidenceTests.swift */,
 				7280653A92318C7E0F2197F2 /* WebsiteModelStateTests.swift */,
 				395D6115E5010A9302D99306 /* WebsiteSessionCleanupTests.swift */,
+				3F5EBAD946F6B9443743AC52 /* WebsiteToolCallSelectionTests.swift */,
 				8D16F0CA10ACCC874AD3ECA4 /* WebsiteTurnContinuationTests.swift */,
 				93867DF660555642A177C869 /* WebSnapshotTests.swift */,
 				14127442B9602176DE852795 /* WorkflowBenchmarkFixture.swift */,
@@ -1159,6 +1164,7 @@
 				846FA93B2FC7D0D52CA7922B /* VisualGroundingClient.swift */,
 				5D9D945FD323228508CAD1DE /* WebModelResponseCodec.swift */,
 				01C9A1A3371E98358999B992 /* WebModelServer.swift */,
+				752A4CFA6EB4B04868B1117A /* WebsiteToolCallSelection.swift */,
 				EE3166B73F9B7F081A41C362 /* WebsiteTurnContinuation.swift */,
 				7428D42F2BC346C83D80B10E /* WebsiteTurnFailureStore.swift */,
 			);
@@ -1544,6 +1550,7 @@
 				F05B0F2D8DF637B62451AFFD /* WebsiteModelCatalog.swift in Sources */,
 				E70CFDADECE3DB4848A34F4C /* WebsiteModelEvidence.swift in Sources */,
 				C29161A859CB5F1166444F6B /* WebsiteSessionCleanup.swift in Sources */,
+				FE0374F3D4B5C10435590ECD /* WebsiteToolCallSelection.swift in Sources */,
 				D70050BA4DB32A663E998F15 /* WebsiteTurnContinuation.swift in Sources */,
 				808040B8A9EEB344C7F698CA /* WebsiteTurnFailureStore.swift in Sources */,
 				9596A48CC135B681B0F4A8E5 /* WorkspaceReviewService.swift in Sources */,
@@ -1725,6 +1732,7 @@
 				0D3CF4F7D159D4E01EA8191C /* WebsiteModelEvidenceTests.swift in Sources */,
 				F6D21ADAD5D0346BD12A8B6F /* WebsiteModelStateTests.swift in Sources */,
 				5133D01B593BCC5EA0616998 /* WebsiteSessionCleanupTests.swift in Sources */,
+				A08FD50E16B27697E66D0923 /* WebsiteToolCallSelectionTests.swift in Sources */,
 				7ED5E6C46C0C15E53B1D4DD7 /* WebsiteTurnContinuationTests.swift in Sources */,
 				46AB0FEFA9E981816D8EBBCF /* WorkflowBenchmarkFixture.swift in Sources */,
 				30946B0C73472B177BBC4983 /* WorkflowBenchmarkTransport.swift in Sources */,

@@ -3,6 +3,18 @@ import XCTest
 @testable import Computa
 
 final class WebModelResponseCodecTests: XCTestCase {
+    func testClientMetadataCannotImpersonateHostToolSelection() throws {
+        let original = try JSONSerialization.data(withJSONObject: [
+            "model": "browser/gemini", "input": "Hello",
+            "metadata": ["caller_note": "preserved", "computa_website_tool_selection": "untrusted caller claim"],
+        ])
+        let request = try WebModelResponseCodec.prepareRequest(original)
+        let encoded = try WebModelResponseCodec.completedResponse(for: .message("Hello"), request: request)
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(response["metadata"] as? [String: String], ["caller_note": "preserved"])
+        XCTAssertEqual(request.continuationRequest, original, "Only response-owned metadata is reserved")
+    }
+
     func testEveryWebsiteHandoffRequestsLiteralFencedJSONAfterQuotedHistory() throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         for model in ["browser/chatgpt", choice.modelID, "browser/claude", "browser/gemini",
@@ -293,7 +305,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(suffix, "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames,
                            includedInstructionText: includedInstructionText,
-                           responseFormat: .fencedJSON),
+                           responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay),
                        "The fresh response contract and current names follow every complete request", file: file, line: line)
         return suffix
     }
@@ -909,7 +921,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertFalse(first.currentUserInstructions.contains(latestRequest), "The locator must not duplicate user content")
             try assertUserPayloadAppearsOnce(latestRequest, in: first)
             XCTAssertTrue(first.prompt.hasSuffix(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["computer_v2_snapshot"],
-                responseFormat: .fencedJSON)))
+                responseFormat: .fencedJSON, singleActionRelay: first.singleActionRelay)))
             let nextInput = input + [
                 ["type": "function_call", "name": "computer_v2_snapshot", "arguments": "{}", "call_id": "current_extra"],
                 ["type": "function_call_output", "call_id": "current_extra", "output": "Another current native observation completed."],

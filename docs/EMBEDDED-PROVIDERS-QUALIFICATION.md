@@ -77,6 +77,37 @@ the prior result or use conditional execution. No command parsing, rewriting,
 execution-policy change or response acceptance relaxation is introduced.
 Fresh installed behavior must be tested separately from instruction wiring.
 
+## Candidate151: one selected ChatGPT action per inference
+
+Installed150's first fresh code/browser task passed the unchanged strict checks
+in 148.007 seconds with ten successful tools. The second completed its edit,
+four tests and browser lookup in 135.800 seconds, but again proposed the test and
+helper commands together before receiving either result. Its strict dependency
+failure remains failed. Both runs made no Git probe; their website ownership,
+normal Chat model selection and cleanup proofs passed. A matrix-label error in
+the independent website checker was corrected through separately reviewed
+metadata-only successors without replaying either model task.
+
+Prompt reminders alone did not establish reliable ordering. The embedded
+ChatGPT relay now selects one tool call after parsing and validating the entire
+reply against the original offered names, argument formats and tool policy.
+An invalid later proposal, forbidden parallel batch, call-limit violation or
+batch above the existing 64-call boundary still rejects the entire reply.
+The selected call preserves its exact arguments or custom input. Unselected
+proposals receive no native call IDs and are never queued or replayed. Both
+streamed and ordinary responses, and native continuation admission, use the
+same selected call. The next inference receives the actual call and result
+before choosing further work. Request history and options remain unchanged.
+
+A finite JSON string in the host-owned response metadata key
+`computa_website_tool_selection` reports proposed, selected and unselected call
+counts. It is selection accounting, not execution, permission, usage or retry
+proof; client metadata cannot impersonate it. Generic codec parsing and other
+provider dispatch remain unchanged. One selected tool call can still contain a
+compound shell program or return a running session, so output and completion
+checks remain necessary. Installed151 qualification remains separate from
+offline wiring, codec and continuation tests.
+
 ## Installed147: captured mixed-format ChatGPT reply
 
 Signed 0.7.0 (147), source `fbc87ca77a0d4a8d650e3fe5e50e90231bf661ba`,

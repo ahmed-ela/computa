@@ -325,6 +325,25 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(calls[0].argumentsJSON.utf8)) as? [String: String], ["cmd": command])
     }
 
+    func testSingleActionHandoffFollowsCompleteRequestOnlyForChatGPT() throws {
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": "browser/" + provider, "input": [["role": "user", "content": "Inspect the requested files"]],
+                "parallel_tool_calls": true,
+                "tools": [["type": "function", "name": "exec_command", "parameters": ["type": "object"]]],
+            ])
+            let request = try WebModelResponseCodec.prepareRequest(original)
+            let handoff = try assertRequestValuesAndHandoff(original, request: request)
+            XCTAssertEqual(request.singleActionRelay, provider == "chatgpt")
+            XCTAssertEqual(handoff.contains("This ChatGPT relay issues one tool call per inference"), provider == "chatgpt")
+            if provider == "chatgpt" {
+                XCTAssertTrue(handoff.contains("the rest are not queued or replayed"))
+                XCTAssertLessThan(handoff.utf8.count, 4_200, "The explicit selection policy stays bounded after history")
+            }
+            XCTAssertEqual(request.continuationRequest, original, "Selection must not rewrite caller options or canonical history")
+        }
+    }
+
     func testBuiltInBrowserGuidanceRequiresCurrentOfferedToolsAndSurvivesQualifiedNames() {
         let absent = ComputaAgentInstructions.webInferenceContract(offeredFunctions: [:])
         XCTAssertFalse(absent.contains(ComputaAgentInstructions.builtInBrowser))
@@ -735,7 +754,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
             customToolNames: request.customToolNames,
             includedInstructionText: includedInstructionText,
-            responseFormat: .fencedJSON)
+            responseFormat: .fencedJSON, singleActionRelay: request.singleActionRelay)
         XCTAssertEqual(suffix, "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        handoff, file: file, line: line)
         return handoff

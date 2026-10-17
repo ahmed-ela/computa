@@ -529,7 +529,8 @@ enum ComputaAgentInstructions {
     /// response handoff. Names come only from the current validated schemas.
     static func webResponseContract(offeredToolNames: [String], customToolNames: Set<String> = [],
                                     includedInstructionText: [String] = [],
-                                    responseFormat: WebResponseFormat = .fencedJSON) -> String {
+                                    responseFormat: WebResponseFormat = .fencedJSON,
+                                    singleActionRelay: Bool = false) -> String {
         let responseFormatInstructions: String
         switch responseFormat {
         case .fencedJSON:
@@ -571,6 +572,13 @@ enum ComputaAgentInstructions {
         quotes as valid JSON; the host passes the decoded string unchanged.
         Exact currently offered custom names: \(customToolNames.sorted().joined(separator: ", "))
         """
+        let selectionContract = singleActionRelay && !offeredToolNames.isEmpty ? """
+        This ChatGPT relay issues one tool call per inference. Propose only the
+        next action. If a valid reply proposes several calls, only the first is
+        issued; the rest are not queued or replayed. Wait for its matching output,
+        then choose the next action from the actual native history. A running
+        command still needs its final output and exit code before dependent work.
+        """ : ""
         return """
         COMPUTA_LOCAL_RESPONSE_HANDOFF:
         Write JSON for Computa's external execution relay. The website does not
@@ -606,6 +614,7 @@ enum ComputaAgentInstructions {
         apply to that value; this transport still requires one JSON envelope.
         For file-only results, use message.text; put truthful limitations or refusals there too.
         \(commandHandoff)
+        \(selectionContract)
         \(literalIdentifiers)
         \(responseFormatInstructions)
         One object; no outside text. Escape quotes, backslashes and

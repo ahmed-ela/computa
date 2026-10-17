@@ -8,6 +8,7 @@ enum WebModelResponseCodec {
 
     struct Request: Sendable {
         let model: String
+        let singleActionRelay: Bool
         let stream: Bool
         let prompt: String
         let runtimeInstructions: String
@@ -223,13 +224,13 @@ enum WebModelResponseCodec {
         \(currentUserInstructions)
 
         \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON))
+            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT))
         """
         let bytes = prompt.utf8.count
         guard bytes <= maximumPromptBytes else {
             throw Failure.promptTooLarge(actualBytes: bytes, maximumBytes: maximumPromptBytes)
         }
-        return Request(model: model, stream: stream, prompt: prompt, runtimeInstructions: runtimeInstructions,
+        return Request(model: model, singleActionRelay: isChatGPT, stream: stream, prompt: prompt, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
                        offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered,
                        toolPolicy: policy, parallelToolCalls: parallel,
@@ -439,11 +440,12 @@ enum WebModelResponseCodec {
         request: Request,
         responseID: String = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
         createdAt: Int = Int(Date().timeIntervalSince1970),
-        websiteModelEvidence: WebsiteModelEvidence? = nil
+        websiteModelEvidence: WebsiteModelEvidence? = nil,
+        websiteToolSelection: String? = nil
     ) throws -> Data {
         _ = try validated(reply, request: request)
         let output = outputItems(for: reply, responseID: responseID)
-        let initial = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: [], completed: false, websiteModelEvidence: websiteModelEvidence)
+        let initial = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: [], completed: false, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection)
         var events: [[String: Any]] = [
             ["type": "response.created", "response": initial],
             ["type": "response.in_progress", "response": initial],
@@ -478,7 +480,7 @@ enum WebModelResponseCodec {
             }
             events.append(["type": "response.output_item.done", "output_index": index, "item": item])
         }
-        let completed = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: output, completed: true, websiteModelEvidence: websiteModelEvidence)
+        let completed = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: output, completed: true, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection)
         events.append(["type": "response.completed", "response": completed])
         var result = Data()
         for (sequence, var event) in events.enumerated() {
@@ -497,12 +499,13 @@ enum WebModelResponseCodec {
         request: Request,
         responseID: String = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
         createdAt: Int = Int(Date().timeIntervalSince1970),
-        websiteModelEvidence: WebsiteModelEvidence? = nil
+        websiteModelEvidence: WebsiteModelEvidence? = nil,
+        websiteToolSelection: String? = nil
     ) throws -> Data {
         _ = try validated(reply, request: request)
         return try JSONSerialization.data(withJSONObject: response(
             request: request, reply: reply, responseID: responseID, createdAt: createdAt,
-            output: outputItems(for: reply, responseID: responseID), completed: true, websiteModelEvidence: websiteModelEvidence
+            output: outputItems(for: reply, responseID: responseID), completed: true, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection
         ), options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
@@ -786,7 +789,7 @@ enum WebModelResponseCodec {
         }
     }
 
-    private static func response(request: Request, reply: Reply, responseID: String, createdAt: Int, output: [[String: Any]], completed: Bool, websiteModelEvidence: WebsiteModelEvidence? = nil) -> [String: Any] {
+    private static func response(request: Request, reply: Reply, responseID: String, createdAt: Int, output: [[String: Any]], completed: Bool, websiteModelEvidence: WebsiteModelEvidence? = nil, websiteToolSelection: String? = nil) -> [String: Any] {
         let finalText: String
         let endTurn: Bool
         switch reply {
@@ -802,11 +805,19 @@ enum WebModelResponseCodec {
                 "status": completed ? "completed" : "in_progress", "output": output, "output_text": finalText,
                 "error": NSNull(), "incomplete_details": NSNull(), "usage": NSNull(),
                 "end_turn": completed ? endTurn : false]) { _, new in new }
+        // This reserved key describes host selection, never execution. A client
+        // metadata value cannot impersonate the host's finite diagnostic.
+        var metadata = value["metadata"] as? [String: Any] ?? [:]
+        var metadataChanged = metadata.removeValue(forKey: "computa_website_tool_selection") != nil
         if let websiteModelEvidence {
-            var metadata = value["metadata"] as? [String: Any] ?? [:]
             metadata["computa_website_model"] = websiteModelEvidence.dictionary
-            value["metadata"] = metadata
+            metadataChanged = true
         }
+        if let websiteToolSelection {
+            metadata["computa_website_tool_selection"] = websiteToolSelection
+            metadataChanged = true
+        }
+        if metadataChanged { value["metadata"] = metadata }
         return value
     }
 }

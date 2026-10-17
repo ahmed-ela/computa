@@ -3,6 +3,88 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testChatSingleActionHandoffPublishesOnlyFirstThenRequiresFreshNativeResult() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-single-action-" + UUID().uuidString)
+        let base = FixtureWebModelTransport(replyTexts: [
+            #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"run-tests"}},{"name":"exec_command","arguments":{"cmd":"discarded-helper-proposal"}}]}"#,
+            #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"fresh-after-observed-failure"}}]}"#,
+        ])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base))
+        let original: [[String: Any]] = [["role": "user", "content": "Run tests, then decide from the observed result"]]
+        let first = try await server.fixtureInfer(turnRequest(input: original, model: syntheticChatGPTModelID), taskID: "single-action")
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: first) as? [String: Any])
+        let calls = try responseOutput(first)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?["arguments"] as? String, #"{"cmd":"run-tests"}"#)
+        let metadata = try XCTUnwrap((response["metadata"] as? [String: Any])?["computa_website_tool_selection"] as? String)
+        let counts = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(metadata.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(counts.keys), ["policy", "version", "proposedCount", "selectedCount", "notSelectedCount"])
+        XCTAssertEqual(counts["policy"] as? String, "single_action_per_inference")
+        XCTAssertEqual(counts["version"] as? Int, 1)
+        XCTAssertEqual(counts["proposedCount"] as? Int, 2)
+        XCTAssertEqual(counts["selectedCount"] as? Int, 1)
+        XCTAssertEqual(counts["notSelectedCount"] as? Int, 1)
+        let firstOperations = await base.operations()
+        XCTAssertEqual(firstOperations.filter { $0 == "webProviderSend" }.count, 1)
+        XCTAssertEqual(firstOperations.last, "webProviderFinish", "The exact owned lease closes before publishing the call")
+        let result: [[String: Any]] = [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
+                                      "output": "Tests failed. Process exited with code 1"]]
+        let nextInput = original + calls + result
+        let second = try await server.fixtureInfer(turnRequest(input: nextInput, model: syntheticChatGPTModelID), taskID: "single-action")
+        let nextCalls = try responseOutput(second)
+        XCTAssertEqual(nextCalls.count, 1)
+        XCTAssertEqual(nextCalls.first?["arguments"] as? String, #"{"cmd":"fresh-after-observed-failure"}"#)
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual(prompts.count, 2)
+        let firstRequest = try canonicalRequest(in: prompts[0]), nextRequest = try canonicalRequest(in: prompts[1])
+        XCTAssertEqual(nextRequest["input"] as? NSArray, nextInput as NSArray)
+        XCTAssertFalse(String(decoding: try JSONSerialization.data(withJSONObject: nextRequest["input"]!), as: UTF8.self).contains("discarded-helper-proposal"))
+        var firstConfiguration = firstRequest, nextConfiguration = nextRequest
+        firstConfiguration.removeValue(forKey: "input"); nextConfiguration.removeValue(forKey: "input")
+        XCTAssertEqual(firstConfiguration as NSDictionary, nextConfiguration as NSDictionary)
+        let beforeForgery = await base.operations()
+        XCTAssertEqual(beforeForgery.filter { $0 == "webProviderStart" }.count, 2)
+        XCTAssertEqual(beforeForgery.filter { $0 == "webProviderFinish" }.count, 2)
+        let unissuedID = String(try XCTUnwrap(calls.first?["call_id"] as? String).dropLast()) + "1"
+        let forgedInput = nextInput + nextCalls + [
+            ["type": "function_call_output", "call_id": try XCTUnwrap(nextCalls.first?["call_id"] as? String), "output": "Observed fresh result"],
+            ["type": "function_call_output", "call_id": unissuedID, "output": "Invented discarded helper result"],
+        ]
+        do { _ = try await server.fixtureInfer(turnRequest(input: forgedInput, model: syntheticChatGPTModelID), taskID: "single-action"); XCTFail("Unissued tail output must not authorize another Start") }
+        catch { XCTAssertEqual(error as? WebsiteTurnContinuation.Failure, .invalidToolOutputs) }
+        let afterForgery = await base.operations()
+        XCTAssertEqual(afterForgery, beforeForgery)
+        let journal = try turnJournal(root: root, task: "single-action")
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "release_verified" }.count, 2)
+    }
+
+    func testChatSingleActionInvalidLaterCallRejectsWholeBatchAndClosesOwnedLease() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-invalid-selection-" + UUID().uuidString)
+        let base = FixtureWebModelTransport(replyTexts: [
+            #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"must-not-be-released"}},{"name":"not_offered","arguments":{}}]}"#,
+        ])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base))
+        do {
+            _ = try await server.fixtureInfer(turnRequest(input: [["role": "user", "content": "Reject the entire invalid batch"]], model: syntheticChatGPTModelID), taskID: "invalid-selection")
+            XCTFail("No response or first call may be released from an invalid batch")
+        } catch { XCTAssertEqual(error as? WebModelResponseCodec.Failure, .unknownTool("not_offered")) }
+        let issues = await server.fixtureFinish(taskID: "invalid-selection")
+        XCTAssertTrue(issues.isEmpty)
+        let receipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(receipts.count, 1)
+        XCTAssertEqual(receipts.first?.outcome, .closed)
+        XCTAssertEqual(receipts.first?.receiptSaved, true)
+        let operations = await base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+        XCTAssertEqual(operations.filter { ["webProviderFinish", "webProviderCancel"].contains($0) }.count, 1)
+        let journal = try turnJournal(root: root, task: "invalid-selection")
+        XCTAssertEqual(journal.filter { $0["phase"] as? String == "failed" }.count, 1)
+        XCTAssertFalse(journal.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") })
+    }
+
     func testChatFreshInferenceLeasesKeepSixToolResultsAndCloseBeforeEachHandoff() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-fresh-six-" + UUID().uuidString)
         let replies = (0..<6).map { #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"round-"# + String($0) + #""}}]}"# }
