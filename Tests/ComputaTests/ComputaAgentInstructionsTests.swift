@@ -325,6 +325,81 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(calls[0].argumentsJSON.utf8)) as? [String: String], ["cmd": command])
     }
 
+    func testBrowserAddressChecksStaySharedAndFreshDespiteTrustedNativeDeduplication() {
+        // Instruction delivery only; a live model must independently qualify.
+        let checks = ComputaAgentInstructions.browserAddressChecks
+        for referenceTools in [true, false] {
+            let native = ComputaAgentInstructions.developerInstructions(referenceTools: referenceTools, embeddedBrowserTools: true)
+            XCTAssertEqual(native.components(separatedBy: checks).count - 1, 1)
+            XCTAssertFalse(ComputaAgentInstructions.developerInstructions(referenceTools: referenceTools).contains(checks))
+            let runtime = ComputaAgentInstructions.webInferenceContract(offeredFunctions: ["relay.browser_open": "browser_open"],
+                includedInstructionText: [native])
+            XCTAssertFalse(runtime.contains(ComputaAgentInstructions.builtInBrowser), "The full native contract still deduplicates")
+            for trusted in [[native], [native, checks], [checks, checks], ["Older browser instructions"]] {
+                let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: ["relay.browser_open"],
+                    includedInstructionText: trusted)
+                XCTAssertEqual(handoff.components(separatedBy: checks).count - 1, 1,
+                    "Current address checks cannot be removed by canonical native history")
+            }
+        }
+        let text = checks.replacingOccurrences(of: "\n", with: " ")
+        XCTAssertTrue(text.contains("Copy requested URLs exactly, including punctuation"))
+        XCTAssertTrue(text.contains("If unavailable, compare with the task"))
+        XCTAssertTrue(text.contains("never guess variants or a homepage"))
+        XCTAssertLessThan(checks.utf8.count, 200)
+    }
+
+    func testFreshBrowserAddressChecksRequireAnExactOfferedNoncustomCapability() {
+        let cases: [(names: [String], custom: Set<String>, expected: Bool)] = [
+            (["browser_open"], [], true),
+            (["functions.browser_read"], [], true),
+            (["nested.relay.browser_navigate"], [], true),
+            (["relay.browser_close"], [], true),
+            (["relay.browser_open", "other.browser_open"], ["relay.browser_open"], true),
+            ([], [], false),
+            (["relay.exec_command", "computer_v2_read_page"], [], false),
+            (["relay.browser_open_notes", "relay.browser_other"], [], false),
+            (["relay.browser_open"], ["relay.browser_open"], false),
+            (["relay.apply_patch"], ["relay.apply_patch"], false),
+            ([".browser_open", "relay..browser_open", "relay.browser_open."], [], false),
+        ]
+        for item in cases {
+            let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: item.names,
+                customToolNames: item.custom, includedInstructionText: [ComputaAgentInstructions.builtInBrowser])
+            XCTAssertEqual(handoff.contains(ComputaAgentInstructions.browserAddressChecks), item.expected,
+                           item.names.joined(separator: ", "))
+        }
+    }
+
+    func testFreshBrowserAddressChecksFollowUnchangedCanonicalRequestAndPreserveLiteralArguments() throws {
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let address = "http://127.0.0.1:12345/cases/code_terminal_browser?ref=UA%204240&tag=a_b-c#résumé"
+        let original = try JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": [["role": "developer", "content": native],
+                ["role": "user", "content": "Read the exact page: " + address]],
+            "tools": [["type": "namespace", "name": "relay", "tools": [["type": "function", "name": "browser_open",
+                "parameters": ["type": "object", "properties": ["url": ["type": "string"]]]]]]],
+        ])
+        let request = try WebModelResponseCodec.prepareRequest(original)
+        let handoff = try assertRequestValuesAndHandoff(original, request: request, includedInstructionText: [native])
+        XCTAssertEqual(request.continuationRequest, original)
+        let end = try XCTUnwrap(request.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
+        let fresh = try XCTUnwrap(request.prompt.range(of: ComputaAgentInstructions.browserAddressChecks,
+            range: end.upperBound..<request.prompt.endIndex))
+        XCTAssertGreaterThan(fresh.lowerBound, end.upperBound)
+        XCTAssertEqual(handoff.components(separatedBy: ComputaAgentInstructions.browserAddressChecks).count - 1, 1)
+        XCTAssertTrue(handoff.contains(ComputaAgentInstructions.literalIdentifiers))
+        for attempted in [address, address.replacingOccurrences(of: "code_terminal_browser", with: "code-terminal-browser")] {
+            let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [
+                ["name": "relay.browser_open", "arguments": ["url": attempted]],
+            ]])
+            let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: request, requireEnvelope: true)
+            guard case let .toolCalls(calls) = reply else { return XCTFail("Expected the unchanged offered browser action") }
+            let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(calls.first).argumentsJSON.utf8)) as? [String: String])
+            XCTAssertEqual(arguments["url"], attempted, "Guidance never rewrites or repairs a tool argument")
+        }
+    }
+
     func testSingleActionHandoffFollowsCompleteRequestOnlyForChatGPT() throws {
         for provider in ["chatgpt", "gemini", "claude"] {
             let original = try JSONSerialization.data(withJSONObject: [

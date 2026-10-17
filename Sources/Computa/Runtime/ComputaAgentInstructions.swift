@@ -302,12 +302,19 @@ enum ComputaAgentInstructions {
     does not prove successful execution.
     """
 
+    /// Shared native guidance and always-current post-history browser handoff.
+    /// Delivery is testable; this is not proof that a model follows an address.
+    static let browserAddressChecks = """
+    Copy requested URLs exactly, including
+    punctuation. If unavailable, compare with the task; never guess variants or a homepage.
+    """
+
     static let builtInBrowser = """
     browser_* tools use Computa's built-in browser. Existing pages: browser_tabs,
     then browser_bind with observed tab_id. browser_open creates AND binds a task-owned
     page; read directly without another bind. Bind anew each turn. Model inference pages
-    are separate and cannot be targeted. Copy requested URLs exactly, including
-    punctuation. If unavailable, compare with the task; never guess variants or a homepage.
+    are separate and cannot be targeted.
+    \(browserAddressChecks)
     browser_read returns snapshot_id/element_index targets; copy exactly.
     Every new read, view change or cursor page supersedes ALL earlier action targets.
     An admitted click or fill consumes its snapshot. At most one input action per tool-call batch.
@@ -457,7 +464,7 @@ enum ComputaAgentInstructions {
 
     /// Callers supply only the complete request's trusted system/developer
     /// instruction values. A byte-exact full block in one value can replace
-    /// duplicate outer prose except the always-fresh command checks; partial,
+    /// duplicate outer prose except the always-fresh command/address checks; partial,
     /// normalized or joined fragments cannot.
     private static func instructionAlreadyIncluded(_ contract: String, in text: [String]) -> Bool {
         let bytes = Data(contract.utf8)
@@ -544,9 +551,12 @@ enum ComputaAgentInstructions {
             or code blocks.
             """
         }
-        let browserHandoff = offeredToolNames.contains {
-            !customToolNames.contains($0) && EmbeddedBrowserTools.names.contains(String($0.split(separator: ".").last ?? ""))
-        } ? """
+        let hasBuiltInBrowser = offeredToolNames.contains { name in
+            let parts = name.split(separator: ".", omittingEmptySubsequences: false)
+            return !customToolNames.contains(name) && parts.allSatisfy { !$0.isEmpty }
+                && parts.last.map { EmbeddedBrowserTools.names.contains(String($0)) } == true
+        }
+        let browserHandoff = hasBuiltInBrowser ? """
         The website need not access the requested page or host network itself.
         Computa executes the requested browser operation on the user's computer,
         including URLs on localhost. Write the permitted action request using
@@ -565,6 +575,9 @@ enum ComputaAgentInstructions {
         let commandHandoff = offeredToolNames.contains {
             !customToolNames.contains($0) && ["exec_command", "write_stdin"].contains(String($0.split(separator: ".").last ?? ""))
         } ? commandChecks : ""
+        // Keep exact-address guidance fresh even when native history already
+        // contains the full browser contract and suppresses its outer duplicate.
+        let browserAddressHandoff = hasBuiltInBrowser ? browserAddressChecks : ""
         let customContract = customToolNames.isEmpty ? "" : """
         Custom tools accept literal string input, not JSON object arguments.
         For those names, use {"name":"exact_custom_tool_name","input":"literal input"}.
@@ -614,6 +627,7 @@ enum ComputaAgentInstructions {
         apply to that value; this transport still requires one JSON envelope.
         For file-only results, use message.text; put truthful limitations or refusals there too.
         \(commandHandoff)
+        \(browserAddressHandoff)
         \(selectionContract)
         \(literalIdentifiers)
         \(responseFormatInstructions)

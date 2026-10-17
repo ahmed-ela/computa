@@ -136,6 +136,38 @@ overlay or changed control still rejects without a click. No Send is replayed
 and the existing one-expansion claim is retained. Installed qualification of
 this candidate remains separate from the reproduced algorithmic regression.
 
+## Candidate153: fresh browser address checks after history
+
+Installed152 passed 436 selected native tests and a final isolated ChatGPT
+adapter run passed all 349 tests. Earlier broader adapter runs each failed one
+test; both passed unchanged in isolation. Those failures remain recorded.
+
+Its original fresh pair qualified one of two strict code/browser tasks. The
+first repaired an indentation error after an explicit failed test, then opened
+a URL with hyphens replacing requested underscores and accurately reported the
+unavailable page. The indentation error's origin is unproven: the corresponding
+reply used rendered-text fallback, so model generation and rendering cannot be
+distinguished from the retained evidence. The second task passed all strict
+checks in 150 seconds with ten tools. A separately declared additional pair's
+first task repeated the wrong-URL failure despite correct code and tests; its
+second task was not submitted. All three completed tasks had clean, closed
+website inferences; their original strict failures remain failed.
+
+A requested Git inspection returned the correct root, status and dirty note;
+independent reads verified its existing HEAD, index, configuration and dirty
+file were preserved. Its strict control rejected extra printf separators.
+The separate missing/valid-file control passed with independent exit codes 1
+and 0 and an accurate final report. This does not establish an all-green matrix.
+
+The exact-address browser rule was present in canonical native history, while
+only terminal checks were refreshed after that history. Candidate153 shares the
+address rule between native browser guidance and a fresh response handoff when
+built-in browser tools are offered. It requires exact requested URLs and
+identifiers, comparison with the task after an unavailable page, and no guessed
+variant or homepage. This proves instruction placement, not why a model chose
+the wrong URL. Tool arguments, navigation, permission checks, canonical history
+and grading remain unchanged. Fresh installed behavior must be tested separately.
+
 ## Installed147: captured mixed-format ChatGPT reply
 
 Signed 0.7.0 (147), source `fbc87ca77a0d4a8d650e3fe5e50e90231bf661ba`,
