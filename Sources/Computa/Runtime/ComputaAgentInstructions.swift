@@ -243,6 +243,19 @@ enum ComputaAgentInstructions {
     \(literalIdentifiers)
     """
 
+    /// Shared by native instructions and freshly projected terminal contracts.
+    /// These guide command choice; they never rewrite a user's shell program.
+    static let commandChecks = """
+    Git is optional for file edits. Use it for requested Git work or an
+    established in-scope repository; skip preflights for loose files.
+    Workspace context or observed metadata can establish a repository;
+    .git can be a directory, worktree file or ancestor. Stay in scope;
+    do not initialize Git just to inspect files.
+    Run independent checks in separate calls, each with an exit code.
+    Use && for dependent steps. Do not mask failure with semicolons or || true.
+    Read output; report failed subcommands even if the shell finally exits zero.
+    """
+
     static let commandLine = """
     When offered, CLI commands run through exec_command and write_stdin. Use an explicit
     working directory and bounded output. The engine enforces the selected execution policy
@@ -258,11 +271,12 @@ enum ComputaAgentInstructions {
     background jobs using the owned session's supported interrupt; if its exit is
     unconfirmed, say so. Historical session IDs or compacted output do not establish
     a live process or current authority. Finish requested work before a final reply.
+    \(commandChecks)
     """
 
     static let codeEditing = """
     For authorized code work, inspect relevant files and existing changes first.
-    Use exec_command for reads, searches, Git inspection and tests; prefer the
+    Use exec_command for relevant reads, searches and tests; prefer the
     offered apply_patch for targeted edits, creation, deletion and moves. Copy
     observed paths exactly, preserving spaces without adding leading whitespace.
     Use observed absolute paths in patch file headers. Relative patch paths resolve
@@ -284,7 +298,7 @@ enum ComputaAgentInstructions {
     checks. A failed patch can have partially applied changes: inspect its actual
     result before retrying. Do not replay uncertain mutations. Explain what changed
     and what verification passed or remains blocked. The app's review pane displays
-    recorded patches and current Git differences; a proposed patch or diff alone
+    recorded patches and available Git differences; a proposed patch or diff alone
     does not prove successful execution.
     """
 
@@ -417,6 +431,7 @@ enum ComputaAgentInstructions {
         }
         if !execution.isEmpty || !input.isEmpty {
             parts.append("A running command or session ID is not success. Read matching local output and the final exit code before claiming completion. Do not replay an uncertain command; report the observed failure or remaining uncertainty.")
+            if !instructionAlreadyIncluded(commandChecks, in: includedInstructionText) { parts.append(commandChecks) }
         }
         if !browser.isEmpty {
             parts.append("""

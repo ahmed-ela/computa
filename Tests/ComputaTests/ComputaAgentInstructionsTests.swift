@@ -191,7 +191,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(instructions.contains("pending or the host budget is exhausted"))
         let computerInstructions = ComputaAgentInstructions.nativeScope + "\n\n" + ComputaAgentInstructions.capabilityEvidence
         XCTAssertLessThan(computerInstructions.utf8.count, 4_600, "The reference interface retains its existing instruction budget.")
-        XCTAssertLessThan(ComputaAgentInstructions.commandLine.utf8.count, 1_200, "CLI guidance has a separate bounded instruction budget.")
+        XCTAssertLessThan(ComputaAgentInstructions.commandLine.utf8.count, 1_900, "CLI guidance includes bounded repository and per-command outcome context.")
     }
 
     func testLegacyInstructionsRemainAvailableForExistingToolDefinitions() {
@@ -266,6 +266,52 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertFalse(absent.contains("Computer UI work requires"))
         XCTAssertLessThan(terminal.utf8.count, 5_200, "Fresh runtime context has a bounded instruction budget independent of history length")
         XCTAssertLessThan(ComputaAgentInstructions.ordinaryRequests.utf8.count, 800)
+    }
+
+    func testCommandChecksFollowCurrentTerminalCapabilityAndTrustedInstructionDeduplication() {
+        // Instruction delivery, not a semantic model-adherence test.
+        let checks = ComputaAgentInstructions.commandChecks
+        for referenceTools in [true, false] {
+            let native = ComputaAgentInstructions.developerInstructions(referenceTools: referenceTools)
+            XCTAssertEqual(native.components(separatedBy: checks).count - 1, 1)
+        }
+        for tool in ["exec_command", "write_stdin"] {
+            let tools = ["relay." + tool: tool]
+            let fresh = ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools)
+            XCTAssertEqual(fresh.components(separatedBy: checks).count - 1, 1)
+            let current = ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools,
+                includedInstructionText: [ComputaAgentInstructions.developerInstructions()])
+            XCTAssertFalse(current.contains(checks), "One complete trusted current block avoids duplication")
+            let stale = ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools,
+                includedInstructionText: ["Use exec_command for Git inspection; verify the final exit code."])
+            XCTAssertTrue(stale.contains(checks), "Persisted older instructions must receive current guidance")
+        }
+        for tools in [[:], ["relay.browser_read": "browser_read"], ["relay.exec_command_notes": "exec_command_notes"]] {
+            XCTAssertFalse(ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools).contains(checks))
+        }
+        XCTAssertLessThan(checks.utf8.count, 750)
+    }
+
+    func testCommandGuidancePreservesCanonicalHistoryAndLiteralShellArguments() throws {
+        let command = "printf 'literal;value'"
+        let original = try JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": [
+                ["role": "developer", "content": "Use exec_command for Git inspection; verify the final exit code."],
+                ["role": "user", "content": "Run the requested literal command"],
+            ], "tools": [["type": "namespace", "name": "relay", "tools": [
+                ["type": "function", "name": "exec_command", "parameters": ["type": "object"]],
+            ]]],
+        ])
+        let request = try WebModelResponseCodec.prepareRequest(original)
+        _ = try assertRequestValuesAndHandoff(original, request: request)
+        XCTAssertTrue(request.prompt.contains(ComputaAgentInstructions.commandChecks))
+        let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [
+            ["name": "relay.exec_command", "arguments": ["cmd": command]],
+        ]])
+        let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: request, requireEnvelope: true)
+        guard case let .toolCalls(calls) = reply else { return XCTFail("Expected an unchanged offered command") }
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(calls[0].argumentsJSON.utf8)) as? [String: String], ["cmd": command])
     }
 
     func testBuiltInBrowserGuidanceRequiresCurrentOfferedToolsAndSurvivesQualifiedNames() {

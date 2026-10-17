@@ -33,6 +33,27 @@ model/product/ownership changes, cancellation and ambiguous HTTP delivery.
 Independent source review and Xcode project lint passed. Installed live
 qualification remains separate from these offline results.
 
+## Candidate149: scoped Git inspection and command outcomes
+
+The V63 code workflow's strict command-scope failure is retained. Its initial
+compound shell command ran an unsolicited Git status probe in an ordinary
+directory. Git reported that it was not a repository, while later file reads
+made the shell's aggregate exit status zero. The helper edit, tests and browser
+result succeeded; that did not establish success for the failed probe.
+
+The harness now treats Git inspection as optional for file edits. It uses Git
+for requested Git work or an established repository within the authorized
+workspace, including linked worktrees and nested repository directories.
+Ordinary file edits do not require Git preflights or repository creation.
+Shared native and fresh website instructions separate independent command
+checks, use dependent steps only after success, and require reporting an
+earlier subcommand's failure even when the final shell exit code is zero.
+
+This is instruction delivery, not shell rewriting or a permission change.
+Canonical requests, literal command arguments and execution behavior remain
+unchanged. Wiring regressions and fresh model behavior are separate evidence;
+the original strict grader and earlier results remain unchanged.
+
 ## Installed147: captured mixed-format ChatGPT reply
 
 Signed 0.7.0 (147), source `fbc87ca77a0d4a8d650e3fe5e50e90231bf661ba`,
