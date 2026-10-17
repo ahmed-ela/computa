@@ -3911,10 +3911,11 @@ async function chatGPTExpandFirstUser(candidate) {
     if (!chatGPTControlExposed(control)) {
       const rect = control.getBoundingClientRect();
       const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
-      const offscreen = [x, y, rect.width, rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0
-        && (x < 0 || y < 0 || Number.isFinite(window.innerWidth) && x >= window.innerWidth
-          || Number.isFinite(window.innerHeight) && y >= window.innerHeight);
-      if (!offscreen || typeof control.scrollIntoView !== 'function') return reject('obstructed');
+      // A center inside the window can still be clipped by a nested scroller
+      // or covered. One scroll may expose it; the same hit test must then pass.
+      const scrollable = [rect.left, rect.top, x, y, rect.width, rect.height].every(Number.isFinite)
+        && rect.width > 0 && rect.height > 0;
+      if (!scrollable || typeof control.scrollIntoView !== 'function') return reject('obstructed');
       control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
       if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
       if (!available()) return reject('unavailable');

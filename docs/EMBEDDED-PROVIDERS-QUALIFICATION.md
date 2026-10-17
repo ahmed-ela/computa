@@ -108,6 +108,34 @@ compound shell program or return a running session, so output and completion
 checks remain necessary. Installed151 qualification remains separate from
 offline wiring, codec and continuation tests.
 
+## Candidate152: reveal the captured message before expanding it
+
+Installed151 passed all 229 selected native tests. Its first fresh live task
+made no Git probe, patched the correct file, preserved the note and tests, and
+passed four tests before running the helper and opening the fixture page.
+All eight native calls returned successful results. Its ninth website
+inference failed first-user ownership, so the original strict workflow remains
+failed: there was no final answer, result read or model-issued tab closure.
+The app closed the task-created browser tab; website cleanup remained
+unconfirmed. The unused repetition and controls were not submitted.
+
+Finite diagnostics showed a 10,240-character rendered prefix of a
+77,583-character submitted message, one scoped expansion control and an
+`obstructed` expansion outcome. This establishes incomplete display and a
+failed visibility check, not the identity of an occluding element. The native
+engine's high-demand text is its generic HTTP 500 mapping, not evidence of a
+provider outage.
+
+The expansion helper previously attempted its single scroll only when the
+control's center lay outside the window. A control clipped by a nested scroll
+container or header can fail hit testing with its center still inside the
+window. The helper now permits one local center-scroll for a valid physical
+control after a failed hit test. Model, ownership, unchanged message, unique
+control, availability and final hit checks remain mandatory. A persistent
+overlay or changed control still rejects without a click. No Send is replayed
+and the existing one-expansion claim is retained. Installed qualification of
+this candidate remains separate from the reproduced algorithmic regression.
+
 ## Installed147: captured mixed-format ChatGPT reply
 
 Signed 0.7.0 (147), source `fbc87ca77a0d4a8d650e3fe5e50e90231bf661ba`,

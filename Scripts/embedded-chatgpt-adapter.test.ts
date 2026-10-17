@@ -1251,6 +1251,69 @@ describe('ChatGPT per-round canonical submission ownership', () => {
   });
 });
 
+describe('ChatGPT first-message expansion after a failed center hit', () => {
+  const choice = { key: 'chat/latest/medium', label: 'Medium' };
+  const staged = async () => {
+    const prompt = 'Owned clipped first-message expansion.\n'.repeat(600);
+    const f = fixture({ userPrompt: prompt });
+    const picker = installObservedModelPicker(f, 'chatgpt', Element);
+    expect((await f.inspect({ allowFirstUserBinding: false })).error).toBeDefined();
+    const outbound = prompt + '\n\n' + markerLine;
+    f.world.__computaModelLastSubmissionCount = 0;
+    f.userBody!.text = outbound.slice(0, 10_240);
+    const expand = new Element('BUTTON', { 'aria-label': 'Show more' });
+    const send = new Element('BUTTON', { 'aria-label': 'Send' });
+    const overlay = new Element('DIV');
+    f.userBody!.parentElement!.append(expand); f.body.append(send, overlay);
+    f.window.innerWidth = 1_000; f.window.innerHeight = 800;
+    expand.getBoundingClientRect = () => ({ left: 20, top: 80, width: 100, height: 30 });
+    f.setHit(overlay); // Finite in-window center, clipped or covered in the rendered page.
+    expand.onClick = () => { f.userBody!.text = outbound; expand.connected = false; };
+    const inspect = () => f.inspect({ allowFirstUserExpansion: true,
+      firstUserExpansionModelChoice: choice, expectedModelChoice: choice }, false);
+    return { f, picker, expand, send, outbound, inspect };
+  };
+
+  test('a clipped center inside the window gets one scroll and one verified local expansion', async () => {
+    const x = await staged(), scrolls: unknown[] = [];
+    (x.expand as any).scrollIntoView = (options: unknown) => { scrolls.push(options); x.f.setHit(x.expand); };
+    const result = await x.inspect();
+    if (result.error) expect(JSON.parse(result.debugStructure)).toMatchObject({
+      expansionOutcome: 'obstructed', bodyInnerTextLength: 10_240, scopedExpandControlCount: 1 });
+    expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true);
+    expect(result.firstUserMarkerVerified).toBe(true); expect(x.f.userBody!.text).toBe(x.outbound);
+    expect(scrolls).toEqual([{ block: 'center', inline: 'nearest', behavior: 'instant' }]);
+    expect(x.expand.clicks).toBe(1); expect(x.send.clicks).toBe(0); expect(x.f.composer.events).toHaveLength(0);
+    expect((x.f.world.__computaModelFirstExpansion as any).outcome).toBe('expanded');
+    expect((await x.inspect()).error).toBeUndefined(); expect(scrolls).toHaveLength(1); expect(x.expand.clicks).toBe(1);
+  });
+
+  test('scrolling cannot bypass a persistent overlay or changed owned control, body or owner', async () => {
+    for (const mutation of ['overlay', 'replacement', 'disabled', 'body', 'owner']) {
+      const x = await staged(); let scrolls = 0;
+      (x.expand as any).scrollIntoView = () => {
+        scrolls++;
+        if (mutation !== 'overlay') x.f.setHit(x.expand);
+        if (mutation === 'replacement') {
+          const parent = x.expand.parentElement!, replacement = new Element('BUTTON', { 'aria-label': 'Show more' });
+          replacement.parentElement = parent; parent.children[parent.children.indexOf(x.expand)] = replacement;
+          x.expand.connected = false;
+        }
+        if (mutation === 'disabled') x.expand.disabled = true;
+        if (mutation === 'body') x.f.userBody!.text += 'changed';
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign-owner';
+      };
+      const result = await x.inspect();
+      expect(result.error, mutation).toBeDefined(); expect(result, mutation).not.toHaveProperty('firstUserVerified');
+      if (mutation === 'overlay') expect(JSON.parse(result.debugStructure).expansionOutcome).toBe('obstructed');
+      expect(scrolls, mutation).toBe(1); expect(x.expand.clicks, mutation).toBe(0);
+      expect(x.f.world.__computaModelFirstProof, mutation).toBeUndefined();
+      expect(x.send.clicks, mutation).toBe(0); expect(x.f.composer.events, mutation).toHaveLength(0);
+      expect((await x.inspect()).error, mutation).toBeDefined(); expect(scrolls, mutation).toBe(1);
+    }
+  });
+});
+
 describe('ChatGPT completed expansion route continuation', () => {
   const choice = { key: 'chat/latest/medium', label: 'Medium' };
   const localURL = 'https://chatgpt.com/c/local-chatgpt%3Acompleted-expansion?temporary-chat=true';
