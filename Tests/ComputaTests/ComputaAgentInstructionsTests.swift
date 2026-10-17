@@ -268,7 +268,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertLessThan(ComputaAgentInstructions.ordinaryRequests.utf8.count, 800)
     }
 
-    func testCommandChecksFollowCurrentTerminalCapabilityAndTrustedInstructionDeduplication() {
+    func testCommandChecksFollowCurrentTerminalCapabilityAndRemainInFreshHandoff() {
         // Instruction delivery, not a semantic model-adherence test.
         let checks = ComputaAgentInstructions.commandChecks
         for referenceTools in [true, false] {
@@ -277,18 +277,23 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         for tool in ["exec_command", "write_stdin"] {
             let tools = ["relay." + tool: tool]
-            let fresh = ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools)
+            let fresh = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(tools.keys))
             XCTAssertEqual(fresh.components(separatedBy: checks).count - 1, 1)
-            let current = ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools,
+            let current = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(tools.keys),
                 includedInstructionText: [ComputaAgentInstructions.developerInstructions()])
-            XCTAssertFalse(current.contains(checks), "One complete trusted current block avoids duplication")
-            let stale = ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools,
+            XCTAssertEqual(current.components(separatedBy: checks).count - 1, 1,
+                "Current canonical native instructions do not remove the fresh command handoff")
+            let commandRange = current.range(of: checks)!
+            XCTAssertLessThan(commandRange.upperBound, current.range(of: "END_COMPUTA_LOCAL_RESPONSE_HANDOFF.")!.lowerBound)
+            let stale = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(tools.keys),
                 includedInstructionText: ["Use exec_command for Git inspection; verify the final exit code."])
             XCTAssertTrue(stale.contains(checks), "Persisted older instructions must receive current guidance")
         }
-        for tools in [[:], ["relay.browser_read": "browser_read"], ["relay.exec_command_notes": "exec_command_notes"]] {
-            XCTAssertFalse(ComputaAgentInstructions.webInferenceContract(offeredFunctions: tools).contains(checks))
+        for names in [[], ["relay.browser_read"], ["relay.exec_command_notes"]] {
+            XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: names).contains(checks))
         }
+        XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["relay.exec_command"],
+            customToolNames: ["relay.exec_command"]).contains(checks))
         XCTAssertLessThan(checks.utf8.count, 750)
     }
 
@@ -296,15 +301,21 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let command = "printf 'literal;value'"
         let original = try JSONSerialization.data(withJSONObject: [
             "model": "browser/chatgpt", "input": [
-                ["role": "developer", "content": "Use exec_command for Git inspection; verify the final exit code."],
+                ["role": "developer", "content": ComputaAgentInstructions.developerInstructions()],
                 ["role": "user", "content": "Run the requested literal command"],
             ], "tools": [["type": "namespace", "name": "relay", "tools": [
                 ["type": "function", "name": "exec_command", "parameters": ["type": "object"]],
             ]]],
         ])
         let request = try WebModelResponseCodec.prepareRequest(original)
-        _ = try assertRequestValuesAndHandoff(original, request: request)
+        _ = try assertRequestValuesAndHandoff(original, request: request,
+            includedInstructionText: [ComputaAgentInstructions.developerInstructions()])
         XCTAssertTrue(request.prompt.contains(ComputaAgentInstructions.commandChecks))
+        let requestEnd = try XCTUnwrap(request.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
+        let currentChecks = try XCTUnwrap(request.prompt.range(of: ComputaAgentInstructions.commandChecks,
+            range: requestEnd.upperBound..<request.prompt.endIndex))
+        XCTAssertGreaterThan(currentChecks.lowerBound, requestEnd.upperBound,
+            "Current command rules follow the complete unchanged native history")
         let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [
             ["name": "relay.exec_command", "arguments": ["cmd": command]],
         ]])
@@ -577,7 +588,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(handoff.hasSuffix("Exact currently offered local function names: \(published)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertTrue(handoff.contains("optional tool_calls.commentary"))
             XCTAssertTrue(handoff.contains("Send it alongside next calls, never outside"))
-            XCTAssertLessThan(handoff.utf8.count, 3_000, "The handoff, including the compact current-terminal clarification, stays bounded independently of history length")
+            XCTAssertLessThan(handoff.utf8.count, 3_600, "The handoff includes bounded current command checks after history")
         }
     }
 
@@ -712,6 +723,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     }
 
     private func assertRequestValuesAndHandoff(_ original: Data, request: WebModelResponseCodec.Request,
+                                                 includedInstructionText: [String] = [],
                                                  file: StaticString = #filePath, line: UInt = #line) throws -> String {
         let prompt = Data(request.prompt.utf8)
         let start = try XCTUnwrap(prompt.range(of: Data("COMPLETE_RESPONSES_REQUEST_JSON:\n".utf8)), file: file, line: line).upperBound
@@ -722,6 +734,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let suffix = String(decoding: prompt[end...], as: UTF8.self)
         let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
             customToolNames: request.customToolNames,
+            includedInstructionText: includedInstructionText,
             responseFormat: .fencedJSON)
         XCTAssertEqual(suffix, "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        handoff, file: file, line: line)

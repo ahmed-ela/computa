@@ -246,14 +246,14 @@ enum ComputaAgentInstructions {
     /// Shared by native instructions and freshly projected terminal contracts.
     /// These guide command choice; they never rewrite a user's shell program.
     static let commandChecks = """
-    Git is optional for file edits. Use it for requested Git work or an
+    Git is optional for edits. Use it for requested Git work or an
     established in-scope repository; skip preflights for loose files.
-    Workspace context or observed metadata can establish a repository;
-    .git can be a directory, worktree file or ancestor. Stay in scope;
-    do not initialize Git just to inspect files.
-    Run independent checks in separate calls, each with an exit code.
-    Use && for dependent steps. Do not mask failure with semicolons or || true.
-    Read output; report failed subcommands even if the shell finally exits zero.
+    Repository context or .git (directory, worktree file or ancestor) can
+    establish scope. Do not initialize Git to inspect files.
+    Run each independent check in a separate call. Batch only independent calls.
+    For dependent steps, await the prior result or use &&. Do not join
+    independent checks with ;, && or ||. Read output and each exit code;
+    report failed subcommands even if the shell finally exits zero.
     """
 
     static let commandLine = """
@@ -431,7 +431,6 @@ enum ComputaAgentInstructions {
         }
         if !execution.isEmpty || !input.isEmpty {
             parts.append("A running command or session ID is not success. Read matching local output and the final exit code before claiming completion. Do not replay an uncertain command; report the observed failure or remaining uncertainty.")
-            if !instructionAlreadyIncluded(commandChecks, in: includedInstructionText) { parts.append(commandChecks) }
         }
         if !browser.isEmpty {
             parts.append("""
@@ -458,7 +457,8 @@ enum ComputaAgentInstructions {
 
     /// Callers supply only the complete request's trusted system/developer
     /// instruction values. A byte-exact full block in one value can replace
-    /// duplicate outer prose; partial, normalized or joined fragments cannot.
+    /// duplicate outer prose except the always-fresh command checks; partial,
+    /// normalized or joined fragments cannot.
     private static func instructionAlreadyIncluded(_ contract: String, in text: [String]) -> Bool {
         let bytes = Data(contract.utf8)
         return text.contains { Data($0.utf8).range(of: bytes) != nil }
@@ -559,6 +559,11 @@ enum ComputaAgentInstructions {
         Compose the permitted command or file action as JSON; Computa runs it
         locally and returns matching output before any execution claim.
         """ : ""
+        // This handoff follows canonical history. Do not deduplicate its current
+        // command rules against an earlier native instruction inside that history.
+        let commandHandoff = offeredToolNames.contains {
+            !customToolNames.contains($0) && ["exec_command", "write_stdin"].contains(String($0.split(separator: ".").last ?? ""))
+        } ? commandChecks : ""
         let customContract = customToolNames.isEmpty ? "" : """
         Custom tools accept literal string input, not JSON object arguments.
         For those names, use {"name":"exact_custom_tool_name","input":"literal input"}.
@@ -600,6 +605,7 @@ enum ComputaAgentInstructions {
         Computa unwraps message.text for the user. Their reply-format constraints
         apply to that value; this transport still requires one JSON envelope.
         For file-only results, use message.text; put truthful limitations or refusals there too.
+        \(commandHandoff)
         \(literalIdentifiers)
         \(responseFormatInstructions)
         One object; no outside text. Escape quotes, backslashes and

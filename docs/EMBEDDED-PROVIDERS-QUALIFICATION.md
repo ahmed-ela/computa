@@ -54,6 +54,29 @@ Canonical requests, literal command arguments and execution behavior remain
 unchanged. Wiring regressions and fresh model behavior are separate evidence;
 the original strict grader and earlier results remain unchanged.
 
+## Candidate150: fresh command handoff and dependency ordering
+
+Installed149 passed all 120 selected native tests. Its fresh ChatGPT code task
+made no Git probe, preserved the unrelated note and tests, passed four tests,
+returned the exact browser result and explicitly closed its created tab.
+Nine website inferences were verified and closed. The strict workflow still
+failed two gates: an unadmitted printf separator, and test/helper calls emitted
+together before either result. A requested Git inspection returned the correct
+worktree root, status and note while preserving the baseline, but its compound
+semicolon command failed the separately declared strict control grammar.
+The separate missing/valid-file control passed with explicit native and host
+exit codes 1 and 0 and an accurate final report. These results remain unchanged.
+
+The current canonical native instructions contain command checks, but149's
+deduplication could omit those checks from the fresh outer website contract.
+This establishes instruction placement, not why the model chose a command.
+Candidate150 always includes the bounded command checks in the fresh response
+handoff after canonical history whenever terminal capabilities are offered. It distinguishes
+independent calls, which may be batched, from dependent steps, which must await
+the prior result or use conditional execution. No command parsing, rewriting,
+execution-policy change or response acceptance relaxation is introduced.
+Fresh installed behavior must be tested separately from instruction wiring.
+
 ## Installed147: captured mixed-format ChatGPT reply
 
 Signed 0.7.0 (147), source `fbc87ca77a0d4a8d650e3fe5e50e90231bf661ba`,
