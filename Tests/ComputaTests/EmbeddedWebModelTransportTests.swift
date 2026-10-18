@@ -9,14 +9,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     func testPreparationTimingIsFiniteContentFreeAndRemovedBeforeObservationParsing() throws {
         let timing: [String: Any] = ["totalMs": 805.25, "beginSubmissionMs": 2.25, "beginSubmissionHashMs": 1.5,
             "modelPrecheckMs": 31.75, "finalGuardMs": 45.5, "editorFocusMs": 0.25, "editorMutationMs": 5.25,
-            "inputDispatchMs": NSNull(), "editorReadinessMs": NSNull(), "editorReadyAtEntry": NSNull(), "openingRecoveryUsed": false]
+            "inputDispatchMs": NSNull(), "editorReadinessMs": NSNull(), "editorReadyAtEntry": NSNull(), "openingRecoveryUsed": false,
+            "outerSetupMs": 1.0, "guardedSetupMs": 2.0, "providerEntryMs": 3.0, "providerSetupMs": 4.0,
+            "insertPreFocusMs": 5.0, "insertPostFocusMs": 6.0, "providerReturnMs": 7.0,
+            "guardedFinalizationMs": 8.0, "outerFinalizationMs": 9.0]
         let original: [String: Any] = ["inserted": true, "submissionOwnershipCapability": "unchanged"]
         var observed = original; observed["preparationTiming"] = timing
         let safe = try XCTUnwrap(EmbeddedWebModelTransport.removePreparationTiming(from: &observed))
         XCTAssertEqual(NSDictionary(dictionary: observed), NSDictionary(dictionary: original))
         XCTAssertEqual(NSDictionary(dictionary: safe), NSDictionary(dictionary: timing))
         let data = try JSONSerialization.data(withJSONObject: safe, options: .sortedKeys)
-        XCTAssertLessThan(data.count, 512)
+        XCTAssertLessThan(data.count, 1_024)
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("unchanged"))
         XCTAssertNil(EmbeddedWebModelTransport.removePreparationTiming(from: &observed))
         XCTAssertEqual(NSDictionary(dictionary: observed), NSDictionary(dictionary: original))
@@ -25,7 +28,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     func testMalformedPreparationTimingCannotChangeAnObservationOrGrantAuthority() {
         let valid: [String: Any] = ["totalMs": 8.0, "beginSubmissionMs": NSNull(), "beginSubmissionHashMs": NSNull(),
             "modelPrecheckMs": 1.0, "finalGuardMs": 2.0, "editorFocusMs": NSNull(), "editorMutationMs": 3.0,
-            "inputDispatchMs": 1.0, "editorReadinessMs": 1.0, "editorReadyAtEntry": false, "openingRecoveryUsed": true]
+            "inputDispatchMs": 1.0, "editorReadinessMs": 1.0, "editorReadyAtEntry": false, "openingRecoveryUsed": true,
+            "outerSetupMs": NSNull(), "guardedSetupMs": NSNull(), "providerEntryMs": NSNull(), "providerSetupMs": NSNull(),
+            "insertPreFocusMs": NSNull(), "insertPostFocusMs": NSNull(), "providerReturnMs": NSNull(),
+            "guardedFinalizationMs": NSNull(), "outerFinalizationMs": NSNull()]
         var cases: [Any] = [NSNull(), [], "PRIVATE_TIMING_CANARY"]
         for key in valid.keys { var bad = valid; bad.removeValue(forKey: key); cases.append(bad) }
         var unknown = valid; unknown["PRIVATE_TIMING_CANARY"] = "PRIVATE_VALUE_CANARY"; cases.append(unknown)
@@ -33,6 +39,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for value in invalidDurations {
             var bad = valid; bad["totalMs"] = value; cases.append(bad)
             var focus = valid; focus["editorFocusMs"] = value; cases.append(focus)
+            for key in ["outerSetupMs", "guardedSetupMs", "providerEntryMs", "providerSetupMs", "insertPreFocusMs",
+                        "insertPostFocusMs", "providerReturnMs", "guardedFinalizationMs", "outerFinalizationMs"] {
+                var span = valid; span[key] = value; cases.append(span)
+            }
         }
         let invalidFlags: [Any] = [0, 1, NSNull(), "true"]
         for value in invalidFlags {

@@ -128,7 +128,13 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                   let taskID = body["taskID"] as? String,
                   let requestID = body["requestID"] as? String
             else { return }
-            state.acceptPrompt(prompt: prompt, taskID: taskID, requestID: requestID)
+            let profile = WebsiteDispatchProfile.begin(taskID: taskID,
+                modelID: state.tasks.first(where: { $0.id == taskID })?.model ?? "",
+                requestID: requestID, origin: .webUI)
+            profile?.mark(.bridgeReceived)
+            WebsiteDispatchProfile.$current.withValue(profile) {
+                _ = state.acceptPrompt(prompt: prompt, taskID: taskID, requestID: requestID)
+            }
 
         case "beginQueueEdit", "editQueuedPrompt", "cancelQueueEdit", "deleteQueuedPrompt", "moveQueuedPrompt", "steerQueuedPrompt":
             guard let taskID = body["taskID"] as? String,

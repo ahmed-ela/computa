@@ -360,6 +360,8 @@ describe('private first-insert model deadline cap', () => {
 });
 
 describe('optional first-preparation timing', () => {
+  const setupDurations = ['outerSetupMs', 'guardedSetupMs', 'providerEntryMs', 'providerSetupMs',
+    'insertPreFocusMs', 'insertPostFocusMs', 'providerReturnMs', 'guardedFinalizationMs', 'outerFinalizationMs'];
   test('an actual first insert keeps exact submission state and emits only finite timing fields', async () => {
     for (const enabled of [false, true]) {
       const x = await chatTurnFixture();
@@ -373,7 +375,7 @@ describe('optional first-preparation timing', () => {
       if (!enabled) { expect(result).not.toHaveProperty('preparationTiming'); continue; }
       const timing = result.preparationTiming;
       expect(Object.keys(timing).sort()).toEqual(['totalMs', 'beginSubmissionMs', 'beginSubmissionHashMs',
-        'modelPrecheckMs', 'finalGuardMs', 'editorFocusMs', 'editorMutationMs', 'inputDispatchMs', 'editorReadinessMs', 'editorReadyAtEntry', 'openingRecoveryUsed'].sort());
+        'modelPrecheckMs', 'finalGuardMs', 'editorFocusMs', 'editorMutationMs', 'inputDispatchMs', 'editorReadinessMs', 'editorReadyAtEntry', 'openingRecoveryUsed', ...setupDurations].sort());
       for (const [key, value] of Object.entries(timing)) {
         if (key === 'openingRecoveryUsed') { expect(value).toBe(false); continue; }
         if (key === 'editorReadyAtEntry') { expect(value).toBeNull(); continue; }
@@ -383,6 +385,9 @@ describe('optional first-preparation timing', () => {
       }
       expect(timing.totalMs).not.toBeNull(); expect(timing.beginSubmissionMs).not.toBeNull();
       expect(timing.beginSubmissionHashMs).not.toBeNull(); expect(timing.editorMutationMs).not.toBeNull();
+      for (const key of setupDurations) {
+        expect(timing[key]).not.toBeNull(); expect(timing[key]).toBeLessThanOrEqual(timing.totalMs);
+      }
       // The execCommand fixture includes browser input in its mutation span.
       expect(timing.inputDispatchMs).toBeNull();
       for (const privateValue of [outbound, firstMarker, state.pending.fingerprint, x.f.document.URL])

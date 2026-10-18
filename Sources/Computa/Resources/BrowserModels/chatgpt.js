@@ -1590,7 +1590,16 @@ function chatGPTPreparationNow() {
 }
 const chatGPTPreparationTiming = { started: chatGPTPreparationNow(), beginSubmissionMs: null,
   beginSubmissionHashMs: null, modelPrecheckMs: null, finalGuardMs: null, editorFocusMs: null, editorMutationMs: null, inputDispatchMs: null,
-  editorReadinessMs: null, editorReadyAtEntry: null };
+  editorReadinessMs: null, editorReadyAtEntry: null,
+  outerSetupMs: null, guardedSetupMs: null, providerEntryMs: null, providerSetupMs: null,
+  insertPreFocusMs: null, insertPostFocusMs: null, providerReturnMs: null,
+  guardedFinalizationMs: null, outerFinalizationMs: null };
+// Successful fresh inserts partition the formerly unmeasured intervals around
+// the existing awaits. These spans do not overlap beginSubmissionMs, model
+// precheck/final guard, focus, literal mutation, input dispatch or readiness.
+// beginSubmissionHashMs remains a child of beginSubmissionMs. The timestamp
+// below is diagnostic only: it cannot grant proof, affect a wait or replay work.
+let chatGPTProviderReturnStarted = null;
 function chatGPTPreparationElapsed(started) {
   const ended = chatGPTPreparationNow();
   return started !== null && ended !== null && ended >= started && ended - started <= 45_000
@@ -2798,7 +2807,9 @@ function chatGPTProductModeAction(request) {
   return reject();
 }
 async function chatGPTGuardedPageAction(request, fingerprint = null) {
+  const setupStarted = chatGPTPreparationNow();
   const product = chatGPTProductModeAction(request);
+  chatGPTPreparationRecord('guardedSetupMs', setupStarted);
   if (product.error) return product;
   if (['ensureChatMode', 'verifyProductMode'].includes(request.action)) return { ...product, temporary: chatGPTTemporaryVerified() };
   if (!product.chatModeReady && request.action !== 'inspect') return { error: 'product_mode_unverified' };
@@ -2811,10 +2822,14 @@ async function chatGPTGuardedPageAction(request, fingerprint = null) {
     if (failure) return failure;
   }
   const result = await providerPageAction(request, fingerprint);
+  chatGPTPreparationRecord('providerReturnMs', chatGPTProviderReturnStarted);
+  const finalizationStarted = chatGPTPreparationNow();
   if (result.error) return result;
   const finalProduct = chatGPTProductModeAction({ ...request, action: 'verifyProductMode' });
   if (finalProduct.error && product.chatModeReady) return finalProduct;
-  return { ...result, ...(finalProduct.error ? product : finalProduct), temporary: chatGPTTemporaryVerified() };
+  const finalized = { ...result, ...(finalProduct.error ? product : finalProduct), temporary: chatGPTTemporaryVerified() };
+  chatGPTPreparationRecord('guardedFinalizationMs', finalizationStarted);
+  return finalized;
 }
 function chatGPTStructure(visible) {
   const buttons = [...document.querySelectorAll('button')].filter(visible).filter(button =>
@@ -3389,6 +3404,7 @@ function chatGPTFocusModelActivity(records, trigger, previousControls) {
       .some(node => associated(node) || node?.nodeType === 1 && [...node.querySelectorAll('[role="menu"]')].some(associated)));
 }
 async function providerPageAction(input, readLineageFingerprint = null) {
+  const entryStarted = chatGPTPreparationNow();
   websiteModelDiagnosticPhase('page_action');
   const modelState = websiteModelPickerState('chatgpt');
   if (['discoverModels', 'selectModel', 'modelDiagnostic'].includes(input.action)) {
@@ -3406,11 +3422,14 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   }
   const focusFirstInstantInInsert = input.prepareFirstInstantInInsert === true;
   if (focusFirstInstantInInsert && !chatGPTFreshInstantInsert(input)) return { error: 'not_fresh' };
+  chatGPTPreparationRecord('providerEntryMs', entryStarted);
+  let setupStarted = null;
   // Focus-only preparation and model-only verification need one final proof.
   // Editor and response actions retain their proof before and after the action.
   if (!['stop', 'prepare', 'verifyModel'].includes(input.action) && input.expectedModelChoice != null) {
     const proof = await websiteModelReadEvidence('chatgpt', input.expectedModelChoice, null,
       { scope: 'action_precheck', action: input.action });
+    setupStarted = chatGPTPreparationNow();
     if (proof.error) return proof;
     if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
     // Reading a freshly mounted picker yields. Before any editor mutation,
@@ -3429,6 +3448,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   }
   if (input.action === 'verifyModel') return modelState.modelVerificationPending
     ? { modelVerificationPending: true } : { modelEvidence: modelState.evidence };
+  if (setupStarted === null) setupStarted = chatGPTPreparationNow();
 
   const { provider, action, expectedConversation, expectedConversationIdentity, expectedUserCounts, expectedFirstUserMarker,
     expectedFirstUserIdentity, expectedFirstUserFingerprint, expectedURL, prompt } = input;
@@ -3541,6 +3561,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     busy: !!stop || claudeStreaming, interrupted, responseLoadFailed, responseNoticeDiagnostic,
     ...(provider === 'chatgpt' ? { answerScopeDiagnostic: chatGPTAnswerScopeDiagnostic(answer) } : {}),
     text: answerText.slice(0, 220_001), answerComplete, completionEvidence };
+  chatGPTPreparationRecord('providerSetupMs', setupStarted);
   if (action === "inspect") {
     const signIn = !composer && !!labelled(document.querySelectorAll('a, button'), /^(?:Log in|Sign in)(?:\s|$)/i);
     const resourceTimingDiagnostic = answerComplete ? chatGPTResourceTimingDiagnostic('completion') : null;
@@ -3564,6 +3585,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   if (["prepare", "insert", "sendReady", "submit", "stop"].includes(action) && !temporary)
     return { error: "temporary_mode_unverified" };
   if (action === "insert") {
+    const preFocusStarted = chatGPTPreparationNow();
     if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
     if (!enabled(composer) || stop) return { error: "composer_unavailable" };
     const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
@@ -3592,9 +3614,11 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       websiteChatDrainPinnedMutations(focusPin);
       if (focusPin.invalidated === true || !chatGPTProductModeProof()) return { error: 'model_unverified' };
     }
+    chatGPTPreparationRecord('insertPreFocusMs', preFocusStarted);
     const focusStarted = chatGPTPreparationNow();
     try { composer.focus(); }
     finally { chatGPTPreparationRecord('editorFocusMs', focusStarted); }
+    const postFocusStarted = chatGPTPreparationNow();
     if (focusFirstInstantInInsert) {
       const focusRecords = chatGPTDrainSignalRecords();
       if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
@@ -3620,6 +3644,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
         || find(['button[data-testid="stop-button"]', 'button[aria-label="Stop streaming"]', 'button[aria-label="Stop generating"]', 'button[aria-label="Stop"]']))
         return { error: 'composer_unavailable' };
     }
+    chatGPTPreparationRecord('insertPostFocusMs', postFocusStarted);
     const mutationStarted = chatGPTPreparationNow();
     const dispatchInput = () => {
       chatGPTPreparationRecord('editorMutationMs', mutationStarted);
@@ -3663,6 +3688,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
         chatGPTPreparationRecord('editorMutationMs', mutationStarted);
       }
     }
+    chatGPTProviderReturnStarted = chatGPTPreparationNow();
     return { ...state, inserted: true };
   }
   if (action === "prepare") {
@@ -4447,7 +4473,9 @@ if (ownedUserCount > 0) {
 }
 if (input.expectedFirstUserFingerprint != null)
   return chatGPTFirstUserFailure('first_missing', 'first_missing');
+chatGPTPreparationRecord('outerSetupMs', chatGPTPreparationTiming.started);
 const observed = await websiteModelFinalGuard('chatgpt', input, await chatGPTGuardedPageAction(input), chatGPTTemporaryVerified);
+const outerFinalizationStarted = chatGPTPreparationNow();
 if (!observed.error && observed.chatModeReady && !chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
 const readContextFailure = finalReadContextFailure(observed);
 if (readContextFailure) return readContextFailure;
@@ -4455,4 +4483,6 @@ if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && ch
   return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length, null, chatGPTTemporaryVerified())
     || { error: 'conversation_changed', detail: 'user_count' };
 const result = { ...observed, firstUserVerified, firstUserFingerprint };
-return chatGPTPreparationResult(chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result));
+const finalized = chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
+chatGPTPreparationRecord('outerFinalizationMs', outerFinalizationStarted);
+return chatGPTPreparationResult(finalized);

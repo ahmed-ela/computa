@@ -5,6 +5,56 @@ import CryptoKit
 @preconcurrency import Foundation
 import OSLog
 
+/// Native dispatch observations only. The first bridge stamp is after WebKit
+/// delivers the validated message; it excludes CUA and unmeasured JS transit.
+/// Task-local metadata never authorizes, delays, retries or changes a request.
+struct WebsiteDispatchProfile: Sendable, Equatable {
+    enum Origin: String, Sendable { case webUI, nativeComposer, runtime }
+    enum Phase: String, Sendable {
+        case bridgeReceived, nativeComposerReceived, promptAccepted, promptRejected
+        case queueScheduled, queueEntered, queueExited, deliveryEntered, appCleanupFinished
+        case runtimeSubmitRequested, runtimeSubmitFinished, runtimeSubmitFailed
+        case coreEntered, coreExited, cleanupGatesPassed, runtimeReady, providerReady
+        case maintenanceModelReady, threadStartRequested, threadStarted, threadNameRequested, threadNameFinished
+        case threadReady, evidenceThreadReady, contextMaintenanceFinished, inferenceModelReady
+        case turnPreparationRequested, turnPrepared, turnStartRequested, turnStartReturned, turnAcknowledged
+    }
+    @TaskLocal static var current: WebsiteDispatchProfile?
+    private static let log = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "WebsiteInference")
+    private let taskID: UUID
+    private let requestID: UUID
+    private let origin: Origin
+    private let started: ContinuousClock.Instant
+
+    static func begin(taskID: String, modelID: String, requestID: String? = nil, origin: Origin) -> Self? {
+        guard let task = UUID(uuidString: taskID),
+              WebsiteModelCatalog.inferenceSelection(for: modelID)?.provider == "chatgpt" else { return nil }
+        let requested = requestID.flatMap(UUID.init(uuidString:))
+        guard requestID == nil || requested != nil else { return nil }
+        if let current, current.taskID == task, requested == nil || current.requestID == requested { return current }
+        return Self(taskID: task, requestID: requested ?? UUID(), origin: origin, started: .now)
+    }
+
+    static func matching(taskID: String, requestID: String? = nil) -> Self? {
+        guard let current, UUID(uuidString: taskID) == current.taskID else { return nil }
+        if let requestID, UUID(uuidString: requestID) != current.requestID { return nil }
+        return current
+    }
+
+    static func milliseconds(_ value: Duration) -> Int {
+        let parts = value.components
+        return Int(max(0, min(600_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
+    }
+
+    func mark(_ phase: Phase, since spanStart: ContinuousClock.Instant? = nil, turnID: String? = nil) {
+        let now = ContinuousClock.now
+        let elapsed = Self.milliseconds(now - started)
+        let span = spanStart.map { Self.milliseconds(now - $0) } ?? -1
+        let turn = turnID.flatMap(UUID.init(uuidString:))?.uuidString.lowercased() ?? "none"
+        Self.log.notice("websiteDispatch version=1 origin=\(origin.rawValue, privacy: .public) taskID=\(taskID.uuidString.lowercased(), privacy: .public) requestID=\(requestID.uuidString.lowercased(), privacy: .public) phase=\(phase.rawValue, privacy: .public) elapsedMs=\(elapsed) spanMs=\(span) turnID=\(turn, privacy: .public)")
+    }
+}
+
 /// A read-only process-generation pin for legacy PID-addressed native tools.
 /// The PID alone is insufficient: it may have been reused since admission.
 struct NativeToolProcessIdentity: Equatable, Sendable {
@@ -2014,6 +2064,10 @@ private extension CodexAppServerRuntime {
         }
 
         func submit(prompt: String, taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
+            let dispatchProfile = WebsiteDispatchProfile.begin(taskID: taskID, modelID: modelID, origin: .runtime)
+            dispatchProfile?.mark(.coreEntered)
+            defer { dispatchProfile?.mark(.coreExited) }
+            let cleanupStarted = ContinuousClock.now
             guard !isConfiguringAPIProviders else {
                 throw RuntimeError.serverError("Wait for API provider configuration to finish.")
             }
@@ -2041,6 +2095,7 @@ private extension CodexAppServerRuntime {
                   contextStoppedTurns[taskID] == nil || turnIdentity.activeTurnID(for: taskID) == nil else {
                 throw RuntimeError.serverError("Wait for context compaction to finish before sending another prompt.")
             }
+            dispatchProfile?.mark(.cleanupGatesPassed, since: cleanupStarted)
             let claim = UUID()
             turnSubmissionClaims[taskID] = claim
             latestSubmissionClaims[taskID] = claim
@@ -2048,13 +2103,17 @@ private extension CodexAppServerRuntime {
                 if turnSubmissionClaims[taskID] == claim { turnSubmissionClaims.removeValue(forKey: taskID) }
                 cancelledSubmissions.remove(claim)
             }
+            let runtimeStarted = ContinuousClock.now
             try await start()
+            dispatchProfile?.mark(.runtimeReady, since: runtimeStarted)
             if let existing = threadForTask[taskID], let loaded = contextForLoadedThread[existing],
                !loaded.supportsModelSwitch(to: modelID, apiModel: apiModel(for: modelID), apiProviderURL: apiProviderURL(for: modelID)) {
                 throw RuntimeError.contextChangeRequiresNewTask
             }
+            let providerStarted = ContinuousClock.now
             if LocalModelCatalog.isWebBrowser(modelID) { try await ensureWebProvider(modelID: modelID) }
             if modelID.hasPrefix("api/") { try await ensureAPIProvider(modelID: modelID) }
+            dispatchProfile?.mark(.providerReady, since: providerStarted)
             let generation = serverGeneration
             // Loaded threads keep their current model for a pre-turn compact
             // RPC; turn/start is what applies the newly selected model. Cold
@@ -2062,7 +2121,9 @@ private extension CodexAppServerRuntime {
             let maintenanceModelID = threadForTask[taskID].flatMap { threadID in
                 contextForLoadedThread[threadID] == nil ? nil : modelForTask[taskID]
             } ?? modelID
+            let maintenanceModelStarted = ContinuousClock.now
             try await prepareInferenceModel(maintenanceModelID, taskID: taskID, claim: claim)
+            dispatchProfile?.mark(.maintenanceModelReady, since: maintenanceModelStarted)
             if !isRemoteInference(modelID), configuration.requiresLocalModelPreflight {
                 let endpoint = try LocalModelServerPreflight.endpoint(launchEnvironment: localProviderLaunchEnvironment)
                 try await LocalModelServerPreflight.check(endpoint: endpoint, modelID: modelID, timeout: 2)
@@ -2143,6 +2204,8 @@ private extension CodexAppServerRuntime {
                     resumedWithoutUsage = context.hasHistory && usage == nil
                 }
             } else {
+                let threadStarted = ContinuousClock.now
+                dispatchProfile?.mark(.threadStartRequested)
                 let response = try await request(
                     method: "thread/start",
                     params: [
@@ -2160,6 +2223,7 @@ private extension CodexAppServerRuntime {
                     ]
                 )
                 threadID = try parseThreadID(from: response)
+                dispatchProfile?.mark(.threadStarted, since: threadStarted)
                 isNewThread = true
                 rememberReferenceToolThread(threadID)
                 threadForTask[taskID] = threadID
@@ -2167,27 +2231,37 @@ private extension CodexAppServerRuntime {
                 contextForLoadedThread[threadID] = requestedContext
 
                 let title = String(prompt.prefix(72))
+                let nameStarted = ContinuousClock.now
+                dispatchProfile?.mark(.threadNameRequested)
                 _ = try? await request(
                     method: "thread/name/set",
                     params: ["threadId": threadID, "name": title]
                 )
+                dispatchProfile?.mark(.threadNameFinished, since: nameStarted)
             }
+            dispatchProfile?.mark(.threadReady)
 
             guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                   !cancelledSubmissions.contains(claim) else { throw CancellationError() }
             let previousModel = modelForTask.updateValue(modelID, forKey: taskID)
+            let evidenceStarted = ContinuousClock.now
             if LocalModelCatalog.isWebBrowser(modelID) {
                 await webModelServer.registerEvidenceThread(taskID: taskID, threadID: threadID)
             }
+            dispatchProfile?.mark(.evidenceThreadReady, since: evidenceStarted)
             if previousModel != nil, previousModel != modelID { measuredContext.removeValue(forKey: taskID) }
             let compactLimit = (threadConfig(for: modelID)["model_auto_compact_token_limit"] as? Int) ?? 3_072
+            let contextMaintenanceStarted = ContinuousClock.now
             if resumedWithoutUsage || (measuredContext[taskID]?.usedTokens ?? 0) >= compactLimit {
                 try await runManagedCompaction(taskID: taskID, threadID: threadID, modelID: maintenanceModelID)
             }
+            dispatchProfile?.mark(.contextMaintenanceFinished, since: contextMaintenanceStarted)
             guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                   !cancelledSubmissions.contains(claim) else { throw CancellationError() }
 
+            let inferenceModelStarted = ContinuousClock.now
             try await prepareInferenceModel(modelID, taskID: taskID, claim: claim)
+            dispatchProfile?.mark(.inferenceModelReady, since: inferenceModelStarted)
 
             // Bindings and screenshot coordinates are valid for one turn only.
             // A resumed thread must observe and bind its target again.
@@ -2220,10 +2294,15 @@ private extension CodexAppServerRuntime {
                 try Task.checkCancellation()
                 guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
+                let turnPreparationStarted = ContinuousClock.now
+                dispatchProfile?.mark(.turnPreparationRequested)
                 inferencePreparation = try await prepareInferenceTurn(
                     taskID: taskID, threadID: threadID, modelID: modelID, isNewThread: isNewThread)
+                dispatchProfile?.mark(.turnPrepared, since: turnPreparationStarted)
                 guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
+                let turnStartRequested = ContinuousClock.now
+                dispatchProfile?.mark(.turnStartRequested)
                 turnResponse = try await request(
                     method: "turn/start",
                     params: [
@@ -2235,6 +2314,7 @@ private extension CodexAppServerRuntime {
                         "approvalPolicy": accessMode.approvalPolicy,
                     ]
                 )
+                dispatchProfile?.mark(.turnStartReturned, since: turnStartRequested)
             } catch {
                 turnIdentity.cancelStart(taskID: taskID, token: startToken)
                 if let previousModel {
@@ -2256,6 +2336,7 @@ private extension CodexAppServerRuntime {
                let turn = result["turn"] as? [String: Any],
                let turnID = turn["id"] as? String {
                 let accepted = turnIdentity.acknowledgeStart(taskID: taskID, turnID: turnID, token: startToken)
+                if accepted { dispatchProfile?.mark(.turnAcknowledged, turnID: turnID) }
                 if accepted, let inferencePreparation {
                     try await registerInferenceTurn(taskID: taskID, threadID: threadID,
                         turnID: turnID, preparationID: inferencePreparation, generation: generation)

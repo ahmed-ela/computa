@@ -2955,7 +2955,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     static func removePreparationTiming(from observed: inout [String: Any]) -> [String: Any]? {
         let raw = observed.removeValue(forKey: "preparationTiming")
         let durations = ["totalMs", "beginSubmissionMs", "beginSubmissionHashMs", "modelPrecheckMs",
-                         "finalGuardMs", "editorFocusMs", "editorMutationMs", "inputDispatchMs", "editorReadinessMs"]
+                         "finalGuardMs", "editorFocusMs", "editorMutationMs", "inputDispatchMs", "editorReadinessMs",
+                         "outerSetupMs", "guardedSetupMs", "providerEntryMs", "providerSetupMs", "insertPreFocusMs",
+                         "insertPostFocusMs", "providerReturnMs", "guardedFinalizationMs", "outerFinalizationMs"]
         guard let value = raw as? [String: Any], Set(value.keys) == Set(durations + ["openingRecoveryUsed", "editorReadyAtEntry"]),
               let flag = value["openingRecoveryUsed"] as? NSNumber,
               CFGetTypeID(flag) == CFBooleanGetTypeID() else { return nil }

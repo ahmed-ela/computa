@@ -121,6 +121,10 @@ final class AppState {
     var promptReceipts: [PromptReceipt] = []
     @ObservationIgnored private var promptReceiptRevision: UInt64 = 0
     @ObservationIgnored private var acceptedPromptRequests: [String: (taskID: String, digest: Data)] = [:]
+    // Diagnostic metadata belongs to an exact FIFO item, never to whichever
+    // request happens to schedule its drain. Missing/evicted metadata simply
+    // yields a separately labelled runtime-origin trace. It grants no authority.
+    @ObservationIgnored private var queuedDispatchProfiles: [String: WebsiteDispatchProfile] = [:]
     private var dispatchingQueueTaskIDs: Set<AgentTask.ID> = []
     private var steeringTaskIDs: Set<AgentTask.ID> = []
     @ObservationIgnored private var resolvedDuringApprovalAttemptIDs: Set<String> = []
@@ -1415,6 +1419,7 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        queuedDispatchProfiles.removeAll()
         updateWebsitePrewarming()
         websiteModelRefreshTask?.cancel()
         let websiteRefresh = websiteModelRefreshTask
@@ -1831,12 +1836,19 @@ final class AppState {
 
     @discardableResult
     func submitComposer() async -> Bool {
+        let profile = selectedTaskID.flatMap { taskID in
+            WebsiteDispatchProfile.begin(taskID: taskID,
+                modelID: tasks.first(where: { $0.id == taskID })?.model ?? "", origin: .nativeComposer)
+        }
+        profile?.mark(.nativeComposerReceived)
         let original = composerText
         let prompt = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, let selectedTaskID else {
             return false
         }
-        let accepted = await submitOrQueue(prompt: prompt, toTaskID: selectedTaskID)
+        let accepted = await WebsiteDispatchProfile.$current.withValue(profile) {
+            await submitOrQueue(prompt: prompt, toTaskID: selectedTaskID)
+        }
         if accepted && composerText == original { composerText = "" }
         return accepted
     }
@@ -1854,10 +1866,14 @@ final class AppState {
     }
 
     private func submitDelivery(prompt rawPrompt: String, toTaskID taskID: AgentTask.ID) async -> PromptDelivery {
+        let profile = WebsiteDispatchProfile.matching(taskID: taskID)
+        profile?.mark(.deliveryEntered)
+        let cleanupStarted = ContinuousClock.now
         // Do not begin a turn while a remembered connection is being restored:
         // Core correctly rejects that race, which otherwise loses first-send UX.
         if let pendingConnection = chromeConnectionTask { await pendingConnection.value }
         if let cleanup = chromeCleanupTask { await cleanup.value }
+        profile?.mark(.appCleanupFinished, since: cleanupStarted)
         guard !Task.isCancelled else { return .notDelivered("Submission was cancelled before delivery.") }
         retireWebsiteModelSelections()
         let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1894,8 +1910,11 @@ final class AppState {
             do {
                 // Bind the persisted native choice to this submission, rather
                 // than racing a global mode update against another task.
+                profile?.mark(.runtimeSubmitRequested)
                 try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode)
+                profile?.mark(.runtimeSubmitFinished)
             } catch {
+                profile?.mark(.runtimeSubmitFailed)
                 discardAssistantDrafts(taskID: taskID)
                 discardReasoningDrafts(taskID: taskID)
                 activeTurnTaskIDs.remove(taskID)
@@ -2027,20 +2046,24 @@ final class AppState {
     /// retransmitted request ID can acknowledge the same prompt, never send twice.
     @discardableResult
     func acceptPrompt(prompt: String, taskID: String, requestID: String) -> Bool {
+        let profile = WebsiteDispatchProfile.matching(taskID: taskID, requestID: requestID)
         guard !requestID.isEmpty, requestID.utf8.count <= 128 else { return false }
         let digest = Data(SHA256.hash(data: Data(prompt.utf8)))
         let accepted: Bool
         if let prior = acceptedPromptRequests[requestID] {
             accepted = prior.taskID == taskID && prior.digest == digest
         } else {
-            accepted = enqueuePrompt(prompt: prompt, taskID: taskID)
+            accepted = WebsiteDispatchProfile.$current.withValue(profile) {
+                enqueuePrompt(prompt: prompt, taskID: taskID)
+            }
             if accepted { acceptedPromptRequests[requestID] = (taskID, digest) }
         }
         promptReceipts.removeAll { $0.id == requestID }
         promptReceiptRevision &+= 1
         promptReceipts.append(PromptReceipt(id: requestID, taskID: taskID, accepted: accepted, revision: promptReceiptRevision))
         if promptReceipts.count > 64 { promptReceipts.removeFirst(promptReceipts.count - 64) }
-        if accepted { scheduleQueueDrain(taskID: taskID) }
+        profile?.mark(accepted ? .promptAccepted : .promptRejected)
+        if accepted { scheduleQueueDrain(taskID: taskID, profile: profile) }
         return accepted
     }
 
@@ -2051,7 +2074,11 @@ final class AppState {
         if queuedPrompts[taskID, default: []].isEmpty && !isBusy(taskID: taskID) {
             pausedQueueTaskIDs.remove(taskID)
         }
-        queuedPrompts[taskID, default: []].append(QueuedPrompt(text: prompt))
+        let item = QueuedPrompt(text: prompt)
+        queuedPrompts[taskID, default: []].append(item)
+        if queuedDispatchProfiles.count < 64, let profile = WebsiteDispatchProfile.matching(taskID: taskID) {
+            queuedDispatchProfiles[item.id] = profile
+        }
         return true
     }
 
@@ -2085,6 +2112,7 @@ final class AppState {
     @discardableResult
     func beginQueueEdit(taskID: String, id: String) -> Bool {
         guard let index = editableQueueIndex(taskID: taskID, id: id) else { return false }
+        queuedDispatchProfiles.removeValue(forKey: id)
         queuedPrompts[taskID]?[index].status = .editing
         return true
     }
@@ -2093,6 +2121,7 @@ final class AppState {
     func editQueuedPrompt(taskID: String, id: String, prompt: String) -> Bool {
         guard let text = validatedPrompt(prompt),
               let index = editableQueueIndex(taskID: taskID, id: id) else { return false }
+        queuedDispatchProfiles.removeValue(forKey: id)
         queuedPrompts[taskID]?[index].text = text
         queuedPrompts[taskID]?[index].status = .queued
         queuedPrompts[taskID]?[index].error = nil
@@ -2113,6 +2142,7 @@ final class AppState {
     @discardableResult
     func deleteQueuedPrompt(taskID: String, id: String) -> Bool {
         guard let index = editableQueueIndex(taskID: taskID, id: id) else { return false }
+        queuedDispatchProfiles.removeValue(forKey: id)
         queuedPrompts[taskID]?.remove(at: index)
         retireWebsiteModelSelections()
         scheduleQueueDrain(taskID: taskID)
@@ -2177,6 +2207,7 @@ final class AppState {
         guard canSteer(taskID: taskID),
               let index = editableQueueIndex(taskID: taskID, id: id),
               let item = queuedPrompts[taskID]?[index], item.status == .queued else { return nil }
+        queuedDispatchProfiles.removeValue(forKey: id)
         steeringTaskIDs.insert(taskID)
         queuedPrompts[taskID]?[index].status = .sending
         return SteerSubmission(taskID: taskID, item: item,
@@ -2228,8 +2259,15 @@ final class AppState {
         return queuedPrompts[taskID]?.firstIndex { $0.id == id && $0.status != .sending }
     }
 
-    private func scheduleQueueDrain(taskID: String) {
-        Task { @MainActor [weak self] in await self?.drainQueue(taskID: taskID) }
+    private func scheduleQueueDrain(taskID: String, profile: WebsiteDispatchProfile? = nil) {
+        profile?.mark(.queueScheduled)
+        Task { @MainActor [weak self] in
+            // A newer request may schedule delivery of an older FIFO item.
+            // The drain selects that item's metadata, not this Task's parent.
+            await WebsiteDispatchProfile.$current.withValue(nil) {
+                await self?.drainQueue(taskID: taskID)
+            }
+        }
     }
 
     private func drainQueue(taskID: String) async {
@@ -2237,9 +2275,14 @@ final class AppState {
               !dispatchingQueueTaskIDs.contains(taskID),
               !pausedQueueTaskIDs.contains(taskID),
               let item = queuedPrompts[taskID]?.first, item.status == .queued else { return }
+        let profile = queuedDispatchProfiles.removeValue(forKey: item.id)
+        profile?.mark(.queueEntered)
+        defer { profile?.mark(.queueExited) }
         dispatchingQueueTaskIDs.insert(taskID)
         queuedPrompts[taskID]?[0].status = .sending
-        let delivery = await submitDelivery(prompt: item.text, toTaskID: taskID)
+        let delivery = await WebsiteDispatchProfile.$current.withValue(profile) {
+            await submitDelivery(prompt: item.text, toTaskID: taskID)
+        }
         let delivered = delivery.wasDelivered
         if delivered {
             queuedPrompts[taskID]?.removeAll { $0.id == item.id }
