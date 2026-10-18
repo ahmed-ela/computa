@@ -373,7 +373,7 @@ describe('optional first-preparation timing', () => {
       if (!enabled) { expect(result).not.toHaveProperty('preparationTiming'); continue; }
       const timing = result.preparationTiming;
       expect(Object.keys(timing).sort()).toEqual(['totalMs', 'beginSubmissionMs', 'beginSubmissionHashMs',
-        'modelPrecheckMs', 'finalGuardMs', 'editorMutationMs', 'inputDispatchMs', 'editorReadinessMs', 'editorReadyAtEntry', 'openingRecoveryUsed'].sort());
+        'modelPrecheckMs', 'finalGuardMs', 'editorFocusMs', 'editorMutationMs', 'inputDispatchMs', 'editorReadinessMs', 'editorReadyAtEntry', 'openingRecoveryUsed'].sort());
       for (const [key, value] of Object.entries(timing)) {
         if (key === 'openingRecoveryUsed') { expect(value).toBe(false); continue; }
         if (key === 'editorReadyAtEntry') { expect(value).toBeNull(); continue; }

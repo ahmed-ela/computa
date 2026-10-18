@@ -2115,6 +2115,164 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const dismiss = picker.menu.onDispatch; let count = 0;
         picker.menu.onDispatch = (event: any) => { dismiss(event); if (event.key === 'Escape' && ++count === 1) callback(); };
       };
+      const focusedFirstInstantInsert = async (ignoreEmptyFocusedPicker = false) => {
+        const { f, picker } = setup(); picker.selected('Instant'); const expected = choice('Instant');
+        // Establish the ordinary real picker proof; this scoped insert must not
+        // depend on a preceding focus-only prepare or a seeded private proof.
+        expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
+        const prompt = 'Synthetic single-operation first Instant preparation\n\n' + markerLine;
+        const selection: any = { anchorNode: f.composer, focusNode: f.composer, removeAllRanges() {}, addRange() {} };
+        f.window.getSelection = () => selection;
+        f.document.createRange = () => ({ selectNodeContents(node: any) { selection.anchorNode = node; selection.focusNode = node; }, collapse() {} });
+        const send = new Node('BUTTON', { 'aria-label': 'Send prompt' }); f.body.append(send);
+        const timeline: string[] = [], queued: any[] = [];
+        let insertions = 0, focuses = 0, ignoredOpenings = 0, onFocus = () => {};
+        const open = picker.trigger.onClick;
+        picker.trigger.onClick = () => {
+          timeline.push('picker');
+          if (ignoreEmptyFocusedPicker && f.document.activeElement === f.composer && !f.composer.textContent) { ignoredOpenings++; return; }
+          open();
+        };
+        f.composer.focus = () => { focuses++; timeline.push('focus'); f.document.activeElement = f.composer; onFocus(); };
+        f.composer.onDispatch = (event: any) => { if (event.type === 'input') timeline.push('input'); };
+        f.document.execCommand = (command: string, _ui: boolean, text: string) => {
+          expect(command).toBe('insertText'); expect(text).toBe(prompt);
+          insertions++; timeline.push('literal'); f.composer.text = text;
+          // Real execCommand emits its own input event. This inert fixture
+          // emulates that browser behavior; an extra adapter dispatch would
+          // produce a second event and fail the exact ordering assertions.
+          f.composer.dispatchEvent({ type: 'input', bubbles: true, inputType: 'insertText', data: text }); return true;
+        };
+        // The fixture DOM is inert. Deliver exactly the records produced by a
+        // simulated synchronous focus handler through the production observer's
+        // takeRecords boundary, rather than calling private proof functions.
+        f.world.__computaModelSignal.observer.takeRecords = () => queued.splice(0);
+        const request = { prompt, expectedModelChoice: expected, submissionSequence: 1, submissionMarker: firstMarker,
+          expectedSubmissionProofs: [], prepareFirstInstantInInsert: true, preparationTiming: true };
+        const start = (overrides: Record<string, unknown> = {}, action = 'insert') => f.run(action, { ...request, ...overrides });
+        const noInput = () => {
+          expect(insertions).toBe(0); expect(f.composer.events.filter((event: any) => event.type === 'input')).toHaveLength(0);
+          expect(send.clicks).toBe(0); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+        };
+        return { f, picker, expected, prompt, send, timeline, queued, start, noInput,
+          onFocus: (callback: () => void) => { onFocus = callback; }, counts: () => ({ insertions, focuses }), ignored: () => ignoredOpenings };
+      };
+      test('scoped first Instant insert proves the model before focus then performs one literal edit without separate prepare', async () => {
+        const x = await focusedFirstInstantInsert(true);
+        expect(x.counts()).toEqual({ insertions: 0, focuses: 0 });
+        const result = await x.start();
+        expect(result.error).toBeUndefined(); expect(result.inserted).toBe(true);
+        expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+        expect(x.timeline).toEqual(['picker', 'focus', 'literal', 'input', 'picker']);
+        expect(x.counts()).toEqual({ insertions: 1, focuses: 1 }); expect(x.ignored()).toBe(0);
+        expect(x.f.composer.textContent).toBe(x.prompt); expect(x.send.clicks).toBe(0);
+        expect(x.f.composer.events.filter((event: any) => event.type === 'input')).toEqual([
+          { type: 'input', bubbles: true, inputType: 'insertText', data: x.prompt }]);
+        expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        expect(x.f.world.__computaChatSubmissionState.pending).toMatchObject({ sequence: 1, marker: firstMarker, phase: 'prepared' });
+      });
+      test('scoped first Instant focus rechecks fresh ownership product model and editor before any input', async () => {
+        const mutations: [string, (x: any) => void][] = [
+          ['user', x => { x.f.appendUser('Foreign focus user'); }],
+          ['assistant', x => { x.f.messages.append(new Node('ARTICLE', { 'data-turn': 'assistant' }, 'Foreign focus reply')); }],
+          ['owner', x => { x.f.world.__computaModelOwner = 'different-owner'; }],
+          ['route', x => { x.f.document.URL = 'https://chatgpt.com/c/foreign-focus'; }],
+          ['temporary', x => { x.f.temporary.values['aria-label'] = 'Temporary chat'; }],
+          ['work', x => { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }],
+          ['power', x => { x.picker.selected('High'); }],
+          ['family', x => {
+            x.picker.selected('GPT-5.5');
+            x.queued.push(
+              { type: 'attributes', target: x.picker.familyOptions[0], attributeName: 'aria-checked', oldValue: 'true' },
+              { type: 'attributes', target: x.picker.familyOptions[2], attributeName: 'aria-checked', oldValue: 'false' });
+          }],
+          ['pin', x => { x.f.world.__computaChatPresetPin = { ...x.f.world.__computaChatPresetPin }; }],
+          ['invocation', x => { x.f.world.__computaChatActiveInvocation = {}; }],
+          ['duplicate_editor', x => { x.f.body.append(new Node('DIV', { ...x.f.composer.values })); }],
+          ['remounted_editor', x => {
+            const old = x.f.composer, replacement = new Node('DIV', { ...old.values });
+            old.parentElement.children = old.parentElement.children.filter((node: any) => node !== old);
+            old.connected = false; old.parentElement = null; x.f.body.append(replacement); x.f.document.activeElement = replacement;
+          }],
+          ['nonempty_editor', x => { x.f.composer.text = 'Foreign focus draft'; }],
+        ];
+        for (const [name, mutate] of mutations) {
+          const x = await focusedFirstInstantInsert(); x.onFocus(() => mutate(x));
+          const result = await x.start();
+          expect({ name, error: result.error }).toMatchObject({ name, error: expect.any(String) });
+          expect(x.counts().focuses).toBe(1); expect(x.timeline.indexOf('picker')).toBeLessThan(x.timeline.indexOf('focus'));
+          x.noInput();
+        }
+      });
+      test('scoped first Instant focus drains Work switch-and-restore records before any input', async () => {
+        const x = await focusedFirstInstantInsert();
+        x.onFocus(() => {
+          x.f.workMode.values['aria-pressed'] = 'true'; x.f.chatMode.values['aria-pressed'] = 'false';
+          x.f.workMode.values['aria-pressed'] = 'false'; x.f.chatMode.values['aria-pressed'] = 'true';
+          x.queued.push(
+            { type: 'attributes', target: x.f.workMode, attributeName: 'aria-pressed', oldValue: 'false' },
+            { type: 'attributes', target: x.f.chatMode, attributeName: 'aria-pressed', oldValue: 'true' },
+            { type: 'attributes', target: x.f.workMode, attributeName: 'aria-pressed', oldValue: 'true' },
+            { type: 'attributes', target: x.f.chatMode, attributeName: 'aria-pressed', oldValue: 'false' });
+        });
+        const result = await x.start();
+        expect(result.error).toBe('product_mode_unverified');
+        expect(x.f.world.__computaChatProductMode).toMatchObject({ invalidated: true, invalidationReason: 'work_selected' });
+        expect(x.queued).toHaveLength(0); x.noInput();
+      });
+      test('scoped first Instant focus rejects newly associated family menus even with an unchanged closed Instant header', async () => {
+        for (const removed of [false, true]) {
+          const x = await focusedFirstInstantInsert();
+          x.onFocus(() => {
+            const menu = new Node('DIV', { id: 'focus-only-family-menu', role: 'menu', 'aria-labelledby': x.picker.trigger.values.id });
+            const other = new Node('DIV', { role: 'menuitemradio', 'aria-checked': 'true' }, 'GPT-5.5'); menu.append(other);
+            x.f.body.append(menu);
+            x.queued.push({ type: 'childList', target: x.f.body, addedNodes: [menu], removedNodes: [] });
+            if (removed) {
+              x.f.body.children = x.f.body.children.filter((node: any) => node !== menu); menu.parentElement = null; menu.connected = false;
+              x.queued.push({ type: 'childList', target: x.f.body, addedNodes: [], removedNodes: [menu] });
+            }
+          });
+          const result = await x.start();
+          expect(result.error).toBe('model_unverified'); expect(x.picker.primary.text).toBe('Instant');
+          expect(x.picker.trigger.values['aria-expanded']).toBe('false');
+          expect(x.queued).toHaveLength(0); x.noInput();
+        }
+      });
+      test('scoped first Instant focus permits unrelated DOM rendering without another pre-input picker opening', async () => {
+        const x = await focusedFirstInstantInsert();
+        x.onFocus(() => {
+          const status = new Node('DIV', { role: 'status' }, 'Unrelated fixture rendering'); x.f.body.append(status);
+          x.queued.push({ type: 'childList', target: x.f.body, addedNodes: [status], removedNodes: [] });
+        });
+        const result = await x.start();
+        expect(result.error).toBeUndefined(); expect(result.inserted).toBe(true);
+        expect(x.queued).toHaveLength(0); expect(x.timeline).toEqual(['picker', 'focus', 'literal', 'input', 'picker']);
+        expect(x.counts()).toEqual({ insertions: 1, focuses: 1 }); expect(x.send.clicks).toBe(0);
+        expect(x.f.composer.events.filter((event: any) => event.type === 'input')).toEqual([
+          { type: 'input', bubbles: true, inputType: 'insertText', data: x.prompt }]);
+      });
+      test('scoped first Instant preparation rejects invalid native request contexts before focus or input', async () => {
+        const invalid: [string, Record<string, unknown>][] = [
+          ['other_model', { expectedModelChoice: choice('High') }],
+          ['later_sequence', { submissionSequence: 2 }],
+          ['other_marker', { submissionMarker: '00000000-0000-4000-8000-000000000009' }],
+          ['owned_user', { expectedUserCounts: [1] }],
+          ['ambiguous_counts', { expectedUserCounts: [0, 1] }],
+          ['retained_proofs', { expectedSubmissionProofs: [{ sequence: 1, fingerprint: 'a'.repeat(64) }] }],
+          ['retained_conversation', { expectedConversation: 'https://chatgpt.com/' }],
+          ['retained_first_fingerprint', { expectedFirstUserFingerprint: 'a'.repeat(64) }],
+        ];
+        for (const [name, overrides] of invalid) {
+          const x = await focusedFirstInstantInsert(); const result = await x.start(overrides);
+          expect({ name, error: result.error }).toMatchObject({ name, error: expect.any(String) });
+          expect(x.counts().focuses).toBe(0); x.noInput();
+        }
+        const action = await focusedFirstInstantInsert();
+        expect((await action.start({}, 'prepare')).error).toBe('not_fresh');
+        expect(action.counts().focuses).toBe(0); action.noInput();
+      });
       const firstInsertReadiness = async (ignoreWhenReady = false, rejectClock = false, missing = '') => {
         const { f, picker } = setup(); picker.selected('Instant'); const expected = choice('Instant');
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);

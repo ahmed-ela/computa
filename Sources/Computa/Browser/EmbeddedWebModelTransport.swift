@@ -797,27 +797,36 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         throw Failure.ownershipFailure(.javaScriptSubmission)
                     }
                 }
-                // This internal focus-only step publishes no readiness or output.
-                // ChatGPT's immediately following insert performs its full model
-                // precheck before any editor mutation, including pinned negative
-                // history. Keep the native product and document checks here.
-                let before = try await page(session, action: "prepare",
-                    recheckModelAfterAwait: session.provider != .chatgpt)
-                guard before["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
-                guard before["prepared"] as? Bool == true else { throw Failure.editorFailure("focus_unavailable") }
-                if !session.submitted {
-                    guard count(before, "responseCount") == 0, count(before, "userCount") == 0,
-                          session.provider.conversationURL(before["url"] as? String) == nil else { throw Failure.notFresh }
+                // A first Instant insert can validate focus inside its existing
+                // full precheck/final-proof pair. Other models and retained rounds keep
+                // their separate preparation and observed response baseline.
+                let prepareFirstInstantInInsert = canPrepareFirstInstantInInsert(session)
+                if !prepareFirstInstantInInsert {
+                    let before = try await page(session, action: "prepare",
+                        recheckModelAfterAwait: session.provider != .chatgpt)
+                    guard before["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
+                    guard before["prepared"] as? Bool == true else { throw Failure.editorFailure("focus_unavailable") }
+                    if !session.submitted {
+                        guard count(before, "responseCount") == 0, count(before, "userCount") == 0,
+                              session.provider.conversationURL(before["url"] as? String) == nil else { throw Failure.notFresh }
+                    }
+                    session.baseline = count(before, "responseCount")
                 }
-                session.baseline = count(before, "responseCount")
                 // Each proof-capable round has a unique transport-only suffix.
                 if session.usesSubmissionOwnership {
                     session.preparedSubmission = Session.SubmissionBinding(sequence: session.sequence + 1,
                         marker: submissionMarker, promptFingerprint: Self.promptFingerprint(prompt),
                         outboundFingerprint: Self.outboundFingerprint(outbound))
                 }
-                let inserted = try await page(session, action: "insert", prompt: outbound)
+                let inserted = try await page(session, action: "insert", prompt: outbound,
+                    prepareFirstInstantInInsert: prepareFirstInstantInInsert)
                 guard inserted["inserted"] as? Bool == true else { throw Failure.editorFailure("insertion_unconfirmed") }
+                if prepareFirstInstantInInsert {
+                    guard inserted["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
+                    guard count(inserted, "responseCount") == 0, count(inserted, "userCount") == 0,
+                          session.provider.conversationURL(inserted["url"] as? String) == nil else { throw Failure.notFresh }
+                    session.baseline = 0
+                }
                 // Wait only through read-only checks. Site normalization can enable
                 // Send later; insertion and the eventual click are never repeated.
                 try await waitForSendReady(session, prompt: outbound)
@@ -2946,7 +2955,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     static func removePreparationTiming(from observed: inout [String: Any]) -> [String: Any]? {
         let raw = observed.removeValue(forKey: "preparationTiming")
         let durations = ["totalMs", "beginSubmissionMs", "beginSubmissionHashMs", "modelPrecheckMs",
-                         "finalGuardMs", "editorMutationMs", "inputDispatchMs", "editorReadinessMs"]
+                         "finalGuardMs", "editorFocusMs", "editorMutationMs", "inputDispatchMs", "editorReadinessMs"]
         guard let value = raw as? [String: Any], Set(value.keys) == Set(durations + ["openingRecoveryUsed", "editorReadyAtEntry"]),
               let flag = value["openingRecoveryUsed"] as? NSNumber,
               CFGetTypeID(flag) == CFBooleanGetTypeID() else { return nil }
@@ -2970,12 +2979,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return Int(max(0, min(600_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
     }
 
+    private func canShareFirstChatGPTEditorContextRecheck(_ session: Session) -> Bool {
+        session.provider == .chatgpt && session.state == "ready" && !session.submitted && !session.pendingSubmission
+            && session.sequence == 0 && session.confirmedUsers == 0 && session.firstUserFingerprint == nil
+            && session.currentSubmission == nil && session.previousSubmission == nil
+            && session.temporary && session.temporaryRequested && session.modelChoice != nil
+            && session.modelSelectionVerified && !session.modelVerificationPending
+    }
+
+    private func canPrepareFirstInstantInInsert(_ session: Session) -> Bool {
+        canShareFirstChatGPTEditorContextRecheck(session)
+            && !session.isDiscovery && !session.isRecoveryProbe && session.usesSubmissionOwnership
+            && session.modelChoice?.key == "chat/latest/instant" && session.preparedSubmission == nil
+            && session.baseline == 0 && session.observedResponseCount == 0 && session.conversation == nil
+            && session.documentGeneration != nil && session.routeContext != nil && session.productModeEvidence != nil
+    }
+
     private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
                       refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true, recheckProductAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
+                      prepareFirstInstantInInsert: Bool = false,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         let preparationActionStarted = ContinuousClock.now
         let logPreparationAction = session.provider == .chatgpt
@@ -3078,6 +3104,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.state == "running" && session.submitted && session.modelVerificationPending
             && ["inspect", "submit", "verifyModel", "verifyProductMode"].contains(action)
         if provider == .chatgpt { input["deferModelVerification"] = deferModelVerification }
+        if prepareFirstInstantInInsert {
+            guard action == "insert", canShareFirstChatGPTEditorContextRecheck(session),
+                  session.modelChoice?.key == "chat/latest/instant", session.conversation == nil,
+                  session.baseline == 0, session.observedResponseCount == 0,
+                  session.preparedSubmission?.sequence == 1 else { throw Failure.invalidRequest }
+            input["prepareFirstInstantInInsert"] = true
+        }
         if profilePreparation { input["preparationTiming"] = true }
         if provider == .chatgpt, session.firstBodyReadRecoveryActive {
             input["suppressFirstUserExpansionClaim"] = true
@@ -3426,12 +3459,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Fresh first-request editor actions need the model read below. Its
         // final product read also rechecks Chat/temporary after that callback;
         // do this shared chain before publishing the original observation.
-        let editorContextRecheck = provider == .chatgpt && ["insert", "sendReady"].contains(action)
-            && session.state == "ready" && !session.submitted && !session.pendingSubmission
-            && session.sequence == 0 && session.confirmedUsers == 0 && session.firstUserFingerprint == nil
-            && session.currentSubmission == nil && session.previousSubmission == nil
-            && session.temporary && session.temporaryRequested && session.modelChoice != nil
-            && session.modelSelectionVerified && !session.modelVerificationPending
+        let editorContextRecheck = ["insert", "sendReady"].contains(action)
+            && canShareFirstChatGPTEditorContextRecheck(session)
             && enforceModel && recheckModelAfterAwait && recheckProductAfterAwait
             && refreshReadOnlyObservation && routeContinuation.isEmpty && !allowBlockedProvider && !deferModelVerification
         // A continuation's fixed submit action has already checked product,

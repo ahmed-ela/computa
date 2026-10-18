@@ -1589,7 +1589,7 @@ function chatGPTPreparationNow() {
   } catch { return null; }
 }
 const chatGPTPreparationTiming = { started: chatGPTPreparationNow(), beginSubmissionMs: null,
-  beginSubmissionHashMs: null, modelPrecheckMs: null, finalGuardMs: null, editorMutationMs: null, inputDispatchMs: null,
+  beginSubmissionHashMs: null, modelPrecheckMs: null, finalGuardMs: null, editorFocusMs: null, editorMutationMs: null, inputDispatchMs: null,
   editorReadinessMs: null, editorReadyAtEntry: null };
 function chatGPTPreparationElapsed(started) {
   const ended = chatGPTPreparationNow();
@@ -3335,6 +3335,59 @@ function chatGPTFailedPageDiagnostic() {
     alertTextLengths: lengths(alertNodes), statusTextLengths: lengths(statusNodes),
     noticesTruncated: alertNodes.length > 8 || statusNodes.length > 8 };
 }
+function chatGPTFreshInstantInsert(request) {
+  const state = globalThis.__computaChatSubmissionState, pending = state?.pending;
+  return request.prepareFirstInstantInInsert === true && request.action === 'insert'
+    && request.expectedModelChoice?.key === 'chat/latest/instant'
+    && request.submissionSequence === 1 && request.submissionMarker === request.expectedFirstUserMarker
+    && Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1 && request.expectedUserCounts[0] === 0
+    && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
+    && request.expectedFirstUserFingerprint == null && request.expectedConversation == null
+    && window === window.top && location.origin === 'https://chatgpt.com'
+    && document.URL === request.expectedURL && new URL(document.URL).pathname === '/'
+    && globalThis.__computaModelOwner === request.ownerToken
+    && websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease
+    && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof
+    && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
+    && state && chatGPTSubmissionContext(state) && state.lastVerified == null
+    && pending?.sequence === 1 && pending.marker === request.submissionMarker && pending.phase === 'prepared'
+    && pending.root === null && pending.body === null && !pending.expansionAttempted
+    && pending.canonical === chatGPTSubmissionCanonical(request.prompt);
+}
+function chatGPTProcessSignalRecords(signal, records) {
+  websiteChatObservePinnedMutations(records);
+  const productProof = globalThis.__computaChatProductMode;
+  const mode = productProof ? chatGPTProductModeState() : null;
+  if (productProof) chatGPTObserveProductMutations(productProof, mode, records);
+  if (!records.some(record => !websiteModelIgnoreOwnPickerMutation(record))) return;
+  if (window !== window.top || location.origin !== 'https://chatgpt.com'
+    || globalThis.__computaModelOwner !== signal.ownerToken) return;
+  // Notification only: draining before input retains the ordinary observer's
+  // negative-history processing and native notification semantics.
+  try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ ownerToken: signal.ownerToken, kind: 'dom_changed' }); }
+  catch { }
+}
+function chatGPTDrainSignalRecords() {
+  const signal = globalThis.__computaModelSignal;
+  const records = signal?.observer?.takeRecords?.() || [];
+  if (records.length) chatGPTProcessSignalRecords(signal, records);
+  return records;
+}
+function chatGPTFocusModelActivity(records, trigger, previousControls) {
+  const controlIDs = new Set([previousControls, trigger.getAttribute('aria-controls'),
+    ...records.filter(record => record.type === 'attributes' && record.target === trigger
+      && record.attributeName === 'aria-controls').map(record => record.oldValue)]
+    .filter(value => typeof value === 'string' && value.length <= 256).flatMap(value => value.split(/\s+/)).filter(Boolean));
+  const triggerID = trigger.getAttribute('id');
+  const associated = node => node?.nodeType === 1 && node.getAttribute('role') === 'menu'
+    && !node.closest('[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]')
+    && (controlIDs.has(node.getAttribute('id')) || typeof triggerID === 'string' && triggerID.length > 0
+      && (node.getAttribute('aria-labelledby') || '').split(/\s+/).includes(triggerID));
+  return records.some(record => record.type === 'attributes' && record.target === trigger
+      && record.attributeName === 'aria-expanded' && (record.oldValue === 'true' || trigger.getAttribute('aria-expanded') === 'true')
+    || record.type === 'childList' && [...(record.addedNodes || []), ...(record.removedNodes || [])]
+      .some(node => associated(node) || node?.nodeType === 1 && [...node.querySelectorAll('[role="menu"]')].some(associated)));
+}
 async function providerPageAction(input, readLineageFingerprint = null) {
   websiteModelDiagnosticPhase('page_action');
   const modelState = websiteModelPickerState('chatgpt');
@@ -3351,6 +3404,8 @@ async function providerPageAction(input, readLineageFingerprint = null) {
         && (!requireTemporary || chatGPTTemporaryVerified()));
     return result;
   }
+  const focusFirstInstantInInsert = input.prepareFirstInstantInInsert === true;
+  if (focusFirstInstantInInsert && !chatGPTFreshInstantInsert(input)) return { error: 'not_fresh' };
   // Focus-only preparation and model-only verification need one final proof.
   // Editor and response actions retain their proof before and after the action.
   if (!['stop', 'prepare', 'verifyModel'].includes(input.action) && input.expectedModelChoice != null) {
@@ -3523,6 +3578,48 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       // authoritative only at the exact-text check immediately before Send.
       globalThis.__computaModelFirstPrompt = prompt;
     }
+    const focusPin = focusFirstInstantInInsert ? globalThis.__computaChatPresetPin : null;
+    const focusSelection = focusPin?.selection, focusAttempt = globalThis.__computaModelSelection;
+    const focusFamily = focusSelection?.family?.key;
+    const currentEditors = () => [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
+      + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))].filter(visible);
+    if (focusFirstInstantInInsert && (!chatGPTFreshInstantInsert(input) || !focusPin || !focusAttempt?.completed
+      || currentEditors().length !== 1 || currentEditors()[0] !== composer))
+      return { error: 'not_fresh' };
+    const previousFocusControls = focusPin?.headerTrigger?.getAttribute('aria-controls');
+    if (focusFirstInstantInInsert) {
+      chatGPTDrainSignalRecords();
+      websiteChatDrainPinnedMutations(focusPin);
+      if (focusPin.invalidated === true || !chatGPTProductModeProof()) return { error: 'model_unverified' };
+    }
+    const focusStarted = chatGPTPreparationNow();
+    try { composer.focus(); }
+    finally { chatGPTPreparationRecord('editorFocusMs', focusStarted); }
+    if (focusFirstInstantInInsert) {
+      const focusRecords = chatGPTDrainSignalRecords();
+      if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
+      if (!chatGPTTemporaryVerified()) return { error: 'temporary_mode_unverified' };
+      if (document.activeElement !== composer && !composer.contains(document.activeElement)) return { error: 'composer_unavailable' };
+      if (!chatGPTFreshInstantInsert(input)) return { error: 'not_fresh' };
+      // The full precheck already ran. Focus handlers are synchronous: drain
+      // their negative history and recheck this exact closed proof without
+      // another picker opening or any yield before the single editor mutation.
+      websiteChatDrainPinnedMutations(focusPin);
+      const picker = websiteChatPickerState();
+      if (chatGPTFocusModelActivity(focusRecords, focusPin.headerTrigger, previousFocusControls)
+        || globalThis.__computaChatPresetPin !== focusPin || globalThis.__computaModelSelection !== focusAttempt
+        || focusAttempt.completed !== true || focusPin.invalidated === true || focusPin.document !== document || focusPin.owner !== input.ownerToken
+        || focusPin.selection !== focusSelection || focusSelection?.family?.key !== focusFamily || focusSelection?.power?.key !== 'instant'
+        || !websiteModelChoiceEqual(input.expectedModelChoice, websiteChatPresetChoice(focusSelection.family, focusSelection.power))
+        || picker.trigger !== focusPin.headerTrigger || !picker.closedPresentation || picker.headerPower?.key !== 'instant'
+        || picker.duplicate || picker.conflicting || picker.indicatorInvalid || picker.selectionAmbiguous || picker.navigationAmbiguous)
+        return { error: 'model_unverified' };
+      const editorsAfterFocus = currentEditors();
+      if (!enabled(composer) || editorsAfterFocus.length !== 1 || editorsAfterFocus[0] !== composer
+        || (composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText)?.trim()
+        || find(['button[data-testid="stop-button"]', 'button[aria-label="Stop streaming"]', 'button[aria-label="Stop generating"]', 'button[aria-label="Stop"]']))
+        return { error: 'composer_unavailable' };
+    }
     const mutationStarted = chatGPTPreparationNow();
     const dispatchInput = () => {
       chatGPTPreparationRecord('editorMutationMs', mutationStarted);
@@ -3530,7 +3627,6 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       try { composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt })); }
       finally { chatGPTPreparationRecord('inputDispatchMs', dispatchStarted); }
     };
-    composer.focus();
     if (composer instanceof HTMLTextAreaElement) {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(composer, prompt);
       dispatchInput();
@@ -3574,7 +3670,9 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     if (!enabled(composer) || stop || claudeStreaming) return { error: "composer_unavailable" };
     const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
     if (value?.trim()) return { error: "composer_not_empty" };
-    composer.focus();
+    const focusStarted = chatGPTPreparationNow();
+    try { composer.focus(); }
+    finally { chatGPTPreparationRecord('editorFocusMs', focusStarted); }
     return { ...state, prepared: document.activeElement === composer || composer.contains(document.activeElement) };
   }
   if (action === "submit" || action === "sendReady") {
@@ -3647,19 +3745,7 @@ if (input.action === 'failedPageDiagnostic') {
 }
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
   const signal = { ownerToken: input.ownerToken, observer: null };
-  signal.observer = new MutationObserver(records => {
-    websiteChatObservePinnedMutations(records);
-    const productProof = globalThis.__computaChatProductMode;
-    const mode = productProof ? chatGPTProductModeState() : null;
-    if (productProof) chatGPTObserveProductMutations(productProof, mode, records);
-    if (!records.some(record => !websiteModelIgnoreOwnPickerMutation(record))) return;
-    if (window !== window.top || location.origin !== 'https://chatgpt.com'
-      || globalThis.__computaModelOwner !== signal.ownerToken) return;
-    // Notification only. Native batches bursts without an inactive-page timer.
-    // No page text, tool requests, or native mutation authority cross this bridge.
-    try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ ownerToken: signal.ownerToken, kind: 'dom_changed' }); }
-    catch { }
-  });
+  signal.observer = new MutationObserver(records => chatGPTProcessSignalRecords(signal, records));
   signal.observer.observe(document.documentElement || document, {
     subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true,
     attributeFilter: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style",
