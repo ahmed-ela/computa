@@ -340,6 +340,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var responseProfile: WebsiteResponseProfile?
         var profiledFirstPositive = false
         var profiledFirstCompletionCandidate = false
+        var profiledCompletionTransitions = 0
+        func profileCompletionTransition(_ phase: WebsiteResponseProfile.Phase) {
+            guard let responseProfile, profiledCompletionTransitions < 32 else { return }
+            profiledCompletionTransitions += 1
+            responseProfile.mark(phase)
+        }
         var readTimeoutCount = 0
         var responseReadRetryUsed = false
         var firstBodyReadRecoveryActive = false
@@ -864,6 +870,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         sequence: session.sequence + 1, started: session.turnStarted) : nil
                 session.profiledFirstPositive = false
                 session.profiledFirstCompletionCandidate = false
+                session.profiledCompletionTransitions = 0
                 session.responseReadRetryUsed = false
                 session.failedPageDiagnosticAttempted = false
                 session.resourceTimingSignatures.removeAll()
@@ -1094,7 +1101,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let settlement = session.initialCheckpointSettlement, !settlement.finished {
             wake = min(wake, settlement.deadline)
         }
-        let changed = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: wake)
+        let profileQuietWait = session.state == "running" && session.completionCandidate && session.candidateSince != nil
+        if profileQuietWait { session.profileCompletionTransition(.quietWaitStarted) }
+        let changed: UInt64
+        do {
+            defer { if profileQuietWait { session.profileCompletionTransition(.quietWaitFinished) } }
+            changed = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: wake)
+        }
         try checkProviderGate(session)
         return changed
     }
@@ -1728,6 +1741,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let responseChanged = session.modelVerificationPending
                     ? !session.response.utf8.elementsEqual(response.utf8) : session.response != response
                 if responseChanged {
+                    if session.profiledFirstCompletionCandidate { session.profileCompletionTransition(.candidateResponseChanged) }
                     session.response = response; session.lastChanged = .now; session.candidateSince = nil
                 }
                 if observed["busy"] as? Bool == false, observed["answerComplete"] as? Bool == true {
@@ -1744,7 +1758,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                        let projected = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) as? [String: Any] {
                         session.responseCodeStructure = projected
                     }
-                    if !previouslyCandidate || session.candidateSince == nil { session.candidateSince = .now }
+                    if !previouslyCandidate || session.candidateSince == nil {
+                        session.candidateSince = .now
+                        session.profileCompletionTransition(.completionCandidateArmed)
+                    }
                     session.completionCandidate = true
                     if let since = session.candidateSince,
                        ContinuousClock.now - max(since, session.lastChanged) >= .milliseconds(1_600) {
@@ -1799,7 +1816,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                 }
             }
-            if !session.completionCandidate { session.candidateSince = nil }
+            if !session.completionCandidate {
+                if previouslyCandidate { session.profileCompletionTransition(.completionCandidateLost) }
+                session.candidateSince = nil
+            }
             guard session.state == "complete" || ContinuousClock.now - session.turnStarted < responseTimeout else {
                 throw Failure.deadline
             }
@@ -4511,18 +4531,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 /// Elapsed marks share an epoch and are not additive phase durations. End
 /// events also record a throwing scope's exit; they do not assert success.
 struct WebsiteResponseProfile: Sendable {
+    @TaskLocal static var cleanup: WebsiteResponseProfile?
     enum Source: String, Sendable, Codable, CaseIterable { case nativeTurn, serverAcknowledged }
     enum Phase: String, Sendable, Codable, CaseIterable {
         case firstPositive, firstCompletionCandidate, quietDeadlineReady
+        case completionCandidateArmed, completionCandidateLost, candidateResponseChanged, quietWaitStarted, quietWaitFinished
         case finalFullInspectStart, finalFullInspectEnd, transportComplete
         case cleanupOwnershipInspectStart, cleanupOwnershipInspectEnd, physicalClose, cookieSettleStart, cookieSettleEnd
         case serverSendAcknowledged, codecStart, codecEnd
         case submissionEvidenceStart, submissionEvidenceEnd, completionEvidenceStart, completionEvidenceEnd
         case encodeStart, encoded, cleanupReceiptDone, inferenceReturnReady, httpWriteStart, httpWriteEnd
+        case cleanupPersistStart, cleanupPersistEnd, cleanupReleaseStart, cleanupReleaseEnd, cleanupObserverStart, cleanupObserverEnd
 
         var source: Source {
             switch self {
             case .firstPositive, .firstCompletionCandidate, .quietDeadlineReady, .finalFullInspectStart, .finalFullInspectEnd,
+                 .completionCandidateArmed, .completionCandidateLost, .candidateResponseChanged, .quietWaitStarted, .quietWaitFinished,
                  .transportComplete, .cleanupOwnershipInspectStart, .cleanupOwnershipInspectEnd, .physicalClose,
                  .cookieSettleStart, .cookieSettleEnd: .nativeTurn
             default: .serverAcknowledged

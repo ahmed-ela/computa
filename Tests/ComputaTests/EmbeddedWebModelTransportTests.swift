@@ -6,6 +6,22 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testMatchedProbeObservesTheWebsitesAriaOnlySendButtons() async throws {
+        let (fixture, view, _, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        for label in ["Send", "Send message", "Send prompt"] {
+            try await resetMatchedProbePage(view)
+            _ = try await evaluate(view, "const b=document.getElementById('probe-send'); b.removeAttribute('data-testid'); b.setAttribute('aria-label',\(try matchedProbeJSON(label))); return true;", world: Self.matchedProbeWorld)
+            _ = try await installMatchedProbe(view, payload: "Exact aria-only Send fixture")
+            try await sendMatchedProbeFixture(view, body: "Exact aria-only Send fixture", answer: #"{"type":"message","text":"HI"}"#, codeCopy: true)
+            let state = try await waitForMatchedProbeState(view) { $0["payloadMatched"] as? Bool == true }
+            XCTAssertEqual(state["invalidReason"] as? String, "none", label)
+            XCTAssertEqual(state["sendClickCount"] as? Int, 1, label)
+            XCTAssertNotNil(state["sendUnixMs"] as? NSNumber, label)
+            XCTAssertNotNil(state["firstTextAfterSendMs"] as? NSNumber, label)
+        }
+    }
+
     func testMatchedProbeExactBundledSourceIsDormantForIneligibleConfigurationAndCannotRetargetNonce() async throws {
         let (fixture, view, _, _) = try await readyInstantPrepareFixture()
         defer { fixture.shutdown() }
@@ -174,7 +190,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     private func resetMatchedProbePage(_ view: WKWebView) async throws {
         _ = try await evaluate(view, #"""
             globalThis.__computaMatchedBenchmarkProbeV1?.stop(); delete globalThis.__computaMatchedBenchmarkProbeV1;
-            document.body.innerHTML='<main></main><textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button>';
+            document.body.innerHTML='<main></main><textarea id="prompt-textarea"></textarea><button id="probe-send" data-testid="send-button">Send</button>';
             return true;
             """#, world: Self.matchedProbeWorld)
     }
@@ -201,7 +217,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     private func sendMatchedProbeFixture(_ view: WKWebView, body: String, answer: String, codeCopy: Bool) async throws {
         let bodyJSON = try matchedProbeJSON(body), answerJSON = try matchedProbeJSON(answer)
         _ = try await evaluate(view, #"""
-            document.querySelector('[data-testid="send-button"]').click();
+            document.getElementById('probe-send').click();
             const user=document.createElement('article'); user.id='probe-user'; user.dataset.turn='user';
             const userBody=document.createElement('div'); userBody.id='probe-user-body'; userBody.dataset.markdownTextStyle='user-message'; userBody.style.whiteSpace='pre-wrap'; userBody.textContent=\#(bodyJSON); user.append(userBody);
             const article=document.createElement('article'); article.id='probe-assistant'; article.dataset.turn='assistant';

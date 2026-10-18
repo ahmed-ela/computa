@@ -733,15 +733,21 @@ actor WebModelServer {
     }
 
     private func persistClosedTransaction(taskID: String, pending: PendingClosedTransaction) async -> CleanupResult {
+        let profile = WebsiteResponseProfile.cleanup
         var receipt = pending.receipt
         receipt.receiptSaved = true
-        guard cleanupReceiptStore?.save(receipt) == true else {
+        profile?.mark(.cleanupPersistStart)
+        let saved = cleanupReceiptStore?.save(receipt) == true
+        profile?.mark(.cleanupPersistEnd)
+        guard saved else {
             receipt.receiptSaved = false
             await cleanupReceiptObserver?(receipt)
             return CleanupResult(receipt: receipt, issues: [Failure.persistenceRequired.localizedDescription])
         }
         if pending.session.provesNativeContinuation, let data = pending.session.completedSnapshot {
             do {
+                profile?.mark(.cleanupReleaseStart)
+                defer { profile?.mark(.cleanupReleaseEnd) }
                 guard let snapshot = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.persistenceRequired }
                 try recordEvidence(pending.session.resolvedModel, snapshot: snapshot, taskID: taskID,
                     inferenceID: pending.session.inferenceID, session: pending.session,
@@ -756,7 +762,11 @@ actor WebModelServer {
             pendingClosedTransactions.removeValue(forKey: taskID)
         }
         lastClosedTransactions[taskID] = receipt
-        await cleanupReceiptObserver?(receipt)
+        profile?.mark(.cleanupObserverStart)
+        do {
+            defer { profile?.mark(.cleanupObserverEnd) }
+            await cleanupReceiptObserver?(receipt)
+        }
         return CleanupResult(receipt: receipt, issues: [])
     }
 
@@ -1215,8 +1225,10 @@ actor WebModelServer {
                             try requireCurrentContext()
                             yieldedTurns[taskID] = YieldedTurn(inferenceID: inferenceID, continuation: continuation)
                         } else {
-                            let closed = await cleanup(taskID: taskID, cancel: Task.isCancelled,
-                                runtimeGeneration: context.runtimeGeneration, trigger: .inference)
+                            let closed = await WebsiteResponseProfile.$cleanup.withValue(responseProfile) {
+                                await cleanup(taskID: taskID, cancel: Task.isCancelled,
+                                    runtimeGeneration: context.runtimeGeneration, trigger: .inference)
+                            }
                             guard closed.receipt.outcome == .closed,
                                   closed.receipt.inferenceID == inferenceID.uuidString.lowercased(),
                                   closed.receipt.sessionToken == session.token.lowercased() else { throw Failure.cleanupFailed }

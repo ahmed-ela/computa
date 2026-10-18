@@ -1780,7 +1780,8 @@ function computaInstallMatchedBenchmarkProbe(config) {
     qualify();
   };
   function onClick(event) {
-    const target = event.target instanceof Element ? event.target.closest('button[data-testid="send-button"]') : null;
+    const target = event.target instanceof Element ? event.target.closest('button[data-testid="send-button"],'
+      + 'button[aria-label="Send prompt"],button[aria-label="Send message"],button[aria-label="Send"]') : null;
     if (!target || !enabled(target)) return;
     // A passive probe never suppresses the website click, even if its timing
     // sample is invalidated by pre-Send contamination.
