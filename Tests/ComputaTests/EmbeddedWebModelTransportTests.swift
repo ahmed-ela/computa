@@ -6,6 +6,90 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    // Insert into existing EmbeddedWebModelTransportTests. Uses the exact
+    // bundled source and a real rendered WKWebView; no getter mocks/fake DOM.
+    // Prepared only. Root applies/runs; this snippet has not been executed.
+    func testMatchedProbeAdmitsOnlyOneTerminalLFOnExactContenteditablePayload() async throws {
+        let (fixture, view, _, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        let payload = "Exact synthetic café 🌍\nKeep this internal line"
+        let answer = #"{"type":"message","text":"HI"}"#
+        let cases: [(name: String, textarea: Bool, terminalLFs: Int, wrongPrefix: Bool, matches: Bool)] = [
+            ("contenteditable_one_terminal_lf", false, 1, false, true),
+            ("textarea_one_extra_lf", true, 1, false, false),
+            ("contenteditable_two_terminal_lfs", false, 2, false, false),
+            ("contenteditable_same_size_wrong_payload", false, 1, true, false),
+        ]
+        for item in cases {
+            try await resetMatchedProbePage(view)
+            let config = try await installMatchedProbe(view, payload: payload)
+            // Swap the editor after installing the observer but before Send,
+            // matching the real page's contenteditable representation boundary.
+            // The raw DOM read is independently checked before the probe sees it.
+            let extraction = try await evaluate(view, """
+                const old=document.getElementById('prompt-textarea');
+                const textarea=\(item.textarea ? "true" : "false");
+                const prefix=\(item.wrongPrefix ? "true" : "false")
+                    ? globalThis.fixtureProbePayload.replace('Exact','Other') : globalThis.fixtureProbePayload;
+                const rendered=prefix+'\\n'.repeat(\(item.terminalLFs));
+                let editor=old;
+                if (!textarea) {
+                  editor=document.createElement('div'); editor.id='prompt-textarea';
+                  editor.setAttribute('contenteditable','true'); editor.setAttribute('aria-label','Ask ChatGPT');
+                  editor.style.whiteSpace='pre-wrap'; editor.style.minHeight='40px';
+                  editor.textContent=rendered; old.replaceWith(editor);
+                } else editor.value=rendered;
+                const actual=textarea ? editor.value : (editor.innerText || editor.textContent || '');
+                return {isTextarea:editor instanceof HTMLTextAreaElement,
+                  renderedExactlyAsConstructed:actual===rendered,
+                  renderedUTF8Bytes:new TextEncoder().encode(actual).length,
+                  editorCount:document.querySelectorAll('#prompt-textarea').length};
+                """, world: Self.matchedProbeWorld) as? [String: Any]
+            let actual = try XCTUnwrap(extraction)
+            XCTAssertEqual(actual["isTextarea"] as? Bool, item.textarea, item.name)
+            XCTAssertEqual(actual["renderedExactlyAsConstructed"] as? Bool, true, item.name)
+            XCTAssertEqual(actual["renderedUTF8Bytes"] as? Int, payload.utf8.count + item.terminalLFs, item.name)
+            XCTAssertEqual(actual["editorCount"] as? Int, 1, item.name)
+            try await sendMatchedProbeFixture(view, body: payload, answer: answer, codeCopy: true)
+            if item.matches {
+                let state = try await waitForMatchedProbeState(view) {
+                    $0["payloadMatched"] as? Bool == true && $0["editorRenderedSHA256"] is String
+                        && $0["editorCanonicalSHA256"] is String
+                }
+                XCTAssertEqual(state["invalidReason"] as? String, "none", item.name)
+                XCTAssertEqual(state["editorRepresentation"] as? String, "single_terminal_newline", item.name)
+                XCTAssertEqual(state["editorUTF8Bytes"] as? Int, payload.utf8.count, item.name)
+                XCTAssertEqual(state["editorSHA256"] as? String, config["expectedSHA256"] as? String, item.name)
+                XCTAssertEqual(state["editorSHA256"] as? String, EmbeddedWebModelTransport.promptFingerprint(payload), item.name)
+                XCTAssertEqual(state["editorCanonicalSHA256"] as? String, config["expectedCanonicalSHA256"] as? String, item.name)
+                XCTAssertEqual(state["userSHA256"] as? String, config["expectedCanonicalSHA256"] as? String, item.name)
+                XCTAssertEqual(state["editorRenderedUTF8Bytes"] as? Int, payload.utf8.count + 1, item.name)
+                XCTAssertEqual(state["editorRenderedSHA256"] as? String,
+                    EmbeddedWebModelTransport.promptFingerprint(payload + "\n"), item.name)
+                XCTAssertNotEqual(state["editorRenderedSHA256"] as? String, state["editorSHA256"] as? String, item.name)
+                XCTAssertEqual(state["sendClickCount"] as? Int, 1, item.name)
+                XCTAssertEqual(state["editorMatchesExpected"] as? Bool, true, item.name)
+                XCTAssertEqual(state["userMatchesExpected"] as? Bool, true, item.name)
+            } else {
+                let state = try await waitForMatchedProbeState(view) {
+                    $0["invalidReason"] as? String == "editor_mismatch"
+                }
+                XCTAssertEqual(state["payloadMatched"] as? Bool, false, item.name)
+                XCTAssertEqual(state["editorMatchesExpected"] as? Bool, false, item.name)
+                XCTAssertNotEqual(state["editorSHA256"] as? String, config["expectedSHA256"] as? String, item.name)
+                XCTAssertEqual(state["sendClickCount"] as? Int, 1, item.name)
+                if item.wrongPrefix {
+                    XCTAssertEqual(state["editorRepresentation"] as? String, "single_terminal_newline", item.name)
+                    XCTAssertEqual(state["editorUTF8Bytes"] as? Int, payload.utf8.count,
+                        "The same byte count after removing one LF cannot replace the full exact hash")
+                } else {
+                    XCTAssertEqual(state["editorRepresentation"] as? String, "exact", item.name)
+                    XCTAssertEqual(state["editorUTF8Bytes"] as? Int, payload.utf8.count + item.terminalLFs, item.name)
+                }
+            }
+        }
+    }
+
     func testMatchedProbeObservesTheWebsitesAriaOnlySendButtons() async throws {
         let (fixture, view, _, _) = try await readyInstantPrepareFixture()
         defer { fixture.shutdown() }

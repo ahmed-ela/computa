@@ -1645,6 +1645,7 @@ function computaInstallMatchedBenchmarkProbe(config) {
     expectedCanonicalSHA256: config.expectedCanonicalSHA256, expectedUTF8Bytes: config.expectedUTF8Bytes,
     invalidReason: 'none', sendClickCount: 0, userCount: 0, assistantCount: 0,
     editorUTF8Bytes: null, editorSHA256: null, editorCanonicalSHA256: null,
+    editorRenderedUTF8Bytes: null, editorRenderedSHA256: null, editorRepresentation: 'unknown',
     userUTF8Bytes: null, userSHA256: null, responseUTF8Bytes: null, responseSHA256: null,
     editorMatchesExpected: null, userMatchesExpected: null, payloadMatched: false,
     installedUnixMs: Date.now(), sendUnixMs: null, sendSinceInstallMs: null,
@@ -1792,7 +1793,16 @@ function computaInstallMatchedBenchmarkProbe(config) {
     const editors = [...document.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea,#prompt-textarea [contenteditable="true"],[contenteditable="true"][aria-label="Ask ChatGPT"],textarea[data-testid="prompt-textarea"]')]
       .filter(visible).filter((node, i, all) => !all.some(other => other !== node && other.contains(node)));
     if (editors.length !== 1) { invalid('editor_unavailable'); return; }
-    const editor = editors[0], text = editor instanceof HTMLTextAreaElement ? editor.value : (editor.innerText || editor.textContent || '');
+    const editor = editors[0], rendered = editor instanceof HTMLTextAreaElement ? editor.value : (editor.innerText || editor.textContent || '');
+    const renderedBytes = new TextEncoder().encode(rendered).length;
+    // ProseMirror can expose one presentation-only terminal LF in innerText.
+    // Preserve its raw hash separately. Only the exact remaining whole payload
+    // may match; textarea values and all other whitespace remain byte-exact.
+    const terminalNewline = !(editor instanceof HTMLTextAreaElement) && rendered.endsWith('\n')
+      && renderedBytes === config.expectedUTF8Bytes + 1;
+    const text = terminalNewline ? rendered.slice(0, -1) : rendered;
+    state.editorRepresentation = terminalNewline ? 'single_terminal_newline' : 'exact';
+    hash(rendered, (value, bytes) => { state.editorRenderedSHA256 = value; state.editorRenderedUTF8Bytes = bytes; });
     hash(text, (value, bytes) => {
       state.editorSHA256 = value; state.editorUTF8Bytes = bytes;
       state.editorMatchesExpected = value === config.expectedSHA256 && bytes === config.expectedUTF8Bytes;

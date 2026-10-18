@@ -3017,12 +3017,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     static func removeMatchedBenchmarkMilestones(from observed: inout [String: Any],
         binding: WebsiteBenchmarkCaptureLease.ObservationBinding?) -> [String: Any]? {
         let raw = observed.removeValue(forKey: "benchmarkMilestones")
-        let hashes = ["editorSHA256", "editorCanonicalSHA256", "userSHA256", "responseSHA256"]
-        let counts = ["editorUTF8Bytes", "userUTF8Bytes", "responseUTF8Bytes"]
+        let hashes = ["editorSHA256", "editorCanonicalSHA256", "editorRenderedSHA256", "userSHA256", "responseSHA256"]
+        let counts = ["editorUTF8Bytes", "editorRenderedUTF8Bytes", "userUTF8Bytes", "responseUTF8Bytes"]
         let durations = ["sendSinceInstallMs", "firstTextAfterSendMs", "firstCompleteAfterSendMs", "lastTextChangeAfterSendMs"]
         let flags = ["editorMatchesExpected", "userMatchesExpected"]
         let keys = ["schemaVersion", "nonce", "expectedSHA256", "expectedCanonicalSHA256", "expectedUTF8Bytes", "invalidReason",
-                    "sendClickCount", "userCount", "assistantCount", "payloadMatched", "currentComplete", "installedUnixMs", "sendUnixMs", "completionScope", "responseKind"]
+                    "sendClickCount", "userCount", "assistantCount", "payloadMatched", "currentComplete", "installedUnixMs", "sendUnixMs", "completionScope", "responseKind", "editorRepresentation"]
             + hashes + counts + durations + flags
         guard let binding, let value = raw as? [String: Any], Set(value.keys) == Set(keys),
               value["nonce"] as? String == binding.nonce.uuidString.lowercased(),
@@ -3033,6 +3033,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                "multiple_sends", "editor_unavailable", "editor_mismatch", "hash_failed", "expired", "overflow"].contains(reason),
               let scope = value["completionScope"] as? String, ["none", "assistant_ancestor", "paired_turn"].contains(scope),
               let kind = value["responseKind"] as? String, ["none", "code", "rendered"].contains(kind) else { return nil }
+        guard let representation = value["editorRepresentation"] as? String,
+              ["unknown", "exact", "single_terminal_newline"].contains(representation) else { return nil }
         func number(_ key: String, upper: Double) -> Double? {
             guard let n = value[key] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
                   n.doubleValue.isFinite, (0...upper).contains(n.doubleValue) else { return nil }
@@ -3042,7 +3044,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               number("expectedUTF8Bytes", upper: 180_200) == Double(binding.utf8Bytes) else { return nil }
         var safe: [String: Any] = ["schemaVersion": 1, "nonce": binding.nonce.uuidString.lowercased(),
             "expectedSHA256": binding.rawOutboundSHA, "expectedCanonicalSHA256": binding.canonicalOutboundSHA,
-            "expectedUTF8Bytes": binding.utf8Bytes, "invalidReason": reason, "completionScope": scope, "responseKind": kind]
+            "expectedUTF8Bytes": binding.utf8Bytes, "invalidReason": reason, "completionScope": scope, "responseKind": kind,
+            "editorRepresentation": representation]
         for key in ["sendClickCount", "userCount", "assistantCount"] {
             guard let n = number(key, upper: 2), n.rounded() == n else { return nil }; safe[key] = Int(n)
         }
@@ -3067,7 +3070,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let n = value[key] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }; safe[key] = n.boolValue
         }
         if safe["editorMatchesExpected"] as? Bool == true {
-            guard safe["editorSHA256"] as? String == binding.rawOutboundSHA, safe["editorUTF8Bytes"] as? Int == binding.utf8Bytes else { return nil }
+            guard representation != "unknown", safe["editorSHA256"] as? String == binding.rawOutboundSHA,
+                  safe["editorUTF8Bytes"] as? Int == binding.utf8Bytes else { return nil }
+            // Hash callbacks can finish in either order. A pending rendered hash
+            // is unknown; a populated one must describe the explicit extraction.
+            if let renderedBytes = safe["editorRenderedUTF8Bytes"] as? Int,
+               let renderedHash = safe["editorRenderedSHA256"] as? String {
+                guard representation == "exact" && renderedBytes == binding.utf8Bytes && renderedHash == binding.rawOutboundSHA
+                    || representation == "single_terminal_newline" && renderedBytes == binding.utf8Bytes + 1
+                        && renderedHash != binding.rawOutboundSHA else { return nil }
+            }
         }
         if safe["userMatchesExpected"] as? Bool == true {
             guard safe["userSHA256"] as? String == binding.canonicalOutboundSHA else { return nil }

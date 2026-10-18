@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import Computa
@@ -259,6 +260,128 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "jsonl" }.count, 256)
         _ = await server.shutdown()
+    }
+
+    /// Diagnostic-only, synthetic store benchmark. It is intentionally opt-in:
+    /// no test queries app state or personal receipts, and no latency threshold
+    /// can turn scheduler/filesystem variance into a functional failure.
+    func testSyntheticCleanupStoreSaveMicrobenchmark() throws {
+        guard let outputPath = ProcessInfo.processInfo.environment["COMPUTA_CLEANUP_BENCHMARK_OUTPUT"] else {
+            throw XCTSkip("Set COMPUTA_CLEANUP_BENCHMARK_OUTPUT to a new private artifact path to run the synthetic store benchmark")
+        }
+        guard outputPath.hasPrefix("/"), outputPath.utf8.count <= 4_096,
+              let label = ProcessInfo.processInfo.environment["COMPUTA_CLEANUP_BENCHMARK_LABEL"],
+              !label.isEmpty, label.utf8.count <= 32,
+              label.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || [45, 46, 95].contains($0) }) else {
+            XCTFail("The synthetic benchmark requires an absolute output path and a bounded label")
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        func syntheticID(_ index: Int, _ field: Int) -> String {
+            String(format: "aa000000-%04x-4000-8000-%012llx", UInt32(field), UInt64(index))
+        }
+        func syntheticReceipt(_ index: Int) throws -> WebsiteSessionCleanupReceipt {
+            let row = WebsiteSessionCleanupReceipt(taskID: syntheticID(index, 1), threadID: syntheticID(index, 2),
+                turnID: syntheticID(index, 3), runtimeGeneration: UUID(uuidString: "f0000000-0000-4000-8000-000000000001")!,
+                outcome: .closed, provider: .chatgpt, route: .embedded,
+                modelID: WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID,
+                reason: .notCreated, trigger: .inference, receiptSaved: true,
+                inferenceID: syntheticID(index, 4), sessionToken: syntheticID(index, 5))
+            return try changed(row, ["attemptID": syntheticID(index, 6), "timestamp": "2026-10-18T00:00:00.000Z"])
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        func line(_ receipt: WebsiteSessionCleanupReceipt) throws -> Data {
+            var data = try encoder.encode(receipt); data.append(0x0A); return data
+        }
+        func transaction(_ root: URL, _ receipt: WebsiteSessionCleanupReceipt) -> URL {
+            root.appendingPathComponent("transactions", isDirectory: true).appendingPathComponent(receipt.taskID, isDirectory: true)
+                .appendingPathComponent(receipt.turnID! + ".jsonl")
+        }
+        func milliseconds(_ elapsed: Duration) throws -> Double {
+            let parts = elapsed.components
+            let value = Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15
+            guard value.isFinite, (0...600_000).contains(value) else { throw CocoaError(.fileReadCorruptFile) }
+            return value
+        }
+        var samples: [[String: Any]] = [], cases: [[String: Any]] = []
+        for seededFiles in [100, 200] {
+            let root = try directory(), store = WebsiteSessionCleanupStore(directory: root)
+            let transactions = root.appendingPathComponent("transactions", isDirectory: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+            try FileManager.default.createDirectory(at: transactions, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            var seedBytes = 0, seeds: [WebsiteSessionCleanupReceipt] = []
+            // Seeding writes exact deterministic native journal/summary bytes
+            // directly, outside measurement. The timed path is the real save().
+            // Every seed is read back through the public store before timing.
+            for index in 1...seededFiles {
+                let row = try syntheticReceipt(index), data = try line(row)
+                XCTAssertTrue(row.isTransactionLinked); XCTAssertTrue(row.isValid)
+                let file = transaction(root, row)
+                try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: 0o700])
+                try data.write(to: file, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+                let summary = root.appendingPathComponent(row.taskID + ".jsonl")
+                try data.write(to: summary, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: summary.path)
+                XCTAssertEqual(try store.transactionRecords(for: row.taskID, turnID: row.turnID!), [row])
+                seedBytes += data.count; seeds.append(row)
+            }
+            var fresh: [WebsiteSessionCleanupReceipt] = []
+            for index in 0..<5 {
+                let row = try syntheticReceipt(seededFiles + index + 1), began = ContinuousClock.now
+                let saved = store.save(row), elapsed = try milliseconds(.now - began)
+                guard saved else { XCTFail("A synthetic fresh save was rejected"); throw CocoaError(.fileWriteUnknown) }
+                XCTAssertEqual(try store.transactionRecords(for: row.taskID, turnID: row.turnID!), [row])
+                XCTAssertEqual(try Data(contentsOf: transaction(root, row)), try line(row))
+                XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(row.taskID + ".jsonl")), try line(row))
+                samples.append(["seededJournalFiles": seededFiles, "journalFilesBefore": seededFiles + index,
+                    "sample": index + 1, "operation": "fresh_save", "elapsedMs": elapsed, "saved": true])
+                fresh.append(row)
+            }
+            for (index, row) in fresh.enumerated() {
+                let journal = transaction(root, row), summary = root.appendingPathComponent(row.taskID + ".jsonl")
+                let oldJournal = try Data(contentsOf: journal), oldSummary = try Data(contentsOf: summary)
+                let began = ContinuousClock.now, saved = store.save(row), elapsed = try milliseconds(.now - began)
+                guard saved else { XCTFail("An exact synthetic persistence retry was rejected"); throw CocoaError(.fileWriteUnknown) }
+                XCTAssertEqual(try Data(contentsOf: journal), oldJournal)
+                XCTAssertEqual(try Data(contentsOf: summary), oldSummary)
+                XCTAssertEqual(try store.transactionRecords(for: row.taskID, turnID: row.turnID!), [row])
+                samples.append(["seededJournalFiles": seededFiles, "journalFilesBefore": seededFiles + 5,
+                    "sample": index + 1, "operation": "idempotent_retry", "elapsedMs": elapsed, "saved": true])
+            }
+            let first = try XCTUnwrap(seeds.first)
+            for (index, field) in ["inferenceID", "sessionToken"].enumerated() {
+                let collision = try changed(syntheticReceipt(seededFiles + 101 + index), [field: field == "inferenceID" ? first.inferenceID! : first.sessionToken!])
+                XCTAssertFalse(store.save(collision), "A fresh task cannot adopt a seeded native inference or website session")
+                XCTAssertFalse(FileManager.default.fileExists(atPath: transaction(root, collision).path))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(collision.taskID + ".jsonl").path))
+            }
+            for row in seeds + fresh {
+                XCTAssertEqual(try store.transactionRecords(for: row.taskID, turnID: row.turnID!), [row])
+            }
+            cases.append(["seededJournalFiles": seededFiles, "seededSummaryFiles": seededFiles, "seededJournalBytes": seedBytes,
+                "timedFreshSaves": 5, "timedExactRetries": 5, "rejectedCrossTaskCollisions": 2,
+                "finalJournalFiles": seededFiles + 5, "allStoredReceiptsReadBackExactly": true])
+        }
+        let report: [String: Any] = ["schemaVersion": 1, "kind": "synthetic_cleanup_store_save_microbenchmark",
+            "fixtureVersion": 1, "label": label, "cases": cases, "samples": samples,
+            "timingBoundary": "only_real_WebsiteSessionCleanupStore_save_including_existing_validation_and_durable_writes",
+            "seeding": "deterministic_synthetic_native_journal_and_summary_bytes_written_before_timing_and_read_back_via_store",
+            "performanceThresholdApplied": false]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .prettyPrinted])
+        guard data.count <= 32_768 else { throw CocoaError(.fileWriteOutOfSpace) }
+        let descriptor = open(outputPath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(descriptor) }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(descriptor, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count < 0 { if errno == EINTR { continue }; throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                guard count > 0 else { throw POSIXError(.EIO) }; offset += count
+            }
+        }
+        guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
     private func changed(_ receipt: WebsiteSessionCleanupReceipt, _ fields: [String: Any], removing: [String] = []) throws -> WebsiteSessionCleanupReceipt {

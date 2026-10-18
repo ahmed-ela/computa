@@ -249,6 +249,68 @@ final class WebsiteResponseProfileTests: XCTestCase {
 
 @MainActor
 final class MatchedBenchmarkProjectionTests: XCTestCase {
+    // Insert into existing MatchedBenchmarkProjectionTests; uses its private
+    // valid/binding/rejected helpers. Prepared only, not applied or executed.
+    func testMatchedBenchmarkProjectionPreservesExplicitSingleTerminalLFWithoutChangingLiteralProof() throws {
+        let literal = String(repeating: "x", count: 32)
+        let literalHash = EmbeddedWebModelTransport.promptFingerprint(literal)
+        let renderedHash = EmbeddedWebModelTransport.promptFingerprint(literal + "\n")
+        let exact = WebsiteBenchmarkCaptureLease.ObservationBinding(nonce: nonce,
+            rawOutboundSHA: literalHash, canonicalOutboundSHA: literalHash, utf8Bytes: 32)
+        var terminal = valid
+        for key in ["expectedSHA256", "expectedCanonicalSHA256", "editorSHA256", "editorCanonicalSHA256", "userSHA256"] {
+            terminal[key] = literalHash
+        }
+        terminal["editorRepresentation"] = "single_terminal_newline"
+        terminal["editorRenderedUTF8Bytes"] = 33
+        terminal["editorRenderedSHA256"] = renderedHash
+        let original: [String: Any] = ["state": "complete", "text": "PRIVATE_AUTHORITY_CANARY"]
+        var observation = original; observation["benchmarkMilestones"] = terminal
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.removeMatchedBenchmarkMilestones(from: &observation, binding: exact))
+        XCTAssertEqual(NSDictionary(dictionary: observation), NSDictionary(dictionary: original))
+        XCTAssertEqual(NSDictionary(dictionary: safe), NSDictionary(dictionary: terminal))
+        XCTAssertEqual(safe["editorUTF8Bytes"] as? Int, 32)
+        XCTAssertEqual(safe["editorRenderedUTF8Bytes"] as? Int, 33)
+        XCTAssertEqual(safe["editorSHA256"] as? String, literalHash)
+        XCTAssertEqual(safe["editorRenderedSHA256"] as? String, renderedHash)
+        XCTAssertNotEqual(literalHash, renderedHash)
+        XCTAssertEqual(safe["editorMatchesExpected"] as? Bool, true)
+        XCTAssertEqual(safe["userMatchesExpected"] as? Bool, true)
+        XCTAssertEqual(safe["payloadMatched"] as? Bool, true)
+        let encoded = try JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys])
+        XCTAssertLessThan(encoded.count, 4_096)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains(literal))
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("PRIVATE_AUTHORITY_CANARY"))
+    }
+
+    func testMatchedBenchmarkProjectionRejectsContradictoryTerminalLFRepresentationsAndCFBooleans() {
+        var terminal = valid
+        terminal["editorRepresentation"] = "single_terminal_newline"
+        terminal["editorRenderedUTF8Bytes"] = 33
+        terminal["editorRenderedSHA256"] = String(repeating: "d", count: 64)
+        var variants: [(String, [String: Any])] = []
+        func add(_ label: String, _ key: String, _ value: Any) {
+            var bad = terminal; bad[key] = value; variants.append((label, bad))
+        }
+        add("wrong_exact_representation", "editorRepresentation", "exact")
+        add("unknown_positive_representation", "editorRepresentation", "unknown")
+        add("unrecognized_representation", "editorRepresentation", "trimmed")
+        add("boolean_representation", "editorRepresentation", true)
+        add("CFBoolean_rendered_byte_count", "editorRenderedUTF8Bytes", NSNumber(value: true))
+        add("string_rendered_byte_count", "editorRenderedUTF8Bytes", "33")
+        add("fractional_rendered_byte_count", "editorRenderedUTF8Bytes", 33.5)
+        add("two_extra_LF_bytes", "editorRenderedUTF8Bytes", 34)
+        add("no_extra_byte", "editorRenderedUTF8Bytes", 32)
+        add("unchanged_hash_with_extra_byte", "editorRenderedSHA256", binding.rawOutboundSHA)
+        add("boolean_rendered_hash", "editorRenderedSHA256", NSNumber(value: true))
+        add("malformed_rendered_hash", "editorRenderedSHA256", "PRIVATE_HASH_CANARY")
+        add("uppercase_rendered_hash", "editorRenderedSHA256", String(repeating: "D", count: 64))
+        add("literal_size_was_relaxed", "editorUTF8Bytes", 33)
+        add("literal_hash_was_relaxed", "editorSHA256", String(repeating: "d", count: 64))
+        add("submitted_canonical_hash_was_relaxed", "userSHA256", String(repeating: "d", count: 64))
+        for (_, bad) in variants { rejected(bad) }
+    }
+
     private let nonce = UUID(uuidString: "cccccccc-1111-4222-8333-dddddddddddd")!
     private var binding: WebsiteBenchmarkCaptureLease.ObservationBinding {
         .init(nonce: nonce, rawOutboundSHA: String(repeating: "a", count: 64),
@@ -260,6 +322,7 @@ final class MatchedBenchmarkProjectionTests: XCTestCase {
          "expectedUTF8Bytes": 32, "invalidReason": "none", "sendClickCount": 1, "userCount": 1, "assistantCount": 1,
          "editorUTF8Bytes": 32, "editorSHA256": String(repeating: "a", count: 64),
          "editorCanonicalSHA256": String(repeating: "b", count: 64), "userUTF8Bytes": 32,
+         "editorRenderedUTF8Bytes": 32, "editorRenderedSHA256": String(repeating: "a", count: 64), "editorRepresentation": "exact",
          "userSHA256": String(repeating: "b", count: 64), "responseUTF8Bytes": 30,
          "responseSHA256": String(repeating: "c", count: 64), "editorMatchesExpected": true,
          "userMatchesExpected": true, "payloadMatched": true, "currentComplete": true,
