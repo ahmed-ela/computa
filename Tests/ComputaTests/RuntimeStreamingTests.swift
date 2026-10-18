@@ -7,6 +7,124 @@ import XCTest
 /// incremental delivery is established before the fixture can finish a reply.
 @MainActor
 final class RuntimeStreamingTests: XCTestCase {
+    func testInitialNamingRunsAfterTurnAcceptanceAndCannotHoldBackInferenceProgress() async throws {
+        try await withHarness(scenario: "name-deferred") { harness in
+            let prompt = String(repeating: "Synthetic title 🧭 ", count: 8)
+            let submitting = Task { try await harness.submit(prompt: prompt) }
+            defer { try? harness.release("release-name"); try? harness.release("release-name-turn"); submitting.cancel() }
+            try await self.waitFor("deferred name request and inference progress") {
+                harness.markerExists("name-requested") && harness.audit.measuredTokens == 1_000
+            }
+            let trace = try harness.trace()
+            let start = try XCTUnwrap(trace.messages.first { $0.direction == .clientToServer && $0.method == "turn/start" })
+            let acknowledgement = try XCTUnwrap(trace.messages.first {
+                $0.direction == .serverToClient && $0.identifier == start.identifier && $0.method == nil
+            })
+            let naming = try XCTUnwrap(trace.messages.first { $0.direction == .clientToServer && $0.method == "thread/name/set" })
+            XCTAssertLessThan(acknowledgement.sequence, naming.sequence)
+            XCTAssertEqual((naming.object["params"] as? [String: Any])?["name"] as? String, String(prompt.prefix(72)), "The persisted RPC preserves the exact existing Unicode title prefix")
+            XCTAssertFalse(trace.messages.contains { $0.direction == .serverToClient && $0.identifier == naming.identifier && $0.method == nil })
+            XCTAssertEqual(harness.audit.deltas.map(\.text), ["Inference progresses while naming is pending."])
+            XCTAssertEqual(harness.audit.status, .running)
+            XCTAssertFalse(harness.markerExists("name-persisted"))
+            try harness.release("release-name")
+            try await submitting.value
+            let saved = try await harness.runtime.loadTasks()
+            XCTAssertEqual(saved.first?.title, String(prompt.prefix(72)).trimmingCharacters(in: .whitespacesAndNewlines))
+            try harness.release("release-name-turn")
+            try await self.waitFor("first named turn completion") { harness.audit.measuredTokens == 1_001 }
+            try await harness.submit(prompt: "A retained turn keeps its original saved title.")
+            try await self.waitFor("retained named turn completion") { harness.audit.measuredTokens == 1_002 }
+            let retained = try await harness.runtime.loadTasks()
+            XCTAssertEqual(retained.first?.title, String(prompt.prefix(72)).trimmingCharacters(in: .whitespacesAndNewlines))
+            XCTAssertEqual(try harness.trace().messages.filter { $0.direction == .clientToServer && $0.method == "thread/name/set" }.count, 1)
+        }
+    }
+
+    func testWebsiteInferenceEntersItsRegisteredContextWhileInitialNamingIsPending() async throws {
+        try await withHarness(scenario: "name-web-deferred", websiteModel: true) { harness in
+            await harness.runtime.configureEmbeddedWebModelTransport(InitialNameProbeTransport(root: harness.root))
+            let submitting = Task { try await harness.submit() }
+            defer { try? harness.release("release-name"); try? harness.release("release-name-turn"); submitting.cancel() }
+            try await self.waitFor("registered website inference while title reply is held") {
+                harness.markerExists("name-requested") && harness.markerExists("website-response.json")
+            }
+            let probe = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: harness.root.appendingPathComponent("website-response.json"))) as? [String: Any])
+            XCTAssertEqual(probe["status"] as? Int, 500)
+            let error = try XCTUnwrap((probe["body"] as? [String: Any])?["error"] as? [String: Any])
+            XCTAssertEqual(error["code"] as? String, "browser_model_error")
+            XCTAssertTrue(harness.markerExists("website-transport-entered"), "The production context gate must admit inference before the name response")
+            XCTAssertFalse(harness.markerExists("name-persisted"))
+            let trace = try harness.trace()
+            let naming = try XCTUnwrap(trace.messages.first { $0.direction == .clientToServer && $0.method == "thread/name/set" })
+            XCTAssertFalse(trace.messages.contains { $0.direction == .serverToClient && $0.identifier == naming.identifier && $0.method == nil })
+            try harness.release("release-name")
+            try await submitting.value
+            try harness.release("release-name-turn")
+            try await self.waitFor("registered probe turn completion") { harness.audit.measuredTokens == 1_001 }
+        }
+    }
+
+    func testInitialNamingFailureRemainsBestEffortAfterAcceptedTurn() async throws {
+        try await withHarness(scenario: "name-error") { harness in
+            try await harness.submit()
+            try await self.waitFor("inference despite title persistence failure") { harness.audit.measuredTokens == 1_000 }
+            XCTAssertEqual(harness.audit.status, .running)
+            let naming = try XCTUnwrap(try harness.trace().messages.first { $0.direction == .clientToServer && $0.method == "thread/name/set" })
+            XCTAssertTrue(try harness.trace().messages.contains { $0.direction == .serverToClient && $0.identifier == naming.identifier && $0.object["error"] != nil })
+            try harness.release("release-name-turn")
+            try await self.waitFor("title-failure turn completion") { harness.audit.measuredTokens == 1_001 }
+        }
+    }
+
+    func testRejectedInitialTurnDoesNotDispatchItsDeferredName() async throws {
+        try await withHarness(scenario: "name-rejected") { harness in
+            do { try await harness.submit(); XCTFail("Fixture must reject turn/start") }
+            catch { XCTAssertTrue(error.localizedDescription.contains("Synthetic turn rejected")) }
+            XCTAssertFalse(try harness.trace().messages.contains { $0.direction == .clientToServer && $0.method == "thread/name/set" })
+        }
+    }
+
+    func testCancelledOrInterruptedInitialTurnCannotDispatchItsDeferredName() async throws {
+        for interrupt in [false, true] {
+            try await withHarness(scenario: "name-cancel-before-ack") { harness in
+                let submitting = Task { try await harness.submit() }
+                defer { try? harness.release("release-turn-ack"); submitting.cancel() }
+                try await self.waitFor("held start acknowledgement") { harness.markerExists("turn-ack-held") && harness.audit.status == .running }
+                if interrupt { try await harness.runtime.interrupt(taskID: harness.taskID) }
+                else { submitting.cancel() }
+                try harness.release("release-turn-ack")
+                _ = try? await submitting.value
+                XCTAssertFalse(try harness.trace().messages.contains { $0.direction == .clientToServer && $0.method == "thread/name/set" })
+            }
+        }
+    }
+
+    func testShutdownBeforeStartAcknowledgementPreventsDeferredNaming() async throws {
+        try await withHarness(scenario: "name-shutdown-before-ack") { harness in
+            let submitting = Task { try await harness.submit() }
+            defer { submitting.cancel() }
+            try await self.waitFor("held acknowledgement before shutdown") { harness.markerExists("turn-ack-held") && harness.audit.status == .running }
+            let report = await harness.runtime.shutdown()
+            XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            do { try await submitting.value; XCTFail("Shutdown must retire the pending start response") }
+            catch { }
+            XCTAssertFalse(try harness.trace().messages.contains { $0.direction == .clientToServer && $0.method == "thread/name/set" })
+        }
+    }
+
+    func testCompletedBeforeStartAcknowledgementStillSavesExactInitialTitle() async throws {
+        try await withHarness(scenario: "name-fast-completed") { harness in
+            let prompt = String(repeating: "Fast completed title 🧭 ", count: 5)
+            try await harness.submit(prompt: prompt)
+            try await self.waitFor("completion before start acknowledgement") { harness.audit.measuredTokens == 1_001 }
+            XCTAssertEqual(harness.audit.status, .completed)
+            let saved = try await harness.runtime.loadTasks()
+            XCTAssertEqual(saved.first?.title, String(prompt.prefix(72)))
+            XCTAssertEqual(try harness.trace().messages.filter { $0.direction == .clientToServer && $0.method == "thread/name/set" }.count, 1)
+        }
+    }
+
     func testAssistantPhasesUseOnlyExplicitAuthoritativeMetadataAndPrecedeText() async throws {
         try await withHarness(scenario: "phase-contract") { harness in
             try await harness.submit()
@@ -478,8 +596,8 @@ final class RuntimeStreamingTests: XCTestCase {
 
     @MainActor
     private final class Harness {
-        let taskID = "streaming-task"
-        let modelID = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
+        let taskID: String
+        let modelID: String
         let root: URL
         let rootDevice: dev_t
         let rootInode: ino_t
@@ -487,7 +605,11 @@ final class RuntimeStreamingTests: XCTestCase {
         let audit = Audit()
         var eventTask: Task<Void, Never>?
 
-        init(scenario: String) throws {
+        init(scenario: String, websiteModel: Bool = false) throws {
+            taskID = websiteModel ? UUID().uuidString.lowercased() : "streaming-task"
+            modelID = websiteModel
+                ? WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
+                : "lmstudio-community/Qwen3.5-4B-MLX-4bit"
             root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
                 .appendingPathComponent("ComputaStreaming-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
@@ -501,7 +623,19 @@ final class RuntimeStreamingTests: XCTestCase {
             let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                 .appendingPathComponent("Fixtures/StreamingAppServer.ts")
             let fixture = root.appendingPathComponent("fixture.ts")
-            try FileManager.default.copyItem(at: source, to: fixture)
+            if websiteModel {
+                var script = try String(contentsOf: source, encoding: .utf8)
+                let thread = "const threadId = 'streaming-thread';"
+                let turn = "const turnId = currentTurn = `streaming-turn-${++turnCount}`;"
+                guard script.components(separatedBy: thread).count == 2,
+                      script.components(separatedBy: turn).count == 2 else {
+                    throw NSError(domain: "StreamingFixtureShape", code: 1)
+                }
+                script = script.replacingOccurrences(of: "#!/usr/bin/env bun\n", with: "#!/usr/bin/env bun\nimport { randomUUID } from 'node:crypto';\n")
+                    .replacingOccurrences(of: thread, with: "const threadId = randomUUID();")
+                    .replacingOccurrences(of: turn, with: "const turnId = currentTurn = (++turnCount, randomUUID());")
+                try Data(script.utf8).write(to: fixture)
+            } else { try FileManager.default.copyItem(at: source, to: fixture) }
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.path)
             try Data(scenario.utf8).write(to: root.appendingPathComponent("scenario"))
             var configuration = CodexAppServerRuntime.Configuration.localQwen
@@ -519,8 +653,8 @@ final class RuntimeStreamingTests: XCTestCase {
             }
         }
 
-        func submit() async throws {
-            try await runtime.submit(prompt: "Synthetic text-only streaming check. Do not use tools.", toTaskID: taskID, modelID: modelID)
+        func submit(prompt: String = "Synthetic text-only streaming check. Do not use tools.") async throws {
+            try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
         }
         func markerExists(_ name: String) -> Bool {
             FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path)
@@ -553,9 +687,9 @@ final class RuntimeStreamingTests: XCTestCase {
         func shutdown() async -> [String] { [] }
     }
 
-    private func withHarness(scenario: String, _ body: (Harness) async throws -> Void) async throws {
+    private func withHarness(scenario: String, websiteModel: Bool = false, _ body: (Harness) async throws -> Void) async throws {
         let failuresBefore = testRun?.failureCount ?? 0
-        let harness = try Harness(scenario: scenario)
+        let harness = try Harness(scenario: scenario, websiteModel: websiteModel)
         do {
             _ = try await harness.runtime.loadTasks()
             try await body(harness)
@@ -588,5 +722,24 @@ final class RuntimeStreamingTests: XCTestCase {
         }
         XCTFail("Timed out waiting for \(label)")
         throw NSError(domain: "RuntimeStreamingTests", code: 1, userInfo: [NSLocalizedDescriptionKey: label])
+    }
+}
+
+// A website-free admission probe. Reaching this transport proves the real
+// WebModelServer accepted the exact native thread/turn context. A failed owned
+// startup and exact-token cleanup avoid authorizing any website action.
+private struct InitialNameProbeTransport: WebModelTransport {
+    let root: URL
+    private let token = UUID().uuidString.lowercased()
+    init(root: URL) { self.root = root }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderStart" {
+            try Data("admitted".utf8).write(to: root.appendingPathComponent("website-transport-entered"))
+            return try JSONSerialization.data(withJSONObject: ["sessionToken": token, "state": "failed"])
+        }
+        guard ["webProviderCancel", "webProviderFinish"].contains(operation),
+              let args = try JSONSerialization.jsonObject(with: params) as? [String: String],
+              args["sessionToken"] == token else { throw WebModelServer.Failure.invalidRequest }
+        return try JSONSerialization.data(withJSONObject: ["cleanup": "not_created"])
     }
 }

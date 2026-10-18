@@ -2273,6 +2273,89 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect((await action.start({}, 'prepare')).error).toBe('not_fresh');
         expect(action.counts().focuses).toBe(0); action.noInput();
       });
+      const firstInstantReadyRequest = { prepareFirstInstantInInsert: undefined, firstInstantReadinessFinalGuardOnly: true };
+      test('first Instant readonly readiness uses one full final model proof and preserves exact editor checks', async () => {
+        const x = await focusedFirstInstantInsert(); expect((await x.start()).inserted).toBe(true); x.timeline.length = 0;
+        const ready = await x.start(firstInstantReadyRequest, 'sendReady');
+        expect(ready.error).toBeUndefined(); expect(ready.sendReady).toBe(true); expect(ready.modelEvidence.selected).toEqual(x.expected);
+        expect(ready.preparationTiming.modelPrecheckMs).toBeNull(); expect(ready.preparationTiming.finalGuardMs).not.toBeNull();
+        expect(x.timeline).toEqual(['picker']); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        x.timeline.length = 0; x.f.composer.text += ' foreign draft';
+        const changed = await x.start(firstInstantReadyRequest, 'sendReady');
+        expect(changed.error).toBe('prompt_not_inserted'); expect(changed.sendReady).toBeUndefined();
+        expect(x.timeline).toEqual([]); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+      });
+      test('first Instant readonly readiness keeps transient disabled Send observational and rechecks after enabling', async () => {
+        const x = await focusedFirstInstantInsert(); expect((await x.start()).inserted).toBe(true); x.timeline.length = 0;
+        x.send.disabled = true;
+        const waiting = await x.start(firstInstantReadyRequest, 'sendReady');
+        expect(waiting.error).toBeUndefined(); expect(waiting.sendReady).toBe(false); expect(x.timeline).toEqual(['picker']);
+        x.timeline.length = 0; x.send.disabled = false;
+        const ready = await x.start(firstInstantReadyRequest, 'sendReady');
+        expect(ready.error).toBeUndefined(); expect(ready.sendReady).toBe(true); expect(x.timeline).toEqual(['picker']);
+        expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+      });
+      test('first Instant readonly readiness requires exact fresh native scope and preserves legacy prechecks', async () => {
+        for (const flag of [undefined, false, 1, 'true']) {
+          const x = await focusedFirstInstantInsert(); expect((await x.start()).inserted).toBe(true); x.timeline.length = 0;
+          const observed = await x.start({ ...firstInstantReadyRequest, firstInstantReadinessFinalGuardOnly: flag }, 'sendReady');
+          expect(observed.error).toBeUndefined(); expect(observed.sendReady).toBe(true);
+          expect(observed.preparationTiming.modelPrecheckMs).not.toBeNull(); expect(x.timeline).toEqual(['picker', 'picker']);
+          expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        }
+        const contexts: [string, Record<string, unknown>, string][] = [
+          ['other_model', { expectedModelChoice: choice('High') }, 'sendReady'],
+          ['later_sequence', { submissionSequence: 2 }, 'sendReady'],
+          ['other_marker', { submissionMarker: '00000000-0000-4000-8000-000000000009' }, 'sendReady'],
+          ['retained_counts', { expectedUserCounts: [0, 1] }, 'sendReady'],
+          ['retained_proofs', { expectedSubmissionProofs: [{ sequence: 1, fingerprint: 'a'.repeat(64) }] }, 'sendReady'],
+          ['retained_conversation', { expectedConversation: 'https://chatgpt.com/' }, 'sendReady'],
+          ['retained_first_fingerprint', { expectedFirstUserFingerprint: 'a'.repeat(64) }, 'sendReady'],
+          ['pending_model_defer', { deferModelVerification: true }, 'sendReady'],
+          ['focus_flag_collision', { prepareFirstInstantInInsert: true }, 'sendReady'],
+          ['not_readonly', {}, 'submit'],
+        ];
+        for (const [name, override, action] of contexts) {
+          const x = await focusedFirstInstantInsert(); expect((await x.start()).inserted).toBe(true); x.timeline.length = 0;
+          const observed = await x.start({ ...firstInstantReadyRequest, ...override }, action);
+          expect({ name, error: observed.error }).toMatchObject({ name, error: expect.any(String) });
+          expect(x.timeline).toEqual([]); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        }
+      });
+      test('first Instant readonly readiness rejects ownership product and model drift during its unchanged final proof', async () => {
+        for (const drift of ['power', 'family', 'owner', 'route', 'work', 'temporary', 'user']) {
+          const x = await focusedFirstInstantInsert(); expect((await x.start()).inserted).toBe(true); x.timeline.length = 0;
+          const open = x.picker.trigger.onClick; let changed = false;
+          x.picker.trigger.onClick = () => {
+            open(); if (changed) return; changed = true;
+            if (drift === 'power') x.picker.selected('High');
+            if (drift === 'family') x.picker.selected('GPT-5.5');
+            if (drift === 'owner') x.f.world.__computaModelOwner = 'different-owner';
+            if (drift === 'route') x.f.document.URL = 'https://chatgpt.com/c/foreign-readiness';
+            if (drift === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+            if (drift === 'temporary') x.f.temporary.values['aria-label'] = 'Temporary chat';
+            if (drift === 'user') x.f.appendUser('Foreign readiness user');
+          };
+          const observed = await x.start(firstInstantReadyRequest, 'sendReady');
+          expect(changed).toBe(true); expect(observed.error).toBeDefined(); expect(observed.sendReady).toBeUndefined();
+          expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        }
+      });
+      test('first Instant readonly readiness does not replace submit current-body model or enabled-Send checks', async () => {
+        for (const drift of ['text', 'disabled_send', 'model']) {
+          const x = await focusedFirstInstantInsert(); expect((await x.start()).inserted).toBe(true);
+          expect((await x.start(firstInstantReadyRequest, 'sendReady')).sendReady).toBe(true);
+          if (drift === 'text') x.f.composer.text += ' foreign body';
+          if (drift === 'disabled_send') x.send.disabled = true;
+          if (drift === 'model') x.picker.selected('High');
+          const pending = x.f.world.__computaChatSubmissionState.pending;
+          const sent = await x.start({ prepareFirstInstantInInsert: undefined,
+            expectedSubmissionProofs: [{ sequence: pending.sequence, fingerprint: pending.fingerprint }] }, 'submit');
+          expect(sent.error).toBe(drift === 'text' ? 'prompt_not_inserted' : drift === 'model' ? 'model_mismatch' : 'send_unavailable');
+          expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+          expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+      });
       const firstInsertReadiness = async (ignoreWhenReady = false, rejectClock = false, missing = '') => {
         const { f, picker } = setup(); picker.selected('Instant'); const expected = choice('Instant');
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);

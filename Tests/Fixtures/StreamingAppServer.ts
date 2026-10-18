@@ -9,13 +9,16 @@ import { createInterface } from 'node:readline';
 const root = process.env.CODEX_HOME!;
 const scenario = readFileSync(join(root, 'scenario'), 'utf8').trim();
 const threadId = 'streaming-thread';
-const model = 'lmstudio-community/Qwen3.5-4B-MLX-4bit';
+let model = 'lmstudio-community/Qwen3.5-4B-MLX-4bit';
+let websiteProvider: any;
 const emit = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
 const result = (id: unknown, value: unknown = {}) => emit({ id, result: value });
 const notify = (method: string, params: object) => emit({ method, params: { threadId, ...params } });
 const mark = (name: string) => writeFileSync(join(root, name), 'ready');
 let turnCount = 0;
 let currentTurn = '';
+let savedName: string | null = null;
+let firstPreview = '';
 const commandProcesses = new Set(['4321', '4322', '9999']);
 const timers = new Set<ReturnType<typeof setInterval>>();
 
@@ -97,15 +100,46 @@ input.on('line', line => {
   if (!Object.hasOwn(request, 'id') || !request.method) return;
   switch (request.method) {
     case 'initialize': result(request.id, { userAgent: 'streaming-fixture' }); break;
-    case 'thread/list': result(request.id, { data: [], nextCursor: null }); break;
-    case 'thread/start': result(request.id, { thread: { id: threadId, turns: [] } }); break;
+    case 'thread/list': result(request.id, { data: scenario.startsWith('name-') && firstPreview ? [{
+      id: threadId, model, name: savedName, preview: firstPreview, cwd: root,
+      status: { type: 'idle' }, updatedAt: 1_790_000_000,
+    }] : [], nextCursor: null }); break;
+    case 'thread/read': result(request.id, { thread: { id: threadId, turns: [] } }); break;
+    case 'thread/start':
+      if (scenario === 'name-web-deferred') { model = request.params.model; websiteProvider = request.params.config['model_providers.web_browser']; }
+      result(request.id, { thread: { id: threadId, turns: [] } }); break;
     case 'thread/resume': result(request.id, {
       thread: { id: threadId, status: { type: 'idle' }, turns: [] },
       initialTurnsPage: { data: [], nextCursor: null, hasMore: false }, model,
     }); break;
-    case 'thread/name/set': result(request.id); break;
+    case 'thread/name/set': {
+      if (scenario === 'name-error') {
+        emit({ id: request.id, error: { code: -32603, message: 'Synthetic title persistence failure.' } });
+      } else if (scenario === 'name-deferred' || scenario === 'name-web-deferred') {
+        mark('name-requested');
+        afterMarker('release-name', () => { savedName = request.params.name; result(request.id); mark('name-persisted'); });
+      } else { savedName = request.params.name; result(request.id); }
+      break;
+    }
     case 'turn/start': {
       const turnId = currentTurn = `streaming-turn-${++turnCount}`;
+      if (turnCount === 1) firstPreview = request.params.input.find((item: any) => item.type === 'text')?.text || '';
+      if (scenario === 'name-rejected') {
+        emit({ id: request.id, error: { code: -32603, message: 'Synthetic turn rejected before acceptance.' } });
+        break;
+      }
+      if (scenario === 'name-cancel-before-ack' || scenario === 'name-shutdown-before-ack') {
+        notify('turn/started', { turn: { id: turnId, status: 'inProgress' } });
+        mark('turn-ack-held');
+        afterMarker('release-turn-ack', () => result(request.id, { turn: { id: turnId, status: 'inProgress' } }));
+        break;
+      }
+      if (scenario === 'name-fast-completed') {
+        notify('turn/started', { turn: { id: turnId, status: 'inProgress' } });
+        completeItem(turnId, 'Completed before start acknowledgement.'); completeTurn(turnId); fence(turnId, 1_001);
+        result(request.id, { turn: { id: turnId, status: 'inProgress' } });
+        break;
+      }
       result(request.id, { turn: { id: turnId, status: 'inProgress' } });
       notify('turn/started', { turn: { id: turnId, status: 'inProgress' } });
       if (turnCount > 1) {
@@ -115,6 +149,24 @@ input.on('line', line => {
         completeItem(turnId, 'New turn completed.');
         completeTurn(turnId);
         fence(turnId, 1_002);
+      } else if (scenario === 'name-web-deferred') {
+        // The HTTP request uses the real prepared/registerInferenceTurn gate.
+        // Its inert embedded transport returns an owned failed startup; no
+        // actual website or model is contacted by this fixture.
+        void (async () => {
+          const response = await fetch(websiteProvider.base_url + '/responses', { method: 'POST',
+            headers: { ...websiteProvider.http_headers, 'content-type': 'application/json' },
+            body: JSON.stringify({ model, input: 'Synthetic initial title concurrency probe', tools: [], stream: false,
+              client_metadata: { 'x-codex-turn-metadata': JSON.stringify({ thread_id: threadId, turn_id: turnId }) } }) });
+          writeFileSync(join(root, 'website-response.json'), JSON.stringify({ status: response.status, body: await response.json() }));
+          afterMarker('release-name-turn', () => { completeTurn(turnId); fence(turnId, 1_001); });
+        })();
+      } else if (scenario === 'name-deferred' || scenario === 'name-error') {
+        delta(turnId, 'Inference progresses while naming is pending.'); fence(turnId, 1_000);
+        afterMarker('release-name-turn', () => {
+          completeItem(turnId, 'Inference finished independently of title persistence.');
+          completeTurn(turnId); fence(turnId, 1_001);
+        });
       } else if (scenario.startsWith('command-')) {
         if (scenario === 'command-approval') {
           approval('command-wrong-turn', 'wrong-turn');

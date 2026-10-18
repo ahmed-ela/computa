@@ -2989,6 +2989,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.modelSelectionVerified && !session.modelVerificationPending
     }
 
+    private func canConsolidateFirstInstantReadinessProof(_ session: Session) -> Bool {
+        canShareFirstChatGPTEditorContextRecheck(session)
+            && !session.isDiscovery && !session.isRecoveryProbe && session.usesSubmissionOwnership
+            && session.modelChoice?.key == "chat/latest/instant"
+            && session.preparedSubmission?.sequence == 1 && session.preparedSubmission?.marker == session.firstUserMarker
+            && session.baseline == 0 && session.observedResponseCount == 0 && session.conversation == nil
+            && session.documentGeneration != nil && session.routeContext != nil && session.productModeEvidence != nil
+    }
+
     private func canPrepareFirstInstantInInsert(_ session: Session) -> Bool {
         canShareFirstChatGPTEditorContextRecheck(session)
             && !session.isDiscovery && !session.isRecoveryProbe && session.usesSubmissionOwnership
@@ -3106,6 +3115,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.state == "running" && session.submitted && session.modelVerificationPending
             && ["inspect", "submit", "verifyModel", "verifyProductMode"].contains(action)
         if provider == .chatgpt { input["deferModelVerification"] = deferModelVerification }
+        if action == "sendReady", canConsolidateFirstInstantReadinessProof(session) {
+            // This removes only the read-only action's duplicate model precheck.
+            // Its full final proof, native model/product callbacks, original
+            // readiness wait/deadline and eventual submit all remain unchanged.
+            input["firstInstantReadinessFinalGuardOnly"] = true
+        }
         if prepareFirstInstantInInsert {
             guard action == "insert", canShareFirstChatGPTEditorContextRecheck(session),
                   session.modelChoice?.key == "chat/latest/instant", session.conversation == nil,

@@ -3369,6 +3369,14 @@ function chatGPTFreshInstantInsert(request) {
     && pending.root === null && pending.body === null && !pending.expansionAttempted
     && pending.canonical === chatGPTSubmissionCanonical(request.prompt);
 }
+function chatGPTFirstInstantReadinessFinalGuard(request) {
+  // Reuse the existing fresh prepared-submission predicate without performing
+  // insertion. Readiness is read-only and its unchanged final guard still
+  // proves the current full model before any observation can be admitted.
+  return request.firstInstantReadinessFinalGuardOnly === true && request.action === 'sendReady'
+    && request.prepareFirstInstantInInsert !== true && request.deferModelVerification !== true
+    && chatGPTFreshInstantInsert({ ...request, action: 'insert', prepareFirstInstantInInsert: true });
+}
 function chatGPTProcessSignalRecords(signal, records) {
   websiteChatObservePinnedMutations(records);
   const productProof = globalThis.__computaChatProductMode;
@@ -3422,11 +3430,15 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   }
   const focusFirstInstantInInsert = input.prepareFirstInstantInInsert === true;
   if (focusFirstInstantInInsert && !chatGPTFreshInstantInsert(input)) return { error: 'not_fresh' };
+  const readinessFinalGuardOnly = input.firstInstantReadinessFinalGuardOnly === true;
+  if (readinessFinalGuardOnly && !chatGPTFirstInstantReadinessFinalGuard(input)) return { error: 'not_fresh' };
   chatGPTPreparationRecord('providerEntryMs', entryStarted);
   let setupStarted = null;
-  // Focus-only preparation and model-only verification need one final proof.
-  // Editor and response actions retain their proof before and after the action.
-  if (!['stop', 'prepare', 'verifyModel'].includes(input.action) && input.expectedModelChoice != null) {
+  // Focus-only preparation, model-only verification and scoped read-only
+  // first-Instant readiness need the full final proof. Mutating editor and
+  // response actions retain their proof before and after the action.
+  if (!['stop', 'prepare', 'verifyModel'].includes(input.action) && input.expectedModelChoice != null
+    && !readinessFinalGuardOnly) {
     const proof = await websiteModelReadEvidence('chatgpt', input.expectedModelChoice, null,
       { scope: 'action_precheck', action: input.action });
     setupStarted = chatGPTPreparationNow();

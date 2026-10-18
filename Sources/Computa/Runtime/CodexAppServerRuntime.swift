@@ -2229,15 +2229,6 @@ private extension CodexAppServerRuntime {
                 threadForTask[taskID] = threadID
                 taskForThread[threadID] = taskID
                 contextForLoadedThread[threadID] = requestedContext
-
-                let title = String(prompt.prefix(72))
-                let nameStarted = ContinuousClock.now
-                dispatchProfile?.mark(.threadNameRequested)
-                _ = try? await request(
-                    method: "thread/name/set",
-                    params: ["threadId": threadID, "name": title]
-                )
-                dispatchProfile?.mark(.threadNameFinished, since: nameStarted)
             }
             dispatchProfile?.mark(.threadReady)
 
@@ -2331,6 +2322,7 @@ private extension CodexAppServerRuntime {
                 // submission cannot load and retain the multi-GB sidecar.
                 prepareVisualGrounderInBackground()
             }
+            var acceptedTurnID: String?
             if let object = try JSONSerialization.jsonObject(with: turnResponse) as? [String: Any],
                let result = object["result"] as? [String: Any],
                let turn = result["turn"] as? [String: Any],
@@ -2341,10 +2333,37 @@ private extension CodexAppServerRuntime {
                     try await registerInferenceTurn(taskID: taskID, threadID: threadID,
                         turnID: turnID, preparationID: inferencePreparation, generation: generation)
                 }
+                // A complete notification can precede this RPC response. Its
+                // exact retired turn still owns the initial saved title.
+                if accepted || turnIdentity.latestTurnID(for: taskID) == turnID { acceptedTurnID = turnID }
             }
             if cancelledSubmissions.contains(claim), turnIdentity.activeTurnID(for: taskID) != nil {
                 try await interrupt(taskID: taskID)
             }
+            if isNewThread, let acceptedTurnID {
+                await setInitialThreadNameIfCurrent(String(prompt.prefix(72)), taskID: taskID,
+                    threadID: threadID, turnID: acceptedTurnID, generation: generation,
+                    claim: claim, dispatchProfile: dispatchProfile)
+            }
+        }
+
+        // Naming is persisted metadata, not a prerequisite for inference. Keep
+        // its existing single best-effort attempt in this submit's lifetime,
+        // after turn acceptance and inference registration, so it can overlap
+        // with the model's work without creating an unowned background Task.
+        private func setInitialThreadNameIfCurrent(_ name: String, taskID: AgentTask.ID,
+            threadID: String, turnID: String, generation: UUID, claim: UUID,
+            dispatchProfile: WebsiteDispatchProfile?) async {
+            guard !Task.isCancelled, !isPreparingCommandShutdown, !isShuttingDown, isReady,
+                  serverGeneration == generation, threadForTask[taskID] == threadID,
+                  taskForThread[threadID] == taskID,
+                  turnSubmissionClaims[taskID] == claim, latestSubmissionClaims[taskID] == claim,
+                  !cancelledSubmissions.contains(claim),
+                  turnIdentity.latestTurnID(for: taskID) == turnID else { return }
+            let started = ContinuousClock.now
+            dispatchProfile?.mark(.threadNameRequested)
+            _ = try? await request(method: "thread/name/set", params: ["threadId": threadID, "name": name])
+            dispatchProfile?.mark(.threadNameFinished, since: started)
         }
 
         func steer(prompt: String, taskID: AgentTask.ID) async throws {

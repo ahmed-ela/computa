@@ -366,8 +366,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let (fixture, view, token, choice) = try await readyInstantPrepareFixture()
         defer { fixture.shutdown() }
         for round in 1...2 {
-            var actions: [String] = []
-            fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
+            var actions: [String] = [], readinessPickerReads: [Int] = []
+            let initialOpens = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
+            var lastOpens = try XCTUnwrap(initialOpens)
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                guard let opens = try? await self.evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int else {
+                    XCTFail("Read the independent picker action ledger"); return
+                }
+                if action == "sendReady" { readinessPickerReads.append(opens - lastOpens) }
+                lastOpens = opens
+            }
             let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
                 "prompt": "Exact first Instant focus and retained append round \(round)"])
             fixture.transport.setBeforePageResultValidationForTesting(nil)
@@ -375,6 +384,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(actions.filter { $0 == "prepare" }.count, round == 1 ? 0 : 1)
             XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
             XCTAssertEqual(actions.filter { $0 == "submit" }.count, 1)
+            XCTAssertFalse(readinessPickerReads.isEmpty, "The original read-only readiness loop remains in both rounds")
+            XCTAssertTrue(readinessPickerReads.allSatisfy { $0 == (round == 1 ? 1 : 2) },
+                          "Only a fresh Instant round consolidates its model read into the full final proof")
             XCTAssertTrue(actions.contains("verifyModel")); XCTAssertTrue(actions.contains("verifyProductMode"))
             let complete = try await waitForState("complete", fixture.transport, token: token)
             try assertChoiceEvidence(complete, choice: choice)
@@ -383,6 +395,63 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testFirstInstantReadonlyReadinessPreservesTransientEnableWaitAndOriginalDeadline() async throws {
+        for enables in [true, false] {
+            let (fixture, view, token, choice) = try await readyInstantPrepareFixture()
+            defer { fixture.shutdown() }
+            var actions: [String] = [], disabled = false
+            var firstReadiness: ContinuousClock.Instant?
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                if action == "sendReady", firstReadiness == nil {
+                    firstReadiness = .now
+                    if enables {
+                        // Release only after the first real disabled-control
+                        // observation returns; no wall-clock race can skip it.
+                        let stillDisabled = try? await self.evaluate(view, "return document.querySelector('[data-testid=send-button]').disabled;")
+                        XCTAssertEqual(stillDisabled as? Bool, true)
+                        let changed = try? await self.evaluate(view, """
+                            document.querySelector('[data-testid=send-button]').disabled = false;
+                            window.fixtureControlledSendReenabled = true; return true;
+                            """)
+                        XCTAssertEqual(changed as? Bool, true)
+                    }
+                }
+                guard action == "insert", !disabled else { return }
+                disabled = true
+                let changed = try? await self.evaluate(view, """
+                    document.querySelector('[data-testid=send-button]').disabled = true;
+                    window.fixtureControlledSendReenabled = false; return true;
+                    """)
+                XCTAssertEqual(changed as? Bool, true)
+            }
+            do {
+                let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": "Observe transient Send readiness without repeating input or renewing the original wait deadline"])
+                XCTAssertTrue(enables, "A permanently disabled Send must time out")
+                try assertRunningOrVerifiedChoice(sent, choice: choice)
+            } catch {
+                XCTAssertFalse(enables, "Transient Send re-enabling should complete through the unchanged readiness wait")
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("send_unavailable"))
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(disabled); XCTAssertTrue(actions.contains("sendReady"))
+            XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+            XCTAssertEqual(actions.filter { $0 == "submit" }.count, enables ? 1 : 0)
+            if enables {
+                XCTAssertGreaterThanOrEqual(actions.filter { $0 == "sendReady" }.count, 2)
+                let reenabled = try await evaluate(view, "return window.fixtureControlledSendReenabled;") as? Bool
+                XCTAssertEqual(reenabled, true)
+                _ = try await waitForState("complete", fixture.transport, token: token)
+            } else if let firstReadiness {
+                XCTAssertLessThan(ContinuousClock.now - firstReadiness, .seconds(3.5), "No readiness retry renews the three-second deadline")
+            } else { XCTFail("An actual readiness observation must precede deadline failure") }
+            try await assertChoiceLedger(view, insertions: 1, sends: enables ? 1 : 0, selections: 0)
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            try await assertHumanTabIntact(fixture)
+        }
     }
 
     func testFirstInstantFocusDriftCannotReachLiteralInputOrSend() async throws {
