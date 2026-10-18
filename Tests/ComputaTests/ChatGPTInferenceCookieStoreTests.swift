@@ -321,13 +321,18 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
     }
 
     private func prewarmBrowser(source: CookieSeedStore, destination: CookieSeedStore, maximumTabs: Int = 8,
-                                onLoad: (() -> Void)? = nil) -> EmbeddedBrowserSession {
+                                onLoad: (() -> Void)? = nil,
+                                configureView: ((CookieSeedNoNavigationView) -> Void)? = nil) -> EmbeddedBrowserSession {
         let browser = EmbeddedBrowserSession(persistent: false, maximumTabs: maximumTabs)
         browser.setCookieSeedFactoryForTesting { _, _ in ChatGPTInferenceCookieSeed(source: source, destination: destination) }
         browser.setCookieValidationSourceForTesting { _ in source }
         browser.setModelViewFactoryForTesting { configuration in
             let view = CookieSeedNoNavigationView(frame: .zero, configuration: configuration)
+            // Cookie/capacity tests represent a published root, independently
+            // of the transport tests' real local document/model proofs.
+            view.publishesRequestedURL = true
             view.onLoad = onLoad
+            configureView?(view)
             return view
         }
         return browser
@@ -352,6 +357,117 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         let again = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
         XCTAssertNil(again); XCTAssertEqual(loads, 1)
         XCTAssertThrowsError(try browser.modelChangeRevision(for: id), "Only the actual transport Start installs an owner")
+    }
+
+    func testIdleBlankPrewarmCannotBeClaimedBeforeOrAfterCookieValidation() async throws {
+        for duringValidation in [false, true] {
+            let source = CookieSeedStore(), destination = CookieSeedStore()
+            var loads = 0
+            let browser = prewarmBrowser(source: source, destination: destination, onLoad: { loads += 1 })
+            defer { browser.shutdown() }
+            browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+            let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
+            let id = try XCTUnwrap(prepared)
+            let view = try XCTUnwrap(browser.webView(for: id) as? CookieSeedNoNavigationView)
+            let reads = source.reads
+            let taken: UUID?
+            if duringValidation {
+                source.holdReads = true
+                let task = Task { try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {}) }
+                await yieldUntil { source.pendingReads.count == 1 }
+                view.publishesRequestedURL = false
+                source.releaseRead()
+                taken = try await task.value
+            } else {
+                view.publishesRequestedURL = false
+                taken = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
+                XCTAssertEqual(source.reads, reads, "An idle blank page must be rejected before another cookie read")
+            }
+            XCTAssertNil(taken); XCTAssertNil(browser.webView(for: id))
+            XCTAssertEqual(loads, 1); XCTAssertTrue(source.sets.isEmpty)
+            XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 0)
+            let diagnostic = try XCTUnwrap(browser.lastInferencePrewarmUnavailableForTesting)
+            XCTAssertTrue(diagnostic.hasPrefix("reason=blank_idle "))
+            XCTAssertTrue(diagnostic.contains("urlPresent=false loading=false navigationPending=false"))
+            XCTAssertLessThan(diagnostic.utf8.count, 512)
+            let next = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(1), admit: {})
+            XCTAssertNil(next); XCTAssertEqual(loads, 1, "Disposal must not retry the provider navigation")
+        }
+    }
+
+    func testGenuinelyInFlightInitialNavigationRetainsItsExactWarmView() async throws {
+        let browser = prewarmBrowser(source: CookieSeedStore(), destination: CookieSeedStore(), configureView: {
+            $0.publishesRequestedURL = false
+            $0.usesLocalNavigation = true
+            $0.reportedLoading = true
+        })
+        defer { browser.shutdown() }
+        browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
+        let id = try XCTUnwrap(prepared)
+        let view = try XCTUnwrap(browser.webView(for: id) as? CookieSeedNoNavigationView)
+        XCTAssertNotNil(view.localNavigation, "The pending state requires a real WKNavigation token")
+        XCTAssertNil(view.url); XCTAssertTrue(view.isLoading)
+        let taken = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
+        XCTAssertEqual(taken, id); XCTAssertTrue(browser.webView(for: id) === view)
+        XCTAssertEqual(view.loadCount, 1); XCTAssertNil(browser.lastInferencePrewarmUnavailableForTesting)
+    }
+
+    func testNativeFailureBeforeWarmGenerationCaptureOrBeforeClaimDiscardsThePage() async throws {
+        for beforeCapture in [false, true] {
+            let source = CookieSeedStore(), destination = CookieSeedStore()
+            var loads = 0
+            let browser = prewarmBrowser(source: source, destination: destination, onLoad: { loads += 1 }, configureView: { view in
+                if beforeCapture {
+                    let loaded = view.onLoad
+                    view.onLoad = { [weak view] in
+                        loaded?()
+                        guard let view else { return }
+                        view.navigationDelegate?.webViewWebContentProcessDidTerminate?(view)
+                    }
+                }
+            })
+            defer { browser.shutdown() }
+            browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+            let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
+            if beforeCapture { XCTAssertNil(prepared) }
+            else {
+                let id = try XCTUnwrap(prepared)
+                // Ordinary URL policy denial records a native page error while
+                // preserving its previously published root and generation.
+                XCTAssertThrowsError(try browser.navigate(tabID: id, to: URL(string: "file:///not-loaded")!))
+            }
+            let taken = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
+            XCTAssertNil(taken); XCTAssertTrue(browser.tabs.isEmpty)
+            XCTAssertEqual(loads, 1); XCTAssertTrue(source.sets.isEmpty)
+            XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 0)
+            let diagnostic = try XCTUnwrap(browser.lastInferencePrewarmUnavailableForTesting)
+            XCTAssertTrue(diagnostic.hasPrefix("reason=navigation_error "))
+            XCTAssertTrue(diagnostic.contains("tabError=true"))
+        }
+    }
+
+    func testNavigationCrossingTheCookieGateCannotReuseItsOldAdmission() async throws {
+        let browser = prewarmBrowser(source: CookieSeedStore(), destination: CookieSeedStore())
+        defer { browser.shutdown() }
+        browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
+        let id = try XCTUnwrap(prepared), view = try XCTUnwrap(browser.webView(for: id))
+        let root = URL(string: "https://chatgpt.com/")!
+        var crossed = false
+        browser.afterChatGPTNavigationGateForTesting = {
+            browser.afterChatGPTNavigationGateForTesting = nil
+            crossed = true
+            try? browser.navigate(tabID: id, to: root)
+        }
+        let admitted = await browser.admitChatGPTNavigationForTesting(tabID: id, view: view, url: root)
+        XCTAssertTrue(crossed); XCTAssertFalse(admitted)
+        let diagnostic = try XCTUnwrap(browser.lastChatGPTNavigationDenialForTesting)
+        XCTAssertTrue(diagnostic.contains("gateChecked=true"))
+        XCTAssertTrue(diagnostic.contains("entryCurrent=true pendingTargetMatches=true ticketMatches=false generationMatches=false"))
+        XCTAssertLessThan(diagnostic.utf8.count, 512)
+        let taken = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
+        XCTAssertNil(taken); XCTAssertNil(browser.webView(for: id))
     }
 
     func testPrewarmClaimRejectsEligibleCookieDriftButIgnoresExcludedConversationKeys() async throws {
@@ -549,7 +665,26 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
 @MainActor
 private final class CookieSeedNoNavigationView: WKWebView {
     var onLoad: (() -> Void)?
-    override func load(_ request: URLRequest) -> WKNavigation? { onLoad?(); return nil }
+    var publishesRequestedURL = false
+    var usesLocalNavigation = false
+    var reportedLoading: Bool?
+    private var requestedURL: URL?
+    private(set) var localNavigation: WKNavigation?
+    private(set) var loadCount = 0
+    override var url: URL? { publishesRequestedURL ? requestedURL : (usesLocalNavigation ? nil : super.url) }
+    override var isLoading: Bool { reportedLoading ?? super.isLoading }
+    override func load(_ request: URLRequest) -> WKNavigation? {
+        loadCount += 1
+        requestedURL = request.url
+        onLoad?()
+        if usesLocalNavigation {
+            // A real local navigation supplies identity without contacting a
+            // provider. Its delegate is intentionally absent in this state test.
+            navigationDelegate = nil
+            localNavigation = super.loadHTMLString("<p>Local navigation fixture</p>", baseURL: nil)
+        }
+        return localNavigation
+    }
 }
 
 private final class DeadlineCookie: HTTPCookie, @unchecked Sendable {

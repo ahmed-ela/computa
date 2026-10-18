@@ -117,6 +117,10 @@ final class EmbeddedBrowserSession {
         init(lifetime: Duration = .seconds(120)) { self.lifetime = lifetime }
     }
 
+    private enum InferencePrewarmUnavailable: String {
+        case identity, navigationError = "navigation_error", blankIdle = "blank_idle", unexpectedRoute = "unexpected_route"
+    }
+
     private struct ToolMutationPopupContext {
         let operationID = UUID()
         let documentID: UUID
@@ -1398,8 +1402,10 @@ final class EmbeddedBrowserSession {
                 warm.generation = self.entries[id]?.tab.documentGeneration
                 guard !Task.isCancelled, self.chatGPTInferencePrewarm === warm,
                       self.chatGPTInferencePrewarmingEnabled, self.inferencePrewarmIsCurrent(warm) else {
-                    self.closeTab(id)
-                    self.discardInferencePrewarm(warm)
+                    self.rejectInferencePrewarm(warm, reason: self.inferencePrewarmClaimFailure(warm) ?? .identity)
+                    // Disable/cancellation may already have removed the slot
+                    // before this newly published exact page was recorded.
+                    if self.entries[id]?.view === warm.view { self.closeTab(id) }
                     return nil
                 }
                 let elapsed = (ContinuousClock.now - warm.created).components
@@ -1438,9 +1444,12 @@ final class EmbeddedBrowserSession {
                       let id = await task.value else { discardInferencePrewarm(warm); return nil }
                 try Task.checkCancellation()
                 try admit()
-                guard ContinuousClock.now < min(deadline, warm.deadline), inferencePrewarmIsCurrent(warm),
-                      let source = warm.source, let cookies = warm.sourceCookies else {
+                guard ContinuousClock.now < min(deadline, warm.deadline) else {
                     discardInferencePrewarm(warm); return nil
+                }
+                if let failure = inferencePrewarmClaimFailure(warm) { rejectInferencePrewarm(warm, reason: failure); return nil }
+                guard let source = warm.source, let cookies = warm.sourceCookies else {
+                    rejectInferencePrewarm(warm, reason: .identity); return nil
                 }
                 let reservation = UUID()
                 let reader: any ChatGPTInferenceCookieSource
@@ -1462,9 +1471,10 @@ final class EmbeddedBrowserSession {
                     })
                 try Task.checkCancellation()
                 try admit()
-                guard ContinuousClock.now < min(deadline, warm.deadline), matches, inferencePrewarmIsCurrent(warm) else {
+                guard ContinuousClock.now < min(deadline, warm.deadline), matches else {
                     discardInferencePrewarm(warm); return nil
                 }
+                if let failure = inferencePrewarmClaimFailure(warm) { rejectInferencePrewarm(warm, reason: failure); return nil }
                 chatGPTInferencePrewarm = nil
                 warm.expiry?.cancel(); warm.expiry = nil
                 warm.sourceCookies = nil
@@ -1472,7 +1482,8 @@ final class EmbeddedBrowserSession {
                 return id
             } catch {
                 let internallyDisposed = chatGPTInferencePrewarm !== warm
-                discardInferencePrewarm(warm)
+                if !internallyDisposed, let failure = inferencePrewarmClaimFailure(warm) { rejectInferencePrewarm(warm, reason: failure) }
+                else { discardInferencePrewarm(warm) }
                 if Task.isCancelled { throw CancellationError() }
                 if error is CancellationError, internallyDisposed { return nil }
                 if error is ChatGPTInferenceCookieSeed.Failure { return nil }
@@ -1494,10 +1505,40 @@ final class EmbeddedBrowserSession {
               entry.isModelOwned, !entry.isToolOwned, entry.usesIsolatedChatGPTProfile,
               !view.configuration.websiteDataStore.isPersistent, view.configuration.websiteDataStore !== source,
               entry.tab.documentGeneration == warm.generation, entry.modelChanges == nil,
-              entry.requestMetadataDiagnostic == nil, entry.inspectorDiagnostic == nil,
+              entry.requestMetadataDiagnostic == nil, entry.inspectorDiagnostic == nil, entry.tab.error == nil,
               entry.ownedTemporaryChatGPTRoutes.isEmpty, entry.modelFailedGeneration != entry.tab.documentGeneration else { return false }
         let root = URL(string: "https://chatgpt.com/")!
         return view.url == root || view.url == nil && entry.pendingConversationURL == root
+    }
+
+    /// An issued load request is not readiness. Only the real root or an
+    /// actually loading native navigation may leave the optional standby slot.
+    /// Actual Start still establishes all document/product/model proofs.
+    private func inferencePrewarmClaimFailure(_ warm: InferencePrewarm) -> InferencePrewarmUnavailable? {
+        guard let id = warm.tabID, let view = warm.view, let entry = entries[id], entry.view === view else { return .identity }
+        if entry.tab.error != nil || entry.modelFailedGeneration == entry.tab.documentGeneration { return .navigationError }
+        guard inferencePrewarmIsCurrent(warm) else { return .identity }
+        let root = URL(string: "https://chatgpt.com/")!
+        if view.url == root { return nil }
+        if view.url == nil, entry.pendingConversationURL == root, entry.navigation != nil, view.isLoading { return nil }
+        return view.url == nil ? .blankIdle : .unexpectedRoute
+    }
+
+    private func rejectInferencePrewarm(_ warm: InferencePrewarm, reason: InferencePrewarmUnavailable) {
+        let entry = warm.tabID.flatMap { entries[$0] }
+        let exact = entry?.view === warm.view && entry != nil
+        let urlPresent = exact && warm.view?.url != nil
+        let loading = exact && warm.view?.isLoading == true
+        let navigationPending = exact && entry?.navigation != nil
+        let tabError = exact && entry?.tab.error != nil
+        let failedGeneration = exact && entry?.modelFailedGeneration == entry?.tab.documentGeneration
+        let generationCurrent = exact && entry?.tab.documentGeneration == warm.generation
+        let diagnostic = "reason=\(reason.rawValue) viewPresent=\(exact) urlPresent=\(urlPresent) loading=\(loading) navigationPending=\(navigationPending) tabError=\(tabError) failedGeneration=\(failedGeneration) generationCurrent=\(generationCurrent)"
+        Self.inferencePrewarmLog.notice("inferencePrewarmUnavailable \(diagnostic, privacy: .public)")
+        #if DEBUG
+        lastInferencePrewarmUnavailableForTesting = diagnostic
+        #endif
+        discardInferencePrewarm(warm)
     }
 
     private func discardInferencePrewarm(_ warm: InferencePrewarm) {
@@ -1582,6 +1623,14 @@ final class EmbeddedBrowserSession {
     private var afterCookieSeedForTesting: (@MainActor () async -> Void)?
     private var cookieValidationSourceForTesting: (@MainActor (WKWebsiteDataStore) -> any ChatGPTInferenceCookieSource)?
     private var prewarmLifetimeForTesting: Duration?
+    private(set) var lastInferencePrewarmUnavailableForTesting: String?
+    var afterChatGPTNavigationGateForTesting: (@MainActor () -> Void)?
+    private(set) var lastChatGPTNavigationDenialForTesting: String?
+
+    func admitChatGPTNavigationForTesting(tabID: UUID, view: WKWebView, url: URL) async -> Bool {
+        guard let admission = beginChatGPTNavigationAdmission(view, tabID: tabID, url: url) else { return false }
+        return await admitChatGPTNavigation(view, tabID: tabID, url: url, admission: admission)
+    }
 
     func setCookieValidationSourceForTesting(_ factory: (@MainActor (WKWebsiteDataStore) -> any ChatGPTInferenceCookieSource)?) {
         cookieValidationSourceForTesting = factory
@@ -1743,11 +1792,36 @@ final class EmbeddedBrowserSession {
     }
 
     fileprivate func admitChatGPTNavigation(_ view: WKWebView, tabID: UUID, url: URL, admission: UUID) async -> Bool {
-        guard let entry = entries[tabID], entry.view === view, let pending = entry.pendingConversationAdmission,
-              pending.id == admission else { return false }
+        guard let entry = entries[tabID], entry.view === view else {
+            recordChatGPTNavigationDenial(reason: "entry_or_view", gateChecked: false); return false
+        }
+        guard let pending = entry.pendingConversationAdmission, pending.id == admission else {
+            recordChatGPTNavigationDenial(reason: "ticket", gateChecked: false, entryCurrent: true); return false
+        }
         let permitted = await admitChatGPTAfterCookieCallbacks(until: .now + .seconds(2))
-        return permitted && entries[tabID] === entry && entry.view === view && entry.pendingConversationURL == url
-            && entry.pendingConversationAdmission?.id == admission && entry.tab.documentGeneration == pending.generation
+        #if DEBUG
+        afterChatGPTNavigationGateForTesting?()
+        #endif
+        let entryCurrent = entries[tabID] === entry && entry.view === view
+        let targetMatches = entryCurrent && entry.pendingConversationURL == url
+        let ticketMatches = entryCurrent && entry.pendingConversationAdmission?.id == admission
+        let generationMatches = entryCurrent && entry.tab.documentGeneration == pending.generation
+        if permitted && entryCurrent && targetMatches && ticketMatches && generationMatches { return true }
+        let reason = !permitted ? "cookie_gate" : !entryCurrent ? "entry_or_view"
+            : !targetMatches ? "pending_target" : !ticketMatches ? "ticket" : "generation"
+        recordChatGPTNavigationDenial(reason: reason, gateChecked: true, cookieGatePermitted: permitted,
+            entryCurrent: entryCurrent, targetMatches: targetMatches, ticketMatches: ticketMatches, generationMatches: generationMatches)
+        return false
+    }
+
+    private func recordChatGPTNavigationDenial(reason: String, gateChecked: Bool, cookieGatePermitted: Bool = false,
+                                              entryCurrent: Bool = false, targetMatches: Bool = false,
+                                              ticketMatches: Bool = false, generationMatches: Bool = false) {
+        let diagnostic = "reason=\(reason) gateChecked=\(gateChecked) cookieGatePermitted=\(cookieGatePermitted) entryCurrent=\(entryCurrent) pendingTargetMatches=\(targetMatches) ticketMatches=\(ticketMatches) generationMatches=\(generationMatches)"
+        Self.inferencePrewarmLog.notice("chatGPTNavigationAdmissionDenied \(diagnostic, privacy: .public)")
+        #if DEBUG
+        lastChatGPTNavigationDenialForTesting = diagnostic
+        #endif
     }
 
     fileprivate func report(_ message: String, tabID: UUID) {
