@@ -2434,10 +2434,12 @@ async function chatGPTSubmissionResult(request, observed) {
 function chatGPTRenderedTemporary() {
   const visible = node => node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== "hidden" && !node.closest('[inert], [aria-hidden="true"]');
+  // Read layout only for exact off controls on the common path. The Save
+  // fallback retains its original current-visibility and exact-label rules.
+  if ([...document.querySelectorAll('button[aria-label="Turn off temporary chat"]')].some(visible)) return true;
+  if (new URL(document.URL).searchParams.get('temporary-chat') !== 'true') return false;
   const buttons = [...document.querySelectorAll('button')].filter(visible);
-  return buttons.some(node => node.getAttribute('aria-label') === 'Turn off temporary chat')
-    || new URL(document.URL).searchParams.get('temporary-chat') === 'true'
-      && buttons.some(node => node.getAttribute('aria-label') === 'Save chat' || (node.innerText || '').trim() === 'Save chat');
+  return buttons.some(node => node.getAttribute('aria-label') === 'Save chat' || (node.innerText || '').trim() === 'Save chat');
 }
 // Product mode is independent of the family picker: normal Chat and Work can
 // offer the same models. Only a fresh, empty normal root may establish Chat
@@ -2457,7 +2459,7 @@ function chatGPTProductModeState() {
     return labels.length === 1 && physical(labels[0]) && websiteModelNormalize(labels[0].textContent) === 'Composer mode';
   };
   const groups = [...document.querySelectorAll('[aria-label], [aria-labelledby]')].slice(0, 1_024)
-    .filter(node => physical(node) && !node.closest(boundary) && labelledGroup(node));
+    .filter(node => !node.closest(boundary) && labelledGroup(node) && physical(node));
   const group = groups.length === 1 ? groups[0] : null;
   const controls = group ? [...group.querySelectorAll('button, [role="button"], [role="radio"], [role="switch"], [role="checkbox"]')].slice(0, 32)
     .filter(node => physical(node) && !node.closest(boundary) && ['Chat', 'Work'].includes(label(node))) : [];
@@ -2620,8 +2622,11 @@ function chatGPTProductModeProof() {
   if (!proof.temporaryRequested && (!state.ready || state.chatSelected !== true)) {
     return chatGPTInvalidateProductProof(proof, 'not_ready');
   }
-  if (proof.temporaryRequested && chatGPTRenderedTemporary()) proof.temporaryAcknowledged = true;
-  if (chatGPTRenderedTemporary() && !proof.temporaryAcknowledged) return null;
+  // Only the private acknowledgement changes between these consecutive
+  // checks; reuse this physical observation within this synchronous call.
+  const renderedTemporary = chatGPTRenderedTemporary();
+  if (proof.temporaryRequested && renderedTemporary) proof.temporaryAcknowledged = true;
+  if (renderedTemporary && !proof.temporaryAcknowledged) return null;
   return { product: 'chatgpt', mode: 'chat', source: 'composer_mode_control',
     temporaryTransition: proof.temporaryAcknowledged ? 'acknowledged' : 'not_requested' };
 }

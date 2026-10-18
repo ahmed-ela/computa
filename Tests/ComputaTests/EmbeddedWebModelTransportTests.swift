@@ -5785,6 +5785,174 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testChatGPTEditorContextRecheckUsesModelThenFinalProductOnce() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        var actions: [String] = []
+        fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Preserve both current proofs while avoiding a duplicate product read"])
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
+        let insert = try XCTUnwrap(actions.firstIndex(of: "insert"))
+        let ready = try XCTUnwrap(actions.firstIndex(of: "sendReady"))
+        let submit = try XCTUnwrap(actions.firstIndex(of: "submit"))
+        XCTAssertEqual(Array(actions[insert..<ready]), ["insert", "verifyModel", "verifyProductMode"])
+        // The button can enable after another read-only readiness cycle.
+        // Each cycle must retain the exact complete verification chain.
+        let readiness = Array(actions[ready..<submit])
+        let readinessCycle = ["sendReady", "verifyModel", "verifyProductMode"]
+        XCTAssertFalse(readiness.isEmpty)
+        XCTAssertEqual(readiness.count % readinessCycle.count, 0)
+        XCTAssertEqual(readiness, (0..<(readiness.count / readinessCycle.count)).flatMap { _ in readinessCycle })
+        XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+        XCTAssertEqual(actions.filter { $0 == "submit" }.count, 1)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        // A retained complete session has existing lineage. Its append keeps
+        // the original independent product/model ordering unchanged.
+        actions.removeAll()
+        fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Retain the original completed-session append checks"])
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let nextInsert = try XCTUnwrap(actions.firstIndex(of: "insert"))
+        let nextReady = try XCTUnwrap(actions.firstIndex(of: "sendReady"))
+        let nextSubmit = try XCTUnwrap(actions.firstIndex(of: "submit"))
+        XCTAssertEqual(Array(actions[nextInsert..<nextReady]), ["insert", "verifyProductMode", "verifyModel", "verifyProductMode"])
+        let nextReadiness = Array(actions[nextReady..<nextSubmit])
+        let originalCycle = ["sendReady", "verifyProductMode", "verifyModel", "verifyProductMode"]
+        XCTAssertFalse(nextReadiness.isEmpty)
+        XCTAssertEqual(nextReadiness.count % originalCycle.count, 0)
+        XCTAssertEqual(nextReadiness, (0..<(nextReadiness.count / originalCycle.count)).flatMap { _ in originalCycle })
+        XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+        XCTAssertEqual(actions.filter { $0 == "submit" }.count, 1)
+        try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+        let nextComplete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(nextComplete, choice: choice)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTEditorContextRecheckRejectsOriginalAndNestedCallbackDrift() async throws {
+        let cases = [("insert", "original", "model"), ("sendReady", "original", "model"),
+            ("insert", "original", "work"), ("sendReady", "original", "transient_work"),
+            ("insert", "model_callback", "work"), ("sendReady", "model_callback", "temporary"),
+            ("sendReady", "model_callback", "owner")]
+        for (stage, boundary, drift) in cases {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            var entered = false, crossed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == stage { entered = true }
+                guard entered, !crossed, action == (boundary == "original" ? stage : "verifyModel") else { return }
+                crossed = true
+                let mutation: String
+                switch drift {
+                case "model": mutation = "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;"
+                case "owner": mutation = "globalThis.__computaModelOwner = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'; return true;"
+                case "temporary": mutation = "const node = document.querySelector('[aria-label=\"Turn off temporary chat\"]'); if (!node) return false; node.remove(); return true;"
+                default: mutation = """
+                    document.getElementById('fixture-composer-mode').hidden = false;
+                    document.getElementById('fixture-chat-mode').setAttribute('aria-pressed', 'false');
+                    document.getElementById('fixture-work-mode').setAttribute('aria-pressed', 'true');
+                    \(drift == "transient_work" ? "document.getElementById('fixture-work-mode').setAttribute('aria-pressed', 'false'); document.getElementById('fixture-chat-mode').setAttribute('aria-pressed', 'true');" : "")
+                    return true;
+                    """
+                }
+                let changed = try? await self.evaluate(view, mutation,
+                    world: drift == "owner" ? .world(name: "computa-chatgpt-model-v1") : .page)
+                XCTAssertEqual(changed as? Bool, true)
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": "Never publish a stale editor context or replay its Send"])
+                XCTFail("The \(stage)/\(boundary)/\(drift) change must fail closed")
+            } catch {
+                let expected: EmbeddedWebModelTransport.Failure = drift == "model" ? .modelMismatch
+                    : drift == "owner" ? .ownershipFailure(.javaScriptOwner)
+                    : drift == "temporary" ? .ownershipFailure(.javaScriptSubmission) : .productModeUnverified
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expected, "\(stage)/\(boundary)/\(drift)")
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(crossed)
+            try await assertChoiceLedger(view, insertions: 1, sends: 0, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            let retained = drift == "model" ? nil : fixture.createdTabs.last
+            XCTAssertEqual(finished["cleanup"] as? String, drift == "model" ? "not_created" : "failed",
+                           "\(stage)/\(boundary)/\(drift)")
+            try await assertHumanTabIntact(fixture, retaining: retained)
+        }
+    }
+
+    func testChatGPTEditorContextRecheckKeepsTheOriginalDeadlineBeforeAnyFreshRead() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        var crossed = false
+        var actions: [String] = []
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            actions.append(action)
+            guard action == "insert", !crossed else { return }
+            crossed = true
+            // page() allocates ten seconds once. This already completed native
+            // callback cannot grant a new ten-second child verification budget.
+            try? await Task.sleep(for: .milliseconds(10_050))
+        }
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Do not renew the original editor deadline"])
+            XCTFail("The original elapsed deadline must reject before fresh verification or Send")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .pageUnavailable) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertTrue(crossed); XCTAssertEqual(actions.last, "insert")
+        try await assertChoiceLedger(view, insertions: 1, sends: 0, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTEditorContextRecheckCancellationCannotReachFinalProductOrSend() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        var inserted = false, blocked = false
+        var actions: [String] = []
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            actions.append(action)
+            if action == "insert" { inserted = true }
+            guard inserted, action == "verifyModel", !blocked else { return }
+            blocked = true
+            while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+        let sending = Task<Void, Error> { _ = try await self.call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Cancellation cannot publish the shared verification or send"] ) }
+        let until = ContinuousClock.now + .seconds(10)
+        while !blocked && ContinuousClock.now < until { try await Task.sleep(for: .milliseconds(5)) }
+        sending.cancel()
+        do { _ = try await sending.value; XCTFail("Expected cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertTrue(blocked); XCTAssertEqual(actions.last, "verifyModel")
+        try await assertChoiceLedger(view, insertions: 1, sends: 0, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testChatGPTInternalPrepareDefersOnlyItsDuplicateModelReadToInsert() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
         defer { fixture.shutdown() }

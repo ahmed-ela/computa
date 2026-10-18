@@ -3418,6 +3418,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.state == "running" && session.firstUserFingerprint != nil && !session.pendingSubmission
             && refreshReadOnlyObservation && routeContinuation.isEmpty
             && enforceModel && session.modelSelectionVerified && recheckModelAfterAwait && !deferModelVerification
+        // Fresh first-request editor actions need the model read below. Its
+        // final product read also rechecks Chat/temporary after that callback;
+        // do this shared chain before publishing the original observation.
+        let editorContextRecheck = provider == .chatgpt && ["insert", "sendReady"].contains(action)
+            && session.state == "ready" && !session.submitted && !session.pendingSubmission
+            && session.sequence == 0 && session.confirmedUsers == 0 && session.firstUserFingerprint == nil
+            && session.currentSubmission == nil && session.previousSubmission == nil
+            && session.temporary && session.temporaryRequested && session.modelChoice != nil
+            && session.modelSelectionVerified && !session.modelVerificationPending
+            && enforceModel && recheckModelAfterAwait && recheckProductAfterAwait
+            && refreshReadOnlyObservation && routeContinuation.isEmpty && !allowBlockedProvider && !deferModelVerification
         // A continuation's fixed submit action has already checked product,
         // editor and owned lineage before one Send. Its empty receipt grants no body,
         // answer or fresh model proof. Leave that work to the ordinary poll;
@@ -3445,13 +3456,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let started = ContinuousClock.now
             defer { if profilePreparation { preparationSpans["postProductMs"] = Self.preparationMilliseconds(.now - started) } }
             try await verifyProductModeAfterAwait(observed, session: session, action: action,
-                                                 recheck: recheckProductAfterAwait && !combinedContextRecheck && !dispatchOnlyAcknowledgement,
+                                                 recheck: recheckProductAfterAwait && !combinedContextRecheck && !dispatchOnlyAcknowledgement && !editorContextRecheck,
                                                  refreshChangedRoute: routeRefreshAvailable,
                                                  refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                  maximumWait: evaluationDeadline - .now,
                                                  allowBlockedProvider: allowBlockedProvider,
                                                  allowPendingModelTemporary: allowPendingModelTemporary,
                                                  allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification)
+        }
+        if editorContextRecheck {
+            // Both original proofs are parsed before this existing model ->
+            // final-product chain. Keep its inclusive model span here; only
+            // this first-request branch skips the later duplicate helper.
+            do {
+                let started = ContinuousClock.now
+                defer { if profilePreparation { preparationSpans["postModelMs"] = Self.preparationMilliseconds(.now - started) } }
+                try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
+                                                       enforceModel: enforceModel, recheck: recheckModelAfterAwait,
+                                                       refreshChangedRoute: routeRefreshAvailable,
+                                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                                       combinedContextRecheck: combinedContextRecheck,
+                                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                                       maximumWait: evaluationDeadline - .now)
+            }
         }
         let betweenChecksStarted = ContinuousClock.now
         // Submit returns only its acknowledgment; observations carry ownership state.
@@ -3581,16 +3608,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if profilePreparation {
             preparationSpans["betweenChecksMs"] = Self.preparationMilliseconds(.now - betweenChecksStarted)
         }
-        do {
-            let started = ContinuousClock.now
-            defer { if profilePreparation { preparationSpans["postModelMs"] = Self.preparationMilliseconds(.now - started) } }
-            try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
-                                                   enforceModel: enforceModel, recheck: recheckModelAfterAwait,
-                                                   refreshChangedRoute: routeRefreshAvailable,
-                                                   refreshReadOnlyObservation: refreshReadOnlyObservation,
-                                                   combinedContextRecheck: combinedContextRecheck,
-                                                   allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
-                                                   maximumWait: evaluationDeadline - .now)
+        if !editorContextRecheck {
+            do {
+                let started = ContinuousClock.now
+                defer { if profilePreparation { preparationSpans["postModelMs"] = Self.preparationMilliseconds(.now - started) } }
+                try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
+                                                       enforceModel: enforceModel, recheck: recheckModelAfterAwait,
+                                                       refreshChangedRoute: routeRefreshAvailable,
+                                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                                       combinedContextRecheck: combinedContextRecheck,
+                                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                                       maximumWait: evaluationDeadline - .now)
+            }
         }
         let finalValidationStarted = ContinuousClock.now
         defer { if profilePreparation { preparationSpans["finalValidationMs"] = Self.preparationMilliseconds(.now - finalValidationStarted) } }

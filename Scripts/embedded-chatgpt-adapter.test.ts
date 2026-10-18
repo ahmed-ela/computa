@@ -2447,6 +2447,94 @@ describe('normal ChatGPT product provenance', () => {
     expect(await proven.inspect()).toMatchObject({ error: 'product_mode_unverified' });
   });
 
+  test('product-state scans keep bounds and aliases but avoid layout reads on unrelated aria labels', () => {
+    const start = source.indexOf('function chatGPTProductModeState()');
+    const end = source.indexOf('function chatGPTProductModeDiagnostic', start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const run = new Function('document', 'getComputedStyle', 'websiteModelNormalize', source.slice(start, end)
+      + 'return chatGPTProductModeState();');
+    const read = (f: ReturnType<typeof fixture>) => run(f.document, (node: Element) => ({ visibility: node.cssVisibility }),
+      (value: unknown) => typeof value === 'string' ? value.normalize('NFC').replace(/\s+/g, ' ').trim() : '');
+    const f = fixture({ response: false, normalRoot: true });
+    const irrelevant = new Element('SPAN', { 'aria-label': 'Unrelated control' }); f.body.append(irrelevant);
+    let unrelatedLayoutReads = 0;
+    irrelevant.getClientRects = () => { unrelatedLayoutReads++; return [{}]; };
+    expect(read(f)).toMatchObject({ ready: true, chatSelected: true, workSelected: false });
+    expect(unrelatedLayoutReads).toBe(0);
+    // Exact aria-labelledby aliases remain supported and physically required.
+    delete f.modeGroup.values['aria-label']; f.modeGroup.values['aria-labelledby'] = 'scan-mode-label';
+    const label = new Element('SPAN', { id: 'scan-mode-label' }, 'Composer mode'); f.body.append(label);
+    expect(read(f).ready).toBe(true);
+    label.cssVisibility = 'hidden'; expect(read(f).ready).toBe(false);
+    label.cssVisibility = 'visible';
+    const duplicate = new Element('SPAN', { id: 'scan-mode-label' }, 'Composer mode'); f.body.append(duplicate);
+    expect(read(f).ready).toBe(false);
+    duplicate.connected = false; f.body.children = f.body.children.filter(node => node !== duplicate);
+    f.modeGroup.cssVisibility = 'hidden'; expect(read(f).ready).toBe(false);
+    f.modeGroup.cssVisibility = 'visible';
+    f.body.append(new Element('DIV', { 'aria-label': 'Composer mode' }));
+    expect(read(f)).toMatchObject({ contradictory: true });
+    // Cheap filtering must happen AFTER the unchanged first1024 candidate cap.
+    const bounded = fixture({ response: false, normalRoot: true });
+    const padding = Array.from({ length: 1024 }, (_, index) => new Element('SPAN', { 'aria-label': 'Other ' + index }));
+    padding.forEach(node => { node.parentElement = bounded.body; });
+    bounded.body.children = [...padding, ...bounded.body.children];
+    expect(read(bounded)).toMatchObject({ ready: false, group: null });
+  });
+
+  test('temporary-state scans inspect exact off controls first and preserve hidden and Save fallbacks', () => {
+    const start = source.indexOf('function chatGPTRenderedTemporary()');
+    const end = source.indexOf('// Product mode is independent', start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const run = new Function('document', 'getComputedStyle', source.slice(start, end) + 'return chatGPTRenderedTemporary();');
+    for (const condition of ['off', 'hidden', 'aria_hidden', 'inert', 'save_aria', 'save_text', 'save_hidden', 'save_wrong_route']) {
+      const f = fixture({ response: false });
+      const unrelated = new Element('BUTTON', { 'aria-label': 'Unrelated action' }, 'Unrelated action'); f.body.append(unrelated);
+      let unrelatedLayoutReads = 0;
+      unrelated.getClientRects = () => { unrelatedLayoutReads++; return [{}]; };
+      if (condition === 'hidden') f.temporary.cssVisibility = 'hidden';
+      if (condition === 'aria_hidden') f.temporary.values['aria-hidden'] = 'true';
+      if (condition === 'inert') f.temporary.values.inert = '';
+      if (condition.startsWith('save_')) {
+        f.temporary.values['aria-label'] = condition === 'save_text' ? 'Other label' : 'Save chat';
+        f.temporary.text = condition === 'save_text' ? 'Save chat' : 'Other text';
+      }
+      if (condition === 'save_hidden') f.temporary.cssVisibility = 'hidden';
+      if (condition === 'save_wrong_route') f.document.URL = 'https://chatgpt.com/';
+      expect(run(f.document, (node: Element) => ({ visibility: node.cssVisibility })))
+        .toBe(['off', 'save_aria', 'save_text'].includes(condition));
+      if (condition === 'off') expect(unrelatedLayoutReads).toBe(0);
+    }
+  });
+
+  test('one product proof reuses only its synchronous temporary observation and rereads later calls', () => {
+    const start = source.indexOf('function chatGPTProductModeProof()');
+    const end = source.indexOf('function chatGPTTemporaryVerified()', start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const run = new Function('env', `
+      const { document, window, location, globalThis } = env;
+      const chatGPTProductModeState = () => env.mode;
+      const chatGPTRenderedTemporary = () => { env.temporaryReads++; return env.rendered; };
+      const chatGPTInvalidateProductProof = (proof, reason) => { proof.invalidated = true; proof.invalidationReason = reason; return null; };
+      ${source.slice(start, end)}
+      return chatGPTProductModeProof();
+    `);
+    const document = { URL: 'https://chatgpt.com/?temporary-chat=true' }, window: any = {}; window.top = window;
+    const proof = { owner: 'OWNER', document, invalidated: false, temporaryRequested: true, temporaryAcknowledged: false };
+    const env = { document, window, location: { origin: 'https://chatgpt.com' },
+      globalThis: { __computaModelOwner: 'OWNER', __computaChatProductMode: proof },
+      mode: { contradictory: false, ready: true, chatSelected: true }, temporaryReads: 0, rendered: true };
+    expect(run(env)).toMatchObject({ temporaryTransition: 'acknowledged' });
+    expect(env.temporaryReads).toBe(1); expect(proof.temporaryAcknowledged).toBe(true);
+    env.rendered = false;
+    expect(run(env)).toMatchObject({ temporaryTransition: 'acknowledged' });
+    expect(env.temporaryReads).toBe(2); // A new call always observes the current DOM again.
+    env.mode.contradictory = true;
+    expect(run(env)).toBeNull(); expect(proof.invalidated).toBe(true);
+    env.mode.contradictory = false; env.rendered = true;
+    expect(run(env)).toBeNull(); expect(env.temporaryReads).toBe(2); // No reviving an invalidated proof.
+  });
+
   test('normal Chat and Work share family labels; Chat is proven before one explicit temporary transition', async () => {
     const f = fixture({ response: false, normalRoot: true });
     const picker = installObservedModelPicker(f, 'chatgpt', Element);
