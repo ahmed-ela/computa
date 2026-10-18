@@ -427,6 +427,142 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testChatCompactsOnlyJSONWhitespaceAndKeepsOriginalAdmissionAndContinuationBytes() throws {
+        let source = #"""
+          { "model" : "browser/chatgpt", "input" : "  hi\n café 🌍  ",
+            "temperature": 1.00e+0, "metadata": { "literal" : "\\u005f \/ \"quote\"" },
+            "tools": [{ "type": "function", "name": "fixture_lookup", "parameters": {
+              "type": "object", "properties": { "exact_value": { "type": "string" } } } }] }
+        """#
+        let raw = Data(source.utf8)
+        let prepared = try WebModelResponseCodec.prepareRequest(raw)
+        try assertContiguousRequestValues(raw, in: prepared)
+        XCTAssertEqual(prepared.continuationRequest, raw)
+        let displayed = String(prepared.prompt[try requestRange(in: prepared.prompt)])
+        XCTAssertTrue(displayed.contains("\"temperature\":1.00e+0"), "Presentation must not round-trip number lexemes through NSNumber")
+        XCTAssertFalse(displayed.contains("\n"), "Only JSON-structural whitespace is removed")
+        let stats = prepared.promptStatistics
+        XCTAssertEqual(stats.originalRequestBytes, raw.count)
+        XCTAssertEqual(stats.sourceRequestBytes, raw.count)
+        XCTAssertLessThan(stats.compactRequestBytes, raw.count)
+        XCTAssertEqual(stats.presentedRequestBytes, displayed.utf8.count)
+        XCTAssertEqual(stats.finalPromptBytes, prepared.prompt.utf8.count)
+        XCTAssertEqual(stats.inputJSONBytes + stats.toolsJSONBytes + stats.instructionsJSONBytes + stats.otherJSONBytes,
+                       stats.compactRequestBytes)
+        XCTAssertEqual(stats.presentedRequestBytes + stats.runtimeBytes + stats.requestContextBytes + stats.currentUserBytes
+            + stats.responseContractBytes + stats.framingBytes, stats.finalPromptBytes)
+        let oversized = Data((" " + String(repeating: " ", count: WebModelResponseCodec.maximumPromptBytes) + source).utf8)
+        XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(oversized)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure,
+                           .promptTooLarge(actualBytes: oversized.count, maximumBytes: WebModelResponseCodec.maximumPromptBytes))
+        }
+    }
+
+    func testChatReadableUnderscoresAreRestrictedToASCIIIntrawordPositions() throws {
+        let text = "browser_open code_terminal_browser a_1 1_a A_B _edge edge_ a__b __pair__ é_word word_é \\_ `code` <tag> &"
+        for provider in ["chatgpt", "gemini", "claude"] {
+            let raw = try JSONSerialization.data(withJSONObject: ["model": "browser/\(provider)", "input": text],
+                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            let prepared = try WebModelResponseCodec.prepareRequest(raw)
+            try assertContiguousRequestValues(raw, in: prepared)
+            let displayed = String(prepared.prompt[try requestRange(in: prepared.prompt)])
+            if provider == "chatgpt" {
+                XCTAssertTrue(displayed.contains("browser_open code_terminal_browser a_1 1_a A_B"))
+                XCTAssertFalse(displayed.contains("\n"))
+            } else {
+                XCTAssertTrue(displayed.contains(#"browser\u005fopen code\u005fterminal\u005fbrowser a\u005f1 1\u005fa A\u005fB"#))
+                XCTAssertTrue(displayed.contains("\n"), "Other provider presentation remains unchanged")
+            }
+            XCTAssertTrue(displayed.contains(#"\u005fedge edge\u005f a\u005f\u005fb \u005f\u005fpair\u005f\u005f é\u005fword word\u005fé"#))
+            for protected in [#"\u005c\u005f"#, #"\u0060"#, #"\u003c"#, #"\u003e"#, #"\u0026"#] {
+                XCTAssertTrue(displayed.contains(protected))
+            }
+        }
+    }
+
+    func testChatIntrawordUnderscoresNeverUseEscapeTailsAsLiteralNeighbors() throws {
+        let cases = [
+            (#""a_b""#, #""a_b""#),
+            (#""\n_b""#, #""\n\u005fb""#),
+            (#""\t_b""#, #""\t\u005fb""#),
+            (#""\u0020_b""#, #""\u0020\u005fb""#),
+            (#""\u0061_b""#, #""\u0061\u005fb""#),
+            (#""a_\u0062""#, #""a\u005f\u0062""#),
+            (#""\ud83c\udf0d_b""#, #""\ud83c\udf0d\u005fb""#),
+            (#""\\_b""#, #""\u005c\u005fb""#),
+            (#""\\n_b""#, #""\u005cn_b""#),
+            (#""a\"_b""#, #""a\u0022\u005fb""#),
+        ]
+        for (encoded, expected) in cases {
+            let raw = Data((#"{"model":"browser/chatgpt","input":"# + encoded + "}").utf8)
+            let prepared = try WebModelResponseCodec.prepareRequest(raw)
+            let displayed = String(prepared.prompt[try requestRange(in: prepared.prompt)])
+            XCTAssertTrue(displayed.contains("\"input\":" + expected), encoded)
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? NSDictionary,
+                           try JSONSerialization.jsonObject(with: raw) as? NSDictionary)
+        }
+    }
+
+    func testChatConciseRelayRequiresCompleteCurrentTrustedNativeInstructions() throws {
+        let native = ComputaAgentInstructions.developerInstructions()
+        let boundary = native.index(native.startIndex, offsetBy: native.count / 2)
+        let cases: [(String, [[String: Any]], String?, Bool)] = [
+            ("developer", [["role": "developer", "content": native]], nil, true),
+            ("system", [["type": "message", "role": "system", "content": [["type": "input_text", "text": native]]]], nil, true),
+            ("top-level", [], native, true),
+            ("user", [["role": "user", "content": native]], nil, false),
+            ("assistant", [["role": "assistant", "content": native]], nil, false),
+            ("tool-output", [["type": "function_call_output", "role": "developer", "call_id": "old", "content": native, "output": native]], nil, false),
+            ("partial", [["role": "developer", "content": String(native.dropLast())]], nil, false),
+            ("normalized", [["role": "developer", "content": native.replacingOccurrences(of: "\n", with: "\r\n")]], nil, false),
+            ("split", [["role": "developer", "content": String(native[..<boundary])], ["role": "developer", "content": String(native[boundary...])]], nil, false),
+        ]
+        for provider in ["chatgpt", "gemini", "claude"] {
+            for (label, input, instructions, eligible) in cases {
+                var value: [String: Any] = ["model": "browser/\(provider)", "input": input + [["role": "user", "content": "hi"]]]
+                if let instructions { value["instructions"] = instructions }
+                let raw = try JSONSerialization.data(withJSONObject: value)
+                let prepared = try WebModelResponseCodec.prepareRequest(raw)
+                XCTAssertEqual(prepared.runtimeInstructions.contains("The complete current native developer contract is already in the request"),
+                               eligible && provider == "chatgpt", label)
+                let displayed = Data(prepared.prompt[try requestRange(in: prepared.prompt)].utf8)
+                XCTAssertEqual(try JSONSerialization.jsonObject(with: displayed) as? NSDictionary,
+                               try JSONSerialization.jsonObject(with: raw) as? NSDictionary)
+                XCTAssertEqual(prepared.continuationRequest, raw)
+            }
+        }
+    }
+
+    func testChatNativeToolPromptHasMeasuredReductionWithoutRemovingSchemasOrFreshCriticalHandoff() throws {
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let tools = EmbeddedBrowserTools.definitions().map { definition -> [String: Any] in
+            var result = definition
+            result["parameters"] = result.removeValue(forKey: "inputSchema")
+            return result
+        } + [["type": "function", "name": "exec_command", "parameters": ["type": "object"]],
+             ["type": "function", "name": "write_stdin", "parameters": ["type": "object"]],
+             ["type": "custom", "name": "apply_patch", "format": ["type": "grammar", "syntax": "lark", "definition": "start: /[\\s\\S]*/"]]]
+        let raw = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "instructions": "Keep every policy",
+            "input": [["role": "developer", "content": native], ["role": "user", "content": "hi"]], "tools": tools,
+            "parallel_tool_calls": false, "tool_choice": "auto"], options: [.sortedKeys, .withoutEscapingSlashes])
+        let prepared = try WebModelResponseCodec.prepareRequest(raw)
+        let suffix = try assertContiguousRequestValues(raw, in: prepared, includedInstructionText: ["Keep every policy", native])
+        XCTAssertEqual(prepared.offeredToolNames, EmbeddedBrowserTools.names.union(["exec_command", "write_stdin", "apply_patch"]))
+        XCTAssertEqual(prepared.customToolNames, ["apply_patch"])
+        let fullRuntime = ComputaAgentInstructions.webInferenceContract(offeredFunctions: Dictionary(uniqueKeysWithValues:
+            prepared.offeredToolNames.map { ($0, $0) }), customToolNames: prepared.customToolNames, includedInstructionText: [native])
+        let runtimeSaved = fullRuntime.utf8.count - prepared.runtimeInstructions.utf8.count
+        let displayed = String(prepared.prompt[try requestRange(in: prepared.prompt)])
+        let identifierSaved = displayed.utf8.filter { $0 == 95 }.count * 5
+        XCTAssertGreaterThan(runtimeSaved, 1_500)
+        XCTAssertGreaterThan(runtimeSaved + identifierSaved, 2_000, "This real browser/native-instruction fixture must improve beyond whitespace alone")
+        for block in [ComputaAgentInstructions.commandChecks, ComputaAgentInstructions.browserAddressChecks,
+                      ComputaAgentInstructions.literalIdentifiers] { XCTAssertTrue(suffix.contains(block)) }
+        XCTAssertTrue(suffix.contains("only the first is\nissued; the rest are not queued or replayed"))
+        XCTAssertTrue(suffix.contains("Return exactly one fenced JSON code block"))
+        XCTAssertEqual(prepared.continuationRequest, raw)
+    }
+
     func testPromptLimitIncludesExpandedJSONEscapes() throws {
         let original = try JSONSerialization.data(withJSONObject: ["model": "browser/chatgpt", "input": String(repeating: "`", count: 30_000)])
         XCTAssertLessThan(original.count, WebModelResponseCodec.maximumPromptBytes)
@@ -529,11 +665,11 @@ final class WebModelResponseCodecTests: XCTestCase {
             let end = try XCTUnwrap(prepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<prepared.prompt.endIndex)).lowerBound
             let displayed = String(prepared.prompt[start..<end])
             XCTAssertTrue(displayed.contains(provider == "chatgpt"
-                ? #"exec\u005fcommand apply\u005fpatch browser\u002eopen\u005ftab"#
+                ? #"exec_command apply_patch browser\u002eopen_tab"#
                 : #"exec\u005fcommand apply\u005fpatch browser.open\u005ftab"#))
             XCTAssertTrue(displayed.contains(#"\u005c\u005f \u005c\u0022 \u005cu005f"#))
-            XCTAssertTrue(displayed.contains(#""max\u005foutput\u005ftokens":64"#))
-            XCTAssertTrue(displayed.contains(#""parallel\u005ftool\u005fcalls":false"#))
+            XCTAssertTrue(displayed.contains(provider == "chatgpt" ? #""max_output_tokens":64"# : #""max\u005foutput\u005ftokens":64"#))
+            XCTAssertTrue(displayed.contains(provider == "chatgpt" ? #""parallel_tool_calls":false"# : #""parallel\u005ftool\u005fcalls":false"#))
             XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? NSDictionary,
                            try JSONSerialization.jsonObject(with: original) as? NSDictionary)
             XCTAssertTrue(prepared.prompt.contains("Parse the JSON once before using its string values."))

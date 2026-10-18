@@ -11,6 +11,7 @@ enum WebModelResponseCodec {
         let singleActionRelay: Bool
         let stream: Bool
         let prompt: String
+        let promptStatistics: WebsitePromptProjection.Statistics
         let runtimeInstructions: String
         let currentUserInstructions: String
         let offeredToolNames: Set<String>
@@ -200,8 +201,9 @@ enum WebModelResponseCodec {
         let configuration = try responseConfiguration(object, schemas: schemas, parallel: parallel)
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
         let includedInstructionText = trustedInstructionText(in: object)
+        let isChatGPT = LocalModelCatalog.webProvider(for: model) == "chatgpt"
         let runtimeInstructions = ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
-            customToolNames: customNames, includedInstructionText: includedInstructionText)
+            customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT)
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
             return message["type"] == nil || message["type"] as? String == "message"
@@ -211,8 +213,10 @@ enum WebModelResponseCodec {
         let displaySource = toolDefinitionsChanged
             ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             : originalJSON
-        let isChatGPT = LocalModelCatalog.webProvider(for: model) == "chatgpt"
-        let displayJSON = displayStableJSON(displaySource, shieldURLPunctuation: isChatGPT)
+        let projection = WebsitePromptProjection.compactValidatedJSON(displaySource)
+        let displayJSON = displayStableJSON(isChatGPT ? projection.json : displaySource, shieldURLPunctuation: isChatGPT)
+        let responseContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
+            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT)
         let prompt = """
         \(runtimeInstructions)
 
@@ -223,14 +227,17 @@ enum WebModelResponseCodec {
 
         \(currentUserInstructions)
 
-        \(ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT))
+        \(responseContract)
         """
         let bytes = prompt.utf8.count
         guard bytes <= maximumPromptBytes else {
             throw Failure.promptTooLarge(actualBytes: bytes, maximumBytes: maximumPromptBytes)
         }
-        return Request(model: model, singleActionRelay: isChatGPT, stream: stream, prompt: prompt, runtimeInstructions: runtimeInstructions,
+        let statistics = projection.statistics(originalRequestBytes: data.count, presentedRequestBytes: displayJSON.utf8.count,
+            runtimeBytes: runtimeInstructions.utf8.count, requestContextBytes: ComputaAgentInstructions.webRequestContext.utf8.count,
+            currentUserBytes: currentUserInstructions.utf8.count, responseContractBytes: responseContract.utf8.count,
+            finalPromptBytes: bytes)
+        return Request(model: model, singleActionRelay: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
                        offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered,
                        toolPolicy: policy, parallelToolCalls: parallel,
@@ -263,35 +270,60 @@ enum WebModelResponseCodec {
     /// selected message DOM was observed changing the literal request after
     /// Send; shielding . : / is a mitigation hypothesis, not a parser diagnosis.
     /// Structural JSON punctuation and decoded values remain unchanged. Other
-    /// providers retain literal URL punctuation. Consume complete escape pairs
+    /// providers retain literal URL punctuation. ChatGPT keeps ASCII intraword
+    /// underscores readable: between ASCII letters/digits they cannot delimit
+    /// CommonMark emphasis. Edge/repeated underscores retain existing shielding.
+    /// Consume complete escape pairs
     /// so quotes and literal backslashes retain their decoded values.
     private static func displayStableJSON(_ original: String, shieldURLPunctuation: Bool = false) -> String {
-        var bytes = original.utf8.makeIterator()
+        let bytes = Array(original.utf8)
+        var index = 0
         var result: [UInt8] = []
         result.reserveCapacity(original.utf8.count)
         let hex = Array("0123456789abcdef".utf8)
         var inString = false
+        var previousLiteralAlphanumeric = false
         func appendUnicodeEscape(_ byte: UInt8) {
             result.append(contentsOf: [92, 117, 48, 48, hex[Int(byte >> 4)], hex[Int(byte & 15)]])
         }
-        while let byte = bytes.next() {
+        func asciiAlphanumeric(_ byte: UInt8) -> Bool {
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+        }
+        while index < bytes.count {
+            let byte = bytes[index]
+            index += 1
             if !inString {
                 result.append(byte)
-                if byte == 34 { inString = true }
+                if byte == 34 { inString = true; previousLiteralAlphanumeric = false }
                 continue
             }
             if byte == 34 {
                 result.append(byte)
                 inString = false
+                previousLiteralAlphanumeric = false
                 continue
             }
-            if byte == 92, let escaped = bytes.next() {
+            if byte == 92, index < bytes.count {
+                let escaped = bytes[index]
+                index += 1
+                previousLiteralAlphanumeric = false
                 if escaped == 47 {
                     if shieldURLPunctuation { appendUnicodeEscape(escaped) }
                     else { result.append(escaped) }
                 }
                 else if escaped == 34 || escaped == 92 { appendUnicodeEscape(escaped) }
-                else { result.append(byte); result.append(escaped) }
+                else {
+                    result.append(byte); result.append(escaped)
+                    // Validated JSON's Unicode escape is one token. Its hex
+                    // tail must not become a literal identifier neighbor.
+                    if escaped == 117 {
+                        result.append(contentsOf: bytes[index..<(index + 4)])
+                        index += 4
+                    }
+                }
+            } else if shieldURLPunctuation && byte == 95 && previousLiteralAlphanumeric && index < bytes.count
+                        && asciiAlphanumeric(bytes[index]) {
+                result.append(byte)
             } else if shieldURLPunctuation && [46, 47, 58].contains(byte)
                         || (33...44).contains(byte) || (59...64).contains(byte)
                         || (91...96).contains(byte) || (123...126).contains(byte) {
@@ -299,6 +331,7 @@ enum WebModelResponseCodec {
             } else {
                 result.append(byte)
             }
+            if byte != 92 { previousLiteralAlphanumeric = asciiAlphanumeric(byte) }
         }
         return String(decoding: result, as: UTF8.self)
     }

@@ -3848,9 +3848,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testStringPunctuationEncodingSurvivesExtraEscapeRenderingWithoutRelaxingOwnership() async throws {
-        // Control the observed +17 quote/markup, +5 markup and +2 underscore
-        // differences. This simulates their transformation rather than
-        // claiming which website component introduced it in the live failure.
+        // Force +17 quote/markup, +5 markup and +2 underscore differences.
+        // Modified intraword text still fails ownership; protected edge/repeated
+        // underscores and unmodified intraword text succeed. This synthetic
+        // transformation does not establish the real website's rendering.
         let original = try JSONSerialization.data(withJSONObject: [
             "model": syntheticChatGPTModelID,
             "input": String(repeating: "Owned quote rendering fixture line.\n", count: 600) + String(repeating: "\"", count: 12) + String(repeating: "<tag>&", count: 5),
@@ -3871,9 +3872,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let underscoreEnd = try XCTUnwrap(underscorePrepared.prompt.range(of: "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: underscoreStart..<underscorePrepared.prompt.endIndex)).lowerBound
         let underscoreLegacy = underscorePrepared.prompt.replacingCharacters(in: underscoreStart..<underscoreEnd,
                                                                             with: String(decoding: underscoreOriginal, as: UTF8.self))
-        for (prompt, extraCharacters) in [(legacy, 17), (quoteOnly, 5), (prepared.prompt, 0), (underscoreLegacy, 2), (underscorePrepared.prompt, 0)] {
+        let protectedUnderscores = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": syntheticChatGPTModelID,
+            "input": String(repeating: "Owned protected underscore fixture line.\n", count: 600) + "_edge a__b tail_",
+        ], options: [.sortedKeys]))
+        let extraEscapeScript = #"const start = prompt.indexOf('COMPLETE_RESPONSES_REQUEST_JSON:\n') + 'COMPLETE_RESPONSES_REQUEST_JSON:\n'.length; const end = prompt.indexOf('\nEND_COMPLETE_RESPONSES_REQUEST_JSON.', start); userBody.textContent = prompt.slice(0, start) + prompt.slice(start, end).replace(/\\(?=")|<|_/g, match => match === '\\' ? '\\\\' : '\\' + match) + prompt.slice(end);"#
+        for (prompt, extraCharacters, transform) in [
+            (legacy, 17, true), (quoteOnly, 5, true), (prepared.prompt, 0, true),
+            (underscoreLegacy, 2, true), (underscorePrepared.prompt, 2, true),
+            (protectedUnderscores.prompt, 0, true), (underscorePrepared.prompt, 0, false),
+        ] {
             let succeeds = extraCharacters == 0
-            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript: #"const start = prompt.indexOf('COMPLETE_RESPONSES_REQUEST_JSON:\n') + 'COMPLETE_RESPONSES_REQUEST_JSON:\n'.length; const end = prompt.indexOf('\nEND_COMPLETE_RESPONSES_REQUEST_JSON.', start); userBody.textContent = prompt.slice(0, start) + prompt.slice(start, end).replace(/\\(?=")|<|_/g, match => match === '\\' ? '\\\\' : '\\' + match) + prompt.slice(end);"#))
+            let fixture = try Fixture(page: Self.collapsedFirstUserPage(expansionScript:
+                transform ? extraEscapeScript : "userBody.textContent = prompt;"))
             defer { fixture.shutdown() }
             let choice = Self.fixtureChoice(.chatgpt)
             let started = try await startChoice(choice, in: fixture)
@@ -5596,6 +5607,82 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
             XCTAssertEqual(finished["cleanup"] as? String, "not_created")
             try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testChatGPTInternalPrepareDefersOnlyItsDuplicateModelReadToInsert() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        var actions: [String] = []
+        fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Prepare once and keep the atomic insert model proof"])
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
+        let prepareIndex = try XCTUnwrap(actions.firstIndex(of: "prepare"))
+        let insertIndex = try XCTUnwrap(actions.firstIndex(of: "insert"))
+        XCTAssertLessThan(prepareIndex, insertIndex)
+        let between = Array(actions[(prepareIndex + 1)..<insertIndex])
+        XCTAssertTrue(between.contains("verifyProductMode"), "The native post-prepare product check remains")
+        XCTAssertFalse(between.contains("verifyModel"), "Insert supplies the next full proof before editing")
+        XCTAssertEqual(actions.filter { $0 == "prepare" }.count, 1)
+        XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+        XCTAssertTrue(actions.contains("verifyModel"), "Other editor-stage model rechecks remain enabled")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTPrepareBoundaryModelAndWorkDriftCannotReachEditorOrSend() async throws {
+        for drift in ["model", "work"] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let generation = fixture.browser.documentGeneration(for: ownedID)
+            var changed = false
+            var actions: [String] = []
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                guard action == "prepare", !changed else { return }
+                changed = true
+                let script = drift == "model"
+                    ? "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;"
+                    : "document.getElementById('fixture-composer-mode').hidden = false; document.getElementById('fixture-chat-mode').setAttribute('aria-pressed','false'); document.getElementById('fixture-work-mode').setAttribute('aria-pressed','true'); return true;"
+                let applied = try? await self.evaluate(view, script)
+                XCTAssertEqual(applied as? Bool, true)
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": "Reject drift after focus and before the first editor mutation"])
+                XCTFail("A stale prepare observation cannot permit input")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                    drift == "model" ? .modelMismatch : .productModeUnverified)
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(changed)
+            XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+            if drift == "model" {
+                XCTAssertTrue(actions.contains("insert"), "The full insert precheck rejects the drift before its input")
+            } else {
+                XCTAssertFalse(actions.contains("insert"), "The retained native product check rejects Work first")
+            }
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, drift == "work" ? "failed" : "not_created")
+            try await assertHumanTabIntact(fixture, retaining: drift == "work" ? ownedID : nil)
         }
     }
 

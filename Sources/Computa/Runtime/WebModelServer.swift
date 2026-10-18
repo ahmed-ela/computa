@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import OSLog
 @preconcurrency import Network
 
 /// Inference transport is separate from the agent loop and transcript store.
@@ -78,6 +79,7 @@ private struct ChromeWebModelTransport: WebModelTransport {
 /// App Server. The App Server keeps its normal tools, approvals and local SQLite/
 /// rollout persistence; only model inference goes through the website.
 actor WebModelServer {
+    private static let promptLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "WebsitePrompt")
     enum Failure: LocalizedError {
         case chromeRequired, embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
         case modelUnverified, modelMismatch, productModeUnverified
@@ -802,6 +804,11 @@ actor WebModelServer {
                          route: Route, taskID: String, identity: NativeRequestIdentity,
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
+        if provider == "chatgpt", route == .embedded {
+            // Finite sizes only: no prompt, account data, URLs or authority tokens.
+            // Presentation measurements do not change admission or tool policy.
+            Self.promptLog.info("promptSizes version=1 \(request.promptStatistics.diagnostic, privacy: .public)")
+        }
         var inferenceID = UUID()
         let submissionFailureSink = ChatSubmissionFailureDiagnosticSink()
         var lease = sessions[taskID]

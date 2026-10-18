@@ -776,7 +776,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         throw Failure.ownershipFailure(.javaScriptSubmission)
                     }
                 }
-                let before = try await page(session, action: "prepare")
+                // This internal focus-only step publishes no readiness or output.
+                // ChatGPT's immediately following insert performs its full model
+                // precheck before any editor mutation, including pinned negative
+                // history. Keep the native product and document checks here.
+                let before = try await page(session, action: "prepare",
+                    recheckModelAfterAwait: session.provider != .chatgpt)
                 guard before["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
                 guard before["prepared"] as? Bool == true else { throw Failure.editorFailure("focus_unavailable") }
                 if !session.submitted {
@@ -2914,6 +2919,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowPendingChatGPTModelVerification: Bool = true,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
+        let preparationActionStarted = ContinuousClock.now
+        let logPreparationAction = session.provider == .chatgpt
+            && (session.state == "loading" || !session.submitted || action == "submit")
+            && ["inspect", "ensureChatMode", "verifyProductMode", "enableTemporary", "selectModel",
+                "verifyModel", "prepare", "insert", "sendReady", "submit"].contains(action)
+        defer {
+            if logPreparationAction {
+                let elapsed = (ContinuousClock.now - preparationActionStarted).components
+                let milliseconds = Int(max(0, min(600_000,
+                    Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)))
+                Self.inspectionLog.info("preparationAction provider=chatgpt action=\(action, privacy: .public) elapsedMs=\(milliseconds)")
+            }
+        }
         guard maximumWait > .zero else { throw Failure.pageUnavailable }
         let evaluationDeadline = ContinuousClock.now + maximumWait
         let budgetParts = maximumWait.components
