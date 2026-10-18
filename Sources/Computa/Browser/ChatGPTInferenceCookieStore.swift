@@ -62,6 +62,8 @@ import Foundation
     private let cancellation = CookieSeedCancellation()
     private var selectionCounts: Summary?
     private(set) var verifiedSummary: Summary?
+    /// Retained only in memory for an optional consume-once preloaded page.
+    private(set) var verifiedSourceCookies: [HTTPCookie]?
     var hasFailedCallerAwaitingCallback: Bool { terminal != nil && pending != nil && !drained }
 
     init(source: any ChatGPTInferenceCookieSource, destination: any ChatGPTInferenceCookieDestination) {
@@ -168,6 +170,7 @@ import Foundation
                 }
                 try check()
                 verifiedSummary = selectionCounts
+                verifiedSourceCookies = selected
                 let waiter = continuation; continuation = nil
                 drainIfPossible()
                 waiter?.resume()
@@ -178,7 +181,7 @@ import Foundation
     /// Creation metadata may legitimately change when WebKit stores a cookie.
     /// Authentication/policy attributes and all string bytes must survive;
     /// Unicode-equivalent but byte-different values do not establish equality.
-    private static func sameCookie(_ left: HTTPCookie, _ right: HTTPCookie) -> Bool {
+    fileprivate static func sameCookie(_ left: HTTPCookie, _ right: HTTPCookie) -> Bool {
         func equal(_ a: String, _ b: String) -> Bool { Data(a.utf8) == Data(b.utf8) }
         return equal(left.domain, right.domain) && equal(left.path, right.path) && equal(left.name, right.name)
             && equal(left.value, right.value) && left.isSecure == right.isSecure && left.isHTTPOnly == right.isHTTPOnly
@@ -226,6 +229,80 @@ import Foundation
             selected.append(cookie)
         }
         return Selection(cookies: selected, eligibleCookieCount: eligible, excludedConversationCookieCount: excluded)
+    }
+}
+
+/// One bounded read-only claim check. A timed-out/cancelled callback retains
+/// its reservation until arrival, but can never issue another operation.
+@MainActor final class ChatGPTInferenceCookieValidation {
+    private let source: any ChatGPTInferenceCookieSource
+    private let cancellation = CookieSeedCancellation()
+    private var continuation: CheckedContinuation<Bool, any Error>?
+    private var timer: Task<Void, Never>?
+    private var terminal = false, pending = false, started = false
+    private var onDrained: @MainActor () -> Void = {}
+    var hasFailedCallerAwaitingCallback: Bool { terminal && pending }
+
+    init(source: any ChatGPTInferenceCookieSource) { self.source = source }
+
+    func cancel() { cancellation.cancel(); finish(.failure(CancellationError())) }
+
+    func run(expected: [HTTPCookie], until deadline: ContinuousClock.Instant,
+             isCurrent: @escaping @MainActor () -> Bool, onDrained: @escaping @MainActor () -> Void) async throws -> Bool {
+        guard !started else { throw ChatGPTInferenceCookieSeed.Failure.unavailable }
+        started = true; self.onDrained = onDrained
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                guard !Task.isCancelled, !cancellation.isCancelled else { finish(.failure(CancellationError())); return }
+                guard isCurrent(), ContinuousClock.now < deadline else {
+                    finish(.failure(ChatGPTInferenceCookieSeed.Failure.unavailable)); return
+                }
+                pending = true
+                timer = Task { @MainActor [self] in
+                    do { try await Task.sleep(until: deadline) } catch { return }
+                    finish(.failure(ChatGPTInferenceCookieSeed.Failure.deadline))
+                }
+                source.read { [self] cookies in
+                    guard pending else { return }
+                    pending = false
+                    if terminal { drain(); return }
+                    do {
+                        guard !cancellation.isCancelled else { throw CancellationError() }
+                        guard isCurrent(), ContinuousClock.now < deadline else { throw ChatGPTInferenceCookieSeed.Failure.unavailable }
+                        let actual = try ChatGPTInferenceCookieSeed.select(cookies, now: Date()).cookies
+                        var remaining = actual
+                        var matches = expected.count == actual.count
+                        for cookie in expected where matches {
+                            guard let index = remaining.firstIndex(where: { ChatGPTInferenceCookieSeed.sameCookie(cookie, $0) }) else {
+                                matches = false; break
+                            }
+                            remaining.remove(at: index)
+                        }
+                        guard !cancellation.isCancelled else { throw CancellationError() }
+                        guard isCurrent(), ContinuousClock.now < deadline else { throw ChatGPTInferenceCookieSeed.Failure.unavailable }
+                        finish(.success(matches))
+                    } catch { finish(.failure(error)) }
+                }
+            }
+        } onCancel: {
+            self.cancellation.cancel()
+            Task { @MainActor [self] in finish(.failure(CancellationError())) }
+        }
+    }
+
+    private func finish(_ result: Result<Bool, any Error>) {
+        guard !terminal else { return }
+        terminal = true; timer?.cancel(); timer = nil
+        let waiter = continuation; continuation = nil
+        waiter?.resume(with: result)
+        if !pending { drain() }
+    }
+
+    private func drain() {
+        let callback = onDrained
+        onDrained = {}
+        callback()
     }
 }
 

@@ -443,6 +443,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     // This transport belongs to one shared browser profile. New tasks must not
     // repeatedly revisit a checkpoint that the profile already encountered.
     private var providerGates: [Provider: ProviderGate] = [:]
+    private var chatGPTPrewarmingEnabled = false
     private var scripts: [Provider: String] = [:]
     private var preparationTimeout: Duration = .seconds(45)
     private var responseTimeout: Duration = .seconds(300)
@@ -664,6 +665,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         browser.revokeModelRequestMetadata(tabID: session.tabID, ownerToken: session.token)
     }
 
+    /// A blank root may load before Send; it has no model Session, prompt,
+    /// adapter ownership or inference result. Actual Start still establishes
+    /// all of those using the unchanged preparation and submission checks.
+    func setChatGPTPrewarmingEnabled(_ enabled: Bool) {
+        chatGPTPrewarmingEnabled = enabled
+        synchronizeProviderGate(.chatgpt)
+        browser.setChatGPTInferencePrewarmingEnabled(enabled && providerGates[.chatgpt] == nil) { [weak self] in
+            guard let self, self.chatGPTPrewarmingEnabled else { throw CancellationError() }
+            self.synchronizeProviderGate(.chatgpt)
+            if let gate = self.providerGates[.chatgpt] { throw gate.failure }
+            try Task.checkCancellation()
+        }
+    }
+
     private func start(_ values: [String: String], requestMetadata: ChatGPTRequestMetadataLease? = nil) async throws -> Data {
         try Task.checkCancellation()
         guard Set(values.keys) == ["provider"] || Set(values.keys) == ["provider", "modelChoice"] else { throw Failure.invalidRequest }
@@ -688,11 +703,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         defer { pendingInferenceStarts -= 1 }
         let preparedTab: UUID?
         if provider == .chatgpt, isolatesChatGPTInference {
-            preparedTab = try await browser.createChatGPTInferenceTab(requestMetadata: requestMetadata, admit: {
+            let admit: @MainActor () throws -> Void = {
                 self.synchronizeProviderGate(provider)
                 if let gate = self.providerGates[provider] { throw gate.failure }
                 try Task.checkCancellation()
-            })
+            }
+            // Metadata capture must be installed before the first navigation;
+            // its explicitly authorized diagnostic path always stays cold.
+            let warmTab = requestMetadata == nil
+                ? try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: admit) : nil
+            if let warmTab { preparedTab = warmTab }
+            else { preparedTab = try await browser.createChatGPTInferenceTab(requestMetadata: requestMetadata, admit: admit) }
         } else { preparedTab = nil }
         let session: Session
         do {
@@ -838,6 +859,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let sent = try await page(session, action: "submit", prompt: outbound)
                 guard sent["submitted"] as? Bool == true else { throw Failure.editorFailure("submission_unconfirmed") }
                 session.acknowledgedSendSequence = submittedSequence
+                // Prepare the next untouched page during website generation,
+                // never while the current request is still preparing to Send.
+                if session.provider == .chatgpt, chatGPTPrewarmingEnabled {
+                    browser.prepareChatGPTInferencePrewarmIfNeeded()
+                }
                 return try snapshot(session)
             default:
                 return try await poll(session)
@@ -883,6 +909,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             browser.recordHumanVerificationRequired(provider: provider.rawValue)
         }
         providerGates[provider] = ProviderGate(failure: failure)
+        if provider == .chatgpt {
+            browser.setChatGPTInferencePrewarmingEnabled(false, admit: { throw failure })
+        }
         for session in sessions.values where session.provider == provider && !session.isRecoveryProbe {
             if session.terminalFailure == nil { session.terminalFailure = failure }
             session.state = "failed"

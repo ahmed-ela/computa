@@ -167,6 +167,7 @@ export type NativeAction =
   | { action: 'selectEntry'; id: string }
   | { action: 'createTask' }
   | { action: 'chooseTaskWorkspace'; taskID: string }
+  | { action: 'prepareWebsiteModel'; taskID: string }
   | { action: 'submitPrompt'; requestID: string; taskID: string; prompt: string }
   | { action: 'interruptTask'; taskID: string }
   | { action: 'retryWebsiteSessionCleanup'; taskID: string }

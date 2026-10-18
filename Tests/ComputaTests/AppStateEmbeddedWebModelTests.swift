@@ -4,6 +4,46 @@ import XCTest
 
 @MainActor
 final class AppStateEmbeddedWebModelTests: XCTestCase {
+    func testWebsitePrewarmingFollowsSelectedProviderOnlyAfterRenderHostReadiness() async {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        let instant = Self.choices("chatgpt")[0].modelID
+        let task = AgentTask(title: "Prewarm fixture", summary: "", status: .draft,
+            workspace: "No workspace selected", model: instant)
+        let runtime = EmbeddedConfigurationRuntime(browser: browser)
+        let state = AppState(tasks: [task], runtime: runtime, preferences: preferences, browserSession: browser)
+        let local = state.defaultModel
+        var enabled: [Bool] = []
+        state.setWebsitePrewarmingObserverForTesting { enabled.append($0) }
+        state.selectTask(task.id)
+        XCTAssertEqual(enabled, [false], "No provider load before the render host is attached")
+        state.refreshWebsiteModelsIfNeeded()
+        XCTAssertEqual(enabled.last, true)
+        let beforeDemand = enabled.count
+        state.prepareWebsiteModel(taskID: "foreign-task")
+        XCTAssertEqual(enabled.count, beforeDemand)
+        state.prepareWebsiteModel(taskID: task.id)
+        XCTAssertEqual(enabled.count, beforeDemand + 1)
+        XCTAssertEqual(enabled.last, true)
+        state.prepareWebsiteModel(taskID: task.id)
+        XCTAssertEqual(enabled.count, beforeDemand + 1, "Native demand hints are throttled independently of the web client")
+        XCTAssertTrue(state.setTaskModel(local, taskID: task.id))
+        XCTAssertEqual(enabled.last, false, "Changing away from ChatGPT releases its unused page")
+        XCTAssertTrue(state.setTaskModel(instant, taskID: task.id))
+        XCTAssertEqual(enabled.last, true)
+        state.replaceTasks(with: [])
+        XCTAssertEqual(enabled.last, false)
+        XCTAssertTrue(state.setDefaultModel(instant))
+        XCTAssertEqual(enabled.last, true)
+        state.createTask()
+        XCTAssertEqual(enabled.last, true)
+        _ = await state.shutdownRuntime()
+        XCTAssertEqual(enabled.last, false)
+        XCTAssertTrue(browser.tabs.isEmpty)
+    }
+
     func testMaintenanceLaunchCannotStartRuntimeOrIndependentWebsiteDiscovery() async {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }

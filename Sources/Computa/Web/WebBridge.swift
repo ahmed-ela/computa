@@ -117,6 +117,12 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "createTask":
             state.createTask()
 
+        case "prepareWebsiteModel":
+            guard Set(body.keys) == ["action", "taskID"],
+                  let taskID = body["taskID"] as? String, taskID == state.selectedTaskID,
+                  state.tasks.contains(where: { $0.id == taskID }) else { return }
+            state.prepareWebsiteModel(taskID: taskID)
+
         case "submitPrompt":
             guard let prompt = body["prompt"] as? String,
                   let taskID = body["taskID"] as? String,

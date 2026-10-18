@@ -60,9 +60,10 @@ final class EmbeddedBrowserSession {
     private(set) var selectedTabID: UUID?
     private(set) var errorMessage: String?
     let maximumTabs: Int
-    var pendingChatGPTInferenceCookiePreparationCount: Int { inferenceCookieSeeds.count }
+    var pendingChatGPTInferenceCookiePreparationCount: Int { inferenceCookieSeeds.count + inferenceCookieValidations.count }
     var failedChatGPTInferenceCookiePreparationCount: Int {
         inferenceCookieSeeds.values.filter(\.hasFailedCallerAwaitingCallback).count
+            + inferenceCookieValidations.values.filter(\.hasFailedCallerAwaitingCallback).count
     }
 
     @ObservationIgnored private var websiteDataStore: WKWebsiteDataStore?
@@ -72,6 +73,10 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private let cookieRetirementDirectory: URL?
     @ObservationIgnored private var temporaryCookieRetirement: ChatGPTTemporaryCookieRetirement?
     @ObservationIgnored private var inferenceCookieSeeds: [UUID: ChatGPTInferenceCookieSeed] = [:]
+    @ObservationIgnored private var inferenceCookieValidations: [UUID: ChatGPTInferenceCookieValidation] = [:]
+    @ObservationIgnored private var chatGPTInferencePrewarmingEnabled = false
+    @ObservationIgnored private var chatGPTInferencePrewarmAdmission: (@MainActor () throws -> Void)?
+    @ObservationIgnored private var chatGPTInferencePrewarm: InferencePrewarm?
     @ObservationIgnored private var chatGPTResumeProtections: [UUID: Set<UUID>] = [:]
     @ObservationIgnored private var uncertainChatGPTResumeProtections: Set<UUID> = []
     @ObservationIgnored private var chatGPTResumeProtectionOverflow = false
@@ -92,6 +97,24 @@ final class EmbeddedBrowserSession {
     private final class ModelRenderHostReference {
         weak var view: NSView?
         init(_ view: NSView) { self.view = view }
+    }
+
+    /// No transport Session, adapter, prompt, model choice or task owns this
+    /// pristine root. Claiming consumes the exact physical page once.
+    @MainActor private final class InferencePrewarm {
+        let created = ContinuousClock.now
+        let lifetime: Duration
+        var deadline: ContinuousClock.Instant { created + lifetime }
+        var claimed = false
+        var task: Task<UUID?, Never>?
+        var expiry: Task<Void, Never>?
+        var tabID: UUID?
+        var view: WKWebView?
+        var generation: UUID?
+        var source: WKWebsiteDataStore?
+        var sourceCookies: [HTTPCookie]?
+        var validation: ChatGPTInferenceCookieValidation?
+        init(lifetime: Duration = .seconds(120)) { self.lifetime = lifetime }
     }
 
     private struct ToolMutationPopupContext {
@@ -350,7 +373,7 @@ final class EmbeddedBrowserSession {
     func withExclusiveCookieMaintenance<Result>(
         _ operation: @MainActor (WKHTTPCookieStore, UUID, @escaping @MainActor () -> Bool) async -> Result
     ) async -> Result? {
-        guard !isShutdown, entries.isEmpty, inferenceCookieSeeds.isEmpty, exclusiveCookieMaintenance == nil else { return nil }
+        guard !isShutdown, entries.isEmpty, inferenceCookieSeeds.isEmpty, inferenceCookieValidations.isEmpty, exclusiveCookieMaintenance == nil else { return nil }
         let lease = UUID(), revision = chatGPTResumeProtectionRevision
         exclusiveCookieMaintenance = lease
         var suspended = false
@@ -435,7 +458,7 @@ final class EmbeddedBrowserSession {
                            isolatedChatGPTStore: WKWebsiteDataStore? = nil) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
-            guard tabs.count + inferenceCookieSeeds.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+            guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
             if let url { try EmbeddedBrowserURLPolicy.validate(url) }
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = isolatedChatGPTStore ?? dataStore()
@@ -462,7 +485,7 @@ final class EmbeddedBrowserSession {
                              popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
-        guard tabs.count + inferenceCookieSeeds.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil)
         let view: WKWebView
         #if DEBUG
@@ -1332,16 +1355,180 @@ final class EmbeddedBrowserSession {
         try createModelTab(initialURL: url)
     }
 
+    private static let inferencePrewarmLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
+
+    func setChatGPTInferencePrewarmingEnabled(_ enabled: Bool, admit: @escaping @MainActor () throws -> Void) {
+        chatGPTInferencePrewarmingEnabled = enabled && !isShutdown
+        chatGPTInferencePrewarmAdmission = chatGPTInferencePrewarmingEnabled ? admit : nil
+        if chatGPTInferencePrewarmingEnabled { prepareChatGPTInferencePrewarmIfNeeded() }
+        else if let warm = chatGPTInferencePrewarm { discardInferencePrewarm(warm) }
+    }
+
+    /// An explicit demand trigger, never a timer-based refresh or retry loop.
+    func prepareChatGPTInferencePrewarmIfNeeded() {
+        guard chatGPTInferencePrewarmingEnabled, !isShutdown, chatGPTInferencePrewarm == nil,
+              inferenceCookieValidations.isEmpty, exclusiveCookieMaintenance == nil,
+              let admit = chatGPTInferencePrewarmAdmission,
+              tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { return }
+        do { try admit() } catch { return }
+        let warm: InferencePrewarm
+        #if DEBUG
+        warm = InferencePrewarm(lifetime: prewarmLifetimeForTesting ?? .seconds(120))
+        #else
+        warm = InferencePrewarm()
+        #endif
+        chatGPTInferencePrewarm = warm
+        warm.expiry = Task { @MainActor [weak self, weak warm] in
+            guard let warm else { return }
+            do { try await Task.sleep(until: warm.deadline) } catch { return }
+            self?.discardInferencePrewarm(warm)
+        }
+        warm.task = Task { @MainActor [weak self, weak warm] in
+            guard let self, let warm else { return nil }
+            do {
+                let id = try await self.createChatGPTInferenceTab(until: min(warm.deadline, .now + .seconds(10)),
+                    admit: {
+                        guard self.chatGPTInferencePrewarm === warm, self.chatGPTInferencePrewarmingEnabled else {
+                            throw ChatGPTInferenceCookieSeed.Failure.unavailable
+                        }
+                        try admit()
+                    }, sourceSelection: { source, cookies in warm.source = source; warm.sourceCookies = cookies })
+                warm.tabID = id
+                warm.view = self.entries[id]?.view
+                warm.generation = self.entries[id]?.tab.documentGeneration
+                guard !Task.isCancelled, self.chatGPTInferencePrewarm === warm,
+                      self.chatGPTInferencePrewarmingEnabled, self.inferencePrewarmIsCurrent(warm) else {
+                    self.closeTab(id)
+                    self.discardInferencePrewarm(warm)
+                    return nil
+                }
+                let elapsed = (ContinuousClock.now - warm.created).components
+                let milliseconds = max(0, min(120_000, elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000))
+                Self.inferencePrewarmLog.notice("inferencePrewarm created=true creationMs=\(milliseconds)")
+                return id
+            } catch { self.discardInferencePrewarm(warm); return nil }
+        }
+    }
+
+    /// Claim before awaiting an in-flight seed. No second Start or refill may
+    /// adopt that slot; all adapter/product/model proofs are established later.
+    func takePrewarmedChatGPTInferenceTab(until deadline: ContinuousClock.Instant,
+                                        admit: @MainActor () throws -> Void) async throws -> UUID? {
+        try Task.checkCancellation()
+        var hit = false
+        let age = chatGPTInferencePrewarm.map { warm -> Int64 in
+            let duration = (ContinuousClock.now - warm.created).components
+            return min(120_000, max(0, min(120, max(0, duration.seconds)) * 1_000 + duration.attoseconds / 1_000_000_000_000_000))
+        } ?? 0
+        defer { Self.inferencePrewarmLog.notice("inferencePrewarm hit=\(hit) ageMs=\(age)") }
+        guard chatGPTInferencePrewarmingEnabled, let warm = chatGPTInferencePrewarm, !warm.claimed else {
+            return nil
+        }
+        warm.claimed = true
+        let waitDeadline = min(deadline, warm.deadline)
+        let timeout = Task { @MainActor [weak self, weak warm] in
+            do { try await Task.sleep(until: waitDeadline) } catch { return }
+            guard let self, let warm else { return }
+            self.discardInferencePrewarm(warm)
+        }
+        defer { timeout.cancel() }
+        return try await withTaskCancellationHandler {
+            do {
+                guard ContinuousClock.now < min(deadline, warm.deadline), let task = warm.task,
+                      let id = await task.value else { discardInferencePrewarm(warm); return nil }
+                try Task.checkCancellation()
+                try admit()
+                guard ContinuousClock.now < min(deadline, warm.deadline), inferencePrewarmIsCurrent(warm),
+                      let source = warm.source, let cookies = warm.sourceCookies else {
+                    discardInferencePrewarm(warm); return nil
+                }
+                let reservation = UUID()
+                let reader: any ChatGPTInferenceCookieSource
+                #if DEBUG
+                reader = cookieValidationSourceForTesting?(source) ?? ChatGPTWKInferenceCookieStore(source)
+                #else
+                reader = ChatGPTWKInferenceCookieStore(source)
+                #endif
+                let validation = ChatGPTInferenceCookieValidation(source: reader)
+                warm.validation = validation
+                inferenceCookieValidations[reservation] = validation
+                let matches = try await validation.run(expected: cookies, until: min(deadline, warm.deadline),
+                    isCurrent: { [weak self, weak warm] in
+                        guard let self, let warm else { return false }
+                        return self.inferencePrewarmIsCurrent(warm)
+                    }, onDrained: { [weak self, weak validation] in
+                        guard let self, let validation, self.inferenceCookieValidations[reservation] === validation else { return }
+                        self.inferenceCookieValidations.removeValue(forKey: reservation)
+                    })
+                try Task.checkCancellation()
+                try admit()
+                guard ContinuousClock.now < min(deadline, warm.deadline), matches, inferencePrewarmIsCurrent(warm) else {
+                    discardInferencePrewarm(warm); return nil
+                }
+                chatGPTInferencePrewarm = nil
+                warm.expiry?.cancel(); warm.expiry = nil
+                warm.sourceCookies = nil
+                hit = true
+                return id
+            } catch {
+                let internallyDisposed = chatGPTInferencePrewarm !== warm
+                discardInferencePrewarm(warm)
+                if Task.isCancelled { throw CancellationError() }
+                if error is CancellationError, internallyDisposed { return nil }
+                if error is ChatGPTInferenceCookieSeed.Failure { return nil }
+                throw error
+            }
+        } onCancel: {
+            Task { @MainActor [weak self, weak warm] in
+                guard let self, let warm else { return }
+                self.discardInferencePrewarm(warm)
+            }
+        }
+    }
+
+    private func inferencePrewarmIsCurrent(_ warm: InferencePrewarm) -> Bool {
+        guard !isShutdown, chatGPTInferencePrewarmingEnabled, chatGPTInferencePrewarm === warm,
+              exclusiveCookieMaintenance == nil, ContinuousClock.now < warm.deadline,
+              let source = warm.source, websiteDataStore === source, let id = warm.tabID,
+              let view = warm.view, let entry = entries[id], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.usesIsolatedChatGPTProfile,
+              !view.configuration.websiteDataStore.isPersistent, view.configuration.websiteDataStore !== source,
+              entry.tab.documentGeneration == warm.generation, entry.modelChanges == nil,
+              entry.requestMetadataDiagnostic == nil, entry.inspectorDiagnostic == nil,
+              entry.ownedTemporaryChatGPTRoutes.isEmpty, entry.modelFailedGeneration != entry.tab.documentGeneration else { return false }
+        let root = URL(string: "https://chatgpt.com/")!
+        return view.url == root || view.url == nil && entry.pendingConversationURL == root
+    }
+
+    private func discardInferencePrewarm(_ warm: InferencePrewarm) {
+        guard chatGPTInferencePrewarm === warm else { return }
+        chatGPTInferencePrewarm = nil
+        warm.task?.cancel(); warm.expiry?.cancel()
+        warm.validation?.cancel()
+        warm.sourceCookies = nil
+        if let id = warm.tabID, entries[id]?.view === warm.view { closeTab(id) }
+    }
+
     /// Independent inference pages need authentication, not the human profile's
     /// accumulated conversation keys. Publication/navigation follows complete
     /// seeding; failure never falls back to the shared store.
     func createChatGPTInferenceTab(requestMetadata: ChatGPTRequestMetadataLease? = nil,
                                    until deadline: ContinuousClock.Instant = .now + .seconds(10),
                                    admit: @MainActor () throws -> Void) async throws -> UUID {
+        // An armed document-start diagnostic always receives a cold view;
+        // an optional unused page must not consume its publication capacity.
+        if requestMetadata != nil, let warm = chatGPTInferencePrewarm { discardInferencePrewarm(warm) }
+        return try await createChatGPTInferenceTab(requestMetadata: requestMetadata, until: deadline, admit: admit, sourceSelection: nil)
+    }
+
+    private func createChatGPTInferenceTab(requestMetadata: ChatGPTRequestMetadataLease? = nil,
+                                          until deadline: ContinuousClock.Instant,
+                                          admit: @MainActor () throws -> Void,
+                                          sourceSelection: ((WKWebsiteDataStore, [HTTPCookie]) -> Void)?) async throws -> UUID {
         try Task.checkCancellation()
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
-        guard tabs.count + inferenceCookieSeeds.count < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         let source = dataStore(), isolated = WKWebsiteDataStore.nonPersistent(), reservation = UUID()
         let seed: ChatGPTInferenceCookieSeed
         #if DEBUG
@@ -1376,6 +1563,7 @@ final class EmbeddedBrowserSession {
                 throw ChatGPTInferenceCookieSeed.Failure.verificationFailed
             }
             entry.inferenceCookieSummary = summary
+            if let sourceSelection, let cookies = seed.verifiedSourceCookies { sourceSelection(source, cookies) }
             if let requestMetadata { _ = installModelRequestMetadata(requestMetadata, tabID: id) }
             try navigate(tabID: id, to: URL(string: "https://chatgpt.com/")!)
             return id
@@ -1392,6 +1580,19 @@ final class EmbeddedBrowserSession {
     private var modelViewFactoryForTesting: (@MainActor (WKWebViewConfiguration) -> WKWebView)?
     private var cookieSeedFactoryForTesting: (@MainActor (WKWebsiteDataStore, WKWebsiteDataStore) -> ChatGPTInferenceCookieSeed)?
     private var afterCookieSeedForTesting: (@MainActor () async -> Void)?
+    private var cookieValidationSourceForTesting: (@MainActor (WKWebsiteDataStore) -> any ChatGPTInferenceCookieSource)?
+    private var prewarmLifetimeForTesting: Duration?
+
+    func setCookieValidationSourceForTesting(_ factory: (@MainActor (WKWebsiteDataStore) -> any ChatGPTInferenceCookieSource)?) {
+        cookieValidationSourceForTesting = factory
+    }
+
+    func awaitChatGPTInferencePrewarmForTesting() async -> UUID? { await chatGPTInferencePrewarm?.task?.value }
+    var chatGPTInferencePrewarmClaimedForTesting: Bool { chatGPTInferencePrewarm?.claimed == true }
+    func setChatGPTInferencePrewarmLifetimeForTesting(_ lifetime: Duration) { prewarmLifetimeForTesting = lifetime }
+    func expireChatGPTInferencePrewarmForTesting() {
+        if let warm = chatGPTInferencePrewarm { discardInferencePrewarm(warm) }
+    }
 
     func setAfterCookieSeedForTesting(_ hook: (@MainActor () async -> Void)?) { afterCookieSeedForTesting = hook }
 
@@ -1430,7 +1631,11 @@ final class EmbeddedBrowserSession {
     func shutdown() {
         guard !isShutdown else { return }
         isShutdown = true
+        chatGPTInferencePrewarmingEnabled = false
+        chatGPTInferencePrewarmAdmission = nil
+        if let warm = chatGPTInferencePrewarm { discardInferencePrewarm(warm) }
         for seed in Array(inferenceCookieSeeds.values) { seed.cancel() }
+        for validation in Array(inferenceCookieValidations.values) { validation.cancel() }
         onHumanVerificationRecoveryCandidate = nil
         for id in tabs.map(\.id) { closeTab(id) }
         temporaryCookieRetirement?.stop()

@@ -37,6 +37,10 @@ final class AppState {
     @ObservationIgnored private var websiteModelRefreshCurrentIntent: WebsiteModelRefreshIntent?
     #if DEBUG
     @ObservationIgnored private var websiteModelRefreshObserverForTesting: (@MainActor (String, Bool) -> Void)?
+    @ObservationIgnored private var websitePrewarmingObserverForTesting: (@MainActor (Bool) -> Void)?
+    func setWebsitePrewarmingObserverForTesting(_ observer: (@MainActor (Bool) -> Void)?) {
+        websitePrewarmingObserverForTesting = observer
+    }
     func setWebsiteModelRefreshObserverForTesting(_ observer: (@MainActor (String, Bool) -> Void)?) {
         websiteModelRefreshObserverForTesting = observer
     }
@@ -45,6 +49,7 @@ final class AppState {
     }
     #endif
     @ObservationIgnored private var didStartWebsiteModelDiscovery = false
+    @ObservationIgnored private var lastWebsitePrewarmDemand: (taskID: AgentTask.ID, time: ContinuousClock.Instant)?
     // Keep the persisted key across the Computa rename.
     private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
     private static let accessModePreferenceKey = "HeyDash.accessMode"
@@ -275,6 +280,35 @@ final class AppState {
         return transport
     }
 
+    private var websitePrewarmingIsReady: Bool {
+        didStartWebsiteModelDiscovery && !cookieMaintenanceOnlyLaunch && !isShuttingDown
+            && !websiteModelsRefreshing && runtime != nil && websiteModelDiscovery == nil
+    }
+
+    /// A content-free composition hint can refresh an expired unused page.
+    /// It never forwards draft text, starts a model Session or submits input.
+    func prepareWebsiteModel(taskID: AgentTask.ID) {
+        guard websitePrewarmingIsReady, taskID == selectedTaskID,
+              let model = selectedTask?.model,
+              WebsiteModelCatalog.inferenceSelection(for: model)?.provider == "chatgpt" else { return }
+        let now = ContinuousClock.now
+        if let last = lastWebsitePrewarmDemand, last.taskID == taskID, now - last.time < .seconds(5) { return }
+        lastWebsitePrewarmDemand = (taskID, now)
+        updateWebsitePrewarming()
+    }
+
+    /// Start only after the render host is attached and ChatGPT is selected.
+    /// Switching providers or shutting down disposes of the unused blank page.
+    private func updateWebsitePrewarming() {
+        let model = selectedTask?.model ?? defaultModel
+        let enabled = websitePrewarmingIsReady && WebsiteModelCatalog.inferenceSelection(for: model)?.provider == "chatgpt"
+        #if DEBUG
+        if let observer = websitePrewarmingObserverForTesting { observer(enabled); return }
+        #endif
+        if enabled { websiteTransport().setChatGPTPrewarmingEnabled(true) }
+        else { embeddedModelTransport?.setChatGPTPrewarmingEnabled(false) }
+    }
+
     /// Called after the privileged WebUI is ready and its background render host
     /// is attached. Saved choices are immediately usable; only providers with
     /// no saved choices need startup discovery. An explicit refresh can replace
@@ -283,6 +317,7 @@ final class AppState {
         guard !cookieMaintenanceOnlyLaunch, !didStartWebsiteModelDiscovery,
               runtime != nil || websiteModelDiscovery != nil else { return }
         didStartWebsiteModelDiscovery = true
+        updateWebsitePrewarming()
         let missing = WebsiteModelCatalog.providers.filter { provider in
             !websiteModelChoices.contains { $0.provider == provider }
         }
@@ -374,6 +409,7 @@ final class AppState {
         let generation = UUID()
         websiteModelRefreshGeneration = generation
         websiteModelsRefreshing = true
+        updateWebsitePrewarming()
         websiteModelsError = nil
         let refresh = Task<Void, Never> { @MainActor [weak self] in
             guard let self else { return }
@@ -449,6 +485,7 @@ final class AppState {
             guard self.websiteModelRefreshGeneration == generation else { return }
             self.websiteModelsError = errors.isEmpty ? nil : errors.joined(separator: "\n")
             self.websiteModelsRefreshing = false
+            self.updateWebsitePrewarming()
             self.websiteModelRefreshTask = nil
             self.websiteModelRefreshGeneration = nil
             self.websiteModelRefreshIntents = []
@@ -676,6 +713,7 @@ final class AppState {
 
     func selectTask(_ id: AgentTask.ID?) {
         selectedTaskID = id
+        updateWebsitePrewarming()
         selectedEntryID = selectedTask?.entries.last?.id
         reviewGeneration &+= 1
         reviewRefresh?.cancel()
@@ -731,6 +769,7 @@ final class AppState {
         )
         tasks.insert(task, at: 0)
         selectedTaskID = task.id
+        updateWebsitePrewarming()
         selectedEntryID = nil
         composerText = ""
         reviewGeneration &+= 1
@@ -876,6 +915,7 @@ final class AppState {
         guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false else { return false }
         defaultModel = modelID
         preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
+        updateWebsitePrewarming()
         return true
     }
 
@@ -886,6 +926,7 @@ final class AppState {
               canChangeModel(for: taskID)
         else { return false }
         tasks[index].model = modelID
+        updateWebsitePrewarming()
         contextUsageByTask.removeValue(forKey: taskID)
         compactionStateByTask.removeValue(forKey: taskID)
         return true
@@ -1374,6 +1415,7 @@ final class AppState {
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        updateWebsitePrewarming()
         websiteModelRefreshTask?.cancel()
         let websiteRefresh = websiteModelRefreshTask
         websiteModelRefreshGeneration = nil
@@ -1434,6 +1476,7 @@ final class AppState {
         selectedTaskID = newTasks.contains(where: { $0.id == priorSelection })
             ? priorSelection
             : newTasks.first?.id
+        updateWebsitePrewarming()
         selectedEntryID = selectedTask?.entries.last?.id
         interruptingTaskIDs.formIntersection(
             Set(newTasks.filter { $0.status == .running }.map(\.id))

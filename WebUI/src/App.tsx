@@ -539,6 +539,18 @@ function Composer({
   onSubmit: () => void;
 }) {
   const textarea = useRef<HTMLTextAreaElement | null>(null);
+  const websitePrepareDemand = useRef<{ taskID: string; model: string; at: number | null }>({ taskID: task.id, model: task.model, at: null });
+  if (websitePrepareDemand.current.taskID !== task.id || websitePrepareDemand.current.model !== task.model) {
+    websitePrepareDemand.current = { taskID: task.id, model: task.model, at: null };
+  }
+  const prepareWebsiteModel = () => {
+    if (task.model !== 'browser/chatgpt' && !task.model.startsWith('browser/chatgpt/choice/')) return;
+    const now = performance.now();
+    const previous = websitePrepareDemand.current;
+    if (previous.at !== null && now < previous.at + 5000) return;
+    previous.at = now;
+    post({ action: 'prepareWebsiteModel', taskID: task.id });
+  };
   const queueActive = task.queuedPrompts.length > 0;
   const canSubmit = !pending && isValidPrompt(value) && (task.modelSelectable || task.isBusy || task.queuePaused || queueActive);
   const willQueue = task.isBusy || task.queuePaused || queueActive;
@@ -567,7 +579,11 @@ function Composer({
           placeholder={task.isBusy ? 'Type your next message to queue it…' : 'Ask a question or describe a task…'}
           aria-label="Task prompt"
           maxLength={200000}
-          onInput={(event) => setValue((event.currentTarget as HTMLTextAreaElement).value)}
+          onFocus={prepareWebsiteModel}
+          onInput={(event) => {
+            setValue((event.currentTarget as HTMLTextAreaElement).value);
+            prepareWebsiteModel();
+          }}
           onKeyDown={(event) => {
             if (shouldSubmitPromptKey(event)) {
               event.preventDefault();

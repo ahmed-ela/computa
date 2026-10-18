@@ -5610,6 +5610,143 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testChatGPTPrewarmedRootIsConsumedOnceAndStillRequiresFullTransportProof() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), isolatedInference: true)
+        defer { fixture.shutdown() }
+        fixture.browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let preparedID = await fixture.browser.awaitChatGPTInferencePrewarmForTesting()
+        let warmID = try XCTUnwrap(preparedID)
+        let warmView = try XCTUnwrap(fixture.browser.webView(for: warmID))
+        try await waitForFixture(warmView)
+        XCTAssertEqual(fixture.isolatedViews.count, 1)
+        XCTAssertFalse(warmView.configuration.websiteDataStore.isPersistent)
+        XCTAssertFalse(warmView.configuration.websiteDataStore === fixture.humanView.configuration.websiteDataStore)
+        let unowned = try await evaluate(warmView, "return typeof globalThis.__computaModelOwner === 'undefined';",
+            world: .world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(unowned as? Bool, true, "Preloading cannot create transport ownership or model proof")
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        XCTAssertEqual(fixture.isolatedViews.count, 1, "Start must consume the existing private view without reloading it")
+        XCTAssertEqual(fixture.isolatedViews.first?.requestLoadCount, 1)
+        XCTAssertTrue(fixture.browser.webView(for: warmID) === warmView)
+        let owner = try await evaluate(warmView, "return globalThis.__computaModelOwner;",
+            world: .world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(owner as? String, token)
+        try await assertChoiceLedger(warmView, insertions: 0, sends: 0, selections: 1)
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Use this fresh preloaded page only after all ordinary checks"])
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        try await assertChoiceLedger(warmView, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: warmID))
+        try await assertHumanTabIntact(fixture)
+
+        let second = try await startChoice(choice, in: fixture)
+        let secondToken = try XCTUnwrap(second["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: secondToken)
+        XCTAssertEqual(fixture.isolatedViews.count, 2, "A consumed or submitted page can never be claimed again")
+        let secondID = try XCTUnwrap(fixture.browser.tabs.first(where: { $0.id != fixture.humanID })?.id)
+        XCTAssertNotEqual(secondID, warmID)
+        let secondView = try XCTUnwrap(fixture.browser.webView(for: secondID))
+        XCTAssertFalse(secondView === warmView)
+        try await assertChoiceLedger(secondView, insertions: 0, sends: 0, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": secondToken])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTDisabledPrewarmingKeepsColdStartAndOrdinaryProof() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), isolatedInference: true)
+        defer { fixture.shutdown() }
+        fixture.browser.setChatGPTInferencePrewarmingEnabled(false, admit: {})
+        let absent = await fixture.browser.awaitChatGPTInferencePrewarmForTesting()
+        XCTAssertNil(absent)
+        XCTAssertTrue(fixture.isolatedViews.isEmpty)
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        XCTAssertEqual(fixture.isolatedViews.count, 1)
+        let view = try XCTUnwrap(fixture.isolatedViews.first)
+        XCTAssertEqual(view.requestLoadCount, 1)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Disabled prewarming keeps the original cold inference path"])
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTPrewarmedRootCannotBypassModelOrWorkDriftBeforeSend() async throws {
+        for drift in ["model", "work"] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), isolatedInference: true)
+            defer { fixture.shutdown() }
+            fixture.browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+            let preparedID = await fixture.browser.awaitChatGPTInferencePrewarmForTesting()
+            let warmID = try XCTUnwrap(preparedID)
+            let view = try XCTUnwrap(fixture.browser.webView(for: warmID))
+            try await waitForFixture(view)
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            XCTAssertEqual(fixture.isolatedViews.count, 1)
+            let mutation = drift == "model"
+                ? "window.fixtureModelSelect(window.fixtureModelInitialLabel); return true;"
+                : "document.getElementById('fixture-composer-mode').hidden = false; document.getElementById('fixture-chat-mode').setAttribute('aria-pressed','false'); document.getElementById('fixture-work-mode').setAttribute('aria-pressed','true'); return true;"
+            let changed = try await evaluate(view, mutation)
+            XCTAssertEqual(changed as? Bool, true)
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": "A warm view cannot authorize changed model or Work mode"])
+                XCTFail("Prewarming cannot bypass the current product/model checks")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                    drift == "model" ? .modelMismatch : .productModeUnverified)
+            }
+            try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, drift == "work" ? "failed" : "not_created")
+            try await assertHumanTabIntact(fixture, retaining: drift == "work" ? warmID : nil)
+        }
+    }
+
+    func testChatGPTPrewarmedRootWithExistingUserHistoryCannotBecomeReady() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), isolatedInference: true)
+        defer { fixture.shutdown() }
+        fixture.browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let preparedID = await fixture.browser.awaitChatGPTInferencePrewarmForTesting()
+        let warmID = try XCTUnwrap(preparedID)
+        let view = try XCTUnwrap(fixture.browser.webView(for: warmID))
+        try await waitForFixture(view)
+        let changed = try await evaluate(view, """
+            const message = document.createElement('div');
+            message.setAttribute('data-message-author-role', 'user');
+            message.textContent = 'Unowned synthetic history';
+            document.getElementById('messages').appendChild(message);
+            return document.querySelectorAll('[data-message-author-role="user"]').length;
+            """)
+        XCTAssertEqual(changed as? Int, 1)
+        let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A loaded root is not proof that the page is fresh")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptUserCount))
+        }
+        XCTAssertEqual(fixture.isolatedViews.count, 1, "Do not silently replace a rejected claimed page")
+        try await assertChoiceLedger(view, insertions: 0, sends: 0, selections: 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: warmID), "No native Send or temporary setup occurred; retire only this private view")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testChatGPTInternalPrepareDefersOnlyItsDuplicateModelReadToInsert() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
         defer { fixture.shutdown() }
@@ -9727,6 +9864,23 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    private final class PrewarmFixtureWebView: WKWebView {
+        let fixtureHTML: String
+        private(set) var requestLoadCount = 0
+
+        init(configuration: WKWebViewConfiguration, fixtureHTML: String) {
+            self.fixtureHTML = fixtureHTML
+            super.init(frame: .zero, configuration: configuration)
+        }
+
+        required init?(coder: NSCoder) { fatalError("Local fixture has no coder initializer") }
+
+        override func load(_ request: URLRequest) -> WKNavigation? {
+            requestLoadCount += 1
+            return super.loadHTMLString(fixtureHTML, baseURL: request.url)
+        }
+    }
+
     @MainActor
     private final class Fixture {
         let browser: EmbeddedBrowserSession
@@ -9735,12 +9889,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let humanID: UUID
         let humanView: WKWebView
         var createdTabs: [UUID] = []
+        var isolatedViews: [PrewarmFixtureWebView] = []
         var page: String
         var initialURL: URL?
         private(set) var transport: EmbeddedWebModelTransport!
         var traceLifecycle = false
 
-        init(page: String = EmbeddedWebModelTransportTests.page, initialURL: URL? = nil,
+        init(page: String = EmbeddedWebModelTransportTests.page, initialURL: URL? = nil, isolatedInference: Bool = false,
              browser: EmbeddedBrowserSession = EmbeddedBrowserSession(persistent: false)) throws {
             self.browser = browser
             self.page = page
@@ -9761,6 +9916,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             humanView = try XCTUnwrap(browser.webView(for: humanID))
             humanView.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
             humanView.loadHTMLString("<p id='human-marker'>Untouched human tab</p>", baseURL: URL(string: "https://example.test/"))
+            if isolatedInference {
+                browser.setModelViewFactoryForTesting { [unowned self] configuration in
+                    let view = PrewarmFixtureWebView(configuration: configuration, fixtureHTML: self.page)
+                    self.isolatedViews.append(view)
+                    return view
+                }
+                transport = EmbeddedWebModelTransport(browser: browser)
+                return
+            }
             transport = EmbeddedWebModelTransport(browser: browser, createTabForTesting: { [unowned self] url in
                 // Load only the local fixture, retaining the product's model
                 // ownership, render-host mounting, and inactive-tab behavior.

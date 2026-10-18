@@ -550,6 +550,9 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         if (!snapshot.modelOptions.some((option) => option.id === action.modelID)) return;
         publish({ ...snapshot, defaultModel: action.modelID });
         return;
+      case 'prepareWebsiteModel':
+        // Preview never opens a website or submits a prompt.
+        return;
       case 'setTaskModel':
         if (!snapshot.modelOptions.some((option) => option.id === action.modelID)) return;
         if (!snapshot.tasks.some((task) => task.id === action.taskID && task.modelSelectable)) return;
