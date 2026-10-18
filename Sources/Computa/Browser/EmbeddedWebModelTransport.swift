@@ -337,6 +337,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var response = ""
         var lastChanged = ContinuousClock.now
         var turnStarted = ContinuousClock.now
+        var responseProfile: WebsiteResponseProfile?
+        var profiledFirstPositive = false
+        var profiledFirstCompletionCandidate = false
         var readTimeoutCount = 0
         var responseReadRetryUsed = false
         var firstBodyReadRecoveryActive = false
@@ -368,9 +371,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var lastProductModeDiagnostic: String?
         var observedResponseCount = 0
         var responseCodeStructure: [String: Any]?
+        var benchmarkObservationLogCount = 0
+        var lastBenchmarkObservationLog: String?
         var failedPageDiagnosticAttempted = false
         var outboundUTF16Count: Int?
         var outboundUTF8Count: Int?
+        // Diagnostic-only immutable hashes; populated only by a saved synthetic capture.
+        var benchmarkObservationBinding: WebsiteBenchmarkCaptureLease.ObservationBinding?
         var resourceTimingSignatures: [String: String] = [:]
         struct ResponseProgressInspection {
             let sequence: Int
@@ -812,6 +819,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     session.baseline = count(before, "responseCount")
                 }
+                if let benchmark = WebsiteBenchmarkCaptureLease.current, prepareFirstInstantInInsert,
+                   canPrepareFirstInstantInInsert(session), session.provider == .chatgpt,
+                   let choice = session.modelChoice, choice.key == "chat/latest/instant",
+                   let generation = session.documentGeneration,
+                   browser.webView(for: session.tabID) === session.view,
+                   browser.documentGeneration(for: session.tabID) == generation,
+                   let url = session.view.url, url.scheme == "https", url.host == "chatgpt.com", url.path == "/" {
+                    let captureStarted = ContinuousClock.now
+                    let saved = benchmark.capture(prompt: prompt, outbound: outbound, modelID: choice.modelID,
+                        sessionToken: session.token, generation: generation, marker: submissionMarker,
+                        nativeFirstFreshInstant: true)
+                    if saved { session.benchmarkObservationBinding = benchmark.observationBinding }
+                    let elapsed = WebsiteBenchmarkCaptureLease.milliseconds(.now - captureStarted)
+                    Self.inspectionLog.notice("benchmarkPayloadCapture version=1 nonce=\(benchmark.nonce.uuidString.lowercased(), privacy: .public) saved=\(saved) elapsedMs=\(elapsed)")
+                }
                 // Each proof-capable round has a unique transport-only suffix.
                 if session.usesSubmissionOwnership {
                     session.preparedSubmission = Session.SubmissionBinding(sequence: session.sequence + 1,
@@ -837,6 +859,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.candidateSince = nil
                 session.lastChanged = .now
                 session.turnStarted = .now
+                session.responseProfile = session.provider == .chatgpt
+                    ? WebsiteResponseProfile.begin(source: .nativeTurn, sessionToken: session.token,
+                        sequence: session.sequence + 1, started: session.turnStarted) : nil
+                session.profiledFirstPositive = false
+                session.profiledFirstCompletionCandidate = false
                 session.responseReadRetryUsed = false
                 session.failedPageDiagnosticAttempted = false
                 session.resourceTimingSignatures.removeAll()
@@ -1694,12 +1721,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         throw Failure.ownershipFailure(.javaScriptSubmission)
                     }
                 }
+                if !session.profiledFirstPositive {
+                    session.profiledFirstPositive = true
+                    session.responseProfile?.mark(.firstPositive)
+                }
                 let responseChanged = session.modelVerificationPending
                     ? !session.response.utf8.elementsEqual(response.utf8) : session.response != response
                 if responseChanged {
                     session.response = response; session.lastChanged = .now; session.candidateSince = nil
                 }
                 if observed["busy"] as? Bool == false, observed["answerComplete"] as? Bool == true {
+                    if !session.profiledFirstCompletionCandidate {
+                        session.profiledFirstCompletionCandidate = true
+                        session.responseProfile?.mark(.firstCompletionCandidate)
+                    }
                     // Retain only the finite projection from this owned answer,
                     // alongside the exact response selected for strict parsing.
                     session.responseCodeStructure = nil
@@ -1713,6 +1748,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.completionCandidate = true
                     if let since = session.candidateSince,
                        ContinuousClock.now - max(since, session.lastChanged) >= .milliseconds(1_600) {
+                        session.responseProfile?.mark(.quietDeadlineReady)
                         var completionObservation = observed
                         var currentAnswerVerified = true
                         if session.modelVerificationPending {
@@ -1720,10 +1756,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             // owned completed-answer candidate. The adapter
                             // rechecks the exact answer after its last await;
                             // native generation/route/lineage checks still run.
-                            let final = try await page(session, action: "inspect",
-                                recheckModelAfterAwait: false, recheckProductAfterAwait: false,
-                                allowPendingChatGPTModelVerification: false,
-                                maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
+                            session.responseProfile?.mark(.finalFullInspectStart)
+                            let final: [String: Any]
+                            do {
+                                defer { session.responseProfile?.mark(.finalFullInspectEnd) }
+                                final = try await page(session, action: "inspect",
+                                    recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                                    allowPendingChatGPTModelVerification: false,
+                                    maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
+                            }
                             currentAnswerVerified = final["modelVerificationPending"] == nil
                                 && final["temporary"] as? Bool == true
                                 && final["interrupted"] as? Bool != true
@@ -1753,6 +1794,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             guard ContinuousClock.now - session.turnStarted < responseTimeout else { throw Failure.deadline }
                             logResourceTimingDiagnostic(completionObservation["resourceTimingDiagnostic"], session: session, phase: "completion")
                             session.state = "complete"
+                            session.responseProfile?.mark(.transportComplete)
                         }
                     }
                 }
@@ -2950,6 +2992,74 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return edges + [FirstUserExpansionRouteEdge(fromURL: from, toURL: to)]
     }
 
+    /// Passive synthetic measurements are always removed before observation
+    /// validation. Invalid/missing/foreign values are unknown, never authority.
+    static func removeMatchedBenchmarkMilestones(from observed: inout [String: Any],
+        binding: WebsiteBenchmarkCaptureLease.ObservationBinding?) -> [String: Any]? {
+        let raw = observed.removeValue(forKey: "benchmarkMilestones")
+        let hashes = ["editorSHA256", "editorCanonicalSHA256", "userSHA256", "responseSHA256"]
+        let counts = ["editorUTF8Bytes", "userUTF8Bytes", "responseUTF8Bytes"]
+        let durations = ["sendSinceInstallMs", "firstTextAfterSendMs", "firstCompleteAfterSendMs", "lastTextChangeAfterSendMs"]
+        let flags = ["editorMatchesExpected", "userMatchesExpected"]
+        let keys = ["schemaVersion", "nonce", "expectedSHA256", "expectedCanonicalSHA256", "expectedUTF8Bytes", "invalidReason",
+                    "sendClickCount", "userCount", "assistantCount", "payloadMatched", "currentComplete", "installedUnixMs", "sendUnixMs", "completionScope", "responseKind"]
+            + hashes + counts + durations + flags
+        guard let binding, let value = raw as? [String: Any], Set(value.keys) == Set(keys),
+              value["nonce"] as? String == binding.nonce.uuidString.lowercased(),
+              value["expectedSHA256"] as? String == binding.rawOutboundSHA,
+              value["expectedCanonicalSHA256"] as? String == binding.canonicalOutboundSHA,
+              let reason = value["invalidReason"] as? String,
+              ["none", "not_fresh", "document_changed", "extra_user", "extra_answer", "user_root_changed", "answer_root_changed", "user_body_changed",
+               "multiple_sends", "editor_unavailable", "editor_mismatch", "hash_failed", "expired", "overflow"].contains(reason),
+              let scope = value["completionScope"] as? String, ["none", "assistant_ancestor", "paired_turn"].contains(scope),
+              let kind = value["responseKind"] as? String, ["none", "code", "rendered"].contains(kind) else { return nil }
+        func number(_ key: String, upper: Double) -> Double? {
+            guard let n = value[key] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+                  n.doubleValue.isFinite, (0...upper).contains(n.doubleValue) else { return nil }
+            return n.doubleValue
+        }
+        guard number("schemaVersion", upper: 1) == 1,
+              number("expectedUTF8Bytes", upper: 180_200) == Double(binding.utf8Bytes) else { return nil }
+        var safe: [String: Any] = ["schemaVersion": 1, "nonce": binding.nonce.uuidString.lowercased(),
+            "expectedSHA256": binding.rawOutboundSHA, "expectedCanonicalSHA256": binding.canonicalOutboundSHA,
+            "expectedUTF8Bytes": binding.utf8Bytes, "invalidReason": reason, "completionScope": scope, "responseKind": kind]
+        for key in ["sendClickCount", "userCount", "assistantCount"] {
+            guard let n = number(key, upper: 2), n.rounded() == n else { return nil }; safe[key] = Int(n)
+        }
+        for key in counts {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let n = number(key, upper: key == "responseUTF8Bytes" ? 220_000 : 180_200), n.rounded() == n else { return nil }; safe[key] = Int(n)
+        }
+        for key in hashes {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let h = value[key] as? String, h.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { return nil }; safe[key] = h
+        }
+        for key in durations {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let n = number(key, upper: 600_000) else { return nil }; safe[key] = n
+        }
+        for key in ["installedUnixMs", "sendUnixMs"] {
+            if key == "sendUnixMs", value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let n = number(key, upper: 4_102_444_800_000), n >= 946_684_800_000, n.rounded() == n else { return nil }; safe[key] = n
+        }
+        for key in flags + ["payloadMatched", "currentComplete"] {
+            if flags.contains(key), value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let n = value[key] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }; safe[key] = n.boolValue
+        }
+        if safe["editorMatchesExpected"] as? Bool == true {
+            guard safe["editorSHA256"] as? String == binding.rawOutboundSHA, safe["editorUTF8Bytes"] as? Int == binding.utf8Bytes else { return nil }
+        }
+        if safe["userMatchesExpected"] as? Bool == true {
+            guard safe["userSHA256"] as? String == binding.canonicalOutboundSHA else { return nil }
+        }
+        if safe["payloadMatched"] as? Bool == true {
+            guard reason == "none", safe["sendClickCount"] as? Int == 1, safe["userCount"] as? Int == 1,
+                  safe["assistantCount"] as? Int == 1, safe["editorMatchesExpected"] as? Bool == true,
+                  safe["userMatchesExpected"] as? Bool == true else { return nil }
+        }
+        return safe
+    }
+
     /// Diagnostic metadata is removed before any observation shape or authority
     /// checks. Invalid/missing timings are unknown, never an inference failure.
     static func removePreparationTiming(from observed: inout [String: Any]) -> [String: Any]? {
@@ -3109,6 +3219,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        // A saved, separately leased synthetic capture only requests passive
+        // measurement; it cannot change readiness, waits or inference authority.
+        let benchmarkFirstInsert = action == "insert" && session.sequence == 0 && !session.submitted
+            && session.confirmedUsers == 0 && session.baseline == 0 && session.observedResponseCount == 0
+            && session.preparedSubmission?.sequence == 1
+        let benchmarkFirstInspect = action == "inspect" && session.sequence == 1
+        if provider == .chatgpt, session.modelChoice?.key == "chat/latest/instant",
+           benchmarkFirstInsert || benchmarkFirstInspect, let binding = session.benchmarkObservationBinding {
+            input["matchedBenchmarkProbe"] = ["schemaVersion": 1, "nonce": binding.nonce.uuidString.lowercased(),
+                "expectedSHA256": binding.rawOutboundSHA, "expectedCanonicalSHA256": binding.canonicalOutboundSHA,
+                "expectedUTF8Bytes": binding.utf8Bytes]
+        }
         // Only a claimed current Send may defer positive model proof. The
         // adapter still performs submit's full precheck before the actual click.
         let deferModelVerification = allowPendingChatGPTModelVerification && !allowBlockedProvider && provider == .chatgpt
@@ -3332,6 +3454,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                let structure = String(data: data, encoding: .utf8) {
                 Self.inspectionLog.notice("preparationJavaScript provider=chatgpt action=\(action, privacy: .public) structure=\(structure, privacy: .public)")
             }
+        }
+        let benchmark = Self.removeMatchedBenchmarkMilestones(from: &observed,
+            binding: provider == .chatgpt ? session.benchmarkObservationBinding : nil)
+        if action == "inspect", let benchmark, session.benchmarkObservationLogCount < 32,
+           let data = try? JSONSerialization.data(withJSONObject: benchmark, options: .sortedKeys), data.count <= 4_096,
+           let structure = String(data: data, encoding: .utf8), structure != session.lastBenchmarkObservationLog {
+            session.lastBenchmarkObservationLog = structure; session.benchmarkObservationLogCount += 1
+            Self.inspectionLog.notice("matchedBenchmark provider=chatgpt sequence=\(session.sequence) structure=\(structure, privacy: .public)")
         }
         logModelDiagnostic(observed, session: session)
         if let safe = Self.sanitizedProductModeDiagnostic(observed["productModeDiagnostic"]),
@@ -3953,6 +4083,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     // anything. Keep the provider gate, but retire this exact
                     // app-created view without evaluating the checkpoint.
                     browser.closeTab(session.tabID)
+                    session.responseProfile?.mark(.physicalClose)
                     guard browser.webView(for: session.tabID) == nil,
                           !browser.tabs.contains(where: { $0.id == session.tabID }), session.view.superview == nil else {
                         throw Failure.staleSession
@@ -3960,7 +4091,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     sessions.removeValue(forKey: session.token)
                     session.state = "finished"
                     if session.provider == .chatgpt {
+                        session.responseProfile?.mark(.cookieSettleStart)
                         _ = await browser.settleChatGPTTemporaryCookieRetirement(until: .now + .seconds(2))
+                        session.responseProfile?.mark(.cookieSettleEnd)
                     }
                     return try snapshot(session, cleanup: "not_created")
                 }
@@ -3972,7 +4105,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard !session.submitted, browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
             } else if session.submitted || session.temporaryRequested || session.temporary {
                 let observed: [String: Any]
-                do { observed = try await page(session, action: "inspect", enforceModel: false, allowBlockedProvider: true) }
+                session.responseProfile?.mark(.cleanupOwnershipInspectStart)
+                do {
+                    defer { session.responseProfile?.mark(.cleanupOwnershipInspectEnd) }
+                    observed = try await page(session, action: "inspect", enforceModel: false, allowBlockedProvider: true)
+                }
                 catch {
                     guard let failure = error as? Failure, case .usageLimited(let provider) = failure,
                           provider == session.provider, session.submitted, session.firstUserFingerprint != nil else { throw error }
@@ -4006,13 +4143,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
             }
             browser.closeTab(session.tabID)
+            session.responseProfile?.mark(.physicalClose)
             sessions.removeValue(forKey: session.token)
             session.state = "finished"
             if session.provider == .chatgpt {
                 // Physical website closure is already verified. Local cookie
                 // maintenance has its own durable state and cannot reopen or
                 // invalidate that receipt when a callback remains pending.
+                session.responseProfile?.mark(.cookieSettleStart)
                 _ = await browser.settleChatGPTTemporaryCookieRetirement(until: .now + .seconds(2))
+                session.responseProfile?.mark(.cookieSettleEnd)
             }
             return try snapshot(session, cleanup: "not_created")
         } catch {
@@ -4057,13 +4197,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     static let maximumTurnSubmissions = 16
     static let maximumTurnUTF8Bytes = 1_048_576
 
-    static func promptFingerprint(_ prompt: String) -> String {
+    nonisolated static func promptFingerprint(_ prompt: String) -> String {
         SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Match the adapter's existing CRLF/NFC/ECMAScript trim policy exactly.
     /// This hash is proof of the full outbound body, including its private marker.
-    static func outboundFingerprint(_ outbound: String) -> String {
+    nonisolated static func outboundFingerprint(_ outbound: String) -> String {
         let spaces = CharacterSet(charactersIn: "\u{0009}\u{000A}\u{000B}\u{000C}\u{000D}\u{0020}\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}")
         let canonical = outbound.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
             .precomposedStringWithCanonicalMapping.trimmingCharacters(in: spaces)
@@ -4361,6 +4501,73 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                let source = try? String(contentsOf: url, encoding: .utf8) { return source }
         }
         return nil
+    }
+}
+
+/// Post-Send diagnostic events only. Native and server epochs are distinct:
+/// nativeTurn starts at the existing turnStarted; serverAcknowledged starts
+/// after Send's existing callback. Join only exact session/sequence IDs, plus
+/// the server's native inference ID and OSLog time. No event grants authority.
+/// Elapsed marks share an epoch and are not additive phase durations. End
+/// events also record a throwing scope's exit; they do not assert success.
+struct WebsiteResponseProfile: Sendable {
+    enum Source: String, Sendable, Codable, CaseIterable { case nativeTurn, serverAcknowledged }
+    enum Phase: String, Sendable, Codable, CaseIterable {
+        case firstPositive, firstCompletionCandidate, quietDeadlineReady
+        case finalFullInspectStart, finalFullInspectEnd, transportComplete
+        case cleanupOwnershipInspectStart, cleanupOwnershipInspectEnd, physicalClose, cookieSettleStart, cookieSettleEnd
+        case serverSendAcknowledged, codecStart, codecEnd
+        case submissionEvidenceStart, submissionEvidenceEnd, completionEvidenceStart, completionEvidenceEnd
+        case encodeStart, encoded, cleanupReceiptDone, inferenceReturnReady, httpWriteStart, httpWriteEnd
+
+        var source: Source {
+            switch self {
+            case .firstPositive, .firstCompletionCandidate, .quietDeadlineReady, .finalFullInspectStart, .finalFullInspectEnd,
+                 .transportComplete, .cleanupOwnershipInspectStart, .cleanupOwnershipInspectEnd, .physicalClose,
+                 .cookieSettleStart, .cookieSettleEnd: .nativeTurn
+            default: .serverAcknowledged
+            }
+        }
+    }
+    struct Event: Encodable, Equatable {
+        let version: Int
+        let source: Source
+        let phase: Phase
+        let sessionID: UUID
+        let sequence: Int
+        let inferenceID: UUID?
+        let elapsedMs: Int
+    }
+    private static let log = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "WebsiteInference")
+    private let source: Source
+    private let sessionID: UUID
+    private let sequence: Int
+    private let inferenceID: UUID?
+    private let started: ContinuousClock.Instant
+
+    static func begin(source: Source, sessionToken: String, sequence: Int, inferenceID: UUID? = nil,
+                      started: ContinuousClock.Instant = .now) -> Self? {
+        guard let sessionID = UUID(uuidString: sessionToken), (1...16).contains(sequence),
+              (source == .nativeTurn ? inferenceID == nil : inferenceID != nil) else { return nil }
+        return Self(source: source, sessionID: sessionID, sequence: sequence, inferenceID: inferenceID, started: started)
+    }
+
+    static func milliseconds(_ value: Duration) -> Int {
+        let parts = value.components
+        return Int(max(0, min(600_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
+    }
+
+    func event(_ phase: Phase, at now: ContinuousClock.Instant = .now) -> Event? {
+        guard phase.source == source else { return nil }
+        return Event(version: 1, source: source, phase: phase, sessionID: sessionID,
+                     sequence: sequence, inferenceID: inferenceID, elapsedMs: Self.milliseconds(now - started))
+    }
+
+    func mark(_ phase: Phase) {
+        guard let event = event(phase) else { return }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(event), let encoded = String(data: data, encoding: .utf8) else { return }
+        Self.log.notice("websiteResponse structure=\(encoded, privacy: .public)")
     }
 }
 

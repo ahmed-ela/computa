@@ -168,6 +168,7 @@ actor WebModelServer {
     private struct InferenceResult: Sendable {
         let data: Data
         let inferenceID: UUID
+        let responseProfile: WebsiteResponseProfile?
     }
 
     private struct InferenceContext: Equatable, Sendable {
@@ -176,6 +177,8 @@ actor WebModelServer {
         let runtimeGeneration: UUID
         let preparationID: UUID
         let isMaintenance: Bool
+        // Diagnostic provenance only; never page/tool or inference authority.
+        let isNewThread: Bool
     }
 
     private struct PreparedInferenceContext: Equatable, Sendable {
@@ -183,6 +186,8 @@ actor WebModelServer {
         let runtimeGeneration: UUID
         let preparationID: UUID
         let isMaintenance: Bool
+        // Diagnostic provenance only; never page/tool or inference authority.
+        let isNewThread: Bool
     }
 
     private struct ContextWaiter {
@@ -283,7 +288,7 @@ actor WebModelServer {
     /// Core calls this before turn/start, removing any preceding turn's
     /// identity before the native engine can open its first HTTP inference.
     func prepareInferenceTurn(taskID: String, threadID: String, runtimeGeneration: UUID, preparationID: UUID,
-                              isMaintenance: Bool = false) throws {
+                              isMaintenance: Bool = false, isNewThread: Bool = false) throws {
         let task = try Self.canonicalID(taskID)
         let thread = try Self.canonicalID(threadID)
         guard !shuttingDown, active[task] == nil, cleanupTasks[task] == nil,
@@ -293,7 +298,7 @@ actor WebModelServer {
         guard cleanupReceiptStore != nil, evidenceDirectory != nil else { throw Failure.persistenceRequired }
         guard runtimeGeneration == cleanupRuntimeGeneration else { throw Failure.inferenceContextRequired }
         preparedInferenceContexts[task] = PreparedInferenceContext(threadID: thread,
-            runtimeGeneration: runtimeGeneration, preparationID: preparationID, isMaintenance: isMaintenance)
+            runtimeGeneration: runtimeGeneration, preparationID: preparationID, isMaintenance: isMaintenance, isNewThread: isNewThread)
         inspectorAuthorizations.removeValue(forKey: task)?.revoke()
         inferenceContexts.removeValue(forKey: task)
         if usedSessionTokens[task] == nil { usedSessionTokens[task] = [] }
@@ -310,14 +315,15 @@ actor WebModelServer {
         let task = try Self.canonicalID(taskID)
         let context = InferenceContext(threadID: try Self.canonicalID(threadID),
             turnID: try Self.canonicalID(turnID), runtimeGeneration: runtimeGeneration, preparationID: preparationID,
-            isMaintenance: preparedInferenceContexts[task]?.isMaintenance ?? false)
+            isMaintenance: preparedInferenceContexts[task]?.isMaintenance ?? false,
+            isNewThread: preparedInferenceContexts[task]?.isNewThread ?? false)
         if inferenceContexts[task] == context { return }
         guard !shuttingDown, !retiringTaskIDs.contains(task),
               sessions[task] == nil, pendingClosedTransactions[task] == nil,
               inferenceContexts[task] == nil,
               preparedInferenceContexts[task] == PreparedInferenceContext(threadID: context.threadID,
                   runtimeGeneration: runtimeGeneration, preparationID: preparationID,
-                  isMaintenance: context.isMaintenance) else { throw Failure.inferenceContextRequired }
+                  isMaintenance: context.isMaintenance, isNewThread: context.isNewThread) else { throw Failure.inferenceContextRequired }
         inferenceContexts[task] = context
         cleanupTurns[task] = context.turnID
         if let waiter = contextWaiters.removeValue(forKey: task) { waiter.continuation.resume(returning: context) }
@@ -817,6 +823,7 @@ actor WebModelServer {
         // Claim this handoff before any suspension. A duplicate request cannot
         // reuse a claim, including after validation, Send or persistence fails.
         var yielded = yieldedTurns.removeValue(forKey: taskID)
+        let firstNativeInference = lease == nil && closedHandoff == nil && yielded == nil
         let correctionStore = evidenceDirectory.map {
             WebsiteModelFormatCorrectionStore(directory: $0.appendingPathComponent("format-corrections-v1"))
         }
@@ -1038,8 +1045,20 @@ actor WebModelServer {
                     // budget; a rejected reply never renews this deadline.
                     responseDeadline = ContinuousClock.now + responseTimeout
                 }
-                let sent = try await call(session.transport, operation: "webProviderSend",
-                    params: ["sessionToken": session.token, "prompt": prompt], submissionFailureSink: submissionFailureSink)
+                // A private nonce arm can retain only a new synthetic first
+                // Instant payload. Task-local metadata reaches the exact native
+                // send without adding wire fields, tools, waits or page authority.
+                let benchmarkCapture = WebsiteBenchmarkCaptureLease.consume(
+                    directory: rejectedReplyDirectory?.deletingLastPathComponent().appendingPathComponent("WebsiteBenchmarkDiagnostics-v1"),
+                    request: request, taskID: taskID, threadID: context.threadID, turnID: context.turnID,
+                    runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
+                    isNewThread: context.isNewThread, isMaintenance: context.isMaintenance,
+                    isFirstInference: firstNativeInference && correctionTicket == nil && session.sequence == 1 && session.turnInferenceCount == 1)
+                defer { benchmarkCapture?.revoke() }
+                let sent = try await WebsiteBenchmarkCaptureLease.$current.withValue(benchmarkCapture) {
+                    try await call(session.transport, operation: "webProviderSend",
+                        params: ["sessionToken": session.token, "prompt": prompt], submissionFailureSink: submissionFailureSink)
+                }
                 try requireCurrentContext()
                 guard sent["state"] as? String == "running" else { throw Self.snapshotFailure(sent) }
                 try Self.verifyInferenceSnapshot(sent, session: &session)
@@ -1050,6 +1069,10 @@ actor WebModelServer {
                 }
                 sessions[taskID] = session
                 lease = session
+                let responseProfile = provider == "chatgpt" && route == .embedded
+                    ? WebsiteResponseProfile.begin(source: .serverAcknowledged, sessionToken: session.token,
+                        sequence: session.sequence, inferenceID: inferenceID) : nil
+                responseProfile?.mark(.serverSendAcknowledged)
                 let end = responseDeadline ?? (ContinuousClock.now + responseTimeout)
                 while ContinuousClock.now < end {
                     try requireCurrentContext()
@@ -1067,12 +1090,18 @@ actor WebModelServer {
                             // Dispatch-only observations never assert fresh model
                             // selection. The owned final answer establishes both
                             // submission and completion before any text/tool parse.
-                            try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
+                            responseProfile?.mark(.submissionEvidenceStart)
+                            do {
+                                defer { responseProfile?.mark(.submissionEvidenceEnd) }
+                                try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
+                            }
                             submissionModelVerificationPending = false
                         }
                         guard let text = value["text"] as? String, !text.isEmpty else { throw Failure.providerFailed }
                         let reply: WebModelResponseCodec.Reply
+                        responseProfile?.mark(.codecStart)
                         do {
+                            defer { responseProfile?.mark(.codecEnd) }
                             reply = try session.route == .embedded
                                 ? WebModelResponseCodec.parseEmbeddedReply(text, request: request)
                                 : WebModelResponseCodec.parseReply(text, request: request)
@@ -1147,15 +1176,21 @@ actor WebModelServer {
                         session.completedSnapshot = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
                         sessions[taskID] = session
                         lease = session
-                        try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "complete")
+                        responseProfile?.mark(.completionEvidenceStart)
+                        do {
+                            defer { responseProfile?.mark(.completionEvidenceEnd) }
+                            try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID, session: session, phase: "complete")
+                        }
                         // Parse and validate the entire proposal above before
                         // selecting a native action. No unselected call is queued.
+                        responseProfile?.mark(.encodeStart)
                         let selection = try WebsiteToolCallSelection.select(validatedReply: reply,
                             singleAction: request.singleActionRelay && provider == "chatgpt" && route == .embedded)
                         let responseID = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
                         let encoded = try request.stream
                             ? WebModelResponseCodec.streamData(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
                             : WebModelResponseCodec.completedResponse(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
+                        responseProfile?.mark(.encoded)
                         let continuation: WebsiteTurnContinuation? = try session.provesNativeContinuation ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
                         if let requestMetadata {
                             let retain = session.retainsConversation && (continuation?.pendingToolCallCount ?? 0) > 0
@@ -1186,6 +1221,7 @@ actor WebModelServer {
                                   closed.receipt.inferenceID == inferenceID.uuidString.lowercased(),
                                   closed.receipt.sessionToken == session.token.lowercased() else { throw Failure.cleanupFailed }
                             guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
+                            responseProfile?.mark(.cleanupReceiptDone)
                             try requireCurrentContext()
                             if !session.provesNativeContinuation {
                                 try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
@@ -1205,7 +1241,8 @@ actor WebModelServer {
                             correctionFinished = true
                         }
                         try requireCurrentContext()
-                        return InferenceResult(data: encoded, inferenceID: inferenceID)
+                        responseProfile?.mark(.inferenceReturnReady)
+                        return InferenceResult(data: encoded, inferenceID: inferenceID, responseProfile: responseProfile)
                     case "running":
                         try Self.verifyInferenceSnapshot(value, session: &session)
                         if value["modelVerificationPending"] as? Bool != true {
@@ -1681,7 +1718,9 @@ actor WebModelServer {
                     }
                     let body = try await infer(prepared, taskID: taskID, identity: identity)
                     failureDiagnostics.clear(taskID: taskID)
+                    body.responseProfile?.mark(.httpWriteStart)
                     do {
+                        defer { body.responseProfile?.mark(.httpWriteEnd) }
                         try await Self.send(connection, status: "200 OK",
                             type: prepared.stream ? "text/event-stream" : "application/json", body: body.data)
                     } catch {
@@ -2130,5 +2169,390 @@ private final class WebListenerReady: @unchecked Sendable {
     func complete(_ result: Result<UInt16, Error>) {
         lock.lock(); let pending = continuation; continuation = nil; lock.unlock()
         pending?.resume(with: result)
+    }
+}
+
+/// Explicit synthetic-only benchmark capture, separate from finite request
+/// metadata/Inspector diagnostics. It never creates an arm, changes inference,
+/// grants page authority or prints payload contents. This same-UID operator
+/// convention is not authentication against another process running as the user.
+final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
+    @TaskLocal static var current: WebsiteBenchmarkCaptureLease?
+    static let purpose = "synthetic_latency_payload_v1"
+    static let maximumPayloadBytes = 180_000
+    private static let maximumArmBytes = 1_024
+    private static let maximumRecordBytes = maximumPayloadBytes * 6 + 8_192
+
+    let nonce: UUID
+    private let taskID: UUID, threadID: UUID, turnID: UUID, runtimeGeneration: UUID, preparationID: UUID
+    private let modelID: String, promptFingerprint: String
+    private let directory: URL, directoryDevice: dev_t, directoryInode: ino_t
+    private let deadline: ContinuousClock.Instant
+    private let lock = NSLock()
+    private var active = true
+    private var attempted = false
+    struct ObservationBinding: Sendable, Equatable {
+        let nonce: UUID
+        let rawOutboundSHA: String
+        let canonicalOutboundSHA: String
+        let utf8Bytes: Int
+    }
+    private var publishedBinding: ObservationBinding?
+    var observationBinding: ObservationBinding? { lock.withLock { publishedBinding } }
+
+    private init(nonce: UUID, taskID: UUID, threadID: UUID, turnID: UUID,
+        runtimeGeneration: UUID, preparationID: UUID, modelID: String, prompt: String,
+        directory: URL, directoryIdentity: stat, deadline: ContinuousClock.Instant) {
+        self.nonce = nonce; self.taskID = taskID; self.threadID = threadID; self.turnID = turnID
+        self.runtimeGeneration = runtimeGeneration; self.preparationID = preparationID
+        self.modelID = modelID; promptFingerprint = EmbeddedWebModelTransport.promptFingerprint(prompt)
+        self.directory = directory; directoryDevice = directoryIdentity.st_dev; directoryInode = directoryIdentity.st_ino
+        self.deadline = deadline
+    }
+
+    func revoke() { lock.withLock { active = false } }
+    private var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } }
+
+    static func consume(directory: URL?, request: WebModelResponseCodec.Request,
+        taskID: String, threadID: String, turnID: String, runtimeGeneration: UUID, preparationID: UUID,
+        isNewThread: Bool, isMaintenance: Bool, isFirstInference: Bool, now: Date = Date()) -> WebsiteBenchmarkCaptureLease? {
+        consume(directory: directory, request: request, taskID: taskID, threadID: threadID, turnID: turnID,
+            runtimeGeneration: runtimeGeneration, preparationID: preparationID, isNewThread: isNewThread,
+            isMaintenance: isMaintenance, isFirstInference: isFirstInference, now: now, beforeArmClaim: nil)
+    }
+
+    #if DEBUG
+    static func consume(directory: URL?, request: WebModelResponseCodec.Request,
+        taskID: String, threadID: String, turnID: String, runtimeGeneration: UUID, preparationID: UUID,
+        isNewThread: Bool, isMaintenance: Bool, isFirstInference: Bool, now: Date,
+        beforeArmClaimForTesting: @escaping @Sendable () -> Void) -> WebsiteBenchmarkCaptureLease? {
+        consume(directory: directory, request: request, taskID: taskID, threadID: threadID, turnID: turnID,
+            runtimeGeneration: runtimeGeneration, preparationID: preparationID, isNewThread: isNewThread,
+            isMaintenance: isMaintenance, isFirstInference: isFirstInference, now: now,
+            beforeArmClaim: beforeArmClaimForTesting)
+    }
+    #endif
+
+    private static func consume(directory: URL?, request: WebModelResponseCodec.Request,
+        taskID: String, threadID: String, turnID: String, runtimeGeneration: UUID, preparationID: UUID,
+        isNewThread: Bool, isMaintenance: Bool, isFirstInference: Bool, now: Date,
+        beforeArmClaim: (@Sendable () -> Void)?) -> WebsiteBenchmarkCaptureLease? {
+        let started = ContinuousClock.now
+        guard !Task.isCancelled, isNewThread, !isMaintenance, isFirstInference,
+              let selection = WebsiteModelCatalog.inferenceSelection(for: request.model),
+              selection.provider == "chatgpt", selection.choice?.key == "chat/latest/instant",
+              let task = canonicalID(taskID), let thread = canonicalID(threadID), let turn = canonicalID(turnID),
+              let directory else { return nil }
+        let descriptor = openDirectory(directory)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var directoryInfo = stat()
+        guard fstat(descriptor, &directoryInfo) == 0, privateDirectory(directoryInfo),
+              flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { return nil }
+        let armFD = openat(descriptor, "arm.json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard armFD >= 0 else { return nil }
+        defer { close(armFD) }
+        var before = stat()
+        guard fstat(armFD, &before) == 0, privateFile(before), before.st_size > 0,
+              before.st_size <= maximumArmBytes, let bytes = read(armFD, maximum: maximumArmBytes),
+              bytes.count == before.st_size, APIModelCorrectionJSON.isUnambiguous(bytes),
+              let fields = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              Set(fields.keys) == ["schemaVersion", "purpose", "nonce", "expiresAt"],
+              ComputerToolArgumentContract.exactInt64(fields["schemaVersion"]) == 1,
+              fields["purpose"] as? String == purpose,
+              let nonceText = fields["nonce"] as? String, let nonce = canonicalID(nonceText),
+              let expiry = fields["expiresAt"] as? String, expiry.utf8.count == 24,
+              matchesSyntheticRequest(request, nonce: nonce) else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.isLenient = false
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+        guard let expiresAt = formatter.date(from: expiry), formatter.string(from: expiresAt) == expiry else { return nil }
+        let seconds = expiresAt.timeIntervalSince(now)
+        guard seconds > 0, seconds <= 600 else { return nil }
+        let originalDeadline = started + .seconds(seconds)
+        let outputName = "payload-" + nonce.uuidString.lowercased() + ".json"
+        var after = stat(), named = stat(), existing = stat()
+        guard fstat(armFD, &after) == 0, same(before, after),
+              fstatat(descriptor, "arm.json", &named, AT_SYMLINK_NOFOLLOW) == 0, same(before, named),
+              fstatat(descriptor, outputName, &existing, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT,
+              directoryMatches(directory, descriptor: descriptor, identity: directoryInfo), !Task.isCancelled else { return nil }
+        let claimed = ".claimed-benchmark-" + UUID().uuidString.lowercased()
+        beforeArmClaim?()
+        guard renameatx_np(descriptor, "arm.json", descriptor, claimed, UInt32(RENAME_EXCL)) == 0 else { return nil }
+        var moved = stat()
+        // A raced replacement is not this open arm. Restore it exclusively or
+        // retain the private claimed file if a newer arm already occupies its name.
+        guard fstatat(descriptor, claimed, &moved, AT_SYMLINK_NOFOLLOW) == 0, privateFile(moved),
+              before.st_dev == moved.st_dev, before.st_ino == moved.st_ino, before.st_size == moved.st_size,
+              before.st_mtimespec.tv_sec == moved.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == moved.st_mtimespec.tv_nsec,
+              lseek(armFD, 0, SEEK_SET) == 0, read(armFD, maximum: maximumArmBytes) == bytes,
+              fstat(armFD, &after) == 0, same(moved, after),
+              fstatat(descriptor, claimed, &named, AT_SYMLINK_NOFOLLOW) == 0, same(after, named) else {
+            _ = renameatx_np(descriptor, claimed, descriptor, "arm.json", UInt32(RENAME_EXCL)); return nil
+        }
+        guard unlinkat(descriptor, claimed, 0) == 0 else { return nil }
+        _ = fsync(descriptor)
+        guard directoryMatches(directory, descriptor: descriptor, identity: directoryInfo),
+              !Task.isCancelled, ContinuousClock.now < originalDeadline else { return nil }
+        return WebsiteBenchmarkCaptureLease(nonce: nonce, taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: runtimeGeneration, preparationID: preparationID, modelID: request.model, prompt: request.prompt,
+            directory: directory, directoryIdentity: directoryInfo, deadline: originalDeadline)
+    }
+
+    @discardableResult
+    func capture(prompt: String, outbound: String, modelID: String, sessionToken: String,
+        generation: UUID, marker: String, nativeFirstFreshInstant: Bool) -> Bool {
+        capture(prompt: prompt, outbound: outbound, modelID: modelID, sessionToken: sessionToken,
+            generation: generation, marker: marker, nativeFirstFreshInstant: nativeFirstFreshInstant, beforePublish: nil)
+    }
+
+    #if DEBUG
+    @discardableResult
+    func capture(prompt: String, outbound: String, modelID: String, sessionToken: String,
+        generation: UUID, marker: String, nativeFirstFreshInstant: Bool,
+        beforePublishForTesting: @escaping @Sendable () -> Void) -> Bool {
+        capture(prompt: prompt, outbound: outbound, modelID: modelID, sessionToken: sessionToken,
+            generation: generation, marker: marker, nativeFirstFreshInstant: nativeFirstFreshInstant,
+            beforePublish: beforePublishForTesting)
+    }
+    #endif
+
+    private func capture(prompt: String, outbound: String, modelID: String, sessionToken: String,
+        generation: UUID, marker: String, nativeFirstFreshInstant: Bool, beforePublish: (@Sendable () -> Void)?) -> Bool {
+        let started = ContinuousClock.now
+        guard nativeFirstFreshInstant, modelID == self.modelID, let session = UUID(uuidString: sessionToken),
+              marker.count == 36, UUID(uuidString: marker) != nil,
+              !outbound.isEmpty, outbound.utf8.count <= Self.maximumPayloadBytes,
+              EmbeddedWebModelTransport.promptFingerprint(prompt) == promptFingerprint,
+              outbound.utf8.elementsEqual((prompt + "\n\nComputa session marker: " + marker).utf8),
+              lock.withLock({ () -> Bool in
+                  guard active, !attempted, ContinuousClock.now < deadline, !Task.isCancelled else { return false }
+                  attempted = true; return true
+              }) else { return false }
+        let descriptor = Self.openDirectory(directory)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        var directoryInfo = stat()
+        guard fstat(descriptor, &directoryInfo) == 0, Self.privateDirectory(directoryInfo),
+              directoryInfo.st_dev == directoryDevice, directoryInfo.st_ino == directoryInode,
+              flock(descriptor, LOCK_EX | LOCK_NB) == 0, isCurrent else { return false }
+        let outputName = "payload-" + nonce.uuidString.lowercased() + ".json"
+        let bytes = Data(outbound.utf8)
+        let rawHash = EmbeddedWebModelTransport.promptFingerprint(outbound)
+        let canonicalHash = EmbeddedWebModelTransport.outboundFingerprint(outbound)
+        // The immutable record cannot time its own final write. This field has
+        // an explicit preparation boundary; native logs the full publication
+        // span separately using only a UUID, boolean and bounded milliseconds.
+        let elapsed = Self.milliseconds(.now - started)
+        let record: [String: Any] = ["schemaVersion": 1, "purpose": Self.purpose,
+            "nonce": nonce.uuidString.lowercased(), "stage": "before_insert", "automaticReplay": false,
+            "provider": "chatgpt", "modelID": modelID,
+            "taskID": taskID.uuidString.lowercased(), "threadID": threadID.uuidString.lowercased(),
+            "turnID": turnID.uuidString.lowercased(), "runtimeGeneration": runtimeGeneration.uuidString.lowercased(),
+            "preparationID": preparationID.uuidString.lowercased(), "sessionToken": session.uuidString.lowercased(),
+            "documentGeneration": generation.uuidString.lowercased(), "marker": marker,
+            "payload": outbound, "utf8Bytes": bytes.count, "utf16Count": outbound.utf16.count,
+            "rawSHA256": rawHash, "canonicalSHA256": canonicalHash,
+            "captureElapsedMs": elapsed, "captureElapsedBoundary": "record_preparation_before_atomic_write"]
+        guard let encoded = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]),
+              encoded.count <= Self.maximumRecordBytes, isCurrent else { return false }
+        let temporary = ".payload-" + UUID().uuidString.lowercased() + ".tmp"
+        let output = openat(descriptor, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard output >= 0 else { return false }
+        defer {
+            var held = stat(), named = stat()
+            if fstat(output, &held) == 0, fstatat(descriptor, temporary, &named, AT_SYMLINK_NOFOLLOW) == 0,
+               Self.same(held, named) { _ = unlinkat(descriptor, temporary, 0) }
+            close(output)
+        }
+        guard fchmod(output, 0o600) == 0, Self.write(encoded, descriptor: output), fsync(output) == 0 else { return false }
+        beforePublish?()
+        let published = lock.withLock { () -> Bool in
+            var held = stat(), named = stat()
+            guard active, ContinuousClock.now < deadline, !Task.isCancelled,
+                  fstat(output, &held) == 0, Self.privateFile(held), held.st_size == encoded.count,
+                  fstatat(descriptor, temporary, &named, AT_SYMLINK_NOFOLLOW) == 0, Self.same(held, named),
+                  Self.directoryMatches(directory, descriptor: descriptor, identity: directoryInfo),
+                  renameatx_np(descriptor, temporary, descriptor, outputName, UInt32(RENAME_EXCL)) == 0 else { return false }
+            publishedBinding = ObservationBinding(nonce: nonce, rawOutboundSHA: rawHash,
+                canonicalOutboundSHA: canonicalHash, utf8Bytes: bytes.count)
+            return true
+        }
+        guard published else { return false }
+        _ = fsync(descriptor)
+        return true
+    }
+
+    static func milliseconds(_ duration: Duration) -> Int {
+        let parts = duration.components
+        return Int(max(0, min(600_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
+    }
+    private static func canonicalID(_ value: String) -> UUID? {
+        guard let id = UUID(uuidString: value), id.uuidString.lowercased() == value else { return nil }; return id
+    }
+    private static func openDirectory(_ url: URL) -> Int32 {
+        guard url.isFileURL, url.path.hasPrefix("/") else { return -1 }
+        let components = url.path.split(separator: "/").map(String.init)
+        guard !components.isEmpty, components.allSatisfy({ $0 != "." && $0 != ".." }) else { return -1 }
+        var descriptor = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return -1 }
+        for component in components {
+            let next = openat(descriptor, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            close(descriptor); guard next >= 0 else { return -1 }; descriptor = next
+        }
+        return descriptor
+    }
+    private static func directoryMatches(_ url: URL, descriptor: Int32, identity: stat) -> Bool {
+        let current = openDirectory(url); guard current >= 0 else { return false }; defer { close(current) }
+        var named = stat(), held = stat()
+        return fstat(current, &named) == 0 && fstat(descriptor, &held) == 0 && privateDirectory(named) && privateDirectory(held)
+            && named.st_dev == identity.st_dev && named.st_ino == identity.st_ino
+            && held.st_dev == identity.st_dev && held.st_ino == identity.st_ino
+    }
+    private static func privateDirectory(_ value: stat) -> Bool {
+        value.st_mode & S_IFMT == S_IFDIR && value.st_uid == geteuid() && value.st_mode & 0o7777 == 0o700
+    }
+    private static func privateFile(_ value: stat) -> Bool {
+        value.st_mode & S_IFMT == S_IFREG && value.st_uid == geteuid() && value.st_nlink == 1 && value.st_mode & 0o7777 == 0o600
+    }
+    private static func same(_ a: stat, _ b: stat) -> Bool {
+        a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size && a.st_mode == b.st_mode
+            && a.st_uid == b.st_uid && a.st_nlink == b.st_nlink
+            && a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec
+            && a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
+    }
+    private static func read(_ descriptor: Int32, maximum: Int) -> Data? {
+        var bytes = Data(count: maximum + 1)
+        let count = bytes.withUnsafeMutableBytes { buffer -> Int? in
+            var count = 0
+            while count < buffer.count {
+                let read = Darwin.read(descriptor, buffer.baseAddress!.advanced(by: count), buffer.count - count)
+                if read < 0 { if errno == EINTR { continue }; return nil }; if read == 0 { return count }; count += read
+            }
+            return count
+        }
+        guard let count, count <= maximum else { return nil }; bytes.count = count; return bytes
+    }
+    private static func write(_ bytes: Data, descriptor: Int32) -> Bool {
+        bytes.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let count = Darwin.write(descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+                if count < 0 { if errno == EINTR { continue }; return false }; guard count > 0 else { return false }; offset += count
+            }
+            return true
+        }
+    }
+    static func matchesSyntheticRequest(_ request: WebModelResponseCodec.Request, nonce: UUID) -> Bool {
+        let expectedModel = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
+        guard request.model == expectedModel,
+              request.continuationRequest.count <= WebModelResponseCodec.maximumPromptBytes,
+              APIModelCorrectionJSON.isUnambiguous(request.continuationRequest),
+              let object = try? JSONSerialization.jsonObject(with: request.continuationRequest) as? [String: Any],
+              object["model"] as? String == request.model,
+              ["previous_response_id", "conversation", "conversation_id", "response_id"].allSatisfy({ object[$0] == nil || object[$0] is NSNull }),
+              let input = object["input"] as? [[String: Any]], (2...34).contains(input.count) else { return false }
+        // Top-level instructions are engine/native-owned and remain in the captured
+        // complete payload. This helper does not reconstruct or replace them/tools.
+        func parts(_ item: [String: Any], role: String) -> [String]? {
+            guard Set(item.keys).isSubset(of: ["type", "role", "content", "id"]),
+                  item["type"] as? String == "message", item["role"] as? String == role,
+                  let content = item["content"] as? [[String: Any]], (1...32).contains(content.count) else { return nil }
+            if let id = item["id"] {
+                guard let value = id as? String, value.hasPrefix("msg_"), value.utf8.count <= 128,
+                      value.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }) else { return nil }
+            }
+            var texts: [String] = []
+            for part in content {
+                guard Set(part.keys) == ["type", "text"], part["type"] as? String == "input_text",
+                      let text = part["text"] as? String, !text.isEmpty else { return nil }
+                texts.append(text)
+            }
+            return texts
+        }
+        let preludeCount = input.count - 2
+        for item in input.prefix(preludeCount) { guard parts(item, role: "developer") != nil else { return false } }
+        guard let environment = parts(input[preludeCount], role: "user"), environment.count == 1,
+              matchesEnvironmentFragment(environment[0]),
+              let user = parts(input[preludeCount + 1], role: "user") else { return false }
+        let expected = "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
+        let policy = ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false)
+        // The native host appends one exact policy text item; the engine can
+        // join it to the user text with LF. Accept only those byte-exact forms,
+        // plus the original bare synthetic form. No generic trimming/joining.
+        if user.count == 1 {
+            return user[0].utf8.elementsEqual(expected.utf8)
+                || user[0].utf8.elementsEqual((expected + "\n" + policy).utf8)
+        }
+        return user.count == 2 && user[0].utf8.elementsEqual(expected.utf8)
+            && user[1].utf8.elementsEqual(policy.utf8)
+    }
+
+    private static func matchesEnvironmentFragment(_ text: String) -> Bool {
+        guard text.utf8.count <= 16_384, !text.contains("<!"), !text.contains("<?"), !text.contains("\0") else { return false }
+        final class Environment: NSObject, XMLParserDelegate {
+            struct Node { let name: String; let attributes: [String: String]; var text = ""; var children: [String: Int] = [:] }
+            var stack: [Node] = [], valid = true, roots = 0, nodes = 0
+            let graph: [String: Set<String>] = [
+                "environment_context": ["cwd", "shell", "shell_version", "current_date", "timezone", "filesystem", "network"],
+                "filesystem": ["workspace_roots", "permission_profile"], "workspace_roots": ["root"],
+                "permission_profile": ["file_system"], "file_system": ["entry"], "entry": ["path", "glob", "special"],
+                "network": ["allowed", "denied"]]
+            func reject(_ parser: XMLParser) { valid = false; parser.abortParsing() }
+            func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String]) {
+                nodes += 1
+                guard valid, nodes <= 256, stack.count < 8 else { reject(parser); return }
+                if stack.isEmpty {
+                    roots += 1; guard roots == 1, name == "environment_context", attributes.isEmpty else { reject(parser); return }
+                } else {
+                    let i = stack.count - 1
+                    guard graph[stack[i].name]?.contains(name) == true else { reject(parser); return }
+                    let repeated = stack[i].name == "workspace_roots" && name == "root" || stack[i].name == "file_system" && name == "entry"
+                    guard repeated || stack[i].children[name] == nil else { reject(parser); return }
+                    stack[i].children[name, default: 0] += 1
+                }
+                let allowed: Bool
+                switch name {
+                case "permission_profile": allowed = Set(attributes.keys) == ["type"] && ["disabled", "managed", "external"].contains(attributes["type"] ?? "")
+                case "file_system":
+                    allowed = Set(attributes.keys).isSubset(of: ["type", "glob_scan_max_depth"])
+                        && ["unrestricted", "restricted", "external"].contains(attributes["type"] ?? "")
+                        && (attributes["glob_scan_max_depth"] == nil || attributes["glob_scan_max_depth"].flatMap { Int($0) }.map { (0...1_024).contains($0) } == true)
+                case "entry": allowed = Set(attributes.keys).isSubset(of: ["access", "escalatable"])
+                    && ["read", "write", "deny"].contains(attributes["access"] ?? "")
+                    && (attributes["escalatable"] == nil || attributes["escalatable"] == "false")
+                case "network": allowed = attributes == ["enabled": "true"]
+                default: allowed = attributes.isEmpty
+                }
+                guard allowed else { reject(parser); return }
+                stack.append(Node(name: name, attributes: attributes))
+            }
+            func parser(_ parser: XMLParser, foundCharacters text: String) {
+                guard !stack.isEmpty else { if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { reject(parser) }; return }
+                stack[stack.count - 1].text += text
+            }
+            func parser(_ parser: XMLParser, didEndElement name: String, namespaceURI: String?, qualifiedName: String?) {
+                guard let node = stack.popLast(), node.name == name else { reject(parser); return }
+                let value = node.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if graph[name] != nil {
+                    guard value.isEmpty else { reject(parser); return }
+                    if name == "environment_context", node.children["cwd"] != 1 || node.children["shell"] != 1 { reject(parser); return }
+                    if name == "filesystem", node.children["permission_profile"] != 1 { reject(parser); return }
+                    if name == "permission_profile", node.children["file_system"] != 1 { reject(parser); return }
+                    if name == "entry", node.children.values.reduce(0, +) != 1 { reject(parser); return }
+                } else {
+                    guard !value.isEmpty, value.utf8.count <= 16_384 else { reject(parser); return }
+                    if ["cwd", "root", "path"].contains(name), !value.hasPrefix("/") { reject(parser); return }
+                    if ["shell", "shell_version", "current_date", "timezone"].contains(name), value.utf8.count > 128 { reject(parser) }
+                }
+            }
+            func parser(_ parser: XMLParser, parseErrorOccurred parseError: any Error) { valid = false }
+            func parser(_ parser: XMLParser, validationErrorOccurred validationError: any Error) { valid = false }
+        }
+        let delegate = Environment(), parser = XMLParser(data: Data(text.utf8))
+        parser.delegate = delegate; parser.shouldResolveExternalEntities = false
+        return parser.parse() && delegate.valid && delegate.roots == 1 && delegate.stack.isEmpty
     }
 }

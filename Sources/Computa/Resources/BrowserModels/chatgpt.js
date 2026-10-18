@@ -1608,7 +1608,224 @@ function chatGPTPreparationElapsed(started) {
 function chatGPTPreparationRecord(key, started) {
   if (chatGPTPreparationTimingEnabled) chatGPTPreparationTiming[key] = chatGPTPreparationElapsed(started);
 }
+// BEGIN COMPUTA MATCHED BENCHMARK PROBE V1 — diagnostic-only, shared verbatim.
+function computaInstallMatchedBenchmarkProbe(config) {
+  const keys = ['schemaVersion', 'nonce', 'expectedSHA256', 'expectedCanonicalSHA256', 'expectedUTF8Bytes'];
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const sha = /^[0-9a-f]{64}$/;
+  if (!config || typeof config !== 'object' || Object.keys(config).length !== keys.length
+    || !keys.every(key => Object.hasOwn(config, key)) || config.schemaVersion !== 1
+    || !uuid.test(config.nonce) || !sha.test(config.expectedSHA256) || !sha.test(config.expectedCanonicalSHA256)
+    || !Number.isSafeInteger(config.expectedUTF8Bytes) || config.expectedUTF8Bytes < 1 || config.expectedUTF8Bytes > 180_200
+    || window !== window.top || location.origin !== 'https://chatgpt.com') return null;
+  const globalKey = '__computaMatchedBenchmarkProbeV1';
+  const existing = globalThis[globalKey];
+  if (existing) {
+    try {
+      const snapshot = existing.snapshot();
+      return existing.nonce === config.nonce && snapshot.expectedSHA256 === config.expectedSHA256
+        && snapshot.expectedCanonicalSHA256 === config.expectedCanonicalSHA256
+        && snapshot.expectedUTF8Bytes === config.expectedUTF8Bytes ? existing : null;
+    } catch { return null; }
+  }
+  const originalDocument = document, started = performance.now();
+  if (!Number.isFinite(started) || started < 0) return null;
+  const canonical = text => text.replace(/\r\n?/g, '\n').normalize('NFC').trim();
+  const roots = role => {
+    const selector = `[data-message-author-role="${role}"], [data-markdown-text-style="${role}-message"], article[data-turn="${role}"]`
+      + (role === 'user' ? ', [data-user-message-bubble]' : '');
+    const all = [...document.querySelectorAll(selector)];
+    return all.filter(node => !all.some(other => other !== node && other.contains(node)));
+  };
+  if (location.pathname !== '/' || roots('user').length || roots('assistant').length) return null;
+  const visible = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden' && getComputedStyle(node).display !== 'none';
+  const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+  const state = { schemaVersion: 1, nonce: config.nonce, expectedSHA256: config.expectedSHA256,
+    expectedCanonicalSHA256: config.expectedCanonicalSHA256, expectedUTF8Bytes: config.expectedUTF8Bytes,
+    invalidReason: 'none', sendClickCount: 0, userCount: 0, assistantCount: 0,
+    editorUTF8Bytes: null, editorSHA256: null, editorCanonicalSHA256: null,
+    userUTF8Bytes: null, userSHA256: null, responseUTF8Bytes: null, responseSHA256: null,
+    editorMatchesExpected: null, userMatchesExpected: null, payloadMatched: false,
+    installedUnixMs: Date.now(), sendUnixMs: null, sendSinceInstallMs: null,
+    firstTextAfterSendMs: null, firstCompleteAfterSendMs: null, lastTextChangeAfterSendMs: null,
+    completionScope: 'none', responseKind: 'none', currentComplete: false };
+  let sendAt = null, userRoot = null, answerRoot = null, pinnedUserText = null;
+  let lastUserText = null, lastAnswerText = null, userGeneration = 0, answerGeneration = 0;
+  let observer = null, stopped = false;
+  const elapsed = from => {
+    const now = performance.now(), value = now - from;
+    return Number.isFinite(value) && value >= 0 && value <= 600_000 ? Math.round(value * 1_000) / 1_000 : null;
+  };
+  const detach = () => { observer?.disconnect(); document.removeEventListener('click', onClick, true); stopped = true; };
+  const invalid = reason => { if (state.invalidReason === 'none') state.invalidReason = reason; state.payloadMatched = false; detach(); };
+  const qualify = () => { state.payloadMatched = state.invalidReason === 'none' && state.sendClickCount === 1
+    && state.userCount === 1 && state.assistantCount === 1 && state.editorMatchesExpected === true && state.userMatchesExpected === true; };
+  const hash = (text, receive) => {
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.length > 220_000) { invalid('overflow'); return; }
+    try {
+      Promise.resolve(crypto.subtle.digest('SHA-256', bytes)).then(value => {
+        if (state.invalidReason !== 'none') return;
+        receive([...new Uint8Array(value)].map(byte => byte.toString(16).padStart(2, '0')).join(''), bytes.length);
+        qualify();
+      }, () => invalid('hash_failed'));
+    } catch { invalid('hash_failed'); }
+  };
+  const userBody = root => root.querySelector('[data-markdown-text-style="user-message"]')
+    || root.querySelector('.whitespace-pre-wrap') || root.querySelector('[data-message-author-role="user"]') || root;
+  const answerBody = root => root.getAttribute('data-markdown-text-style') === 'assistant-message' ? root
+    : root.querySelector('[data-markdown-text-style="assistant-message"]') || root.querySelector('.markdown')
+      || root.querySelector('[data-message-author-role="assistant"]') || root;
+  const scopedCopy = (answer, users, assistants) => {
+    for (let node = answer, depth = 0; node && depth < 10; node = node.parentElement, depth++) {
+      if (['MAIN', 'BODY', 'HTML'].includes(node.tagName) || users.some(user => node === user || node.contains(user))
+        || assistants.filter(other => node === other || node.contains(other)).length > 1) break;
+      const footerCopies = [...node.querySelectorAll('.turn-action-controls button[aria-label="Copy"], button[data-testid="copy-turn-action-button"]')]
+        .filter(copy => !answer.contains(copy) && !copy.closest('pre,code'));
+      if (footerCopies.some(enabled)) return 'assistant_ancestor';
+    }
+    // Physical paired-turn fallback mirrors the current footer layout, without
+    // borrowing native ownership/proof objects. It is never inference authority.
+    const turn = answer.closest('div[data-talvt-turn-state]');
+    const outer = turn?.closest('div[data-content-search-turn-key]');
+    if (!turn || turn.getAttribute('data-talvt-turn-state') !== 'complete' || !outer || outer === turn
+      || !visible(turn) || !visible(outer) || outer.closest('div[data-talvt-turn-state]')
+      || outer.parentElement?.closest('div[data-content-search-turn-key]')
+      || outer.querySelectorAll('div[data-talvt-turn-state]').length !== 1
+      || users.length !== 1 || assistants.length !== 1 || !turn.contains(users[0]) || !turn.contains(assistants[0])
+      || !outer.contains(users[0]) || !outer.contains(assistants[0])) return 'none';
+    const precedes = (a, b) => a !== b && !a.contains(b) && !b.contains(a) && (a.compareDocumentPosition(b) & 4) !== 0;
+    if (!precedes(users[0], assistants[0])) return 'none';
+    const content = 'pre,code,blockquote,.markdown,[data-turn],form,input,textarea,select,option,[contenteditable],'
+      + '[role="textbox"],[role="menu"],[role="dialog"],[role="listbox"],[data-message-author-role],'
+      + '[data-markdown-text-style],[data-user-message-bubble],[data-tool-call-id]';
+    const outside = node => node?.closest('div[data-talvt-turn-state]') === turn && !node.closest(content)
+      && ![...users, ...assistants].some(root => root.contains(node));
+    const copies = [...turn.querySelectorAll('button[aria-label="Copy"]')].filter(outside);
+    if (copies.length !== 1 || !enabled(copies[0])) return 'none';
+    const companions = ['Rate response', 'Read aloud', 'Regenerate response'].map(name =>
+      [...turn.querySelectorAll('button,[role="button"]')].filter(node => node.getAttribute('aria-label') === name && outside(node) && enabled(node)));
+    if (companions.some(items => items.length > 1) || companions.filter(items => items.length === 1).length < 2) return 'none';
+    for (let row = copies[0].parentElement, depth = 0; row && row !== turn && depth < 6; row = row.parentElement, depth++) {
+      if (!companions.flat().every(node => row.contains(node))) continue;
+      if (!outside(row) || !visible(row) || !precedes(assistants[0], row) || row.querySelector(content)
+        || row.querySelectorAll('*').length > 256) return 'none';
+      const pending = [...row.childNodes]; let visited = 0;
+      while (pending.length) {
+        if (++visited > 256) return 'none';
+        const node = pending.pop();
+        if (node.nodeType === 3 && (node.textContent || '').trim()) return 'none';
+        if (node.nodeType === 1) {
+          if (['SCRIPT', 'STYLE', 'TEMPLATE', 'IFRAME'].includes(node.tagName)) return 'none';
+          if (node.tagName !== 'BUTTON' && node.getAttribute('role') !== 'button') pending.push(...node.childNodes);
+        }
+      }
+      return 'paired_turn';
+    }
+    return 'none';
+  };
+  const sample = () => {
+    if (stopped || sendAt === null) return;
+    if (document !== originalDocument || location.origin !== 'https://chatgpt.com') { invalid('document_changed'); return; }
+    if (elapsed(started) === null) { invalid('expired'); return; }
+    state.currentComplete = false;
+    const users = roots('user'), assistants = roots('assistant');
+    state.userCount = Math.min(2, users.length); state.assistantCount = Math.min(2, assistants.length);
+    if (users.length > 1) { invalid('extra_user'); return; }
+    if (assistants.length > 1) { invalid('extra_answer'); return; }
+    if (userRoot && users.length && users[0] !== userRoot) { invalid('user_root_changed'); return; }
+    if (answerRoot && assistants.length && assistants[0] !== answerRoot) { invalid('answer_root_changed'); return; }
+    if (users.length === 1) {
+      userRoot ||= users[0];
+      const text = canonical(userBody(userRoot).innerText || userBody(userRoot).textContent || '');
+      if (pinnedUserText !== null && text !== pinnedUserText) { invalid('user_body_changed'); return; }
+      if (text && text !== lastUserText) {
+        lastUserText = text; const generation = ++userGeneration;
+        hash(text, (value, bytes) => {
+          if (generation !== userGeneration) return;
+          state.userSHA256 = value; state.userUTF8Bytes = bytes;
+          state.userMatchesExpected = value === config.expectedCanonicalSHA256;
+          if (state.userMatchesExpected) pinnedUserText = text;
+        });
+      }
+    }
+    if (assistants.length === 1) {
+      answerRoot ||= assistants[0]; const answer = answerBody(answerRoot);
+      const codes = [...answer.querySelectorAll('code')];
+      const kind = codes.length === 1 ? 'code' : 'rendered';
+      const text = canonical(codes.length === 1 ? (codes[0].textContent || '') : (answer.innerText || answer.textContent || ''));
+      // A fence language label alone is not a first response token.
+      if (text && text.toLowerCase() !== 'json' && visible(answer)) {
+        state.firstTextAfterSendMs ??= elapsed(sendAt);
+        if (text !== lastAnswerText) {
+          lastAnswerText = text; state.lastTextChangeAfterSendMs = elapsed(sendAt); state.responseKind = kind;
+          const generation = ++answerGeneration;
+          hash(text, (value, bytes) => { if (generation === answerGeneration) { state.responseSHA256 = value; state.responseUTF8Bytes = bytes; } });
+        }
+        const stop = [...document.querySelectorAll('button[data-testid="stop-button"],button[aria-label="Stop streaming"],button[aria-label="Stop generating"],button[aria-label="Stop"]')].some(visible);
+        const scope = scopedCopy(answer, users, assistants);
+        if (!stop && scope !== 'none') { state.firstCompleteAfterSendMs ??= elapsed(sendAt); state.completionScope = scope; state.currentComplete = true; }
+      } else if (lastAnswerText !== null) {
+        // Do not retain a stale hash if the same physical answer empties.
+        lastAnswerText = null; answerGeneration += 1;
+        state.responseSHA256 = null; state.responseUTF8Bytes = null; state.responseKind = 'none';
+        state.lastTextChangeAfterSendMs = elapsed(sendAt);
+      }
+    } else if (lastAnswerText !== null) {
+      lastAnswerText = null; answerGeneration += 1;
+      state.responseSHA256 = null; state.responseUTF8Bytes = null; state.responseKind = 'none';
+      state.lastTextChangeAfterSendMs = elapsed(sendAt);
+    }
+    qualify();
+  };
+  function onClick(event) {
+    const target = event.target instanceof Element ? event.target.closest('button[data-testid="send-button"]') : null;
+    if (!target || !enabled(target)) return;
+    // A passive probe never suppresses the website click, even if its timing
+    // sample is invalidated by pre-Send contamination.
+    if (roots('user').length || roots('assistant').length) { invalid('not_fresh'); return; }
+    state.sendClickCount = Math.min(2, state.sendClickCount + 1);
+    if (state.sendClickCount !== 1) { invalid('multiple_sends'); return; }
+    sendAt = performance.now(); state.sendUnixMs = Date.now(); state.sendSinceInstallMs = elapsed(started);
+    const editors = [...document.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea,#prompt-textarea [contenteditable="true"],[contenteditable="true"][aria-label="Ask ChatGPT"],textarea[data-testid="prompt-textarea"]')]
+      .filter(visible).filter((node, i, all) => !all.some(other => other !== node && other.contains(node)));
+    if (editors.length !== 1) { invalid('editor_unavailable'); return; }
+    const editor = editors[0], text = editor instanceof HTMLTextAreaElement ? editor.value : (editor.innerText || editor.textContent || '');
+    hash(text, (value, bytes) => {
+      state.editorSHA256 = value; state.editorUTF8Bytes = bytes;
+      state.editorMatchesExpected = value === config.expectedSHA256 && bytes === config.expectedUTF8Bytes;
+      if (!state.editorMatchesExpected) invalid('editor_mismatch');
+    });
+    hash(canonical(text), value => { state.editorCanonicalSHA256 = value; });
+    sample();
+  }
+  observer = new MutationObserver(sample);
+  observer.observe(document.documentElement || document, { subtree: true, childList: true, characterData: true,
+    attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'class', 'style', 'hidden', 'data-talvt-turn-state', 'data-message-author-role', 'data-markdown-text-style', 'data-user-message-bubble'] });
+  document.addEventListener('click', onClick, true);
+  const api = Object.freeze({ nonce: config.nonce,
+    snapshot() { if (!stopped && elapsed(started) === null) invalid('expired'); return { ...state }; },
+    read() { return JSON.stringify(this.snapshot()); }, stop() { detach(); } });
+  Object.defineProperty(globalThis, globalKey, { value: api, configurable: true });
+  return api;
+}
+// END COMPUTA MATCHED BENCHMARK PROBE V1.
+
+function chatGPTMatchedBenchmarkResult(observed) {
+  try {
+    const binding = input.matchedBenchmarkProbe, probe = globalThis.__computaMatchedBenchmarkProbeV1;
+    if (input.action !== 'inspect' || !binding || !probe || probe.nonce !== binding.nonce
+      || !observed || typeof observed !== 'object') return observed;
+    const snapshot = probe.snapshot();
+    if (snapshot.expectedSHA256 !== binding.expectedSHA256 || snapshot.expectedCanonicalSHA256 !== binding.expectedCanonicalSHA256
+      || snapshot.expectedUTF8Bytes !== binding.expectedUTF8Bytes) return observed;
+    return { ...observed, benchmarkMilestones: snapshot };
+  } catch { return observed; }
+}
+
 function chatGPTPreparationResult(observed) {
+  observed = chatGPTMatchedBenchmarkResult(observed);
   if (!chatGPTPreparationTimingEnabled || !observed || typeof observed !== 'object') return observed;
   try {
     const openingRecoveryUsed = input.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening?.recoveryClaimed === true
@@ -3793,6 +4010,10 @@ if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
       "data-chatgpt-selection-message-id", "data-tool-call-id", "role"]
   });
   globalThis.__computaModelSignal = signal;
+}
+// Diagnostic-only observation does not await, mutate the page, or grant proof.
+if (input.action === 'insert' && input.matchedBenchmarkProbe != null) {
+  try { computaInstallMatchedBenchmarkProbe(input.matchedBenchmarkProbe); } catch { /* inference unchanged */ }
 }
 const ownedMessages = chatGPTMessageRoots('user');
 const ownedUserCount = ownedMessages.length;

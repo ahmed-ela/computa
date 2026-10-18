@@ -2534,7 +2534,7 @@ private extension CodexAppServerRuntime {
                 } else {
                     try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
                         runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID,
-                        isMaintenance: isMaintenance)
+                        isMaintenance: isMaintenance, isNewThread: isNewThread)
                 }
                 return preparationID
             } catch {
@@ -2655,10 +2655,8 @@ private extension CodexAppServerRuntime {
         private func computerTurnInput(prompt: String, threadID: String, taskID: AgentTask.ID) throws -> [[String: String]] {
             var input = [["type": "text", "text": prompt]]
             if configuration.computerInteractionPolicy == .backgroundOnly {
-                let surfaces = configuration.externalChromeToolsEnabled
-                    ? "offered background AX, authorized Chrome, or built-in browser UI operations"
-                    : "offered native background AX or built-in browser UI operations"
-                input.append(["type": "text", "text": "APP_RUNTIME_INTERACTION_POLICY: background_only. No activation or global input, including recovery. Use only \(surfaces). Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."])
+                input.append(["type": "text", "text": ComputaAgentInstructions.runtimeInteractionPolicy(
+                    externalChromeTools: configuration.externalChromeToolsEnabled)])
             }
             if configuration.externalChromeToolsEnabled, browserContinuationTargets[taskID] != nil {
                 input.append(["type": "text", "text": "APP_RUNTIME_CONTINUATION: Previous turn's element references and cursors have expired. If continuing with the same browser tab, first call \(usesReferenceGuidance(taskID: taskID) ? "computer_v2_read_page(view=overview)" : "computer_v2_snapshot(view=overview)") without old IDs. The runtime can reacquire that exact tab through the existing authorized connection and return fresh elements; it never replays an action or substitutes another tab. For a different target, inventory and bind explicitly."])

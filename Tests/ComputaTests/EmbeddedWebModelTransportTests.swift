@@ -6,6 +6,321 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testMatchedProbeExactBundledSourceIsDormantForIneligibleConfigurationAndCannotRetargetNonce() async throws {
+        let (fixture, view, _, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        try await resetMatchedProbePage(view)
+        let source = try Self.matchedProbeScript.get()
+        let definitions = try await evaluate(view, source + "\nglobalThis.fixtureInstallMatchedProbe=computaInstallMatchedBenchmarkProbe; return typeof computaInstallMatchedBenchmarkProbe;", world: Self.matchedProbeWorld) as? String
+        XCTAssertEqual(definitions, "function")
+        let initiallyAbsent = try await evaluate(view, "return globalThis.__computaMatchedBenchmarkProbeV1 == null;", world: Self.matchedProbeWorld) as? Bool
+        XCTAssertEqual(initiallyAbsent, true)
+        let rejected = try await evaluate(view, #"""
+            const base = {schemaVersion:1,nonce:'cccccccc-1111-4222-8333-dddddddddddd',
+              expectedSHA256:'a'.repeat(64),expectedCanonicalSHA256:'b'.repeat(64),expectedUTF8Bytes:12};
+            const variants = [null,{}, {...base,schemaVersion:true}, {...base,nonce:base.nonce.toUpperCase()},
+              {...base,expectedSHA256:'PRIVATE_CANARY'}, {...base,expectedUTF8Bytes:true}, {...base,expectedUTF8Bytes:180201},
+              {...base,unexpected:'PRIVATE_CANARY'}];
+            const allRejected = variants.every(value => globalThis.fixtureInstallMatchedProbe(value) === null);
+            document.querySelector('button[data-testid="send-button"]').click();
+            return allRejected && globalThis.__computaMatchedBenchmarkProbeV1 == null;
+            """#, world: Self.matchedProbeWorld) as? Bool
+        XCTAssertEqual(rejected, true, "Dormant diagnostics must install neither observer nor getter")
+        let config = try await installMatchedProbe(view, payload: "Matched UTF-8 café 🌍")
+        let reuse = try await evaluate(view, #"""
+            const original = globalThis.__computaMatchedBenchmarkProbeV1;
+            const same = globalThis.fixtureInstallMatchedProbe(globalThis.fixtureProbeConfig);
+            const other = globalThis.fixtureInstallMatchedProbe({...globalThis.fixtureProbeConfig,expectedSHA256:'f'.repeat(64)});
+            return same === original && other === null && globalThis.__computaMatchedBenchmarkProbeV1 === original;
+            """#, world: Self.matchedProbeWorld) as? Bool
+        XCTAssertEqual(reuse, true)
+        XCTAssertEqual(config["expectedUTF8Bytes"] as? Int, "Matched UTF-8 café 🌍".utf8.count)
+        _ = try await evaluate(view, #"""
+            const old = document.createElement('article'); old.dataset.turn='user'; old.textContent='pre-Send contamination';
+            document.querySelector('main').append(old); document.querySelector('button[data-testid="send-button"]').click();
+            return true;
+            """#, world: Self.matchedProbeWorld)
+        let contaminated = try await matchedProbeState(view)
+        XCTAssertEqual(contaminated["invalidReason"] as? String, "not_fresh")
+        XCTAssertTrue(contaminated["sendUnixMs"] is NSNull, "Rejected pre-Send contamination must not invent a send timestamp")
+        XCTAssertEqual(contaminated["payloadMatched"] as? Bool, false)
+    }
+
+    func testMatchedProbeLateFullBodyBindsEarlierFirstTextAndCodeCopyDoesNotComplete() async throws {
+        let (fixture, view, _, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        try await resetMatchedProbePage(view)
+        let payload = "Computa synthetic café 🌍\n" + String(repeating: "x", count: 11_000)
+        let config = try await installMatchedProbe(view, payload: payload)
+        try await sendMatchedProbeFixture(view, body: String(payload.prefix(1_024)), answer: "json", codeCopy: false)
+        let labelOnly = try await waitForMatchedProbeState(view) { $0["userSHA256"] is String }
+        XCTAssertTrue(labelOnly["firstTextAfterSendMs"] is NSNull, "Fence language label alone is not response text")
+        _ = try await evaluate(view, #"""
+            document.getElementById('probe-answer').innerHTML='<pre><code>{"type":"message","text":"HI"}</code><button aria-label="Copy">Copy code</button></pre>';
+            return true;
+            """#, world: Self.matchedProbeWorld)
+        let early = try await waitForMatchedProbeState(view) { $0["firstTextAfterSendMs"] is NSNumber && $0["responseSHA256"] is String }
+        let firstText = try XCTUnwrap((early["firstTextAfterSendMs"] as? NSNumber)?.doubleValue)
+        XCTAssertEqual(early["editorSHA256"] as? String, config["expectedSHA256"] as? String)
+        XCTAssertEqual(early["editorUTF8Bytes"] as? Int, payload.utf8.count)
+        XCTAssertEqual(early["userMatchesExpected"] as? Bool, false)
+        XCTAssertEqual(early["payloadMatched"] as? Bool, false)
+        XCTAssertTrue(early["firstCompleteAfterSendMs"] is NSNull, "A code-block Copy button is not the assistant footer")
+        XCTAssertEqual(early["currentComplete"] as? Bool, false)
+        _ = try await evaluate(view, #"""
+            document.getElementById('probe-user-body').textContent=globalThis.fixtureProbePayload;
+            const controls=document.createElement('div'); controls.className='turn-action-controls';
+            controls.innerHTML='<button data-testid="copy-turn-action-button" aria-label="Copy" disabled>Copy</button>';
+            document.getElementById('probe-assistant').append(controls); return true;
+            """#, world: Self.matchedProbeWorld)
+        let full = try await waitForMatchedProbeState(view) { $0["payloadMatched"] as? Bool == true }
+        XCTAssertEqual((full["firstTextAfterSendMs"] as? NSNumber)?.doubleValue, firstText, "Late body hashing must not restart the first-text clock")
+        XCTAssertTrue(full["firstCompleteAfterSendMs"] is NSNull, "A disabled footer does not complete")
+        _ = try await evaluate(view, "document.querySelector('[data-testid=copy-turn-action-button]').disabled=false; return true;", world: Self.matchedProbeWorld)
+        let completed = try await waitForMatchedProbeState(view) { $0["currentComplete"] as? Bool == true }
+        XCTAssertEqual(completed["invalidReason"] as? String, "none")
+        XCTAssertEqual(completed["userSHA256"] as? String, config["expectedCanonicalSHA256"] as? String)
+        XCTAssertEqual(completed["sendClickCount"] as? Int, 1)
+        XCTAssertEqual(completed["userCount"] as? Int, 1)
+        XCTAssertEqual(completed["assistantCount"] as? Int, 1)
+        XCTAssertEqual((completed["firstTextAfterSendMs"] as? NSNumber)?.doubleValue, firstText)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap((completed["firstCompleteAfterSendMs"] as? NSNumber)?.doubleValue), firstText)
+        let rawJSON = try await evaluate(view, "return globalThis.__computaMatchedBenchmarkProbeV1.read();", world: Self.matchedProbeWorld)
+        let json = try XCTUnwrap(rawJSON as? String)
+        XCTAssertLessThan(json.utf8.count, 4_096)
+        XCTAssertFalse(json.contains("Computa synthetic"))
+        XCTAssertFalse(json.contains("\"text\":\"HI\""))
+    }
+
+    func testMatchedProbeWrongPayloadAndFreshRootOrCountDriftCannotQualify() async throws {
+        let (fixture, view, _, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        for mutation in ["wrong_editor", "wrong_body", "replace_user", "extra_user", "replace_answer", "extra_answer", "changed_body"] {
+            try await resetMatchedProbePage(view)
+            _ = try await installMatchedProbe(view, payload: "Exact matched benchmark payload café")
+            if mutation == "wrong_editor" {
+                _ = try await evaluate(view, "document.getElementById('prompt-textarea').value+=' extra'; document.querySelector('[data-testid=send-button]').click(); return true;", world: Self.matchedProbeWorld)
+                let value = try await waitForMatchedProbeState(view) { $0["invalidReason"] as? String == "editor_mismatch" }
+                XCTAssertEqual(value["payloadMatched"] as? Bool, false); continue
+            }
+            try await sendMatchedProbeFixture(view, body: mutation == "wrong_body" ? "Wrong body" : "Exact matched benchmark payload café", answer: #"{"type":"message","text":"HI"}"#, codeCopy: true)
+            if mutation == "wrong_body" {
+                let value = try await waitForMatchedProbeState(view) { $0["userMatchesExpected"] as? Bool == false }
+                XCTAssertEqual(value["payloadMatched"] as? Bool, false, "A tentative response may never qualify against the wrong submitted body"); continue
+            }
+            _ = try await waitForMatchedProbeState(view) { $0["payloadMatched"] as? Bool == true }
+            let command: String
+            let reason: String
+            switch mutation {
+            case "replace_user": command = "const n=document.getElementById('probe-user'); n.replaceWith(n.cloneNode(true));"; reason = "user_root_changed"
+            case "extra_user": command = "const n=document.getElementById('probe-user').cloneNode(true); n.id='extra'; document.querySelector('main').append(n);"; reason = "extra_user"
+            case "replace_answer": command = "const n=document.getElementById('probe-assistant'); n.replaceWith(n.cloneNode(true));"; reason = "answer_root_changed"
+            case "extra_answer": command = "const n=document.getElementById('probe-assistant').cloneNode(true); n.id='extra'; document.querySelector('main').append(n);"; reason = "extra_answer"
+            default: command = "document.getElementById('probe-user-body').textContent+=' changed';"; reason = "user_body_changed"
+            }
+            _ = try await evaluate(view, command + " return true;", world: Self.matchedProbeWorld)
+            let value = try await waitForMatchedProbeState(view) { $0["invalidReason"] as? String == reason }
+            XCTAssertEqual(value["payloadMatched"] as? Bool, false, mutation)
+        }
+    }
+
+    func testMatchedProbeEmptyAnswerClearsLatestResponseWithoutRewritingFirstMilestones() async throws {
+        let (fixture, view, _, _) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        try await resetMatchedProbePage(view)
+        _ = try await installMatchedProbe(view, payload: "Exact empty-answer fixture")
+        try await sendMatchedProbeFixture(view, body: "Exact empty-answer fixture", answer: #"{"type":"message","text":"HI"}"#, codeCopy: true)
+        _ = try await evaluate(view, #"""
+            const controls=document.createElement('div'); controls.className='turn-action-controls';
+            controls.innerHTML='<button data-testid="copy-turn-action-button" aria-label="Copy">Copy</button>';
+            document.getElementById('probe-assistant').append(controls); return true;
+            """#, world: Self.matchedProbeWorld)
+        let before = try await waitForMatchedProbeState(view) { $0["payloadMatched"] as? Bool == true && $0["responseSHA256"] is String && $0["currentComplete"] as? Bool == true }
+        _ = try await evaluate(view, "document.getElementById('probe-answer').replaceChildren(); return true;", world: Self.matchedProbeWorld)
+        let empty = try await waitForMatchedProbeState(view) { $0["responseSHA256"] is NSNull }
+        XCTAssertTrue(empty["responseUTF8Bytes"] is NSNull)
+        XCTAssertEqual(empty["responseKind"] as? String, "none")
+        XCTAssertEqual(empty["currentComplete"] as? Bool, false)
+        XCTAssertEqual((empty["firstTextAfterSendMs"] as? NSNumber)?.doubleValue, (before["firstTextAfterSendMs"] as? NSNumber)?.doubleValue)
+        XCTAssertEqual((empty["firstCompleteAfterSendMs"] as? NSNumber)?.doubleValue, (before["firstCompleteAfterSendMs"] as? NSNumber)?.doubleValue)
+        XCTAssertEqual(empty["payloadMatched"] as? Bool, true, "Prompt equality is intentionally distinct from a current valid answer")
+    }
+
+    private static let matchedProbeWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+    private static let matchedProbeScript: Result<String, Error> = Result {
+        let name = "Computa_Computa.bundle"
+        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        let candidates = [Bundle.main.bundleURL.deletingLastPathComponent(), executableDirectory]
+            .compactMap { Bundle(url: $0.appendingPathComponent(name)) }
+        let bundles = Bundle.allBundles + candidates + [Bundle.main]
+        guard let url = bundles.compactMap({ $0.url(forResource: "chatgpt", withExtension: "js", subdirectory: "BrowserModels") }).first else {
+            throw NSError(domain: "MatchedBenchmarkProbeTest", code: 1, userInfo: [NSLocalizedDescriptionKey: "Bundled ChatGPT resource missing"])
+        }
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let begin = "// BEGIN COMPUTA MATCHED BENCHMARK PROBE V1"
+        let end = "// END COMPUTA MATCHED BENCHMARK PROBE V1."
+        guard source.components(separatedBy: begin).count == 2, source.components(separatedBy: end).count == 2,
+              let start = source.range(of: begin), let finish = source.range(of: end), start.lowerBound < finish.lowerBound else {
+            throw NSError(domain: "MatchedBenchmarkProbeTest", code: 2, userInfo: [NSLocalizedDescriptionKey: "Ambiguous fixed probe markers"])
+        }
+        // Do not rebuild the function or copy selectors into a second observer.
+        return String(source[start.lowerBound..<finish.upperBound]) + "\n"
+    }
+
+    private func matchedProbeJSON(_ value: Any) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys]), as: UTF8.self)
+    }
+
+    private func resetMatchedProbePage(_ view: WKWebView) async throws {
+        _ = try await evaluate(view, #"""
+            globalThis.__computaMatchedBenchmarkProbeV1?.stop(); delete globalThis.__computaMatchedBenchmarkProbeV1;
+            document.body.innerHTML='<main></main><textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button>';
+            return true;
+            """#, world: Self.matchedProbeWorld)
+    }
+
+    @discardableResult private func installMatchedProbe(_ view: WKWebView, payload: String) async throws -> [String: Any] {
+        let payloadJSON = try matchedProbeJSON(payload)
+        let source = try Self.matchedProbeScript.get()
+        let result = try await evaluate(view, #"""
+            \#(source)
+            globalThis.fixtureProbePayload=\#(payloadJSON);
+            const bytes=new TextEncoder().encode(globalThis.fixtureProbePayload);
+            const hash=async text => [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(x=>x.toString(16).padStart(2,'0')).join('');
+            globalThis.fixtureProbeConfig={schemaVersion:1,nonce:'cccccccc-1111-4222-8333-dddddddddddd',
+              expectedSHA256:await hash(globalThis.fixtureProbePayload),
+              expectedCanonicalSHA256:await hash(globalThis.fixtureProbePayload.replace(/\r\n?/g,'\n').normalize('NFC').trim()),expectedUTF8Bytes:bytes.length};
+            document.getElementById('prompt-textarea').value=globalThis.fixtureProbePayload;
+            globalThis.fixtureInstallMatchedProbe=computaInstallMatchedBenchmarkProbe;
+            const probe=globalThis.fixtureInstallMatchedProbe(globalThis.fixtureProbeConfig);
+            return probe ? globalThis.fixtureProbeConfig : null;
+            """#, world: Self.matchedProbeWorld)
+        return try XCTUnwrap(result as? [String: Any], "The exact bundled probe must install on a fresh synthetic root")
+    }
+
+    private func sendMatchedProbeFixture(_ view: WKWebView, body: String, answer: String, codeCopy: Bool) async throws {
+        let bodyJSON = try matchedProbeJSON(body), answerJSON = try matchedProbeJSON(answer)
+        _ = try await evaluate(view, #"""
+            document.querySelector('[data-testid="send-button"]').click();
+            const user=document.createElement('article'); user.id='probe-user'; user.dataset.turn='user';
+            const userBody=document.createElement('div'); userBody.id='probe-user-body'; userBody.dataset.markdownTextStyle='user-message'; userBody.style.whiteSpace='pre-wrap'; userBody.textContent=\#(bodyJSON); user.append(userBody);
+            const article=document.createElement('article'); article.id='probe-assistant'; article.dataset.turn='assistant';
+            const answer=document.createElement('div'); answer.id='probe-answer'; answer.dataset.markdownTextStyle='assistant-message';
+            const text=\#(answerJSON);
+            if (\#(codeCopy ? "true" : "false")) { const pre=document.createElement('pre'), code=document.createElement('code'), copy=document.createElement('button'); code.textContent=text; copy.setAttribute('aria-label','Copy'); copy.textContent='Copy code'; pre.append(code,copy); answer.append(pre); }
+            else answer.textContent=text;
+            article.append(answer); document.querySelector('main').append(user,article); return true;
+            """#, world: Self.matchedProbeWorld)
+    }
+
+    private func matchedProbeState(_ view: WKWebView, maximumWait: Duration = .seconds(3)) async throws -> [String: Any] {
+        let value = try await evaluate(view, "return globalThis.__computaMatchedBenchmarkProbeV1?.snapshot() || null;",
+            world: Self.matchedProbeWorld, maximumWait: maximumWait)
+        return try XCTUnwrap(value as? [String: Any])
+    }
+
+    private func waitForMatchedProbeState(_ view: WKWebView, file: StaticString = #filePath, line: UInt = #line,
+                                         matching predicate: ([String: Any]) -> Bool) async throws -> [String: Any] {
+        let deadline = ContinuousClock.now + .seconds(5)
+        var last: [String: Any] = [:]
+        while ContinuousClock.now < deadline {
+            let value = try await matchedProbeState(view, maximumWait: min(.seconds(1), deadline - .now))
+            last = value
+            if predicate(value) { return value }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("The real WebKit benchmark observation did not reach its bounded expected state: \(last)", file: file, line: line)
+        throw FixtureFailure.timeout
+    }
+
+    func testMatchedBenchmarkProbeInstallsAtNativeFirstInsertSequenceZeroOnlyWhenCapturePublished() async throws {
+        for armed in [false, true] {
+            let (fixture, view, token, choice) = try await readyInstantPrepareFixture()
+            defer { fixture.shutdown() }
+            let root = try websiteBenchmarkTemporaryDirectory()
+                .appendingPathComponent("benchmark-real-insert-phase-" + UUID().uuidString)
+            let directory = root.appendingPathComponent("WebsiteBenchmarkDiagnostics-v1")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            defer { try? FileManager.default.removeItem(at: root) }
+            let nonce = UUID(), task = UUID(), thread = UUID(), turn = UUID()
+            let nonceText = nonce.uuidString.lowercased()
+            let policy = ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false)
+            let user = "Computa latency benchmark \(nonceText). Reply with exactly HI. Do not use tools."
+                + "\n" + policy
+            let input: [[String: Any]] = [
+                ["type": "message", "role": "user", "content": [["type": "input_text", "text":
+                    "<environment_context><cwd>/tmp/computa-empty-fixture</cwd><shell>zsh</shell></environment_context>"]]],
+                ["type": "message", "role": "user", "content": [["type": "input_text", "text": user]]]]
+            let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject:
+                ["model": choice.modelID, "input": input, "instructions": "Synthetic native instruction prelude", "tools": []]))
+            if armed {
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.calendar = Calendar(identifier: .gregorian)
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+                let arm: [String: Any] = ["schemaVersion": 1, "purpose": "synthetic_latency_payload_v1", "nonce": nonceText,
+                    "expiresAt": formatter.string(from: Date().addingTimeInterval(120))]
+                let armURL = directory.appendingPathComponent("arm.json")
+                try JSONSerialization.data(withJSONObject: arm).write(to: armURL)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: armURL.path)
+            }
+            let lease = WebsiteBenchmarkCaptureLease.consume(directory: directory, request: request,
+                taskID: task.uuidString.lowercased(), threadID: thread.uuidString.lowercased(), turnID: turn.uuidString.lowercased(),
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: UUID(),
+                isNewThread: true, isMaintenance: false, isFirstInference: true)
+            XCTAssertEqual(lease != nil, armed)
+            defer { lease?.revoke() }
+            let before = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(before["state"] as? String, "ready")
+            XCTAssertEqual(before["sequence"] as? Int, 0)
+            var actions: [String] = [], insertProbe: [String: Any]?
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                guard action == "insert" else { return }
+                let value = try? await self.evaluate(view,
+                    "return globalThis.__computaMatchedBenchmarkProbeV1?.snapshot() || null;",
+                    world: .world(name: "computa-chatgpt-model-v1"))
+                insertProbe = value as? [String: Any]
+            }
+            let sent = try await WebsiteBenchmarkCaptureLease.$current.withValue(lease) {
+                try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": request.prompt])
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+            XCTAssertEqual(actions.filter { $0 == "submit" }.count, 1)
+            XCTAssertFalse(actions.contains("prepare"), "Exercise the actual fresh Instant folded-insert path")
+            XCTAssertEqual(sent["sequence"] as? Int, 1)
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+            if armed {
+                let binding = try XCTUnwrap(lease?.observationBinding)
+                let probe = try XCTUnwrap(insertProbe, "A published capture must install its observer before native sequence advances")
+                XCTAssertEqual(probe["nonce"] as? String, binding.nonce.uuidString.lowercased())
+                XCTAssertEqual(probe["expectedSHA256"] as? String, binding.rawOutboundSHA)
+                XCTAssertEqual(probe["expectedCanonicalSHA256"] as? String, binding.canonicalOutboundSHA)
+                XCTAssertEqual(probe["expectedUTF8Bytes"] as? Int, binding.utf8Bytes)
+                XCTAssertEqual(probe["sendClickCount"] as? Int, 0, "The snapshot is taken at insert, before any Send")
+                XCTAssertEqual(probe["userCount"] as? Int, 0)
+                XCTAssertEqual(probe["assistantCount"] as? Int, 0)
+                XCTAssertEqual(probe["invalidReason"] as? String, "none")
+                let output = directory.appendingPathComponent("payload-" + nonceText + ".json")
+                let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output)) as? [String: Any])
+                XCTAssertEqual(record["rawSHA256"] as? String, binding.rawOutboundSHA)
+                XCTAssertEqual(record["sessionToken"] as? String, token.lowercased())
+            } else {
+                XCTAssertNil(insertProbe, "An ordinary unarmed inference must not install passive benchmark code")
+                XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+            }
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: choice)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testPreparationTimingIsFiniteContentFreeAndRemovedBeforeObservationParsing() throws {
         let timing: [String: Any] = ["totalMs": 805.25, "beginSubmissionMs": 2.25, "beginSubmissionHashMs": 1.5,
             "modelPrecheckMs": 31.75, "finalGuardMs": 45.5, "editorFocusMs": 0.25, "editorMutationMs": 5.25,

@@ -3,6 +3,132 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testSyntheticCaptureAdmissionCannotChangeInferenceWireOrToolSelection() async throws {
+        enum Arm: CaseIterable { case absent, wrongNonce, unsafeMode, matching }
+        let nonce = "cccccccc-1111-4222-8333-dddddddddddd"
+        let otherNonce = "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb"
+        let instant = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let environment = """
+        <environment_context>
+        <cwd>/tmp/computa-empty-fixture</cwd>
+        <shell>zsh</shell>
+        <current_date>2026-10-18</current_date>
+        <timezone>America/New_York</timezone>
+        <filesystem><workspace_roots><root>/tmp/computa-empty-fixture</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+        </environment_context>
+        """
+        func message(_ role: String, _ text: String) -> [String: Any] {
+            ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
+        }
+        let input = [message("developer", "Synthetic native developer prelude"), message("user", environment),
+            message("user", "Computa latency benchmark \(nonce). Reply with exactly HI. Do not use tools."
+                + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false))]
+        // The adversarial second reply is an inert protocol fixture. No command is
+        // executed; it proves capture cannot bypass ordinary single-action selection.
+        let replies = [#"{"type":"message","text":"HI"}"#,
+            #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"first-inert-proposal"}},{"name":"exec_command","arguments":{"cmd":"must-not-be-published"}}]}"#]
+        for reply in replies {
+            var normalConfiguration: NSDictionary?
+            var normalOutput: NSArray?
+            for arm in Arm.allCases {
+                let root = try websiteBenchmarkTemporaryDirectory()
+                    .appendingPathComponent("capture-noninterference-" + UUID().uuidString)
+                let directory = root.appendingPathComponent("WebsiteBenchmarkDiagnostics-v1")
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700])
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+                let armURL = directory.appendingPathComponent("arm.json")
+                if arm != .absent {
+                    let formatter = DateFormatter()
+                    formatter.locale = Locale(identifier: "en_US_POSIX")
+                    formatter.calendar = Calendar(identifier: .gregorian)
+                    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+                    let fields: [String: Any] = ["schemaVersion": 1,
+                        "purpose": "synthetic_latency_payload_v1",
+                        "nonce": arm == .wrongNonce ? otherNonce : nonce,
+                        "expiresAt": formatter.string(from: Date().addingTimeInterval(120))]
+                    try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]).write(to: armURL)
+                    try FileManager.default.setAttributes([.posixPermissions: arm == .unsafeMode ? 0o644 : 0o600],
+                        ofItemAtPath: armURL.path)
+                }
+                let base = FixtureWebModelTransport(replyTexts: [reply])
+                let observer = SyntheticCaptureNoninterferenceTransport(
+                    base: WebsiteInferenceFixtureTransport(base, defaultChatChoice: instant))
+                let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                    rejectedReplyDirectory: root.appendingPathComponent("rejected"), storageDirectory: root)
+                await server.configureEmbeddedTransport(observer)
+                let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased()
+                let turn = UUID().uuidString.lowercased(), preparation = UUID()
+                // fixtureInfer/bindWebsiteInferenceFixtureTurn deliberately default to
+                // non-new-thread provenance; exercise the real new-thread gate here.
+                try await server.prepareInferenceTurn(taskID: task, threadID: thread,
+                    runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+                    isNewThread: true)
+                try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn,
+                    runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation)
+                var request = try XCTUnwrap(JSONSerialization.jsonObject(
+                    with: turnRequest(input: input, model: instant.modelID)) as? [String: Any])
+                request["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(
+                    taskID: task, threadID: thread, turnID: turn)]
+                let response = try await server.infer(JSONSerialization.data(withJSONObject: request), taskID: task)
+                let prompts = await base.sentPrompts(), operations = await base.operations()
+                let captureAdmission = await observer.captureAdmissionAtSend()
+                XCTAssertEqual(captureAdmission, [arm == .matching], "Positive control proves the native capture gate was reached")
+                XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+                XCTAssertEqual(prompts.count, 1)
+                var canonical = try canonicalRequest(in: XCTUnwrap(prompts.first))
+                XCTAssertEqual(canonical["input"] as? NSArray, input as NSArray)
+                XCTAssertEqual(canonical["model"] as? String, instant.modelID)
+                XCTAssertEqual(canonical["tools"] as? NSArray, request["tools"] as? NSArray)
+                XCTAssertEqual(canonical["instructions"] as? String, "Keep exact controlled scope")
+                // Client correlation differs per native fixture and is unrelated to
+                // model/tool configuration; capture must add no request fields.
+                canonical.removeValue(forKey: "client_metadata")
+                let configuration = canonical as NSDictionary
+                if let normalConfiguration { XCTAssertEqual(configuration, normalConfiguration) }
+                else { normalConfiguration = configuration }
+                var output = try responseOutput(response)
+                for index in output.indices {
+                    output[index].removeValue(forKey: "id")
+                    output[index].removeValue(forKey: "call_id")
+                }
+                if let normalOutput { XCTAssertEqual(output as NSArray, normalOutput) }
+                else { normalOutput = output as NSArray }
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
+                if reply == replies[0] {
+                    XCTAssertEqual(output.count, 1)
+                    XCTAssertEqual(output.first?["type"] as? String, "message")
+                    let content = try XCTUnwrap(output.first?["content"] as? [[String: Any]])
+                    XCTAssertEqual(content.count, 1)
+                    XCTAssertEqual(content.first?["type"] as? String, "output_text")
+                    XCTAssertEqual(content.first?["text"] as? String, "HI")
+                } else {
+                    XCTAssertEqual(output.count, 1)
+                    XCTAssertEqual(output.first?["name"] as? String, "exec_command")
+                    XCTAssertEqual(output.first?["arguments"] as? String, #"{"cmd":"first-inert-proposal"}"#)
+                    let metadata = try XCTUnwrap((object["metadata"] as? [String: Any])?["computa_website_tool_selection"] as? String)
+                    let policy = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(metadata.utf8)) as? [String: Any])
+                    XCTAssertEqual(Set(policy.keys), ["policy", "version", "proposedCount", "selectedCount", "notSelectedCount"])
+                    XCTAssertEqual(policy["policy"] as? String, "single_action_per_inference")
+                    XCTAssertEqual(policy["version"] as? Int, 1)
+                    XCTAssertEqual(policy["proposedCount"] as? Int, 2)
+                    XCTAssertEqual(policy["selectedCount"] as? Int, 1)
+                    XCTAssertEqual(policy["notSelectedCount"] as? Int, 1)
+                }
+                let receipts = await server.latestCleanupReceipts()
+                XCTAssertEqual(receipts.count, 1)
+                XCTAssertEqual(receipts.first?.outcome, .closed)
+                XCTAssertEqual(receipts.first?.receiptSaved, true)
+                // The inert transport never captures outbound bytes. A matching arm
+                // is consumed once; all ineligible arms remain untouched.
+                XCTAssertEqual(FileManager.default.fileExists(atPath: armURL.path), arm != .absent && arm != .matching)
+                XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)),
+                    arm != .absent && arm != .matching ? ["arm.json"] : [])
+            }
+        }
+    }
+
     func testChatSingleActionHandoffPublishesOnlyFirstThenRequiresFreshNativeResult() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-single-action-" + UUID().uuidString)
         let base = FixtureWebModelTransport(replyTexts: [
@@ -2738,5 +2864,16 @@ private actor PendingChatModelFixtureTransport: WebModelTransport {
         }
         if mutation == .missingFinalModel, isComplete { value.removeValue(forKey: "modelEvidence") }
         return try JSONSerialization.data(withJSONObject: value)
+    }
+}
+
+private actor SyntheticCaptureNoninterferenceTransport: WebModelTransport {
+    private let base: any WebModelTransport
+    private var admitted: [Bool] = []
+    init(base: any WebModelTransport) { self.base = base }
+    func captureAdmissionAtSend() -> [Bool] { admitted }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderSend" { admitted.append(WebsiteBenchmarkCaptureLease.current != nil) }
+        return try await base.request(operation: operation, params: params)
     }
 }

@@ -3,6 +3,15 @@ import Foundation
 /// Computa owns its agent instructions. It does not discover the user's Codex
 /// prompts/configuration or bundle another application's instructions.
 enum ComputaAgentInstructions {
+    /// Exact user-input suffix emitted by the native host. Kept shared with
+    /// the synthetic diagnostic matcher so it cannot drift from the wire text.
+    static func runtimeInteractionPolicy(externalChromeTools: Bool) -> String {
+        let surfaces = externalChromeTools
+            ? "offered background AX, authorized Chrome, or built-in browser UI operations"
+            : "offered native background AX or built-in browser UI operations"
+        return "APP_RUNTIME_INTERACTION_POLICY: background_only. No activation or global input, including recovery. Use only \(surfaces). Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."
+    }
+
     static let ordinaryRequests = """
     Answer general or self-contained questions directly when information suffices.
     The user need not name tools or provide harness instructions. Requested actions

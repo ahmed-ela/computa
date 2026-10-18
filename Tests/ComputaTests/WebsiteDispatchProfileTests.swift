@@ -170,3 +170,161 @@ private actor DispatchProfileRuntime: AgentRuntimeClient {
     func interrupt(taskID: AgentTask.ID) async throws { }
     func resolveApproval(requestID: String, approved: Bool) async throws { }
 }
+
+final class WebsiteResponseProfileTests: XCTestCase {
+    func testPostSendProfileRejectsArbitraryIdentityOutOfScopeOrdinalAndOrigin() throws {
+        let session = UUID().uuidString, inference = UUID()
+        for invalid in ["", "PRIVATE_PAYLOAD_CANARY", "https://chatgpt.com/c/private", String(repeating: "x", count: 1_024)] {
+            XCTAssertNil(WebsiteResponseProfile.begin(source: .nativeTurn, sessionToken: invalid, sequence: 1))
+        }
+        for sequence in [-1, 0, 17, Int.max] {
+            XCTAssertNil(WebsiteResponseProfile.begin(source: .nativeTurn, sessionToken: session, sequence: sequence))
+        }
+        XCTAssertNil(WebsiteResponseProfile.begin(source: .nativeTurn, sessionToken: session, sequence: 1, inferenceID: inference))
+        XCTAssertNil(WebsiteResponseProfile.begin(source: .serverAcknowledged, sessionToken: session, sequence: 1))
+        XCTAssertNotNil(WebsiteResponseProfile.begin(source: .nativeTurn, sessionToken: session, sequence: 16))
+        XCTAssertNotNil(WebsiteResponseProfile.begin(source: .serverAcknowledged, sessionToken: session, sequence: 1, inferenceID: inference))
+    }
+
+    func testEveryPostSendEventHasOnlyItsBoundedFiniteSchemaAndTrustedUUIDs() throws {
+        let session = UUID(), inference = UUID(), started = ContinuousClock.now
+        let phases = WebsiteResponseProfile.Phase.allCases
+        XCTAssertEqual(Set(phases.map(\.rawValue)).count, phases.count)
+        for phase in phases {
+            let profile = try XCTUnwrap(WebsiteResponseProfile.begin(source: phase.source, sessionToken: session.uuidString,
+                sequence: 2, inferenceID: phase.source == .nativeTurn ? nil : inference, started: started))
+            let event = try XCTUnwrap(profile.event(phase, at: started + .milliseconds(125)))
+            let data = try JSONEncoder().encode(event)
+            XCTAssertLessThan(data.count, 512)
+            let value = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            var keys: Set<String> = ["version", "source", "phase", "sessionID", "sequence", "elapsedMs"]
+            if phase.source == .serverAcknowledged { keys.insert("inferenceID") }
+            XCTAssertEqual(Set(value.keys), keys)
+            XCTAssertEqual(value["version"] as? Int, 1)
+            XCTAssertEqual(value["source"] as? String, phase.source.rawValue)
+            XCTAssertEqual(value["phase"] as? String, phase.rawValue)
+            XCTAssertEqual((value["sessionID"] as? String).flatMap(UUID.init(uuidString:)), session)
+            XCTAssertEqual(value["sequence"] as? Int, 2)
+            XCTAssertEqual(value["elapsedMs"] as? Int, 125)
+            XCTAssertEqual((value["inferenceID"] as? String).flatMap(UUID.init(uuidString:)),
+                           phase.source == .nativeTurn ? nil : inference)
+            for secret in ["PRIVATE_PAYLOAD_CANARY", "prompt", "cookie_value", "https://", "tool_arguments"] {
+                XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(secret), phase.rawValue)
+            }
+        }
+    }
+
+    func testPostSendClockBoundsAreDiagnosticAndNeverProduceUnboundedOrNegativeNumbers() throws {
+        XCTAssertEqual(WebsiteResponseProfile.milliseconds(.nanoseconds(-1)), 0)
+        XCTAssertEqual(WebsiteResponseProfile.milliseconds(.zero), 0)
+        XCTAssertEqual(WebsiteResponseProfile.milliseconds(.microseconds(1_500)), 1)
+        XCTAssertEqual(WebsiteResponseProfile.milliseconds(.seconds(600)), 600_000)
+        XCTAssertEqual(WebsiteResponseProfile.milliseconds(.seconds(Int64.max)), 600_000)
+        let start = ContinuousClock.now
+        let profile = try XCTUnwrap(WebsiteResponseProfile.begin(source: .nativeTurn,
+            sessionToken: UUID().uuidString, sequence: 1, started: start))
+        XCTAssertEqual(profile.event(.firstPositive, at: start - .seconds(1))?.elapsedMs, 0)
+        XCTAssertEqual(profile.event(.transportComplete, at: start + .seconds(601))?.elapsedMs, 600_000)
+    }
+
+    func testPostSendOriginAndOrdinalRemainIndependentAndNeverBorrowAStateOrPhase() throws {
+        let session = UUID().uuidString, inference = UUID(), start = ContinuousClock.now
+        let native = try XCTUnwrap(WebsiteResponseProfile.begin(source: .nativeTurn, sessionToken: session, sequence: 1, started: start))
+        let server = try XCTUnwrap(WebsiteResponseProfile.begin(source: .serverAcknowledged, sessionToken: session,
+            sequence: 1, inferenceID: inference, started: start + .seconds(1)))
+        let next = try XCTUnwrap(WebsiteResponseProfile.begin(source: .nativeTurn, sessionToken: session, sequence: 2,
+            started: start + .seconds(2)))
+        XCTAssertNil(native.event(.httpWriteStart)); XCTAssertNil(server.event(.transportComplete))
+        let nativeEvent = try XCTUnwrap(native.event(.firstPositive, at: start + .seconds(2)))
+        let serverEvent = try XCTUnwrap(server.event(.codecStart, at: start + .seconds(2)))
+        XCTAssertEqual(nativeEvent.sessionID, serverEvent.sessionID); XCTAssertEqual(nativeEvent.sequence, serverEvent.sequence)
+        XCTAssertEqual(nativeEvent.elapsedMs, 2_000); XCTAssertEqual(serverEvent.elapsedMs, 1_000)
+        XCTAssertNil(nativeEvent.inferenceID); XCTAssertEqual(serverEvent.inferenceID, inference)
+        XCTAssertEqual(next.event(.firstPositive, at: start + .seconds(2))?.sequence, 2)
+        XCTAssertEqual(next.event(.firstPositive, at: start + .seconds(2))?.elapsedMs, 0)
+        XCTAssertEqual(native.event(.firstPositive, at: start + .seconds(2)), nativeEvent,
+                       "Sampling does not mutate, reset or consume another diagnostic context")
+    }
+}
+
+@MainActor
+final class MatchedBenchmarkProjectionTests: XCTestCase {
+    private let nonce = UUID(uuidString: "cccccccc-1111-4222-8333-dddddddddddd")!
+    private var binding: WebsiteBenchmarkCaptureLease.ObservationBinding {
+        .init(nonce: nonce, rawOutboundSHA: String(repeating: "a", count: 64),
+              canonicalOutboundSHA: String(repeating: "b", count: 64), utf8Bytes: 32)
+    }
+    private var valid: [String: Any] {
+        ["schemaVersion": 1, "nonce": nonce.uuidString.lowercased(),
+         "expectedSHA256": String(repeating: "a", count: 64), "expectedCanonicalSHA256": String(repeating: "b", count: 64),
+         "expectedUTF8Bytes": 32, "invalidReason": "none", "sendClickCount": 1, "userCount": 1, "assistantCount": 1,
+         "editorUTF8Bytes": 32, "editorSHA256": String(repeating: "a", count: 64),
+         "editorCanonicalSHA256": String(repeating: "b", count: 64), "userUTF8Bytes": 32,
+         "userSHA256": String(repeating: "b", count: 64), "responseUTF8Bytes": 30,
+         "responseSHA256": String(repeating: "c", count: 64), "editorMatchesExpected": true,
+         "userMatchesExpected": true, "payloadMatched": true, "currentComplete": true,
+         "installedUnixMs": 1_792_300_000_000, "sendUnixMs": 1_792_300_000_010, "sendSinceInstallMs": 10.0,
+         "firstTextAfterSendMs": 20.5, "firstCompleteAfterSendMs": 30.5, "lastTextChangeAfterSendMs": 20.5,
+         "completionScope": "assistant_ancestor", "responseKind": "code"]
+    }
+    private func rejected(_ raw: Any, binding override: WebsiteBenchmarkCaptureLease.ObservationBinding? = nil,
+                          file: StaticString = #filePath, line: UInt = #line) {
+        let original: [String: Any] = ["submitted": true, "modelEvidence": ["unchanged": "PRIVATE_AUTHORITY_CANARY"], "text": "PRIVATE_ANSWER_CANARY"]
+        var observation = original; observation["benchmarkMilestones"] = raw
+        XCTAssertNil(EmbeddedWebModelTransport.removeMatchedBenchmarkMilestones(from: &observation, binding: override ?? binding), file: file, line: line)
+        XCTAssertEqual(NSDictionary(dictionary: observation), NSDictionary(dictionary: original), file: file, line: line)
+    }
+
+    func testMatchedBenchmarkProjectionIsExactBoundedContentFreeAndRemovedBeforeAuthorityChecks() throws {
+        let original: [String: Any] = ["submitted": true, "text": "PRIVATE_ANSWER_CANARY"]
+        var observation = original; observation["benchmarkMilestones"] = valid
+        let safe = try XCTUnwrap(EmbeddedWebModelTransport.removeMatchedBenchmarkMilestones(from: &observation, binding: binding))
+        XCTAssertEqual(NSDictionary(dictionary: observation), NSDictionary(dictionary: original))
+        XCTAssertEqual(NSDictionary(dictionary: safe), NSDictionary(dictionary: valid))
+        let data = try JSONSerialization.data(withJSONObject: safe, options: .sortedKeys)
+        XCTAssertLessThan(data.count, 4_096)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("PRIVATE_"))
+        XCTAssertNil(EmbeddedWebModelTransport.removeMatchedBenchmarkMilestones(from: &observation, binding: binding))
+    }
+
+    func testMatchedBenchmarkProjectionRejectsUnknownMissingAndUnarmedValuesWithoutChangingObservation() {
+        let primitiveValues: [Any] = [NSNull(), [], "PRIVATE_PAGE_CANARY"]
+        for value in primitiveValues { rejected(value) }
+        for key in valid.keys { var bad = valid; bad.removeValue(forKey: key); rejected(bad) }
+        var unknown = valid; unknown["PRIVATE_PAGE_CANARY"] = "PRIVATE_VALUE_CANARY"; rejected(unknown)
+        var observation: [String: Any] = ["state": "running", "benchmarkMilestones": valid]
+        XCTAssertNil(EmbeddedWebModelTransport.removeMatchedBenchmarkMilestones(from: &observation, binding: nil))
+        XCTAssertEqual(NSDictionary(dictionary: observation), NSDictionary(dictionary: ["state": "running"]))
+    }
+
+    func testMatchedBenchmarkProjectionDistinguishesCFBooleansAndRejectsNonfiniteOrUnboundedMetadata() {
+        var variants: [[String: Any]] = []
+        func add(_ key: String, _ value: Any) { var bad = valid; bad[key] = value; variants.append(bad) }
+        for key in ["schemaVersion", "expectedUTF8Bytes", "sendClickCount", "userCount", "assistantCount", "editorUTF8Bytes", "userUTF8Bytes", "responseUTF8Bytes", "installedUnixMs", "sendUnixMs", "sendSinceInstallMs", "firstTextAfterSendMs", "firstCompleteAfterSendMs", "lastTextChangeAfterSendMs"] {
+            add(key, true); add(key, "PRIVATE_NUMBER_CANARY")
+        }
+        for key in ["editorMatchesExpected", "userMatchesExpected", "payloadMatched", "currentComplete"] { add(key, NSNumber(value: 1)) }
+        for value in [Double.nan, Double.infinity, -1.0, 600_000.1] { add("firstTextAfterSendMs", value) }
+        add("sendClickCount", 1.5); add("userCount", 3); add("responseUTF8Bytes", 220_001)
+        add("installedUnixMs", 946_684_799_999); add("sendUnixMs", 4_102_444_800_001)
+        add("invalidReason", "PRIVATE_REASON_CANARY"); add("completionScope", "PRIVATE_SCOPE_CANARY"); add("responseKind", "PRIVATE_KIND_CANARY")
+        add("editorSHA256", "PRIVATE_HASH_CANARY"); add("userSHA256", String(repeating: "B", count: 64))
+        add("payloadMatched", NSNull()); add("currentComplete", NSNull())
+        for bad in variants { rejected(bad) }
+    }
+
+    func testMatchedBenchmarkProjectionRejectsForeignBindingAndContradictoryPositiveClaims() {
+        let foreign = WebsiteBenchmarkCaptureLease.ObservationBinding(nonce: UUID(), rawOutboundSHA: binding.rawOutboundSHA,
+            canonicalOutboundSHA: binding.canonicalOutboundSHA, utf8Bytes: binding.utf8Bytes)
+        rejected(valid, binding: foreign)
+        var variants: [[String: Any]] = []
+        func add(_ key: String, _ value: Any) { var bad = valid; bad[key] = value; variants.append(bad) }
+        add("nonce", nonce.uuidString); add("expectedSHA256", String(repeating: "d", count: 64))
+        add("expectedCanonicalSHA256", String(repeating: "d", count: 64)); add("expectedUTF8Bytes", 33)
+        add("editorSHA256", String(repeating: "d", count: 64)); add("editorUTF8Bytes", 31)
+        add("userSHA256", String(repeating: "d", count: 64)); add("userMatchesExpected", false)
+        add("editorMatchesExpected", false); add("userCount", 0); add("assistantCount", 0); add("sendClickCount", 0)
+        add("invalidReason", "user_root_changed")
+        for bad in variants { rejected(bad) }
+    }
+}
