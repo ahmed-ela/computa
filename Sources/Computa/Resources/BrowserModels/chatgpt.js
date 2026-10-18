@@ -1562,6 +1562,37 @@ async function websiteModelFinalGuard(provider, request, observed, currentTempor
     ? { modelDiagnostic: websiteModelDiagnostic(websiteModelPickerState(provider)) } : {}) };
 }
 
+// Optional first-preparation timings are diagnostic only. No timer grants page
+// authority, schedules work, or changes an action's return/throw behavior.
+const chatGPTPreparationTimingEnabled = input?.preparationTiming === true && input.provider === 'chatgpt'
+  && ['prepare', 'insert', 'sendReady', 'submit', 'verifyModel', 'verifyProductMode'].includes(input.action)
+  && Array.isArray(input.expectedUserCounts) && input.expectedUserCounts.length === 1 && input.expectedUserCounts[0] === 0;
+function chatGPTPreparationNow() {
+  if (!chatGPTPreparationTimingEnabled) return null;
+  try {
+    const value = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  } catch { return null; }
+}
+const chatGPTPreparationTiming = { started: chatGPTPreparationNow(), beginSubmissionMs: null,
+  beginSubmissionHashMs: null, modelPrecheckMs: null, finalGuardMs: null, editorMutationMs: null, inputDispatchMs: null };
+function chatGPTPreparationElapsed(started) {
+  const ended = chatGPTPreparationNow();
+  return started !== null && ended !== null && ended >= started && ended - started <= 45_000
+    ? Math.round((ended - started) * 1_000) / 1_000 : null;
+}
+function chatGPTPreparationRecord(key, started) {
+  if (chatGPTPreparationTimingEnabled) chatGPTPreparationTiming[key] = chatGPTPreparationElapsed(started);
+}
+function chatGPTPreparationResult(observed) {
+  if (!chatGPTPreparationTimingEnabled || !observed || typeof observed !== 'object') return observed;
+  try {
+    const openingRecoveryUsed = input.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening?.recoveryClaimed === true
+      || input.action === 'insert' && globalThis.__computaChatSubmissionState?.pending?.firstInsertOpening?.recoveryClaimed === true;
+    const { started, ...timings } = chatGPTPreparationTiming;
+    return { ...observed, preparationTiming: { ...timings, totalMs: chatGPTPreparationElapsed(started), openingRecoveryUsed } };
+  } catch { return observed; }
+}
 function websiteChatProvisionalHeaderRecords(pin, pending, records) {
   if (pending.completed || pin.invalidated === true) return;
   const proving = pending.proofLease != null && globalThis.__computaChatActiveInvocation === pending.proofLease;
@@ -1734,6 +1765,7 @@ websiteModelReadEvidence = async function(provider, expected, openingRecovery = 
     if (pin.invalidated === true) return { error: 'model_mismatch' };
     pending.proofLease = websiteChatInvocationLease;
   }
+  const precheckStarted = context?.scope === 'action_precheck' ? chatGPTPreparationNow() : null;
   try {
     const result = await websiteModelFullReadEvidence(provider, expected, openingRecovery, context);
     if (pending && !pending.completed) {
@@ -1746,7 +1778,10 @@ websiteModelReadEvidence = async function(provider, expected, openingRecovery = 
       }
     }
     return result;
-  } finally { if (pending) pending.proofLease = null; }
+  } finally {
+    if (pending) pending.proofLease = null;
+    if (context?.scope === 'action_precheck') chatGPTPreparationRecord('modelPrecheckMs', precheckStarted);
+  }
 };
 const websiteModelFullFinalGuard = websiteModelFinalGuard;
 websiteModelFinalGuard = async function(provider, request, observed, currentTemporary = null) {
@@ -1756,7 +1791,10 @@ websiteModelFinalGuard = async function(provider, request, observed, currentTemp
     ? chatGPTResponseReadSnapshot() : null;
   if (candidate && !chatGPTResponseSnapshotMatches(candidate, observed))
     return { error: 'conversation_changed', detail: 'response_changed' };
-  const result = await websiteModelFullFinalGuard(provider, request, observed, currentTemporary);
+  const finalGuardStarted = chatGPTPreparationNow();
+  let result;
+  try { result = await websiteModelFullFinalGuard(provider, request, observed, currentTemporary); }
+  finally { chatGPTPreparationRecord('finalGuardMs', finalGuardStarted); }
   if (result.error) return result;
   if (result.modelVerificationPending === true) {
     delete result.modelEvidence;
@@ -2233,7 +2271,10 @@ async function chatGPTBeginSubmission(request) {
       || !chatGPTSubmissionPins(parent) || !chatGPTSubmissionBodyIntact(parent, roots)))
     return chatGPTSubmissionFailure(state, 'begin_admission', parent);
   const captured = [...roots];
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+  const hashStarted = chatGPTPreparationNow();
+  let digest;
+  try { digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical)); }
+  finally { chatGPTPreparationRecord('beginSubmissionHashMs', hashStarted); }
   const now = chatGPTMessageRoots('user');
   if (!chatGPTSubmissionContext(state) || state.pending || state.lastVerified !== parent
     || now.length !== captured.length || now.some((node, index) => node !== captured[index])
@@ -2639,7 +2680,10 @@ async function chatGPTGuardedPageAction(request, fingerprint = null) {
   if (!product.chatModeReady && request.action !== 'inspect') return { error: 'product_mode_unverified' };
   if (request.action === 'insert' && (request.submissionSequence != null || request.submissionMarker != null
     || globalThis.__computaChatSubmissionState != null)) {
-    const failure = await chatGPTBeginSubmission(request);
+    const beginStarted = chatGPTPreparationNow();
+    let failure;
+    try { failure = await chatGPTBeginSubmission(request); }
+    finally { chatGPTPreparationRecord('beginSubmissionMs', beginStarted); }
     if (failure) return failure;
   }
   const result = await providerPageAction(request, fingerprint);
@@ -3355,10 +3399,17 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       // authoritative only at the exact-text check immediately before Send.
       globalThis.__computaModelFirstPrompt = prompt;
     }
+    const mutationStarted = chatGPTPreparationNow();
+    const dispatchInput = () => {
+      chatGPTPreparationRecord('editorMutationMs', mutationStarted);
+      const dispatchStarted = chatGPTPreparationNow();
+      try { composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt })); }
+      finally { chatGPTPreparationRecord('inputDispatchMs', dispatchStarted); }
+    };
     composer.focus();
     if (composer instanceof HTMLTextAreaElement) {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(composer, prompt);
-      composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt }));
+      dispatchInput();
     } else {
       // A background WebKit editor can have focus without an editing caret.
       // Select only this empty, owned composer before the single insertion.
@@ -3384,9 +3435,13 @@ async function providerPageAction(input, readLineageFingerprint = null) {
         range.collapse(false);
         selection.removeAllRanges();
         selection.addRange(range);
-        composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt }));
-      } else if (!document.execCommand("insertText", false, prompt))
-          return { error: "insert_command_rejected" };
+        dispatchInput();
+      } else {
+        // execCommand includes its browser-dispatched input handlers; this
+        // fallback cannot split mutation from reaction without changing it.
+        if (!document.execCommand("insertText", false, prompt)) return { error: "insert_command_rejected" };
+        chatGPTPreparationRecord('editorMutationMs', mutationStarted);
+      }
     }
     return { ...state, inserted: true };
   }
@@ -4178,7 +4233,7 @@ if (ownedUserCount > 0) {
       ? chatGPTFirstUserStructure('first_bound', 'binding') : undefined;
   const result = { ...observed, firstUserVerified, firstUserFingerprint, firstUserMarkerVerified: true,
     ...(firstUserDebugStructure ? { firstUserDebugStructure } : {}) };
-  return chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
+  return chatGPTPreparationResult(chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result));
 }
 if (input.expectedFirstUserFingerprint != null)
   return chatGPTFirstUserFailure('first_missing', 'first_missing');
@@ -4190,4 +4245,4 @@ if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && ch
   return websiteModelAcknowledgedUserAppend(input, ownedUserCount, chatGPTMessageRoots('user').length, null, chatGPTTemporaryVerified())
     || { error: 'conversation_changed', detail: 'user_count' };
 const result = { ...observed, firstUserVerified, firstUserFingerprint };
-return chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
+return chatGPTPreparationResult(chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result));

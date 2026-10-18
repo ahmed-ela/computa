@@ -2941,6 +2941,30 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return edges + [FirstUserExpansionRouteEdge(fromURL: from, toURL: to)]
     }
 
+    /// Diagnostic metadata is removed before any observation shape or authority
+    /// checks. Invalid/missing timings are unknown, never an inference failure.
+    static func removePreparationTiming(from observed: inout [String: Any]) -> [String: Any]? {
+        let raw = observed.removeValue(forKey: "preparationTiming")
+        let durations = ["totalMs", "beginSubmissionMs", "beginSubmissionHashMs", "modelPrecheckMs",
+                         "finalGuardMs", "editorMutationMs", "inputDispatchMs"]
+        guard let value = raw as? [String: Any], Set(value.keys) == Set(durations + ["openingRecoveryUsed"]),
+              let flag = value["openingRecoveryUsed"] as? NSNumber,
+              CFGetTypeID(flag) == CFBooleanGetTypeID() else { return nil }
+        var safe: [String: Any] = ["openingRecoveryUsed": flag.boolValue]
+        for key in durations {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let number = value[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, (0...45_000).contains(number.doubleValue) else { return nil }
+            safe[key] = number.doubleValue
+        }
+        return safe
+    }
+
+    private static func preparationMilliseconds(_ duration: Duration) -> Int {
+        let parts = duration.components
+        return Int(max(0, min(600_000, Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)))
+    }
+
     private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
                       refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true, recheckProductAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
@@ -2953,7 +2977,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && (session.state == "loading" || !session.submitted || action == "submit")
             && ["inspect", "ensureChatMode", "verifyProductMode", "enableTemporary", "selectModel",
                 "verifyModel", "prepare", "insert", "sendReady", "submit"].contains(action)
+        let profilePreparation = session.provider == .chatgpt && !session.isDiscovery
+            && session.confirmedUsers == 0 && session.sequence <= 1
+            && ["prepare", "insert", "sendReady", "submit", "verifyModel", "verifyProductMode"].contains(action)
+            && (session.state == "loading" || !session.submitted || action == "submit")
+        var preparationSpans: [String: Int] = [:]
         defer {
+            if profilePreparation {
+                let total = Self.preparationMilliseconds(.now - preparationActionStarted)
+                let setup = preparationSpans["nativeSetupMs"] ?? -1
+                let evaluation = preparationSpans["evaluationMs"] ?? -1
+                let validation = preparationSpans["callbackValidationMs"] ?? -1
+                let product = preparationSpans["postProductMs"] ?? -1
+                let between = preparationSpans["betweenChecksMs"] ?? -1
+                let model = preparationSpans["postModelMs"] ?? -1
+                let final = preparationSpans["finalValidationMs"] ?? -1
+                Self.inspectionLog.notice("preparationSpans provider=chatgpt action=\(action, privacy: .public) nativeSetupMs=\(setup) evaluationMs=\(evaluation) callbackValidationMs=\(validation) postProductMs=\(product) betweenChecksMs=\(between) postModelMs=\(model) finalValidationMs=\(final) totalMs=\(total)")
+            }
             if logPreparationAction {
                 let elapsed = (ContinuousClock.now - preparationActionStarted).components
                 let milliseconds = Int(max(0, min(600_000,
@@ -3033,6 +3073,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.state == "running" && session.submitted && session.modelVerificationPending
             && ["inspect", "submit", "verifyModel", "verifyProductMode"].contains(action)
         if provider == .chatgpt { input["deferModelVerification"] = deferModelVerification }
+        if profilePreparation { input["preparationTiming"] = true }
         if provider == .chatgpt, session.firstBodyReadRecoveryActive {
             input["suppressFirstUserExpansionClaim"] = true
         }
@@ -3094,6 +3135,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let result = EmbeddedScriptResult()
         let bytes: Data
         do {
+            let evaluationStarted = ContinuousClock.now
+            if profilePreparation { preparationSpans["nativeSetupMs"] = Self.preparationMilliseconds(evaluationStarted - preparationActionStarted) }
+            defer {
+                if profilePreparation {
+                    preparationSpans["evaluationMs"] = Self.preparationMilliseconds(.now - evaluationStarted)
+                }
+            }
             bytes = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
                     result.install(continuation)
@@ -3149,6 +3197,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             throw error
         }
+        let callbackValidationStarted = ContinuousClock.now
         // A callback and its timeout can become runnable together. A late
         // result must not win that scheduling race and gain page authority.
         guard ContinuousClock.now < evaluationDeadline else { throw Failure.pageUnavailable }
@@ -3220,7 +3269,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard action == "submit" && firstConversation || temporaryToggle else { throw Failure.ownershipFailure(.routeAfter) }
         }
         try Task.checkCancellation()
-        guard let observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        if provider == .chatgpt {
+            let timing = Self.removePreparationTiming(from: &observed)
+            if profilePreparation, let timing,
+               let data = try? JSONSerialization.data(withJSONObject: timing, options: .sortedKeys),
+               let structure = String(data: data, encoding: .utf8) {
+                Self.inspectionLog.notice("preparationJavaScript provider=chatgpt action=\(action, privacy: .public) structure=\(structure, privacy: .public)")
+            }
+        }
         logModelDiagnostic(observed, session: session)
         if let safe = Self.sanitizedProductModeDiagnostic(observed["productModeDiagnostic"]),
            safe != session.lastProductModeDiagnostic {
@@ -3381,14 +3438,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 } ?? false
             } == true
             && Self.isChatGPTDispatchOnlySubmissionAcknowledgement(observed)
-        try await verifyProductModeAfterAwait(observed, session: session, action: action,
-                                             recheck: recheckProductAfterAwait && !combinedContextRecheck && !dispatchOnlyAcknowledgement,
-                                             refreshChangedRoute: routeRefreshAvailable,
-                                             refreshReadOnlyObservation: refreshReadOnlyObservation,
-                                             maximumWait: evaluationDeadline - .now,
-                                             allowBlockedProvider: allowBlockedProvider,
-                                             allowPendingModelTemporary: allowPendingModelTemporary,
-                                             allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification)
+        if profilePreparation {
+            preparationSpans["callbackValidationMs"] = Self.preparationMilliseconds(.now - callbackValidationStarted)
+        }
+        do {
+            let started = ContinuousClock.now
+            defer { if profilePreparation { preparationSpans["postProductMs"] = Self.preparationMilliseconds(.now - started) } }
+            try await verifyProductModeAfterAwait(observed, session: session, action: action,
+                                                 recheck: recheckProductAfterAwait && !combinedContextRecheck && !dispatchOnlyAcknowledgement,
+                                                 refreshChangedRoute: routeRefreshAvailable,
+                                                 refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                                 maximumWait: evaluationDeadline - .now,
+                                                 allowBlockedProvider: allowBlockedProvider,
+                                                 allowPendingModelTemporary: allowPendingModelTemporary,
+                                                 allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification)
+        }
+        let betweenChecksStarted = ContinuousClock.now
         // Submit returns only its acknowledgment; observations carry ownership state.
         if let observedURL = observed["url"] as? String {
             guard provider.accepts(observedURL), provider.routeContext(observedURL) == currentContext else { throw Failure.documentChanged }
@@ -3451,13 +3516,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if binding.sequence == currentSubmission.sequence { session.currentSubmissionVerified = true }
             }
             if action == "inspect", session.pendingSubmission, count(observed, "userCount") == 0 {
-                try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
-                                                       enforceModel: enforceModel, recheck: recheckModelAfterAwait,
-                                                       refreshChangedRoute: routeRefreshAvailable,
-                                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
-                                                       combinedContextRecheck: combinedContextRecheck,
-                                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
-                                                       maximumWait: evaluationDeadline - .now)
+                if profilePreparation {
+                    preparationSpans["betweenChecksMs"] = Self.preparationMilliseconds(.now - betweenChecksStarted)
+                }
+                do {
+                    let started = ContinuousClock.now
+                    defer { if profilePreparation { preparationSpans["postModelMs"] = Self.preparationMilliseconds(.now - started) } }
+                    try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
+                                                           enforceModel: enforceModel, recheck: recheckModelAfterAwait,
+                                                           refreshChangedRoute: routeRefreshAvailable,
+                                                           refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                                           combinedContextRecheck: combinedContextRecheck,
+                                                           allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                                           maximumWait: evaluationDeadline - .now)
+                }
                 if !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
                     // a later promotion still requires the first-message proof.
@@ -3506,13 +3578,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.pendingSubmission = false
             }
         }
-        try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
-                                               enforceModel: enforceModel, recheck: recheckModelAfterAwait,
-                                               refreshChangedRoute: routeRefreshAvailable,
-                                               refreshReadOnlyObservation: refreshReadOnlyObservation,
-                                               combinedContextRecheck: combinedContextRecheck,
-                                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
-                                               maximumWait: evaluationDeadline - .now)
+        if profilePreparation {
+            preparationSpans["betweenChecksMs"] = Self.preparationMilliseconds(.now - betweenChecksStarted)
+        }
+        do {
+            let started = ContinuousClock.now
+            defer { if profilePreparation { preparationSpans["postModelMs"] = Self.preparationMilliseconds(.now - started) } }
+            try await verifyModelEvidenceAfterAwait(observed, session: session, action: action,
+                                                   enforceModel: enforceModel, recheck: recheckModelAfterAwait,
+                                                   refreshChangedRoute: routeRefreshAvailable,
+                                                   refreshReadOnlyObservation: refreshReadOnlyObservation,
+                                                   combinedContextRecheck: combinedContextRecheck,
+                                                   allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                                   maximumWait: evaluationDeadline - .now)
+        }
+        let finalValidationStarted = ContinuousClock.now
+        defer { if profilePreparation { preparationSpans["finalValidationMs"] = Self.preparationMilliseconds(.now - finalValidationStarted) } }
         if session.usesSubmissionOwnership, ["insert", "sendReady", "submit"].contains(action) {
             guard observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability else {
                 logSubmissionFailure(session, action: action, stage: .capabilityMissing, observed: observed)

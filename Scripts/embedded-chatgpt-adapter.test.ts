@@ -316,6 +316,65 @@ async function chatTurnFixture(modelChoice?: { key: string; label: string }, ini
     } };
 }
 
+describe('optional first-preparation timing', () => {
+  test('an actual first insert keeps exact submission state and emits only finite timing fields', async () => {
+    for (const enabled of [false, true]) {
+      const x = await chatTurnFixture();
+      const outbound = 'PRIVATE_TIMING_PROMPT_CANARY\n\n' + markerLine;
+      const result = await x.f.rawRun({ action: 'insert', prompt: outbound, expectedUserCounts: [0],
+        submissionSequence: 1, submissionMarker: firstMarker, preparationTiming: enabled });
+      expect(result.error).toBeUndefined(); expect(result.inserted).toBe(true);
+      expect(x.f.composer.text).toBe(outbound); expect(x.send.clicks).toBe(0);
+      const state: any = x.f.world.__computaChatSubmissionState;
+      expect(state.pending.phase).toBe('prepared'); expect(state.pending.canonical).toBe(outbound);
+      if (!enabled) { expect(result).not.toHaveProperty('preparationTiming'); continue; }
+      const timing = result.preparationTiming;
+      expect(Object.keys(timing).sort()).toEqual(['totalMs', 'beginSubmissionMs', 'beginSubmissionHashMs',
+        'modelPrecheckMs', 'finalGuardMs', 'editorMutationMs', 'inputDispatchMs', 'openingRecoveryUsed'].sort());
+      for (const [key, value] of Object.entries(timing)) {
+        if (key === 'openingRecoveryUsed') { expect(value).toBe(false); continue; }
+        if (value === null) continue;
+        expect(typeof value).toBe('number'); expect(Number.isFinite(value)).toBe(true);
+        expect(value as number).toBeGreaterThanOrEqual(0); expect(value as number).toBeLessThanOrEqual(45_000);
+      }
+      expect(timing.totalMs).not.toBeNull(); expect(timing.beginSubmissionMs).not.toBeNull();
+      expect(timing.beginSubmissionHashMs).not.toBeNull(); expect(timing.editorMutationMs).not.toBeNull();
+      // The execCommand fixture includes browser input in its mutation span.
+      expect(timing.inputDispatchMs).toBeNull();
+      for (const privateValue of [outbound, firstMarker, state.pending.fingerprint, x.f.document.URL])
+        expect(JSON.stringify(timing)).not.toContain(privateValue);
+    }
+  });
+
+  test('unsupported flag values and nonempty native history never enable timing', async () => {
+    for (const flag of [undefined, false, 1, 'true', {}]) {
+      const f = fixture({ response: false });
+      const result = await f.inspect({ preparationTiming: flag });
+      expect(result).not.toHaveProperty('preparationTiming');
+    }
+    const x = await chatTurnFixture(); const record = await x.dispatch('PRIVATE_HISTORY_CANARY');
+    x.answer('Done');
+    const result = await x.observe(record, { preparationTiming: true });
+    expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true);
+    expect(result).not.toHaveProperty('preparationTiming'); expect(x.send.clicks).toBe(1);
+  });
+
+  test('timing clock failure and a backwards clock leave action results intact', () => {
+    const start = source.indexOf('// Optional first-preparation timings are diagnostic only.');
+    const end = source.indexOf('function websiteChatProvisionalHeaderRecords', start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const helper = new Function('input', 'performance', 'globalThis', source.slice(start, end)
+      + "return chatGPTPreparationResult({ inserted: true });");
+    const input = { provider: 'chatgpt', action: 'insert', preparationTiming: true, expectedUserCounts: [0] };
+    const failed = helper(input, { now() { throw new Error('PRIVATE_CLOCK_CANARY'); } }, {});
+    expect(failed.inserted).toBe(true); expect(failed.preparationTiming.totalMs).toBeNull();
+    let value = 10;
+    const backwards = helper(input, { now: () => value-- }, {});
+    expect(backwards.inserted).toBe(true); expect(backwards.preparationTiming.totalMs).toBeNull();
+    expect(JSON.stringify(failed)).not.toContain('PRIVATE_CLOCK_CANARY');
+  });
+});
+
 function moveFixtureElement(node: Element, parent: Element) {
   if (node.parentElement) node.parentElement.children = node.parentElement.children.filter(child => child !== node);
   parent.append(node);
