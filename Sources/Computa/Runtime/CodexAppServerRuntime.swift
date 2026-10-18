@@ -301,6 +301,19 @@ enum AppServerCompletedToolItemContract {
 }
 
 enum AppServerThreadHistoryContract {
+    /// Explicit saved names win. Unnamed chats use their first visible user
+    /// prompt, whose appended runtime guidance was removed during history read.
+    static func displayTitle(name: String?, preview: String?, entries: [TimelineEntry] = []) -> String {
+        func nonEmpty(_ value: String?) -> String? {
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+            return value
+        }
+        if let name = nonEmpty(name) { return name }
+        if let prompt = entries.first(where: { $0.kind == .user })?.body,
+           let title = nonEmpty(String(prompt.prefix(72))) { return title }
+        return nonEmpty(preview).map { String($0.prefix(72)) } ?? "Untitled task"
+    }
+
     /// A thread's unloaded/list status is not its last user turn's outcome.
     /// Unknown/missing turn outcomes provide no evidence of failure.
     static func latestUserTurnStatus(from data: Data, rejectedTurns: Set<String> = []) throws -> TaskStatus? {
@@ -2322,7 +2335,6 @@ private extension CodexAppServerRuntime {
                 // submission cannot load and retain the multi-GB sidecar.
                 prepareVisualGrounderInBackground()
             }
-            var acceptedTurnID: String?
             if let object = try JSONSerialization.jsonObject(with: turnResponse) as? [String: Any],
                let result = object["result"] as? [String: Any],
                let turn = result["turn"] as? [String: Any],
@@ -2333,37 +2345,13 @@ private extension CodexAppServerRuntime {
                     try await registerInferenceTurn(taskID: taskID, threadID: threadID,
                         turnID: turnID, preparationID: inferencePreparation, generation: generation)
                 }
-                // A complete notification can precede this RPC response. Its
-                // exact retired turn still owns the initial saved title.
-                if accepted || turnIdentity.latestTurnID(for: taskID) == turnID { acceptedTurnID = turnID }
             }
             if cancelledSubmissions.contains(claim), turnIdentity.activeTurnID(for: taskID) != nil {
                 try await interrupt(taskID: taskID)
             }
-            if isNewThread, let acceptedTurnID {
-                await setInitialThreadNameIfCurrent(String(prompt.prefix(72)), taskID: taskID,
-                    threadID: threadID, turnID: acceptedTurnID, generation: generation,
-                    claim: claim, dispatchProfile: dispatchProfile)
-            }
-        }
-
-        // Naming is persisted metadata, not a prerequisite for inference. Keep
-        // its existing single best-effort attempt in this submit's lifetime,
-        // after turn acceptance and inference registration, so it can overlap
-        // with the model's work without creating an unowned background Task.
-        private func setInitialThreadNameIfCurrent(_ name: String, taskID: AgentTask.ID,
-            threadID: String, turnID: String, generation: UUID, claim: UUID,
-            dispatchProfile: WebsiteDispatchProfile?) async {
-            guard !Task.isCancelled, !isPreparingCommandShutdown, !isShuttingDown, isReady,
-                  serverGeneration == generation, threadForTask[taskID] == threadID,
-                  taskForThread[threadID] == taskID,
-                  turnSubmissionClaims[taskID] == claim, latestSubmissionClaims[taskID] == claim,
-                  !cancelledSubmissions.contains(claim),
-                  turnIdentity.latestTurnID(for: taskID) == turnID else { return }
-            let started = ContinuousClock.now
-            dispatchProfile?.mark(.threadNameRequested)
-            _ = try? await request(method: "thread/name/set", params: ["threadId": threadID, "name": name])
-            dispatchProfile?.mark(.threadNameFinished, since: started)
+            // Unnamed titles come from the saved first user item at reload.
+            // An initial name mutation here can race the engine's first index
+            // materialization and replace canonical metadata with defaults.
         }
 
         func steer(prompt: String, taskID: AgentTask.ID) async throws {
@@ -3073,6 +3061,7 @@ private extension CodexAppServerRuntime {
                 throw RuntimeError.malformedResponse("thread/list did not return a thread collection")
             }
 
+            var explicitlyNamedTaskIDs = Set<AgentTask.ID>()
             var tasks = records.compactMap { record -> AgentTask? in
                 guard let threadID = record["id"] as? String else { return nil }
                 // Another window may reload the shared live runtime. Preserve
@@ -3084,7 +3073,8 @@ private extension CodexAppServerRuntime {
 
                 let preview = record["preview"] as? String ?? ""
                 let name = record["name"] as? String
-                let title = nonEmpty(name) ?? nonEmpty(preview).map { String($0.prefix(72)) } ?? "Untitled task"
+                if nonEmpty(name) != nil { explicitlyNamedTaskIDs.insert(id) }
+                let title = AppServerThreadHistoryContract.displayTitle(name: name, preview: preview)
                 let statusObject = record["status"] as? [String: Any]
                 let statusType = statusObject?["type"] as? String
                 let status: TaskStatus = switch statusType {
@@ -3131,6 +3121,10 @@ private extension CodexAppServerRuntime {
                     let rejectedTurns = Set(failures.map(\.turnID) + websiteFailures.map(\.turnID))
                     tasks[index].entries = try AppServerThreadHistoryContract.entries(from: history,
                         excludingAssistantTurns: rejectedTurns) + nativeFailureEntries(threadID: threadID)
+                    if !explicitlyNamedTaskIDs.contains(taskID) {
+                        tasks[index].title = AppServerThreadHistoryContract.displayTitle(name: nil,
+                            preview: tasks[index].title, entries: tasks[index].entries)
+                    }
                     for record in websiteFailures {
                         guard let user = tasks[index].entries.first(where: { $0.kind == .user && $0.turnID == record.turnID }) else { continue }
                         var restored = record.entry

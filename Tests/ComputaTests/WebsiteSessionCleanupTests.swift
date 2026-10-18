@@ -796,6 +796,7 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
         config.codexHomePath = root.appendingPathComponent("PrivateHome").path
         config.workspacePath = root.appendingPathComponent("Workspace").path
         config.protocolTracePath = root.appendingPathComponent("first-protocol.jsonl").path
+        let prompt = "Synthetic café 🧭 inspection failure. Do not use tools."
         let taskID = UUID().uuidString, first = CodexAppServerRuntime(configuration: config)
         let transport = CleanupReceiptTransport(pageUnavailableOnPoll: true), audit = CleanupRuntimeAudit(taskID: taskID)
         let observer = Task { for await event in first.events() { audit.receive(event) } }
@@ -803,7 +804,7 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
         await first.configureEmbeddedWebModelTransport(transport)
         do {
             _ = try await first.loadTasks()
-            try await first.submit(prompt: "Synthetic inspection failure. Do not use tools.", toTaskID: taskID, modelID: "browser/claude")
+            try await first.submit(prompt: prompt, toTaskID: taskID, modelID: "browser/claude")
             let deadline = ContinuousClock.now + .seconds(45)
             while audit.status != .waiting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
             XCTAssertEqual(audit.status, .waiting)
@@ -816,6 +817,9 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             let automatic = try XCTUnwrap(audit.receipts.first { $0.trigger == .automatic && $0.outcome == .closed })
             let threadID = try XCTUnwrap(automatic.threadID), turnID = try XCTUnwrap(automatic.turnID)
             _ = await first.shutdown()
+            let firstWire = try AppServerWireTrace.load(root.appendingPathComponent("first-protocol.jsonl"))
+            XCTAssertTrue(firstWire.parseFailures.isEmpty)
+            XCTAssertFalse(firstWire.messages.contains { $0.direction == .clientToServer && $0.method == "thread/name/set" })
             var reloadConfig = config; reloadConfig.protocolTracePath = root.appendingPathComponent("reload-protocol.jsonl").path
             let reloadedRuntime = CodexAppServerRuntime(configuration: reloadConfig), inert = CleanupReceiptTransport()
             await reloadedRuntime.configureEmbeddedWebModelTransport(inert)
@@ -823,6 +827,11 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
                 let tasks = try await reloadedRuntime.loadTasks()
                 let restored = try XCTUnwrap(tasks.first { $0.id == threadID })
                 XCTAssertEqual(restored.status, .waiting)
+                XCTAssertEqual(restored.title, prompt)
+                XCTAssertEqual(restored.model, "browser/claude")
+                XCTAssertEqual(restored.entries.filter { $0.kind == .user }.map(\.body), [prompt])
+                XCTAssertEqual(restored.entries.first { $0.kind == .user }?.turnID, turnID)
+                XCTAssertFalse(restored.title.contains("APP_RUNTIME_INTERACTION_POLICY"))
                 XCTAssertFalse(restored.entries.contains { $0.kind == .assistant })
                 let errors = restored.entries.filter { $0.title == "Agent error" }
                 XCTAssertEqual(errors.count, 1)
@@ -836,10 +845,116 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
                 let reloadedCalls = await inert.calls()
                 XCTAssertTrue(reloadedCalls.isEmpty, "Loading failed history cannot invoke any website operation")
                 _ = await reloadedRuntime.shutdown()
+                try assertUnnamedWebsiteThreadMetadata(in: root.appendingPathComponent("reload-protocol.jsonl"), threadID: threadID)
+                let reloadWire = try AppServerWireTrace.load(root.appendingPathComponent("reload-protocol.jsonl"))
+                XCTAssertFalse(reloadWire.messages.contains { $0.direction == .clientToServer && $0.method == "turn/start" })
             } catch { _ = await reloadedRuntime.shutdown(); throw error }
             let calls = await transport.calls()
             XCTAssertEqual(calls.filter { $0.0 == "webProviderSend" }.count, 1)
         } catch { _ = await first.shutdown(); throw error }
+    }
+
+    func testActualBundledEngineKeepsFirstLongUnicodeTitleAcrossLaterTurnAndColdRestartWithoutNamingRPC() async throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("ComputaUnnamedTitleRestart-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+        config.executable = .bundled; config.model = "browser/claude"
+        config.codexHomePath = root.appendingPathComponent("PrivateHome").path
+        config.workspacePath = root.appendingPathComponent("Workspace").path
+        config.protocolTracePath = root.appendingPathComponent("first-protocol.jsonl").path
+        let firstPrompt = String(repeating: "航🧭é ", count: 24) + "Only return OK. Do not use tools."
+        let expectedTitle = String(firstPrompt.prefix(72)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let secondPrompt = "Second synthetic turn. Only return OK. Do not use tools."
+        let taskID = UUID().uuidString, runtime = CodexAppServerRuntime(configuration: config)
+        let firstTransport = CleanupReceiptTransport(), secondTransport = CleanupReceiptTransport()
+        let audit = CleanupRuntimeAudit(taskID: taskID)
+        let observer = Task { for await event in runtime.events() { audit.receive(event) } }
+        defer { observer.cancel() }
+        await runtime.configureEmbeddedWebModelTransport(firstTransport)
+        do {
+            _ = try await runtime.loadTasks()
+            try await runtime.submit(prompt: firstPrompt, toTaskID: taskID, modelID: "browser/claude")
+            let firstDeadline = ContinuousClock.now + .seconds(45)
+            while (audit.status != .completed || !audit.receipts.contains { $0.trigger == .inference && $0.outcome == .closed }),
+                  ContinuousClock.now < firstDeadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(audit.status, .completed)
+            let firstReceipt = try XCTUnwrap(audit.receipts.first { $0.trigger == .inference && $0.outcome == .closed })
+            let threadID = try XCTUnwrap(firstReceipt.threadID), firstTurnID = try XCTUnwrap(firstReceipt.turnID)
+            let firstTasks = try await runtime.loadTasks()
+            let afterFirst = try XCTUnwrap(firstTasks.first { $0.id == taskID })
+            XCTAssertEqual(afterFirst.title, expectedTitle)
+            XCTAssertEqual(afterFirst.entries.filter { $0.kind == .user }.map(\.body), [firstPrompt])
+            XCTAssertEqual(afterFirst.entries.first { $0.kind == .user }?.turnID, firstTurnID)
+            // A later real turn gets a new deterministic website session. Its
+            // text cannot replace the first visible user's saved display title.
+            await runtime.configureEmbeddedWebModelTransport(secondTransport)
+            audit.status = nil
+            try await runtime.submit(prompt: secondPrompt, toTaskID: taskID, modelID: "browser/claude")
+            let secondDeadline = ContinuousClock.now + .seconds(45)
+            while (audit.status != .completed || !audit.receipts.contains {
+                $0.trigger == .inference && $0.outcome == .closed && $0.turnID != firstTurnID
+            }), ContinuousClock.now < secondDeadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(audit.status, .completed)
+            XCTAssertTrue(audit.errors.isEmpty)
+            let secondReceipt = try XCTUnwrap(audit.receipts.first {
+                $0.trigger == .inference && $0.outcome == .closed && $0.turnID != firstTurnID
+            })
+            XCTAssertEqual(secondReceipt.threadID, threadID)
+            let secondTurnID = try XCTUnwrap(secondReceipt.turnID)
+            let currentTasks = try await runtime.loadTasks()
+            let current = try XCTUnwrap(currentTasks.first { $0.id == taskID })
+            XCTAssertEqual(current.title, expectedTitle)
+            XCTAssertEqual(current.entries.filter { $0.kind == .user }.map(\.body), [firstPrompt, secondPrompt])
+            XCTAssertEqual(current.entries.filter { $0.kind == .user }.compactMap(\.turnID), [firstTurnID, secondTurnID])
+            _ = await runtime.shutdown()
+            let firstTrace = root.appendingPathComponent("first-protocol.jsonl")
+            try assertUnnamedWebsiteThreadMetadata(in: firstTrace, threadID: threadID)
+            let firstWire = try AppServerWireTrace.load(firstTrace)
+            XCTAssertEqual(firstWire.messages.filter { $0.direction == .clientToServer && $0.method == "turn/start" }.count, 2)
+            var reloadConfig = config
+            reloadConfig.protocolTracePath = root.appendingPathComponent("reload-protocol.jsonl").path
+            let cold = CodexAppServerRuntime(configuration: reloadConfig), inert = CleanupReceiptTransport()
+            await cold.configureEmbeddedWebModelTransport(inert)
+            do {
+                let restoredTasks = try await cold.loadTasks()
+                let restored = try XCTUnwrap(restoredTasks.first { $0.id == threadID })
+                XCTAssertEqual(restored.title, expectedTitle)
+                XCTAssertEqual(restored.status, .completed)
+                XCTAssertEqual(restored.model, "browser/claude")
+                XCTAssertEqual(restored.entries.filter { $0.kind == .user }.map(\.body), [firstPrompt, secondPrompt])
+                XCTAssertEqual(restored.entries.filter { $0.kind == .user }.compactMap(\.turnID), [firstTurnID, secondTurnID])
+                let reloadCalls = await inert.calls(); XCTAssertTrue(reloadCalls.isEmpty)
+                _ = await cold.shutdown()
+                let reloadTrace = root.appendingPathComponent("reload-protocol.jsonl")
+                try assertUnnamedWebsiteThreadMetadata(in: reloadTrace, threadID: threadID)
+                let reloadWire = try AppServerWireTrace.load(reloadTrace)
+                XCTAssertFalse(reloadWire.messages.contains { $0.direction == .clientToServer && $0.method == "turn/start" })
+            } catch { _ = await cold.shutdown(); throw error }
+            let firstCalls = await firstTransport.calls(), secondCalls = await secondTransport.calls()
+            XCTAssertEqual(firstCalls.filter { $0.0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(secondCalls.filter { $0.0 == "webProviderSend" }.count, 1)
+        } catch { _ = await runtime.shutdown(); throw error }
+    }
+
+    private func assertUnnamedWebsiteThreadMetadata(in traceURL: URL, threadID: String,
+        file: StaticString = #filePath, line: UInt = #line) throws {
+        let wire = try AppServerWireTrace.load(traceURL)
+        XCTAssertTrue(wire.parseFailures.isEmpty, file: file, line: line)
+        XCTAssertFalse(wire.messages.contains { $0.direction == .clientToServer && $0.method == "thread/name/set" },
+            "Automatic titles cannot issue a metadata RPC before initial thread persistence", file: file, line: line)
+        let listed = wire.messages.filter { $0.direction == .serverToClient }
+            .compactMap { $0.object["result"] as? [String: Any] }
+            .flatMap { $0["data"] as? [[String: Any]] ?? [] }
+            .filter { $0["id"] as? String == threadID }
+        let record = try XCTUnwrap(listed.last, "Native thread/list must retain the website thread", file: file, line: line)
+        XCTAssertEqual(record["modelProvider"] as? String, "web_browser", file: file, line: line)
+        XCTAssertEqual(record["source"] as? String, "vscode", file: file, line: line)
+        XCTAssertEqual(record["model"] as? String, "browser/claude", file: file, line: line)
+        XCTAssertFalse((record["cwd"] as? String ?? "").isEmpty, file: file, line: line)
+        XCTAssertFalse((record["cliVersion"] as? String ?? "").isEmpty, file: file, line: line)
+        XCTAssertTrue(record["name"] == nil || record["name"] is NSNull, file: file, line: line)
     }
 
     func testActualBundledEngineRestartRestoresTypedFailureThenHistoricalGenericFailureWithoutReplaying() async throws {
