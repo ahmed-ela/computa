@@ -733,7 +733,8 @@ actor WebModelServer {
     }
 
     private func persistClosedTransaction(taskID: String, pending: PendingClosedTransaction) async -> CleanupResult {
-        let profile = WebsiteResponseProfile.cleanup
+        let profile = WebsiteResponseProfile.cleanup?.matchingCleanup(sessionToken: pending.session.token,
+            sequence: pending.session.sequence, inferenceID: pending.session.inferenceID)
         var receipt = pending.receipt
         receipt.receiptSaved = true
         profile?.mark(.cleanupPersistStart)

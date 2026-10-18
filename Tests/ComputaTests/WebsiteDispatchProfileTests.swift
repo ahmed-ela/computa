@@ -214,6 +214,54 @@ final class WebsiteResponseProfileTests: XCTestCase {
         }
     }
 
+    func testCleanupProfileRequiresExactSessionSequenceAndInferenceWithoutResettingItsClock() throws {
+        let session = UUID(), inference = UUID(), start = ContinuousClock.now
+        let profile = try XCTUnwrap(WebsiteResponseProfile.begin(source: .serverAcknowledged,
+            sessionToken: session.uuidString, sequence: 2, inferenceID: inference, started: start))
+        let matched = try XCTUnwrap(profile.matchingCleanup(sessionToken: session.uuidString.lowercased(),
+            sequence: 2, inferenceID: inference))
+        XCTAssertEqual(matched.event(.cleanupPersistStart, at: start + .milliseconds(125)),
+                       profile.event(.cleanupPersistStart, at: start + .milliseconds(125)))
+        XCTAssertEqual(matched.event(.cleanupPersistStart, at: start + .milliseconds(125))?.elapsedMs, 125)
+        XCTAssertNil(profile.matchingCleanup(sessionToken: UUID().uuidString, sequence: 2, inferenceID: inference))
+        XCTAssertNil(profile.matchingCleanup(sessionToken: "PRIVATE_INVALID_TOKEN", sequence: 2, inferenceID: inference))
+        for sequence in [-1, 0, 1, 3, 17, Int.max] {
+            XCTAssertNil(profile.matchingCleanup(sessionToken: session.uuidString, sequence: sequence, inferenceID: inference))
+        }
+        XCTAssertNil(profile.matchingCleanup(sessionToken: session.uuidString, sequence: 2, inferenceID: UUID()))
+        let native = try XCTUnwrap(WebsiteResponseProfile.begin(source: .nativeTurn,
+            sessionToken: session.uuidString, sequence: 2, started: start))
+        XCTAssertNil(native.matchingCleanup(sessionToken: session.uuidString, sequence: 2, inferenceID: inference))
+    }
+
+    func testInheritedCleanupProfileCannotLabelAnotherTransactionAndScopeRestores() async throws {
+        let session = UUID().uuidString, inference = UUID(), nextInference = UUID()
+        let profile = try XCTUnwrap(WebsiteResponseProfile.begin(source: .serverAcknowledged,
+            sessionToken: session, sequence: 1, inferenceID: inference))
+        let next = try XCTUnwrap(WebsiteResponseProfile.begin(source: .serverAcknowledged,
+            sessionToken: session, sequence: 2, inferenceID: nextInference))
+        XCTAssertNil(WebsiteResponseProfile.cleanup)
+        let result = await WebsiteResponseProfile.$cleanup.withValue(profile) {
+            let inherited = Task {
+                let current = WebsiteResponseProfile.cleanup
+                return [
+                    current?.matchingCleanup(sessionToken: session, sequence: 1, inferenceID: inference) != nil,
+                    current?.matchingCleanup(sessionToken: session, sequence: 2, inferenceID: nextInference) == nil,
+                    current?.matchingCleanup(sessionToken: UUID().uuidString, sequence: 1, inferenceID: inference) == nil
+                ]
+            }
+            let inheritedMatches = await inherited.value
+            WebsiteResponseProfile.$cleanup.withValue(next) {
+                XCTAssertNil(WebsiteResponseProfile.cleanup?.matchingCleanup(sessionToken: session, sequence: 1, inferenceID: inference))
+                XCTAssertNotNil(WebsiteResponseProfile.cleanup?.matchingCleanup(sessionToken: session, sequence: 2, inferenceID: nextInference))
+            }
+            XCTAssertNotNil(WebsiteResponseProfile.cleanup?.matchingCleanup(sessionToken: session, sequence: 1, inferenceID: inference))
+            return inheritedMatches
+        }
+        XCTAssertEqual(result, [true, true, true])
+        XCTAssertNil(WebsiteResponseProfile.cleanup)
+    }
+
     func testPostSendClockBoundsAreDiagnosticAndNeverProduceUnboundedOrNegativeNumbers() throws {
         XCTAssertEqual(WebsiteResponseProfile.milliseconds(.nanoseconds(-1)), 0)
         XCTAssertEqual(WebsiteResponseProfile.milliseconds(.zero), 0)
@@ -249,8 +297,89 @@ final class WebsiteResponseProfileTests: XCTestCase {
 
 @MainActor
 final class MatchedBenchmarkProjectionTests: XCTestCase {
-    // Insert into existing MatchedBenchmarkProjectionTests; uses its private
-    // valid/binding/rejected helpers. Prepared only, not applied or executed.
+    func testMatchedBenchmarkChunkLogReassemblesExactFiniteProjectionBelowOSLogLimit() throws {
+        let session = UUID(uuidString: "AAAAAAAA-1111-4222-8333-BBBBBBBBBBBB")!
+        let log = try XCTUnwrap(EmbeddedWebModelTransport.matchedBenchmarkChunkedLog(valid,
+            binding: binding, sessionToken: session.uuidString, sequence: 1, snapshot: 1))
+        let expected = try JSONSerialization.data(withJSONObject: valid, options: .sortedKeys)
+        XCTAssertGreaterThan(expected.count, 1_024, "This fixture must reproduce the actual single-record truncation trigger")
+        XCTAssertEqual(Data(log.structure.utf8), expected)
+        XCTAssertEqual(log.records.count, (expected.count + 511) / 512)
+        XCTAssertLessThanOrEqual(log.records.count, 8)
+        var assembled = Data()
+        for (offset, record) in log.records.enumerated() {
+            XCTAssertLessThanOrEqual(record.utf8.count, 960)
+            XCTAssertTrue(record.utf8.allSatisfy { (0x20...0x7e).contains($0) })
+            let fields = try matchedChunkFields(record)
+            XCTAssertEqual(Set(fields.keys), Set(["version", "nonce", "sessionID", "sequence", "snapshot", "part", "parts", "sha256", "base64"]))
+            XCTAssertEqual(fields["version"], "1"); XCTAssertEqual(fields["nonce"], nonce.uuidString.lowercased())
+            XCTAssertEqual(fields["sessionID"], session.uuidString.lowercased()); XCTAssertEqual(fields["sequence"], "1")
+            XCTAssertEqual(fields["snapshot"], "1"); XCTAssertEqual(fields["part"], String(offset + 1))
+            XCTAssertEqual(fields["parts"], String(log.records.count))
+            XCTAssertEqual(fields["sha256"], EmbeddedWebModelTransport.promptFingerprint(log.structure))
+            let chunk = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(fields["base64"])))
+            XCTAssertEqual(chunk.count, offset + 1 == log.records.count ? expected.count - offset * 512 : 512)
+            assembled.append(chunk)
+        }
+        XCTAssertEqual(assembled, expected)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: assembled) as? [String: Any])
+        XCTAssertEqual(NSDictionary(dictionary: decoded), NSDictionary(dictionary: valid))
+    }
+
+    func testMatchedBenchmarkChunkLogRejectsForeignBindingAndUnknownOrPrivateFields() {
+        var unknown = valid; unknown["PRIVATE_PAGE_CANARY"] = "PRIVATE_PAYLOAD_CANARY"
+        var nonfinite = valid; nonfinite["firstTextAfterSendMs"] = Double.infinity
+        var missing = valid; missing.removeValue(forKey: "userSHA256")
+        var malformedHash = valid; malformedHash["responseSHA256"] = "PRIVATE_RESPONSE_CANARY"
+        let session = UUID().uuidString
+        for raw in [unknown, nonfinite, missing, malformedHash] {
+            XCTAssertNil(EmbeddedWebModelTransport.matchedBenchmarkChunkedLog(raw,
+                binding: binding, sessionToken: session, sequence: 1, snapshot: 1))
+        }
+        let foreign = WebsiteBenchmarkCaptureLease.ObservationBinding(nonce: UUID(),
+            rawOutboundSHA: binding.rawOutboundSHA, canonicalOutboundSHA: binding.canonicalOutboundSHA, utf8Bytes: binding.utf8Bytes)
+        XCTAssertNil(EmbeddedWebModelTransport.matchedBenchmarkChunkedLog(valid,
+            binding: foreign, sessionToken: session, sequence: 1, snapshot: 1))
+    }
+
+    func testMatchedBenchmarkChunkLogBindsSnapshotsAndSessionsWithoutChangingProjection() throws {
+        let firstSession = UUID(), secondSession = UUID()
+        let first = try XCTUnwrap(EmbeddedWebModelTransport.matchedBenchmarkChunkedLog(valid,
+            binding: binding, sessionToken: firstSession.uuidString, sequence: 1, snapshot: 1))
+        let last = try XCTUnwrap(EmbeddedWebModelTransport.matchedBenchmarkChunkedLog(valid,
+            binding: binding, sessionToken: secondSession.uuidString, sequence: 16, snapshot: 32))
+        XCTAssertEqual(first.structure, last.structure)
+        XCTAssertEqual(first.records.count, last.records.count)
+        for (a, b) in zip(first.records, last.records) {
+            let before = try matchedChunkFields(a), after = try matchedChunkFields(b)
+            XCTAssertEqual(before["base64"], after["base64"]); XCTAssertEqual(before["sha256"], after["sha256"])
+            XCTAssertNotEqual(before["sessionID"], after["sessionID"])
+            XCTAssertEqual(after["snapshot"], "32"); XCTAssertEqual(after["sequence"], "16")
+            XCTAssertLessThanOrEqual(b.utf8.count, 960)
+        }
+        for session in ["", "PRIVATE_SESSION_CANARY", firstSession.uuidString + " "] {
+            XCTAssertNil(EmbeddedWebModelTransport.matchedBenchmarkChunkedLog(valid,
+                binding: binding, sessionToken: session, sequence: 1, snapshot: 1))
+        }
+        for (sequence, snapshot) in [(0,1), (17,1), (1,0), (1,33)] {
+            XCTAssertNil(EmbeddedWebModelTransport.matchedBenchmarkChunkedLog(valid,
+                binding: binding, sessionToken: firstSession.uuidString, sequence: sequence, snapshot: snapshot))
+        }
+    }
+
+    private func matchedChunkFields(_ record: String) throws -> [String: String] {
+        let components = record.split(separator: " ")
+        XCTAssertEqual(components.first, "matchedBenchmarkChunk")
+        var result: [String: String] = [:]
+        for component in components.dropFirst() {
+            let fields = component.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            XCTAssertEqual(fields.count, 2)
+            guard fields.count == 2 else { throw CocoaError(.coderReadCorrupt) }
+            let key = String(fields[0]); XCTAssertNil(result[key]); result[key] = String(fields[1])
+        }
+        return result
+    }
+
     func testMatchedBenchmarkProjectionPreservesExplicitSingleTerminalLFWithoutChangingLiteralProof() throws {
         let literal = String(repeating: "x", count: 32)
         let literalHash = EmbeddedWebModelTransport.promptFingerprint(literal)

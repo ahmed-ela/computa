@@ -33,7 +33,13 @@ final class WebsiteSessionCleanupTests: XCTestCase {
         XCTAssertEqual(automatic.route, .embedded); XCTAssertEqual(automatic.modelID, "browser/claude")
         XCTAssertEqual(automatic.runtimeGeneration, generation.uuidString.lowercased()); XCTAssertTrue(automatic.receiptSaved)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(replacement))
-        let closed = await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
+        let unrelatedProfile = try XCTUnwrap(WebsiteResponseProfile.begin(source: .serverAcknowledged,
+            sessionToken: UUID().uuidString, sequence: 1, inferenceID: UUID()))
+        // A stale inherited diagnostic must not fence real cleanup or retarget
+        // its transport, durable receipt, release evidence, or observer.
+        let closed = await WebsiteResponseProfile.$cleanup.withValue(unrelatedProfile) {
+            await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
+        }
         XCTAssertEqual(closed.outcome, .closed); XCTAssertEqual(closed.reason, .deleted)
         XCTAssertEqual(closed.trigger, .manual); XCTAssertTrue(closed.receiptSaved)
         let repeated = await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
@@ -382,6 +388,63 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
             }
         }
         guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    func testHistoricalValidationRereadsChangedJournalOnEverySave() throws {
+        let root = try directory(), scope = Scope(), next = Scope(), store = WebsiteSessionCleanupStore(directory: root)
+        let original = receipt(scope), later = receipt(next)
+        XCTAssertTrue(store.save(original))
+        let file = journalFile(root, scope), exact = try Data(contentsOf: file)
+        let malformed = try changed(original, ["timestamp": "not-a-date"])
+        var corrupt = try JSONEncoder().encode(malformed); corrupt.append(0x0A)
+        try corrupt.write(to: file, options: .atomic)
+        XCTAssertFalse(store.save(later), "A prior valid pass must never cache a file or hide subsequent corruption")
+        try exact.write(to: file, options: .atomic)
+        XCTAssertTrue(store.save(later), "The next pass validates the restored bytes independently")
+        XCTAssertEqual(try store.transactionRecords(for: next.task, turnID: next.turn), [later])
+    }
+
+    func testOnePassRejectsInvalidProviderOrTimestampAfterAValidHistoricalRow() throws {
+        for fields in [["provider": "chatgpt"], ["timestamp": "not-a-date"]] {
+            let root = try directory(), scope = Scope(), next = Scope(), store = WebsiteSessionCleanupStore(directory: root)
+            let first = receipt(scope)
+            XCTAssertTrue(store.save(first))
+            let second = try changed(receipt(scope, inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased()), fields)
+            XCTAssertFalse(second.isValid)
+            let file = journalFile(root, scope), exact = try Data(contentsOf: file)
+            var corrupt = exact; corrupt.append(try JSONEncoder().encode(second)); corrupt.append(0x0A)
+            try corrupt.write(to: file, options: .atomic)
+            XCTAssertFalse(store.save(receipt(next)), "A valid earlier model/timestamp cannot validate a changed provider or malformed row")
+            try exact.write(to: file, options: .atomic)
+            let later = receipt(next)
+            XCTAssertTrue(store.save(later))
+            XCTAssertEqual(try store.transactionRecords(for: next.task, turnID: next.turn), [later])
+        }
+    }
+
+    func testOnePassDoesNotMemoizeCanonicallyEquivalentNonASCIIModelBytesAsValid() throws {
+        let model = WebsiteModelChoice(provider: "chatgpt", key: "fixture/(x)", label: "Instant").modelID
+        XCTAssertTrue(model.contains("K"))
+        let forged = model.replacingOccurrences(of: "K", with: "\u{212A}")
+        XCTAssertEqual(model, forged, "Swift String equality treats the Kelvin sign as canonical ASCII K")
+        XCTAssertNotEqual(Array(model.utf8), Array(forged.utf8))
+        XCTAssertNotNil(WebsiteModelCatalog.choice(for: model))
+        XCTAssertNil(WebsiteModelCatalog.choice(for: forged), "Encoded model IDs require ASCII bytes")
+        let root = try directory(), scope = Scope(), next = Scope(), store = WebsiteSessionCleanupStore(directory: root)
+        let first = try changed(receipt(scope), ["provider": "chatgpt", "modelID": model])
+        let second = try changed(receipt(scope, inference: UUID().uuidString.lowercased(), token: UUID().uuidString.lowercased()),
+            ["provider": "chatgpt", "modelID": forged])
+        XCTAssertTrue(first.isValid); XCTAssertFalse(second.isValid)
+        XCTAssertTrue(store.save(first))
+        let file = journalFile(root, scope), exact = try Data(contentsOf: file), later = receipt(next)
+        var corrupt = exact; corrupt.append(try JSONEncoder().encode(second)); corrupt.append(0x0A)
+        try corrupt.write(to: file, options: .atomic)
+        XCTAssertThrowsError(try store.transactionRecords(for: scope.task, turnID: scope.turn))
+        XCTAssertFalse(store.save(later), "An earlier valid row must not grant validity to distinct malformed bytes")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journalFile(root, next).path))
+        try exact.write(to: file, options: .atomic)
+        XCTAssertTrue(store.save(later))
+        XCTAssertEqual(try store.transactionRecords(for: next.task, turnID: next.turn), [later])
     }
 
     private func changed(_ receipt: WebsiteSessionCleanupReceipt, _ fields: [String: Any], removing: [String] = []) throws -> WebsiteSessionCleanupReceipt {

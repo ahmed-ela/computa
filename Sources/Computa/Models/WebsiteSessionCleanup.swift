@@ -47,7 +47,9 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
         self.reason = reason; self.trigger = trigger; self.receiptSaved = receiptSaved
     }
 
-    var isValid: Bool {
+    var isValid: Bool { isValid(using: ValidationContext()) }
+
+    fileprivate func isValid(using validation: ValidationContext) -> Bool {
         guard [1, 2, 3].contains(schemaVersion), UUID(uuidString: attemptID) != nil, UUID(uuidString: taskID) != nil,
               UUID(uuidString: runtimeGeneration) != nil, timestamp.utf8.count <= 32 else { return false }
         guard threadID == nil || UUID(uuidString: threadID!) != nil,
@@ -62,16 +64,44 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
                 guard sessionToken == nil, outcome == .unconfirmed, reason == .cleanupUnverified else { return false }
             }
         } else if inferenceID != nil || sessionToken != nil || trigger == .inference { return false }
-        let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard formatter.date(from: timestamp) != nil else { return false }
+        guard validation.validTimestamp(timestamp) else { return false }
         if let modelID {
-            guard let provider, modelID == "browser/\(provider.rawValue)"
-                || WebsiteModelCatalog.choice(for: modelID)?.provider == provider.rawValue else { return false }
+            guard let provider, validation.validModel(modelID, provider: provider) else { return false }
         }
         switch outcome {
         case .closed: return provider != nil && route != nil && modelID != nil && [.deleted, .notCreated].contains(reason)
         case .noOwnedSession: return provider == nil && route == nil && modelID == nil && reason == .noOwnedSession
         case .unconfirmed: return ![.deleted, .notCreated, .noOwnedSession].contains(reason)
+        }
+    }
+
+    /// Pure validation work shared only by one synchronous read/save pass.
+    /// It never retains file bytes, receipt identities or a prior pass's result.
+    /// Fresh saves still reread and validate all historical journal rows.
+    /// Exact retries retain their existing target-read and synchronization path.
+    fileprivate final class ValidationContext {
+        private let formatter: ISO8601DateFormatter
+        // Swift String equality normalizes canonical Unicode equivalents.
+        // The catalog's ASCII/base64 validation distinguishes their bytes.
+        private struct ModelKey: Hashable { let provider: String; let modelID: Data }
+        private var models: [ModelKey: Bool] = [:]
+
+        init() {
+            formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        }
+
+        func validTimestamp(_ timestamp: String) -> Bool { formatter.date(from: timestamp) != nil }
+
+        func validModel(_ modelID: String, provider: Provider) -> Bool {
+            let key = ModelKey(provider: provider.rawValue, modelID: Data(modelID.utf8))
+            if let previous = models[key] { return previous }
+            let valid = modelID == "browser/\(provider.rawValue)"
+                || WebsiteModelCatalog.choice(for: modelID)?.provider == provider.rawValue
+            // A pass with unusual model diversity keeps the same validation;
+            // it merely stops memoizing rather than accumulating unbounded keys.
+            if models.count < 64 { models[key] = valid }
+            return valid
         }
     }
 
@@ -163,7 +193,8 @@ struct WebsiteSessionCleanupStore: Sendable {
     }
 
     private func saveInferenceObservation(_ receipt: WebsiteSessionCleanupReceipt) -> Bool {
-        guard receipt.isValid, receipt.receiptSaved, receipt.isJournalLinked,
+        let validation = WebsiteSessionCleanupReceipt.ValidationContext()
+        guard receipt.isValid(using: validation), receipt.receiptSaved, receipt.isJournalLinked,
               let turnID = receipt.turnID else { return false }
         let taskDirectory = transactionsDirectory.appendingPathComponent(receipt.taskID, isDirectory: true)
         let file = taskDirectory.appendingPathComponent(turnID + ".jsonl")
@@ -176,7 +207,7 @@ struct WebsiteSessionCleanupStore: Sendable {
             let fileExists = taskFiles.contains(file)
             guard fileExists || (taskFiles.count < limits.transactionTurnsPerTask && inventory.files.count < limits.transactionFiles) else { return false }
             try prepareDirectory(taskDirectory)
-            let existing = try transactionRecords(for: receipt.taskID, turnID: turnID)
+            let existing = try transactionRecords(for: receipt.taskID, turnID: turnID, validation: validation)
             if let saved = existing.first(where: { $0.attemptID == receipt.attemptID }) {
                 guard saved == receipt else { return false }
                 try synchronize(file); return true
@@ -189,7 +220,8 @@ struct WebsiteSessionCleanupStore: Sendable {
             for otherFile in inventory.files {
                 let rows = try records(otherFile, taskID: otherFile.deletingLastPathComponent().lastPathComponent,
                     turnID: otherFile.deletingPathExtension().lastPathComponent,
-                    maximumRecords: limits.transactionRecords, maximumBytes: limits.transactionBytes, requireTransactions: true)
+                    maximumRecords: limits.transactionRecords, maximumBytes: limits.transactionBytes,
+                    requireTransactions: true, validation: validation)
                 for row in rows {
                     if row.attemptID == receipt.attemptID { return false }
                     let sharesToken = receipt.sessionToken != nil && row.sessionToken == receipt.sessionToken
@@ -211,12 +243,18 @@ struct WebsiteSessionCleanupStore: Sendable {
     }
 
     func transactionRecords(for taskID: String, turnID: String) throws -> [WebsiteSessionCleanupReceipt] {
+        try transactionRecords(for: taskID, turnID: turnID, validation: WebsiteSessionCleanupReceipt.ValidationContext())
+    }
+
+    private func transactionRecords(for taskID: String, turnID: String,
+                                    validation: WebsiteSessionCleanupReceipt.ValidationContext) throws -> [WebsiteSessionCleanupReceipt] {
         guard WebsiteSessionCleanupReceipt.canonicalUUID(taskID), WebsiteSessionCleanupReceipt.canonicalUUID(turnID) else { throw corrupt() }
         guard !isLink(directory), !isLink(transactionsDirectory) else { throw corrupt() }
         let taskDirectory = transactionsDirectory.appendingPathComponent(taskID, isDirectory: true)
         guard !isLink(taskDirectory) else { throw corrupt() }
         return try records(taskDirectory.appendingPathComponent(turnID + ".jsonl"), taskID: taskID, turnID: turnID,
-            maximumRecords: limits.transactionRecords, maximumBytes: limits.transactionBytes, requireTransactions: true)
+            maximumRecords: limits.transactionRecords, maximumBytes: limits.transactionBytes,
+            requireTransactions: true, validation: validation)
     }
 
     func archivedLegacyRecords(for taskID: String) throws -> [WebsiteSessionCleanupReceipt] {
@@ -341,7 +379,8 @@ struct WebsiteSessionCleanupStore: Sendable {
     }
 
     private func records(_ file: URL, taskID: String, turnID: String? = nil,
-                         maximumRecords: Int, maximumBytes: Int, requireTransactions: Bool = false) throws -> [WebsiteSessionCleanupReceipt] {
+                         maximumRecords: Int, maximumBytes: Int, requireTransactions: Bool = false,
+                         validation suppliedValidation: WebsiteSessionCleanupReceipt.ValidationContext? = nil) throws -> [WebsiteSessionCleanupReceipt] {
         guard !isLink(file) else { throw corrupt() }
         if !FileManager.default.fileExists(atPath: file.path) { return [] }
         guard try fileSize(file) <= maximumBytes else { throw corrupt() }
@@ -350,13 +389,14 @@ struct WebsiteSessionCleanupStore: Sendable {
         let lines = data.dropLast().split(separator: 0x0A, omittingEmptySubsequences: false)
         guard lines.count <= maximumRecords else { throw corrupt() }
         let legacy: Set<String> = ["schemaVersion", "attemptID", "taskID", "threadID", "turnID", "runtimeGeneration", "timestamp", "outcome", "provider", "route", "modelID", "reason", "trigger", "receiptSaved"]
+        let validation = suppliedValidation ?? WebsiteSessionCleanupReceipt.ValidationContext()
         var seen = Set<String>()
         let result = try lines.map { line in
             guard !line.isEmpty, line.count <= limits.recordBytes,
                   let raw = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
                   Set(raw.keys).isSubset(of: [2, 3].contains(raw["schemaVersion"] as? Int ?? 0) ? legacy.union(["inferenceID", "sessionToken"]) : legacy) else { throw corrupt() }
             let value = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: Data(line))
-            guard value.isValid, value.receiptSaved, value.taskID.lowercased() == taskID.lowercased(),
+            guard value.isValid(using: validation), value.receiptSaved, value.taskID.lowercased() == taskID.lowercased(),
                   turnID == nil || value.turnID == turnID,
                   !requireTransactions || value.isJournalLinked,
                   seen.insert(value.attemptID).inserted else { throw corrupt() }

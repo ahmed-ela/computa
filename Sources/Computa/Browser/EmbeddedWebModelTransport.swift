@@ -3012,6 +3012,39 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return edges + [FirstUserExpansionRouteEdge(fromURL: from, toURL: to)]
     }
 
+    struct MatchedBenchmarkChunkedLog {
+        let structure: String
+        let records: [String]
+    }
+
+    /// Synthetic diagnostics only: revalidate the finite projection, then use
+    /// the established 512-byte/base64 pattern to stay below OSLog truncation.
+    /// No chunk, hash or logging result participates in inference authority.
+    static func matchedBenchmarkChunkedLog(_ benchmark: [String: Any],
+        binding: WebsiteBenchmarkCaptureLease.ObservationBinding,
+        sessionToken: String, sequence: Int, snapshot: Int) -> MatchedBenchmarkChunkedLog? {
+        guard sessionToken.count == 36, let session = UUID(uuidString: sessionToken),
+              session.uuidString.lowercased() == sessionToken.lowercased(),
+              (1...16).contains(sequence), (1...32).contains(snapshot) else { return nil }
+        var observation: [String: Any] = ["benchmarkMilestones": benchmark]
+        guard let safe = removeMatchedBenchmarkMilestones(from: &observation, binding: binding),
+              let data = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys),
+              !data.isEmpty, data.count <= 4_096,
+              data.allSatisfy({ (0x20...0x7e).contains($0) }),
+              let structure = String(data: data, encoding: .utf8) else { return nil }
+        let chunks = stride(from: 0, to: data.count, by: 512).map { offset in
+            data.subdata(in: offset..<min(offset + 512, data.count)).base64EncodedString()
+        }
+        guard (1...8).contains(chunks.count) else { return nil }
+        let nonce = binding.nonce.uuidString.lowercased(), sessionID = session.uuidString.lowercased()
+        let wholeSHA256 = promptFingerprint(structure)
+        let records = chunks.enumerated().map { index, chunk in
+            "matchedBenchmarkChunk version=1 nonce=\(nonce) sessionID=\(sessionID) sequence=\(sequence) snapshot=\(snapshot) part=\(index + 1) parts=\(chunks.count) sha256=\(wholeSHA256) base64=\(chunk)"
+        }
+        guard records.allSatisfy({ $0.utf8.count <= 960 }) else { return nil }
+        return MatchedBenchmarkChunkedLog(structure: structure, records: records)
+    }
+
     /// Passive synthetic measurements are always removed before observation
     /// validation. Invalid/missing/foreign values are unknown, never authority.
     static func removeMatchedBenchmarkMilestones(from observed: inout [String: Any],
@@ -3489,11 +3522,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         let benchmark = Self.removeMatchedBenchmarkMilestones(from: &observed,
             binding: provider == .chatgpt ? session.benchmarkObservationBinding : nil)
-        if action == "inspect", let benchmark, session.benchmarkObservationLogCount < 32,
-           let data = try? JSONSerialization.data(withJSONObject: benchmark, options: .sortedKeys), data.count <= 4_096,
-           let structure = String(data: data, encoding: .utf8), structure != session.lastBenchmarkObservationLog {
-            session.lastBenchmarkObservationLog = structure; session.benchmarkObservationLogCount += 1
-            Self.inspectionLog.notice("matchedBenchmark provider=chatgpt sequence=\(session.sequence) structure=\(structure, privacy: .public)")
+        if action == "inspect", let benchmark, let binding = session.benchmarkObservationBinding,
+           session.benchmarkObservationLogCount < 32,
+           let log = Self.matchedBenchmarkChunkedLog(benchmark, binding: binding, sessionToken: session.token,
+               sequence: session.sequence, snapshot: session.benchmarkObservationLogCount + 1),
+           log.structure != session.lastBenchmarkObservationLog {
+            session.lastBenchmarkObservationLog = log.structure; session.benchmarkObservationLogCount += 1
+            for record in log.records { Self.inspectionLog.notice("\(record, privacy: .public)") }
         }
         logModelDiagnostic(observed, session: session)
         if let safe = Self.sanitizedProductModeDiagnostic(observed["productModeDiagnostic"]),
@@ -4586,6 +4621,14 @@ struct WebsiteResponseProfile: Sendable {
         guard let sessionID = UUID(uuidString: sessionToken), (1...16).contains(sequence),
               (source == .nativeTurn ? inferenceID == nil : inferenceID != nil) else { return nil }
         return Self(source: source, sessionID: sessionID, sequence: sequence, inferenceID: inferenceID, started: started)
+    }
+
+    /// Cleanup can inherit a different inference's TaskLocal through callbacks.
+    /// Filter diagnostics only; a mismatch must never skip or alter cleanup.
+    func matchingCleanup(sessionToken: String, sequence: Int, inferenceID: UUID) -> Self? {
+        guard source == .serverAcknowledged, UUID(uuidString: sessionToken) == sessionID,
+              sequence == self.sequence, inferenceID == self.inferenceID else { return nil }
+        return self
     }
 
     static func milliseconds(_ value: Duration) -> Int {
