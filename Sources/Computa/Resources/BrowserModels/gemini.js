@@ -379,8 +379,19 @@ function websiteChatPickerState() {
 }
 async function websiteChatObserveSelection(request, expected, freshGuard = null, attempt = null, context = null) {
   const owner = globalThis.__computaModelOwner, url = document.URL, originalDocument = document;
-  const until = Date.now() + 1_800;
   const mutable = typeof freshGuard === 'function';
+  let until = Date.now() + 1_800;
+  // Only the private first-insert final guard may carry time already spent on
+  // editor readiness. Other reads retain their original independent budget.
+  const cappedFirstInsert = !mutable && request.action === 'insert' && request.submissionSequence === 1
+    && request.expectedModelChoice?.key === 'chat/latest/instant' && context?.action === 'insert'
+    && context.scope === 'action_final_guard' && context.firstInsertDeadline !== undefined;
+  if (cappedFirstInsert) {
+    if (!Number.isSafeInteger(context.firstInsertDeadline) || context.firstInsertDeadline < 0)
+      return { error: 'model_unverified' };
+    until = Math.min(until, context.firstInsertDeadline);
+    if (Date.now() >= until) return { error: 'model_unverified' };
+  }
   const owned = () => window === window.top && location.origin === 'https://chatgpt.com'
     && document === originalDocument && document.URL === url && globalThis.__computaModelOwner === owner
     && owner === request.ownerToken && websiteChatInvocationLease != null
@@ -616,6 +627,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = drainOpeningEvidence();
       if (!insertOpeningIntact(current)) insertOpening = null;
     }
+    if (cappedFirstInsert && Date.now() >= until) throw failure('model_unverified');
     primaryOpened = true; readStage = 'primary_open_requested';
     trigger.click();
     const powerAcknowledged = () => {
@@ -764,6 +776,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       websiteChatTrackPinnedControls(globalThis.__computaChatPresetPin, familyState);
       websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
+    if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
     return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
@@ -1119,7 +1132,7 @@ function websiteModelGuard(state, expected) {
   if (!websiteModelChoiceEqual(state.selected, expected)) return { error: 'model_mismatch', modelEvidence: state.evidence };
   return null;
 }
-function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClockFailure = null) {
+function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClockFailure = null, observeEditorControls = false) {
   if (condition()) return Promise.resolve(true);
   websiteModelDiagnosticPhase(phase);
   return new Promise(resolve => {
@@ -1135,7 +1148,8 @@ function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClo
     };
     observer.observe(document.documentElement || document, { subtree: true, childList: true, characterData: true,
       attributes: true, attributeFilter: ['aria-expanded', 'aria-hidden', 'aria-controls', 'aria-labelledby', 'aria-checked',
-        'aria-selected', 'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-label', 'aria-disabled', 'disabled', 'data-state', 'role', 'class', 'style', 'hidden', 'inert'] });
+        'aria-selected', 'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-label', 'aria-disabled', 'disabled', 'data-state', 'role', 'class', 'style', 'hidden', 'inert',
+        ...(observeEditorControls === true ? ['id', 'contenteditable', 'data-testid'] : [])] });
     const milliseconds = Math.max(1, Math.min(10_000, Math.ceil(until - Date.now())));
     const clock = window.webkit?.messageHandlers?.computaModelClock;
     if (clock && typeof input?.operationID === 'string') {

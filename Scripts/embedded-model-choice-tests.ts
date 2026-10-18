@@ -2115,6 +2115,180 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const dismiss = picker.menu.onDispatch; let count = 0;
         picker.menu.onDispatch = (event: any) => { dismiss(event); if (event.key === 'Escape' && ++count === 1) callback(); };
       };
+      const firstInsertReadiness = async (ignoreWhenReady = false, rejectClock = false, missing = '') => {
+        const { f, picker } = setup(); picker.selected('Instant'); const expected = choice('Instant');
+        expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
+        expect((await f.run('prepare', { expectedModelChoice: expected })).prepared).toBe(true);
+        const prompt = 'Synthetic editor acknowledgement request\n\n' + markerLine;
+        const selection: any = { anchorNode: f.composer, focusNode: f.composer, removeAllRanges() {}, addRange() {} };
+        f.window.getSelection = () => selection;
+        f.document.createRange = () => ({ selectNodeContents(node: any) { selection.anchorNode = node; selection.focusNode = node; }, collapse() {} });
+        let insertions = 0, openings = 0;
+        f.document.execCommand = (command: string, _ui: boolean, text: string) => {
+          expect(command).toBe('insertText'); expect(text).toBe(prompt); insertions++; f.composer.text = text;
+          if (['composer', 'both'].includes(missing)) {
+            f.composer.parentElement.children = f.composer.parentElement.children.filter((node: any) => node !== f.composer);
+            f.composer.connected = false;
+          }
+          return true;
+        };
+        const send = new Node('BUTTON', { 'aria-label': missing === 'voice' ? 'Use voice' : 'Send prompt' });
+        send.disabled = missing !== 'voice';
+        if (!['send', 'both'].includes(missing)) f.body.append(send);
+        const open = picker.trigger.onClick;
+        picker.trigger.onClick = () => {
+          if (!f.composer.textContent) { open(); return; }
+          openings++;
+          const currentSend = f.document.querySelectorAll('button[data-testid="send-button"], button[aria-label="Send prompt"]')[0];
+          if (currentSend && !currentSend.disabled && !ignoreWhenReady) open();
+        };
+        const request = { prompt, expectedModelChoice: expected, submissionSequence: 1, submissionMarker: firstMarker,
+          expectedSubmissionProofs: [], preparationTiming: true,
+          ...(rejectClock ? { operationID: 'a909845c-2857-4b22-a66b-261b22281513' } : {}) };
+        if (rejectClock) f.window.webkit.messageHandlers.computaModelClock = {
+          postMessage: () => Promise.reject(new Error('PRIVATE_READINESS_CLOCK_CANARY')) };
+        let settled = false;
+        const inserting = f.run('insert', request).then((value: any) => { settled = true; return value; });
+        for (let tick = 0; tick < 20 && (insertions === 0 || !f.world.__computaChatSubmissionState?.pending); tick++) {
+          await microtasks(); await new Promise(resolve => setImmediate(resolve));
+        }
+        await microtasks();
+        expect(insertions).toBe(1);
+        const state = f.world.__computaChatSubmissionState, pending = state.pending;
+        expect(pending.phase).toBe('prepared'); expect(state.lastVerified).toBeNull();
+        const notify = (attribute?: string, target?: any) => f.observers.forEach((observer: any) => {
+          if (attribute && !(observer.options?.attributes === true && observer.options.attributeFilter?.includes(attribute))) return;
+          observer.callback(attribute ? [{ type: 'attributes', attributeName: attribute, target, oldValue: null }] : []);
+        });
+        const expire = async () => {
+          if (!settled) { f.advanceTime(1_801); f.flush(); await microtasks(); f.flush(); await microtasks(); }
+          return inserting;
+        };
+        const noReplay = () => {
+          expect(insertions).toBe(1); expect(send.clicks).toBe(0);
+          expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+        };
+        return { f, picker, expected, prompt, request, send, inserting, state, pending, notify, expire, noReplay,
+          openings: () => openings, settled: () => settled };
+      };
+      test('first Instant insert waits for editor acknowledgement before its sole final picker opening', async () => {
+        const x = await firstInsertReadiness();
+        // A controlled site ignores picker actions while its Send is disabled.
+        // Old ordering opens immediately; no readiness proof is fabricated.
+        const before = x.openings();
+        x.f.advanceTime(20); x.send.disabled = false; x.notify(); await microtasks();
+        if (!x.settled()) { x.f.advanceTime(901); x.f.flush(); await microtasks(); }
+        const result = await x.expire();
+        expect(before).toBe(0); expect(result.error).toBeUndefined(); expect(result.inserted).toBe(true);
+        expect(result.modelEvidence.selected).toEqual(x.expected); expect(x.openings()).toBe(1);
+        expect(result.preparationTiming).toMatchObject({ editorReadyAtEntry: false, openingRecoveryUsed: false });
+        expect(typeof result.preparationTiming.editorReadinessMs).toBe('number');
+        expect(x.picker.trigger.values['aria-expanded']).toBe('false'); x.noReplay();
+      });
+      test('first Instant readiness observes initially missing Send and editor mounts before its picker proof', async () => {
+        for (const missing of ['send', 'composer', 'both']) {
+          const x = await firstInsertReadiness(false, false, missing);
+          expect(x.openings()).toBe(0);
+          if (['composer', 'both'].includes(missing)) x.f.body.append(new Node('DIV', { ...x.f.composer.values }, x.prompt));
+          if (['send', 'both'].includes(missing)) x.f.body.append(x.send);
+          x.send.disabled = false; x.notify(); await microtasks();
+          const result = await x.expire();
+          expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+          expect(result.preparationTiming.editorReadyAtEntry).toBe(false); expect(x.openings()).toBe(1); x.noReplay();
+        }
+      });
+      test('first Instant readiness wakes for a data-testid-only Voice-to-Send transition', async () => {
+        const x = await firstInsertReadiness(false, false, 'voice');
+        expect(x.openings()).toBe(0); expect(x.send.disabled).toBe(false);
+        // No childList, disabled, or aria-label mutation accompanies this.
+        x.send.values['data-testid'] = 'send-button'; x.notify('data-testid', x.send); await microtasks();
+        const result = await x.expire();
+        expect(result.error).toBeUndefined(); expect(result.preparationTiming.editorReadyAtEntry).toBe(false);
+        expect(result.modelEvidence.selected).toEqual(x.expected); expect(x.openings()).toBe(1); x.noReplay();
+      });
+      test('first Instant readiness permits exact current controls to remount without replaying editor input', async () => {
+        for (const replacement of ['send', 'composer', 'both']) {
+          const x = await firstInsertReadiness();
+          let currentSend = x.send;
+          if (replacement !== 'composer') {
+            currentSend = new Node('BUTTON', { ...x.send.values });
+            x.send.parentElement.children = x.send.parentElement.children.filter((node: any) => node !== x.send);
+            x.send.connected = false; x.f.body.append(currentSend);
+          }
+          if (replacement !== 'send') {
+            const editor = new Node('DIV', { ...x.f.composer.values }, x.prompt);
+            x.f.composer.parentElement.children = x.f.composer.parentElement.children.filter((node: any) => node !== x.f.composer);
+            x.f.composer.connected = false; x.f.body.append(editor);
+          }
+          currentSend.disabled = false; x.notify(); await microtasks();
+          const result = await x.expire();
+          expect(result.error).toBeUndefined(); expect(result.inserted).toBe(true);
+          expect(result.modelEvidence.selected).toEqual(x.expected); expect(x.openings()).toBe(1);
+          expect(currentSend.clicks).toBe(0); x.noReplay();
+        }
+      });
+      test('first Instant readiness rejects ambiguous or wrong-text replacement controls', async () => {
+        for (const replacement of ['duplicate_send', 'duplicate_editor', 'wrong_editor']) {
+          const x = await firstInsertReadiness();
+          if (replacement === 'duplicate_send') x.f.body.append(new Node('BUTTON', { ...x.send.values }));
+          else {
+            const editor = new Node('DIV', { ...x.f.composer.values }, replacement === 'wrong_editor' ? 'Foreign editor body' : x.prompt);
+            if (replacement === 'wrong_editor') {
+              x.f.composer.parentElement.children = x.f.composer.parentElement.children.filter((node: any) => node !== x.f.composer);
+              x.f.composer.connected = false;
+            }
+            x.f.body.append(editor);
+          }
+          x.send.disabled = false; x.notify(); await microtasks();
+          expect((await x.expire()).error).toBeDefined(); expect(x.openings()).toBe(0); x.noReplay();
+        }
+      });
+      test('first Instant readiness rejects owner model Work and literal drift without a picker action', async () => {
+        for (const mutation of ['owner', 'route', 'invocation', 'power', 'pin', 'work', 'temporary', 'body',
+          'fingerprint', 'phase', 'user', 'assistant']) {
+          const x = await firstInsertReadiness();
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'different-owner';
+          if (mutation === 'route') x.f.document.URL = 'https://chatgpt.com/c/foreign';
+          if (mutation === 'invocation') x.f.world.__computaChatActiveInvocation = {};
+          if (mutation === 'power') x.picker.selected('High');
+          if (mutation === 'pin') x.f.world.__computaChatPresetPin = { ...x.f.world.__computaChatPresetPin };
+          if (mutation === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+          if (mutation === 'temporary') x.f.temporary.connected = false;
+          if (mutation === 'body') x.f.composer.text += 'foreign';
+          if (mutation === 'fingerprint') x.pending.fingerprint = '0'.repeat(64);
+          if (mutation === 'phase') x.pending.phase = 'send_claimed';
+          if (mutation === 'user') x.f.body.append(new Node('ARTICLE', { 'data-turn': 'user' }));
+          if (mutation === 'assistant') x.f.body.append(new Node('ARTICLE', { 'data-turn': 'assistant' }));
+          x.send.disabled = false; x.notify(); await microtasks();
+          const result = await x.expire();
+          expect(result.error).toBeDefined(); expect(x.openings()).toBe(0); x.noReplay();
+        }
+      });
+      test('first Instant readiness does not renew its deadline or recover an unready editor', async () => {
+        for (const missing of ['', 'send', 'composer', 'both']) {
+          const x = await firstInsertReadiness(false, false, missing);
+          x.f.advanceTime(1_801); x.f.flush(); await microtasks();
+          expect((await x.expire()).error).toBe('send_unavailable'); expect(x.openings()).toBe(0); x.noReplay();
+        }
+      });
+      test('first Instant readiness cannot turn a rejected native clock into later positive proof', async () => {
+        const x = await firstInsertReadiness(false, true);
+        const result = await x.expire();
+        expect(result.error).toBe('send_unavailable'); expect(x.openings()).toBe(0);
+        x.send.disabled = false; x.notify(); await microtasks();
+        expect((await x.inserting).error).toBe('send_unavailable'); expect(x.openings()).toBe(0);
+        expect(JSON.stringify(result)).not.toContain('PRIVATE_READINESS_CLOCK_CANARY'); x.noReplay();
+      });
+      test('first Instant final picker inherits only the readiness budget that remains', async () => {
+        const x = await firstInsertReadiness(true);
+        x.f.advanceTime(1_000); x.send.disabled = false; x.notify(); await microtasks();
+        expect(x.openings()).toBe(1);
+        // The model proof gets the remaining ~800ms, not a new1800ms scope.
+        const delay = x.f.scheduledDelays.at(-1);
+        expect(delay).toBeGreaterThan(0); expect(delay).toBeLessThanOrEqual(800);
+        x.f.advanceTime(801); x.f.flush(); await microtasks();
+        expect((await x.expire()).error).toBeDefined(); expect(x.openings()).toBe(1); x.noReplay();
+      });
       const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '') => {
         const { f, picker } = setup(); picker.selected('Instant');
         const expected = choice('Instant');
@@ -2245,6 +2419,9 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         let insertions = 0, openings = 0; const open = picker.trigger.onClick;
         f.document.execCommand = (_command: string, _ui: boolean, text: string) => { insertions++; f.composer.text = text; return true; };
         picker.trigger.onClick = () => { if (f.composer.textContent) openings++; else open(); };
+        // This case targets the picker's clock after editor acknowledgement.
+        // Keep that intended boundary independent of readiness/mount waiting.
+        f.body.append(new Node('BUTTON', { 'aria-label': 'Send prompt' }));
         f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => Promise.reject(new Error('synthetic native clock rejection')) };
         const result = await f.run('insert', { prompt, expectedModelChoice: expected, submissionSequence: 1,
           submissionMarker: firstMarker, expectedSubmissionProofs: [], operationID: 'a909845c-2857-4b22-a66b-261b22281513' });

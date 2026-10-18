@@ -316,6 +316,49 @@ async function chatTurnFixture(modelChoice?: { key: string; label: string }, ini
     } };
 }
 
+describe('readiness-only selector observation', () => {
+  test('only an exact opt-in adds the fixed editor selector attributes to the existing event waiter', async () => {
+    const helper = readFileSync(new URL('./embedded-model-choice-helper.js', import.meta.url), 'utf8');
+    const start = helper.indexOf('function websiteModelWaitForChange(');
+    const end = helper.indexOf('async function websiteModelSettleSelection(', start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const run = new Function('optIn', `
+      let callback, captured, ready = false;
+      const Date = { now: () => 1000 }, window = {}, input = {};
+      const document = { documentElement: {} };
+      const websiteModelDiagnosticPhase = () => {};
+      const setTimeout = () => 0, clearTimeout = () => {};
+      class MutationObserver {
+        constructor(value) { callback = value; }
+        observe(_target, options) { captured = options; }
+        disconnect() {}
+      }
+      ${helper.slice(start, end)}
+      const pending = websiteModelWaitForChange(2000, () => ready, 'model_wait', null, optIn);
+      ready = true; callback([]); return pending.then(() => captured.attributeFilter);
+    `);
+    const baseline = await run(false);
+    for (const value of [undefined, false, 1, 'true']) expect(await run(value)).toEqual(baseline);
+    expect(await run(true)).toEqual([...baseline, 'id', 'contenteditable', 'data-testid']);
+    for (const name of ['id', 'contenteditable', 'data-testid']) expect(baseline).not.toContain(name);
+  });
+});
+
+describe('private first-insert model deadline cap', () => {
+  test('expired and malformed final-guard caps reject before observing or clicking page controls', async () => {
+    const start = source.indexOf('async function websiteChatObserveSelection(');
+    const end = source.indexOf('async function websiteChatPickerAction(', start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const run = new AsyncFunction('document', 'globalThis', 'Date', 'context', source.slice(start, end)
+      + "return websiteChatObserveSelection({ action: 'insert', submissionSequence: 1, expectedModelChoice: { key: 'chat/latest/instant' } }, {}, null, null, context);");
+    for (const value of [999, 1_000, -1, 1.5, NaN, Infinity, null, '1001']) {
+      const result = await run({ URL: 'https://chatgpt.com/' }, {}, { now: () => 1_000 },
+        { action: 'insert', scope: 'action_final_guard', firstInsertDeadline: value });
+      expect(result).toEqual({ error: 'model_unverified' });
+    }
+  });
+});
+
 describe('optional first-preparation timing', () => {
   test('an actual first insert keeps exact submission state and emits only finite timing fields', async () => {
     for (const enabled of [false, true]) {
@@ -330,9 +373,10 @@ describe('optional first-preparation timing', () => {
       if (!enabled) { expect(result).not.toHaveProperty('preparationTiming'); continue; }
       const timing = result.preparationTiming;
       expect(Object.keys(timing).sort()).toEqual(['totalMs', 'beginSubmissionMs', 'beginSubmissionHashMs',
-        'modelPrecheckMs', 'finalGuardMs', 'editorMutationMs', 'inputDispatchMs', 'openingRecoveryUsed'].sort());
+        'modelPrecheckMs', 'finalGuardMs', 'editorMutationMs', 'inputDispatchMs', 'editorReadinessMs', 'editorReadyAtEntry', 'openingRecoveryUsed'].sort());
       for (const [key, value] of Object.entries(timing)) {
         if (key === 'openingRecoveryUsed') { expect(value).toBe(false); continue; }
+        if (key === 'editorReadyAtEntry') { expect(value).toBeNull(); continue; }
         if (value === null) continue;
         expect(typeof value).toBe('number'); expect(Number.isFinite(value)).toBe(true);
         expect(value as number).toBeGreaterThanOrEqual(0); expect(value as number).toBeLessThanOrEqual(45_000);

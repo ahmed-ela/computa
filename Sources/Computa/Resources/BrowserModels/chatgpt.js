@@ -379,8 +379,19 @@ function websiteChatPickerState() {
 }
 async function websiteChatObserveSelection(request, expected, freshGuard = null, attempt = null, context = null) {
   const owner = globalThis.__computaModelOwner, url = document.URL, originalDocument = document;
-  const until = Date.now() + 1_800;
   const mutable = typeof freshGuard === 'function';
+  let until = Date.now() + 1_800;
+  // Only the private first-insert final guard may carry time already spent on
+  // editor readiness. Other reads retain their original independent budget.
+  const cappedFirstInsert = !mutable && request.action === 'insert' && request.submissionSequence === 1
+    && request.expectedModelChoice?.key === 'chat/latest/instant' && context?.action === 'insert'
+    && context.scope === 'action_final_guard' && context.firstInsertDeadline !== undefined;
+  if (cappedFirstInsert) {
+    if (!Number.isSafeInteger(context.firstInsertDeadline) || context.firstInsertDeadline < 0)
+      return { error: 'model_unverified' };
+    until = Math.min(until, context.firstInsertDeadline);
+    if (Date.now() >= until) return { error: 'model_unverified' };
+  }
   const owned = () => window === window.top && location.origin === 'https://chatgpt.com'
     && document === originalDocument && document.URL === url && globalThis.__computaModelOwner === owner
     && owner === request.ownerToken && websiteChatInvocationLease != null
@@ -616,6 +627,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = drainOpeningEvidence();
       if (!insertOpeningIntact(current)) insertOpening = null;
     }
+    if (cappedFirstInsert && Date.now() >= until) throw failure('model_unverified');
     primaryOpened = true; readStage = 'primary_open_requested';
     trigger.click();
     const powerAcknowledged = () => {
@@ -764,6 +776,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       websiteChatTrackPinnedControls(globalThis.__computaChatPresetPin, familyState);
       websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
+    if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
     return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
@@ -1119,7 +1132,7 @@ function websiteModelGuard(state, expected) {
   if (!websiteModelChoiceEqual(state.selected, expected)) return { error: 'model_mismatch', modelEvidence: state.evidence };
   return null;
 }
-function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClockFailure = null) {
+function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClockFailure = null, observeEditorControls = false) {
   if (condition()) return Promise.resolve(true);
   websiteModelDiagnosticPhase(phase);
   return new Promise(resolve => {
@@ -1135,7 +1148,8 @@ function websiteModelWaitForChange(until, condition, phase = 'model_wait', onClo
     };
     observer.observe(document.documentElement || document, { subtree: true, childList: true, characterData: true,
       attributes: true, attributeFilter: ['aria-expanded', 'aria-hidden', 'aria-controls', 'aria-labelledby', 'aria-checked',
-        'aria-selected', 'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-label', 'aria-disabled', 'disabled', 'data-state', 'role', 'class', 'style', 'hidden', 'inert'] });
+        'aria-selected', 'aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'aria-label', 'aria-disabled', 'disabled', 'data-state', 'role', 'class', 'style', 'hidden', 'inert',
+        ...(observeEditorControls === true ? ['id', 'contenteditable', 'data-testid'] : [])] });
     const milliseconds = Math.max(1, Math.min(10_000, Math.ceil(until - Date.now())));
     const clock = window.webkit?.messageHandlers?.computaModelClock;
     if (clock && typeof input?.operationID === 'string') {
@@ -1575,7 +1589,8 @@ function chatGPTPreparationNow() {
   } catch { return null; }
 }
 const chatGPTPreparationTiming = { started: chatGPTPreparationNow(), beginSubmissionMs: null,
-  beginSubmissionHashMs: null, modelPrecheckMs: null, finalGuardMs: null, editorMutationMs: null, inputDispatchMs: null };
+  beginSubmissionHashMs: null, modelPrecheckMs: null, finalGuardMs: null, editorMutationMs: null, inputDispatchMs: null,
+  editorReadinessMs: null, editorReadyAtEntry: null };
 function chatGPTPreparationElapsed(started) {
   const ended = chatGPTPreparationNow();
   return started !== null && ended !== null && ended >= started && ended - started <= 45_000
@@ -1752,6 +1767,104 @@ websiteChatDrainPinnedMutations = function(pin) {
   websiteChatFullDrainPinnedMutations(pin);
   websiteChatDrainProvisionalHeader(pin);
 };
+// Controlled first-Instant ordering: wait for the current exact editor and
+// enabled Send without inferring why either is still unavailable. This performs
+// no action and cannot replace the unchanged full picker proof that follows.
+let chatGPTFirstInsertFinalDeadline = null;
+function chatGPTAwaitFirstInsertEditor(request, observed) {
+  if (observed.error || observed.inserted !== true || request.action !== 'insert'
+    || request.expectedModelChoice?.key !== 'chat/latest/instant' || request.submissionSequence !== 1
+    || request.submissionMarker !== request.expectedFirstUserMarker
+    || !Array.isArray(request.expectedSubmissionProofs) || request.expectedSubmissionProofs.length !== 0
+    || request.expectedFirstUserFingerprint != null || request.expectedConversation != null) return null;
+  const state = globalThis.__computaChatSubmissionState, record = state?.pending;
+  const pin = globalThis.__computaChatPresetPin, attempt = globalThis.__computaModelSelection;
+  if (!record || !pin || !attempt?.completed) return null;
+  const started = chatGPTPreparationNow();
+  const until = Date.now() + 1_800, originalDocument = document, originalURL = document.URL;
+  const invocation = websiteChatInvocationLease, selection = pin.selection;
+  const canonical = record.canonical, fingerprint = record.fingerprint, familyKey = selection?.family?.key;
+  const visible = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
+  const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+  const composers = () => [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
+    + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))].filter(visible);
+  const sends = () => [...new Set(document.querySelectorAll('button[data-testid="send-button"], button[aria-label="Send prompt"], '
+    + 'button[aria-label="Send message"], button[aria-label="Send"]'))].filter(visible);
+  const composerCandidates = composers(), sendCandidates = sends();
+  // This is a read-only ordering hint, not control dispatch or body binding.
+  // Zero controls may be a pending mount; no positive proof uses that state.
+  if (composerCandidates.length > 1 || sendCandidates.length > 1) return { error: 'composer_unavailable' };
+  let send = sendCandidates[0] || null, editorReady = false;
+  const failure = () => {
+    if (window !== window.top || document !== originalDocument || document.URL !== originalURL
+      || document.URL !== request.expectedURL || location.origin !== 'https://chatgpt.com'
+      || !invocation || websiteChatInvocationLease !== invocation || globalThis.__computaChatActiveInvocation !== invocation
+      || globalThis.__computaModelOwner !== request.ownerToken) return { error: 'document_changed' };
+    if (globalThis.__computaChatSubmissionState !== state || state.pending !== record || state.lastVerified != null
+      || state.revoked || state.document !== document || state.owner !== request.ownerToken
+      || state.firstMarker !== request.expectedFirstUserMarker || !websiteModelChoiceEqual(state.modelChoice, request.expectedModelChoice)
+      || record.document !== document || record.owner !== request.ownerToken
+      || record.sequence !== 1 || record.marker !== request.submissionMarker || record.phase !== 'prepared'
+      || record.root !== null || record.body !== null || record.expansionAttempted
+      || record.canonical !== canonical || canonical !== chatGPTSubmissionCanonical(request.prompt)
+      || record.fingerprint !== fingerprint || typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(fingerprint)
+      || globalThis.__computaModelFirstPrompt !== request.prompt || globalThis.__computaModelFirstSubmitted === true
+      || globalThis.__computaModelFirstProof || chatGPTMessageRoots('user').length || chatGPTMessageRoots('assistant').length)
+      return chatGPTSubmissionFailure(state, 'begin_admission', record);
+    websiteChatDrainPinnedMutations(pin);
+    if (globalThis.__computaChatPresetPin !== pin || globalThis.__computaModelSelection !== attempt
+      || attempt.completed !== true || pin.invalidated === true || pin.owner !== request.ownerToken || pin.document !== document
+      || pin.selection !== selection || selection?.family?.key !== familyKey || selection?.power?.key !== 'instant'
+      || !websiteModelChoiceEqual(request.expectedModelChoice, websiteChatPresetChoice(selection.family, selection.power)))
+      return { error: 'model_mismatch' };
+    const picker = websiteChatPickerState();
+    if (picker.trigger !== pin.headerTrigger || !picker.closedPresentation || picker.headerPower?.key !== 'instant'
+      || picker.duplicate || picker.conflicting || picker.indicatorInvalid || picker.selectionAmbiguous || picker.navigationAmbiguous)
+      return { error: 'model_unverified' };
+    if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
+    if (!chatGPTTemporaryVerified()) return { error: 'temporary_mode_unverified' };
+    const currentComposers = composers(), currentSends = sends();
+    if (currentComposers.length > 1 || currentSends.length > 1
+      || [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Stop streaming"], '
+        + 'button[aria-label="Stop generating"], button[aria-label="Stop"]')].some(visible)) return { error: 'composer_unavailable' };
+    send = currentSends[0] || null;
+    editorReady = false;
+    const composer = currentComposers[0];
+    if (!composer) return null;
+    if (!enabled(composer)) return { error: 'composer_unavailable' };
+    const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
+    if (typeof value !== 'string' || value.replace(/\r\n/g, '\n').trim() !== request.prompt.trim()
+      || chatGPTSubmissionCanonical(value) !== record.canonical) return { error: 'prompt_not_inserted' };
+    editorReady = true;
+    return null;
+  };
+  let rejected = failure();
+  if (rejected) return rejected;
+  const readyAtEntry = editorReady && enabled(send);
+  if (chatGPTPreparationTimingEnabled) chatGPTPreparationTiming.editorReadyAtEntry = readyAtEntry;
+  if (readyAtEntry) {
+    if (Date.now() >= until) return { error: 'send_unavailable' };
+    chatGPTFirstInsertFinalDeadline = until;
+    chatGPTPreparationRecord('editorReadinessMs', started);
+    return null;
+  }
+  return (async () => {
+    let clockFailed = false;
+    try {
+      const changed = await websiteModelWaitForChange(until, () => {
+        rejected = failure(); return !!rejected || editorReady && enabled(send);
+      }, 'model_wait', () => { clockFailed = true; }, true);
+      if (rejected) return rejected;
+      if (clockFailed || !changed || Date.now() >= until) return { error: 'send_unavailable' };
+      rejected = failure();
+      if (rejected) return rejected;
+      if (Date.now() >= until || !editorReady || !enabled(send)) return { error: 'send_unavailable' };
+      chatGPTFirstInsertFinalDeadline = until;
+      return null;
+    } finally { chatGPTPreparationRecord('editorReadinessMs', started); }
+  })();
+}
 const websiteModelFullReadEvidence = websiteModelReadEvidence;
 websiteModelReadEvidence = async function(provider, expected, openingRecovery = null, context = null) {
   if (provider === 'chatgpt') {
@@ -1766,8 +1879,11 @@ websiteModelReadEvidence = async function(provider, expected, openingRecovery = 
     pending.proofLease = websiteChatInvocationLease;
   }
   const precheckStarted = context?.scope === 'action_precheck' ? chatGPTPreparationNow() : null;
+  const cappedContext = provider === 'chatgpt' && input.action === 'insert' && context?.scope === 'action_final_guard'
+    && context.action === 'insert' && chatGPTFirstInsertFinalDeadline !== null
+    ? { ...context, firstInsertDeadline: chatGPTFirstInsertFinalDeadline } : context;
   try {
-    const result = await websiteModelFullReadEvidence(provider, expected, openingRecovery, context);
+    const result = await websiteModelFullReadEvidence(provider, expected, openingRecovery, cappedContext);
     if (pending && !pending.completed) {
       websiteChatDrainPinnedMutations(pin);
       if (pin.invalidated === true) return { error: 'model_mismatch' };
@@ -1791,6 +1907,9 @@ websiteModelFinalGuard = async function(provider, request, observed, currentTemp
     ? chatGPTResponseReadSnapshot() : null;
   if (candidate && !chatGPTResponseSnapshotMatches(candidate, observed))
     return { error: 'conversation_changed', detail: 'response_changed' };
+  const editorWait = provider === 'chatgpt' ? chatGPTAwaitFirstInsertEditor(request, observed) : null;
+  const editorFailure = editorWait instanceof Promise ? await editorWait : editorWait;
+  if (editorFailure) return editorFailure;
   const finalGuardStarted = chatGPTPreparationNow();
   let result;
   try { result = await websiteModelFullFinalGuard(provider, request, observed, currentTemporary); }

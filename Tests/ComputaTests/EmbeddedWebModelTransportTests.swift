@@ -9,7 +9,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     func testPreparationTimingIsFiniteContentFreeAndRemovedBeforeObservationParsing() throws {
         let timing: [String: Any] = ["totalMs": 805.25, "beginSubmissionMs": 2.25, "beginSubmissionHashMs": 1.5,
             "modelPrecheckMs": 31.75, "finalGuardMs": 45.5, "editorMutationMs": 5.25,
-            "inputDispatchMs": NSNull(), "openingRecoveryUsed": false]
+            "inputDispatchMs": NSNull(), "editorReadinessMs": NSNull(), "editorReadyAtEntry": NSNull(), "openingRecoveryUsed": false]
         let original: [String: Any] = ["inserted": true, "submissionOwnershipCapability": "unchanged"]
         var observed = original; observed["preparationTiming"] = timing
         let safe = try XCTUnwrap(EmbeddedWebModelTransport.removePreparationTiming(from: &observed))
@@ -25,7 +25,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     func testMalformedPreparationTimingCannotChangeAnObservationOrGrantAuthority() {
         let valid: [String: Any] = ["totalMs": 8.0, "beginSubmissionMs": NSNull(), "beginSubmissionHashMs": NSNull(),
             "modelPrecheckMs": 1.0, "finalGuardMs": 2.0, "editorMutationMs": 3.0,
-            "inputDispatchMs": 1.0, "openingRecoveryUsed": true]
+            "inputDispatchMs": 1.0, "editorReadinessMs": 1.0, "editorReadyAtEntry": false, "openingRecoveryUsed": true]
         var cases: [Any] = [NSNull(), [], "PRIVATE_TIMING_CANARY"]
         for key in valid.keys { var bad = valid; bad.removeValue(forKey: key); cases.append(bad) }
         var unknown = valid; unknown["PRIVATE_TIMING_CANARY"] = "PRIVATE_VALUE_CANARY"; cases.append(unknown)
@@ -36,6 +36,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let invalidFlags: [Any] = [0, 1, NSNull(), "true"]
         for value in invalidFlags {
             var bad = valid; bad["openingRecoveryUsed"] = value; cases.append(bad)
+        }
+        for value in invalidFlags where !(value is NSNull) {
+            var bad = valid; bad["editorReadyAtEntry"] = value; cases.append(bad)
         }
         for raw in cases {
             var observed: [String: Any] = ["error": "model_mismatch", "preparationTiming": raw]
