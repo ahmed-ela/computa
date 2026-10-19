@@ -114,7 +114,7 @@ final class EmbeddedBrowserSession {
         var source: WKWebsiteDataStore?
         var sourceCookies: [HTTPCookie]?
         var validation: ChatGPTInferenceCookieValidation?
-        init(lifetime: Duration = .seconds(120)) { self.lifetime = lifetime }
+        init(lifetime: Duration) { self.lifetime = lifetime }
     }
 
     private enum InferencePrewarmUnavailable: String {
@@ -1360,6 +1360,11 @@ final class EmbeddedBrowserSession {
     }
 
     private static let inferencePrewarmLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
+    // Keep one prompt-free root through normal pauses between tasks. Expiring
+    // it sooner repeatedly discards a hydrated page just before the next Send.
+    // Adoption still validates current cookies, view, generation and route;
+    // the transport establishes fresh product/model/readiness proofs afterward.
+    private static let inferencePrewarmLifetime: Duration = .seconds(600)
 
     func setChatGPTInferencePrewarmingEnabled(_ enabled: Bool, admit: @escaping @MainActor () throws -> Void) {
         chatGPTInferencePrewarmingEnabled = enabled && !isShutdown
@@ -1377,9 +1382,9 @@ final class EmbeddedBrowserSession {
         do { try admit() } catch { return }
         let warm: InferencePrewarm
         #if DEBUG
-        warm = InferencePrewarm(lifetime: prewarmLifetimeForTesting ?? .seconds(120))
+        warm = InferencePrewarm(lifetime: prewarmLifetimeForTesting ?? Self.inferencePrewarmLifetime)
         #else
-        warm = InferencePrewarm()
+        warm = InferencePrewarm(lifetime: Self.inferencePrewarmLifetime)
         #endif
         chatGPTInferencePrewarm = warm
         warm.expiry = Task { @MainActor [weak self, weak warm] in
@@ -1424,7 +1429,7 @@ final class EmbeddedBrowserSession {
         var hit = false
         let age = chatGPTInferencePrewarm.map { warm -> Int64 in
             let duration = (ContinuousClock.now - warm.created).components
-            return min(120_000, max(0, min(120, max(0, duration.seconds)) * 1_000 + duration.attoseconds / 1_000_000_000_000_000))
+            return min(600_000, max(0, min(600, max(0, duration.seconds)) * 1_000 + duration.attoseconds / 1_000_000_000_000_000))
         } ?? 0
         defer { Self.inferencePrewarmLog.notice("inferencePrewarm hit=\(hit) ageMs=\(age)") }
         guard chatGPTInferencePrewarmingEnabled, let warm = chatGPTInferencePrewarm, !warm.claimed else {

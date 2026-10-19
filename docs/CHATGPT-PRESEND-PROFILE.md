@@ -61,6 +61,18 @@ editor-center condition. It retains unique visible enabled controls, exposed
 Send, exact raw and canonical body equality, the complete verification chain,
 call-local receipt binding, fallback and independent submit checks.
 
+All three build-171 native runs used the shortcut, but pre-Send times were
+1.399, 2.585 and 2.553 seconds. The two slower requests adopted roots only
+2.070 and 2.100 seconds old and waited 1.181 and 1.007 seconds for their first
+product callback; the mature 18.326-second-old root waited 27 ms. Setup after
+that callback was similar. The two-minute expiry had discarded the hydrated
+standby during normal pauses, including the manual direct comparison.
+Build 172 keeps the single unused, prompt-free root for ten minutes. It does
+not refresh on a timer or add website traffic. Cookie validation, physical
+page/generation/route checks, claim deadlines, fresh model/product/readiness
+proofs and expiration/disable/shutdown cleanup are unchanged. Cold hydration
+remains a real wait. The age diagnostic now covers the full bounded lifetime.
+
 Compare the same full captured payload, model and turn through Computa and the
 normal built-in browser. Keep failed attempts, first samples and incomplete
 arms explicit. Distinguish native action spans, page performance clocks and
@@ -86,3 +98,8 @@ regression proves an actual positive readiness receipt, no separate readiness
 RPC, one insertion and one Send, verified completion and retained human tabs.
 Existing malformed-receipt, delayed-enable, raw-text, disabled-Send,
 cancellation and document-generation checks remain covered.
+
+Build 172 passed 41 focused native tests covering cookie seeding/adoption,
+expiry, cancellation, generation changes, exact readiness and Temporary
+ownership. The build-171 run of 377 adapter cases is carried forward only
+after checking that both the adapter and its test source are byte-identical.
