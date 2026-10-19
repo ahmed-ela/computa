@@ -1040,6 +1040,41 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         catch { XCTAssertEqual(error as? EmbeddedBrowserSession.Failure, .tabClosed) }
     }
 
+    func testNativeChannelDeadlineCannotInventChangeOrConsumeTheNextWaiter() async throws {
+        let channel = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
+        defer { channel.close() }
+        let before = try channel.currentRevision()
+        let deadline = ContinuousClock.now + .milliseconds(50)
+        let expired = try await channel.wait(after: before, until: deadline)
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now, deadline, "A deadline-only wake must never return early")
+        XCTAssertEqual(expired, before, "Timer expiry is not a page mutation")
+        XCTAssertEqual(try channel.currentRevision(), before)
+        let alreadyExpired = try await channel.wait(after: before, until: deadline)
+        XCTAssertEqual(alreadyExpired, before)
+
+        let next = Task { try await channel.wait(after: before, until: .now + .seconds(5)) }
+        await Task.yield()
+        channel.signal()
+        let nextRevision = try await next.value
+        XCTAssertEqual(nextRevision, before + 1, "An expired wait cannot consume a subsequent real signal")
+        XCTAssertEqual(try channel.currentRevision(), before + 1)
+
+        let cancelled = Task { try await channel.wait(after: before + 1, until: .now + .seconds(5)) }
+        await Task.yield()
+        cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Cancellation must terminate its own waiter") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(try channel.currentRevision(), before + 1, "Cancelling a waiter must not invent a mutation")
+
+        let afterCancellation = Task { try await channel.wait(after: before + 1, until: .now + .seconds(5)) }
+        await Task.yield()
+        channel.signal()
+        let afterCancellationRevision = try await afterCancellation.value
+        XCTAssertEqual(afterCancellationRevision, before + 2,
+                       "A cancelled waiter must be removed and resumed only once")
+        XCTAssertEqual(try channel.currentRevision(), before + 2)
+    }
+
     func testNativeDOMSignalBatchingDoesNotDependOnWebsiteTimers() async throws {
         let channel = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let before = try channel.currentRevision()

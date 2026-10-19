@@ -292,7 +292,17 @@ The source passed 387 adapter tests and eleven focused native completion tests, 
 
 A corrected one-send focus diagnostic physically moved native keyboard focus to Task prompt, verified by native accessibility. The page still reported focus at Send and first text, with no blur event. Its first text appeared at 3.629 seconds; full payload/model checks and owned-tab closure passed. The page-focus manipulation remained unachieved, so the second planned control was not sent. Safari's developer setting was restored off. This result provides no causal focus comparison.
 
-Build-177 installation, fresh matched measurements and V82 workflow results are still required. The failed V81 workflow and generic extractor failure remain retained; the latter is not attributed to a particular guard. Future fixtures use literal GUI paste and record the actual submitted prompt. Their runtime boundary must precede draft creation as well as Send.
+Build 177 was built and independently audited but not installed. Build 178 carries this change plus the timer precision fix below; fresh matched measurements and V83 workflow results are still required. The failed V81 workflow and generic extractor failure remain retained; the latter is not attributed to a particular guard. Future fixtures use literal GUI paste and record the actual submitted prompt. Their runtime boundary must precede draft creation as well as Send.
 
 - Build-177 adapter test log: `981ee26fd807257f5a07dbb1f307e33762a0109a8e47a8710b5338b231e27103`.
 - Build-177 native test log: `05d8e7626d56399c740e05c23c77d6ad063195882c12a2b366fc572fa8cc4a3f`.
+
+## Build-178 deadline precision experiment
+
+The native change channel used Swift's default sleep tolerance for an already chosen absolute deadline. The clock can add scheduling leeway after that deadline. In an eight-run counterbalanced probe derived from the actual channel source, the four default-tolerance 1.6-second waits completed in 1698.304–1704.804ms; the four zero-tolerance waits took 1603.375–1608.127ms. This isolates roughly 97ms of avoidable timer leeway in that controlled probe, not end-to-end provider latency.
+
+The channel now requests `tolerance: .zero`. It retains the full absolute deadline and 1.6-second response stability requirement, and does not alter the 100ms DOM notification batch, ownership/model checks or cleanup. A timer wake returns the same revision; only a real page change increments it. A regression covers deadline-only wakes, expired deadlines, subsequent real signals and cancellation without inventing a change or consuming another waiter. Zero tolerance is a request to the scheduler, not a guarantee of immediate actor execution.
+
+Swift documents nil tolerance as clock-chosen leeway in [Clock](https://github.com/swiftlang/swift/blob/main/stdlib/public/Concurrency/Clock.swift) and [the clock proposal](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0329-clock-instant-duration.md). This changes existing one-shot deadline waits; it adds no periodic background timer. Build 178 passed seventeen focused native channel/completion tests with unchanged source hashes. The unchanged adapter and adapter-test bytes retain the separate build-177 result of 387 passing cases. Installed build-178 latency and workflow validation remain pending.
+
+- Build-178 native test log: `c18c7032203e16bc271f9c228564ffbe04af61cc3b72e042810dd45654815023`.

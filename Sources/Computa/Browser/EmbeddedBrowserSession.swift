@@ -2262,7 +2262,9 @@ final class EmbeddedModelChangeChannel {
                 guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
                 let timeout = Task {
                     do {
-                        try await Task.sleep(until: deadline, clock: .continuous)
+                        // Callers choose the absolute deadline, including any
+                        // required quiet interval; avoid extra timer leeway.
+                        try await Task.sleep(until: deadline, tolerance: .zero, clock: .continuous)
                         self.complete(id, cancelled: false)
                     } catch { }
                 }
