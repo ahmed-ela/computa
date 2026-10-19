@@ -402,3 +402,17 @@ The final frozen source passed **406 adapter tests** (13,803 assertions) and **5
 - Final test freeze: `5580f18d04aef66b24ecaf2901c4217f8ab2cfc0fa02f613ed5870083ef342f2`.
 - Adapter log: `8259f18f7b175d8c763d205282b29dd69c7c168b51794d187c0afbcbbc7d05dc`.
 - Focused native log: `6d4ac18a7df7758ddffbbc88ffafbb7a619059b996f49720b2bda518f4db79e6`.
+
+### Installed build-181 diagnostic result
+
+Signed 0.7.0 (181), source `ad4a12f2913ce07d98bdf55e6354d65e89d1354b`, passed independent 56-file/52-resource installation checks. Its separately prespecified C1→D1 pair passed the production-compatible complete-envelope reader, exact 51,657-byte payload/model/Temporary/one-turn checks and both owned closures. First text/candidate appeared at **4661ms native versus 4281ms direct** (+380ms). Native used a code envelope and direct an inline rendered fence; the different representations, one-pair sample and website variation remain confounds. No general speedup or pure-app-overhead claim follows.
+
+Native body-to-raw was 1666ms versus 535ms direct. At the first-text checkpoint the native observer guard had accumulated 24ms (maximum call 5ms), answer extraction 1ms, generic anatomy work 3ms, user-text reads 2ms and synchronous expansion-candidate checks 2ms. These partial, potentially nested wall scopes do not explain the extra second and must not be summed as total CPU. The expansion row does not time an asynchronous click or wait. The native late 250ms timers recorded intervals 640/638/250/267ms followed by approximately 251ms intervals, including the late response window. There was no observed one-second clamp; these finite samples do not prove every browser scheduling path is unaffected. Final full proof took 184ms; first native candidate to transport completion was 2056ms, including an observed response change that rearmed the unchanged stability guard.
+
+The collector retained four additional existing sanitized first-user prefixes in the same sole PID/window export, but no such records appeared; absence cannot establish that no expansion occurred. The auxiliary reader's first revision accidentally expected one snapshot after reducing the pair count to one. The corrected second revision restores exactly the required three snapshots, retaining the failed revision and all original phase/binding/size checks, without another query or provider request.
+
+Existing build-180 logs also show the next cold standby page beginning about 48ms after submission, well before first text. That exposes a scheduling difference from the direct control, not causal proof. The next controlled candidate defers refill until the first validated nonempty response while preserving blank-root adoption before Send and all response proofs. Both 181 sessions closed and Safari's developer setting was restored off.
+
+- Installed verifier: `89dd9ad6ec16d7ebbf10fc036588e8b238ebcb8365043779eea363dca7ac312c`.
+- One-pair report: `5ed0b6917ab0f01363b4e2c36d90554b1b0e75bafbd0dfa3d9857d0b1def8ec0`.
+- Bounded auxiliary reconstruction: `1328626f972eb081f75a291f8c4622ca5dc94303dc4e6377213e4ca99cb4e146`.
