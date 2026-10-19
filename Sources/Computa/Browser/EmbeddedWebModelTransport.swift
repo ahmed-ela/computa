@@ -2359,6 +2359,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let failure = rawFailure as? String, failures.contains(failure) else { return nil }
             safe["expansionContextFailure"] = failure
         }
+        if let rawFailure = value["expansionAdmissionFailure"] {
+            let failures: Set<String> = ["suppressed", "action", "binding", "native_pin", "private_pin", "claim_spent",
+                "user_count", "submission", "submission_count", "marker", "prompt", "model_choice", "text_prefix",
+                "frame", "provider", "origin", "owner", "product", "temporary", "root", "body",
+                "conversation_route", "conversation_identity", "url"]
+            guard let failure = rawFailure as? String, failures.contains(failure) else { return nil }
+            safe["expansionAdmissionFailure"] = failure
+        }
         if let rawError = value["expansionModelError"] {
             let errors: Set<String> = ["model_unverified", "model_unavailable", "model_mismatch", "document_changed",
                 "conversation_changed", "product_mode_unverified", "temporary_mode_unverified"]
@@ -2639,7 +2647,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             for key in ["action", "scope"] { productObservation[key] = summary[key] }
         }
         var bodyObservation: [String: Any] = [:]
-        for key in ["bodySelection", "expansionOutcome", "expansionContextFailure", "expansionModelError"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
+        for key in ["bodySelection", "expansionOutcome", "expansionContextFailure", "expansionAdmissionFailure", "expansionModelError"] + firstUserBodyLengths + firstUserBodyCounts + firstUserBodyFlags {
             if let value = summary.removeValue(forKey: key) { bodyObservation[key] = value }
         }
         if !bodyObservation.isEmpty {

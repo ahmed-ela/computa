@@ -4056,22 +4056,34 @@ function chatGPTFirstUserExpandControls(root, roots, maxDepth = 3) {
   }
   return [...controls];
 }
+// Invocation-local rejection facts only; no claim, retry or ownership comes
+// from this diagnostic. In particular a pre-claim context failure must not be
+// lost merely because the expansion was correctly refused.
+let chatGPTFirstUserExpansionAdmissionFailure = null;
 function chatGPTFirstUserExpansionCandidate(root, body, rendered) {
   const prompt = globalThis.__computaModelFirstPrompt, marker = input.expectedFirstUserMarker;
-  if (input.suppressFirstUserExpansionClaim === true || input.action !== 'inspect'
-    || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
-    || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
-    || globalThis.__computaModelFirstExpansion != null || ownedUserCount !== 1
-    || globalThis.__computaModelFirstSubmitted !== true || globalThis.__computaModelLastSubmissionCount !== 0
-    || typeof marker !== 'string' || !/^[a-f0-9-]{36}$/i.test(marker) || globalThis.__computaModelFirstMarker !== marker
-    || typeof prompt !== 'string' || prompt.length > 180_000 || !prompt.endsWith(`\n\nComputa session marker: ${marker}`)
-    || !websiteModelChoiceValid(input.firstUserExpansionModelChoice)) return null;
+  const reject = reason => { chatGPTFirstUserExpansionAdmissionFailure = reason; return null; };
+  if (input.suppressFirstUserExpansionClaim === true) return reject('suppressed');
+  if (input.action !== 'inspect') return reject('action');
+  if (input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true) return reject('binding');
+  if (input.expectedFirstUserFingerprint != null) return reject('native_pin');
+  if (globalThis.__computaModelFirstProof != null) return reject('private_pin');
+  if (globalThis.__computaModelFirstExpansion != null) return reject('claim_spent');
+  if (ownedUserCount !== 1) return reject('user_count');
+  if (globalThis.__computaModelFirstSubmitted !== true) return reject('submission');
+  if (globalThis.__computaModelLastSubmissionCount !== 0) return reject('submission_count');
+  if (typeof marker !== 'string' || !/^[a-f0-9-]{36}$/i.test(marker)
+    || globalThis.__computaModelFirstMarker !== marker) return reject('marker');
+  if (typeof prompt !== 'string' || prompt.length > 180_000
+    || !prompt.endsWith(`\n\nComputa session marker: ${marker}`)) return reject('prompt');
+  if (!websiteModelChoiceValid(input.firstUserExpansionModelChoice)) return reject('model_choice');
   const canonical = prompt.replace(/\r\n?/g, '\n').normalize('NFC').trim();
   if (!rendered || rendered.length >= canonical.length || !canonical.startsWith(rendered)
-    || rendered.includes(`Computa session marker: ${marker}`)) return null;
+    || rendered.includes(`Computa session marker: ${marker}`)) return reject('text_prefix');
   const candidate = { root, body, rendered, prompt, canonical, marker, clicked: false, outcome: 'claimed',
     document, owner: input.ownerToken, routeURL: input.expectedURL, modelChoice: input.firstUserExpansionModelChoice };
-  return chatGPTFirstUserExpansionContext(candidate) ? candidate : null;
+  const contextFailure = chatGPTFirstUserExpansionContextFailure(candidate);
+  return contextFailure === null ? candidate : reject(contextFailure);
 }
 function chatGPTFirstUserExpansionContextFailure(candidate) {
   const roots = chatGPTMessageRoots('user');
@@ -4480,6 +4492,8 @@ function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots
     Object.assign(result, chatGPTProductProofFailureDiagnostic());
     Object.assign(result, globalThis.__computaModelFirstExpansion?.textDiagnostic || {});
     const outcome = globalThis.__computaModelFirstExpansion?.outcome;
+    if (chatGPTFirstUserExpansionAdmissionFailure !== null)
+      result.expansionAdmissionFailure = chatGPTFirstUserExpansionAdmissionFailure;
     result.expansionOutcome = ['unavailable', 'ambiguous', 'disabled', 'obstructed', 'claimed', 'model_unverified',
       'timeout', 'context_changed', 'node_changed', 'text_mismatch', 'expanded', 'failed'].includes(outcome)
       ? outcome : input.allowFirstUserExpansion === true ? 'ineligible' : 'not_requested';

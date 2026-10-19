@@ -2017,8 +2017,13 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           'expansionTextAnalyzed', 'expansionClicked', 'expansionExactPrefixMatches', 'expansionASCIIPrefixMatches',
           'expansionASCIIPromptMatches', 'expansionASCIIRenderedLength', 'expansionASCIIPrefixLength', 'expansionASCIIPromptLength',
           'expansionUnicodeSpaceCount', 'expansionExpectedUnicodeSpaceCount', 'expansionFormatCount', 'expansionExpectedFormatCount',
-          'expansionFirstMismatchClass', 'expansionFirstMismatchOffset']);
+          'expansionFirstMismatchClass', 'expansionFirstMismatchOffset', 'expansionAdmissionFailure']);
         expect(Object.keys(JSON.parse(result.debugStructure)).every(key => allowed.has(key))).toBe(true);
+        const admission = JSON.parse(result.debugStructure).expansionAdmissionFailure;
+        if (admission !== undefined) expect(['suppressed', 'action', 'binding', 'native_pin', 'private_pin', 'claim_spent',
+          'user_count', 'submission', 'submission_count', 'marker', 'prompt', 'model_choice', 'text_prefix',
+          'frame', 'provider', 'origin', 'owner', 'product', 'temporary', 'root', 'body',
+          'conversation_route', 'conversation_identity', 'url']).toContain(admission);
       });
 
       test('diagnostic construction failure or unknown action retains the original ownership error', async () => {

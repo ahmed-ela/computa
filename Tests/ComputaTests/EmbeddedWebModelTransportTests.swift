@@ -8198,6 +8198,20 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             var forged = source; forged["expansionContextFailure"] = invalid
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
         }
+        for failure in ["suppressed", "action", "binding", "native_pin", "private_pin", "claim_spent",
+                        "user_count", "submission", "submission_count", "marker", "prompt", "model_choice", "text_prefix",
+                        "frame", "provider", "origin", "owner", "product", "temporary", "root", "body",
+                        "conversation_route", "conversation_identity", "url"] {
+            var candidate = source; candidate["expansionAdmissionFailure"] = failure
+            let records = try projected(candidate)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(records[1].utf8)) as? [String: Any])
+            XCTAssertEqual(body["expansionAdmissionFailure"] as? String, failure)
+            XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+        }
+        for invalid in ["private_canary", "none", "timeout", 1, true, NSNull()] as [Any] {
+            var forged = source; forged["expansionAdmissionFailure"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(try encode(forged), provider: .chatgpt))
+        }
         for key in lengths + counts {
             for invalid in [-1, lengths.contains(key) ? 220_002 : 1_001, 1.5, true, NSNull(), "private_canary"] as [Any] {
                 var forged = source; forged[key] = invalid
