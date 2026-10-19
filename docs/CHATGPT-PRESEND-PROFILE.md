@@ -361,8 +361,30 @@ All three native auxiliary snapshots reassembled with exact binding/session/sequ
 
 ## Build-180 avoidable extraction and diagnostic work
 
-The next candidate defers the rendered-text fallback for already validated literal response envelopes and omits generic anatomy diagnostics on ordinary confirmed replies when the caller explicitly requests that. Actual empty user/answer sides and first-user failure diagnostics remain collected. Model/product mutation discovery remains unchanged: skipping message-only batches can miss an outside control labelled by text inside a message. These are measured-source work reductions to validate, not a claimed explanation or fix for the entire 179 raw-text residual. The frozen source passed 400 adapter tests (13,694 assertions) and 46 focused native tests, including two real WebKit traversal/failure cases. Both runs verified unchanged source hashes. Signed installation and fresh matched measurements are pending.
+Build 180 defers the rendered-text fallback for already validated literal response envelopes and omits generic anatomy diagnostics on ordinary confirmed replies when the caller explicitly requests that. Actual empty user/answer sides and first-user failure diagnostics remain collected. Model/product mutation discovery remains unchanged: skipping message-only batches can miss an outside control labelled by text inside a message. These are source work reductions, not an established explanation or fix for the entire 179 raw-text residual. The frozen source passed 400 adapter tests (13,694 assertions) and 46 focused native tests, including two real WebKit traversal/failure cases. Both runs verified unchanged source hashes.
 
 - Build-180 test freeze: `11e9914ecaf6d1bb00f84836a82a6129acb7ad9fb64fb823efd07cb36b819dff`.
 - Build-180 adapter log: `defba6142dbbc46f29491584d9370f8d0646def573af2d26cec5e26c4f5b84ab`.
 - Build-180 focused native log: `eafbf31286209545a071f495c06286175da06e428ef8ec4b6efd5eb2225fc53c`.
+
+### Installed build-180 results
+
+Signed 0.7.0 (180), executable source `8d2f75b1a32ff3fdd0c1f40d461548d744a2af07`, passed independent build/install verification for 56 bundle files and 52 resources, preserving the engine and keeping Gemini diagnostics off. This is a controlled test installation, with no release publication or notarization.
+
+The prespecified three-pair C1,C2,C3,D1,D2,D3 block used the exact 51,657-byte payload in normal Chat/latest Instant/Temporary. All native answers were HI and all owned website sessions and direct tabs closed. The frozen benchmark reader excluded D1 and D2 because their complete JSON fences were inline rather than newline-delimited. The production codec accepts that complete inline form; this is a benchmark-contract mismatch, not evidence of a live parser failure. The old report remains unchanged: one eligible pair and two excluded pairs. There is no qualified three-pair average or demonstrated end-to-end improvement.
+
+| Pair | Native first text | Direct first text | Frozen report |
+| --- | --- | --- | --- |
+| 1 | 4967ms | 3312ms | Excluded: direct inline fence |
+| 2 | 4908ms | 3193ms | Excluded: direct inline fence |
+| 3 | 4818ms | 2883ms | Eligible; both ordinary HI |
+
+Both fresh V84 code/terminal/browser workflows passed all twelve original checks. Each model fixed only the helper, preserved the note and tests, ran four passing tests, obtained its reference from the helper, filled and submitted the built-in browser form, read the exact result receipt and closed its task-created tab. Independent verification also passed all eight tests and the helper-only edit checks. All 22 website inferences completed and saved/closed, with no failed inference rows. These are bounded workflow results, not an unrestricted provider qualification. The fixture server stopped, was reaped and left its loopback port closed. Safari's developer setting was restored off.
+
+Four unsent benchmark setup errors and two unsent fixture UI errors were retained. No provider Send was replayed. The original V81 timeout and V83 R2 browser omission remain retained separately. Further profiling will measure synchronous call costs and late scheduling before attributing the remaining raw-text gap to DOM checks, focus or cold browser state.
+
+- Installed verifier: `1728a30ea4f08239fbdd7b1ff9056fd8d428c4f34397481b2942a96025ec7f44`.
+- Frozen matched report: `360e0c3c4e7dcaf1c84245de79df1605dab1eac035b81cc53953f704057b7e17`.
+- Exact V84 extraction: `9c9a04e81dcc466835d4ae91461cd378831926e86027d992503c93b42320e825`.
+- V84 workflow report: `edb725248038da7e2cecc0f532a1b4f4cfc5775534c32f0a6b9d5a252d637c9d`.
+- Independent R1/R2 verification: `1e997d3772659bc61368b4caaa27223189f5f2fbfd55c841c8834564306c4aad`, `1922c71a48fe21c5fcdc0740c169772590cf81baf756107c996d31f9690724ae`.
