@@ -2702,6 +2702,67 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         } catch { fixture.shutdown(); throw error }
     }
 
+    func testOwnedChatGPTReplySkipsRepeatedGenericStructureWalkAfterFirstBinding() async throws {
+        let (fixture, view, token, choice) = try await readyInstantPrepareFixture()
+        defer { fixture.shutdown() }
+        let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        _ = try await evaluate(view, """
+            globalThis.fixtureGenericStructureWalks = 0;
+            const original = document.createTreeWalker;
+            document.createTreeWalker = function(...args) {
+              globalThis.fixtureGenericStructureWalks++;
+              return original.apply(this, args);
+            }; return true;
+            """, world: privateWorld)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Bind this owned response before skipping its unused page anatomy diagnostic"])
+        let first = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        try assertRunningOrVerifiedChoice(first, choice: choice)
+        let initialWalks = try await evaluate(view, "return globalThis.fixtureGenericStructureWalks;", world: privateWorld) as? Int
+        XCTAssertGreaterThan(try XCTUnwrap(initialWalks), 0, "The first unbound inspection keeps the original structural diagnostic")
+        _ = try await evaluate(view, "globalThis.fixtureGenericStructureWalks = 0; return true;", world: privateWorld)
+        let next = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        try assertRunningOrVerifiedChoice(next, choice: choice)
+        let repeatedWalks = try await evaluate(view, "return globalThis.fixtureGenericStructureWalks;", world: privateWorld) as? Int
+        XCTAssertEqual(repeatedWalks, 0, "The native request must skip the unused body-tree diagnostic on an ordinary owned 1/1 reply")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        try assertChoiceEvidence(complete, choice: choice)
+        XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true))
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testOwnedChatGPTStructureOptOutKeepsSpecificFirstUserFailureDiagnostics() async throws {
+        let prompt = "Original private diagnostic body"
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: prompt)
+        defer { fixture.shutdown() }
+        var emissions: [(isFailure: Bool, record: String)] = []
+        fixture.transport.setFirstUserStructureEmissionObserverForTesting { emissions.append(($0, $1)) }
+        let changed = try await evaluate(view, """
+            const user = document.querySelector('[data-message-author-role="user"]');
+            const body = user.querySelector('[data-markdown-text-style="user-message"]');
+            const before = body.textContent;
+            body.textContent = before.replace('Original private diagnostic body', 'Changed private diagnostic body');
+            return body.textContent !== before;
+            """) as? Bool
+        XCTAssertEqual(changed, true)
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("Opting out of a generic anatomy log cannot admit a changed owned user body")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+        }
+        let records = try emissions.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.record.utf8)) as? [String: Any]) }
+        XCTAssertTrue(emissions.contains { $0.isFailure })
+        XCTAssertTrue(records.contains { $0["kind"] as? String == "first_user_structure" },
+            "The independent rejection path must retain its finite first-user diagnostic")
+        XCTAssertFalse(emissions.contains { $0.record.contains(prompt) || $0.record.contains("Changed private diagnostic body") })
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+    }
+
     func testConcreteChatGPTDefersPickerReadsUntilFullCompletedAnswerProof() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
         defer { fixture.shutdown() }

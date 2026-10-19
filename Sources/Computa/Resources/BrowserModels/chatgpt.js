@@ -2226,10 +2226,12 @@ websiteModelFinalGuard = async function(provider, request, observed, currentTemp
 function modelResponseExtraction(answer) {
   const flags = { literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null,
     selectedExtraction: 'rendered_fallback', extractionReason: 'absent_answer' };
-  let rendered = '', blocks = [], code = null;
-  const fallback = reason => ({ text: rendered, blocks, code, flags: { ...flags, extractionReason: reason } });
+  let blocks = [], code = null;
+  // A verified literal code body needs no rendered-text traversal. Read the
+  // rendered fallback only after its unchanged structural checks decline.
+  const fallback = reason => ({ text: answer ? (answer.innerText || answer.textContent || '').trim() : '',
+    blocks, code, flags: { ...flags, extractionReason: reason } });
   if (!answer) return fallback('absent_answer');
-  rendered = (answer.innerText || answer.textContent || '').trim();
   blocks = [...answer.querySelectorAll('pre')];
   const codes = [...answer.querySelectorAll('code')];
   if (codes.length === 1) code = codes[0];
@@ -3983,7 +3985,10 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   if (action === "inspect") {
     const signIn = !composer && !!labelled(document.querySelectorAll('a, button'), /^(?:Log in|Sign in)(?:\s|$)/i);
     const resourceTimingDiagnostic = answerComplete ? chatGPTResourceTimingDiagnostic('completion') : null;
-    return { ...state, signIn, debugStructure: chatGPTStructure(visible),
+    // Native can decline this generic diagnostic on an established reply.
+    // Keep fresh/empty shapes observable and preserve every proof above.
+    const includeDebugStructure = input.requestDebugStructure !== false || userCount === 0 || answers.length === 0;
+    return { ...state, signIn, ...(includeDebugStructure ? { debugStructure: chatGPTStructure(visible) } : {}),
       ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };
   }
   if (action === "enableTemporary") {

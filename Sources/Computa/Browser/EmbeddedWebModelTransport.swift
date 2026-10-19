@@ -3442,6 +3442,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        // Normal owned replies do not consume the generic page anatomy log.
+        // The adapter still collects it for an actually empty user/answer side;
+        // first-user failures retain their independent diagnostic path.
+        if provider == .chatgpt, action == "inspect", session.submitted, session.confirmedUsers >= 1 {
+            input["requestDebugStructure"] = false
+        }
         // A saved, separately leased synthetic capture only requests passive
         // measurement; it cannot change readiness, waits or inference authority.
         let benchmarkFirstInsert = action == "insert" && session.sequence == 0 && !session.submitted

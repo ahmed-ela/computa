@@ -344,3 +344,25 @@ A fresh signed build and one explicitly diagnostic same-payload normal Chat/late
 - Source test freeze: `bf5576e6e18d5cd729a3af8d9f201ee3f501b1818175fac1d8a9659bc8d7163f`.
 - Adapter test log: `be16caf3b3d6afd1ee0a4c0e19d8e659a95204fcc6a7f8b2ec116be3e3b38879`.
 - Focused native test log: `3a1f5373517678c0dc8930bb694808684daa8a91bb05fea35da046a0fd6f91f3`.
+
+### Installed build-179 diagnostic result
+
+Signed 0.7.0 (179), executable source `f2157f5cee710f66a887642c49ac6393638ee702`, passed the independent 56-file/52-resource installed check. The prespecified C1 then D1 diagnostic pair passed every original per-arm payload/model/Temporary/response/owned-cleanup check, with no exclusions. Both used the exact 51,657-byte input and returned the same ordinary two-byte canonical HI. This is one diagnostic pair, not a three-pair qualification.
+
+Probe5 first text was **4527ms native versus 3689ms direct** (+838ms). Auxiliary raw text appeared at **4528ms versus 3689ms**, showing the delay was already present before raw response text became available; a large delay solely from native polling of already-present text does not explain this arm. The modern body appeared at 2934ms native versus 3163ms direct; body-to-raw was 1594ms versus 526ms. Equal auxiliary/Probe5 timing cannot exclude synchronous work before both observers.
+
+The first body-triggered frame callback took 555ms native versus 501ms direct. The native eight-frame burst ended at 3649ms, 879ms before raw text; it did not cover the late delay. Twelve early nested timers completed by 1517ms native and 1332ms direct without a one-second deep-timer interval. This cannot rule out later scheduling. Native document focus was false and direct focus true; visibility was visible in both. Focus is a correlation, not an isolated cause. One same-origin script transferred about 18KB (50KB decoded) natively while the direct sizes were zero, but both resource entries ended around 1.2s, well before the body and raw text. That observation alone does not establish cache causality or explain the extra second.
+
+All three native auxiliary snapshots reassembled with exact binding/session/sequence/chunk SHA checks. The direct auxiliary was installed 1834ms before its sole Send and expired at its fixed deadline; its frozen snapshot later passed full payload proof. Web Inspector was detached during both measured intervals. The native website session and exact direct tab closed, and Safari's developer setting was restored off. Two unsent model-picker/variable setup errors were retained, with no duplicate Send.
+
+- Installed verifier: `95ee0c114cc86e16e4eb552e37d72a23bb3ee047fd808575f3460b911ddd8d3f`.
+- Strict one-pair report: `ed5c37915ca0e8fbd1d87e8121f1a91c1334ddecbad7203ebacb16bb79d3ac8b`.
+- Bounded auxiliary reconstruction: `0921152b338500c66c012aff3dc5b71aeb6f7f4dcf708529d1b7475dba70e5cb`.
+
+## Build-180 avoidable extraction and diagnostic work
+
+The next candidate defers the rendered-text fallback for already validated literal response envelopes and omits generic anatomy diagnostics on ordinary confirmed replies when the caller explicitly requests that. Actual empty user/answer sides and first-user failure diagnostics remain collected. Model/product mutation discovery remains unchanged: skipping message-only batches can miss an outside control labelled by text inside a message. These are measured-source work reductions to validate, not a claimed explanation or fix for the entire 179 raw-text residual. The frozen source passed 400 adapter tests (13,694 assertions) and 46 focused native tests, including two real WebKit traversal/failure cases. Both runs verified unchanged source hashes. Signed installation and fresh matched measurements are pending.
+
+- Build-180 test freeze: `11e9914ecaf6d1bb00f84836a82a6129acb7ad9fb64fb823efd07cb36b819dff`.
+- Build-180 adapter log: `defba6142dbbc46f29491584d9370f8d0646def573af2d26cec5e26c4f5b84ab`.
+- Build-180 focused native log: `eafbf31286209545a071f495c06286175da06e428ef8ec4b6efd5eb2225fc53c`.

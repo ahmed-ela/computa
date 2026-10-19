@@ -235,7 +235,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     flush: () => { const queued = timers.splice(0); queued.forEach(callback => callback()); } };
 }
 
-function observedChatGPTCodeBlock(f: ReturnType<typeof fixture>, raw: string, options: { noPre?: boolean; measuredPRE?: boolean } = {}) {
+function observedChatGPTCodeBlock(f: ReturnType<typeof fixture>, raw: string, options: { noPre?: boolean; measuredPRE?: boolean; renderedText?: () => string } = {}) {
   f.answer.text = ""; f.answer.children = [];
   const outer = new Element("DIV", { class: options.measuredPRE ? "CodeBlock-zu1QM3" : "CodeBlock-generated-class" });
   const wrapper = new Element("DIV", { class: options.measuredPRE
@@ -252,7 +252,7 @@ function observedChatGPTCodeBlock(f: ReturnType<typeof fixture>, raw: string, op
   const content = new Element("DIV", { class: "text-size-chat overflow-auto outline-none px-4 pt-0 pb-3" });
   if (options.noPre) content.append(code); else pre.append(code);
   wrapper.append(header, options.noPre ? content : pre); outer.append(wrapper); f.answer.append(outer);
-  Object.defineProperty(f.answer, "innerText", { get: () => (options.measuredPRE ? "JSON\n\n\n" : "JSON\n") + raw });
+  Object.defineProperty(f.answer, "innerText", { get: options.renderedText ?? (() => (options.measuredPRE ? "JSON\n\n\n" : "JSON\n") + raw) });
   return { outer, wrapper, header, label, copy, wrap, pre, code, content };
 }
 
@@ -2938,6 +2938,27 @@ describe('normal ChatGPT product provenance', () => {
       productModeEvidence: { mode: 'chat', temporaryTransition: 'acknowledged' } });
   });
 
+  test('message text can label an outside Composer group and permanently revoke product provenance', async () => {
+    const f = fixture({ userPrompt: 'Synthetic owned prompt' }); await f.inspect();
+    const label = new Element('SPAN', { id: 'outside-mode-label' }, 'Ordinary answer label'); f.answer.append(label);
+    const outside = new Element('DIV', { role: 'group', 'aria-labelledby': 'outside-mode-label' });
+    outside.append(new Element('BUTTON', { 'aria-pressed': 'true' }, 'Chat'),
+      new Element('BUTTON', { 'aria-pressed': 'false' }, 'Work')); f.body.append(outside);
+    f.observers[0].callback([{ type: 'childList', target: f.body, addedNodes: [outside], removedNodes: [] }]);
+    expect((f.world.__computaChatProductMode as any).invalidated).toBe(false);
+    label.text = 'Composer mode';
+    const posted = f.posted.length;
+    f.observers[0].callback([{ type: 'characterData', target: label.childNodes[0], oldValue: 'Ordinary answer label' }]);
+    // The local classifier ignores this message record, but its referenced
+    // label changes the global product controls. Keep that negative history.
+    expect(f.world.__computaChatProductMode).toMatchObject({ invalidated: true,
+      invalidationReason: 'contradictory_controls', productMutationRelevantCount: 0, productMutationIgnoredCount: 1 });
+    expect(f.posted.length).toBe(posted + 1);
+    label.text = 'Ordinary answer label'; outside.connected = false;
+    expect(await f.inspect({ action: 'verifyProductMode' })).toMatchObject({ error: 'product_mode_unverified' });
+    expect(f.chatMode.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+  });
+
   test('a product change during a fresh model proof cannot admit editor readiness or a Send', async () => {
     const f = fixture({ response: false });
     const picker = installObservedModelPicker(f, 'chatgpt', Element, { genericHeader: true });
@@ -2990,6 +3011,75 @@ describe('normal ChatGPT product provenance', () => {
 });
 
 describe("embedded ChatGPT fixed adapter", () => {
+  test("accepted literal envelopes do not traverse rendered answer text", async () => {
+    for (const options of [{}, { measuredPRE: true }, { noPre: true }]) {
+      for (const envelope of [
+        { type: "message", text: 'Literal "quotes", C:\\tmp\\file\nnext line' },
+        { type: "tool_calls", calls: [{ name: "browser_open", arguments: { url: "http://127.0.0.1:12345/fixture" } }] },
+      ]) {
+        const f = fixture({ userPrompt: "Synthetic owned literal response" });
+        const raw = "\n" + JSON.stringify(envelope) + "\n";
+        let renderedReads = 0;
+        observedChatGPTCodeBlock(f, raw, { ...options, renderedText: () => {
+          renderedReads++; throw Error("An accepted literal body must not require rendered text");
+        } });
+        const result = await f.inspect();
+        expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true);
+        expect(result.firstUserMarkerVerified).toBe(true);
+        expect(result.text).toBe(raw); expect(JSON.parse(result.text)).toEqual(envelope);
+        expect(result.completionEvidence.codeStructure).toMatchObject({ selectedExtraction: "raw_code",
+          extractionReason: "accepted_literal_code", literalCodeValidJSON: true,
+          literalCodeKnownEnvelopeType: envelope.type });
+        expect(renderedReads).toBe(0);
+      }
+    }
+  });
+
+  test("declined literal bodies and ordinary answers preserve fresh rendered fallback text", async () => {
+    const raw = '{"type":"tool_calls","calls":[{"name":"browser_read","arguments":{}}]}';
+    for (const kind of ["authored_prose", "invalid_json", "unknown_type", "div_header"] as const) {
+      const f = fixture(); let renderedReads = 0;
+      const rendered = "Rendered provider text for " + kind;
+      const block = observedChatGPTCodeBlock(f, raw, { noPre: kind === "div_header", renderedText: () => {
+        renderedReads++; return "  " + rendered + "\n";
+      } });
+      let reason = "outside_content";
+      if (kind === "authored_prose") f.answer.append(new Element("P", {}, "Authored prose"));
+      if (kind === "invalid_json") { block.code.text = '{"type":"message","text":"invalid "quote""}'; reason = "invalid_json"; }
+      if (kind === "unknown_type") { block.code.text = '{"type":"unrecognized","text":"unknown"}'; reason = "unknown_envelope_type"; }
+      if (kind === "div_header") block.label.text = "json";
+      const result = await f.inspect();
+      expect(result.error).toBeUndefined(); expect(result.text).toBe(rendered);
+      expect(result.completionEvidence.codeStructure).toMatchObject({ selectedExtraction: "rendered_fallback", extractionReason: reason });
+      expect(renderedReads).toBeGreaterThan(0);
+    }
+    const f = fixture(); let renderedReads = 0;
+    Object.defineProperty(f.answer, "innerText", { get: () => { renderedReads++; return "  Visible ordinary response\n"; } });
+    const result = await f.inspect();
+    expect(result.text).toBe("Visible ordinary response");
+    expect(result.completionEvidence.codeStructure).toMatchObject({ selectedExtraction: "rendered_fallback", extractionReason: "missing_code" });
+    expect(renderedReads).toBeGreaterThan(0);
+  });
+
+  test("literal extraction cannot retain a prior body or rendered fallback across reads", async () => {
+    const f = fixture(); let renderedReads = 0, rendered = "First rendered fallback";
+    const first = '{"type":"message","text":"first"}';
+    const block = observedChatGPTCodeBlock(f, first, { measuredPRE: true,
+      renderedText: () => { renderedReads++; return rendered; } });
+    expect((await f.inspect()).text).toBe(first); expect(renderedReads).toBe(0);
+    f.answer.append(new Element("P", {}, "Authored prose"));
+    expect((await f.inspect()).text).toBe(rendered); expect(renderedReads).toBeGreaterThan(0);
+    rendered = "Changed rendered fallback";
+    expect((await f.inspect()).text).toBe(rendered);
+    f.answer.children = f.answer.children.filter(node => node === block.outer);
+    const next = '{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf done"}}]}';
+    block.code.text = next;
+    const priorReads = renderedReads, result = await f.inspect();
+    expect(result.error).toBeUndefined(); expect(result.text).toBe(next);
+    expect(result.completionEvidence.codeStructure.selectedExtraction).toBe("raw_code");
+    expect(renderedReads).toBe(priorReads);
+  });
+
   test("a sole fenced envelope preserves literal JSON escapes and code-block controls", async () => {
     for (const envelope of [
       { type: "message", text: 'Literal "quoted" text, C:\\tmp\\file\nnext line\\n stays literal' },
@@ -3290,6 +3380,53 @@ describe("embedded ChatGPT fixed adapter", () => {
     expect(result.debugStructure.length).toBeLessThanOrEqual(8192);
     f.userBody!.text = f.userBody!.text.replace("Literal", "Changed");
     expect(await f.inspect()).toMatchObject({ error: "conversation_changed", detail: "first_user_message" });
+  });
+
+  test("only an explicit false suppresses the ordinary reply structure diagnostic", async () => {
+    for (const flag of [undefined, true, null, 0, "false", false]) {
+      const f = fixture({ userPrompt: "Owned diagnostic-budget request" });
+      let walks = 0;
+      Object.assign(f.document, { createTreeWalker: () => { walks++; return { nextNode: () => null }; } });
+      const result = await f.inspect(flag === undefined ? {} : { requestDebugStructure: flag });
+      expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true);
+      expect(result.firstUserMarkerVerified).toBe(true); expect(result.answerComplete).toBe(true);
+      expect(result.text).toBe('{"type":"message","text":"OK"}');
+      // First-message diagnostics and all completion/provenance facts remain
+      // independent of the optional generic whole-document structure.
+      expect(JSON.parse(result.firstUserDebugStructure)).toMatchObject({ kind: 'first_user_structure', reason: 'first_bound' });
+      expect(Object.hasOwn(result, 'debugStructure')).toBe(flag !== false);
+      expect(walks).toBe(flag === false ? 0 : 1);
+      const fresh = await f.inspect({ requestDebugStructure: true });
+      expect(JSON.parse(fresh.debugStructure)).toMatchObject({ articleUsers: 1, articleAssistants: 1 });
+      expect(walks).toBe(flag === false ? 1 : 2);
+    }
+  });
+
+  test("empty user or response shapes retain structure even when native declines the ordinary diagnostic", async () => {
+    for (const kind of ['no_user', 'no_answer'] as const) {
+      const f = fixture(kind === 'no_user' ? {} : { userPrompt: 'Owned empty-response request', response: false });
+      if (kind === 'no_answer') f.body.append(new Element('BUTTON', { 'aria-label': 'Copy' }));
+      let walks = 0;
+      Object.assign(f.document, { createTreeWalker: () => { walks++; return { nextNode: () => null }; } });
+      const result = await f.inspect({ requestDebugStructure: false });
+      expect(result.error).toBeUndefined(); expect(Object.hasOwn(result, 'debugStructure')).toBe(true);
+      expect(JSON.parse(result.debugStructure)).toMatchObject(kind === 'no_user'
+        ? { articleUsers: 0, articleAssistants: 1 } : { articleUsers: 1, articleAssistants: 0 });
+      expect(walks).toBe(1);
+      if (kind === 'no_answer') {
+        expect(result.firstUserVerified).toBe(true); expect(result.responseCount).toBe(0);
+        expect(result.answerComplete).toBe(false); expect(result.text).toBe('');
+      }
+    }
+  });
+
+  test("declining a generic structure cannot suppress a first-message rejection diagnostic", async () => {
+    const f = fixture({ userPrompt: 'Owned corruption-diagnostic request' }); await f.inspect();
+    f.userBody!.text = f.userBody!.text.replace('Owned', 'Changed');
+    const result = await f.inspect({ requestDebugStructure: false });
+    expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+    expect(JSON.parse(result.debugStructure)).toMatchObject({ kind: 'first_user_structure' });
+    expect(f.composer.events).toEqual([]); expect(f.chatMode.clicks).toBe(0);
   });
 
   test("a Copy control outside two physical answers supplies no completion proof", async () => {
