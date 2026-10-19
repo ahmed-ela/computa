@@ -778,7 +778,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testFirstInstantFoldsFocusIntoInsertButRetainedAppendStillPrepares() async throws {
-        let (fixture, view, token, choice) = try await readyInstantPrepareFixture()
+        let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)
         defer { fixture.shutdown() }
         for round in 1...2 {
             var actions: [String] = [], readinessPickerReads: [Int] = []
@@ -799,9 +799,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(actions.filter { $0 == "prepare" }.count, round == 1 ? 0 : 1)
             XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
             XCTAssertEqual(actions.filter { $0 == "submit" }.count, 1)
-            XCTAssertFalse(readinessPickerReads.isEmpty, "The original read-only readiness loop remains in both rounds")
-            XCTAssertTrue(readinessPickerReads.allSatisfy { $0 == (round == 1 ? 1 : 2) },
-                          "Only a fresh Instant round consolidates its model read into the full final proof")
+            if round == 1 {
+                XCTAssertTrue(readinessPickerReads.isEmpty, "A fresh prepared Instant receipt skips the separate readiness action")
+                let insert = try XCTUnwrap(actions.firstIndex(of: "insert"))
+                let submit = try XCTUnwrap(actions.firstIndex(of: "submit"))
+                XCTAssertEqual(Array(actions[insert..<submit]), ["insert", "verifyModel", "verifyProductMode"])
+            } else {
+                XCTAssertFalse(readinessPickerReads.isEmpty, "Retained rounds keep the original readiness loop")
+                XCTAssertTrue(readinessPickerReads.allSatisfy { $0 == 2 })
+            }
             XCTAssertTrue(actions.contains("verifyModel")); XCTAssertTrue(actions.contains("verifyProductMode"))
             let complete = try await waitForState("complete", fixture.transport, token: token)
             try assertChoiceEvidence(complete, choice: choice)
@@ -810,6 +816,185 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testFirstInstantPreparedEditorReadinessOptionalFailuresKeepOriginalLoop() async throws {
+        for fault in ["absent", "false", "numeric", "string", "extra", "marker", "fingerprint", "sequence"] {
+            let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)
+            defer {
+                fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+                fixture.transport.setBeforePageResultValidationForTesting(nil)
+                fixture.shutdown()
+            }
+            var actions: [String] = [], hints = 0
+            fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
+            fixture.transport.setPreparedEditorReadinessTransformForTesting { raw in
+                hints += 1
+                guard var hint = raw as? [String: Any] else { XCTFail("Expected the actual terminal product hint"); return raw }
+                XCTAssertEqual(hint["ready"] as? Bool, true, fault)
+                switch fault {
+                case "absent": return nil
+                case "false": hint["ready"] = false
+                case "numeric": hint["ready"] = 1
+                case "string": hint["ready"] = "true"
+                case "extra": hint["unexpected"] = true
+                case "marker": hint["marker"] = UUID().uuidString.lowercased()
+                case "fingerprint": hint["fingerprint"] = String(repeating: "0", count: 64)
+                default: hint["sequence"] = 2
+                }
+                return hint
+            }
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": "An optional readiness \(fault) cannot replace the original loop"])
+            fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+            XCTAssertEqual(hints, 1, fault)
+            let insert = try XCTUnwrap(actions.firstIndex(of: "insert"))
+            let ready = try XCTUnwrap(actions.firstIndex(of: "sendReady"))
+            XCTAssertEqual(Array(actions[insert..<ready]), ["insert", "verifyModel", "verifyProductMode"], fault)
+            XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1, fault)
+            XCTAssertEqual(actions.filter { $0 == "submit" }.count, 1, fault)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+            _ = try await waitForState("complete", fixture.transport, token: token)
+        }
+    }
+
+    func testFirstInstantPreparedEditorReadinessCannotRelaxRawBodyOrSubmitRecheck() async throws {
+        for drift in ["nfc_at_insert", "body_after_hint", "disabled_after_hint"] {
+            let (fixture, view, token, _) = try await readyInstantPrepareFixture(synchronousReadiness: true)
+            defer {
+                fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+                fixture.transport.setBeforePageResultValidationForTesting(nil)
+                fixture.shutdown()
+            }
+            var actions: [String] = [], changed = false, readyHints = 0
+            fixture.transport.setPreparedEditorReadinessTransformForTesting { raw in
+                if (raw as? [String: Any])?["ready"] as? Bool == true { readyHints += 1 }
+                return raw
+            }
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                guard !changed, actions.contains("insert"),
+                      action == (drift == "nfc_at_insert" ? "insert" : "verifyProductMode") else { return }
+                changed = true
+                let mutated = try? await self.evaluate(view, """
+                    // Let the fixture's one normalization finish before deliberately changing its physical editor/control.
+                    while (window.fixtureNormalizationCount < 1) await new Promise(resolve => setTimeout(resolve, 5));
+                    const editor = document.getElementById('fixture-editor');
+                    const drift = \(String(reflecting: drift)), before = editor.innerText;
+                    if (drift === 'disabled_after_hint') {
+                      document.querySelector('[data-testid="send-button"]').disabled = true; return true;
+                    }
+                    editor.textContent = drift === 'nfc_at_insert' ? before.normalize('NFC') : before + ' changed';
+                    return editor.innerText !== before;
+                    """)
+                XCTAssertEqual(mutated as? Bool, true, drift)
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": "Preserve decomposed cafe\u{301} and emoji 🌍 exactly"])
+                XCTFail("The \(drift) mutation must reject before Send")
+            } catch {
+                if drift == "disabled_after_hint" {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("send_unavailable"), drift)
+                } else if case .editorFailure(let detail) = error as? EmbeddedWebModelTransport.Failure {
+                    XCTAssertTrue(detail.hasPrefix("text_difference;"), detail)
+                } else {
+                    XCTFail("Expected the existing exact editor comparison to reject \(drift): \(error)")
+                }
+            }
+            fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(changed, drift)
+            XCTAssertEqual(readyHints, drift == "nfc_at_insert" ? 0 : 1, drift)
+            XCTAssertEqual(actions.contains("sendReady"), drift == "nfc_at_insert", drift)
+            XCTAssertEqual(actions.contains("submit"), drift != "nfc_at_insert", drift)
+            try await assertChoiceLedger(view, insertions: 1, sends: 0, selections: 0)
+        }
+    }
+
+    func testFirstInstantPositivePreparedReadinessCannotSurviveCancellationBeforeSend() async throws {
+        let (fixture, view, token, _) = try await readyInstantPrepareFixture(synchronousReadiness: true)
+        defer {
+            fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            fixture.shutdown()
+        }
+        var actions: [String] = [], positiveHints = 0, cancelledCurrentRequest = false
+        fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
+        fixture.transport.setPreparedEditorReadinessTransformForTesting { raw in
+            guard (raw as? [String: Any])?["ready"] as? Bool == true else {
+                XCTFail("Expected the real terminal product observation's positive readiness hint")
+                return raw
+            }
+            positiveHints += 1
+            // Cancel the actual child request after observing its real hint.
+            // There is no timer, polling race or cancellation of the XCTest task.
+            withUnsafeCurrentTask { task in
+                XCTAssertNotNil(task)
+                task?.cancel()
+                cancelledCurrentRequest = task?.isCancelled == true
+            }
+            return raw
+        }
+        let sending = Task<Void, Error> {
+            _ = try await self.call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": "A positive prepared-readiness observation cannot override cancellation"])
+        }
+        do { try await sending.value; XCTFail("Cancellation after a positive hint must reject before Send") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertEqual(positiveHints, 1)
+        XCTAssertTrue(cancelledCurrentRequest)
+        let insert = try XCTUnwrap(actions.firstIndex(of: "insert"))
+        XCTAssertEqual(Array(actions[insert...]), ["insert", "verifyModel", "verifyProductMode"])
+        try await assertChoiceLedger(view, insertions: 1, sends: 0, selections: 0)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testFirstInstantPositivePreparedReadinessCannotSurviveNativeGenerationInvalidation() async throws {
+        let (fixture, view, token, _) = try await readyInstantPrepareFixture(synchronousReadiness: true)
+        defer {
+            fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            fixture.shutdown()
+        }
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let generation = try XCTUnwrap(fixture.browser.documentGeneration(for: ownedID))
+        var actions: [String] = [], positiveHints = 0
+        fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
+        fixture.transport.setPreparedEditorReadinessTransformForTesting { raw in
+            guard (raw as? [String: Any])?["ready"] as? Bool == true else {
+                XCTFail("Expected the real terminal product observation's positive readiness hint")
+                return raw
+            }
+            positiveHints += 1
+            // The real native Stop lifecycle synchronously invalidates this
+            // view's document generation without replacing the rendered DOM.
+            fixture.browser.stop(tabID: ownedID)
+            return raw
+        }
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": "A positive prepared-readiness observation belongs to one native generation"])
+            XCTFail("The invalidated generation must reject before Send")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.documentGenerationBefore))
+        }
+        fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertEqual(positiveHints, 1)
+        XCTAssertNotEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+        XCTAssertTrue(fixture.browser.webView(for: ownedID) === view)
+        XCTAssertFalse(actions.contains("submit"))
+        XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+        try await assertChoiceLedger(view, insertions: 1, sends: 0, selections: 0)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        try await assertHumanTabIntact(fixture, retaining: ownedID)
     }
 
     func testFirstInstantReadonlyReadinessPreservesTransientEnableWaitAndOriginalDeadline() async throws {
@@ -4216,6 +4401,104 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "not_created")
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testTemporaryUserOutlineSurvivesFirstExpansionAndRetainedSecondSend() async throws {
+        let fixture = try Fixture(page: Self.temporaryOutlineFirstUserPage())
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let generation = fixture.browser.documentGeneration(for: ownedID)
+        var sawClippedOutline = false, firstFingerprint: String?
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "submit", !sawClippedOutline else { return }
+            let clipped = try? await self.evaluate(view, """
+                const bubble = document.querySelector('[data-user-message-bubble="true"]');
+                return !!bubble?.querySelector(':scope > svg.temporaryOutline-bbkcxS')
+                  && bubble.querySelector('.whitespace-pre-wrap').innerText.length === 10240
+                  && !document.querySelector('[aria-label="Turn off temporary chat"], #fixture-composer-mode');
+                """)
+            XCTAssertEqual(clipped as? Bool, true); sawClippedOutline = clipped as? Bool == true
+        }
+        for round in 1...2 {
+            let prompt = round == 1 ? String(repeating: "Owned dashed-outline fixture line.\n", count: 600)
+                : "Retain the exact full first body through the second owned submission"
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: choice)
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            let fingerprint = try XCTUnwrap(proof["firstUserFingerprint"] as? String)
+            XCTAssertEqual(fingerprint.count, 64); XCTAssertEqual(complete["sequence"] as? Int, round)
+            if round == 1 { firstFingerprint = fingerprint } else { XCTAssertEqual(fingerprint, firstFingerprint) }
+            let full = try await evaluate(view, """
+                return document.querySelector('[data-user-message-bubble="true"] .whitespace-pre-wrap').innerText === window.fixturePrompts[0]
+                  && window.fixtureExpansionClicks === 1;
+                """)
+            XCTAssertEqual(full as? Bool, true)
+            try await assertChoiceLedger(view, insertions: round, sends: round, selections: 1)
+        }
+        XCTAssertTrue(sawClippedOutline)
+        XCTAssertEqual(fixture.createdTabs.count, 1); XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testTemporaryUserOutlineRejectsUnownedMalformedAndNonTemporaryVariants() async throws {
+        for variant in ["url_only", "duplicate", "nested_body", "assistant", "code", "interactive", "malformed",
+                        "fake_class", "hidden", "inert", "opacity", "queryless", "duplicate_query", "ackless", "pin_drift", "normal_chat"] {
+            let fixture = try Fixture(page: Self.temporaryOutlineFirstUserPage(variant: variant))
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            var changedPin = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "submit", !changedPin, ["ackless", "pin_drift", "normal_chat"].contains(variant) else { return }
+                changedPin = true
+                let changed = try? await self.evaluate(view, """
+                    const variant = \(String(reflecting: variant));
+                    const proof = globalThis.__computaChatProductMode, pending = globalThis.__computaChatSubmissionState?.pending;
+                    if (!proof || !pending) return false;
+                    if (variant === 'pin_drift') pending.fingerprint = '0'.repeat(64);
+                    else proof.temporaryAcknowledged = false;
+                    if (variant === 'normal_chat') {
+                      proof.temporaryRequested = false;
+                      const group = document.createElement('div'); group.id = 'fixture-composer-mode';
+                      group.setAttribute('role','group'); group.setAttribute('aria-label','Composer mode');
+                      group.innerHTML = '<button aria-pressed="true">Chat</button><button aria-pressed="false">Work</button>';
+                      document.body.prepend(group);
+                    } return true;
+                    """, world: .world(name: "computa-chatgpt-model-v1"))
+                XCTAssertEqual(changed as? Bool, true, variant)
+            }
+            var rejected = false
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": String(repeating: "Reject an unproven dashed-outline fixture line.\n", count: 600)])
+                _ = try await waitForState("complete", fixture.transport, token: token)
+            } catch {
+                rejected = true
+                switch error as? EmbeddedWebModelTransport.Failure {
+                case .some(.ownershipFailure(_)), .some(.productModeUnverified), .some(.temporaryUnverified), .some(.modelUnverified): break
+                case .some(.documentChanged) where ["queryless", "duplicate_query"].contains(variant): break
+                default: XCTFail("Expected a finite proof rejection for \(variant), got \(error)")
+                }
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(rejected, variant)
+            XCTAssertEqual(changedPin, ["ackless", "pin_drift", "normal_chat"].contains(variant), variant)
+            let expansions = try await evaluate(view, "return window.fixtureExpansionClicks || 0;") as? Int
+            XCTAssertEqual(expansions, 0, variant)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        }
     }
 
     func testCollapsedOwnedFirstMessageExpandsDuringInspectWithoutRepeatingSendOrCreatingTab() async throws {
@@ -9921,7 +10204,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         } catch { }
     }
 
-    private func readyInstantPrepareFixture() async throws -> (Fixture, WKWebView, String, WebsiteModelChoice) {
+    private func readyInstantPrepareFixture(synchronousReadiness: Bool = false) async throws -> (Fixture, WKWebView, String, WebsiteModelChoice) {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt, initiallySelectTarget: true)
             .replacingOccurrences(of: "aria-valuenow=\"1\"", with: "aria-valuenow=\"0\""))
@@ -9930,6 +10213,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let token = try XCTUnwrap(started["sessionToken"] as? String)
             let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
             _ = try await waitForState("ready", fixture.transport, token: token)
+            if synchronousReadiness {
+                _ = try await evaluate(view, """
+                    document.getElementById('fixture-editor').addEventListener('input', () => {
+                      document.querySelector('[data-testid="send-button"]').disabled = false;
+                    }); return true;
+                    """)
+            }
             return (fixture, view, token, choice)
         } catch { fixture.shutdown(); throw error }
     }
@@ -10070,6 +10360,51 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
               user.appendChild(more);
             }
             """)
+    }
+
+    private static func temporaryOutlineFirstUserPage(variant: String = "valid") -> String {
+        collapsedFirstUserPage()
+            .replacingOccurrences(of: "document.getElementById('messages').appendChild(user);", with: """
+                document.getElementById('messages').appendChild(user);
+                const variant = \(String(reflecting: variant));
+                if (window.fixturePrompts.length === 1) {
+                  document.querySelector('[aria-label="Turn off temporary chat"]')?.remove();
+                  document.getElementById('fixture-composer-mode')?.remove();
+                  const style = document.createElement('style');
+                  style.textContent = '[data-user-message-bubble="true"]{position:relative} svg.temporaryOutline-bbkcxS{pointer-events:none;position:absolute;inset:0;height:100%;width:100%}';
+                  document.head.appendChild(style);
+                }
+                user.removeAttribute('data-message-author-role'); user.setAttribute('data-user-message-bubble','true');
+                userBody.removeAttribute('data-markdown-text-style'); userBody.className = 'whitespace-pre-wrap';
+                const content = document.createElement('div');
+                while (user.firstChild) content.appendChild(user.firstChild);
+                const outline = document.createElementNS('http://www.w3.org/2000/svg','svg');
+                outline.setAttribute('class','pointer-events-none absolute inset-0 h-full w-full temporaryOutline-bbkcxS');
+                outline.setAttribute('aria-hidden','true'); outline.setAttribute('focusable','false');
+                const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+                for (const [key,value] of Object.entries({x:'0.5',y:'0.5',width:'calc(100% - 1px)',height:'calc(100% - 1px)',
+                  fill:'none',stroke:'currentColor','stroke-opacity':'0.4','stroke-width':'1','stroke-dasharray':'8 8','vector-effect':'non-scaling-stroke'})) rect.setAttribute(key,value);
+                outline.appendChild(rect); user.append(outline, content); window.fixtureTemporaryOutline = outline;
+                if (variant === 'url_only') outline.remove();
+                if (variant === 'duplicate') user.prepend(outline.cloneNode(true));
+                if (variant === 'nested_body') userBody.prepend(outline);
+                if (variant === 'code') { const code = document.createElement('code'); code.appendChild(outline); user.prepend(code); }
+                if (variant === 'interactive') { user.setAttribute('role','button'); user.setAttribute('tabindex','0'); }
+                if (variant === 'malformed') rect.setAttribute('stroke-dasharray','8 7');
+                if (variant === 'fake_class') outline.setAttribute('class','pointer-events-none absolute inset-0 h-full w-full temporaryOutline-not!observed');
+                if (variant === 'hidden') user.hidden = true;
+                if (variant === 'inert') user.inert = true;
+                if (variant === 'opacity') user.style.opacity = '0';
+                if (variant === 'queryless' || variant === 'duplicate_query') {
+                  const url = new URL(document.URL); url.searchParams.delete('temporary-chat');
+                  if (variant === 'duplicate_query') { url.searchParams.append('temporary-chat','true'); url.searchParams.append('temporary-chat','true'); }
+                  history.replaceState({},'',url);
+                }
+                """)
+            .replacingOccurrences(of: "document.getElementById('messages').appendChild(turn);", with: """
+                document.getElementById('messages').appendChild(turn);
+                if (\(String(reflecting: variant)) === 'assistant') answer.prepend(window.fixtureTemporaryOutline);
+                """)
     }
 
     private static func collapsedFirstUserPage(deferred: Bool = false, ignored: Bool = false,

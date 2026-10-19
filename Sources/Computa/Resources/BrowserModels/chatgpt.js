@@ -2795,7 +2795,117 @@ function chatGPTRenderedTemporary() {
   if ([...document.querySelectorAll('button[aria-label="Turn off temporary chat"]')].some(visible)) return true;
   if (new URL(document.URL).searchParams.get('temporary-chat') !== 'true') return false;
   const buttons = [...document.querySelectorAll('button')].filter(visible);
-  return buttons.some(node => node.getAttribute('aria-label') === 'Save chat' || (node.innerText || '').trim() === 'Save chat');
+  if (buttons.some(node => node.getAttribute('aria-label') === 'Save chat' || (node.innerText || '').trim() === 'Save chat')) return true;
+  return chatGPTTemporaryOutlineVerified();
+}
+// Pure physical signature only. Callers must independently prove the submitted
+// user root and the acknowledged transition; this decoration grants no ownership.
+function chatGPTTemporaryOutlineForRoot(root, body) {
+  try {
+    const svgNamespace = 'http://www.w3.org/2000/svg';
+    const excluded = '[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"], '
+      + '[data-turn="assistant"], [role="tooltip"], pre, code, button, a, form, input, textarea, '
+      + '[role="button"], [role="link"], [role="menu"], [role="dialog"], [contenteditable="true"], [contenteditable=""]';
+    const physical = (node, decoration = null) => {
+      if (!node?.isConnected || node.nodeType !== 1 || node.getClientRects().length === 0) return false;
+      const rect = node.getBoundingClientRect();
+      if (![rect.width, rect.height].every(value => Number.isFinite(value) && value > 0 && value <= 10_000_000)) return false;
+      let current = node, depth = 0;
+      for (; current && depth < 64; current = current.parentElement, depth++) {
+        const style = getComputedStyle(current), opacity = Number(style.opacity);
+        if (current.hasAttribute('inert') || current !== decoration && current.getAttribute('aria-hidden') === 'true'
+          || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse'
+          || !Number.isFinite(opacity) || opacity <= 0) return false;
+      }
+      return current == null;
+    };
+    if (!root || !body || root === body || root.tagName !== 'DIV'
+      || root.getAttribute('data-user-message-bubble') !== 'true' || !root.contains(body)
+      || root.closest(excluded) || body.closest(excluded) || !physical(root) || !physical(body)) return false;
+    const selected = root.querySelector('[data-markdown-text-style="user-message"]')
+      || root.querySelector('.whitespace-pre-wrap') || root.querySelector('[data-message-author-role="user"]') || root;
+    if (selected !== body || root.children.length !== 2 || root.lastElementChild.tagName !== 'DIV'
+      || !root.lastElementChild.contains(body)) return false;
+    const allSVGs = [...root.querySelectorAll('svg[class]')];
+    if (allSVGs.length > 128) return false;
+    const outlines = allSVGs.filter(node => [...node.classList].some(value => value.startsWith('temporaryOutline-')));
+    if (outlines.length !== 1) return false;
+    const svg = outlines[0], attrs = node => [...node.attributes].map(attribute => attribute.name).sort().join(',');
+    if (svg !== root.firstElementChild || svg.parentElement !== root || body.contains(svg)
+      || svg.namespaceURI !== svgNamespace || svg.localName !== 'svg'
+      || attrs(svg) !== 'aria-hidden,class,focusable' || svg.getAttribute('aria-hidden') !== 'true'
+      || svg.getAttribute('focusable') !== 'false' || svg.closest(excluded) || !physical(svg, svg)) return false;
+    const classes = [...svg.classList].sort();
+    const fixed = ['absolute', 'h-full', 'inset-0', 'pointer-events-none', 'w-full'];
+    if (classes.length !== 6 || !fixed.every(value => classes.includes(value))
+      || classes.filter(value => /^temporaryOutline-[A-Za-z0-9_-]{1,64}$/.test(value)).length !== 1
+      || svg.children.length !== 1 || [...svg.childNodes].some(node => node.nodeType !== 1
+        && (node.nodeType !== 3 || node.textContent.trim() !== ''))) return false;
+    const rect = svg.firstElementChild;
+    const values = { x: '0.5', y: '0.5', width: 'calc(100% - 1px)', height: 'calc(100% - 1px)',
+      fill: 'none', stroke: 'currentColor', 'stroke-opacity': '0.4', 'stroke-width': '1',
+      'stroke-dasharray': '8 8', 'vector-effect': 'non-scaling-stroke' };
+    if (rect.namespaceURI !== svgNamespace || rect.localName !== 'rect'
+      || attrs(rect) !== Object.keys(values).sort().join(',') || rect.children.length !== 0
+      || rect.textContent.trim() !== '' || !Object.entries(values).every(([name, value]) => rect.getAttribute(name) === value)
+      || !physical(rect, svg)) return false;
+    const style = getComputedStyle(rect);
+    return style.stroke !== 'none' && Number(style.strokeOpacity) > 0 && Number.parseFloat(style.strokeWidth) > 0;
+  } catch { return false; }
+}
+// This fallback observes an existing acknowledged Temporary session only. It
+// never latches product provenance, binds a body, or calls proof/context getters.
+function chatGPTTemporaryOutlineVerified() {
+  try {
+    const product = globalThis.__computaChatProductMode, state = globalThis.__computaChatSubmissionState;
+    const url = new URL(document.URL), marker = input.expectedFirstUserMarker;
+    if (websiteChatInvocationLease == null || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease
+      || websiteChatInvocationLease.document !== document || websiteChatInvocationLease.owner !== input.ownerToken
+      || window !== window.top || input.provider !== 'chatgpt' || url.origin !== 'https://chatgpt.com'
+      || url.username || url.password || url.searchParams.getAll('temporary-chat').length !== 1
+      || url.searchParams.get('temporary-chat') !== 'true'
+      || !/^\/(?:c\/(?:[A-Za-z0-9-]+|local-chatgpt(?:%3[Aa]|:)[A-Za-z0-9-]+)\/?)?$/.test(url.pathname)
+      || !state || state.revoked || state.document !== document || state.owner !== input.ownerToken
+      || globalThis.__computaModelOwner !== state.owner
+      || document.URL !== input.expectedURL && !chatGPTInitialSubmissionRoute(state)
+      || !product || product.invalidated || product.document !== document || product.owner !== state.owner
+      || product.temporaryRequested !== true || product.temporaryAcknowledged !== true
+      || !websiteModelChoiceValid(state.modelChoice)
+      || input.expectedModelChoice != null && !websiteModelChoiceEqual(state.modelChoice, input.expectedModelChoice)
+      || typeof marker !== 'string' || !/^[a-f0-9-]{36}$/i.test(marker) || state.firstMarker !== marker
+      || globalThis.__computaModelFirstMarker !== marker || globalThis.__computaModelFirstSubmitted !== true) return false;
+    const prompt = globalThis.__computaModelFirstPrompt, markerLine = `Computa session marker: ${marker}`;
+    if (typeof prompt !== 'string' || prompt.length > 180_000 || !prompt.endsWith(`\n\n${markerLine}`)
+      || prompt.split('\n').filter(line => line === markerLine).length !== 1) return false;
+    const canonical = chatGPTSubmissionCanonical(prompt), roots = chatGPTMessageRoots('user');
+    const root = roots[0], body = root && chatGPTUserBody(root);
+    if (canonical == null || !root?.isConnected || !body?.isConnected || roots.length < 1 || roots.length > 16) return false;
+    const rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || ''), first = globalThis.__computaModelFirstProof;
+    if (!rendered) return false;
+    if (input.expectedFirstUserFingerprint == null) {
+      // The first claimed Send may still be clipped. Its exact prepared bytes
+      // and native round pin precede expansion; they grant no rendered binding.
+      const record = state.pending?.phase === 'send_claimed' ? state.pending : state.lastVerified;
+      if (roots.length !== 1 || globalThis.__computaModelLastSubmissionCount !== 0
+        || !record || record.sequence !== 1 || record.document !== document || record.owner !== state.owner
+        || record.marker !== marker || record.canonical !== canonical || !chatGPTSubmissionPins(record)
+        || !['send_claimed', 'verified'].includes(record.phase)
+        || record.phase === 'verified' && (input.action !== 'inspect' || input.allowFirstUserBinding !== true
+          || !chatGPTSubmissionBodyIntact(record, roots))
+        || first != null && (first.marker !== marker || first.fingerprint !== record.fingerprint || rendered !== canonical)
+        || rendered !== canonical && (!canonical.startsWith(rendered) || rendered.length >= canonical.length
+          || rendered.includes(markerLine))) return false;
+    } else {
+      // Retained rounds retain the full first native/private pin and the latest
+      // digest-proven body. A pending append cannot replace either witness.
+      const record = state.lastVerified;
+      if (typeof input.expectedFirstUserFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(input.expectedFirstUserFingerprint)
+        || !first || first.marker !== marker || first.fingerprint !== input.expectedFirstUserFingerprint
+        || rendered !== canonical || !record || record.phase !== 'verified' || record.document !== document
+        || record.owner !== state.owner || !chatGPTSubmissionPins(record) || !chatGPTSubmissionBodyIntact(record, roots)) return false;
+    }
+    return chatGPTTemporaryOutlineForRoot(root, body);
+  } catch { return false; }
 }
 // Product mode is independent of the family picker: normal Chat and Work can
 // offer the same models. Only a fresh, empty normal root may establish Chat
@@ -4475,6 +4585,59 @@ async function chatGPTExpandFirstUser(candidate) {
     return await chatGPTObserveFirstUserExpansion(candidate);
   } catch { return reject('failed'); }
 }
+// An optional scheduling observation for the terminal native product recheck.
+// It neither prepares/claims a message nor replaces submit's ordinary checks.
+function chatGPTPreparedEditorReadinessResult(observed) {
+  try {
+    const request = input.firstInstantPreparedEditorReadiness;
+    if (!request || typeof request !== 'object' || Array.isArray(request)
+      || Object.keys(request).sort().join(',') !== 'fingerprint,marker,sequence'
+      || request.sequence !== 1 || typeof request.marker !== 'string' || !/^[a-f0-9-]{36}$/i.test(request.marker)
+      || typeof request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.fingerprint)
+      || input.action !== 'verifyProductMode' || observed.error || observed.temporary !== true
+      || !chatGPTProductModeProof() || !chatGPTTemporaryVerified()
+      || !websiteChatInvocationLease || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease
+      || websiteChatInvocationLease.document !== document || window !== window.top
+      || location.origin !== 'https://chatgpt.com' || document.URL !== input.expectedURL
+      || globalThis.__computaModelOwner !== input.ownerToken
+      || input.expectedFirstUserMarker !== request.marker || input.expectedFirstUserFingerprint != null
+      || input.expectedConversation != null || globalThis.__computaModelFirstProof != null
+      || globalThis.__computaModelFirstSubmitted === true || globalThis.__computaModelLastSubmissionCount != null
+      || !Array.isArray(input.expectedUserCounts) || input.expectedUserCounts.length !== 1 || input.expectedUserCounts[0] !== 0
+      || !Array.isArray(input.expectedSubmissionProofs) || input.expectedSubmissionProofs.length !== 0
+      || chatGPTMessageRoots('user').length !== 0 || chatGPTMessageRoots('assistant').length !== 0) return observed;
+    const state = globalThis.__computaChatSubmissionState, pending = state?.pending;
+    const expected = globalThis.__computaModelFirstPrompt;
+    if (!state || state.document !== document || state.owner !== input.ownerToken || state.revoked
+      || state.firstMarker !== request.marker || state.lastVerified != null
+      || state.modelChoice?.key !== 'chat/latest/instant' || !websiteModelChoiceValid(state.modelChoice)
+      || !pending || pending.document !== document || pending.owner !== input.ownerToken
+      || pending.sequence !== request.sequence || pending.marker !== request.marker || pending.fingerprint !== request.fingerprint
+      || pending.phase !== 'prepared' || pending.root !== null || pending.body !== null || pending.expansionAttempted !== false
+      || typeof expected !== 'string' || expected.length > 180_000
+      || !expected.endsWith(`\n\nComputa session marker: ${request.marker}`)
+      || chatGPTSubmissionCanonical(expected) !== pending.canonical) return observed;
+    const visible = node => !!node && node.isConnected && node.getClientRects().length > 0
+      && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
+    const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+    const nodes = selectors => [...new Set(selectors.flatMap(selector => [...document.querySelectorAll(selector)]))].filter(visible);
+    const editors = nodes(['#prompt-textarea[contenteditable="true"]', 'textarea#prompt-textarea',
+      '#prompt-textarea [contenteditable="true"]', '[contenteditable="true"][aria-label="Ask ChatGPT"]', 'textarea[data-testid="prompt-textarea"]']);
+    const sends = nodes(['button[data-testid="send-button"]', 'button[aria-label="Send prompt"]',
+      'button[aria-label="Send message"]', 'button[aria-label="Send"]']);
+    const stops = nodes(['button[data-testid="stop-button"]', 'button[aria-label="Stop streaming"]',
+      'button[aria-label="Stop generating"]', 'button[aria-label="Stop"]']);
+    const editor = editors.length === 1 ? editors[0] : null, send = sends.length === 1 ? sends[0] : null;
+    const value = editor instanceof HTMLTextAreaElement ? editor.value : editor?.innerText;
+    // Keep raw submit equality as well as the pending record's canonical identity.
+    const actual = typeof value === 'string' && value.length <= 180_200 ? value.replace(/\r\n/g, '\n').trim() : null;
+    const ready = enabled(editor) && enabled(send) && chatGPTControlExposed(editor) && chatGPTControlExposed(send)
+      && stops.length === 0 && actual !== null && actual === expected.trim()
+      && chatGPTSubmissionCanonical(value) === pending.canonical;
+    return { ...observed, firstInstantPreparedEditorReadiness: { sequence: pending.sequence,
+      marker: pending.marker, fingerprint: pending.fingerprint, ready: !!ready } };
+  } catch { return observed; }
+}
 function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots) {
   try {
     const limit = 220_000, result = {};
@@ -4743,4 +4906,4 @@ if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action) && ch
 const result = { ...observed, firstUserVerified, firstUserFingerprint };
 const finalized = chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
 chatGPTPreparationRecord('outerFinalizationMs', outerFinalizationStarted);
-return chatGPTPreparationResult(finalized);
+return chatGPTPreparationResult(chatGPTPreparedEditorReadinessResult(finalized));

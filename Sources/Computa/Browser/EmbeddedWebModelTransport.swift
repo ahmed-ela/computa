@@ -471,6 +471,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     #if DEBUG
     enum FirstUserExpansionRouteCheckpoint { case routeAccepted, continuationInput }
     private var beforePageResultValidationForTesting: (@MainActor (String) async -> Void)?
+    private var preparedEditorReadinessTransformForTesting: (@MainActor (Any?) -> Any?)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
@@ -543,6 +544,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setBeforePageResultValidationForTesting(_ hook: (@MainActor (String) async -> Void)?) {
         beforePageResultValidationForTesting = hook
+    }
+
+    func setPreparedEditorReadinessTransformForTesting(_ transform: (@MainActor (Any?) -> Any?)?) {
+        preparedEditorReadinessTransformForTesting = transform
     }
 
     /// Separate model-enforced reads from product-only lineage observations.
@@ -846,8 +851,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         marker: submissionMarker, promptFingerprint: Self.promptFingerprint(prompt),
                         outboundFingerprint: Self.outboundFingerprint(outbound))
                 }
+                let readinessRequest = firstInstantReadinessRequest(session)
+                var readinessReceipt: PreparedEditorReadinessReceipt?
                 let inserted = try await page(session, action: "insert", prompt: outbound,
-                    prepareFirstInstantInInsert: prepareFirstInstantInInsert)
+                    prepareFirstInstantInInsert: prepareFirstInstantInInsert,
+                    preparedReadinessRequest: readinessRequest, preparedReadinessSink: { readinessReceipt = $0 })
                 guard inserted["inserted"] as? Bool == true else { throw Failure.editorFailure("insertion_unconfirmed") }
                 if prepareFirstInstantInInsert {
                     guard inserted["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
@@ -857,7 +865,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 // Wait only through read-only checks. Site normalization can enable
                 // Send later; insertion and the eventual click are never repeated.
-                try await waitForSendReady(session, prompt: outbound)
+                let alreadyReady = readinessRequest.map {
+                    readinessReceipt?.requestID == $0.id && isCurrent($0, session: session)
+                } ?? false
+                if !alreadyReady { try await waitForSendReady(session, prompt: outbound) }
                 try Task.checkCancellation()
                 session.response = ""
                 session.responseCodeStructure = nil
@@ -3181,6 +3192,50 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.documentGeneration != nil && session.routeContext != nil && session.productModeEvidence != nil
     }
 
+    /// A call-local readiness observation. Submit still proves and claims every actual Send.
+    private struct PreparedEditorReadinessRequest {
+        let id = UUID()
+        let token: String
+        let view: ObjectIdentifier
+        let generation: UUID
+        let url: URL
+        let choice: WebsiteModelChoice
+        let binding: Session.SubmissionBinding
+        var dictionary: [String: Any] {
+            ["sequence": binding.sequence, "marker": binding.marker, "fingerprint": binding.outboundFingerprint]
+        }
+    }
+    private struct PreparedEditorReadinessReceipt { let requestID: UUID }
+
+    private func firstInstantReadinessRequest(_ session: Session) -> PreparedEditorReadinessRequest? {
+        guard canConsolidateFirstInstantReadinessProof(session), let generation = session.documentGeneration,
+              let url = session.view.url, let choice = session.modelChoice, let binding = session.preparedSubmission else { return nil }
+        return .init(token: session.token, view: ObjectIdentifier(session.view), generation: generation,
+                     url: url, choice: choice, binding: binding)
+    }
+
+    private func isCurrent(_ request: PreparedEditorReadinessRequest, session: Session) -> Bool {
+        canConsolidateFirstInstantReadinessProof(session) && sessions[request.token] === session
+            && session.token == request.token && ObjectIdentifier(session.view) == request.view
+            && browser.webView(for: session.tabID) === session.view
+            && browser.documentGeneration(for: session.tabID) == request.generation
+            && session.documentGeneration == request.generation && session.view.url == request.url
+            && session.modelChoice == request.choice
+            && session.preparedSubmission?.sequence == request.binding.sequence
+            && session.preparedSubmission?.marker == request.binding.marker
+            && session.preparedSubmission?.promptFingerprint == request.binding.promptFingerprint
+            && session.preparedSubmission?.outboundFingerprint == request.binding.outboundFingerprint
+    }
+
+    private func readinessReceipt(_ raw: Any?, request: PreparedEditorReadinessRequest) -> PreparedEditorReadinessReceipt? {
+        guard let value = raw as? [String: Any], Set(value.keys) == ["sequence", "marker", "fingerprint", "ready"],
+              ComputerToolArgumentContract.exactInt64(value["sequence"]) == Int64(request.binding.sequence),
+              value["marker"] as? String == request.binding.marker,
+              value["fingerprint"] as? String == request.binding.outboundFingerprint,
+              let ready = value["ready"] as? NSNumber, CFGetTypeID(ready) == CFBooleanGetTypeID(), ready.boolValue else { return nil }
+        return .init(requestID: request.id)
+    }
+
     private func canPrepareFirstInstantInInsert(_ session: Session) -> Bool {
         canShareFirstChatGPTEditorContextRecheck(session)
             && !session.isDiscovery && !session.isRecoveryProbe && session.usesSubmissionOwnership
@@ -3196,6 +3251,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowPendingChatGPTModelVerification: Bool = true,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
                       prepareFirstInstantInInsert: Bool = false,
+                      preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
+                      preparedReadinessSink: ((PreparedEditorReadinessReceipt) -> Void)? = nil,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         let preparationActionStarted = ContinuousClock.now
         let logPreparationAction = session.provider == .chatgpt
@@ -3324,6 +3381,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             input["prepareFirstInstantInInsert"] = true
         }
         if profilePreparation { input["preparationTiming"] = true }
+        let requestsPreparedReadiness = action == "verifyProductMode" && preparedReadinessSink != nil
+            && preparedReadinessRequest.map({ isCurrent($0, session: session) }) == true
+        if requestsPreparedReadiness, let preparedReadinessRequest {
+            // Separate metadata: an unsent prepared body never becomes dispatched lineage proof.
+            input["firstInstantPreparedEditorReadiness"] = preparedReadinessRequest.dictionary
+        }
         if provider == .chatgpt, session.firstBodyReadRecoveryActive {
             input["suppressFirstUserExpansionClaim"] = true
         }
@@ -3520,6 +3583,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        var preparedReadiness = observed.removeValue(forKey: "firstInstantPreparedEditorReadiness")
+        #if DEBUG
+        if requestsPreparedReadiness, let transform = preparedEditorReadinessTransformForTesting {
+            preparedReadiness = transform(preparedReadiness)
+        }
+        #endif
         if provider == .chatgpt {
             let timing = Self.removePreparationTiming(from: &observed)
             if profilePreparation, let timing,
@@ -3718,7 +3787,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                  maximumWait: evaluationDeadline - .now,
                                                  allowBlockedProvider: allowBlockedProvider,
                                                  allowPendingModelTemporary: allowPendingModelTemporary,
-                                                 allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification)
+                                                 allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                                 preparedReadinessRequest: action == "verifyModel" ? preparedReadinessRequest : nil,
+                                                 preparedReadinessSink: action == "verifyModel" ? preparedReadinessSink : nil)
         }
         if editorContextRecheck {
             // Both original proofs are parsed before this existing model ->
@@ -3733,6 +3804,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                        refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                        combinedContextRecheck: combinedContextRecheck,
                                                        allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                                       preparedReadinessRequest: action == "insert" ? preparedReadinessRequest : nil,
+                                                       preparedReadinessSink: action == "insert" ? preparedReadinessSink : nil,
                                                        maximumWait: evaluationDeadline - .now)
             }
         }
@@ -3901,6 +3974,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     generation: generation, firstUserFingerprint: fingerprint)
             }
         }
+        if requestsPreparedReadiness, let request = preparedReadinessRequest,
+           isCurrent(request, session: session), let receipt = readinessReceipt(preparedReadiness, request: request) {
+            preparedReadinessSink?(receipt)
+        }
         return observed
     }
 
@@ -3933,7 +4010,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                             recheck: Bool, refreshChangedRoute: Bool,
                                             refreshReadOnlyObservation: Bool, maximumWait: Duration,
                                             allowBlockedProvider: Bool, allowPendingModelTemporary: Bool,
-                                            allowPendingChatGPTModelVerification: Bool) async throws {
+                                            allowPendingChatGPTModelVerification: Bool,
+                                            preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
+                                            preparedReadinessSink: ((PreparedEditorReadinessReceipt) -> Void)? = nil) async throws {
         guard session.provider == .chatgpt else { return }
         // Before hydration or the explicitly claimed Chat click, an untouched
         // root can report pending readiness. That never authorizes temporary
@@ -3972,6 +4051,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                        refreshReadOnlyObservation: refreshReadOnlyObservation,
                                        allowBlockedProvider: allowBlockedProvider, allowPendingModelTemporary: pendingPicker,
                                        allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                       preparedReadinessRequest: preparedReadinessRequest,
+                                       preparedReadinessSink: preparedReadinessSink,
                                        maximumWait: maximumWait)
             let current: WebsiteProductModeEvidence
             do { current = try WebsiteProductModeEvidence.parse(fresh["productModeEvidence"],
@@ -3989,6 +4070,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                               refreshReadOnlyObservation: Bool,
                                               combinedContextRecheck: Bool,
                                               allowPendingChatGPTModelVerification: Bool,
+                                              preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
+                                              preparedReadinessSink: ((PreparedEditorReadinessReceipt) -> Void)? = nil,
                                               maximumWait: Duration) async throws {
         if observed["modelVerificationPending"] != nil {
             guard observed["modelVerificationPending"] as? Bool == true,
@@ -4017,6 +4100,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                            recheckProductAfterAwait: !combinedContextRecheck,
                                            refreshReadOnlyObservation: refreshReadOnlyObservation,
                                            allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                           preparedReadinessRequest: preparedReadinessRequest,
+                                           preparedReadinessSink: preparedReadinessSink,
                                            maximumWait: maximumWait)
                 let currentEvidence = try validatedModelEvidence(fresh, session: session)
                 guard evidence.isSameResolvedSelection(as: currentEvidence) else { throw Failure.modelMismatch }
