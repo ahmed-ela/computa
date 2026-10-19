@@ -114,12 +114,17 @@ final class EmbeddedBrowserSession {
         var source: WKWebsiteDataStore?
         var sourceCookies: [HTTPCookie]?
         var validation: ChatGPTInferenceCookieValidation?
+        var resumeValidation: ChatGPTInferenceCookieValidation?
+        var resumeTask: Task<Void, Never>?
         init(lifetime: Duration) { self.lifetime = lifetime }
     }
 
     private enum InferencePrewarmUnavailable: String {
         case identity, navigationError = "navigation_error", blankIdle = "blank_idle", unexpectedRoute = "unexpected_route"
     }
+
+    private enum InferenceCookieValidationPhase: String { case claim, resume }
+    private enum InferenceCookieValidationOutcome: String { case match, mismatch, unavailable, cancelled }
 
     private struct ToolMutationPopupContext {
         let operationID = UUID()
@@ -1368,6 +1373,7 @@ final class EmbeddedBrowserSession {
 
     func setChatGPTInferencePrewarmingEnabled(_ enabled: Bool, preserveUnusedRoot: Bool = false,
                                             admit: @escaping @MainActor () throws -> Void) {
+        let wasEnabled = chatGPTInferencePrewarmingEnabled
         // Only a published, unclaimed pristine root may survive a draft pause.
         // Pausing grants no creation/adoption permission and renews no deadline.
         let retained = !enabled && preserveUnusedRoot && chatGPTInferencePrewarm.map {
@@ -1375,8 +1381,83 @@ final class EmbeddedBrowserSession {
         } == true
         chatGPTInferencePrewarmingEnabled = enabled && !isShutdown
         chatGPTInferencePrewarmAdmission = chatGPTInferencePrewarmingEnabled ? admit : nil
-        if chatGPTInferencePrewarmingEnabled { prepareChatGPTInferencePrewarmIfNeeded() }
-        else if !retained, let warm = chatGPTInferencePrewarm { discardInferencePrewarm(warm) }
+        if chatGPTInferencePrewarmingEnabled {
+            if !wasEnabled { validateResumedInferencePrewarmIfNeeded() }
+            prepareChatGPTInferencePrewarmIfNeeded()
+        } else if let warm = chatGPTInferencePrewarm {
+            warm.resumeTask?.cancel(); warm.resumeValidation?.cancel()
+            if !retained { discardInferencePrewarm(warm) }
+        }
+    }
+
+    private static func recordInferenceCookieValidation(_ phase: InferenceCookieValidationPhase,
+                                                       _ outcome: InferenceCookieValidationOutcome) {
+        inferencePrewarmLog.notice("inferencePrewarm validationPhase=\(phase.rawValue, privacy: .public) validationOutcome=\(outcome.rawValue, privacy: .public)")
+    }
+
+    /// An explicit resume may replace a stale, still-unclaimed standby before
+    /// Start. This read never grants adoption: every claim reads again below.
+    private func validateResumedInferencePrewarmIfNeeded() {
+        guard let warm = chatGPTInferencePrewarm, !warm.claimed, inferencePrewarmIsCurrent(warm),
+              warm.resumeValidation == nil, inferenceCookieValidations.isEmpty,
+              let source = warm.source, let cookies = warm.sourceCookies,
+              let admit = chatGPTInferencePrewarmAdmission else { return }
+        do { try admit() } catch { return }
+        let reservation = UUID()
+        let reader: any ChatGPTInferenceCookieSource
+        #if DEBUG
+        reader = cookieValidationSourceForTesting?(source) ?? ChatGPTWKInferenceCookieStore(source)
+        #else
+        reader = ChatGPTWKInferenceCookieStore(source)
+        #endif
+        let validation = ChatGPTInferenceCookieValidation(source: reader)
+        warm.resumeValidation = validation
+        inferenceCookieValidations[reservation] = validation
+        warm.resumeTask = Task { @MainActor [weak self, weak warm] in
+            guard let self, let warm else { validation.cancel(); return }
+            defer {
+                if warm.resumeValidation === validation {
+                    warm.resumeTask = nil
+                    // Cancellation may finish the waiter before the native
+                    // callback drains. Do not allow another resume read yet.
+                    if self.inferenceCookieValidations[reservation] !== validation { warm.resumeValidation = nil }
+                }
+            }
+            let isCurrent: @MainActor @Sendable () -> Bool = { [weak self, weak warm, weak validation] in
+                guard let self, let warm, let validation else { return false }
+                return !warm.claimed && warm.resumeValidation === validation && self.inferencePrewarmIsCurrent(warm)
+            }
+            let matches: Bool
+            do {
+                matches = try await validation.run(expected: cookies, until: min(warm.deadline, .now + .seconds(2)),
+                    isCurrent: isCurrent, onDrained: { [weak self, weak warm, weak validation] in
+                        guard let self, let validation, self.inferenceCookieValidations[reservation] === validation else { return }
+                        self.inferenceCookieValidations.removeValue(forKey: reservation)
+                        if let warm, warm.resumeValidation === validation, warm.resumeTask == nil { warm.resumeValidation = nil }
+                    })
+            } catch {
+                Self.recordInferenceCookieValidation(.resume, error is CancellationError ? .cancelled : .unavailable)
+                guard !(error is CancellationError), !Task.isCancelled, isCurrent() else { return }
+                warm.resumeTask = nil; warm.resumeValidation = nil
+                self.discardInferencePrewarm(warm)
+                return
+            }
+            Self.recordInferenceCookieValidation(.resume, matches ? .match : .mismatch)
+            guard !Task.isCancelled, isCurrent() else { return }
+            do { try admit() } catch {
+                if isCurrent() {
+                    warm.resumeTask = nil; warm.resumeValidation = nil
+                    self.discardInferencePrewarm(warm)
+                }
+                return
+            }
+            guard !Task.isCancelled, isCurrent(), !matches else { return }
+            // Detach this completed check before disposing its old slot. The
+            // replacement still passes normal admission, seeding and capacity.
+            warm.resumeTask = nil; warm.resumeValidation = nil
+            self.discardInferencePrewarm(warm)
+            self.prepareChatGPTInferencePrewarmIfNeeded()
+        }
     }
 
     /// An explicit demand trigger, never a timer-based refresh or retry loop.
@@ -1442,6 +1523,9 @@ final class EmbeddedBrowserSession {
             return nil
         }
         warm.claimed = true
+        // Start supersedes an optional preflight, but never reuses its result.
+        // Its outstanding callback remains capacity-accounted until drained.
+        warm.resumeTask?.cancel(); warm.resumeValidation?.cancel()
         let waitDeadline = min(deadline, warm.deadline)
         let timeout = Task { @MainActor [weak self, weak warm] in
             do { try await Task.sleep(until: waitDeadline) } catch { return }
@@ -1472,14 +1556,21 @@ final class EmbeddedBrowserSession {
                 let validation = ChatGPTInferenceCookieValidation(source: reader)
                 warm.validation = validation
                 inferenceCookieValidations[reservation] = validation
-                let matches = try await validation.run(expected: cookies, until: min(deadline, warm.deadline),
-                    isCurrent: { [weak self, weak warm] in
-                        guard let self, let warm else { return false }
-                        return self.inferencePrewarmIsCurrent(warm)
-                    }, onDrained: { [weak self, weak validation] in
-                        guard let self, let validation, self.inferenceCookieValidations[reservation] === validation else { return }
-                        self.inferenceCookieValidations.removeValue(forKey: reservation)
-                    })
+                let matches: Bool
+                do {
+                    matches = try await validation.run(expected: cookies, until: min(deadline, warm.deadline),
+                        isCurrent: { [weak self, weak warm] in
+                            guard let self, let warm else { return false }
+                            return self.inferencePrewarmIsCurrent(warm)
+                        }, onDrained: { [weak self, weak validation] in
+                            guard let self, let validation, self.inferenceCookieValidations[reservation] === validation else { return }
+                            self.inferenceCookieValidations.removeValue(forKey: reservation)
+                        })
+                } catch {
+                    Self.recordInferenceCookieValidation(.claim, error is CancellationError ? .cancelled : .unavailable)
+                    throw error
+                }
+                Self.recordInferenceCookieValidation(.claim, matches ? .match : .mismatch)
                 try Task.checkCancellation()
                 try admit()
                 guard ContinuousClock.now < min(deadline, warm.deadline), matches else {
@@ -1563,6 +1654,7 @@ final class EmbeddedBrowserSession {
         chatGPTInferencePrewarm = nil
         warm.task?.cancel(); warm.expiry?.cancel()
         warm.validation?.cancel()
+        warm.resumeTask?.cancel(); warm.resumeValidation?.cancel()
         warm.sourceCookies = nil
         if let id = warm.tabID, entries[id]?.view === warm.view { closeTab(id) }
     }
@@ -1654,6 +1746,10 @@ final class EmbeddedBrowserSession {
     }
 
     func awaitChatGPTInferencePrewarmForTesting() async -> UUID? { await chatGPTInferencePrewarm?.task?.value }
+    func awaitChatGPTInferencePrewarmResumeForTesting() async -> UUID? {
+        await chatGPTInferencePrewarm?.resumeTask?.value
+        return await chatGPTInferencePrewarm?.task?.value
+    }
     var chatGPTInferencePrewarmClaimedForTesting: Bool { chatGPTInferencePrewarm?.claimed == true }
     func setChatGPTInferencePrewarmLifetimeForTesting(_ lifetime: Duration) { prewarmLifetimeForTesting = lifetime }
     func expireChatGPTInferencePrewarmForTesting() {

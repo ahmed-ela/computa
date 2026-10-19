@@ -88,6 +88,30 @@ path. Explicit provider changes, discovery refresh, provider blocking, expiry
 and shutdown still discard the unused page. The user's default model is not
 changed, and no transport session, prompt or conversation is preserved.
 
+The build-173 follow-up preserved a 510-second-old page through New Task, but
+fresh claim validation refused it and the request fell back to a cold page
+(4.372 seconds before Send). No physical-identity failure was logged. Cookie
+changes in the shared profile are a leading explanation, not a confirmed
+diagnosis of that particular miss. Both native requests completed with owned
+cleanup; one direct control completed, a second unsent control was closed, and
+the remaining planned samples were not run.
+
+Build 174 adds a read-only cookie check when an existing unused page resumes.
+A mismatch may replace that page before the user submits. This is triggered
+only by the explicit resume, with the existing admission and capacity limits;
+it is not a periodic refresh. A matching preflight never authorizes adoption:
+the independent fresh claim-time cookie read remains mandatory. Cancellation,
+expiry, pause, disable and shutdown cannot revive the page or refill it from a
+late callback. Outstanding callbacks retain their capacity reservation until
+drained. Diagnostics record only the finite phase and outcome, without cookie
+names or values.
+
+The fresh build-174 comparison prespecifies three native samples followed by
+three direct controls using each native request's exact captured payload.
+This avoids direct controls changing shared-profile cookies before the next
+native sample. It is a blocked comparison, not an interleaved experiment; the
+ordering limitation remains explicit when reporting its results.
+
 Compare the same full captured payload, model and turn through Computa and the
 normal built-in browser. Keep failed attempts, first samples and incomplete
 arms explicit. Distinguish native action spans, page performance clocks and
@@ -124,3 +148,10 @@ prewarm policy, physical-view retention/resume, no creation or adoption while
 paused, cookie changes, in-flight seeding/claims, expiry and hard revocation.
 Default-model persistence and active-turn model guards also passed. The
 adapter and adapter-test bytes remain unchanged from the 377-case run.
+
+Build 174 passed all 66 focused native cases, including resume preflight,
+post-preflight cookie drift, replacement, superseded reads and outstanding
+callback capacity. The first compile rejected an unannotated local closure
+under Swift 6; adding its explicit main-actor/sendable type resolved it. The
+failed compile is retained separately from the successful run. Adapter and
+adapter-test bytes are still identical to the 377-case build-171 execution.

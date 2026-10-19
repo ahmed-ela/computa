@@ -382,10 +382,13 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         }
         XCTAssertEqual(pausedAdmissions, 0); XCTAssertEqual(loads, 1)
         browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let resumed = await browser.awaitChatGPTInferencePrewarmResumeForTesting()
+        XCTAssertEqual(resumed, id)
+        XCTAssertEqual(source.reads, readsBeforePause + 1, "Explicit resume validates before a user submits")
         XCTAssertEqual(loads, 1, "Resuming an existing root must not navigate a replacement")
         let taken = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
         XCTAssertEqual(taken, id); XCTAssertTrue(browser.webView(for: id) === view)
-        XCTAssertEqual(source.reads, readsBeforePause + 1, "Resume still validates current source cookies")
+        XCTAssertEqual(source.reads, readsBeforePause + 2, "A successful preflight never replaces the fresh claim read")
         let repeated = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
         XCTAssertNil(repeated); XCTAssertEqual(loads, 1)
         XCTAssertTrue(browser.humanTabs.isEmpty); XCTAssertNil(browser.selectedTabID)
@@ -414,7 +417,54 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         }
     }
 
-    func testPausedPrewarmCannotHideSourceCookieChangesFromResumedClaim() async throws {
+    func testResumeReplacesStalePausedPrewarmBeforeTheFreshClaim() async throws {
+        let source = CookieSeedStore([try cookie()]), destination = CookieSeedStore()
+        var loads = 0
+        let browser = prewarmBrowser(source: source, destination: destination, onLoad: { loads += 1 })
+        defer { browser.shutdown() }
+        browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
+        let id = try XCTUnwrap(prepared)
+        let readsBeforePause = source.reads
+        browser.setChatGPTInferencePrewarmingEnabled(false, preserveUnusedRoot: true, admit: {})
+        source.cookies = [try cookie(value: "CHANGED_DURING_DRAFT_PAUSE")]
+        let replacementDestination = CookieSeedStore()
+        browser.setCookieSeedFactoryForTesting { _, _ in
+            ChatGPTInferenceCookieSeed(source: source, destination: replacementDestination)
+        }
+        browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let resumed = await browser.awaitChatGPTInferencePrewarmResumeForTesting()
+        let replacement = try XCTUnwrap(resumed)
+        XCTAssertNotEqual(replacement, id); XCTAssertNil(browser.webView(for: id))
+        XCTAssertEqual(loads, 2); XCTAssertEqual(source.reads, readsBeforePause + 2)
+        XCTAssertEqual(replacementDestination.sets.map(\.value), ["CHANGED_DURING_DRAFT_PAUSE"])
+        let taken = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
+        XCTAssertEqual(taken, replacement); XCTAssertNotNil(browser.webView(for: replacement))
+        XCTAssertEqual(source.reads, readsBeforePause + 3, "Replacement adoption still validates current source cookies")
+        XCTAssertEqual(loads, 2); XCTAssertTrue(source.sets.isEmpty)
+        XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 0)
+    }
+
+    func testResumeIgnoresExcludedConversationCookieChangesWithoutReplacingTheRoot() async throws {
+        let auth = try cookie()
+        let source = CookieSeedStore([auth, try cookie("conv_key_" + conversation)]), destination = CookieSeedStore()
+        var loads = 0
+        let browser = prewarmBrowser(source: source, destination: destination, onLoad: { loads += 1 })
+        defer { browser.shutdown() }
+        browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
+        let id = try XCTUnwrap(prepared), reads = source.reads
+        browser.setChatGPTInferencePrewarmingEnabled(false, preserveUnusedRoot: true, admit: {})
+        source.cookies = [auth, try cookie("history_off_" + conversation, value: "changed")]
+        browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let resumed = await browser.awaitChatGPTInferencePrewarmResumeForTesting()
+        XCTAssertEqual(resumed, id); XCTAssertEqual(source.reads, reads + 1)
+        let taken = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
+        XCTAssertEqual(taken, id); XCTAssertEqual(source.reads, reads + 2)
+        XCTAssertEqual(loads, 1); XCTAssertEqual(destination.sets.count, 1)
+    }
+
+    func testMatchingResumePreflightCannotAuthorizeLaterCookieDriftAtClaim() async throws {
         let source = CookieSeedStore([try cookie()]), destination = CookieSeedStore()
         var loads = 0
         let browser = prewarmBrowser(source: source, destination: destination, onLoad: { loads += 1 })
@@ -423,13 +473,85 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
         let id = try XCTUnwrap(prepared)
         browser.setChatGPTInferencePrewarmingEnabled(false, preserveUnusedRoot: true, admit: {})
-        source.cookies = [try cookie(value: "CHANGED_DURING_DRAFT_PAUSE")]
         browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
-        XCTAssertNotNil(browser.webView(for: id)); XCTAssertEqual(loads, 1)
+        let resumed = await browser.awaitChatGPTInferencePrewarmResumeForTesting()
+        XCTAssertEqual(resumed, id)
+        source.cookies = [try cookie(value: "CHANGED_AFTER_RESUME_PREFLIGHT")]
         let taken = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
         XCTAssertNil(taken); XCTAssertNil(browser.webView(for: id))
-        XCTAssertEqual(loads, 1); XCTAssertTrue(source.sets.isEmpty)
+        XCTAssertEqual(loads, 1, "A failed claim cannot refill the standby")
         XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 0)
+    }
+
+    func testHeldResumePreflightCannotReviveOrRefillAfterLifecycleCancellation() async throws {
+        for operation in ["pause", "expiry", "disable", "shutdown"] {
+            let source = CookieSeedStore([try cookie()]), destination = CookieSeedStore()
+            var loads = 0
+            let browser = prewarmBrowser(source: source, destination: destination, maximumTabs: 1, onLoad: { loads += 1 })
+            defer { browser.shutdown() }
+            browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+            let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
+            let id = try XCTUnwrap(prepared)
+            browser.setChatGPTInferencePrewarmingEnabled(false, preserveUnusedRoot: true, admit: {})
+            source.holdReads = true
+            source.cookies = [try cookie(value: "OBSOLETE_PREFLIGHT_MISMATCH")]
+            browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+            await yieldUntil { source.pendingReads.count == 1 }
+            let reads = source.reads
+            browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+            browser.prepareChatGPTInferencePrewarmIfNeeded()
+            XCTAssertEqual(source.reads, reads, "One explicit resume has at most one preflight")
+            if operation == "pause" { browser.setChatGPTInferencePrewarmingEnabled(false, preserveUnusedRoot: true, admit: {}) }
+            else if operation == "expiry" { browser.expireChatGPTInferencePrewarmForTesting() }
+            else if operation == "disable" { browser.setChatGPTInferencePrewarmingEnabled(false, admit: {}) }
+            else { browser.shutdown() }
+            XCTAssertEqual(browser.webView(for: id) != nil, operation == "pause", operation)
+            XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 1)
+            XCTAssertThrowsError(try browser.createTab(), "An outstanding cookie callback retains capacity")
+            browser.prepareChatGPTInferencePrewarmIfNeeded()
+            source.holdReads = false; source.releaseRead(twice: true)
+            _ = await browser.awaitChatGPTInferencePrewarmResumeForTesting()
+            await yieldUntil { browser.pendingChatGPTInferenceCookiePreparationCount == 0 }
+            XCTAssertEqual(source.reads, reads, "A cancelled resume cannot start another seed or preflight")
+            XCTAssertEqual(loads, 1, operation)
+            XCTAssertEqual(browser.webView(for: id) != nil, operation == "pause", operation)
+            if operation != "pause" { XCTAssertTrue(browser.tabs.isEmpty, operation) }
+            let unavailable = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {})
+            XCTAssertNil(unavailable, operation)
+        }
+    }
+
+    func testFreshClaimSupersedesHeldResumePreflightWithoutLateDiscardOfItsAdoptedView() async throws {
+        let auth = try cookie()
+        let source = CookieSeedStore([auth]), destination = CookieSeedStore()
+        var loads = 0
+        let browser = prewarmBrowser(source: source, destination: destination, maximumTabs: 1, onLoad: { loads += 1 })
+        defer { browser.shutdown() }
+        browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
+        let id = try XCTUnwrap(prepared), view = try XCTUnwrap(browser.webView(for: id))
+        browser.setChatGPTInferencePrewarmingEnabled(false, preserveUnusedRoot: true, admit: {})
+        source.holdReads = true
+        browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        await yieldUntil { source.pendingReads.count == 1 }
+        let preflightReads = source.reads
+        let obsoleteCallback = source.pendingReads.removeFirst()
+        let claim = Task { try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: {}) }
+        await yieldUntil { source.pendingReads.count == 1 }
+        XCTAssertTrue(browser.chatGPTInferencePrewarmClaimedForTesting)
+        XCTAssertEqual(source.reads, preflightReads + 1, "Claim validation is independent of the held preflight")
+        XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 2)
+        browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
+        XCTAssertEqual(source.pendingReads.count, 1, "A claimed slot cannot begin another resume preflight")
+        source.holdReads = false; source.releaseRead(twice: true)
+        let taken = try await claim.value
+        XCTAssertEqual(taken, id); XCTAssertTrue(browser.webView(for: id) === view)
+        XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 1)
+        let obsoleteCookies = [try cookie(value: "OBSOLETE_PREFLIGHT_MISMATCH")]
+        obsoleteCallback(obsoleteCookies); obsoleteCallback(obsoleteCookies)
+        await yieldUntil { browser.pendingChatGPTInferenceCookiePreparationCount == 0 }
+        XCTAssertTrue(browser.webView(for: id) === view, "The superseded callback cannot discard an adopted page")
+        XCTAssertEqual(loads, 1); XCTAssertEqual(destination.sets.count, 1)
     }
 
     func testDraftPauseCannotRetainAnInFlightSeedOrClaim() async throws {
