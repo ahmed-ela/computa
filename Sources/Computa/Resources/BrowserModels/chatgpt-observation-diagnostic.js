@@ -42,11 +42,13 @@ function computaInstallObservationDiagnostic(config) {
     firstModernBodyAfterSendMs: null, firstRawTextAfterSendMs: null, firstRawTextUTF16Length: null,
     firstRawTextCountClamped: false, callbacks: 0, mutationCallbacks: 0, mutationRecords: 0,
     timerIntervals: [], rafEarlyIntervals: [], rafBodyIntervals: [], visibilityFocus: [],
-    resourceSummary: null
+    resourceSummary: null,
+    syncWork: Array.from({ length: 5 }, () => [0, 0, 0, false]), bodyTimerIntervals: []
   };
   let stopped = false, sendAt = null, userRoot = null, assistantRoot = null, modernBody = null;
   let observer = null, expiryTimer = null, nestedTimer = null, earlyFrame = null, bodyFrame = null;
   let lastTimerAt = null, lastEarlyAt = null, lastBodyAt = null;
+  let lateBodyTimer = null, lastLateBodyAt = null, lateBodyTicks = 0;
   const rounded = n => Number.isFinite(n) && n >= 0 && n <= 15000 ? Math.round(n * 1000) / 1000 : null;
   const now = () => performance.now();
   const elapsed = origin => rounded(now() - origin);
@@ -96,6 +98,7 @@ function computaInstallObservationDiagnostic(config) {
     if (nestedTimer !== null) clearTimeout(nestedTimer);
     if (earlyFrame !== null) cancelAnimationFrame(earlyFrame);
     if (bodyFrame !== null) cancelAnimationFrame(bodyFrame);
+    if (lateBodyTimer !== null) clearTimeout(lateBodyTimer);
     if (sendAt !== null && elapsed(sendAt) !== null) focusSnapshot('end');
     if (reason !== 'explicit_stop' && reason !== 'deadline') state.payloadBindingVerified = false;
     collectResources();
@@ -174,6 +177,7 @@ function computaInstallObservationDiagnostic(config) {
     if (!modernBody) {
       modernBody = bodies[0]; state.firstModernBodyAfterSendMs = ownTime(); focusSnapshot('body');
       lastBodyAt = now(); scheduleFrame('body');
+      lastLateBodyAt = lastBodyAt; scheduleLateBodyTimer();
     }
     // No innerText, geometry, style, visibility/layout query or response text export.
     const raw = modernBody.textContent || '';
@@ -182,6 +186,19 @@ function computaInstallObservationDiagnostic(config) {
       state.firstRawTextCountClamped = raw.length > 220001;
     }
   };
+  // Finite late cadence only: no DOM, probe, snapshot, guard or layout read.
+  function scheduleLateBodyTimer() {
+    lateBodyTimer = setTimeout(() => {
+      lateBodyTimer = null;
+      try {
+        if (stopped || sendAt === null || state.invalidReason !== 'none' || state.callbacks >= 256) return;
+        const stamp = now(), after = rounded(stamp - sendAt), interval = rounded(stamp - lastLateBodyAt);
+        if (after === null || interval === null) return;
+        state.callbacks++; lateBodyTicks++; state.bodyTimerIntervals.push([after, interval]); lastLateBodyAt = stamp;
+        if (lateBodyTicks < 8) scheduleLateBodyTimer();
+      } catch { /* A failed diagnostic clock cannot affect the page. */ }
+    }, 250);
+  }
   function onClick(event) {
     if (!callback()) return;
     const target = event.target instanceof Element ? event.target.closest('button[data-testid="send-button"],'
@@ -237,7 +254,23 @@ function computaInstallObservationDiagnostic(config) {
     }
     return JSON.parse(JSON.stringify(state));
   };
-  const api = Object.freeze({ revision: 1, binding, snapshot, stop() { if (!stopped) readProbe(); end('explicit_stop'); return snapshot(); } });
+  // Called only beside existing synchronous work; no probe/layout/guard call.
+  const syncNow = () => {
+    try {
+      if (stopped || sendAt === null || state.invalidReason !== 'none' || document !== documentAtInstall
+        || document.documentElement !== rootAtInstall || globalThis.__computaModelOwner !== ownerAtInstall
+        || globalThis.__computaMatchedBenchmarkProbeV1 !== probe) return null;
+      const value = now(); return Number.isFinite(value) && value >= sendAt && value - sendAt <= 15000 ? value : null;
+    } catch { return null; }
+  };
+  const recordSync = (index, started) => {
+    if (stopped || sendAt === null || !Number.isInteger(index) || index < 0 || index >= 5
+      || !Number.isFinite(started) || started < sendAt) return;
+    const row = state.syncWork[index], ended = syncNow(), duration = ended === null ? null : rounded(ended - started);
+    if (duration === null || row[0] >= 256 || rounded(row[1] + duration) === null) { row[3] = true; return; }
+    row[0]++; row[1] = rounded(row[1] + duration); row[2] = Math.max(row[2], duration);
+  };
+  const api = Object.freeze({ revision: 1, binding, snapshot, syncNow, recordSync, stop() { if (!stopped) readProbe(); end('explicit_stop'); return snapshot(); } });
   Object.defineProperty(globalThis, key, { value: api, writable: false, configurable: false, enumerable: false });
   return api;
 }

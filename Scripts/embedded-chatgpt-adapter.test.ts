@@ -3997,6 +3997,8 @@ describe('bounded semantic alert aside response error', () => {
 });
 
 describe('response mutation notifications survive HTML replacement', () => {
+  const syncStart = source.indexOf('function chatGPTSyncWorkStart(');
+  const syncEnd = source.indexOf('// BEGIN COMPUTA MATCHED BENCHMARK PROBE V1', syncStart);
   const processStart = source.indexOf('function chatGPTProcessSignalRecords(');
   const processEnd = source.indexOf('function chatGPTDrainSignalRecords(', processStart);
   const filterStart = source.indexOf('function websiteModelIgnoreOwnPickerMutation(');
@@ -4005,6 +4007,7 @@ describe('response mutation notifications survive HTML replacement', () => {
   const installEnd = source.indexOf('// Diagnostic-only observation does not await', installStart);
 
   function notificationFixture(legacyHTMLTarget = false) {
+    expect(syncStart).toBeGreaterThan(0); expect(syncEnd).toBeGreaterThan(syncStart);
     expect(processStart).toBeGreaterThan(0); expect(processEnd).toBeGreaterThan(processStart);
     expect(filterStart).toBeGreaterThan(0); expect(filterEnd).toBeGreaterThan(filterStart);
     expect(installStart).toBeGreaterThan(0); expect(installEnd).toBeGreaterThan(installStart);
@@ -4043,7 +4046,7 @@ describe('response mutation notifications survive HTML replacement', () => {
       'signal.observer.observe(document, {', 'signal.observer.observe(document.documentElement || document, {');
     const install = new Function('document', 'window', 'location', 'MutationObserver', 'globalThis', 'input',
       'const websiteChatObservePinnedMutations = () => {};\n'
-      + source.slice(filterStart, filterEnd) + source.slice(processStart, processEnd) + installation);
+      + source.slice(syncStart, syncEnd) + source.slice(filterStart, filterEnd) + source.slice(processStart, processEnd) + installation);
     install(document, window, { origin: 'https://chatgpt.com' }, Observer, world, { ownerToken });
     function deliver(record: any) {
       for (const registration of registrations) {
@@ -4153,7 +4156,7 @@ describe('armed observation diagnostic without inference authority', () => {
     const deliver = (records: any[] = [{ type: 'characterData' }]) => observers.filter(o => o.active)
       .forEach(o => o.callback(records.map(record => ({ removedNodes: [], ...record }))));
     let user: RawElement, answer: RawElement, modern: RawElement;
-    return { run, world, current, timers, frames, observers, document, window, location, resources, deliver,
+    return { run, world, current, timers, frames, observers, document, window, location, performance, probe, resources, deliver,
       setTime(value: number) { clock = value; },
       send() { current.sendClickCount = 1; current.sendUnixMs = 1_000_000 + clock; clicks.forEach(callback => callback({ target: send, isTrusted: false })); },
       appendAnswer(raw = '') {
@@ -4178,6 +4181,124 @@ describe('armed observation diagnostic without inference authority', () => {
     const endMarker = '// END COMPUTA MATCHED BENCHMARK PROBE V1.\n';
     const end = source.indexOf(endMarker, begin) + endMarker.length;
     expect(createHash('sha256').update(source.slice(begin, end)).digest('hex')).toBe('665280936fd0dfd7bf1281f81ff10c30d84fffdaffd3f4aba177caf7bc85dcb1');
+  });
+
+  test('synchronous cost recording is dormant before Send and reads no proof or DOM query', () => {
+    const f = auxiliaryFixture(), api = f.run();
+    const empty = Array.from({ length: 5 }, () => [0, 0, 0, false]);
+    expect(api.syncNow()).toBeNull(); api.recordSync(0, 0);
+    expect(api.snapshot().syncWork).toEqual(empty);
+    f.setTime(100); f.send(); f.appendAnswer('HI');
+    const originalQuery = f.document.querySelectorAll, originalSnapshot = f.probe.snapshot;
+    f.document.querySelectorAll = () => { throw Error('recording must not query the DOM'); };
+    f.probe.snapshot = () => { throw Error('recording must not read the source proof'); };
+    const scheduled = [f.timers.size, f.frames.size, f.observers.length];
+    const began = api.syncNow(); f.setTime(107); api.recordSync(0, began);
+    const second = api.syncNow(); f.setTime(110); api.recordSync(0, second);
+    expect([f.timers.size, f.frames.size, f.observers.length]).toEqual(scheduled);
+    f.document.querySelectorAll = originalQuery; f.probe.snapshot = originalSnapshot;
+    expect(api.snapshot().syncWork[0]).toEqual([2, 10, 7, false]);
+    expect(api.snapshot().payloadBindingVerified).toBe(false);
+  });
+
+  test('synchronous samples have finite call budgets and never mutate frozen metrics', () => {
+    const f = auxiliaryFixture(), api = f.run(); f.setTime(100); f.send(); f.appendAnswer('HI');
+    for (const invalid of [null, undefined, true, '100', NaN, Infinity, -1]) api.recordSync(0, invalid);
+    for (const invalid of [-1, 5, 0.5, true, '0']) api.recordSync(invalid, 100);
+    expect(api.snapshot().syncWork[0]).toEqual([0, 0, 0, false]);
+    for (let i = 0; i < 257; i++) {
+      f.setTime(100 + i); const began = api.syncNow(); f.setTime(101 + i); api.recordSync(0, began);
+    }
+    expect(api.snapshot().syncWork[0]).toEqual([256, 256, 1, true]);
+    const originalNow = f.performance.now; f.performance.now = () => { throw Error('clock unavailable'); };
+    expect(api.syncNow()).toBeNull(); expect(() => api.recordSync(1, 100)).not.toThrow();
+    f.performance.now = originalNow;
+    expect(api.snapshot().syncWork[1]).toEqual([0, 0, 0, true]);
+    f.qualify(); const beforeStop = api.syncNow(), stopped = api.stop();
+    f.setTime(1000); api.recordSync(0, beforeStop);
+    expect(api.syncNow()).toBeNull(); expect(api.snapshot().syncWork).toEqual(stopped.syncWork);
+    expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0);
+  });
+
+  test('late body cadence measures eight actual timer intervals without any DOM or proof reads', () => {
+    const f = auxiliaryFixture(), api = f.run(); f.setTime(100); f.send(); f.setTime(500); f.appendAnswer();
+    const originalQuery = f.document.querySelectorAll, originalSnapshot = f.probe.snapshot;
+    const html = f.document.documentElement;
+    f.document.querySelectorAll = () => { throw Error('late cadence must not query'); };
+    f.probe.snapshot = () => { throw Error('late cadence must not read proof'); };
+    Object.defineProperty(f.document, 'documentElement', { configurable: true, get() { throw Error('late cadence must not read DOM identity'); } });
+    for (let i = 0; i < 8; i++) expect(f.fireTimer(250, i === 4 ? 1000 : 250)).toBe(true);
+    expect(f.fireTimer(250)).toBe(false);
+    Object.defineProperty(f.document, 'documentElement', { configurable: true, writable: true, value: html });
+    f.document.querySelectorAll = originalQuery; f.probe.snapshot = originalSnapshot;
+    const measured = api.snapshot();
+    expect(measured.bodyTimerIntervals).toHaveLength(8);
+    expect(measured.bodyTimerIntervals.map((row: number[]) => row[1])).toEqual([250, 250, 250, 250, 1000, 250, 250, 250]);
+    expect(measured.bodyTimerIntervals[0][0]).toBe(650);
+    expect(measured.firstRawTextAfterSendMs).toBeNull(); expect(measured.payloadBindingVerified).toBe(false);
+    api.stop(); expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0);
+  });
+
+  test('late cadence respects the existing stop and fifteen-second boundaries without rescheduling', () => {
+    for (const expired of [false, true]) {
+      const f = auxiliaryFixture(), api = f.run(); f.setTime(100); f.send(); f.setTime(200); f.appendAnswer('HI');
+      const late = [...f.timers.values()].find(timer => timer.delay === 250)!.callback;
+      if (expired) {
+        f.setTime(15101); expect(f.fireTimer(250, 0)).toBe(true);
+        expect([...f.timers.values()].some(timer => timer.delay === 250)).toBe(false);
+        expect(f.fireTimer(15000, 0)).toBe(true);
+      } else api.stop();
+      const frozen = api.snapshot(); f.setTime(16000); late();
+      expect(api.snapshot().bodyTimerIntervals).toEqual(frozen.bodyTimerIntervals);
+      expect(api.snapshot().callbacks).toBe(frozen.callbacks);
+      expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0);
+    }
+  });
+
+  test('all diagnostic arrays and five saturated cost rows fit the existing payload limit', () => {
+    const f = auxiliaryFixture(), api = f.run(); f.setTime(100); f.send();
+    let clock = 100;
+    for (let row = 0; row < 5; row++) for (let call = 0; call < 257; call++) {
+      const began = api.syncNow(); f.setTime(++clock); api.recordSync(row, began);
+    }
+    for (let i = 0; i < 12; i++) expect(f.fireTimer()).toBe(true);
+    for (let i = 0; i < 8; i++) expect(f.fireFrame()).toBe(true);
+    f.setTime(1600); f.appendAnswer();
+    for (let i = 0; i < 8; i++) expect(f.fireFrame()).toBe(true);
+    for (let i = 0; i < 8; i++) expect(f.fireTimer(250, 250)).toBe(true);
+    f.raw('x'.repeat(220002)); f.qualify(); f.current.currentComplete = true;
+    for (let i = 0; i < 8; i++) f.resources.push({ initiatorType: 'script', name: `https://chatgpt.com/script-${i}.js`,
+      startTime: 0, responseEnd: 3000, duration: 3000,
+      encodedBodySize: 1073741824, decodedBodySize: 1073741824, transferSize: 1073741824 });
+    const final = api.stop(), json = JSON.stringify(final);
+    expect(final.syncWork).toEqual(Array.from({ length: 5 }, () => [256, 256, 1, true]));
+    expect(final.timerIntervals).toHaveLength(12); expect(final.rafEarlyIntervals).toHaveLength(8);
+    expect(final.rafBodyIntervals).toHaveLength(8); expect(final.bodyTimerIntervals).toHaveLength(8);
+    expect(final.visibilityFocus).toHaveLength(4); expect(final.resourceSummary.entries).toHaveLength(8);
+    expect(final.firstRawTextUTF16Length).toBe(220001); expect(final.firstRawTextCountClamped).toBe(true);
+    expect(final.payloadBindingVerified).toBe(true); expect(final.sourceProbeCurrentComplete).toBe(true);
+    expect(Buffer.byteLength(json)).toBeLessThanOrEqual(4096); expect(JSON.parse(json)).toEqual(final);
+    expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0);
+  });
+
+  test('observer cost finally preserves the actual guard result and original exception', async () => {
+    const f = fixture({ userPrompt: 'Owned synchronous guard request' }); await f.inspect();
+    const posted = f.posted.length, indices: number[] = [];
+    f.world.__computaObservationDiagnosticV1 = { syncNow() { throw Error('diagnostic clock failed'); },
+      recordSync(index: number) { indices.push(index); throw Error('diagnostic recorder failed'); } };
+    const record = { type: 'characterData', target: f.answer.children[0].childNodes[0] };
+    expect(() => f.observers[0].callback([record])).not.toThrow();
+    expect(f.posted.length).toBe(posted + 1); expect(indices).toEqual([0]);
+    const original = f.document.querySelectorAll, failure = new Error('actual product discovery failed');
+    f.document.querySelectorAll = selector => {
+      if (selector === '[aria-label], [aria-labelledby]') throw failure;
+      return original(selector);
+    };
+    let thrown: unknown;
+    try { f.observers[0].callback([record]); } catch (error) { thrown = error; }
+    expect(thrown).toBe(failure); expect(indices).toEqual([0, 0]);
+    expect(f.posted.length).toBe(posted + 1);
+    f.document.querySelectorAll = original;
   });
 
   test('ineligible configuration and missing source probe create no observer or scheduled work', () => {

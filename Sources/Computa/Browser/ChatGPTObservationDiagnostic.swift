@@ -50,7 +50,9 @@ enum ChatGPTObservationDiagnostic {
             "assistantCount", "firstModernBodyAfterSendMs", "firstRawTextAfterSendMs", "firstRawTextUTF16Length",
             "firstRawTextCountClamped", "callbacks", "mutationCallbacks", "mutationRecords", "timerIntervals",
             "rafEarlyIntervals", "rafBodyIntervals", "visibilityFocus", "resourceSummary"]
-        guard value.count == fields.count, Set(value.keys) == fields,
+        let optionalFields = Set(value.keys).intersection(["syncWork", "bodyTimerIntervals"])
+        let expectedFields = fields.union(optionalFields)
+        guard value.count == expectedFields.count, Set(value.keys) == expectedFields,
               integer(value["schemaVersion"], upper: 1) == 1, integer(value["revision"], upper: 1) == 1,
               boolean(value["diagnosticOnly"]) == true, boolean(value["modelProofRequiredExternally"]) == true,
               let supplied = value["binding"] as? [String: Any], supplied.count == 5,
@@ -104,9 +106,22 @@ enum ChatGPTObservationDiagnostic {
               timingTuples(value["timerIntervals"], maximum: 12), timingTuples(value["rafEarlyIntervals"], maximum: 8),
               timingTuples(value["rafBodyIntervals"], maximum: 8), focusTuples(value["visibilityFocus"]),
               resourceSummary(value["resourceSummary"]),
+              !optionalFields.contains("syncWork") || syncWork(value["syncWork"]),
+              !optionalFields.contains("bodyTimerIntervals") || timingTuples(value["bodyTimerIntervals"], maximum: 8),
               let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]),
               !data.isEmpty, data.count <= 4_096, data.allSatisfy({ (0x20...0x7e).contains($0) }) else { return nil }
         return Snapshot(data: data, phase: stopped ? .terminal : hasText ? .firstText : sent ? .early : nil)
+    }
+
+    private static func syncWork(_ raw: Any?) -> Bool {
+        guard let rows = raw as? [[Any]], rows.count == 5 else { return false }
+        for row in rows {
+            guard row.count == 4, let calls = integer(row[0], upper: 256),
+                  let total = number(row[1], upper: 15_000), let maximum = number(row[2], upper: total),
+                  boolean(row[3]) != nil,
+                  (calls > 0 ? total <= Double(calls) * maximum + 0.001 : total == 0 && maximum == 0) else { return false }
+        }
+        return true
     }
 
     private static func boolean(_ raw: Any?) -> Bool? {

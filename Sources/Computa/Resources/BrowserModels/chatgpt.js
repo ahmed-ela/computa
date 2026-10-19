@@ -1608,6 +1608,9 @@ function chatGPTPreparationElapsed(started) {
 function chatGPTPreparationRecord(key, started) {
   if (chatGPTPreparationTimingEnabled) chatGPTPreparationTiming[key] = chatGPTPreparationElapsed(started);
 }
+// No supplied callback ever executes a guard; these functions record only clocks.
+function chatGPTSyncWorkStart() { try { return globalThis.__computaObservationDiagnosticV1?.syncNow?.() ?? null; } catch { return null; } }
+function chatGPTSyncWorkEnd(index, started) { try { globalThis.__computaObservationDiagnosticV1?.recordSync?.(index, started); } catch { } }
 // BEGIN COMPUTA MATCHED BENCHMARK PROBE V1 — diagnostic-only, shared verbatim.
 function computaInstallMatchedBenchmarkProbe(config) {
   const keys = ['schemaVersion', 'nonce', 'expectedSHA256', 'expectedCanonicalSHA256', 'expectedUTF8Bytes'];
@@ -3783,13 +3786,17 @@ function chatGPTFirstInstantReadinessFinalGuard(request) {
     && chatGPTFreshInstantInsert({ ...request, action: 'insert', prepareFirstInstantInInsert: true });
 }
 function chatGPTProcessSignalRecords(signal, records) {
-  websiteChatObservePinnedMutations(records);
-  const productProof = globalThis.__computaChatProductMode;
-  const mode = productProof ? chatGPTProductModeState() : null;
-  if (productProof) chatGPTObserveProductMutations(productProof, mode, records);
-  if (!records.some(record => !websiteModelIgnoreOwnPickerMutation(record))) return;
-  if (window !== window.top || location.origin !== 'https://chatgpt.com'
-    || globalThis.__computaModelOwner !== signal.ownerToken) return;
+  const observerStarted = chatGPTSyncWorkStart();
+  try {
+    websiteChatObservePinnedMutations(records);
+    const productProof = globalThis.__computaChatProductMode;
+    const mode = productProof ? chatGPTProductModeState() : null;
+    if (productProof) chatGPTObserveProductMutations(productProof, mode, records);
+    if (!records.some(record => !websiteModelIgnoreOwnPickerMutation(record))) return;
+    if (window !== window.top || location.origin !== 'https://chatgpt.com'
+      || globalThis.__computaModelOwner !== signal.ownerToken) return;
+  }
+  finally { chatGPTSyncWorkEnd(0, observerStarted); }
   // Notification only: draining before input retains the ordinary observer's
   // negative-history processing and native notification semantics.
   try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ ownerToken: signal.ownerToken, kind: 'dom_changed' }); }
@@ -3940,7 +3947,9 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   const interrupted = !!claudeStatus && (claudeStatus.textContent || "").trim().replace(/’/g, "'") === "Claude's response was interrupted.";
   const claudeStreaming = provider === "claude" && [...document.querySelectorAll('[data-testid="assistant-message"][data-is-streaming="true"]')].some(visible);
   const answer = answers.at(-1);
-  const responseExtraction = modelResponseExtraction(answer);
+  let responseExtraction; const extractionStarted = chatGPTSyncWorkStart();
+  try { responseExtraction = modelResponseExtraction(answer); }
+  finally { chatGPTSyncWorkEnd(1, extractionStarted); }
   const answerText = modelResponseText(answer, responseExtraction);
   let answerComplete = false;
   let rendererScopedCopies = [];
@@ -3988,7 +3997,12 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     // Native can decline this generic diagnostic on an established reply.
     // Keep fresh/empty shapes observable and preserve every proof above.
     const includeDebugStructure = input.requestDebugStructure !== false || userCount === 0 || answers.length === 0;
-    return { ...state, signIn, ...(includeDebugStructure ? { debugStructure: chatGPTStructure(visible) } : {}),
+    let debugStructure;
+    if (includeDebugStructure) {
+      const structureStarted = chatGPTSyncWorkStart();
+      try { debugStructure = chatGPTStructure(visible); } finally { chatGPTSyncWorkEnd(2, structureStarted); }
+    }
+    return { ...state, signIn, ...(includeDebugStructure ? { debugStructure } : {}),
       ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };
   }
   if (action === "enableTemporary") {
@@ -4229,8 +4243,11 @@ let firstUserFingerprint = null;
 let firstSnapshot = null;
 let firstUserRejectionDiagnostic;
 let chatGPTFinalResponseSnapshot = null;
-const normalizedFirstBody = node => (node.innerText || node.textContent || "")
-  .replace(/\r\n?/g, "\n").normalize("NFC").trim();
+const normalizedFirstBody = node => {
+  const bodyStarted = chatGPTSyncWorkStart();
+  try { return (node.innerText || node.textContent || "").replace(/\r\n?/g, "\n").normalize("NFC").trim(); }
+  finally { chatGPTSyncWorkEnd(3, bodyStarted); }
+};
 function chatGPTFirstUserExpandControls(root, roots, maxDepth = 3) {
   const controls = new Set(), assistants = chatGPTMessageRoots('assistant');
   const physical = node => node.isConnected && node.getClientRects().length > 0
@@ -4894,7 +4911,9 @@ if (ownedUserCount > 0) {
     // A consumed local claim cannot acquire first-message or cleanup authority
     // on a later read after failure, replacement, or a different full body.
     return chatGPTFirstUserFailure('snapshot_before_action', 'digest', { roots: ownedMessages, body: first, rendered });
-  const expansion = chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered);
+  let expansion; const expansionStarted = chatGPTSyncWorkStart();
+  try { expansion = chatGPTFirstUserExpansionCandidate(ownedMessages[0], first, rendered); }
+  finally { chatGPTSyncWorkEnd(4, expansionStarted); }
   if (expansion) {
     expansionRejected = !await chatGPTExpandFirstUser(expansion);
     // A display click can mutate the body before a later guard rejects it.

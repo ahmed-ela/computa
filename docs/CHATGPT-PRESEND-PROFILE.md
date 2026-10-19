@@ -388,3 +388,17 @@ Four unsent benchmark setup errors and two unsent fixture UI errors were retaine
 - Exact V84 extraction: `9c9a04e81dcc466835d4ae91461cd378831926e86027d992503c93b42320e825`.
 - V84 workflow report: `edb725248038da7e2cecc0f532a1b4f4cfc5775534c32f0a6b9d5a252d637c9d`.
 - Independent R1/R2 verification: `1e997d3772659bc61368b4caaa27223189f5f2fbfd55c841c8834564306c4aad`, `1922c71a48fe21c5fcdc0740c169772590cf81baf756107c996d31f9690724ae`.
+
+The bounded artifact-only 180 reconstruction preserves all strict exclusions. Native body-to-raw intervals were 1591/1655/1582ms; direct intervals were 83/614/111ms. The native full final proofs took 180/171/189ms. These are per-arm observations from the retained nonpositive cohort, not a matched aggregate or an isolated explanation. Reconstruction SHA: `52e7c64f5855a26db0f07625930d04dfe9216b2265b21b32a525ebfe11411153`.
+
+## Build-181 targeted synchronous-work diagnostic
+
+The existing armed synthetic diagnostic now records five fixed, bounded call-cost rows for observer guard work, answer extraction, generic anatomy diagnostics, first-user rendered-text reads and synchronous expansion-candidate checks. Each original guard executes directly inside a local try/finally; optional recording supplies no result or authority. Timings measure synchronous wall time, may overlap across nested rows and are not exact CPU costs. A finite set of eight body-anchored 250ms timers covers the late interval omitted by the earlier short frame burst. Timer callbacks read no DOM, probe, snapshot or proof.
+
+The existing 15-second window, per-row call caps, three-snapshot logging limit and 4096-byte payload budget remain unchanged. Invalid diagnostic fields are removed before ordinary validation. The maximal populated shape has round-trip and chunk-budget coverage. This adds measurements, not a claimed latency improvement. A separately prespecified one-pair normal Chat/latest Instant/Temporary experiment will use the exact same whole payload and the production complete-envelope grammar, retaining output representations and all failures without regrading build 180.
+
+The final frozen source passed **406 adapter tests** (13,803 assertions) and **51 focused native tests**, including the existing production complete-fence acceptance/rejection cases. Both final runs retained unchanged input hashes. An initial adapter run exposed three test-slice harnesses missing the new passive timing helper definitions; the test-only fix and the initial input-freeze drift are retained, followed by the clean full runs. Signed installation and the new diagnostic pair are pending.
+
+- Final test freeze: `5580f18d04aef66b24ecaf2901c4217f8ab2cfc0fa02f613ed5870083ef342f2`.
+- Adapter log: `8259f18f7b175d8c763d205282b29dd69c7c168b51794d187c0afbcbbc7d05dc`.
+- Focused native log: `6d4ac18a7df7758ddffbbc88ffafbb7a619059b996f49720b2bda518f4db79e6`.

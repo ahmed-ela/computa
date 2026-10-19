@@ -107,6 +107,63 @@ final class ChatGPTObservationDiagnosticTests: XCTestCase {
         XCTAssertNil(remove(bad))
     }
 
+    func testOptionalSynchronousCostsAndLateCadenceRemainStrictlyFiniteAndNonAuthoritative() throws {
+        XCTAssertNotNil(remove(value()), "Retained snapshots without these optional measurements remain valid")
+        let empty: [Any] = [0, 0, 0, false]
+        var valid = value(text: true)
+        valid["syncWork"] = [[2, 10, 7, false] as [Any], empty, empty, [256, 256, 1, true], empty]
+        valid["bodyTimerIntervals"] = [[650, 250], [900, 250], [1900, 1000]]
+        let accepted = try XCTUnwrap(remove(valid))
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: accepted.data) as? [String: Any])
+        XCTAssertEqual(decoded["payloadBindingVerified"] as? Bool, false)
+        XCTAssertNotNil(decoded["syncWork"])
+        let invalidRows: [[Any]] = [[true, 10, 7, false], [257, 10, 7, false], [2, -1, 1, false],
+            [2, Double.nan, 1, false], [2, 15_001, 1, false], [2, 10, 11, false],
+            [1, 10, 7, false], [0, 1, 1, true], [2, 10, 7, 1], [2, 10, 7, false, "PRIVATE"]]
+        for row in invalidRows {
+            var bad = valid; bad["syncWork"] = [row, empty, empty, empty, empty]
+            XCTAssertNil(remove(bad))
+        }
+        for badRows in [Array(repeating: empty, count: 4), Array(repeating: empty, count: 6)] {
+            var bad = valid; bad["syncWork"] = badRows; XCTAssertNil(remove(bad))
+        }
+        for badIntervals: [[Any]] in [[[1, true]], [[1, -1]], [[Double.infinity, 1]],
+                                     [[900, 250], [650, 250]], Array(repeating: [1, 1], count: 9)] {
+            var bad = valid; bad["bodyTimerIntervals"] = badIntervals; XCTAssertNil(remove(bad))
+        }
+        var unknown = valid; unknown["syncWorkToolAuthority"] = true
+        XCTAssertNil(remove(unknown))
+    }
+
+    func testMaximalSynchronousAndLateCadenceSnapshotFitsTheExistingChunkBudget() throws {
+        var maximal = value(text: true, terminal: true)
+        maximal["syncWork"] = Array(repeating: [256, 15_000, 15_000, true] as [Any], count: 5)
+        maximal["bodyTimerIntervals"] = Array(repeating: [15_000, 15_000], count: 8)
+        maximal["timerIntervals"] = Array(repeating: [15_000, 15_000], count: 12)
+        maximal["rafEarlyIntervals"] = Array(repeating: [15_000, 15_000], count: 8)
+        maximal["rafBodyIntervals"] = Array(repeating: [15_000, 15_000], count: 8)
+        maximal["visibilityFocus"] = ["install", "send", "body", "end"].map { [$0, 15_000, "prerender", false] as [Any] }
+        maximal["callbacks"] = 256; maximal["mutationCallbacks"] = 128; maximal["mutationRecords"] = 1_025
+        maximal["firstRawTextUTF16Length"] = 220_001; maximal["firstRawTextCountClamped"] = true
+        maximal["resourceSummary"] = ["scannedCount": 256, "scanTruncated": true, "selectedCount": 256,
+            "selectedTruncated": true, "available": true,
+            "entries": Array(repeating: [-15_000, 15_000, 15_000, 1_073_741_824, 1_073_741_824, 1_073_741_824], count: 8)]
+        let snapshot = try XCTUnwrap(remove(maximal))
+        XCTAssertLessThanOrEqual(snapshot.data.count, 4_096)
+        let roundTrip = try XCTUnwrap(JSONSerialization.jsonObject(with: snapshot.data) as? [String: Any])
+        let repeated = try XCTUnwrap(remove(roundTrip))
+        XCTAssertEqual(repeated.data, snapshot.data)
+        var budget = ChatGPTObservationDiagnostic.LogBudget()
+        let log = try XCTUnwrap(budget.consume(snapshot, binding: binding, sessionToken: UUID().uuidString, sequence: 1))
+        XCTAssertLessThanOrEqual(log.records.count, 8)
+        XCTAssertTrue(log.records.allSatisfy { $0.utf8.count <= 960 })
+        let restored = try log.records.reduce(into: Data()) { data, line in
+            let delimiter = try XCTUnwrap(line.range(of: " base64="))
+            data.append(try XCTUnwrap(Data(base64Encoded: String(line[delimiter.upperBound...]))))
+        }
+        XCTAssertEqual(restored, snapshot.data)
+    }
+
     func testThreeCheckpointBudgetPreservesTerminalAndBoundsEveryChunk() throws {
         var budget = ChatGPTObservationDiagnostic.LogBudget()
         let token = UUID().uuidString
