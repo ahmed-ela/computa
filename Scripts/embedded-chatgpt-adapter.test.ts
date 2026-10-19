@@ -429,6 +429,62 @@ function moveFixtureElement(node: Element, parent: Element) {
   parent.append(node);
 }
 
+async function modernOnlyEmptyChatGPTAnswerFixture() {
+  const choice = { key: 'chat/latest/medium', label: 'Medium' };
+  const x = await chatTurnFixture(choice);
+  const record = await x.dispatch('Wait for actual answer text, even beside a completed footer', { deferModelVerification: true });
+  const bound = await x.observe(record, { deferModelVerification: true });
+  expect(bound.error).toBeUndefined(); expect(bound.submissionProof).toEqual({ sequence: 1, fingerprint: record.fingerprint });
+  const turn = new Element('SECTION');
+  const answer = new Element('DIV', { 'data-markdown-text-style': 'assistant-message' });
+  const body = new Element('DIV'); answer.append(body);
+  const footer = new Element('DIV', { class: 'turn-action-controls' });
+  const copy = new Element('BUTTON', { 'aria-label': 'Copy' }); footer.append(copy);
+  turn.append(answer, footer); x.f.messages.append(turn);
+  return { x, record, choice, answer, body, copy };
+}
+
+describe('ChatGPT modern-only empty answer', () => {
+  test('an empty modern assistant beside a legacy user and enabled footer carries no response proof', async () => {
+    const p = await modernOnlyEmptyChatGPTAnswerFixture();
+    const pickerClicks = p.x.picker!.trigger.clicks;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const observed = await p.x.observe(p.record, { deferModelVerification: true });
+      expect(observed.error).toBeUndefined();
+      expect(observed).toMatchObject({ text: '', answerComplete: true, busy: false,
+        responseCount: 1, userCount: 1, modelVerificationPending: true,
+        answerScopeDiagnostic: { rootPresent: true, bodyPresent: true, rootTextLength: 0,
+          bodyTextLength: 0, rootChildren: 1, bodyChildren: 1 } });
+      expect(observed).not.toHaveProperty('modelEvidence');
+      expect(p.x.picker!.trigger.clicks).toBe(pickerClicks);
+    }
+    expect((await p.x.f.diagnose()).failureDiagnostic).toMatchObject({
+      modernUsers: { connected: 0, visible: 0 }, legacyUsers: { connected: 1, visible: 1 },
+      modernAssistants: { connected: 1, visible: 1 }, legacyAssistants: { connected: 0, visible: 0 },
+      stopPresent: false, copyPresent: true, copyEnabled: true });
+    expect(p.x.send.clicks).toBe(1); expect(p.copy.clicks).toBe(0);
+  });
+
+  test('later nonempty content in the same modern-only answer requires fresh full proof', async () => {
+    const p = await modernOnlyEmptyChatGPTAnswerFixture();
+    expect(await p.x.observe(p.record, { deferModelVerification: true })).toMatchObject({ text: '', modelVerificationPending: true });
+    const pickerClicks = p.x.picker!.trigger.clicks;
+    const response = JSON.stringify({ type: 'message', text: 'Actual delayed answer' });
+    p.body.text = response;
+    const candidate = await p.x.observe(p.record, { deferModelVerification: true });
+    expect(candidate.error).toBeUndefined();
+    expect(candidate).toMatchObject({ text: response, answerComplete: true, busy: false, modelVerificationPending: true });
+    expect(candidate).not.toHaveProperty('modelEvidence');
+    expect(p.x.picker!.trigger.clicks).toBe(pickerClicks);
+    const verified = await p.x.observe(p.record, { deferModelVerification: false });
+    expect(verified.error).toBeUndefined(); expect(verified.text).toBe(response);
+    expect(verified.modelEvidence.selected).toEqual(p.choice);
+    expect(verified).not.toHaveProperty('modelVerificationPending');
+    expect(p.x.picker!.trigger.clicks).toBeGreaterThan(pickerClicks);
+    expect(p.x.send.clicks).toBe(1); expect(p.copy.clicks).toBe(0);
+  });
+});
+
 async function pairedChatGPTFooterFixture() {
   const choice = { key: 'chat/latest/medium', label: 'Medium' };
   const x = await chatTurnFixture(choice);
@@ -3799,5 +3855,117 @@ describe('bounded semantic alert aside response error', () => {
       const result = await f.inspect(); expect(result.error).toBeDefined(); expect(result.responseLoadFailed).toBeUndefined();
       expect(w.retry.clicks).toBe(0); expect(w.retry.events.length).toBe(0);
     }
+  });
+});
+
+describe('response mutation notifications survive HTML replacement', () => {
+  const processStart = source.indexOf('function chatGPTProcessSignalRecords(');
+  const processEnd = source.indexOf('function chatGPTDrainSignalRecords(', processStart);
+  const filterStart = source.indexOf('function websiteModelIgnoreOwnPickerMutation(');
+  const filterEnd = source.indexOf('function websiteModelHitTestTarget(', filterStart);
+  const installStart = source.indexOf('if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken)');
+  const installEnd = source.indexOf('// Diagnostic-only observation does not await', installStart);
+
+  function notificationFixture(legacyHTMLTarget = false) {
+    expect(processStart).toBeGreaterThan(0); expect(processEnd).toBeGreaterThan(processStart);
+    expect(filterStart).toBeGreaterThan(0); expect(filterEnd).toBeGreaterThan(filterStart);
+    expect(installStart).toBeGreaterThan(0); expect(installEnd).toBeGreaterThan(installStart);
+    class Node {
+      parentNode: Node | null = null;
+      constructor(public nodeType: number, public attributes: Record<string, string> = {}) {}
+      get parentElement() { return this.parentNode?.nodeType === 1 ? this.parentNode : null; }
+      contains(target: Node | null): boolean {
+        for (let node = target; node; node = node.parentNode) if (node === this) return true;
+        return false;
+      }
+      getAttribute(name: string) { return this.attributes[name] ?? null; }
+      closest(_selector: string): Node | null {
+        for (let node: Node | null = this; node; node = node.parentElement)
+          if (node.attributes['data-markdown-text-style'] === 'assistant-message') return node;
+        return null;
+      }
+      querySelector() { return null; }
+      querySelectorAll() { return []; }
+    }
+    const document = Object.assign(new Node(9), { documentElement: new Node(1) });
+    document.documentElement.parentNode = document;
+    const oldHTML = document.documentElement;
+    const registrations: { target: Node; options: Record<string, any>; callback: (records: any[]) => void }[] = [];
+    class Observer {
+      constructor(public callback: (records: any[]) => void) {}
+      observe(target: Node, options: Record<string, any>) { registrations.push({ target, options, callback: this.callback }); }
+    }
+    const posted: unknown[] = [], ownerToken = 'f33c8869-a5d3-4b9d-b29e-7b6f591a8e30';
+    const world: any = { __computaModelOwner: ownerToken };
+    const window: any = { webkit: { messageHandlers: { computaChatGPTSignal: {
+      postMessage: (message: unknown) => posted.push(message)
+    } } } }; window.top = window;
+    let installation = source.slice(installStart, installEnd);
+    if (legacyHTMLTarget) installation = installation.replace(
+      'signal.observer.observe(document, {', 'signal.observer.observe(document.documentElement || document, {');
+    const install = new Function('document', 'window', 'location', 'MutationObserver', 'globalThis', 'input',
+      'const websiteChatObservePinnedMutations = () => {};\n'
+      + source.slice(filterStart, filterEnd) + source.slice(processStart, processEnd) + installation);
+    install(document, window, { origin: 'https://chatgpt.com' }, Observer, world, { ownerToken });
+    function deliver(record: any) {
+      for (const registration of registrations) {
+        if (!registration.options[record.type]) continue;
+        if (record.type === 'attributes' && registration.options.attributeFilter
+          && !registration.options.attributeFilter.includes(record.attributeName)) continue;
+        if (record.target === registration.target
+          || registration.options.subtree && registration.target.contains(record.target)) registration.callback([record]);
+      }
+    }
+    function textIn(parent: Node) {
+      const answer = new Node(1, { 'data-markdown-text-style': 'assistant-message' }); answer.parentNode = parent;
+      const text = new Node(3); text.parentNode = answer; return { answer, text };
+    }
+    return { document, oldHTML, posted, world, ownerToken, deliver, textIn,
+      replaceHTML() {
+        const replacement = new Node(1); oldHTML.parentNode = null;
+        replacement.parentNode = document; document.documentElement = replacement;
+        deliver({ type: 'childList', target: document, addedNodes: [replacement], removedNodes: [oldHTML] });
+        return replacement;
+      },
+      chromeIn(parent: Node) { const node = new Node(1); node.parentNode = parent; return node; }
+    };
+  }
+
+  test('replacement and new answer mutations notify through the same Document and owner', () => {
+    const f = notificationFixture();
+    const replacement = f.replaceHTML();
+    expect(f.posted).toEqual([{ ownerToken: f.ownerToken, kind: 'dom_changed' }]);
+    const { answer, text } = f.textIn(replacement);
+    f.deliver({ type: 'childList', target: replacement, addedNodes: [answer], removedNodes: [] });
+    f.deliver({ type: 'characterData', target: text });
+    expect(f.posted).toEqual(Array.from({ length: 3 }, () => ({ ownerToken: f.ownerToken, kind: 'dom_changed' })));
+    const detached = f.textIn(f.oldHTML);
+    f.deliver({ type: 'characterData', target: detached.text });
+    expect(f.posted).toHaveLength(3);
+  });
+
+  test('the old HTML-only registration misses replacement and the newly populated answer subtree', () => {
+    const f = notificationFixture(true), old = f.textIn(f.oldHTML);
+    f.deliver({ type: 'characterData', target: old.text });
+    expect(f.posted).toHaveLength(1); // Proves the delivery harness and callback work before replacement.
+    const replacement = f.replaceHTML(), current = f.textIn(replacement);
+    f.deliver({ type: 'childList', target: replacement, addedNodes: [current.answer], removedNodes: [] });
+    f.deliver({ type: 'characterData', target: current.text });
+    expect(f.posted).toHaveLength(1);
+  });
+
+  test('replacement notifications preserve picker-noise filtering and reject a changed owner', () => {
+    const f = notificationFixture(), replacement = f.replaceHTML();
+    f.posted.length = 0;
+    const chrome = f.chromeIn(replacement);
+    f.world.__computaModelReadUI = { until: Date.now() + 300, provider: 'chatgpt', roots: [chrome], ids: [] };
+    f.deliver({ type: 'attributes', target: chrome, attributeName: 'class' });
+    expect(f.posted).toHaveLength(0);
+    const current = f.textIn(replacement);
+    f.deliver({ type: 'characterData', target: current.text });
+    expect(f.posted).toHaveLength(1);
+    f.world.__computaModelOwner = '00000000-0000-4000-8000-000000000001';
+    f.deliver({ type: 'characterData', target: current.text });
+    expect(f.posted).toHaveLength(1);
   });
 });

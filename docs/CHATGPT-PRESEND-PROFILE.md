@@ -283,3 +283,16 @@ Paths below are relative to the off-repo `instant-aftersend-20261019-v1` evidenc
 |`candidate176-run/fixture-extractor-execution1.json`|`6f366a245429c85b8701c324b91ea6b1185d3af1ed6c7e53d0195c70e5b83799`|
 |`candidate176-run/fixture2-terminal-native-log1.json`|`7b15f2a19e5cea284d3c74be87a83f1efa3c8dd440444c4be3cb960cde7ea1de`|
 |`candidate176-run/fixture2-failure-classification2.json`|`947d41d83b586b63455d623d74d276079244ce5895da41c18f7680d9dce86cae`|
+
+## Build-177 observation follow-up
+
+The response notifier now observes the stable Document rather than its replaceable HTML child. The previous registration could miss both HTML replacement and later text mutations in the new subtree. The callback, current-owner/origin/frame checks, picker-noise filtering and native coalescing are unchanged. A notification only requests a new guarded read; it grants no response or model authority. This is a demonstrated latent observation bug, not a proven explanation of the V81 timeout.
+
+The source passed 387 adapter tests and eleven focused native completion tests, including exact modern-only empty-answer and late-text cases. Empty text cannot publish, restart Send or extend the original deadline. Text that appears later must start its own quiet interval and pass the full proof. Both test runs retained unchanged source hashes.
+
+A corrected one-send focus diagnostic physically moved native keyboard focus to Task prompt, verified by native accessibility. The page still reported focus at Send and first text, with no blur event. Its first text appeared at 3.629 seconds; full payload/model checks and owned-tab closure passed. The page-focus manipulation remained unachieved, so the second planned control was not sent. Safari's developer setting was restored off. This result provides no causal focus comparison.
+
+Build-177 installation, fresh matched measurements and V82 workflow results are still required. The failed V81 workflow and generic extractor failure remain retained; the latter is not attributed to a particular guard. Future fixtures use literal GUI paste and record the actual submitted prompt. Their runtime boundary must precede draft creation as well as Send.
+
+- Build-177 adapter test log: `981ee26fd807257f5a07dbb1f307e33762a0109a8e47a8710b5338b231e27103`.
+- Build-177 native test log: `05d8e7626d56399c740e05c23c77d6ad063195882c12a2b366fc572fa8cc4a3f`.

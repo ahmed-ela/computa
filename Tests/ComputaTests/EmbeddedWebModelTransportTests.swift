@@ -10119,6 +10119,128 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(finish["cleanup"] as? String, "not_created")
     }
 
+    private func stageModernOnlyEmptyChatGPTAnswer(_ view: WKWebView) async throws {
+        let shape = try await evaluate(view, """
+            const user = document.querySelector('[data-message-author-role="user"]');
+            const userBody = user.querySelector('[data-markdown-text-style="user-message"]');
+            userBody.removeAttribute('data-markdown-text-style'); userBody.classList.add('whitespace-pre-wrap');
+            const answer = document.querySelector('[data-markdown-text-style="assistant-message"]');
+            const body = answer.firstElementChild;
+            body.removeAttribute('data-markdown-text-style'); body.textContent = '';
+            body.id = 'fixture-empty-modern-answer-body';
+            const copy = answer.parentElement.querySelector('button[aria-label="Copy"]');
+            return { modernUsers: document.querySelectorAll('[data-markdown-text-style="user-message"]').length,
+              legacyUsers: document.querySelectorAll('[data-message-author-role="user"]').length,
+              modernAssistants: document.querySelectorAll('[data-markdown-text-style="assistant-message"]').length,
+              legacyAssistants: document.querySelectorAll('[data-message-author-role="assistant"], article[data-turn="assistant"]').length,
+              rootChildren: answer.childElementCount, rootTextLength: answer.textContent.length,
+              bodyChildren: body.childElementCount, bodyTextLength: body.textContent.length,
+              enabledCopy: !!copy && !copy.disabled,
+              stop: !!document.querySelector('button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]') };
+            """) as? [String: Any]
+        XCTAssertEqual(shape?["modernUsers"] as? Int, 0)
+        XCTAssertEqual(shape?["legacyUsers"] as? Int, 1)
+        XCTAssertEqual(shape?["modernAssistants"] as? Int, 1)
+        XCTAssertEqual(shape?["legacyAssistants"] as? Int, 0)
+        XCTAssertEqual(shape?["rootChildren"] as? Int, 1)
+        XCTAssertEqual(shape?["rootTextLength"] as? Int, 0)
+        XCTAssertEqual(shape?["bodyChildren"] as? Int, 0)
+        XCTAssertEqual(shape?["bodyTextLength"] as? Int, 0)
+        XCTAssertEqual(shape?["enabledCopy"] as? Bool, true)
+        XCTAssertEqual(shape?["stop"] as? Bool, false)
+    }
+
+    func testChatGPTEmptyModernAnswerCannotPublishOrExtendTheResponseDeadline() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .seconds(3))
+        let began = ContinuousClock.now
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "An empty assistant with a footer cannot complete this response"])
+        try await stageModernOnlyEmptyChatGPTAnswer(view)
+        var diagnostics: [String] = []
+        fixture.transport.setResponseProgressDiagnosticObserverForTesting { diagnostics.append($0) }
+        var pendingReads = 0
+        var expired = false
+        let bound = began + .seconds(5)
+        while ContinuousClock.now < bound {
+            do {
+                let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(pending["state"] as? String, "running")
+                try assertRunningOrVerifiedChoice(pending, choice: choice)
+                XCTAssertNil(pending["completionEvidence"])
+                pendingReads += 1
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline)
+                expired = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(75))
+        }
+        XCTAssertGreaterThan(pendingReads, 1)
+        XCTAssertTrue(expired, "Repeated empty completed-footer reads must not renew the original response deadline")
+        XCTAssertLessThan(ContinuousClock.now - began, .milliseconds(4_500))
+        XCTAssertEqual(diagnostics.count, 1)
+        let diagnostic = try XCTUnwrap(diagnostics.first)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(diagnostic.utf8)) as? [String: Any])
+        XCTAssertEqual(record["cause"] as? String, "response_deadline")
+        let inspection = try XCTUnwrap(record["lastInspection"] as? [String: Any])
+        XCTAssertEqual(inspection["responseCount"] as? Int, 1)
+        XCTAssertEqual(inspection["userCount"] as? Int, 1)
+        XCTAssertEqual(inspection["answerComplete"] as? Bool, true)
+        XCTAssertEqual(inspection["busy"] as? Bool, false)
+        XCTAssertEqual(inspection["textBytes"] as? Int, 0)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTDelayedModernAnswerStartsItsOwnQuietIntervalAndFullProof() async throws {
+        let (fixture, token, view) = try await boundInspectionFixture(
+            prompt: "Wait for nonempty content in the same modern assistant", bindFirstRead: false)
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        try await stageModernOnlyEmptyChatGPTAnswer(view)
+        let empty = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(empty["state"] as? String, "running")
+        try assertRunningOrVerifiedChoice(empty, choice: choice)
+        let pickerClicksValue = try await evaluate(view, "return window.fixtureModelTriggerClicks;")
+        let pickerClicks = try XCTUnwrap(pickerClicksValue as? Int)
+        try await Task.sleep(for: .milliseconds(1_750))
+        let stillEmpty = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(stillEmpty["state"] as? String, "running")
+        try assertRunningOrVerifiedChoice(stillEmpty, choice: choice)
+        let emptyPickerClicks = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
+        XCTAssertEqual(emptyPickerClicks, pickerClicks, "Empty text must not trigger a full completion picker proof")
+        _ = try await evaluate(view, #"document.getElementById('fixture-empty-modern-answer-body').textContent = '{"type":"message","text":"Actual delayed answer"}'; return true;"#)
+        let nonemptyBegan = ContinuousClock.now
+        let candidate = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(candidate["state"] as? String, "running", "Time spent empty cannot satisfy the answer's quiet interval")
+        try assertRunningOrVerifiedChoice(candidate, choice: choice)
+        let candidatePickerClicks = try await evaluate(view, "return window.fixtureModelTriggerClicks;") as? Int
+        XCTAssertEqual(candidatePickerClicks, pickerClicks)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - nonemptyBegan, .milliseconds(1_500))
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Actual delayed answer"}"#)
+        try assertChoiceEvidence(complete, choice: choice)
+        XCTAssertNoThrow(try WebsiteProductModeEvidence.parse(complete["productModeEvidence"], requireTemporary: true))
+        let context = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(context["responseCount"] as? Int, 1)
+        let verifiedPickerClicksValue = try await evaluate(view, "return window.fixtureModelTriggerClicks;")
+        let verifiedPickerClicks = try XCTUnwrap(verifiedPickerClicksValue as? Int)
+        XCTAssertGreaterThan(verifiedPickerClicks, pickerClicks, "Only the later real answer may obtain fresh full model proof")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testLateCompletionFooterStartsItsOwnQuietInterval() async throws {
         let fixture = try Fixture()
         defer { fixture.shutdown() }

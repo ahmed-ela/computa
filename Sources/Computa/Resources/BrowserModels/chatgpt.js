@@ -4165,7 +4165,9 @@ if (input.action === 'failedPageDiagnostic') {
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
   const signal = { ownerToken: input.ownerToken, observer: null };
   signal.observer = new MutationObserver(records => chatGPTProcessSignalRecords(signal, records));
-  signal.observer.observe(document.documentElement || document, {
+  // The HTML element can be replaced without replacing this Document or owner.
+  // Observe its parent so replacement and the new subtree still wake a fresh read.
+  signal.observer.observe(document, {
     subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true,
     attributeFilter: ["disabled", "aria-disabled", "aria-hidden", "aria-busy", "aria-label", "class", "style",
       "aria-checked", "aria-pressed", "aria-selected", "aria-valuenow", "aria-valuemin", "aria-valuemax", "aria-controls", "aria-labelledby", "aria-expanded", "title", "hidden", "inert", "contenteditable", "data-testid", "data-is-streaming",
