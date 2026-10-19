@@ -49,6 +49,18 @@ the new outline path are rejected.
 
 ## Measurement boundaries
 
+The first build-170 matched request returned `HI` with confirmed owned-session
+closure, but still took 1.545 seconds from the UI click to actual website Send.
+It fell back to the separate readiness chain (113 ms). A second matched
+pre-Send geometry observation found one enabled editor with a 51,012-pixel
+height inside a 665-pixel viewport, with its center outside its clipping
+ancestor. The single enabled Send button remained exposed and hit-testable.
+The optional receipt had added an editor-center hit test that the existing
+readiness and submit paths did not require. Build 171 removes only that extra
+editor-center condition. It retains unique visible enabled controls, exposed
+Send, exact raw and canonical body equality, the complete verification chain,
+call-local receipt binding, fallback and independent submit checks.
+
 Compare the same full captured payload, model and turn through Computa and the
 normal built-in browser. Keep failed attempts, first samples and incomplete
 arms explicit. Distinguish native action spans, page performance clocks and
@@ -67,3 +79,10 @@ is 525 unique passing cases, one explicit skip and no unresolved failures.
 The original failed run is retained. An earlier compilation also stopped for
 disk exhaustion and establishes no test result; obsolete products were
 archived with verified file inventories and regenerable caches were cleared.
+
+The build-171 follow-up passed all ten focused native cases, including a real
+WebKit long-editor clipping regression, and all 377 adapter cases. The
+regression proves an actual positive readiness receipt, no separate readiness
+RPC, one insertion and one Send, verified completion and retained human tabs.
+Existing malformed-receipt, delayed-enable, raw-text, disabled-Send,
+cancellation and document-generation checks remain covered.

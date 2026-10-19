@@ -818,6 +818,75 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testFirstInstantPreparedEditorReadinessAcceptsExactLongEditorClippedByItsScroller() async throws {
+        let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)
+        defer {
+            fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            fixture.shutdown()
+        }
+        _ = try await evaluate(view, """
+            // The actual editable grows with its full body inside a short
+            // scroll container; its geometric center is not the visible caret.
+            document.getElementById('prompt-textarea').style.cssText =
+              'position:fixed;left:20px;top:120px;width:620px;height:80px;overflow:auto';
+            document.querySelector('[data-testid="send-button"]').style.cssText =
+              'position:fixed;left:20px;top:240px;z-index:10000';
+            return true;
+            """)
+        var actions: [String] = [], positiveHints = 0
+        var geometry: [String: Any]?
+        fixture.transport.setPreparedEditorReadinessTransformForTesting { raw in
+            XCTAssertEqual((raw as? [String: Any])?["ready"] as? Bool, true,
+                           "The real terminal product read must recognize the exact prepared editor")
+            if (raw as? [String: Any])?["ready"] as? Bool == true { positiveHints += 1 }
+            return raw
+        }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            actions.append(action)
+            guard action == "insert" else { return }
+            geometry = try? await self.evaluate(view, """
+                const editor = document.getElementById('fixture-editor');
+                const scroller = document.getElementById('prompt-textarea');
+                const send = document.querySelector('[data-testid="send-button"]');
+                const rect = editor.getBoundingClientRect(), clip = scroller.getBoundingClientRect();
+                const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+                const hit = document.elementFromPoint(x, y), button = send.getBoundingClientRect();
+                const sendX = button.left + button.width / 2, sendY = button.top + button.height / 2;
+                const sendHit = document.elementFromPoint(sendX, sendY);
+                return { editorTall: rect.height > window.innerHeight,
+                  editorCenterOutsideViewport: y >= window.innerHeight,
+                  editorCenterClipped: y >= clip.bottom,
+                  editorCenterHit: hit === editor || !!hit && editor.contains(hit),
+                  editorConnected: editor.isConnected, editorHasLayout: editor.getClientRects().length > 0,
+                  sendEnabled: !send.disabled && send.getAttribute('aria-disabled') !== 'true',
+                  sendCenterInViewport: sendX >= 0 && sendY >= 0 && sendX < window.innerWidth && sendY < window.innerHeight,
+                  sendCenterHit: sendHit === send || !!sendHit && send.contains(sendHit) };
+                """) as? [String: Any]
+        }
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": String(repeating: "Clipped editor exact ownership line.\n", count: 1_400)])
+        fixture.transport.setPreparedEditorReadinessTransformForTesting(nil)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
+        let observed = try XCTUnwrap(geometry)
+        for key in ["editorTall", "editorCenterOutsideViewport", "editorCenterClipped", "editorConnected",
+                    "editorHasLayout", "sendEnabled", "sendCenterInViewport", "sendCenterHit"] {
+            XCTAssertEqual(observed[key] as? Bool, true, key)
+        }
+        XCTAssertEqual(observed["editorCenterHit"] as? Bool, false)
+        XCTAssertEqual(positiveHints, 1)
+        let insert = try XCTUnwrap(actions.firstIndex(of: "insert"))
+        let submit = try XCTUnwrap(actions.firstIndex(of: "submit"))
+        XCTAssertEqual(Array(actions[insert..<submit]), ["insert", "verifyModel", "verifyProductMode"])
+        XCTAssertFalse(actions.contains("sendReady"), "A clipped editor center must not add another readiness RPC")
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 0)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testFirstInstantPreparedEditorReadinessOptionalFailuresKeepOriginalLoop() async throws {
         for fault in ["absent", "false", "numeric", "string", "extra", "marker", "fingerprint", "sequence"] {
             let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)

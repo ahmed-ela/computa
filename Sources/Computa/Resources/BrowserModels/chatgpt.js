@@ -4631,7 +4631,9 @@ function chatGPTPreparedEditorReadinessResult(observed) {
     const value = editor instanceof HTMLTextAreaElement ? editor.value : editor?.innerText;
     // Keep raw submit equality as well as the pending record's canonical identity.
     const actual = typeof value === 'string' && value.length <= 180_200 ? value.replace(/\r\n/g, '\n').trim() : null;
-    const ready = enabled(editor) && enabled(send) && chatGPTControlExposed(editor) && chatGPTControlExposed(send)
+    // The contenteditable can be much taller than its clipped scroll viewport.
+    // Its center need not be onscreen; Send must still be physically exposed.
+    const ready = enabled(editor) && enabled(send) && chatGPTControlExposed(send)
       && stops.length === 0 && actual !== null && actual === expected.trim()
       && chatGPTSubmissionCanonical(value) === pending.canonical;
     return { ...observed, firstInstantPreparedEditorReadiness: { sequence: pending.sequence,
