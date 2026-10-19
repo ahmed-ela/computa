@@ -155,3 +155,78 @@ callback capacity. The first compile rejected an unannotated local closure
 under Swift 6; adding its explicit main-actor/sendable type resolved it. The
 failed compile is retained separately from the successful run. Adapter and
 adapter-test bytes are still identical to the 377-case build-171 execution.
+
+## Installed build-174 result
+
+Signed Computa 0.7.0 (174), source
+`3a2422889d9956ffe998638c2ac7ea04445749cd`, passed the independent build,
+signature, installation and complete 55-file/51-resource checks. The engine
+and adapter resources remain unchanged; Gemini diagnostics are off. This is a
+local signed test installation, not a notarized release or published tag.
+
+All three native samples sent the full 51,657-byte payload and returned `HI`
+with confirmed owned-session closure. The first postlaunch sample is included.
+
+| Sample | UI click to page Send | UI click to native completion | Warm age |
+| --- | ---: | ---: | ---: |
+| C1 | 1.452 s | 9.357 s | 45.557 s |
+| C2 | 1.378 s | 11.677 s | 42.328 s |
+| C3 | 1.362 s | 8.117 s | 29.474 s |
+| Mean | 1.397 s | 9.717 s | |
+
+The pre-Send median is 1.378 seconds. Against the older build-168 estimate of
+1.459 seconds, the observed mean difference is 62 ms (4.2%). This small,
+nonconcurrent, blocked comparison does not establish a causal speedup.
+End-to-end time did not improve against that older 8.244-second mean.
+
+Fresh resume and claim-time cookie checks matched in all three requests. All
+adopted their prepared pages, with no opening recovery or separate SendReady
+action. Mean warm-hit to payload capture was 695 ms, including 44 ms to the
+first product callback and 652 ms afterward. Capture to insert-chain completion
+was 476 ms; the actual editor mutation took 14–16 ms. The native claim to page
+Send interval averaged 54 ms. These spans include browser scheduling, model and
+product verification, and other preparation; not every gap is independently
+attributed or proven necessary. They are not additive JavaScript CPU profiles.
+
+Three exact-payload direct controls completed and their owned tabs closed.
+Two pairs passed the unchanged strict response-format checks. D3 returned a
+43-byte inline fenced response and remains excluded; it was not replayed and
+the parser was not relaxed. In the two eligible pairs, page Send to first
+completion candidate averaged 6.907 seconds through Computa and 3.371 seconds
+directly. That after-Send gap remains unexplained by this pre-Send change;
+different response representations and fixed block/time effects remain. No
+three-pair qualification or pure app-overhead claim is made.
+
+Candidate to native completion averaged 2.247 seconds across the three native
+samples under the same host-clock assumption. The native-clock candidate to
+quiet-deadline span averaged 1.768 seconds, including the unchanged stability
+guard; final full inspection averaged 159 ms. Server-clock cleanup persistence
+averaged 100 ms. These clocks and nested spans must not be summed as separate
+nonoverlapping overhead buckets.
+
+One unsent direct-control model-proof read hit the operator's 30-second tool
+timeout. The same tab recovered with zero sends/users/assistants, then passed
+the complete checks and was sent once. Its setup artifact is retained. A first
+collection-preparation attempt incorrectly treated host click dispatch return
+as a page acknowledgement: the actual page Send followed it by 3–5 ms. A
+separately reviewed measurement-boundary correction retains the original
+markers/error, uses the actual after-model observation and closure as upper
+bounds, and adds no timing tolerance. All original payload/model/response/
+source/cleanup checks remain unchanged. UI/page/native clocks are distinct;
+cross-clock estimates use an explicitly uncalibrated same-host assumption.
+
+Two fresh V79 code/terminal/browser workflows passed all twelve checks each:
+20 successful tool calls, 22 saved-and-closed website inferences and zero
+failed inferences within the completed turns. Independent execution passed
+eight unit tests and both helper outputs. Only the allowed helper changed;
+tests, seeds, references and the unrelated note were preserved. The model
+closed both created browser tabs. The fixture server was stopped and reaped,
+its PID was absent and its port refused connections. Safari's temporary
+developer setting was restored off. Gemini and Claude live work remains halted.
+
+The retained content-free evidence hashes are:
+
+- Focused native test log: `1e107cc218be9f1eb2ce784481f346f1062e4ce775e1688811f687db946b05f0`.
+- Native pre-Send report: `4a2b466505ac25a709bd0340f28f843f58155cfc28e5b96d812fc35bc894f560`.
+- All-six-attempt matched report, including D3 exclusion: `3699c7031e50e9732665cf7702533eb26263f131a44b21b0da04a598089ecbfb`.
+- V79 workflow report: `550e3e51948c44b516e6d8eb8656f7d8bc06640ba7af7a4c1ecf0babcbfca6e0`.
