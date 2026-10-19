@@ -1971,6 +1971,35 @@ function chatGPTResponseSnapshotMatches(captured, observed) {
       return user.root === previous.root && user.body === previous.body && user.body?.isConnected && user.text === previous.text;
     });
 }
+// Native supplies only the candidate it already waited on. Check the current
+// exact body, completion footer and Stop state before opening any picker. This
+// cannot prove a model or complete a response: a match only permits the normal
+// fresh full proof; a mismatch uses this invocation's ordinary deferred read.
+function chatGPTQuietCompletionPrecheck(request) {
+  if (!Object.prototype.hasOwnProperty.call(request, 'quietCompletionCandidate')) return null;
+  const candidate = request.quietCompletionCandidate;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+    || Object.keys(candidate).sort().join(',') !== 'responseCount,text,userCount'
+    || typeof candidate.text !== 'string' || !candidate.text.length
+    || new TextEncoder().encode(candidate.text).length > 220_000
+    || !Number.isSafeInteger(candidate.responseCount) || candidate.responseCount < 1 || candidate.responseCount > 10_000
+    || !Number.isSafeInteger(candidate.userCount) || candidate.userCount < 1 || candidate.userCount > 16
+    || request.provider !== 'chatgpt' || request.action !== 'inspect' || request.deferModelVerification !== false
+    || request.expectedModelChoice == null || globalThis.__computaModelFirstSubmitted !== true
+    || !Array.isArray(request.expectedUserCounts) || request.expectedUserCounts.length !== 1
+    || request.expectedUserCounts[0] !== candidate.userCount || request.submissionSequence !== candidate.userCount
+    || typeof request.expectedFirstUserFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.expectedFirstUserFingerprint))
+    return { error: 'model_unverified' };
+  const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+  const current = chatGPTResponseReadSnapshot();
+  return !!record && state.pending == null && chatGPTSubmissionContext(state)
+    && record.phase === 'verified' && record.sequence === candidate.userCount && chatGPTSubmissionPins(record)
+    && chatGPTSubmissionBodyIntact(record, current.users.map(user => user.root))
+    && current.text === candidate.text && current.answers.length === candidate.responseCount
+    && current.users.length === candidate.userCount && current.busy === false
+    && !!current.answer && current.answer.isConnected && !!current.footer && current.footer.isConnected
+    && current.copies.some(copy => copy.enabled);
+}
 function chatGPTFinalizeResponseRead(observed) {
   if (observed.error || !chatGPTFinalResponseSnapshot) return observed;
   if (!websiteChatInvocationLease || globalThis.__computaChatActiveInvocation !== websiteChatInvocationLease
@@ -3574,7 +3603,7 @@ function chatGPTResourceTimingDiagnostic(phase) {
       || claim.userCount !== globalThis.__computaModelLastSubmissionCount
       || !Number.isInteger(claim.sequence) || claim.sequence !== claim.userCount + 1
       || claim.sequence < 1 || claim.sequence > 10_000) return null;
-    const result = { kind: 'chatgpt_resource_timing_v1', phase, sequence: claim.sequence,
+    const result = { kind: 'chatgpt_resource_timing_v2', phase, sequence: claim.sequence,
       available: false, sendMarkAvailable: false, scanTruncated: false, scannedCount: 0,
       conversationCount: 0, preparationCount: 0, observations: [], observationsTruncated: false,
       absenceInconclusive: true };
@@ -3608,10 +3637,21 @@ function chatGPTResourceTimingDiagnostic(phase) {
       if (!endpoint) continue;
       const responseStatusAvailable = typeof entry.responseStatus === 'number';
       if (responseStatusAvailable && (!Number.isInteger(entry.responseStatus) || entry.responseStatus < 0 || entry.responseStatus > 599)) continue;
+      // Public Resource Timing values may be absent or zero when unavailable.
+      // Keep unknown distinct from zero and never infer headers from duration.
+      const offset = value => typeof value === 'number' && Number.isFinite(value) && value > 0
+        && value >= entry.startTime && value <= entry.responseEnd && value - claim.mark <= 3_600_000
+        ? Math.floor(value - claim.mark) : null;
+      let requestStartOffsetMs = offset(entry.requestStart), responseStartOffsetMs = offset(entry.responseStart);
+      if (requestStartOffsetMs !== null && responseStartOffsetMs !== null && entry.requestStart > entry.responseStart) {
+        requestStartOffsetMs = null; responseStartOffsetMs = null;
+      }
+      const responseEndOffsetMs = offset(entry.responseEnd);
       if (endpoint === 'conversation') result.conversationCount++; else result.preparationCount++;
       result.observations.push({ endpoint,
         initiator: ['fetch', 'xmlhttprequest'].includes(entry.initiatorType) ? entry.initiatorType : 'other',
         startOffsetMs: Math.floor(entry.startTime - claim.mark), durationMs: Math.floor(entry.duration),
+        requestStartOffsetMs, responseStartOffsetMs, responseEndOffsetMs,
         transferBytes: entry.transferSize, encodedBodyBytes: entry.encodedBodySize, decodedBodyBytes: entry.decodedBodySize,
         responseStatusAvailable, responseStatus: responseStatusAvailable ? entry.responseStatus : null });
     }
@@ -3752,6 +3792,9 @@ function chatGPTFocusModelActivity(records, trigger, previousControls) {
 async function providerPageAction(input, readLineageFingerprint = null) {
   const entryStarted = chatGPTPreparationNow();
   websiteModelDiagnosticPhase('page_action');
+  const quietCandidate = chatGPTQuietCompletionPrecheck(input);
+  if (quietCandidate?.error) return quietCandidate;
+  if (quietCandidate === false) input.deferModelVerification = true;
   const modelState = websiteModelPickerState('chatgpt');
   if (['discoverModels', 'selectModel', 'modelDiagnostic'].includes(input.action)) {
     const result = await websiteModelPickerAction(modelState, input, ownedUserCount === 0

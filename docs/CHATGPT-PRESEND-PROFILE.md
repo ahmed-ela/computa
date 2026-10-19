@@ -230,3 +230,47 @@ The retained content-free evidence hashes are:
 - Native pre-Send report: `4a2b466505ac25a709bd0340f28f843f58155cfc28e5b96d812fc35bc894f560`.
 - All-six-attempt matched report, including D3 exclusion: `3699c7031e50e9732665cf7702533eb26263f131a44b21b0da04a598089ecbfb`.
 - V79 workflow report: `550e3e51948c44b516e6d8eb8656f7d8bc06640ba7af7a4c1ecf0babcbfca6e0`.
+
+## After-Send follow-up
+
+The eligible build-174 pairs place 3.229 seconds of their 3.536-second page
+candidate gap before first DOM response text. Native detection adds only
+approximately 52–196 ms after the page candidate; it cannot explain that
+earlier gap. Separate resource diagnostics place C1/C3 DOM text approximately
+1.186/1.702 seconds after an ended conversation resource. These are untrusted
+page observations with adjacent but different Send marks, not proof of stream
+decoding, first-byte or rendering causality. C2 has no retained conversation
+entry and remains inconclusive.
+
+One mismatch in the earlier comparison is being tested explicitly: native
+ownership verification expands the clipped 51 KB user body during generation,
+while direct controls expanded it after completion. The experiment keeps the
+same full captured payload, model and passive observer in both conditions,
+with prespecified late/early/early/late order. It records finite page clocks,
+visibility and resource timings. It grants no native ownership authority.
+
+The production follow-up removes a separate deferred inspection immediately
+before the already-required full completion inspection. A strictly bounded,
+call-local candidate body/count precheck keeps the picker closed when text,
+busy state or footer changes. Only the same candidate with a new full positive
+model/product/body/ownership proof can complete. Changed candidates return to
+the existing pending path and rearm the unchanged 1.6-second quiet interval.
+No positive proof survives into a later poll, and deadlines remain unchanged.
+
+The completed build-174 direct-profile crossover observed first text at
+3.603/3.522/3.443/4.369 seconds (late/early/early/late). Both early runs expanded
+once before first text, without scrolling; both late runs expanded once through
+the normal UI after the candidate. Full payload, normal Chat/Instant/temporary
+mode and owned-tab cleanup were verified in every run. This small experiment
+does not reproduce a multi-second penalty from early expansion; it is not a
+provider qualification or proof of rendering causality. One diagnostic install
+syntax error and one first-load readiness observation were retained before any
+Send and repaired in their same unsent tabs; no provider request was replayed.
+
+The build-175 source passed 77 focused behavior tests, three resource-timing
+tests and 382 adapter tests. The final source review found no material blockers.
+Its passive Resource Timing v2 records nullable request/header/end offsets from
+the existing owned Send mark, preserving the v1 parser, finite allowlist, four
+rows, 256-entry scan and 2 KiB limit. It neither intercepts fetch nor records URLs,
+request bodies or cookies. Missing entries remain inconclusive. Installed
+build-175 measurements and fresh tool workflows are still required.

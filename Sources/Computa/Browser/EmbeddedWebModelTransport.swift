@@ -461,6 +461,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var preparationTimeout: Duration = .seconds(45)
     private var responseTimeout: Duration = .seconds(300)
     private var inspectionTimeout: Duration = .seconds(30)
+    private static let completionQuietInterval: Duration = .milliseconds(1_600)
     private var initialCheckpointSettlementTimeout: Duration = .seconds(3)
     private static let inspectionLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
     private struct InspectionSignature: Equatable {
@@ -1107,7 +1108,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if session.state == "loading" { wake = min(wake, session.created + preparationTimeout) }
         else if session.state == "running" { wake = min(wake, session.turnStarted + responseTimeout) }
         if session.state == "running", session.completionCandidate, let since = session.candidateSince {
-            wake = min(wake, max(since, session.lastChanged) + .milliseconds(1_600))
+            wake = min(wake, max(since, session.lastChanged) + Self.completionQuietInterval)
         }
         if let retry = session.initialReadRetry { wake = min(wake, retry) }
         if let settlement = session.initialCheckpointSettlement, !settlement.finished {
@@ -1367,13 +1368,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                  "observationsTruncated", "absenceInconclusive"]
         guard ["send", "completion", "failure"].contains(phase), (1...10_000).contains(sequence),
               let value = raw as? [String: Any], Set(value.keys) == keys,
-              value["kind"] as? String == "chatgpt_resource_timing_v1", value["phase"] as? String == phase,
+              let kind = value["kind"] as? String,
+              ["chatgpt_resource_timing_v1", "chatgpt_resource_timing_v2"].contains(kind), value["phase"] as? String == phase,
               ComputerToolArgumentContract.exactInt64(value["sequence"]) == Int64(sequence) else { return nil }
         func integer(_ raw: Any?, maximum: Int64) -> Int? {
             guard let number = ComputerToolArgumentContract.exactInt64(raw), (0...maximum).contains(number) else { return nil }
             return Int(number)
         }
-        var safe: [String: Any] = ["kind": "chatgpt_resource_timing_v1", "phase": phase, "sequence": sequence]
+        var safe: [String: Any] = ["kind": kind, "phase": phase, "sequence": sequence]
         for key in ["available", "sendMarkAvailable", "scanTruncated", "observationsTruncated", "absenceInconclusive"] {
             guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }; safe[key] = flag
         }
@@ -1387,8 +1389,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if safe["available"] as? Bool != true || safe["sendMarkAvailable"] as? Bool != true {
             guard scanned == 0, conversation == 0, preparation == 0, safe["scanTruncated"] as? Bool == false else { return nil }
         }
-        let sampleKeys: Set<String> = ["endpoint", "initiator", "startOffsetMs", "durationMs", "transferBytes",
-                                       "encodedBodyBytes", "decodedBodyBytes", "responseStatusAvailable", "responseStatus"]
+        let timingKeys = ["requestStartOffsetMs", "responseStartOffsetMs", "responseEndOffsetMs"]
+        var sampleKeys: Set<String> = ["endpoint", "initiator", "startOffsetMs", "durationMs", "transferBytes",
+                                      "encodedBodyBytes", "decodedBodyBytes", "responseStatusAvailable", "responseStatus"]
+        if kind == "chatgpt_resource_timing_v2" { sampleKeys.formUnion(timingKeys) }
         var samples: [[String: Any]] = []
         for sample in observations {
             guard Set(sample.keys) == sampleKeys, let endpoint = sample["endpoint"] as? String,
@@ -1399,6 +1403,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             for key in ["startOffsetMs", "durationMs", "transferBytes", "encodedBodyBytes", "decodedBodyBytes"] {
                 guard let number = integer(sample[key], maximum: key.hasSuffix("Ms") ? 3_600_000 : 2_147_483_647) else { return nil }
                 projected[key] = number
+            }
+            if kind == "chatgpt_resource_timing_v2" {
+                var previous = projected["startOffsetMs"] as? Int ?? 0
+                for key in timingKeys {
+                    if sample[key] is NSNull { projected[key] = NSNull(); continue }
+                    guard let number = integer(sample[key], maximum: 3_600_000), number >= previous else { return nil }
+                    projected[key] = number; previous = number
+                }
             }
             if statusAvailable {
                 guard let status = integer(sample["responseStatus"], maximum: 599) else { return nil }; projected["responseStatus"] = status
@@ -1565,6 +1577,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return true
     }
 
+    /// An already stable candidate still needs one fresh, complete answer/model
+    /// proof. Use it as this poll's observation instead of first queueing a
+    /// deferred observation and then immediately inspecting the same answer.
+    /// A changed answer, missing footer or resumed generation rearms the usual
+    /// quiet interval below; a positive proof is never retained for a later poll.
+    private func canInspectQuietChatGPTCompletion(_ session: Session) -> Bool {
+        guard session.provider == .chatgpt, session.state == "running", session.submitted,
+              session.completionCandidate, let since = session.candidateSince,
+              ContinuousClock.now - max(since, session.lastChanged) >= Self.completionQuietInterval,
+              session.modelVerificationPending, session.modelSelectionVerified, session.modelChoice != nil,
+              session.temporary, session.temporaryRequested, session.firstUserFingerprint != nil,
+              !session.pendingSubmission, session.currentSubmissionVerified,
+              session.currentSubmission?.sequence == session.sequence, session.confirmedUsers == session.sequence,
+              !session.response.isEmpty, session.observedResponseCount > session.baseline else { return false }
+        return true
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
@@ -1584,10 +1613,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         let observed: [String: Any]
         let readTimeoutCount = session.readTimeoutCount
+        let inspectsQuietCompletion = canInspectQuietChatGPTCompletion(session)
+        let quietCandidateResponse = inspectsQuietCompletion ? session.response : nil
+        let quietCandidateResponseCount = inspectsQuietCompletion ? session.observedResponseCount : nil
         // WebKit may queue an inspection while the provider renders its reply.
         // The adapter's own waits remain bounded; allow queue time without
         // extending the inference's preparation or response deadline.
-        do { observed = try await page(session, action: "inspect", maximumWait: min(inspectionTimeout, deadline - .now)) }
+        do {
+            if inspectsQuietCompletion {
+                session.responseProfile?.mark(.quietDeadlineReady)
+                session.responseProfile?.mark(.finalFullInspectStart)
+                defer { session.responseProfile?.mark(.finalFullInspectEnd) }
+                observed = try await page(session, action: "inspect",
+                    recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                    preferQuietChatGPTCompletion: true,
+                    maximumWait: min(inspectionTimeout, deadline - .now))
+            } else {
+                observed = try await page(session, action: "inspect", maximumWait: min(inspectionTimeout, deadline - .now))
+            }
+        }
         catch {
             if let failure = error as? Failure, failure.diagnosticCode != nil { throw failure }
             if !Task.isCancelled, ContinuousClock.now >= deadline { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
@@ -1750,8 +1794,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.profiledFirstPositive = true
                     session.responseProfile?.mark(.firstPositive)
                 }
-                let responseChanged = session.modelVerificationPending
-                    ? !session.response.utf8.elementsEqual(response.utf8) : session.response != response
+                let responseChanged = (session.modelVerificationPending
+                    ? !session.response.utf8.elementsEqual(response.utf8) : session.response != response)
+                    || quietCandidateResponseCount.map { count(observed, "responseCount") != $0 } == true
                 if responseChanged {
                     if session.profiledFirstCompletionCandidate { session.profileCompletionTransition(.candidateResponseChanged) }
                     session.response = response; session.lastChanged = .now; session.candidateSince = nil
@@ -1776,8 +1821,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     session.completionCandidate = true
                     if let since = session.candidateSince,
-                       ContinuousClock.now - max(since, session.lastChanged) >= .milliseconds(1_600) {
-                        session.responseProfile?.mark(.quietDeadlineReady)
+                       ContinuousClock.now - max(since, session.lastChanged) >= Self.completionQuietInterval {
+                        if !inspectsQuietCompletion { session.responseProfile?.mark(.quietDeadlineReady) }
                         var completionObservation = observed
                         var currentAnswerVerified = true
                         if session.modelVerificationPending {
@@ -1785,9 +1830,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             // owned completed-answer candidate. The adapter
                             // rechecks the exact answer after its last await;
                             // native generation/route/lineage checks still run.
-                            session.responseProfile?.mark(.finalFullInspectStart)
                             let final: [String: Any]
-                            do {
+                            if inspectsQuietCompletion {
+                                final = observed
+                            } else {
+                                session.responseProfile?.mark(.finalFullInspectStart)
                                 defer { session.responseProfile?.mark(.finalFullInspectEnd) }
                                 final = try await page(session, action: "inspect",
                                     recheckModelAfterAwait: false, recheckProductAfterAwait: false,
@@ -1795,6 +1842,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                     maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
                             }
                             currentAnswerVerified = final["modelVerificationPending"] == nil
+                                && (!inspectsQuietCompletion || quietCandidateResponse.map { $0.utf8.elementsEqual(response.utf8) } == true
+                                    && quietCandidateResponseCount == count(final, "responseCount"))
                                 && final["temporary"] as? Bool == true
                                 && final["interrupted"] as? Bool != true
                                 && final["responseLoadFailed"] as? Bool != true
@@ -3250,6 +3299,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       refreshReadOnlyObservation: Bool = true,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
+                      preferQuietChatGPTCompletion: Bool = false,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
                       prepareFirstInstantInInsert: Bool = false,
                       preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
@@ -3364,10 +3414,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         // Only a claimed current Send may defer positive model proof. The
         // adapter still performs submit's full precheck before the actual click.
-        let deferModelVerification = allowPendingChatGPTModelVerification && !allowBlockedProvider && provider == .chatgpt
+        let deferModelVerification = allowPendingChatGPTModelVerification && !preferQuietChatGPTCompletion
+            && !allowBlockedProvider && provider == .chatgpt
             && session.state == "running" && session.submitted && session.modelVerificationPending
             && ["inspect", "submit", "verifyModel", "verifyProductMode"].contains(action)
         if provider == .chatgpt { input["deferModelVerification"] = deferModelVerification }
+        if preferQuietChatGPTCompletion {
+            guard action == "inspect", !allowBlockedProvider, allowPendingChatGPTModelVerification,
+                  !recheckModelAfterAwait, !recheckProductAfterAwait,
+                  canInspectQuietChatGPTCompletion(session) else { throw Failure.invalidRequest }
+            // This is only an invocation-local negative precondition for opening
+            // the picker. A mismatch returns the ordinary pending observation;
+            // no candidate metadata grants completion or positive model proof.
+            input["quietCompletionCandidate"] = ["text": session.response,
+                "responseCount": session.observedResponseCount, "userCount": session.sequence]
+        }
         if action == "sendReady", canConsolidateFirstInstantReadinessProof(session) {
             // This removes only the read-only action's duplicate model precheck.
             // Its full final proof, native model/product callbacks, original
@@ -3572,6 +3633,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
                                       allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                      preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
                                       firstUserExpansionRouteContinuation: nextContinuation,
                                       maximumWait: evaluationDeadline - .now)
             }
@@ -3647,6 +3709,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                      preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
                                       maximumWait: evaluationDeadline - .now)
             case "submission_observation_replaced":
                 let bindings = [session.currentSubmission, session.previousSubmission].compactMap { $0 }
@@ -3665,6 +3728,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                      preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
                                       maximumWait: evaluationDeadline - .now)
             case "first_user_observation_replaced":
                 // Provider frameworks can replace an unchanged message while
@@ -3682,6 +3746,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                       refreshChangedRoute: false, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: false, allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                      preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
                                       maximumWait: evaluationDeadline - .now)
             case "document_changed", "conversation_changed":
                 if session.usesSubmissionOwnership, observed["detail"] as? String == "submission_message" {

@@ -630,6 +630,83 @@ describe('ChatGPT named paired-turn Copy association', () => {
   });
 });
 
+describe('ChatGPT quiet completion precheck', () => {
+  const choice = { key: 'chat/latest/medium', label: 'Medium' };
+  const stage = async () => {
+    const x = await chatTurnFixture(choice);
+    const record = await x.dispatch('Exact quiet candidate request', { deferModelVerification: true });
+    const answer = x.answer('Exact quiet answer');
+    const observed = await x.observe(record, { deferModelVerification: true });
+    expect(observed.error).toBeUndefined(); expect(observed.answerComplete).toBe(true);
+    expect(observed.submissionProof).toEqual({ sequence: 1, fingerprint: record.fingerprint });
+    const candidate = { text: observed.text, responseCount: observed.responseCount, userCount: observed.userCount };
+    return { x, record, answer, candidate, picker: x.picker! };
+  };
+
+  test('exact current candidates run a fresh full proof for first and retained submissions', async () => {
+    const p = await stage();
+    for (let sequence = 1; sequence <= 2; sequence++) {
+      const record = sequence === 1 ? p.record
+        : await p.x.dispatch('Exact retained quiet candidate', { deferModelVerification: true });
+      if (sequence === 2) p.x.answer('Retained quiet answer');
+      const pending = await p.x.observe(record, { deferModelVerification: true });
+      const before = p.picker.trigger.clicks;
+      const full = await p.x.observe(record, { deferModelVerification: false,
+        quietCompletionCandidate: { text: pending.text, responseCount: pending.responseCount, userCount: pending.userCount } });
+      expect(full.error).toBeUndefined(); expect(full).not.toHaveProperty('modelVerificationPending');
+      expect(full.modelEvidence.selected).toEqual(choice); expect(full.text).toBe(pending.text);
+      expect(full.submissionProof).toEqual({ sequence, fingerprint: record.fingerprint });
+      expect(p.picker.trigger.clicks).toBeGreaterThan(before); expect(p.x.send.clicks).toBe(sequence);
+    }
+  });
+
+  test('changed body, busy state, missing footer and changed counts defer without opening the picker', async () => {
+    for (const mutation of ['text', 'busy', 'disabled_copy', 'hidden_copy', 'missing_footer', 'extra_answer']) {
+      const p = await stage(), before = p.picker.trigger.clicks;
+      if (mutation === 'text') p.answer.children[0].text = JSON.stringify({ type: 'message', text: 'Changed quiet answer' });
+      if (mutation === 'busy') p.x.f.body.append(new Element('BUTTON', { 'data-testid': 'stop-button' }));
+      if (mutation === 'disabled_copy') p.answer.children[1].disabled = true;
+      if (mutation === 'hidden_copy') p.answer.children[1].values.hidden = '';
+      if (mutation === 'missing_footer') {
+        p.answer.children[1].connected = false; p.answer.children = p.answer.children.slice(0, 1);
+      }
+      if (mutation === 'extra_answer') p.x.answer('Unrelated extra answer');
+      const deferred = await p.x.observe(p.record, { deferModelVerification: false, quietCompletionCandidate: p.candidate });
+      expect(deferred.error, mutation).toBeUndefined(); expect(deferred.modelVerificationPending, mutation).toBe(true);
+      expect(deferred, mutation).not.toHaveProperty('modelEvidence');
+      expect(deferred.submissionProof, mutation).toEqual({ sequence: 1, fingerprint: p.record.fingerprint });
+      expect(p.picker.trigger.clicks, mutation).toBe(before); expect(p.x.send.clicks, mutation).toBe(1);
+    }
+  });
+
+  test('candidate metadata has exact shape, finite integer counts and UTF8 bounds', async () => {
+    const p = await stage(), before = p.picker.trigger.clicks;
+    const invalid = [null, [], {}, { ...p.candidate, extra: true },
+      { ...p.candidate, text: '' }, { ...p.candidate, text: 1 }, { ...p.candidate, text: 'é'.repeat(110_001) },
+      ...[true, '1', 0, -1, 1.5, 10_001].map(value => ({ ...p.candidate, responseCount: value })),
+      ...[true, '1', 0, -1, 1.5, 17, 2].map(value => ({ ...p.candidate, userCount: value }))];
+    for (const candidate of invalid) {
+      const rejected = await p.x.observe(p.record, { deferModelVerification: false, quietCompletionCandidate: candidate });
+      expect(rejected.error).toBe('model_unverified'); expect(rejected).not.toHaveProperty('modelEvidence');
+      expect(rejected).not.toHaveProperty('firstUserVerified');
+    }
+    expect(p.picker.trigger.clicks).toBe(before); expect(p.x.send.clicks).toBe(1);
+  });
+
+  test('candidate metadata cannot replace current model or ownership proof', async () => {
+    for (const mutation of ['model', 'owner', 'submission']) {
+      const p = await stage(), before = p.picker.trigger.clicks;
+      if (mutation === 'model') p.picker.selected('High');
+      if (mutation === 'owner') p.x.f.world.__computaModelOwner = 'foreign-owner';
+      if (mutation === 'submission') (p.x.f.world.__computaChatSubmissionState as any).lastVerified.fingerprint = 'a'.repeat(64);
+      const rejected = await p.x.observe(p.record, { deferModelVerification: false, quietCompletionCandidate: p.candidate });
+      expect(rejected.error, mutation).toBeDefined(); expect(rejected, mutation).not.toHaveProperty('modelEvidence');
+      expect(rejected, mutation).not.toHaveProperty('firstUserVerified');
+      expect(p.picker.trigger.clicks, mutation).toBe(before); expect(p.x.send.clicks, mutation).toBe(1);
+    }
+  });
+});
+
 describe('ChatGPT bounded in-flight model proof deferral', () => {
   const choice = { key: 'chat/latest/medium', label: 'Medium' };
 
@@ -1764,9 +1841,10 @@ describe('ChatGPT resource timing finite diagnostic', () => {
     const complete = await f.inspect({ expectedUserCounts: [1] });
     expect(complete.firstUserVerified).toBe(true); expect(complete.answerComplete).toBe(true);
     const diagnostic = complete.resourceTimingDiagnostic;
-    expect(diagnostic).toMatchObject({ phase: 'completion', sequence: 1, conversationCount: 2, preparationCount: 1,
+    expect(diagnostic).toMatchObject({ kind: 'chatgpt_resource_timing_v2', phase: 'completion', sequence: 1, conversationCount: 2, preparationCount: 1,
       scannedCount: 3, scanTruncated: false, observationsTruncated: false, absenceInconclusive: true });
     expect(diagnostic.observations[0]).toEqual({ endpoint: 'conversation', initiator: 'fetch', startOffsetMs: 1, durationMs: 50,
+      requestStartOffsetMs: null, responseStartOffsetMs: null, responseEndOffsetMs: 51,
       transferBytes: 130, encodedBodyBytes: 100, decodedBodyBytes: 150, responseStatusAvailable: true, responseStatus: 200 });
     expect(diagnostic.observations[1].responseStatusAvailable).toBe(false); expect(diagnostic.observations[1].responseStatus).toBeNull();
     expect(diagnostic.observations[2].responseStatus).toBe(0); expect(diagnostic.absenceInconclusive).toBe(true);
@@ -1777,6 +1855,33 @@ describe('ChatGPT resource timing finite diagnostic', () => {
     expect(send.clicks).toBe(before.clicks); expect(f.observers.length).toBe(before.observers); expect(f.scheduledDelays.length).toBe(before.timers);
     expect(reads).toBe(before.reads + 1); expect(f.world.__computaChatResourceTimingClaim).toBe(claim);
     for (const secret of ['PRIVATE', firstMarker, 'https:', 'backend-api', 'name', 'upload']) expect(JSON.stringify(failed.resourceTimingDiagnostic)).not.toContain(secret);
+  });
+  test('public request and response timing offsets are finite ordered or explicitly unknown', async () => {
+    let now = 100.25, entries: any[] = [];
+    const { f, send } = await sent({ now: () => now, getEntriesByType: () => entries }); now = 200;
+    const read = async (changes: Record<string, unknown>) => {
+      entries = [ended(undefined, { requestStart: 110.5, responseStart: 130.1, ...changes })];
+      const result = await f.diagnose();
+      expect(result).not.toHaveProperty('submissionProof'); expect(result).not.toHaveProperty('firstUserVerified');
+      expect(result.resourceTimingDiagnostic.kind).toBe('chatgpt_resource_timing_v2');
+      return result.resourceTimingDiagnostic.observations[0];
+    };
+    expect(await read({ headers: 'PRIVATE_HEADERS', cookies: 'PRIVATE_COOKIES' })).toEqual({
+      endpoint: 'conversation', initiator: 'fetch', startOffsetMs: 1, durationMs: 50,
+      requestStartOffsetMs: 10, responseStartOffsetMs: 29, responseEndOffsetMs: 51,
+      transferBytes: 130, encodedBodyBytes: 100, decodedBodyBytes: 150, responseStatusAvailable: false, responseStatus: null });
+    for (const bad of [undefined, null, 0, -1, NaN, Infinity, true, '110', 101, 152, 3_600_101]) {
+      expect((await read({ requestStart: bad })).requestStartOffsetMs).toBeNull();
+      expect((await read({ responseStart: bad })).responseStartOffsetMs).toBeNull();
+    }
+    // Compare the original fractions before flooring, which can hide reversal.
+    expect(await read({ requestStart: 130.9, responseStart: 130.8 })).toMatchObject({
+      requestStartOffsetMs: null, responseStartOffsetMs: null, responseEndOffsetMs: 51 });
+    expect(await read({ requestStart: undefined, responseStart: 130.1 })).toMatchObject({
+      requestStartOffsetMs: null, responseStartOffsetMs: 29, responseEndOffsetMs: 51 });
+    const diagnostic = (await f.diagnose()).resourceTimingDiagnostic;
+    for (const secret of ['PRIVATE', 'headers', 'cookies', 'https:']) expect(JSON.stringify(diagnostic)).not.toContain(secret);
+    expect(send.clicks).toBe(1);
   });
   test('unavailable zero incomplete future and fractional premark entries remain inconclusive without a retry', async () => {
     for (const unavailable of [undefined, { now: () => 100.25 }, { getEntriesByType: () => [] }]) {
