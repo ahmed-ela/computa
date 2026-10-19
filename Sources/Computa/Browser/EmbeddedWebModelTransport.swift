@@ -921,11 +921,6 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard sent["submitted"] as? Bool == true else { throw Failure.editorFailure("submission_unconfirmed") }
                 session.acknowledgedSendSequence = submittedSequence
                 logModelNativeLifecycle(session, phase: .submitted)
-                // Prepare the next untouched page during website generation,
-                // never while the current request is still preparing to Send.
-                if session.provider == .chatgpt, chatGPTPrewarmingEnabled {
-                    browser.prepareChatGPTInferencePrewarmIfNeeded()
-                }
                 return try snapshot(session)
             default:
                 return try await poll(session)
@@ -1834,6 +1829,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.profiledFirstPositive = true
                     session.responseProfile?.mark(.firstPositive)
                     logModelNativeLifecycle(session, phase: .firstPositive)
+                    // Refill only after the current owned page has produced
+                    // text; standby bootstrap can overlap the remaining turn.
+                    if session.provider == .chatgpt, chatGPTPrewarmingEnabled {
+                        browser.prepareChatGPTInferencePrewarmIfNeeded()
+                    }
                 }
                 let responseChanged = (session.modelVerificationPending
                     ? !session.response.utf8.elementsEqual(response.utf8) : session.response != response)

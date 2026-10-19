@@ -416,3 +416,12 @@ Existing build-180 logs also show the next cold standby page beginning about 48m
 - Installed verifier: `89dd9ad6ec16d7ebbf10fc036588e8b238ebcb8365043779eea363dca7ac312c`.
 - One-pair report: `5ed0b6917ab0f01363b4e2c36d90554b1b0e75bafbd0dfa3d9857d0b1def8ec0`.
 - Bounded auxiliary reconstruction: `1328626f972eb081f75a291f8c4622ca5dc94303dc4e6377213e4ca99cb4e146`.
+
+## Build-182 standby scheduling experiment
+
+The next candidate moves the existing standby-refill call from acknowledged Send to the existing once-per-Send first-positive branch, after fresh owned-page/count/Temporary/nonempty checks. Blank-root adoption before the current Send remains unchanged. The standby keeps all provider/cancellation/cookie/isolation/capacity guards and remains unowned and prompt-free. This removes that automatic preload from the initial generation interval; explicit concurrent user demand can still create a standby through its existing path. It does not guarantee no overlap with later streaming, stability or final proof.
+
+The frozen candidate passed **60 focused native tests** covering cookie admission, prewarm ownership and lifecycle, AppState demand, response stability and final proof. The new real-WebKit regression holds the acknowledged answer empty, verifies no standby, releases valid text while still busy, verifies one untouched separate private standby and no duplicates, then completes the original full proof and cleanup. Its initial human-only cleanup expectation failed because the desired standby remained; the corrected test first verifies that exact standby survives Finish, explicitly disables prewarming and then checks human-only cleanup. The initial failure is retained. The unchanged adapter and adapter-test bytes retain build 181's separate 406-case result. Signed installation, three new matched pairs and fresh V85 workflows are pending; no latency benefit is established yet.
+
+- Final native test freeze: `0d094e09937f97477a5940880a24497e283e73f4cfea7f7146b557a98544cdae`.
+- Native test log: `fe3c83ec313623dd7f90466bc54a1a70bd2324932d62ebbef26ff6e8f31b8b58`.

@@ -6682,6 +6682,79 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testChatGPTStandbyRefillWaitsForFirstOwnedNonemptyResponse() async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), isolatedInference: true)
+        defer { fixture.shutdown() }
+        fixture.transport.setChatGPTPrewarmingEnabled(true)
+        let preparedID = await fixture.browser.awaitChatGPTInferencePrewarmForTesting()
+        let ownedID = try XCTUnwrap(preparedID)
+        let ownedView = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await waitForFixture(ownedView)
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        XCTAssertEqual(fixture.isolatedViews.count, 1, "Start still consumes the existing blank root")
+        _ = try await evaluate(ownedView, """
+            document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+              const body = document.querySelector('#messages section [data-markdown-text-style="assistant-message"] [data-markdown-text-style="assistant-message"]');
+              const reply = body.textContent;
+              body.textContent = '';
+              const stop = document.createElement('button'); stop.id = 'fixture-refill-stop';
+              stop.setAttribute('data-testid', 'stop-button'); stop.textContent = 'Stop generating';
+              document.body.appendChild(stop);
+              window.fixtureReleaseStandbyReply = () => { body.textContent = reply; return true; };
+            }, {once:true}); return true;
+            """)
+        let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": "Keep the next blank page out of this owned answer's initial generation"])
+        try assertRunningOrVerifiedChoice(sent, choice: choice)
+        for _ in 0..<2 {
+            let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["state"] as? String, "running")
+        }
+        let beforeText = await fixture.browser.awaitChatGPTInferencePrewarmForTesting()
+        XCTAssertNil(beforeText, "Acknowledged Send and empty-answer reads cannot refill the standby")
+        XCTAssertEqual(fixture.isolatedViews.count, 1)
+        try await assertChoiceLedger(ownedView, insertions: 1, sends: 1, selections: 1)
+
+        _ = try await evaluate(ownedView, "return window.fixtureReleaseStandbyReply();")
+        let firstPositive = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(firstPositive["state"] as? String, "running", "The busy answer still needs ordinary completion proof")
+        let refillID = await fixture.browser.awaitChatGPTInferencePrewarmForTesting()
+        let standbyID = try XCTUnwrap(refillID)
+        XCTAssertNotEqual(standbyID, ownedID)
+        let standby = try XCTUnwrap(fixture.browser.webView(for: standbyID))
+        try await waitForFixture(standby)
+        XCTAssertEqual(fixture.isolatedViews.count, 2, "The first owned nonempty answer starts one standby")
+        XCTAssertFalse(standby.configuration.websiteDataStore.isPersistent)
+        XCTAssertFalse(standby.configuration.websiteDataStore === ownedView.configuration.websiteDataStore)
+        XCTAssertFalse(standby.configuration.websiteDataStore === fixture.humanView.configuration.websiteDataStore)
+        let unowned = try await evaluate(standby, "return typeof globalThis.__computaModelOwner === 'undefined';",
+            world: .world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(unowned as? Bool, true, "Refill creates no transport owner or inference")
+        try await assertChoiceLedger(standby, insertions: 0, sends: 0, selections: 0)
+        for _ in 0..<3 {
+            let running = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(running["state"] as? String, "running")
+        }
+        let retainedStandby = await fixture.browser.awaitChatGPTInferencePrewarmForTesting()
+        XCTAssertEqual(retainedStandby, standbyID)
+        XCTAssertEqual(fixture.isolatedViews.count, 2, "Repeated positive reads cannot create another standby")
+        try await assertChoiceLedger(standby, insertions: 0, sends: 0, selections: 0)
+
+        _ = try await evaluate(ownedView, "document.getElementById('fixture-refill-stop').remove(); return true;")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        try await assertChoiceLedger(ownedView, insertions: 1, sends: 1, selections: 1)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertTrue(fixture.browser.webView(for: standbyID) === standby,
+                      "Finishing the owned turn preserves the untouched standby")
+        fixture.transport.setChatGPTPrewarmingEnabled(false)
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testChatGPTPrewarmedRootIsConsumedOnceAndStillRequiresFullTransportProof() async throws {
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), isolatedInference: true)
         defer { fixture.shutdown() }
