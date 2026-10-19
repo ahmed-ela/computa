@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { installObservedModelPicker } from "./embedded-provider-adapter-fixture";
 import { defineWebsiteModelChoiceTests } from "./embedded-model-choice-tests";
 
@@ -3967,5 +3968,142 @@ describe('response mutation notifications survive HTML replacement', () => {
     f.world.__computaModelOwner = '00000000-0000-4000-8000-000000000001';
     f.deliver({ type: 'characterData', target: current.text });
     expect(f.posted).toHaveLength(1);
+  });
+});
+
+describe('armed observation diagnostic without inference authority', () => {
+  const auxiliarySource = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt-observation-diagnostic.js', import.meta.url), 'utf8');
+  const install = new Function('config', 'document', 'window', 'location', 'performance', 'MutationObserver', 'setTimeout', 'clearTimeout',
+    'requestAnimationFrame', 'cancelAnimationFrame', 'globalThis', 'Element', 'Date', 'URL',
+    auxiliarySource + '\nreturn computaInstallObservationDiagnostic(config);');
+  const binding = { schemaVersion: 1, nonce: '01000000-0000-4000-8000-000000000001', expectedSHA256: 'a'.repeat(64),
+    expectedCanonicalSHA256: 'b'.repeat(64), expectedUTF8Bytes: 51657 };
+  function auxiliaryFixture() {
+    class RawElement extends Element {
+      get innerText(): string { throw new Error('auxiliary must not read innerText'); }
+      getClientRects(): any[] { throw new Error('auxiliary must not read layout'); }
+      getBoundingClientRect(): any { throw new Error('auxiliary must not read geometry'); }
+    }
+    let clock = 0, serial = 0;
+    const html = new RawElement('HTML'), body = new RawElement('BODY'), messages = new RawElement('MAIN'); html.append(body); body.append(messages);
+    const send = new RawElement('BUTTON', { 'aria-label': 'Send' }); body.append(send);
+    const clicks = new Set<(event: any) => void>(), pagehides = new Set<() => void>();
+    const timers = new Map<number, { callback: () => void; delay: number }>(), frames = new Map<number, () => void>();
+    const observers: any[] = [];
+    const current: any = { ...binding, invalidReason: 'none', sendClickCount: 0, userCount: 0, assistantCount: 0,
+      editorMatchesExpected: null, userMatchesExpected: null, payloadMatched: false, currentComplete: false, sendUnixMs: null };
+    const probe = { nonce: binding.nonce, snapshot: () => ({ ...current }) };
+    const world: any = { __computaMatchedBenchmarkProbeV1: probe, __computaModelOwner: '01000000-0000-4000-8000-000000000002' };
+    const document: any = { documentElement: html, visibilityState: 'visible', hasFocus: () => true,
+      querySelectorAll: (selector: string) => document.documentElement.querySelectorAll(selector),
+      addEventListener: (name: string, callback: any) => { if (name === 'click') clicks.add(callback); },
+      removeEventListener: (name: string, callback: any) => { if (name === 'click') clicks.delete(callback); } };
+    const window: any = { addEventListener: (name: string, callback: any) => { if (name === 'pagehide') pagehides.add(callback); },
+      removeEventListener: (name: string, callback: any) => { if (name === 'pagehide') pagehides.delete(callback); } }; window.top = window;
+    const resources: any[] = [];
+    const performance = { now: () => clock, getEntriesByType: (kind: string) => { expect(kind).toBe('resource'); return resources; } };
+    class Observer {
+      active = false; target: any;
+      constructor(public callback: (records: any[]) => void) { observers.push(this); }
+      observe(target: any) { this.active = true; this.target = target; }
+      disconnect() { this.active = false; }
+    }
+    const location: any = { origin: 'https://chatgpt.com', pathname: '/' };
+    const run = (config: any = binding) => install(config, document, window, location, performance, Observer,
+      (callback: () => void, delay: number) => { const id = ++serial; timers.set(id, { callback, delay }); return id; },
+      (id: number) => timers.delete(id), (callback: () => void) => { const id = ++serial; frames.set(id, callback); return id; },
+      (id: number) => frames.delete(id), world, RawElement, { now: () => 1_000_000 + clock }, URL);
+    const deliver = (records: any[] = [{ type: 'characterData' }]) => observers.filter(o => o.active)
+      .forEach(o => o.callback(records.map(record => ({ removedNodes: [], ...record }))));
+    let user: RawElement, answer: RawElement, modern: RawElement;
+    return { run, world, current, timers, frames, observers, document, window, location, resources, deliver,
+      setTime(value: number) { clock = value; },
+      send() { current.sendClickCount = 1; current.sendUnixMs = 1_000_000 + clock; clicks.forEach(callback => callback({ target: send, isTrusted: false })); },
+      appendAnswer(raw = '') {
+        user = new RawElement('DIV', { 'data-user-message-bubble': 'true' });
+        answer = new RawElement('ARTICLE', { 'data-turn': 'assistant' }); modern = new RawElement('DIV', { 'data-markdown-text-style': 'assistant-message' }, raw);
+        answer.append(modern); messages.append(user, answer); current.userCount = 1; current.assistantCount = 1; deliver(); return { user, answer, modern };
+      },
+      qualify() { Object.assign(current, { editorMatchesExpected: true, userMatchesExpected: true, payloadMatched: true,
+        editorSHA256: binding.expectedSHA256, editorCanonicalSHA256: binding.expectedCanonicalSHA256,
+        userSHA256: binding.expectedCanonicalSHA256, editorUTF8Bytes: binding.expectedUTF8Bytes, userUTF8Bytes: binding.expectedUTF8Bytes }); },
+      raw(text: string) { modern.text = text; deliver(); },
+      fireTimer(delay = 0, advance = 4) { const entry = [...timers].find(([, task]) => task.delay === delay); if (!entry) return false;
+        timers.delete(entry[0]); clock += advance; entry[1].callback(); return true; },
+      fireFrame() { const entry = frames.entries().next().value; if (!entry) return false; frames.delete(entry[0]); clock += 16; entry[1](); return true; },
+      pagehide() { pagehides.forEach(callback => callback()); },
+      listenerCounts: () => [clicks.size, pagehides.size]
+    };
+  }
+
+  test('the original Probe5 source remains byte-identical', () => {
+    const begin = source.indexOf('// BEGIN COMPUTA MATCHED BENCHMARK PROBE V1');
+    const endMarker = '// END COMPUTA MATCHED BENCHMARK PROBE V1.\n';
+    const end = source.indexOf(endMarker, begin) + endMarker.length;
+    expect(createHash('sha256').update(source.slice(begin, end)).digest('hex')).toBe('665280936fd0dfd7bf1281f81ff10c30d84fffdaffd3f4aba177caf7bc85dcb1');
+  });
+
+  test('ineligible configuration and missing source probe create no observer or scheduled work', () => {
+    for (const config of [{ ...binding, extra: true }, { ...binding, expectedUTF8Bytes: true }, { ...binding, nonce: 'ABCDEF00-0000-4000-8000-000000000001' },
+      Object.assign({ ...binding }, { [Symbol('extra')]: true })]) {
+      const f = auxiliaryFixture(); expect(f.run(config)).toBeNull(); expect(f.observers).toHaveLength(0); expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0);
+    }
+    const f = auxiliaryFixture(); delete f.world.__computaMatchedBenchmarkProbeV1; expect(f.run()).toBeNull(); expect(f.listenerCounts()).toEqual([0, 0]);
+  });
+
+  test('install is idle; one Send records bounded raw and scheduling observations before late clipped-user qualification', () => {
+    const f = auxiliaryFixture(), api = f.run(); expect(f.observers).toHaveLength(0); expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0);
+    f.setTime(100); f.send(); expect(f.observers[0].target).toBe(f.document);
+    for (let i = 0; i < 12; i++) expect(f.fireTimer()).toBe(true);
+    expect(f.fireTimer()).toBe(false); for (let i = 0; i < 8; i++) expect(f.fireFrame()).toBe(true);
+    f.current.editorMatchesExpected = true; f.current.userMatchesExpected = false; f.setTime(500); f.appendAnswer();
+    for (let i = 0; i < 8; i++) expect(f.fireFrame()).toBe(true);
+    f.setTime(900); f.raw('JSON'); const tentative = api.snapshot();
+    expect(tentative.firstModernBodyAfterSendMs).toBe(400); expect(tentative.firstRawTextAfterSendMs).toBe(800);
+    expect(tentative.firstRawTextUTF16Length).toBe(4); expect(tentative.payloadBindingVerified).toBe(false);
+    f.qualify(); f.current.currentComplete = true; f.setTime(1100); const final = api.stop();
+    expect(final.payloadBindingVerified).toBe(true); expect(final.firstRawTextAfterSendMs).toBe(800);
+    expect(final.timerIntervals).toHaveLength(12); expect(final.rafEarlyIntervals).toHaveLength(8); expect(final.rafBodyIntervals).toHaveLength(8);
+    expect(final.visibilityFocus).toHaveLength(4); expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0); expect(f.listenerCounts()).toEqual([0, 0]);
+    f.setTime(1200); f.raw('later'); expect(api.snapshot().firstRawTextAfterSendMs).toBe(800);
+  });
+
+  test('deadline freezes metrics but later full Probe5 proof can bind the same physical clipped user', () => {
+    const f = auxiliaryFixture(), api = f.run(); f.setTime(100); f.send(); f.current.editorMatchesExpected = true; f.current.userMatchesExpected = false;
+    f.setTime(1000); f.appendAnswer('HI'); f.current.currentComplete = true;
+    for (let i = 0; i < 300; i++) f.resources.push({ name: `https://chatgpt.com/private-module-${i}.js?secret=never-output`, initiatorType: 'script',
+      startTime: 50, responseEnd: 14000, duration: 13950, encodedBodySize: 12, decodedBodySize: 24, transferSize: 42 });
+    f.resources.push({ name: 'https://chatgpt.com/not-yet-ended.js', initiatorType: 'script', startTime: 1, responseEnd: 20000, duration: 19999 });
+    f.resources.push({ name: 'https://chatgpt.com/invalid-duration.js', initiatorType: 'script', startTime: 50, responseEnd: 14000, duration: -7 });
+    f.setTime(15100); expect(f.fireTimer(15000, 3)).toBe(true); const pending = api.snapshot();
+    expect(pending.endedReason).toBe('deadline'); expect(pending.payloadBindingVerified).toBe(false);
+    expect(pending.resourceSummary.available).toBe(true); expect(pending.resourceSummary.scanTruncated).toBe(true);
+    expect(pending.resourceSummary.entries).toHaveLength(8); expect(pending.resourceSummary.entries[0][0]).toBe(-50);
+    expect(pending.resourceSummary.entries.at(-1)[2]).toBeNull();
+    expect(JSON.stringify(pending)).not.toContain('private-module'); expect(JSON.stringify(pending)).not.toContain('secret');
+    const earlier = pending.firstRawTextAfterSendMs; f.setTime(30000); f.qualify(); const late = api.snapshot();
+    expect(late.payloadBindingVerified).toBe(true); expect(late.firstRawTextAfterSendMs).toBe(earlier); expect(late.expired).toBe(true);
+    expect(late.resourceSummary).toEqual(pending.resourceSummary); expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0);
+    expect(new TextEncoder().encode(JSON.stringify(late)).length).toBeLessThanOrEqual(4096);
+  });
+
+  test('document/owner/physical-root changes and record overflow remain irreversible negatives', () => {
+    for (const failure of ['document', 'owner', 'removed', 'records'] as const) {
+      const f = auxiliaryFixture(), api = f.run(); f.send(); const nodes = f.appendAnswer('HI'); f.qualify();
+      if (failure === 'document') f.document.documentElement = new Element('HTML');
+      if (failure === 'owner') f.world.__computaModelOwner = 'different';
+      if (failure === 'removed') f.deliver([{ type: 'childList', removedNodes: [nodes.answer] }]);
+      if (failure === 'records') f.deliver(Array.from({ length: 1025 }, () => ({ type: 'characterData' })));
+      const snapshot = api.snapshot(); expect(snapshot.stopped).toBe(true); expect(snapshot.payloadBindingVerified).toBe(false);
+      if (failure === 'records') { expect(snapshot.endedReason).toBe('record_budget'); expect(snapshot.mutationRecords).toBe(1025); }
+      f.qualify(); expect(api.snapshot().payloadBindingVerified).toBe(false); expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0);
+    }
+  });
+
+  test('setup expiry, changed immutable binding and a second Send do not create a new measurement', () => {
+    const f = auxiliaryFixture(), api = f.run(); expect(f.run({ ...binding, expectedSHA256: 'c'.repeat(64) })).toBeNull();
+    f.setTime(15001); f.send(); expect(api.snapshot().sourceProbeSendObserved).toBe(false); expect(api.snapshot().expired).toBe(true);
+    expect(f.observers).toHaveLength(0); expect(f.timers.size).toBe(0); expect(f.frames.size).toBe(0);
+    const g = auxiliaryFixture(), other = g.run(); g.send(); g.send(); expect(other.snapshot().invalidReason).toBe('multiple_send_clicks');
   });
 });

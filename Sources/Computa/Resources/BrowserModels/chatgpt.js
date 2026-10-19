@@ -1835,8 +1835,33 @@ function chatGPTMatchedBenchmarkResult(observed) {
   } catch { return observed; }
 }
 
+// The separately loaded auxiliary diagnostic never supplies inference proof.
+// Its private input is present only for an armed, captured first-Instant run.
+function chatGPTObservationDiagnosticResult(observed) {
+  try {
+    const binding = input.matchedObservationDiagnostic;
+    if (!binding || !['inspect', 'failedPageDiagnostic', 'stop'].includes(input.action)
+      || !observed || typeof observed !== 'object') return observed;
+    const api = globalThis.__computaObservationDiagnosticV1, probe = globalThis.__computaMatchedBenchmarkProbeV1;
+    const fields = ['schemaVersion', 'nonce', 'expectedSHA256', 'expectedCanonicalSHA256', 'expectedUTF8Bytes'];
+    if (!api || api.revision !== 1 || !probe || !fields.every(name => api.binding?.[name] === binding[name])) return observed;
+    const diagnostic = input.stopObservationDiagnostic === true || input.action !== 'inspect' ? api.stop() : api.snapshot();
+    const current = probe.snapshot();
+    // Read the existing passive binding again even if the auxiliary's finite
+    // observation window has ended. No output text, timing or callback authorizes an action.
+    if (!fields.every(name => current[name] === binding[name]) || current.invalidReason !== 'none'
+      || current.sendClickCount !== 1 || current.userCount !== 1 || current.assistantCount !== 1
+      || current.payloadMatched !== true || current.editorMatchesExpected !== true || current.userMatchesExpected !== true
+      || current.editorSHA256 !== binding.expectedSHA256 || current.editorCanonicalSHA256 !== binding.expectedCanonicalSHA256
+      || current.userSHA256 !== binding.expectedCanonicalSHA256 || current.editorUTF8Bytes !== binding.expectedUTF8Bytes
+      || current.userUTF8Bytes !== binding.expectedUTF8Bytes) return observed;
+    return { ...observed, observationDiagnostic: diagnostic };
+  } catch { return observed; }
+}
+
 function chatGPTPreparationResult(observed) {
   observed = chatGPTMatchedBenchmarkResult(observed);
+  if (input.matchedObservationDiagnostic != null) observed = chatGPTObservationDiagnosticResult(observed);
   if (!chatGPTPreparationTimingEnabled || !observed || typeof observed !== 'object') return observed;
   try {
     const openingRecoveryUsed = input.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening?.recoveryClaimed === true
@@ -4160,7 +4185,7 @@ if (globalThis.__computaChatSubmissionState == null && input.expectedSubmissionP
   return chatGPTSubmissionFailure(null);
 if (input.action === 'failedPageDiagnostic') {
   const resourceTimingDiagnostic = chatGPTResourceTimingDiagnostic('failure');
-  return { failureDiagnostic: chatGPTFailedPageDiagnostic(), ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };
+  return chatGPTObservationDiagnosticResult({ failureDiagnostic: chatGPTFailedPageDiagnostic(), ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) });
 }
 if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
   const signal = { ownerToken: input.ownerToken, observer: null };
@@ -4180,6 +4205,15 @@ if (globalThis.__computaModelSignal?.ownerToken !== input.ownerToken) {
 // Diagnostic-only observation does not await, mutate the page, or grant proof.
 if (input.action === 'insert' && input.matchedBenchmarkProbe != null) {
   try { computaInstallMatchedBenchmarkProbe(input.matchedBenchmarkProbe); } catch { /* inference unchanged */ }
+}
+if (input.action === 'insert' && input.matchedObservationDiagnostic != null && input.matchedBenchmarkProbe != null
+  && input.expectedModelChoice?.key === 'chat/latest/instant' && input.submissionSequence === 1) {
+  try {
+    const fields = ['schemaVersion', 'nonce', 'expectedSHA256', 'expectedCanonicalSHA256', 'expectedUTF8Bytes'];
+    if (fields.every(name => input.matchedObservationDiagnostic[name] === input.matchedBenchmarkProbe[name])
+      && typeof computaInstallObservationDiagnostic === 'function')
+      computaInstallObservationDiagnostic(input.matchedObservationDiagnostic);
+  } catch { /* diagnostic failure leaves inference unchanged */ }
 }
 const ownedMessages = chatGPTMessageRoots('user');
 const ownedUserCount = ownedMessages.length;

@@ -460,6 +460,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var providerGates: [Provider: ProviderGate] = [:]
     private var chatGPTPrewarmingEnabled = false
     private var scripts: [Provider: String] = [:]
+    private var observationDiagnosticSource: String?
+    private var observationDiagnosticLogBudgets: [String: ChatGPTObservationDiagnostic.LogBudget] = [:]
     private var preparationTimeout: Duration = .seconds(45)
     private var responseTimeout: Duration = .seconds(300)
     private var inspectionTimeout: Duration = .seconds(30)
@@ -1212,8 +1214,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     guard result.isPending else { return }
                     // No model/menu reads, first-message expansion or owner
                     // binding. The fixed adapter returns before any async work.
-                    let input: [String: Any] = ["provider": "chatgpt", "action": "failedPageDiagnostic",
+                    var input: [String: Any] = ["provider": "chatgpt", "action": "failedPageDiagnostic",
                         "expectedURL": url.absoluteString, "ownerToken": session.token, "bindOwner": false]
+                    if session.modelChoice?.key == "chat/latest/instant", session.sequence == 1,
+                       observationDiagnosticSource != nil, let binding = session.benchmarkObservationBinding {
+                        input["matchedObservationDiagnostic"] = ["schemaVersion": 1, "nonce": binding.nonce.uuidString.lowercased(),
+                            "expectedSHA256": binding.rawOutboundSHA, "expectedCanonicalSHA256": binding.canonicalOutboundSHA,
+                            "expectedUTF8Bytes": binding.utf8Bytes]
+                    }
                     session.providerAdapterEverDispatched = true
                     session.view.callAsyncJavaScript(script, arguments: ["input": input], in: nil, in: world) { reply in
                         switch reply {
@@ -1232,7 +1240,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { unavailable("timed_out"); return }
             guard current() else { unavailable("stale"); return }
             guard bytes.count <= 8_192,
-                  let observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any], observed["error"] == nil,
+                  var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { unavailable("unavailable"); return }
+            let observationDiagnostic = ChatGPTObservationDiagnostic.remove(from: &observed, binding: session.benchmarkObservationBinding)
+            logObservationDiagnostic(observationDiagnostic, session: session)
+            guard observed["error"] == nil,
                   let raw = observed["failureDiagnostic"] as? [String: Any],
                   let safe = Self.sanitizedFailedPageDiagnostic(raw) else { unavailable("unavailable"); return }
             logResourceTimingDiagnostic(observed["resourceTimingDiagnostic"], session: session, phase: "failure")
@@ -1461,6 +1472,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         for (index, chunk) in chunks.enumerated() {
             Self.inspectionLog.error("resourceTimingDiagnostic provider=chatgpt sequence=\(session.sequence) phase=\(phase, privacy: .public) id=\(identifier, privacy: .public) part=\(index + 1)/\(chunks.count) base64=\(chunk, privacy: .public)")
         }
+    }
+
+    /// A separate, synthetic-only sink. Its records cannot change any session
+    /// proof, result, retry, deadline or cleanup decision.
+    private func logObservationDiagnostic(_ snapshot: ChatGPTObservationDiagnostic.Snapshot?, session: Session) {
+        guard let snapshot, session.provider == .chatgpt, session.modelChoice?.key == "chat/latest/instant",
+              session.sequence == 1, let binding = session.benchmarkObservationBinding,
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == (session.documentGeneration ?? session.initialDocumentGeneration) else { return }
+        var budget = observationDiagnosticLogBudgets[session.token] ?? .init()
+        guard let log = budget.consume(snapshot, binding: binding, sessionToken: session.token, sequence: session.sequence) else { return }
+        observationDiagnosticLogBudgets[session.token] = budget
+        for record in log.records { Self.inspectionLog.notice("\(record, privacy: .public)") }
     }
 
     private enum InitialCheckpointPhase: String {
@@ -3365,7 +3389,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             throw Failure.ownershipFailure(.documentGenerationBefore)
         }
         let provider = session.provider
-        guard let script = script(for: provider) else { throw Failure.pageUnavailable }
+        guard var script = script(for: provider) else { throw Failure.pageUnavailable }
         guard let url = session.view.url, provider.accepts(url.absoluteString) else {
             // This can precede JavaScript execution after a failed navigation.
             // Record classifications only, without publishing the page URL.
@@ -3429,6 +3453,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             input["matchedBenchmarkProbe"] = ["schemaVersion": 1, "nonce": binding.nonce.uuidString.lowercased(),
                 "expectedSHA256": binding.rawOutboundSHA, "expectedCanonicalSHA256": binding.canonicalOutboundSHA,
                 "expectedUTF8Bytes": binding.utf8Bytes]
+            // Only the already armed fresh first Instant capture loads this
+            // optional resource. It shares the existing invocation, not an RPC.
+            if benchmarkFirstInsert, let source = observationDiagnosticScript() {
+                script = source + "\n" + script
+            }
+            if observationDiagnosticSource != nil {
+                input["matchedObservationDiagnostic"] = input["matchedBenchmarkProbe"]
+                if benchmarkFirstInspect && allowBlockedProvider { input["stopObservationDiagnostic"] = true }
+            }
         }
         // Only a claimed current Send may defer positive model proof. The
         // adapter still performs submit's full precheck before the actual click.
@@ -3664,6 +3697,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        let observationDiagnostic = ChatGPTObservationDiagnostic.remove(from: &observed,
+            binding: provider == .chatgpt ? session.benchmarkObservationBinding : nil)
+        logObservationDiagnostic(observationDiagnostic, session: session)
         var preparedReadiness = observed.removeValue(forKey: "firstInstantPreparedEditorReadiness")
         #if DEBUG
         if requestsPreparedReadiness, let transform = preparedEditorReadinessTransformForTesting {
@@ -4295,6 +4331,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func performFinish(_ session: Session, cancel: Bool,
                                cleanupCause: WebModelCleanupCause) async -> Data {
+        defer {
+            if sessions[session.token] == nil { observationDiagnosticLogBudgets.removeValue(forKey: session.token) }
+        }
         finishInitialCheckpointSettlement(session, phase: cancel ? .cancelled : .finished)
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
         if let capture = session.postBlockDiagnostic, let task = capture.task {
@@ -4732,6 +4771,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard let script = Self.loadScript(provider: provider) else { return nil }
         scripts[provider] = script
         return script
+    }
+
+    private func observationDiagnosticScript() -> String? {
+        if let source = observationDiagnosticSource { return source }
+        #if SWIFT_PACKAGE
+        let bundles = [Bundle.module, Bundle.main]
+        #else
+        let bundles = [Bundle.main]
+        #endif
+        for bundle in bundles {
+            if let url = bundle.url(forResource: "chatgpt-observation-diagnostic", withExtension: "js", subdirectory: "BrowserModels"),
+               let source = try? String(contentsOf: url, encoding: .utf8), source.utf8.count <= 32_768 {
+                observationDiagnosticSource = source
+                return source
+            }
+        }
+        return nil
     }
 
     private static func loadScript(provider: Provider) -> String? {

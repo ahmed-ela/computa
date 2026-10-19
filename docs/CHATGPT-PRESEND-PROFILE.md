@@ -332,3 +332,15 @@ The bounded collection was performed once and reused for artifact-only decomposi
 |`optimized178-fixtures-extraction1.json`|`9e88d2af5d6506e4627b2f720c63b3988606ff14ce5911da8c6151d4066d2e65`|
 |`optimized178-fixtures1.json`|`183c3fcecfe14237b70ac14a31501ea7190a39b10d40f3da969461ab1ee8790a`|
 |`candidate178-run/fixture-server-stopped1.json`|`8a858ce929d25455ad0f7467b12a5110ec3857d61f1a064fb0a2513cd8125c02`|
+
+## Build-179 bounded observation diagnostic
+
+Build 179 adds a synthetic-benchmark-only observation diagnostic to investigate the remaining resource-end to first-text residual. It records bounded raw text-count, scheduling and script-resource timing metadata without response text or URLs. The optional record is removed before ordinary observation validation; it grants no inference authority and changes no completion, ownership, permission or cleanup decision. Probe5 remains byte-identical. The diagnostic installs through the existing armed insertion RPC and performs no scheduled measurement work before the observed Send.
+
+The frozen source passed **393 adapter tests** (13,542 assertions) and **44 focused native tests**, including four sanitizer cases, seventeen channel/completion cases, seventeen benchmark-capture cases and six dispatch-profile cases. Both runs verified unchanged source hashes. The regenerated native project also registers the two existing capture/profile test files already included by the authoritative project specification. These are scoped results, not an all-suite claim.
+
+A fresh signed build and one explicitly diagnostic same-payload normal Chat/latest Instant/Temporary native/direct pair are pending. This diagnostic is not itself a latency optimization or a provider qualification. The dominant observation-delay cause and goal remain unresolved.
+
+- Source test freeze: `bf5576e6e18d5cd729a3af8d9f201ee3f501b1818175fac1d8a9659bc8d7163f`.
+- Adapter test log: `be16caf3b3d6afd1ee0a4c0e19d8e659a95204fcc6a7f8b2ec116be3e3b38879`.
+- Focused native test log: `3a1f5373517678c0dc8930bb694808684daa8a91bb05fea35da046a0fd6f91f3`.
