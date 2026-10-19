@@ -274,3 +274,31 @@ the existing owned Send mark, preserving the v1 parser, finite allowlist, four
 rows, 256-entry scan and 2 KiB limit. It neither intercepts fetch nor records URLs,
 request bodies or cookies. Missing entries remain inconclusive. Installed
 build-175 measurements and fresh tool workflows are still required.
+
+
+The installed build-175 native samples reduced the comparable last-wake to
+full-proof-start gap from 83.667 ms to 0.667 ms. This includes queue/processing
+time, not an exclusive JavaScript CPU measurement. Candidate-to-transport
+completion averaged 1.927 seconds before and 1.987 seconds after; the new first
+sample changed its response and correctly restarted stability. Overall tail
+improvement is not established. The current three page candidates averaged
+5.992 seconds after Send. Both pre-header wait and post-resource DOM delay
+remain, and native window occlusion was not previously logged.
+
+A separate build-176 experiment applies the public
+[`WKPreferences.inactiveSchedulingPolicy`](https://developer.apple.com/documentation/webkit/wkpreferences/inactiveschedulingpolicy-swift.property)
+`.none` policy only to model-owned configurations before construction. Human
+and tool tabs retain their platform defaults. WebKit's
+[implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKPreferences.mm#L169-L194)
+changes background process assertions; its
+[macOS visibility checks](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/mac/PageClientImplMac.mm#L196-L246)
+include whole-window occlusion, rather than opaque-sibling pixel coverage.
+This is an unproven scheduling hypothesis; it does not disable every WebCore
+timer policy. Three bounded native lifecycle snapshots per inference round
+will expose attachment, hidden state, window visibility and occlusion without
+recording page content or authorizing any action. Fresh installed measurements
+are required before attributing a latency change to this policy.
+
+The scheduling candidate passed eleven focused configuration, diagnostic and
+completion-verification tests. Adapter bytes are unchanged from the 382-test
+build-175 result; installed scheduling measurements remain pending.

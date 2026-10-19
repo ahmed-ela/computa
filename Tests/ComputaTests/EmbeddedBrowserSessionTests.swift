@@ -133,6 +133,37 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertNotNil(first.uiDelegate)
     }
 
+    func testOnlyInferenceViewsDisableInactiveSchedulingBeforeConstruction() throws {
+        let platformDefault = WKWebViewConfiguration().preferences.inactiveSchedulingPolicy
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let humanID = try session.createTab()
+        let human = try XCTUnwrap(session.webView(for: humanID))
+        var constructionPolicy: WKPreferences.InactiveSchedulingPolicy?
+        let modelID = try session.createUnloadedModelTabForTesting { configuration in
+            constructionPolicy = configuration.preferences.inactiveSchedulingPolicy
+            return WKWebView(frame: .zero, configuration: configuration)
+        }
+        let model = try XCTUnwrap(session.webView(for: modelID))
+        let toolID = try session.createToolTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let tool = try XCTUnwrap(session.webView(for: toolID))
+        let laterHuman = try XCTUnwrap(session.webView(for: session.createTab(select: false)))
+
+        XCTAssertEqual(constructionPolicy, WKPreferences.InactiveSchedulingPolicy.none)
+        XCTAssertEqual(model.configuration.preferences.inactiveSchedulingPolicy, .none)
+        for view in [human, tool, laterHuman] {
+            XCTAssertEqual(view.configuration.preferences.inactiveSchedulingPolicy, platformDefault,
+                           "Model scheduling must not change the platform policy for human or tool tabs")
+            XCTAssertFalse(view.configuration.preferences === model.configuration.preferences)
+        }
+        XCTAssertEqual(session.selectedTabID, humanID)
+        XCTAssertFalse(model.isInspectable)
+        XCTAssertFalse(model.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
+        XCTAssertFalse(tool.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
+        XCTAssertTrue(human.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
+        XCTAssertTrue(model.configuration.userContentController.userScripts.isEmpty)
+    }
+
     func testAsyncBlankPopupPreservesOpenerAndSharedConfigurationAndClosesOnlyChild() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),

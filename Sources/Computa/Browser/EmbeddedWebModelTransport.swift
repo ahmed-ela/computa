@@ -341,6 +341,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var profiledFirstPositive = false
         var profiledFirstCompletionCandidate = false
         var profiledCompletionTransitions = 0
+        enum NativeLifecyclePhase: String { case submitted, firstPositive, completion }
+        var loggedNativeLifecyclePhases = Set<NativeLifecyclePhase>()
         func profileCompletionTransition(_ phase: WebsiteResponseProfile.Phase) {
             guard let responseProfile, profiledCompletionTransitions < 32 else { return }
             profiledCompletionTransitions += 1
@@ -884,6 +886,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.profiledFirstPositive = false
                 session.profiledFirstCompletionCandidate = false
                 session.profiledCompletionTransitions = 0
+                session.loggedNativeLifecyclePhases.removeAll(keepingCapacity: true)
                 session.responseReadRetryUsed = false
                 session.failedPageDiagnosticAttempted = false
                 session.resourceTimingSignatures.removeAll()
@@ -915,6 +918,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let sent = try await page(session, action: "submit", prompt: outbound)
                 guard sent["submitted"] as? Bool == true else { throw Failure.editorFailure("submission_unconfirmed") }
                 session.acknowledgedSendSequence = submittedSequence
+                logModelNativeLifecycle(session, phase: .submitted)
                 // Prepare the next untouched page during website generation,
                 // never while the current request is still preparing to Send.
                 if session.provider == .chatgpt, chatGPTPrewarmingEnabled {
@@ -1153,6 +1157,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID)
         Self.inspectionLog.error("preparationTimeout provider=\(session.provider.rawValue, privacy: .public) \(diagnostic, privacy: .public)")
         return .preparationDeadline
+    }
+
+    /// At most three synchronous native snapshots per submitted round. These
+    /// content-free lifecycle facts cannot wake, inspect or authorize a page.
+    private func logModelNativeLifecycle(_ session: Session, phase: Session.NativeLifecyclePhase) {
+        guard session.provider == .chatgpt, !session.isDiscovery, session.submitted,
+              sessions[session.token] === session, (1...Self.maximumTurnSubmissions).contains(session.sequence),
+              session.acknowledgedSendSequence == session.sequence,
+              browser.webView(for: session.tabID) === session.view,
+              session.loggedNativeLifecyclePhases.insert(phase).inserted else { return }
+        let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID)
+        Self.inspectionLog.notice("modelNativeLifecycle version=1 provider=chatgpt sessionID=\(session.token.lowercased(), privacy: .public) tabID=\(session.tabID.uuidString.lowercased(), privacy: .public) sequence=\(session.sequence) phase=\(phase.rawValue, privacy: .public) \(diagnostic, privacy: .public)")
     }
 
     /// An abort-only observation, separate from inference and cleanup proofs.
@@ -1793,6 +1809,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if !session.profiledFirstPositive {
                     session.profiledFirstPositive = true
                     session.responseProfile?.mark(.firstPositive)
+                    logModelNativeLifecycle(session, phase: .firstPositive)
                 }
                 let responseChanged = (session.modelVerificationPending
                     ? !session.response.utf8.elementsEqual(response.utf8) : session.response != response)
@@ -1873,6 +1890,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             logResourceTimingDiagnostic(completionObservation["resourceTimingDiagnostic"], session: session, phase: "completion")
                             session.state = "complete"
                             session.responseProfile?.mark(.transportComplete)
+                            logModelNativeLifecycle(session, phase: .completion)
                         }
                     }
                 }

@@ -477,6 +477,12 @@ final class EmbeddedBrowserSession {
             // the original click's gesture. Human popups still use the tab cap
             // and navigation policy; inference-owned pages cannot open them.
             configuration.preferences.javaScriptCanOpenWindowsAutomatically = !modelOwned && !toolOwned
+            if modelOwned {
+                // Inference pages must keep executing while privately hosted.
+                // This public macOS 14 policy controls inactive/detached view
+                // scheduling; it grants no browser or model authority.
+                configuration.preferences.inactiveSchedulingPolicy = .none
+            }
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
             let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned,
                                         usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil)
