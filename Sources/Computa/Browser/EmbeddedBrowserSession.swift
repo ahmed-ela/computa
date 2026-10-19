@@ -1366,11 +1366,17 @@ final class EmbeddedBrowserSession {
     // the transport establishes fresh product/model/readiness proofs afterward.
     private static let inferencePrewarmLifetime: Duration = .seconds(600)
 
-    func setChatGPTInferencePrewarmingEnabled(_ enabled: Bool, admit: @escaping @MainActor () throws -> Void) {
+    func setChatGPTInferencePrewarmingEnabled(_ enabled: Bool, preserveUnusedRoot: Bool = false,
+                                            admit: @escaping @MainActor () throws -> Void) {
+        // Only a published, unclaimed pristine root may survive a draft pause.
+        // Pausing grants no creation/adoption permission and renews no deadline.
+        let retained = !enabled && preserveUnusedRoot && chatGPTInferencePrewarm.map {
+            !$0.claimed && inferencePrewarmIdentityIsCurrent($0)
+        } == true
         chatGPTInferencePrewarmingEnabled = enabled && !isShutdown
         chatGPTInferencePrewarmAdmission = chatGPTInferencePrewarmingEnabled ? admit : nil
         if chatGPTInferencePrewarmingEnabled { prepareChatGPTInferencePrewarmIfNeeded() }
-        else if let warm = chatGPTInferencePrewarm { discardInferencePrewarm(warm) }
+        else if !retained, let warm = chatGPTInferencePrewarm { discardInferencePrewarm(warm) }
     }
 
     /// An explicit demand trigger, never a timer-based refresh or retry loop.
@@ -1503,7 +1509,13 @@ final class EmbeddedBrowserSession {
     }
 
     private func inferencePrewarmIsCurrent(_ warm: InferencePrewarm) -> Bool {
-        guard !isShutdown, chatGPTInferencePrewarmingEnabled, chatGPTInferencePrewarm === warm,
+        chatGPTInferencePrewarmingEnabled && inferencePrewarmIdentityIsCurrent(warm)
+    }
+
+    /// Retention alone may use this identity check while adoption is paused.
+    /// Every actual claim still requires inferencePrewarmIsCurrent above.
+    private func inferencePrewarmIdentityIsCurrent(_ warm: InferencePrewarm) -> Bool {
+        guard !isShutdown, chatGPTInferencePrewarm === warm,
               exclusiveCookieMaintenance == nil, ContinuousClock.now < warm.deadline,
               let source = warm.source, websiteDataStore === source, let id = warm.tabID,
               let view = warm.view, let entry = entries[id], entry.view === view,

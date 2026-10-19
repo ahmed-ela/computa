@@ -16,7 +16,8 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         let state = AppState(tasks: [task], runtime: runtime, preferences: preferences, browserSession: browser)
         let local = state.defaultModel
         var enabled: [Bool] = []
-        state.setWebsitePrewarmingObserverForTesting { enabled.append($0) }
+        var preserved: [Bool] = []
+        state.setWebsitePrewarmingObserverForTesting { enabled.append($0); preserved.append($1) }
         state.selectTask(task.id)
         XCTAssertEqual(enabled, [false], "No provider load before the render host is attached")
         state.refreshWebsiteModelsIfNeeded()
@@ -41,6 +42,72 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         XCTAssertEqual(enabled.last, true)
         _ = await state.shutdownRuntime()
         XCTAssertEqual(enabled.last, false)
+        XCTAssertFalse(preserved.contains(true), "Only creating a non-ChatGPT draft can preserve an unused page")
+        XCTAssertTrue(browser.tabs.isEmpty)
+    }
+
+    func testOnlyNewDraftSoftPausesWebsitePrewarmingWithUnchangedLocalDefault() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        let instant = Self.choices("chatgpt")[0].modelID
+        let websiteTask = AgentTask(title: "Website fixture", summary: "", status: .draft,
+            workspace: "No workspace selected", model: instant)
+        let runtime = EmbeddedConfigurationRuntime(browser: browser)
+        let state = AppState(tasks: [websiteTask], runtime: runtime, preferences: preferences, browserSession: browser)
+        let local = state.defaultModel
+        XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: local))
+        let localTask = AgentTask(title: "Existing local fixture", summary: "", status: .draft,
+            workspace: "No workspace selected", model: local)
+        state.replaceTasks(with: [websiteTask, localTask])
+        var observations: [[Bool]] = []
+        state.setWebsitePrewarmingObserverForTesting { observations.append([$0, $1]) }
+        state.selectTask(websiteTask.id)
+        state.refreshWebsiteModelsIfNeeded()
+        XCTAssertEqual(observations.last, [true, false])
+
+        state.createTask()
+        let newDraftID = try XCTUnwrap(state.selectedTaskID)
+        XCTAssertEqual(state.selectedTask?.model, local)
+        XCTAssertEqual(state.defaultModel, local, "New task must keep the user's default model")
+        XCTAssertEqual(observations.last, [false, true])
+        XCTAssertTrue(state.setTaskModel(instant, taskID: newDraftID))
+        XCTAssertEqual(observations.last, [true, false])
+        XCTAssertTrue(state.setTaskModel(local, taskID: newDraftID))
+        XCTAssertEqual(observations.last, [false, false], "An explicit provider change is a hard deselection")
+        state.selectTask(websiteTask.id)
+        XCTAssertEqual(observations.last, [true, false])
+        state.selectTask(localTask.id)
+        XCTAssertEqual(observations.last, [false, false], "Selecting an existing local task cannot preserve the page")
+        state.selectTask(newDraftID)
+        XCTAssertEqual(observations.last, [false, false], "Re-selecting a draft is an explicit task selection")
+        XCTAssertTrue(state.setDefaultModel(instant))
+        XCTAssertEqual(observations.last, [false, false], "Changing the default is not new-draft preservation")
+        _ = await state.shutdownRuntime()
+    }
+
+    func testNewDraftWebsitePrewarmingPreservationRequiresReadinessAndStopsAtShutdown() async {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        let runtime = EmbeddedConfigurationRuntime(browser: browser)
+        let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser)
+        XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: state.defaultModel))
+        var observations: [[Bool]] = []
+        state.setWebsitePrewarmingObserverForTesting { observations.append([$0, $1]) }
+
+        state.createTask()
+        XCTAssertEqual(observations.last, [false, false], "No unused page may be retained before render-host readiness")
+        state.refreshWebsiteModelsIfNeeded()
+        XCTAssertEqual(observations.last, [false, false], "Readiness with a local model is not a new-draft hint")
+        state.createTask()
+        XCTAssertEqual(observations.last, [false, true])
+        _ = await state.shutdownRuntime()
+        XCTAssertEqual(observations.last, [false, false])
+        state.createTask()
+        XCTAssertEqual(observations.last, [false, false], "A new draft cannot preserve a page after shutdown")
         XCTAssertTrue(browser.tabs.isEmpty)
     }
 

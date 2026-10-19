@@ -686,10 +686,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// A blank root may load before Send; it has no model Session, prompt,
     /// adapter ownership or inference result. Actual Start still establishes
     /// all of those using the unchanged preparation and submission checks.
-    func setChatGPTPrewarmingEnabled(_ enabled: Bool) {
+    func setChatGPTPrewarmingEnabled(_ enabled: Bool, preserveUnusedRoot: Bool = false) {
         chatGPTPrewarmingEnabled = enabled
         synchronizeProviderGate(.chatgpt)
-        browser.setChatGPTInferencePrewarmingEnabled(enabled && providerGates[.chatgpt] == nil) { [weak self] in
+        browser.setChatGPTInferencePrewarmingEnabled(enabled && providerGates[.chatgpt] == nil,
+            preserveUnusedRoot: preserveUnusedRoot && !enabled && providerGates[.chatgpt] == nil) { [weak self] in
             guard let self, self.chatGPTPrewarmingEnabled else { throw CancellationError() }
             self.synchronizeProviderGate(.chatgpt)
             if let gate = self.providerGates[.chatgpt] { throw gate.failure }

@@ -37,8 +37,8 @@ final class AppState {
     @ObservationIgnored private var websiteModelRefreshCurrentIntent: WebsiteModelRefreshIntent?
     #if DEBUG
     @ObservationIgnored private var websiteModelRefreshObserverForTesting: (@MainActor (String, Bool) -> Void)?
-    @ObservationIgnored private var websitePrewarmingObserverForTesting: (@MainActor (Bool) -> Void)?
-    func setWebsitePrewarmingObserverForTesting(_ observer: (@MainActor (Bool) -> Void)?) {
+    @ObservationIgnored private var websitePrewarmingObserverForTesting: (@MainActor (Bool, Bool) -> Void)?
+    func setWebsitePrewarmingObserverForTesting(_ observer: (@MainActor (Bool, Bool) -> Void)?) {
         websitePrewarmingObserverForTesting = observer
     }
     func setWebsiteModelRefreshObserverForTesting(_ observer: (@MainActor (String, Bool) -> Void)?) {
@@ -302,15 +302,17 @@ final class AppState {
     }
 
     /// Start only after the render host is attached and ChatGPT is selected.
-    /// Switching providers or shutting down disposes of the unused blank page.
-    private func updateWebsitePrewarming() {
+    /// Explicit provider changes and shutdown dispose of the unused blank page;
+    /// only a newly created draft may pause it while its model is being chosen.
+    private func updateWebsitePrewarming(preserveUnusedRootOnDeselection: Bool = false) {
         let model = selectedTask?.model ?? defaultModel
         let enabled = websitePrewarmingIsReady && WebsiteModelCatalog.inferenceSelection(for: model)?.provider == "chatgpt"
+        let preserveUnusedRoot = preserveUnusedRootOnDeselection && websitePrewarmingIsReady && !enabled
         #if DEBUG
-        if let observer = websitePrewarmingObserverForTesting { observer(enabled); return }
+        if let observer = websitePrewarmingObserverForTesting { observer(enabled, preserveUnusedRoot); return }
         #endif
         if enabled { websiteTransport().setChatGPTPrewarmingEnabled(true) }
-        else { embeddedModelTransport?.setChatGPTPrewarmingEnabled(false) }
+        else { embeddedModelTransport?.setChatGPTPrewarmingEnabled(false, preserveUnusedRoot: preserveUnusedRoot) }
     }
 
     /// Called after the privileged WebUI is ready and its background render host
@@ -773,7 +775,9 @@ final class AppState {
         )
         tasks.insert(task, at: 0)
         selectedTaskID = task.id
-        updateWebsitePrewarming()
+        // A new draft briefly inherits the user's default model. Pause rather
+        // than discard an unused root while the user chooses this task's model.
+        updateWebsitePrewarming(preserveUnusedRootOnDeselection: true)
         selectedEntryID = nil
         composerText = ""
         reviewGeneration &+= 1

@@ -73,6 +73,21 @@ page/generation/route checks, claim deadlines, fresh model/product/readiness
 proofs and expiration/disable/shutdown cleanup are unchanged. Cold hydration
 remains a real wait. The age diagnostic now covers the full bounded lifetime.
 
+Build 172's second request was a counterexample to expiry as the sole cause:
+only 256 seconds had passed since the preceding refill, but the adopted root
+was again two seconds old. Opening a new draft uses the user's configured
+default model. When that default is local Qwen, the draft transition disabled
+prewarming and discarded the preceding blank page before Instant was selected
+again. The two attempted native samples and direct controls remain retained;
+the third planned pair was not run after this cause was identified.
+
+The follow-up distinguishes that new-draft transition from hard revocation.
+It pauses creation and adoption while preserving only the already existing,
+bounded, unused page. Selecting ChatGPT again resumes the existing validation
+path. Explicit provider changes, discovery refresh, provider blocking, expiry
+and shutdown still discard the unused page. The user's default model is not
+changed, and no transport session, prompt or conversation is preserved.
+
 Compare the same full captured payload, model and turn through Computa and the
 normal built-in browser. Keep failed attempts, first samples and incomplete
 arms explicit. Distinguish native action spans, page performance clocks and
@@ -103,3 +118,9 @@ Build 172 passed 41 focused native tests covering cookie seeding/adoption,
 expiry, cancellation, generation changes, exact readiness and Temporary
 ownership. The build-171 run of 377 adapter cases is carried forward only
 after checking that both the adapter and its test source are byte-identical.
+
+Build 173 passed 62 focused native cases, including the actual new-draft
+prewarm policy, physical-view retention/resume, no creation or adoption while
+paused, cookie changes, in-flight seeding/claims, expiry and hard revocation.
+Default-model persistence and active-turn model guards also passed. The
+adapter and adapter-test bytes remain unchanged from the 377-case run.
