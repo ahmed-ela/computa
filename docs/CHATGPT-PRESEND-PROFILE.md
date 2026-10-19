@@ -231,74 +231,55 @@ The retained content-free evidence hashes are:
 - All-six-attempt matched report, including D3 exclusion: `3699c7031e50e9732665cf7702533eb26263f131a44b21b0da04a598089ecbfb`.
 - V79 workflow report: `550e3e51948c44b516e6d8eb8656f7d8bc06640ba7af7a4c1ecf0babcbfca6e0`.
 
-## After-Send follow-up
+## ChatGPT after-send profiling — 2026-10-19
 
-The eligible build-174 pairs place 3.229 seconds of their 3.536-second page
-candidate gap before first DOM response text. Native detection adds only
-approximately 52–196 ms after the page candidate; it cannot explain that
-earlier gap. Separate resource diagnostics place C1/C3 DOM text approximately
-1.186/1.702 seconds after an ended conversation resource. These are untrusted
-page observations with adjacent but different Send marks, not proof of stream
-decoding, first-byte or rendering causality. C2 has no retained conversation
-entry and remains inconclusive.
+Completion now uses one fresh full answer/model proof after the owned response has stayed quiet, removing the immediately preceding deferred read. The 1.6-second stability interval, exact answer/body checks, model and normal-Chat/temporary-mode verification, route/generation guards, cancellation and cleanup checks remain in place. Passive resource timing adds finite request/response offsets without recording URLs, request bodies or response text.
 
-One mismatch in the earlier comparison is being tested explicitly: native
-ownership verification expands the clipped 51 KB user body during generation,
-while direct controls expanded it after completion. The experiment keeps the
-same full captured payload, model and passive observer in both conditions,
-with prespecified late/early/early/late order. It records finite page clocks,
-visibility and resource timings. It grants no native ownership authority.
+The consistent native phase boundary, last quiet-wait wake to full-proof start, fell from **83.667ms** in build 174 to **0.667ms** in 175 and **0.333ms** in 176 recovery run 2. This measures about **83ms removed from that inclusive phase**, including queue/native work; it is not exclusive JavaScript CPU time. Across all three native requests per cohort, first candidate to transport completion averaged **1.927s → 1.987s → 1.996s**. Actual response changes that restarted stability checks remain included. These samples do not establish an overall completion-tail speedup. The `quietDeadlineReady` marker changed placement, so its absolute position is not a valid before/after comparison.
 
-The production follow-up removes a separate deferred inspection immediately
-before the already-required full completion inspection. A strictly bounded,
-call-local candidate body/count precheck keeps the picker closed when text,
-busy state or footer changes. Only the same candidate with a new full positive
-model/product/body/ownership proof can complete. Changed candidates return to
-the existing pending path and rearm the unchanged 1.6-second quiet interval.
-No positive proof survives into a later poll, and deadlines remain unchanged.
+Each matched comparison used normal ChatGPT latest/Instant in a fresh temporary chat, the same captured **51,657-byte** whole payload within its pair, unchanged Probe5/Direct4 bindings, explicit model/mode verification and owned-tab closure. All three native requests preceded all three direct controls.
 
-The completed build-174 direct-profile crossover observed first text at
-3.603/3.522/3.443/4.369 seconds (late/early/early/late). Both early runs expanded
-once before first text, without scrolling; both late runs expanded once through
-the normal UI after the candidate. Full payload, normal Chat/Instant/temporary
-mode and owned-tab cleanup were verified in every run. This small experiment
-does not reproduce a multi-second penalty from early expansion; it is not a
-provider qualification or proof of rendering causality. One diagnostic install
-syntax error and one first-load readiness observation were retained before any
-Send and repaired in their same unsent tabs; no provider request was replayed.
+| Cohort | Eligible pairs | Native Send→first text | Direct Send→first text | Mean native minus direct |
+| --- | ---: | ---: | ---: | ---: |
+|175|2/3|5.946s|3.656s|+2.290s|
+|176 recovery run 2|2/3|4.508s|4.077s|+0.431s|
 
-The build-175 source passed 77 focused behavior tests, three resource-timing
-tests and 382 adapter tests. The final source review found no material blockers.
-Its passive Resource Timing v2 records nullable request/header/end offsets from
-the existing owned Send mark, preserving the v1 parser, finite allowlist, four
-rows, 256-entry scan and 2 KiB limit. It neither intercepts fetch nor records URLs,
-request bodies or cookies. Missing entries remain inconclusive. Installed
-build-175 measurements and fresh tool workflows are still required.
+175 D3 and 176 recovery D2 remain excluded by the strict response fence. The two eligible 176 differences were **+1.132s and −0.270s**. All attempts and exclusions are retained. Provider/session/time/order variation and output representation differences remain confounds; the lower observed gap is not proof that a particular browser setting caused an improvement.
 
+The eligible request-start→response-start difference averaged **+1.303s** in 175 and **+0.186s** in 176 recovery. Approximate resource-end→first-text differences averaged **+0.942s** and **+0.466s**. Resource-internal intervals use each request's performance clock; resource-to-text residuals use distinct adjacent native/probe marks and the direct page-wall/performance reconstruction. They do not isolate decoding, rendering or pure application overhead. Missing entries remain unknown; no first decoded event was captured.
 
-The installed build-175 native samples reduced the comparable last-wake to
-full-proof-start gap from 83.667 ms to 0.667 ms. This includes queue/processing
-time, not an exclusive JavaScript CPU measurement. Candidate-to-transport
-completion averaged 1.927 seconds before and 1.987 seconds after; the new first
-sample changed its response and correctly restarted stability. Overall tail
-improvement is not established. The current three page candidates averaged
-5.992 seconds after Send. Both pre-header wait and post-resource DOM delay
-remain, and native window occlusion was not previously logged.
+The model-view-only public `inactiveSchedulingPolicy = .none` experiment has **no established causal benefit**. All sampled 176 native views were attached, visible and unoccluded; native `document.hasFocus()` was not measured. A separate one-send direct focus diagnostic retained focus despite the attempted Task-prompt click. Its footer appeared empty at 3215ms and real text at 3310ms, with `hasFocus=true` throughout the recorded stages. The focus manipulation was not achieved, so the planned second control was not run and no focus comparison is valid.
 
-A separate build-176 experiment applies the public
-[`WKPreferences.inactiveSchedulingPolicy`](https://developer.apple.com/documentation/webkit/wkpreferences/inactiveschedulingpolicy-swift.property)
-`.none` policy only to model-owned configurations before construction. Human
-and tool tabs retain their platform defaults. WebKit's
-[implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKPreferences.mm#L169-L194)
-changes background process assertions; its
-[macOS visibility checks](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/mac/PageClientImplMac.mm#L196-L246)
-include whole-window occlusion, rather than opaque-sibling pixel coverage.
-This is an unproven scheduling hypothesis; it does not disable every WebCore
-timer policy. Three bounded native lifecycle snapshots per inference round
-will expose attachment, hidden state, window visibility and occlusion without
-recording page content or authorizing any action. Fresh installed measurements
-are required before attributing a latency change to this policy.
+The original 176 cohort stopped when the local **256-task receipt capacity** prevented evidence persistence. C2's website response was withheld, and its cleanup receipt could not initially be saved. Reversible archival of old owned benchmark receipts and a persist-only cleanup retry restored headroom; this was an operational recovery, **not a source-level capacity fix**. Its failed attempts remain separate from fresh 176 recovery measurements.
 
-The scheduling candidate passed eleven focused configuration, diagnostic and
-completion-verification tests. Adapter bytes are unchanged from the 382-test
-build-175 result; installed scheduling measurements remain pending.
+The earlier late/early/early/late clipped-user expansion crossover observed first text at 3.603/3.522/3.443/4.369 seconds. Both early expansions occurred before first text without scrolling. All four exact-payload/model/temporary/cleanup checks passed, but response representations varied. This did not reproduce a multi-second early-expansion penalty and cannot establish rendering causality. Its unsent install/readiness errors remain retained.
+
+The model-only scheduling policy uses Apple's public [inactiveSchedulingPolicy](https://developer.apple.com/documentation/webkit/wkpreferences/inactiveschedulingpolicy-swift.property). WebKit's [implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKPreferences.mm#L169-L194) changes background process assertions. Its [macOS visibility checks](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/mac/PageClientImplMac.mm#L196-L246) include whole-window occlusion; the setting does not disable every timer policy. Human/tool views retain platform defaults. Three finite content-free native lifecycle observations per round log attachment, visibility and occlusion; they grant no page authority.
+
+Build 175 passed 77 focused native behavior cases, three resource-timing cases and 382 adapter tests. Build 176 reran eleven targeted configuration, diagnostic and completion tests. Adapter/test bytes remained unchanged from the 382-pass execution. These are separate scoped runs, not an all-suite claim. Signed Computa 0.7.0 (176), executable source `1acbd9cb7544aeeba289bfd13634fb80d3c97710`, passed independent build/signature/install checks for all 55 bundle files and 51 resources, with the engine preserved and Gemini diagnostics off.
+
+The extra diagnostic tab was closed and Safari's temporary developer setting was restored to off. This is a local signed test installation, with no release tag, notarization or publication. Gemini and Claude live work remains halted.
+
+Two fresh V81 tool workflows produced mixed results. The first visibly completed the code repair, four tests, helper output and exact browser receipt, and issued its own `browser_close`. The second successfully edited the file, ran commands and submitted the accepted browser lookup, but its next website inference timed out at the existing five-minute deadline. App cleanup closed its task-created browser tab; that is not a model-issued close or a verified final answer. Both owned website sessions closed.
+
+Independent CLI verification passed all eight tests, both helper outputs and both allowed-file/protected-note checks. The prescribed one-shot workflow extractor returned a generic failure and produced no grading input. It was not retried or relaxed; the twelve-check grader was not run. The first observed completion and the second failed workflow are not promoted to two qualified passes. The loopback server was stopped/reaped, its PID was absent and its port refused connections.
+
+Separate finite stall/terminal captures show the failed inference was submitted with 71,135 UTF-8 bytes but had no first-positive observation. The cached last admitted inspection retained one verified user, an assistant scope with zero text, no active generation and no recognized notice; its age was not recorded. The bounded fresh failure diagnostic also ran and found a visible assistant, no Stop/Retry control and no alert. It did not measure assistant text length. This occurred before the completion consolidation path could run. An upstream empty response versus a recognition/scoping issue remains unresolved. No provider replay was performed. Overall website reliability remains unresolved; the safe phase optimization and completed benchmark do not establish a general tool-workflow reliability guarantee.
+
+### Retained evidence
+
+Paths below are relative to the off-repo `instant-aftersend-20261019-v1` evidence folder.
+
+| Artifact | SHA256 |
+| --- | --- |
+|`optimized175-matched-block-report1.json`|`4ad9412b4bc2fe21f22b22abb70066263bc13700d6cd0eb825572d08d58d4fb5`|
+|`optimized175-after-send-decomposition3.json`|`b0650c994ad2d957f5e461830eb7d468a9163e287de3bad612cb1c2da838abe3`|
+|`optimized176r2-matched-block-report2.json`|`d30fbbd8144d192f4e32bd81821d7fbefdabb5267296b5f36e690ed40dac3d22`|
+|`optimized176r2-after-send-decomposition4.json`|`2dbf9e3808664f46cba1201a9be220f2078d3054e423dc569da54f41885cdfb1`|
+|`direct-focus-diagnostic-outcome1.json`|`6d91ccbc5facffb5bf8aa7aa6dd5eddfc70f81f8674e8bbd1cc5353675c38360`|
+|`optimized176r2-d1-focusblur1-focus-result1.json`|`348793ea17d2e367ae7215e01cadc7ef2d0de24aed01b81b2b876d3c10bc0618`|
+|`safari-restored-final176-1.json`|`83f37b88b45e94b58cb8641ad492874325a080f92134205771fde718d637983c`|
+|`optimized176-fixtures-observed-outcomes1.json`|`a921796aa37af6a51d2bea1a6e5aaeece509beacec8761c411d46d026db6b658`|
+|`candidate176-run/fixture-extractor-execution1.json`|`6f366a245429c85b8701c324b91ea6b1185d3af1ed6c7e53d0195c70e5b83799`|
+|`candidate176-run/fixture2-terminal-native-log1.json`|`7b15f2a19e5cea284d3c74be87a83f1efa3c8dd440444c4be3cb960cde7ea1de`|
+|`candidate176-run/fixture2-failure-classification2.json`|`947d41d83b586b63455d623d74d276079244ce5895da41c18f7680d9dce86cae`|
