@@ -308,6 +308,31 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
             guard value.isFinite, (0...600_000).contains(value) else { throw CocoaError(.fileReadCorruptFile) }
             return value
         }
+        func measuredSave(_ store: WebsiteSessionCleanupStore, _ receipt: WebsiteSessionCleanupReceipt)
+            throws -> (saved: Bool, elapsedMs: Double, scopes: [[Any]]) {
+            typealias Scope = WebsiteSessionCleanupStore.SaveTimingScope
+            var metrics = Dictionary(uniqueKeysWithValues: Scope.allCases.map {
+                ($0, (count: 0, total: 0.0, maximum: 0.0, firstCalls: [Double]()))
+            })
+            var measurementError: Error?
+            let began = ContinuousClock.now
+            let saved = store.save(receipt, timing: { scope, duration in
+                do {
+                    let ms = try milliseconds(duration)
+                    var value = metrics[scope]!
+                    value.count += 1; value.total += ms; value.maximum = max(value.maximum, ms)
+                    if value.firstCalls.count < 2 { value.firstCalls.append(ms) }
+                    metrics[scope] = value
+                } catch { measurementError = error }
+            })
+            let elapsed = try milliseconds(.now - began)
+            if let measurementError { throw measurementError }
+            let scopes = Scope.allCases.map { scope -> [Any] in
+                let value = metrics[scope]!
+                return [value.count, value.total, value.maximum, value.firstCalls]
+            }
+            return (saved, elapsed, scopes)
+        }
         var samples: [[String: Any]] = [], cases: [[String: Any]] = []
         for seededFiles in [100, 200] {
             let root = try directory(), store = WebsiteSessionCleanupStore(directory: root)
@@ -334,26 +359,26 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
             }
             var fresh: [WebsiteSessionCleanupReceipt] = []
             for index in 0..<5 {
-                let row = try syntheticReceipt(seededFiles + index + 1), began = ContinuousClock.now
-                let saved = store.save(row), elapsed = try milliseconds(.now - began)
+                let row = try syntheticReceipt(seededFiles + index + 1)
+                let measurement = try measuredSave(store, row), saved = measurement.saved, elapsed = measurement.elapsedMs
                 guard saved else { XCTFail("A synthetic fresh save was rejected"); throw CocoaError(.fileWriteUnknown) }
                 XCTAssertEqual(try store.transactionRecords(for: row.taskID, turnID: row.turnID!), [row])
                 XCTAssertEqual(try Data(contentsOf: transaction(root, row)), try line(row))
                 XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(row.taskID + ".jsonl")), try line(row))
                 samples.append(["seededJournalFiles": seededFiles, "journalFilesBefore": seededFiles + index,
-                    "sample": index + 1, "operation": "fresh_save", "elapsedMs": elapsed, "saved": true])
+                    "sample": index + 1, "operation": "fresh_save", "elapsedMs": elapsed, "saved": true, "scopeTimings": measurement.scopes])
                 fresh.append(row)
             }
             for (index, row) in fresh.enumerated() {
                 let journal = transaction(root, row), summary = root.appendingPathComponent(row.taskID + ".jsonl")
                 let oldJournal = try Data(contentsOf: journal), oldSummary = try Data(contentsOf: summary)
-                let began = ContinuousClock.now, saved = store.save(row), elapsed = try milliseconds(.now - began)
+                let measurement = try measuredSave(store, row), saved = measurement.saved, elapsed = measurement.elapsedMs
                 guard saved else { XCTFail("An exact synthetic persistence retry was rejected"); throw CocoaError(.fileWriteUnknown) }
                 XCTAssertEqual(try Data(contentsOf: journal), oldJournal)
                 XCTAssertEqual(try Data(contentsOf: summary), oldSummary)
                 XCTAssertEqual(try store.transactionRecords(for: row.taskID, turnID: row.turnID!), [row])
                 samples.append(["seededJournalFiles": seededFiles, "journalFilesBefore": seededFiles + 5,
-                    "sample": index + 1, "operation": "idempotent_retry", "elapsedMs": elapsed, "saved": true])
+                    "sample": index + 1, "operation": "idempotent_retry", "elapsedMs": elapsed, "saved": true, "scopeTimings": measurement.scopes])
             }
             let first = try XCTUnwrap(seeds.first)
             for (index, field) in ["inferenceID", "sessionToken"].enumerated() {
@@ -373,7 +398,13 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
             "fixtureVersion": 1, "label": label, "cases": cases, "samples": samples,
             "timingBoundary": "only_real_WebsiteSessionCleanupStore_save_including_existing_validation_and_durable_writes",
             "seeding": "deterministic_synthetic_native_journal_and_summary_bytes_written_before_timing_and_read_back_via_store",
-            "performanceThresholdApplied": false]
+            "performanceThresholdApplied": false,
+            "scopeTimingContract": ["fixedScopes": WebsiteSessionCleanupStore.SaveTimingScope.allCases.map(\.rawValue),
+                "clock": "ContinuousClock synchronous wall time, not CPU", "firstCallsRetainedPerScope": 2,
+                "scopeRow": ["calls", "totalMs", "maximumMs", "firstCallsMs"],
+                "freshWriteOrder": "journal then summary; atomicWrite/synchronize/readback first two calls follow that order",
+                "scopeCoverage": "leaf timings do not include every guard, encoding, directory preparation or sink overhead",
+                "ordinaryProductionSink": "nil; no clock sampling or callbacks"]]
         let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .prettyPrinted])
         guard data.count <= 32_768 else { throw CocoaError(.fileWriteOutOfSpace) }
         let descriptor = open(outputPath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -388,6 +419,72 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
             }
         }
         guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    func testOptionalSaveTimingsPreserveBytesSyncRetriesAndCorruptionRejection() throws {
+        let plainRoot = try directory(), timedRoot = try directory(), scope = Scope(), row = receipt(scope)
+        let plain = WebsiteSessionCleanupStore(directory: plainRoot), timed = WebsiteSessionCleanupStore(directory: timedRoot)
+        typealias Stage = WebsiteSessionCleanupStore.SaveTimingScope
+        var stages: [Stage: [Duration]] = [:]
+        let sink: WebsiteSessionCleanupStore.SaveTimingSink = { stage, elapsed in
+            stages[stage, default: []].append(elapsed)
+        }
+        XCTAssertTrue(plain.save(row)); XCTAssertTrue(timed.save(row, timing: sink))
+        XCTAssertEqual(stages[.inventory]?.count, 1); XCTAssertEqual(stages[.records]?.count, 2)
+        for stage in [Stage.atomicWrite, .synchronize, .readback] { XCTAssertEqual(stages[stage]?.count, 2) }
+        XCTAssertTrue(stages.values.flatMap { $0 }.allSatisfy { $0 >= .zero })
+        let journal = journalFile(timedRoot, scope), summary = timedRoot.appendingPathComponent(scope.task + ".jsonl")
+        let journalBytes = try Data(contentsOf: journal), summaryBytes = try Data(contentsOf: summary)
+        XCTAssertEqual(journalBytes, try Data(contentsOf: journalFile(plainRoot, scope)))
+        XCTAssertEqual(summaryBytes, try Data(contentsOf: plainRoot.appendingPathComponent(scope.task + ".jsonl")))
+        XCTAssertEqual(timed.latest(), plain.latest())
+        stages.removeAll()
+        XCTAssertTrue(timed.save(row, timing: sink))
+        XCTAssertEqual(stages[.synchronize]?.count, 2); XCTAssertNil(stages[.atomicWrite]); XCTAssertNil(stages[.readback])
+        XCTAssertEqual(try Data(contentsOf: journal), journalBytes); XCTAssertEqual(try Data(contentsOf: summary), summaryBytes)
+        try Data("corrupt\n".utf8).write(to: journal, options: .atomic)
+        let next = Scope()
+        XCTAssertFalse(timed.save(receipt(next), timing: sink), "Profiling cannot bypass current historical validation")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journalFile(timedRoot, next).path))
+        XCTAssertEqual(try Data(contentsOf: summary), summaryBytes)
+    }
+
+    func testFreshMetadataDistinguishesMissingEmptyDirectoryAndDanglingJournal() throws {
+        let root = try directory(), scope = Scope(), store = WebsiteSessionCleanupStore(directory: root)
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [])
+        let file = journalFile(root, scope)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: file)
+        XCTAssertThrowsError(try store.transactionRecords(for: scope.task, turnID: scope.turn))
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try store.transactionRecords(for: scope.task, turnID: scope.turn))
+        XCTAssertFalse(store.save(receipt(Scope())), "A journal-shaped directory is not a regular historical file")
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createSymbolicLink(at: file, withDestinationURL: root.appendingPathComponent("missing"))
+        XCTAssertThrowsError(try store.transactionRecords(for: scope.task, turnID: scope.turn))
+        XCTAssertFalse(store.save(receipt(Scope())), "A dangling symlink is not an absent journal")
+        try FileManager.default.removeItem(at: file)
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [])
+        let row = receipt(scope)
+        XCTAssertTrue(store.save(row)); XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [row])
+    }
+
+    func testFreshMetadataRejectsTaskSymlinkAndRegularFileWithoutReusingEarlierType() throws {
+        let root = try directory(), scope = Scope(), next = Scope(), store = WebsiteSessionCleanupStore(directory: root)
+        let row = receipt(scope)
+        XCTAssertTrue(store.save(row))
+        let task = journalFile(root, scope).deletingLastPathComponent(), held = root.appendingPathComponent("held-task")
+        try FileManager.default.moveItem(at: task, to: held)
+        try FileManager.default.createSymbolicLink(at: task, withDestinationURL: held)
+        XCTAssertFalse(store.save(receipt(next)), "Even an intact target cannot authorize a symlinked task")
+        try FileManager.default.removeItem(at: task)
+        try Data("not a directory".utf8).write(to: task)
+        XCTAssertFalse(store.save(receipt(next)), "A valid earlier directory read cannot authorize a changed regular file")
+        try FileManager.default.removeItem(at: task)
+        try FileManager.default.moveItem(at: held, to: task)
+        XCTAssertTrue(store.save(receipt(next)))
+        XCTAssertEqual(try store.transactionRecords(for: scope.task, turnID: scope.turn), [row])
     }
 
     func testHistoricalValidationRereadsChangedJournalOnEverySave() throws {

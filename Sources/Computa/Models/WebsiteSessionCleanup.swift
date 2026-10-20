@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// A cleanup observation, never a model response or evidence of a past deletion.
@@ -119,6 +120,9 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
 /// The owning server serializes writes and retries an identical receipt after a
 /// storage failure, without performing physical website cleanup a second time.
 struct WebsiteSessionCleanupStore: Sendable {
+    // Optional synchronous microbenchmark sink; production callers leave it nil.
+    enum SaveTimingScope: String, CaseIterable, Hashable { case inventory, records, atomicWrite, synchronize, readback }
+    typealias SaveTimingSink = (SaveTimingScope, Duration) -> Void
     struct Limits: Sendable {
         var recordBytes = 2_048
         var summaryRecords = 64
@@ -143,16 +147,16 @@ struct WebsiteSessionCleanupStore: Sendable {
     private var transactionsDirectory: URL { directory.appendingPathComponent("transactions", isDirectory: true) }
     private var archiveDirectory: URL { directory.appendingPathComponent("legacy-archive", isDirectory: true) }
 
-    func save(_ receipt: WebsiteSessionCleanupReceipt) -> Bool {
+    func save(_ receipt: WebsiteSessionCleanupReceipt, timing: SaveTimingSink? = nil) -> Bool {
         guard receipt.isValid, receipt.receiptSaved else { return false }
-        if receipt.isJournalLinked, !saveInferenceObservation(receipt) { return false }
+        if receipt.isJournalLinked, !saveInferenceObservation(receipt, timing: timing) { return false }
         let file = summaryFile(receipt.taskID)
         do {
             try prepareDirectory(directory)
-            let existing = try records(file, taskID: receipt.taskID, maximumRecords: limits.summaryRecords, maximumBytes: limits.summaryBytes)
+            let existing = try records(file, taskID: receipt.taskID, maximumRecords: limits.summaryRecords, maximumBytes: limits.summaryBytes, timing: timing)
             if let saved = existing.first(where: { $0.attemptID == receipt.attemptID }) {
                 guard saved == receipt else { return false }
-                try synchronize(file); return true
+                try synchronize(file, timing: timing); return true
             }
             if existing.isEmpty {
                 if try summaryFiles().count >= limits.summaryTasks {
@@ -180,7 +184,7 @@ struct WebsiteSessionCleanupStore: Sendable {
                           try transactionRecords(for: row.taskID, turnID: turnID).contains(row) else { return false }
                 } else if !saveArchivedLegacy(row) { return false }
             }
-            try write(data, to: file)
+            try write(data, to: file, timing: timing)
             return true
         } catch { return false }
     }
@@ -192,7 +196,7 @@ struct WebsiteSessionCleanupStore: Sendable {
         return saveInferenceObservation(receipt)
     }
 
-    private func saveInferenceObservation(_ receipt: WebsiteSessionCleanupReceipt) -> Bool {
+    private func saveInferenceObservation(_ receipt: WebsiteSessionCleanupReceipt, timing: SaveTimingSink? = nil) -> Bool {
         let validation = WebsiteSessionCleanupReceipt.ValidationContext()
         guard receipt.isValid(using: validation), receipt.receiptSaved, receipt.isJournalLinked,
               let turnID = receipt.turnID else { return false }
@@ -200,17 +204,17 @@ struct WebsiteSessionCleanupStore: Sendable {
         let file = taskDirectory.appendingPathComponent(turnID + ".jsonl")
         do {
             try prepareDirectory(directory); try prepareDirectory(transactionsDirectory)
-            let inventory = try transactionInventory()
+            let inventory = try transactionInventory(timing: timing)
             let taskExists = inventory.tasks.contains(receipt.taskID)
             guard taskExists || inventory.tasks.count < limits.transactionTasks else { return false }
             let taskFiles = inventory.files.filter { $0.deletingLastPathComponent().lastPathComponent == receipt.taskID }
             let fileExists = taskFiles.contains(file)
             guard fileExists || (taskFiles.count < limits.transactionTurnsPerTask && inventory.files.count < limits.transactionFiles) else { return false }
             try prepareDirectory(taskDirectory)
-            let existing = try transactionRecords(for: receipt.taskID, turnID: turnID, validation: validation)
+            let existing = try transactionRecords(for: receipt.taskID, turnID: turnID, validation: validation, timing: timing)
             if let saved = existing.first(where: { $0.attemptID == receipt.attemptID }) {
                 guard saved == receipt else { return false }
-                try synchronize(file); return true
+                try synchronize(file, timing: timing); return true
             }
             if let first = existing.first {
                 guard first.threadID == receipt.threadID, first.runtimeGeneration == receipt.runtimeGeneration else { return false }
@@ -221,7 +225,7 @@ struct WebsiteSessionCleanupStore: Sendable {
                 let rows = try records(otherFile, taskID: otherFile.deletingLastPathComponent().lastPathComponent,
                     turnID: otherFile.deletingPathExtension().lastPathComponent,
                     maximumRecords: limits.transactionRecords, maximumBytes: limits.transactionBytes,
-                    requireTransactions: true, validation: validation)
+                    requireTransactions: true, validation: validation, timing: timing)
                 for row in rows {
                     if row.attemptID == receipt.attemptID { return false }
                     let sharesToken = receipt.sessionToken != nil && row.sessionToken == receipt.sessionToken
@@ -237,7 +241,7 @@ struct WebsiteSessionCleanupStore: Sendable {
             let data = try encoded(existing + [receipt])
             guard data.count <= limits.transactionBytes,
                   inventory.bytes - (try fileSize(file)) + data.count <= limits.transactionDirectoryBytes else { return false }
-            try write(data, to: file)
+            try write(data, to: file, timing: timing)
             return true
         } catch { return false }
     }
@@ -247,14 +251,14 @@ struct WebsiteSessionCleanupStore: Sendable {
     }
 
     private func transactionRecords(for taskID: String, turnID: String,
-                                    validation: WebsiteSessionCleanupReceipt.ValidationContext) throws -> [WebsiteSessionCleanupReceipt] {
+                                    validation: WebsiteSessionCleanupReceipt.ValidationContext, timing: SaveTimingSink? = nil) throws -> [WebsiteSessionCleanupReceipt] {
         guard WebsiteSessionCleanupReceipt.canonicalUUID(taskID), WebsiteSessionCleanupReceipt.canonicalUUID(turnID) else { throw corrupt() }
         guard !isLink(directory), !isLink(transactionsDirectory) else { throw corrupt() }
         let taskDirectory = transactionsDirectory.appendingPathComponent(taskID, isDirectory: true)
         guard !isLink(taskDirectory) else { throw corrupt() }
         return try records(taskDirectory.appendingPathComponent(turnID + ".jsonl"), taskID: taskID, turnID: turnID,
             maximumRecords: limits.transactionRecords, maximumBytes: limits.transactionBytes,
-            requireTransactions: true, validation: validation)
+            requireTransactions: true, validation: validation, timing: timing)
     }
 
     func archivedLegacyRecords(for taskID: String) throws -> [WebsiteSessionCleanupReceipt] {
@@ -335,15 +339,18 @@ struct WebsiteSessionCleanupStore: Sendable {
         }
     }
 
-    private func transactionInventory() throws -> (tasks: Set<String>, files: [URL], bytes: Int) {
+    private func transactionInventory(timing: SaveTimingSink? = nil) throws -> (tasks: Set<String>, files: [URL], bytes: Int) {
+        let began = timing.map { _ in ContinuousClock.now }
+        defer { if let began { timing?(.inventory, .now - began) } }
         guard !isLink(directory), !isLink(transactionsDirectory) else { throw corrupt() }
         if !FileManager.default.fileExists(atPath: transactionsDirectory.path) { return ([], [], 0) }
         let tasks = try FileManager.default.contentsOfDirectory(at: transactionsDirectory, includingPropertiesForKeys: nil)
         guard tasks.count <= limits.transactionTasks else { throw corrupt() }
         var files: [URL] = [], bytes = 0, taskIDs = Set<String>()
         for task in tasks {
-            guard WebsiteSessionCleanupReceipt.canonicalUUID(task.lastPathComponent), !isLink(task),
-                  (try task.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true else { throw corrupt() }
+            let attributes = try fileStat(task)
+            guard WebsiteSessionCleanupReceipt.canonicalUUID(task.lastPathComponent),
+                  let attributes, attributes.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { throw corrupt() }
             taskIDs.insert(task.lastPathComponent)
             let turns = try FileManager.default.contentsOfDirectory(at: task, includingPropertiesForKeys: nil)
             guard turns.count <= limits.transactionTurnsPerTask else { throw corrupt() }
@@ -371,19 +378,39 @@ struct WebsiteSessionCleanupStore: Sendable {
     }
 
     private func fileSize(_ file: URL) throws -> Int {
-        guard !isLink(file) else { throw corrupt() }
-        if !FileManager.default.fileExists(atPath: file.path) { return 0 }
-        let attributes = try file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-        guard attributes.isRegularFile == true, let size = attributes.fileSize else { throw corrupt() }
+        try regularFileSize(file) ?? 0
+    }
+
+    /// One fresh metadata read: only a missing path is absent. Symlinks,
+    /// nonregular files and other read errors cannot become empty journals.
+    private func regularFileSize(_ file: URL) throws -> Int? {
+        guard let attributes = try fileStat(file) else { return nil }
+        guard attributes.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              let size = Int(exactly: attributes.st_size), size >= 0 else { throw corrupt() }
         return size
+    }
+
+    private func fileStat(_ url: URL) throws -> stat? {
+        try url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { throw corrupt() }
+            var attributes = stat()
+            guard Darwin.lstat(path, &attributes) == 0 else {
+                let code = errno
+                if code == ENOENT { return nil }
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
+            return attributes
+        }
     }
 
     private func records(_ file: URL, taskID: String, turnID: String? = nil,
                          maximumRecords: Int, maximumBytes: Int, requireTransactions: Bool = false,
-                         validation suppliedValidation: WebsiteSessionCleanupReceipt.ValidationContext? = nil) throws -> [WebsiteSessionCleanupReceipt] {
-        guard !isLink(file) else { throw corrupt() }
-        if !FileManager.default.fileExists(atPath: file.path) { return [] }
-        guard try fileSize(file) <= maximumBytes else { throw corrupt() }
+                         validation suppliedValidation: WebsiteSessionCleanupReceipt.ValidationContext? = nil,
+                         timing: SaveTimingSink? = nil) throws -> [WebsiteSessionCleanupReceipt] {
+        let began = timing.map { _ in ContinuousClock.now }
+        defer { if let began { timing?(.records, .now - began) } }
+        guard let size = try regularFileSize(file) else { return [] }
+        guard size <= maximumBytes else { throw corrupt() }
         let data = try Data(contentsOf: file)
         guard !data.isEmpty, data.count <= maximumBytes, data.last == 0x0A else { throw corrupt() }
         let lines = data.dropLast().split(separator: 0x0A, omittingEmptySubsequences: false)
@@ -432,14 +459,22 @@ struct WebsiteSessionCleanupStore: Sendable {
         return data
     }
 
-    private func write(_ data: Data, to file: URL) throws {
+    private func write(_ data: Data, to file: URL, timing: SaveTimingSink? = nil) throws {
         guard !isLink(file) else { throw corrupt() }
-        try data.write(to: file, options: .atomic)
-        try synchronize(file)
+        do {
+            let began = timing.map { _ in ContinuousClock.now }
+            defer { if let began { timing?(.atomicWrite, .now - began) } }
+            try data.write(to: file, options: .atomic)
+        }
+        try synchronize(file, timing: timing)
+        let began = timing.map { _ in ContinuousClock.now }
+        defer { if let began { timing?(.readback, .now - began) } }
         guard try Data(contentsOf: file) == data else { throw corrupt() }
     }
 
-    private func synchronize(_ file: URL) throws {
+    private func synchronize(_ file: URL, timing: SaveTimingSink? = nil) throws {
+        let began = timing.map { _ in ContinuousClock.now }
+        defer { if let began { timing?(.synchronize, .now - began) } }
         guard !isLink(file), try fileSize(file) > 0 else { throw corrupt() }
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         let handle = try FileHandle(forWritingTo: file)

@@ -452,3 +452,25 @@ Both fresh V85 code/terminal/browser workflows passed all twelve original checks
 - Auxiliary reconstruction: `bf4f94bcb8b046f0f672b8e86aa4fe38238444122eb4f23b1dac15928390137c`.
 - V85 workflow report: `8cc79ae0dd7ab188dc4446b6120810ad821a2eb67c4f1c8b8b8572087a090fb1`.
 - Independent R1/R2: `d57fdc62c337a59eae2c49205b3cf27d2353cdd474d8aca721201ea78f85af60`, `3df4d0d7129fc282032a70f175f96a8e41dd42f0f67e8eb363eb673711a99fd6`.
+
+## Build-183 cleanup metadata optimization
+
+The save microbenchmark now has an optional synchronous timing sink for five fixed scopes: inventory, record reads/validation, atomic writes, synchronization and readback. Production leaves it nil. The existing synthetic fixture still verifies exact persisted bytes, repeated saves, causal collision rejection and fresh corruption detection; timings do not decide functional success.
+
+With 200 seeded journals, the original fresh save averaged 49.283ms: inventory took 18.300ms and record reads/validation 26.376ms. Both atomic writes, synchronizations and readbacks together cost less than 1ms. Omitting the UI summary would therefore remove little of the measured cost and was not implemented.
+
+Metadata reads previously repeated `attributesOfItem`, existence and URL resource queries. The candidate performs one fresh `lstat` per path check, preserving regular-file/directory and nonnegative-size requirements. Only `ENOENT` means absent; symlinks, other file types and other errors fail closed. Every save still rereads historical bytes and executes both existing parsers and all identity, collision, capacity, durable-write and readback checks. No result is cached across calls.
+
+| Synthetic store | Original fresh save | Foundation consolidation | Final lstat candidate |
+| --- | --- | --- | --- |
+| 100 seeded journals | 25.497ms | 22.803ms | 16.881ms |
+| 200 seeded journals | 49.283ms | 42.494ms | 30.752ms |
+
+Each mean uses five fresh saves at the stated starting size. At 200 journals, inventory fell to 8.566ms and record reads/validation to 17.427ms; exact-retry saves fell from 19.884 to 10.608ms. The 37.6% fresh-save reduction is a sequential synthetic measurement, not a demonstrated end-to-end improvement or direct attribution of the live 176–318ms phase. The final benchmark passed, and the store suite executed 30 tests with one opt-in benchmark skip and zero failures. Regressions cover missing versus empty/corrupt files, directories, dangling links and changed task-directory types. Installed validation and a new matched block remain pending.
+
+- Final store source: `605a805bb102572b3e86ce9c05387a6aee791f95b5d88138fdbcc656aa5e0610`.
+- Original scope report: `b288d6aa9bdc37f761dc1ab3c0bb5de03c10a3798c2cb1e7c59ae5f47e5e3f14`.
+- Final scope report: `d4852b56c37fafea1db196fa62da3b7200a94ada6c5b068d3fd5a93b630c7b7c`.
+- Final store test log: `dcbb0b8bfe4a42b8104b1b0f996e82daafb3f342977cf09c23f0f37746671aaa`.
+
+An additional direct focus experiment stopped during CUA setup before Temporary selection, payload insertion or Send when the tool timed out and reset. Its unsent tab was closed and Safari's developer setting restored off. It provides no focus or latency evidence; the original three-pair report remains unchanged.
