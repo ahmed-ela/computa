@@ -99,6 +99,20 @@ struct ComputaApp: App {
                 .keyboardShortcut(",", modifiers: .command)
                 .disabled(launchMode == .testHost || state.approvalGateBlocksInteraction)
             }
+            #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+            CommandMenu("Model Diagnostics") {
+                Toggle("Focus Next Armed Model Turn", isOn: Binding(
+                    get: { state.browserSession.modelNativeFocusDiagnosticRequested },
+                    set: { state.browserSession.setModelNativeFocusDiagnosticRequested($0) }
+                ))
+                .disabled(launchMode == .testHost || state.browserSession.modelNativeFocusDiagnosticTabID != nil)
+                Button("Restore Model Focus") {
+                    state.browserSession.cancelModelNativeFocusDiagnostic()
+                }
+                .disabled(launchMode == .testHost || state.browserSession.modelNativeFocusDiagnosticTabID == nil)
+                Text("Focus diagnostic: \(state.browserSession.modelNativeFocusDiagnosticDisposition.rawValue)")
+            }
+            #endif
         }
     }
 }

@@ -505,3 +505,85 @@ Both fresh V86 code/terminal/browser workflows passed all twelve original checks
 - V86 workflow report: `38e59fbb9c4eab3f8657299098ee84fb46f373da293085a5a6c8a8282cea3581`.
 - Exact V86 extraction: `29152db9dabfe0419bb51c099c8d9e3958df24a3b1ce04ca0e4e0eb5ff8df4d0`.
 - Independent R1/R2: `8e1812d674987b51823c21bfba20721c233478febfc4d467d4c9db86ff7247e3`, `1ed0c8eeba518bc884a00b919e0d2516532c229bb776dd2ada609fb2b5c6848f`.
+
+## Build-183 presentation and Send controls
+
+Twelve controls used the same complete 51,657-byte captured payload
+(`3067a360c298c8a72b9eda0c4f19879b4a2494f34bc3265cdd365677788b9050`),
+normal Chat/GPT-6/Instant and a fresh acknowledged Temporary conversation each
+time. All ran in the installed build-183 process and its human browser's default
+persistent profile. The first six alternated visible/background conditions in
+V/B, B/V, V/B order. The next six held the page visible and alternated trusted
+website clicks/programmatic clicks in T/P, P/T, T/P order.
+
+| Control | Send to first text, all three observations | Mean text | Mean completion candidate |
+| --- | --- | --- | --- |
+| Visible human tab | 3176 / 3770 / 4573ms | 3840ms | 4080ms |
+| Detached background human tab | 8103 / 5834 / 5072ms | 6336ms | 6337ms |
+| Normal Send click, visible | 3481 / 4560 / 3441ms | 3827ms | 4024ms |
+| Programmatic Send click, visible | 3406 / 4231 / 3925ms | 3854ms | 4004ms |
+
+These are page-observation endpoints, not native verified completion or provider
+generation alone. Every response decoded to HI, but plain text, rendered inline
+fences and code-block envelopes differed. All observations remain in the means;
+there was no favorable-format selection or provider replay.
+
+Detaching the human tab was associated with 2497ms longer mean first-text time.
+Actual hidden onset preceded first text and persisted through the candidate in
+each background trial. Attachment, focus and visibility changed together, so
+this does not isolate focus or prove that Computa's native inference host has
+the same delay. The native host uses an attached private view and an isolated
+nonpersistent store; its previous observations reported visible but unfocused.
+
+Programmatic Send was 27ms slower to first text on average and 20ms faster to a
+completion candidate. Individual paired text differences were -75, -329 and
++484ms. This small block did not reproduce a consistent programmatic-Send
+penalty. Both Send conditions started visible/unfocused with the editor active
+and became focused about 1.34s afterward, unlike the sampled native condition.
+Trust and transient user activation were verified for each actual click.
+
+All twelve exact payload/model/product/current-turn proofs passed. Each trial
+contained one Send, and its target and blank sibling were closed. Two unsent
+Send setup failures and one unsent presentation setup failure were preserved.
+One zero-Send observation window expired during an interruption; its supported
+same-document reset and subsequent single Send were separately verified.
+Safari's temporary developer feature was restored off.
+
+The original native mean first-text gap of 1144ms remains unexplained. The next
+test should change only actual native focus while preserving its view, host,
+store, payload, model and Send path. A diagnostic-only native menu now prepares
+that experiment under `DEBUG` or `COMPUTA_NATIVE_FOCUS_DIAGNOSTIC`. Its opt-in is
+consumed by the next exact inspector lease, requires the existing key window,
+and restores prior focus on revocation, cancellation, host removal or movement.
+It never activates or reorders a window. Normal Release excludes the menu and
+retains its existing focus policy. This source preparation is not an installed
+optimization or live native-focus result.
+
+The existing native UI cannot replay a byte-identical first-turn request: it
+generates fresh message IDs and a session marker, and its capture capability is
+read-only. The planned native qualification must preserve those guards, record
+each real outbound payload and compare it with its own byte-identical direct
+control. Repeated native conditions can hold the task contract and fresh-store
+configuration constant, but their generated identities remain a declared
+difference. The current inspector lease offers no pause or replay shortcut.
+
+Twenty-two selected native tests passed: eight new focus-diagnostic cases, seven
+existing inspector/lease cases and seven existing focus/host regressions.
+Coverage includes exact-view scope, failed acquisition rollback, expired or
+revoked leases, newer human focus, missing or detached original responders, and
+restoration before host removal or movement. The tested source hashes remained
+unchanged during the run. No live provider requests or OS window activation
+occurred in these tests.
+
+The separate completion audit found no current-request terminal signal tied to
+the final committed answer text that could safely replace the 1600ms fallback.
+Copy controls, nonbusy state, the named turn state and observed network events
+do not supply that proof by themselves. The fallback and final full verification
+remain unchanged. Thirteen focused adapter tests passed (2066 assertions),
+including late text/footer changes, current-turn ambiguity, cancellation,
+picker drift and retained tool rounds.
+
+- Presentation ledger: `6d7073cad5ef438414d703e67cf3d9916a3c1101f35b96d5d0bffcfdc6c4dda8`.
+- Send ledger: `090c8ed0311d85a4b13ab4d586e1488e9f14adb44fc8a0f532c3bfae0e7bdb98`.
+- Native focus test receipt: `24d540a11b7ba1e66fa69f8d8d0d57846405d20abbc602ce2fb4f57fc8d6f57e`.
+- Completion audit test receipt: `063f58c695b908de6fb21a6809264f96d193484de381cbdf9d360a7a1da42204`.

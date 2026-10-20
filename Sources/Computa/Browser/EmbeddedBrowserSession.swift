@@ -59,6 +59,40 @@ final class EmbeddedBrowserSession {
     var humanTabs: [EmbeddedBrowserTab] { tabs.filter { entries[$0.id]?.isModelOwned == false } }
     private(set) var selectedTabID: UUID?
     private(set) var errorMessage: String?
+    #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+    enum ModelNativeFocusDiagnosticDisposition: String {
+        case idle, armed, acquired, rejected, restored
+    }
+    private(set) var modelNativeFocusDiagnosticRequested = false
+    private(set) var modelNativeFocusDiagnosticTabID: UUID?
+    private(set) var modelNativeFocusDiagnosticDisposition: ModelNativeFocusDiagnosticDisposition = .idle
+
+    /// Native UI only. The next successful, manually armed inspector binding
+    /// consumes this choice; no website or model-tool operation can set it.
+    func setModelNativeFocusDiagnosticRequested(_ requested: Bool) {
+        guard !isShutdown, modelNativeFocusDiagnosticTabID == nil else { return }
+        modelNativeFocusDiagnosticRequested = requested
+        modelNativeFocusDiagnosticDisposition = requested ? .armed : .idle
+    }
+
+    func cancelModelNativeFocusDiagnostic() {
+        modelNativeFocusDiagnosticRequested = false
+        guard let id = modelNativeFocusDiagnosticTabID, let entry = entries[id] else {
+            modelNativeFocusDiagnosticTabID = nil
+            modelNativeFocusDiagnosticDisposition = .idle
+            return
+        }
+        endModelNativeFocusDiagnostic(entry)
+    }
+
+    private func endModelNativeFocusDiagnostic(_ entry: Entry) {
+        (entry.view as? EmbeddedModelWebView)?.endNativeFocusDiagnostic()
+        if modelNativeFocusDiagnosticTabID == entry.tab.id {
+            modelNativeFocusDiagnosticTabID = nil
+            modelNativeFocusDiagnosticDisposition = .restored
+        }
+    }
+    #endif
     let maximumTabs: Int
     var pendingChatGPTInferenceCookiePreparationCount: Int { inferenceCookieSeeds.count + inferenceCookieValidations.count }
     var failedChatGPTInferenceCookiePreparationCount: Int {
@@ -896,7 +930,26 @@ final class EmbeddedBrowserSession {
                     guard let self, let current = self.entries[tabID], current.inspectorDiagnostic?.id == id else { return }
                     self.revokeModelInspector(current, reason: .nativeContext)
                 }
-            }, action: { view.isInspectable = true })
+            }, action: {
+                view.isInspectable = true
+                #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+                if modelNativeFocusDiagnosticRequested {
+                    modelNativeFocusDiagnosticRequested = false
+                    if modelNativeFocusDiagnosticTabID == nil,
+                       let model = view as? EmbeddedModelWebView,
+                       model.beginNativeFocusDiagnostic(onEnd: { [weak self] in
+                           guard let self, self.modelNativeFocusDiagnosticTabID == tabID else { return }
+                           self.modelNativeFocusDiagnosticTabID = nil
+                           self.modelNativeFocusDiagnosticDisposition = .restored
+                       }) {
+                        modelNativeFocusDiagnosticTabID = tabID
+                        modelNativeFocusDiagnosticDisposition = .acquired
+                    } else {
+                        modelNativeFocusDiagnosticDisposition = .rejected
+                    }
+                }
+                #endif
+            })
         guard activated else { return false }
         let expiry = Task { @MainActor [weak self] in
             do { try await Task.sleep(until: binding.deadline, clock: .continuous) }
@@ -921,6 +974,9 @@ final class EmbeddedBrowserSession {
     }
 
     private func revokeModelInspector(_ entry: Entry, reason: ModelInspectorRevocation) {
+        #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+        endModelNativeFocusDiagnostic(entry)
+        #endif
         guard let diagnostic = entry.inspectorDiagnostic else { return }
         entry.inspectorDiagnostic = nil
         diagnostic.expiry.cancel()
@@ -987,7 +1043,12 @@ final class EmbeddedBrowserSession {
             modelRenderHost = modelRenderHosts.first?.view
             for entry in entries.values where (entry.isModelOwned || entry.isToolOwned) && entry.presentationHost == nil {
                 if modelRenderHost != nil { mountModelView(entry) }
-                else if entry.view.superview === host { entry.view.removeFromSuperview() }
+                else if entry.view.superview === host {
+                    #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+                    endModelNativeFocusDiagnostic(entry)
+                    #endif
+                    entry.view.removeFromSuperview()
+                }
             }
         }
     }
@@ -1012,7 +1073,12 @@ final class EmbeddedBrowserSession {
 
     private func mountModelView(_ entry: Entry) {
         guard let host = modelRenderHost else { return }
-        if entry.view.superview !== host { entry.view.removeFromSuperview() }
+        if entry.view.superview !== host {
+            #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+            endModelNativeFocusDiagnostic(entry)
+            #endif
+            entry.view.removeFromSuperview()
+        }
         entry.view.autoresizingMask = []
         entry.view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
         (entry.view as? EmbeddedModelWebView)?.captureNativeFocus(in: host.window)
@@ -1798,6 +1864,9 @@ final class EmbeddedBrowserSession {
 
     func shutdown() {
         guard !isShutdown else { return }
+        #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+        cancelModelNativeFocusDiagnostic()
+        #endif
         isShutdown = true
         chatGPTInferencePrewarmingEnabled = false
         chatGPTInferencePrewarmAdmission = nil
@@ -2048,7 +2117,63 @@ private final class EmbeddedModelWebView: WKWebView {
     private var focusFieldSelection: NSRange?
     private var restoringFocus = false
 
-    override var acceptsFirstResponder: Bool { false }
+    #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+    private var nativeFocusDiagnosticActive = false
+    private var nativeFocusDiagnosticOnEnd: (() -> Void)?
+
+    /// The session calls this only inside one exact inspector lease's activation.
+    /// Neither the window nor this view is activated, reordered or reparented.
+    func beginNativeFocusDiagnostic(onEnd: @escaping () -> Void) -> Bool {
+        guard !nativeFocusDiagnosticActive, let target = window, target.isKeyWindow,
+              !isHiddenOrHasHiddenAncestor, let responder = target.firstResponder,
+              !ownsResponder(responder) else { return false }
+        captureNativeFocus(in: target)
+        guard focusWindow === target, focusResponder === responder else { return false }
+        nativeFocusDiagnosticActive = true
+        guard target.makeFirstResponder(self), nativeFocusDiagnosticActive, window === target, target.isKeyWindow,
+              let current = target.firstResponder, ownsResponder(current) else {
+            // A failed AppKit acquisition can leave the window itself as
+            // responder. Restore that fallback without replacing a newer human.
+            finishNativeFocusDiagnostic(allowWindowFallback: true)
+            return false
+        }
+        nativeFocusDiagnosticOnEnd = onEnd
+        return true
+    }
+
+    func endNativeFocusDiagnostic() {
+        guard nativeFocusDiagnosticActive else { return }
+        finishNativeFocusDiagnostic(allowWindowFallback: false)
+    }
+
+    private func finishNativeFocusDiagnostic(allowWindowFallback: Bool) {
+        let onEnd = nativeFocusDiagnosticOnEnd
+        nativeFocusDiagnosticOnEnd = nil
+        nativeFocusDiagnosticActive = false
+        restoreNativeFocus(allowWindowFallback: allowWindowFallback)
+        // A detached/disabled original control must not leave the page as the
+        // responder after its diagnostic grant ends. Respect every newer human.
+        if let target = window, let current = target.firstResponder, ownsResponder(current) {
+            _ = target.makeFirstResponder(nil)
+        }
+        onEnd?()
+    }
+    #endif
+
+    override var acceptsFirstResponder: Bool {
+        #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+        nativeFocusDiagnosticActive
+        #else
+        false
+        #endif
+    }
+
+    #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if nativeFocusDiagnosticActive, newWindow !== window { endNativeFocusDiagnostic() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+    #endif
 
     func captureNativeFocus(in targetWindow: NSWindow? = nil) {
         guard let target = targetWindow ?? window, let responder = target.firstResponder,
@@ -2075,9 +2200,14 @@ private final class EmbeddedModelWebView: WKWebView {
         }
     }
 
-    func restoreNativeFocus() {
-        guard !restoringFocus, let target = window, target === focusWindow,
-              let current = target.firstResponder, ownsResponder(current) else { return }
+    func restoreNativeFocus(allowWindowFallback: Bool = false) {
+        #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+        guard !nativeFocusDiagnosticActive else { return }
+        #endif
+        guard !restoringFocus, let target = window, target === focusWindow else { return }
+        let current = target.firstResponder
+        guard current.map({ ownsResponder($0) }) == true
+                || (allowWindowFallback && (current == nil || current === target)) else { return }
         if let field = focusField {
             guard field.window === target, !field.isHiddenOrHasHiddenAncestor,
                   field.isEnabled, field.isEditable,
@@ -2150,6 +2280,9 @@ private final class EmbeddedModelWebView: WKWebView {
     }
 
     override func becomeFirstResponder() -> Bool {
+        #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+        if nativeFocusDiagnosticActive { return super.becomeFirstResponder() }
+        #endif
         // NSWindow has already installed this responder at this point. A
         // refusal falls back to the window, clearing the human's input. Restore
         // the exact captured responder synchronously before another key event.
