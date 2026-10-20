@@ -425,3 +425,30 @@ The frozen candidate passed **60 focused native tests** covering cookie admissio
 
 - Final native test freeze: `0d094e09937f97477a5940880a24497e283e73f4cfea7f7146b557a98544cdae`.
 - Native test log: `fe3c83ec313623dd7f90466bc54a1a70bd2324932d62ebbef26ff6e8f31b8b58`.
+
+### Installed build-182 results
+
+Signed 0.7.0 (182), executable source `a2b1b3c1b8c64bb8218c73aed10b1b6ae3295262`, passed the independent 56-file/52-resource install verification. The first installer copy failed with an unspecified `ditto` error; a diagnostic copy and the full install retry succeeded. The failure is retained; disk space was not established as its cause. This remains a controlled test installation without a published release.
+
+All three prespecified native-first pairs passed the strict reader with identical whole 51,657-byte payloads per pair, normal Chat/latest Instant, fresh Temporary chats and confirmed owned-session closure:
+
+| Pair | Native first text | Direct first text | Observed difference |
+| --- | --- | --- | --- |
+| 1 | 4363ms | 3961ms | 402ms |
+| 2 | 4389ms | 3256ms | 1133ms |
+| 3 | 4666ms | 4581ms | 85ms |
+| Mean | 4473ms | 3933ms | 540ms |
+
+All six responses resolved to HI, but only pair 2 had equal response representations and lengths. Provider variation, output representation and block order remain confounds. Standby creation moved to 47–50ms after first validated text, confirming the scheduling change. The direct control also became faster than build 181's single pair; these observations establish no native-specific speedup.
+
+The same passive selector observed an assistant body before text in both arms. Body-to-text averaged 1336ms native versus 556ms direct, but body presence is an empty-or-nonempty scaffold observation, not a common first-token event: the native scaffold appeared about 242ms earlier while native text appeared about 540ms later. The 781ms interval difference therefore cannot all be attributed to delayed rendering of an equivalent event. Raw text and the independent first-text probe agreed within 1ms. Synchronous observer guard work accumulated only 28–31ms, with individual calls at most 5ms; these potentially nested partial wall scopes do not explain the gap. Focus, asynchronous expansion and cold page work remain unproven causes.
+
+Native first-candidate-to-transport completion was 1785/1860/1886ms, including the retained 1600ms stability guard. Final full proofs took 185/259/184ms. Transport-to-native completion was 258/284/408ms, including cleanup receipt persistence of 176/188/318ms. These separate boundaries identify another measurable optimization candidate without weakening stability or final ownership proof.
+
+Both fresh V85 code/terminal/browser workflows passed all twelve original checks with no native errors, failed commands or unverified browser calls. Each made only the intended helper edit, preserved the note/tests, passed four tests, looked up its generated reference through the built-in browser, reported the exact receipt and closed its created tab. Independent verification passed all eight tests and edit-preservation checks. All 22 website inferences completed and saved/closed. These are bounded workflow results, not unrestricted provider qualification. The fixture server exited cleanly and its port closed; Safari developer features were restored off. Two unsent benchmark setup failures were retained, with no provider Send replay.
+
+- Installed verifier: `b07fab3da99a1625ad70bfd2248016c3dfca9e65af3a5e780fefd0249ed1e2ca`.
+- Matched report: `c14cde67085a95a828515bd6c1b83a7f3689f5b1db6a9d76001543474f542e3a`.
+- Auxiliary reconstruction: `bf4f94bcb8b046f0f672b8e86aa4fe38238444122eb4f23b1dac15928390137c`.
+- V85 workflow report: `8cc79ae0dd7ab188dc4446b6120810ad821a2eb67c4f1c8b8b8572087a090fb1`.
+- Independent R1/R2: `d57fdc62c337a59eae2c49205b3cf27d2353cdd474d8aca721201ea78f85af60`, `3df4d0d7129fc282032a70f175f96a8e41dd42f0f67e8eb363eb673711a99fd6`.
