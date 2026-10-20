@@ -67,8 +67,8 @@ final class EmbeddedBrowserSession {
     private(set) var modelNativeFocusDiagnosticTabID: UUID?
     private(set) var modelNativeFocusDiagnosticDisposition: ModelNativeFocusDiagnosticDisposition = .idle
 
-    /// Native UI only. The next successful, manually armed inspector binding
-    /// consumes this choice; no website or model-tool operation can set it.
+    /// Native UI only. A live, successfully saved synthetic first-turn capture
+    /// consumes this choice; ordinary turns and Inspector leases cannot do so.
     func setModelNativeFocusDiagnosticRequested(_ requested: Bool) {
         guard !isShutdown, modelNativeFocusDiagnosticTabID == nil else { return }
         modelNativeFocusDiagnosticRequested = requested
@@ -86,10 +86,17 @@ final class EmbeddedBrowserSession {
     }
 
     private func endModelNativeFocusDiagnostic(_ entry: Entry) {
+        let synthetic = entry.syntheticNativeFocusDiagnostic
+        entry.syntheticNativeFocusDiagnostic = nil
+        synthetic?.expiry.cancel()
+        synthetic?.binding.revoke()
         (entry.view as? EmbeddedModelWebView)?.endNativeFocusDiagnostic()
         if modelNativeFocusDiagnosticTabID == entry.tab.id {
             modelNativeFocusDiagnosticTabID = nil
             modelNativeFocusDiagnosticDisposition = .restored
+        }
+        if let synthetic {
+            Self.inspectorDiagnosticLog.notice("syntheticNativeFocusDiagnostic version=1 nonce=\(synthetic.binding.nonce.uuidString.lowercased(), privacy: .public) sessionID=\(synthetic.binding.ownerToken.lowercased(), privacy: .public) generation=\(synthetic.binding.generation.uuidString.lowercased(), privacy: .public) disposition=restored")
         }
     }
     #endif
@@ -191,6 +198,10 @@ final class EmbeddedBrowserSession {
         var geminiDocumentCommitObserved = false
         var serverRedirectObservedInCurrentNavigation = false
         var inspectorDiagnostic: (id: UUID, binding: ChatGPTInspectorLease.Binding, expiry: Task<Void, Never>)?
+        #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+        var syntheticNativeFocusDiagnostic: (id: UUID, binding: WebsiteBenchmarkCaptureLease.NativeFocusBinding,
+                                            expiry: Task<Void, Never>)?
+        #endif
         var requestMetadataDiagnostic: RequestMetadataDiagnostic?
         var ownedTemporaryChatGPTRoutes: Set<UUID> = []
         var inferenceCookieSummary: ChatGPTInferenceCookieSeed.Summary?
@@ -932,23 +943,6 @@ final class EmbeddedBrowserSession {
                 }
             }, action: {
                 view.isInspectable = true
-                #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
-                if modelNativeFocusDiagnosticRequested {
-                    modelNativeFocusDiagnosticRequested = false
-                    if modelNativeFocusDiagnosticTabID == nil,
-                       let model = view as? EmbeddedModelWebView,
-                       model.beginNativeFocusDiagnostic(onEnd: { [weak self] in
-                           guard let self, self.modelNativeFocusDiagnosticTabID == tabID else { return }
-                           self.modelNativeFocusDiagnosticTabID = nil
-                           self.modelNativeFocusDiagnosticDisposition = .restored
-                       }) {
-                        modelNativeFocusDiagnosticTabID = tabID
-                        modelNativeFocusDiagnosticDisposition = .acquired
-                    } else {
-                        modelNativeFocusDiagnosticDisposition = .rejected
-                    }
-                }
-                #endif
             })
         guard activated else { return false }
         let expiry = Task { @MainActor [weak self] in
@@ -961,6 +955,56 @@ final class EmbeddedBrowserSession {
         Self.inspectorDiagnosticLog.notice("inspectorDiagnostic disposition=granted")
         return true
     }
+
+    #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+    /// The exact active synthetic capture admits one native focus experiment,
+    /// before insertion. No Inspector, website, request or tool grant is involved.
+    @discardableResult
+    func grantSyntheticBenchmarkNativeFocusDiagnostic(_ binding: WebsiteBenchmarkCaptureLease.NativeFocusBinding,
+        tabID: UUID, view: WKWebView, ownerToken: String, generation: UUID) -> Bool {
+        guard modelNativeFocusDiagnosticRequested, !isShutdown, !Task.isCancelled,
+              modelNativeFocusDiagnosticTabID == nil, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.syntheticNativeFocusDiagnostic == nil,
+              entry.inspectorDiagnostic == nil, entry.requestMetadataDiagnostic == nil,
+              entry.modelChanges?.ownerToken == ownerToken, entry.modelSignalOriginHost == "chatgpt.com",
+              entry.tab.documentGeneration == generation, Self.inspectorOriginAllowed(view.url),
+              view.url?.path == "/", let model = view as? EmbeddedModelWebView else { return false }
+        let id = UUID()
+        let activated = binding.activate(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation,
+            onRevocation: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, let current = self.entries[tabID],
+                          current.syntheticNativeFocusDiagnostic?.id == id else { return }
+                    self.endModelNativeFocusDiagnostic(current)
+                }
+            }, action: {
+                modelNativeFocusDiagnosticRequested = false
+                guard model.beginNativeFocusDiagnostic(onEnd: { [weak self] in
+                    guard let self, let current = self.entries[tabID],
+                          current.syntheticNativeFocusDiagnostic?.id == id else { return }
+                    self.endModelNativeFocusDiagnostic(current)
+                }) else {
+                    modelNativeFocusDiagnosticDisposition = .rejected
+                    Self.inspectorDiagnosticLog.notice("syntheticNativeFocusDiagnostic version=1 nonce=\(binding.nonce.uuidString.lowercased(), privacy: .public) sessionID=\(binding.ownerToken.lowercased(), privacy: .public) generation=\(binding.generation.uuidString.lowercased(), privacy: .public) disposition=rejected reason=\(model.nativeFocusDiagnosticRejection.rawValue, privacy: .public)")
+                    return false
+                }
+                modelNativeFocusDiagnosticTabID = tabID
+                modelNativeFocusDiagnosticDisposition = .acquired
+                return true
+            })
+        guard activated else { return false }
+        let expiry = Task { @MainActor [weak self] in
+            do { try await Task.sleep(until: binding.deadline, clock: .continuous) }
+            catch { return }
+            guard let self, let current = self.entries[tabID],
+                  current.syntheticNativeFocusDiagnostic?.id == id else { return }
+            self.endModelNativeFocusDiagnostic(current)
+        }
+        entry.syntheticNativeFocusDiagnostic = (id, binding, expiry)
+        Self.inspectorDiagnosticLog.notice("syntheticNativeFocusDiagnostic version=1 nonce=\(binding.nonce.uuidString.lowercased(), privacy: .public) sessionID=\(binding.ownerToken.lowercased(), privacy: .public) generation=\(binding.generation.uuidString.lowercased(), privacy: .public) disposition=acquired")
+        return true
+    }
+    #endif
 
     func revokeModelInspectorDiagnostic(tabID: UUID, ownerToken: String) {
         guard let entry = entries[tabID], entry.modelChanges?.ownerToken == ownerToken else { return }
@@ -2120,20 +2164,33 @@ private final class EmbeddedModelWebView: WKWebView {
     #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
     private var nativeFocusDiagnosticActive = false
     private var nativeFocusDiagnosticOnEnd: (() -> Void)?
+    enum NativeFocusDiagnosticRejection: String {
+        case none, active, unattached, hidden, notKeyWindow = "not_key_window"
+        case responderUnavailable = "responder_unavailable", alreadyOwned = "already_owned"
+        case snapshotChanged = "snapshot_changed", acquisitionFailed = "acquisition_failed"
+    }
+    private(set) var nativeFocusDiagnosticRejection: NativeFocusDiagnosticRejection = .none
 
-    /// The session calls this only inside one exact inspector lease's activation.
+    /// The session calls this only inside one exact synthetic capture's activation.
     /// Neither the window nor this view is activated, reordered or reparented.
     func beginNativeFocusDiagnostic(onEnd: @escaping () -> Void) -> Bool {
-        guard !nativeFocusDiagnosticActive, let target = window, target.isKeyWindow,
-              !isHiddenOrHasHiddenAncestor, let responder = target.firstResponder,
-              !ownsResponder(responder) else { return false }
+        nativeFocusDiagnosticRejection = .none
+        guard !nativeFocusDiagnosticActive else { nativeFocusDiagnosticRejection = .active; return false }
+        guard let target = window else { nativeFocusDiagnosticRejection = .unattached; return false }
+        guard target.isKeyWindow else { nativeFocusDiagnosticRejection = .notKeyWindow; return false }
+        guard !isHiddenOrHasHiddenAncestor else { nativeFocusDiagnosticRejection = .hidden; return false }
+        guard let responder = target.firstResponder else { nativeFocusDiagnosticRejection = .responderUnavailable; return false }
+        guard !ownsResponder(responder) else { nativeFocusDiagnosticRejection = .alreadyOwned; return false }
         captureNativeFocus(in: target)
-        guard focusWindow === target, focusResponder === responder else { return false }
+        guard focusWindow === target, focusResponder === responder else {
+            nativeFocusDiagnosticRejection = .snapshotChanged; return false
+        }
         nativeFocusDiagnosticActive = true
         guard target.makeFirstResponder(self), nativeFocusDiagnosticActive, window === target, target.isKeyWindow,
               let current = target.firstResponder, ownsResponder(current) else {
             // A failed AppKit acquisition can leave the window itself as
             // responder. Restore that fallback without replacing a newer human.
+            nativeFocusDiagnosticRejection = .acquisitionFailed
             finishNativeFocusDiagnostic(allowWindowFallback: true)
             return false
         }

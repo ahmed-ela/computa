@@ -2186,8 +2186,10 @@ private final class WebListenerReady: @unchecked Sendable {
 }
 
 /// Explicit synthetic-only benchmark capture, separate from finite request
-/// metadata/Inspector diagnostics. It never creates an arm, changes inference,
-/// grants page authority or prints payload contents. This same-UID operator
+/// metadata/Inspector diagnostics. It never creates an arm, replays inference,
+/// grants page authority or prints payload contents. Diagnostic builds can
+/// separately admit one UI-requested native focus experiment after publication.
+/// This same-UID operator
 /// convention is not authentication against another process running as the user.
 final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
     @TaskLocal static var current: WebsiteBenchmarkCaptureLease?
@@ -2213,6 +2215,66 @@ final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
     private var publishedBinding: ObservationBinding?
     var observationBinding: ObservationBinding? { lock.withLock { publishedBinding } }
 
+    #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+    private var nativeFocusCapture: (sessionToken: String, generation: UUID)?
+    private var nativeFocusBound = false
+    private var nativeFocusActivated = false
+    private var nativeFocusRevoked = false
+    private var nativeFocusOnRevocation: (@Sendable () -> Void)?
+
+    /// Native-only diagnostic capability. Passive observation hashes alone
+    /// cannot admit focus; this requires a successfully published live capture.
+    final class NativeFocusBinding: @unchecked Sendable {
+        private let lease: WebsiteBenchmarkCaptureLease
+        let deadline: ContinuousClock.Instant
+        let nonce: UUID, generation: UUID
+        let ownerToken: String
+        private let view: ObjectIdentifier
+
+        fileprivate init(lease: WebsiteBenchmarkCaptureLease, view: ObjectIdentifier,
+                         ownerToken: String, generation: UUID) {
+            self.lease = lease; deadline = lease.deadline; nonce = lease.nonce
+            self.view = view; self.ownerToken = ownerToken; self.generation = generation
+        }
+
+        func activate(view: ObjectIdentifier, ownerToken: String, generation: UUID,
+                      onRevocation: @escaping @Sendable () -> Void, action: () -> Bool) -> Bool {
+            lease.lock.withLock {
+                guard !Task.isCancelled, lease.active, !lease.nativeFocusRevoked,
+                      !lease.nativeFocusActivated, ContinuousClock.now < deadline,
+                      self.view == view, self.ownerToken == ownerToken, self.generation == generation else { return false }
+                lease.nativeFocusActivated = true
+                guard action() else { return false }
+                lease.nativeFocusOnRevocation = onRevocation
+                return true
+            }
+        }
+
+        func revoke() { lease.revokeNativeFocusDiagnostic() }
+    }
+
+    func bindNativeFocusDiagnostic(view: ObjectIdentifier, ownerToken: String,
+                                   generation: UUID) -> NativeFocusBinding? {
+        lock.withLock {
+            guard !Task.isCancelled, active, ContinuousClock.now < deadline,
+                  !nativeFocusBound, !nativeFocusRevoked, publishedBinding != nil,
+                  let captured = nativeFocusCapture, captured.sessionToken == ownerToken,
+                  captured.generation == generation else { return nil }
+            nativeFocusBound = true
+            return NativeFocusBinding(lease: self, view: view, ownerToken: ownerToken, generation: generation)
+        }
+    }
+
+    private func revokeNativeFocusDiagnostic() {
+        let callback: (@Sendable () -> Void)? = lock.withLock {
+            nativeFocusRevoked = true
+            let callback = nativeFocusOnRevocation; nativeFocusOnRevocation = nil
+            return callback
+        }
+        callback?()
+    }
+    #endif
+
     private init(nonce: UUID, taskID: UUID, threadID: UUID, turnID: UUID,
         runtimeGeneration: UUID, preparationID: UUID, modelID: String, prompt: String,
         directory: URL, directoryIdentity: stat, deadline: ContinuousClock.Instant) {
@@ -2223,7 +2285,12 @@ final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
         self.deadline = deadline
     }
 
-    func revoke() { lock.withLock { active = false } }
+    func revoke() {
+        lock.withLock { active = false }
+        #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+        revokeNativeFocusDiagnostic()
+        #endif
+    }
     private var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } }
 
     static func consume(directory: URL?, request: WebModelResponseCodec.Request,
@@ -2391,6 +2458,9 @@ final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
                   renameatx_np(descriptor, temporary, descriptor, outputName, UInt32(RENAME_EXCL)) == 0 else { return false }
             publishedBinding = ObservationBinding(nonce: nonce, rawOutboundSHA: rawHash,
                 canonicalOutboundSHA: canonicalHash, utf8Bytes: bytes.count)
+            #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+            nativeFocusCapture = (sessionToken, generation)
+            #endif
             return true
         }
         guard published else { return false }

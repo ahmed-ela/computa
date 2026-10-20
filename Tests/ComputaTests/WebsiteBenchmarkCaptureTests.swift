@@ -98,6 +98,89 @@ final class WebsiteBenchmarkCaptureTests: XCTestCase {
         lease.revoke(); XCTAssertFalse(f.capture(lease, prompt: request.prompt, outbound: outbound))
     }
 
+    #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+    func testNativeFocusBindingRequiresSavedCaptureAndPinsOneExactScope() throws {
+        let f = try BenchmarkCaptureFixture(); defer { f.remove() }
+        try f.arm(); let request = try f.request(), lease = try XCTUnwrap(f.consume(request: request))
+        let view = NSObject(), other = NSObject(), owner = f.session.uuidString
+        XCTAssertNil(lease.bindNativeFocusDiagnostic(view: ObjectIdentifier(view), ownerToken: owner, generation: f.generation))
+        XCTAssertTrue(f.capture(lease, prompt: request.prompt, outbound: request.prompt + "\n\nComputa session marker: " + f.marker))
+        XCTAssertNil(lease.bindNativeFocusDiagnostic(view: ObjectIdentifier(view), ownerToken: UUID().uuidString, generation: f.generation))
+        XCTAssertNil(lease.bindNativeFocusDiagnostic(view: ObjectIdentifier(view), ownerToken: owner, generation: UUID()))
+        let binding = try XCTUnwrap(lease.bindNativeFocusDiagnostic(view: ObjectIdentifier(view), ownerToken: owner, generation: f.generation))
+        XCTAssertEqual(binding.nonce, f.nonce)
+        XCTAssertEqual(binding.ownerToken, owner)
+        XCTAssertEqual(binding.generation, f.generation)
+        XCTAssertNil(lease.bindNativeFocusDiagnostic(view: ObjectIdentifier(view), ownerToken: owner, generation: f.generation))
+        XCTAssertFalse(binding.activate(view: ObjectIdentifier(other), ownerToken: owner, generation: f.generation,
+            onRevocation: {}, action: { XCTFail("Foreign view cannot acquire focus"); return true }))
+        XCTAssertFalse(binding.activate(view: ObjectIdentifier(view), ownerToken: UUID().uuidString, generation: f.generation,
+            onRevocation: {}, action: { XCTFail("Foreign owner cannot acquire focus"); return true }))
+        XCTAssertFalse(binding.activate(view: ObjectIdentifier(view), ownerToken: owner, generation: UUID(),
+            onRevocation: {}, action: { XCTFail("Foreign document cannot acquire focus"); return true }))
+        var acquisitions = 0
+        XCTAssertTrue(binding.activate(view: ObjectIdentifier(view), ownerToken: owner, generation: f.generation,
+            onRevocation: {}, action: { acquisitions += 1; return true }))
+        XCTAssertFalse(binding.activate(view: ObjectIdentifier(view), ownerToken: owner, generation: f.generation,
+            onRevocation: {}, action: { acquisitions += 1; return true }))
+        XCTAssertEqual(acquisitions, 1)
+        lease.revoke()
+    }
+
+    func testNativeFocusBindingRejectsFailedRevokedExpiredAndCancelledCapture() async throws {
+        for mode in ["publication_failed", "revoked", "expired", "cancelled"] {
+            let f = try BenchmarkCaptureFixture(); defer { f.remove() }
+            var fields = f.fields()
+            if mode == "expired" { fields["expiresAt"] = f.timestamp(f.now.addingTimeInterval(0.2)) }
+            try f.arm(fields: fields)
+            let request = try f.request(), lease = try XCTUnwrap(f.consume(request: request))
+            let view = NSObject(), identity = ObjectIdentifier(view), owner = f.session.uuidString
+            if mode == "publication_failed" { try Data("existing immutable output".utf8).write(to: f.output) }
+            XCTAssertEqual(f.capture(lease, prompt: request.prompt,
+                outbound: request.prompt + "\n\nComputa session marker: " + f.marker), mode != "publication_failed")
+            if mode == "revoked" { lease.revoke() }
+            if mode == "expired" { try await Task.sleep(for: .milliseconds(250)) }
+            if mode == "cancelled" {
+                let attempt = Task {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return lease.bindNativeFocusDiagnostic(view: identity, ownerToken: owner, generation: f.generation)
+                }
+                let binding = await attempt.value
+                XCTAssertNil(binding)
+            } else {
+                XCTAssertNil(lease.bindNativeFocusDiagnostic(view: identity, ownerToken: owner, generation: f.generation), mode)
+            }
+            lease.revoke()
+        }
+    }
+
+    func testNativeFocusFailureIsConsumedAndRevocationIsOnceOutsideTheCaptureLock() async throws {
+        for succeeds in [false, true] {
+            let f = try BenchmarkCaptureFixture(); defer { f.remove() }
+            try f.arm(); let request = try f.request(), lease = try XCTUnwrap(f.consume(request: request))
+            XCTAssertTrue(f.capture(lease, prompt: request.prompt, outbound: request.prompt + "\n\nComputa session marker: " + f.marker))
+            let view = NSObject(), identity = ObjectIdentifier(view), owner = f.session.uuidString
+            let binding = try XCTUnwrap(lease.bindNativeFocusDiagnostic(view: identity, ownerToken: owner, generation: f.generation))
+            let callbacks = BenchmarkCaptureCount()
+            XCTAssertEqual(binding.activate(view: identity, ownerToken: owner, generation: f.generation,
+                onRevocation: {
+                    _ = lease.observationBinding // Reenter the capture lock; callback must run outside it.
+                    callbacks.increment()
+                }, action: { succeeds }), succeeds)
+            XCTAssertFalse(binding.activate(view: identity, ownerToken: owner, generation: f.generation,
+                onRevocation: {}, action: { XCTFail("An attempted acquisition cannot replay"); return true }))
+            let revoked = expectation(description: "Bounded revocation without capture-lock deadlock")
+            DispatchQueue.global().async {
+                binding.revoke(); lease.revoke(); binding.revoke()
+                revoked.fulfill()
+            }
+            await fulfillment(of: [revoked], timeout: 1)
+            XCTAssertEqual(callbacks.value, succeeds ? 1 : 0)
+            XCTAssertNil(lease.bindNativeFocusDiagnostic(view: identity, ownerToken: owner, generation: f.generation))
+        }
+    }
+    #endif
+
     func testConcurrentArmClaimsAreSingleUseAndAReplacementArmIsNeverCaptured() throws {
         let f = try BenchmarkCaptureFixture(); defer { f.remove() }
         try f.arm(); let count = BenchmarkCaptureCount()

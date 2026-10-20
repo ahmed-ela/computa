@@ -552,8 +552,8 @@ Safari's temporary developer feature was restored off.
 The original native mean first-text gap of 1144ms remains unexplained. The next
 test should change only actual native focus while preserving its view, host,
 store, payload, model and Send path. A diagnostic-only native menu now prepares
-that experiment under `DEBUG` or `COMPUTA_NATIVE_FOCUS_DIAGNOSTIC`. Its opt-in is
-consumed by the next exact inspector lease, requires the existing key window,
+that experiment under `DEBUG` or `COMPUTA_NATIVE_FOCUS_DIAGNOSTIC`. The build-184
+version consumed its opt-in through the next exact inspector lease, required the existing key window,
 and restores prior focus on revocation, cancellation, host removal or movement.
 It never activates or reorders a window. Normal Release excludes the menu and
 retains its existing focus policy. This source preparation is not an installed
@@ -587,3 +587,33 @@ picker drift and retained tool rounds.
 - Send ledger: `090c8ed0311d85a4b13ab4d586e1488e9f14adb44fc8a0f532c3bfae0e7bdb98`.
 - Native focus test receipt: `24d540a11b7ba1e66fa69f8d8d0d57846405d20abbc602ce2fb4f57fc8d6f57e`.
 - Completion audit test receipt: `063f58c695b908de6fb21a6809264f96d193484de381cbdf9d360a7a1da42204`.
+
+## Build-184 qualification and build-185 diagnostic admission
+
+Both build-184 native attempts returned HI and verified owned-session closure.
+Their first-text times were 4518ms and 4855ms after Send; the answer container
+preceded readable text by 1592ms and 1574ms. Both sampled visible/unfocused.
+Neither qualified a focus comparison: the external Inspector watcher first
+missed a 38ms initial journal window, then could not link the exact synthetic
+nonce to a durably saved transcript before its bounded admission window ended.
+Both attempts and their failures are retained; no direct controls were sent.
+
+Build185 removes that diagnostic race. A native UI opt-in can be consumed only
+after the existing synthetic capture has successfully saved its exact first-turn
+payload, immediately before insertion. A single-use binding retains the capture's
+session, document generation, view, expiry and revocation scope. Ordinary turns
+and Inspector grants cannot consume this opt-in. Focus acquisition still requires
+an existing key window and never activates, reorders or reparents a window.
+Both native test conditions leave Web Inspector disabled. Actual focus samples
+and the nonce-bound admission log must establish the treatment; a menu setting
+alone does not. Send, response verification and the 1600ms guard are unchanged.
+This is diagnostic preparation, not a demonstrated latency improvement.
+
+Forty-five selected native tests passed with no failures, covering synthetic-only
+admission, saved-capture scope, revocation/expiry/cancellation, Inspector
+independence, focus restoration, and unchanged inference wire/tool selection.
+Production source hashes were unchanged during that run.
+
+- First attempt record: `3e6834e6ba13a6ac15a51450f82cf97bf6455c999bad4ab3b79dda1ebde8a98a`.
+- Second attempt record: `be0d6122cef68dbcec2cc667e0c77cef3b0aebff23ea474293226a374755275f`.
+- Selected native test receipt: `3395d3970a9723d55a86b3e2942945abb2ed65a7893c655dacb467a6a393966c`.

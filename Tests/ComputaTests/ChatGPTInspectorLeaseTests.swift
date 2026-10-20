@@ -162,7 +162,7 @@ final class ChatGPTInspectorBrowserTests: XCTestCase {
 
 #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
 @MainActor
-final class ChatGPTInspectorNativeFocusTests: XCTestCase {
+final class SyntheticBenchmarkNativeFocusTests: XCTestCase {
     func testNativeFocusDiagnosticIsOptInAndPreservesTheExactLeasedDocumentAndHost() async throws {
         let fixture = try await NativeFocusInspectorFixture(); defer { fixture.shutdown() }
         let otherID = try fixture.browser.createUnloadedModelTabForTesting()
@@ -179,16 +179,25 @@ final class ChatGPTInspectorNativeFocusTests: XCTestCase {
         XCTAssertFalse(other.acceptsFirstResponder)
         XCTAssertFalse(fixture.browser.modelNativeFocusDiagnosticRequested)
         XCTAssertEqual(fixture.browser.modelNativeFocusDiagnosticDisposition, .idle)
-
-        XCTAssertTrue(fixture.grant(try fixture.binding()))
+        XCTAssertFalse(fixture.grant(try fixture.binding()), "A valid synthetic capture alone cannot opt into native focus")
+        XCTAssertFalse(fixture.view.acceptsFirstResponder)
         XCTAssertTrue(fixture.window.firstResponder === fixture.input)
-        XCTAssertFalse(fixture.view.acceptsFirstResponder, "Inspector access alone must retain ordinary background focus policy")
+
+        fixture.browser.setModelNativeFocusDiagnosticRequested(true)
+        XCTAssertTrue(try fixture.grantInspector())
+        XCTAssertTrue(fixture.window.firstResponder === fixture.input)
+        XCTAssertFalse(fixture.view.acceptsFirstResponder, "Inspector access cannot admit synthetic benchmark focus")
+        XCTAssertTrue(fixture.browser.modelNativeFocusDiagnosticRequested, "Inspector access cannot consume the independent UI opt-in")
         fixture.browser.revokeModelInspectorDiagnostic(tabID: fixture.id, ownerToken: fixture.token)
 
         fixture.browser.setModelNativeFocusDiagnosticRequested(true)
         let binding = try fixture.binding()
-        XCTAssertFalse(fixture.browser.grantModelInspectorDiagnostic(binding, tabID: otherID, view: other,
+        XCTAssertFalse(fixture.browser.grantSyntheticBenchmarkNativeFocusDiagnostic(binding, tabID: otherID, view: other,
             ownerToken: fixture.token, generation: try XCTUnwrap(fixture.browser.documentGeneration(for: otherID))))
+        XCTAssertFalse(fixture.browser.grantSyntheticBenchmarkNativeFocusDiagnostic(binding, tabID: fixture.id, view: fixture.view,
+            ownerToken: UUID().uuidString, generation: try XCTUnwrap(generation)))
+        XCTAssertFalse(fixture.browser.grantSyntheticBenchmarkNativeFocusDiagnostic(binding, tabID: fixture.id, view: fixture.view,
+            ownerToken: fixture.token, generation: UUID()))
         XCTAssertTrue(fixture.browser.modelNativeFocusDiagnosticRequested, "A foreign view must not consume the pending opt-in")
         XCTAssertTrue(fixture.grant(binding))
         XCTAssertEqual(fixture.browser.modelNativeFocusDiagnosticDisposition, .acquired)
@@ -217,7 +226,7 @@ final class ChatGPTInspectorNativeFocusTests: XCTestCase {
         XCTAssertFalse(fixture.view.acceptsFirstResponder)
         XCTAssertNil(fixture.browser.modelNativeFocusDiagnosticTabID)
         XCTAssertTrue(fixture.window.firstResponder === fixture.input)
-        XCTAssertTrue(fixture.view.isInspectable, "Cancelling focus must not invent a second inspector policy")
+        XCTAssertFalse(fixture.view.isInspectable, "Synthetic focus must not enable Inspector access")
     }
 
     func testNativeFocusDiagnosticRejectsUnavailableWindowAndRollsBackFailedAcquisition() async throws {
@@ -227,13 +236,29 @@ final class ChatGPTInspectorNativeFocusTests: XCTestCase {
             if failure == "hidden" { fixture.view.isHidden = true }
             if failure == "acquisition" { fixture.window.rejectModelFocus = true }
             fixture.browser.setModelNativeFocusDiagnosticRequested(true)
-            XCTAssertTrue(fixture.grant(try fixture.binding()), "Focus refusal must not alter the valid inspector lease")
+            XCTAssertFalse(fixture.grant(try fixture.binding()), "An unavailable native destination must reject the one-shot focus grant")
             XCTAssertEqual(fixture.browser.modelNativeFocusDiagnosticDisposition, .rejected, failure)
             XCTAssertFalse(fixture.browser.modelNativeFocusDiagnosticRequested, failure)
             XCTAssertNil(fixture.browser.modelNativeFocusDiagnosticTabID, failure)
             XCTAssertFalse(fixture.view.acceptsFirstResponder, failure)
             XCTAssertTrue(fixture.window.firstResponder === fixture.input, "A failed acquisition must restore its displaced responder: \(failure)")
             XCTAssertEqual(fixture.window.modelFocusAttempts, failure == "acquisition" ? 1 : 0)
+        }
+    }
+
+    func testSyntheticFocusRejectsInspectorRevokedAndExpiredAdmissionWithoutConsumingTheUIChoice() async throws {
+        for rejection in ["inspector", "revoked", "expired"] {
+            let fixture = try await NativeFocusInspectorFixture(); defer { fixture.shutdown() }
+            let binding = try fixture.binding(expiresIn: rejection == "expired" ? 0.2 : 60)
+            fixture.browser.setModelNativeFocusDiagnosticRequested(true)
+            if rejection == "inspector" { XCTAssertTrue(try fixture.grantInspector()) }
+            if rejection == "revoked" { try XCTUnwrap(fixture.lastLease).revoke() }
+            if rejection == "expired" { try await Task.sleep(for: .milliseconds(250)) }
+            XCTAssertFalse(fixture.grant(binding), rejection)
+            XCTAssertTrue(fixture.browser.modelNativeFocusDiagnosticRequested, rejection)
+            XCTAssertNil(fixture.browser.modelNativeFocusDiagnosticTabID, rejection)
+            XCTAssertFalse(fixture.view.acceptsFirstResponder, rejection)
+            XCTAssertTrue(fixture.window.firstResponder === fixture.input, rejection)
         }
     }
 
@@ -244,7 +269,7 @@ final class ChatGPTInspectorNativeFocusTests: XCTestCase {
         fixture.input.removeFromSuperview()
         fixture.window.reportNilResponder = true
         fixture.browser.setModelNativeFocusDiagnosticRequested(true)
-        XCTAssertTrue(fixture.grant(try fixture.binding()))
+        XCTAssertFalse(fixture.grant(try fixture.binding()))
         XCTAssertEqual(fixture.browser.modelNativeFocusDiagnosticDisposition, .rejected)
         XCTAssertFalse(fixture.view.acceptsFirstResponder)
         XCTAssertEqual(fixture.window.modelFocusAttempts, 0)
@@ -255,13 +280,13 @@ final class ChatGPTInspectorNativeFocusTests: XCTestCase {
     }
 
     func testNativeFocusDiagnosticRevocationsRestoreAndDoNotLeakToTheNextLease() async throws {
-        for lifecycle in ["finished", "stop", "context", "expiry", "closed", "shutdown"] {
+        for lifecycle in ["cancel", "stop", "context", "expiry", "closed", "shutdown"] {
             let fixture = try await NativeFocusInspectorFixture(); defer { fixture.shutdown() }
             fixture.browser.setModelNativeFocusDiagnosticRequested(true)
             XCTAssertTrue(fixture.grant(try fixture.binding(expiresIn: lifecycle == "expiry" ? 0.5 : 60)))
             XCTAssertTrue(fixture.ownsCurrentResponder, lifecycle)
             switch lifecycle {
-            case "finished": fixture.browser.revokeModelInspectorDiagnostic(tabID: fixture.id, ownerToken: fixture.token)
+            case "cancel": fixture.browser.cancelModelNativeFocusDiagnostic()
             case "stop": fixture.browser.stop(tabID: fixture.id)
             case "context": try XCTUnwrap(fixture.lastLease).revoke()
             case "expiry": break
@@ -278,9 +303,9 @@ final class ChatGPTInspectorNativeFocusTests: XCTestCase {
             XCTAssertFalse(fixture.view.isInspectable, lifecycle)
             XCTAssertTrue(fixture.window.firstResponder === fixture.input, lifecycle)
             XCTAssertFalse(fixture.browser.modelNativeFocusDiagnosticRequested, lifecycle)
-            if lifecycle == "finished" {
-                XCTAssertTrue(fixture.grant(try fixture.binding()))
-                XCTAssertFalse(fixture.view.acceptsFirstResponder, "A later inspector lease needs a new focus opt-in")
+            if lifecycle == "cancel" {
+                XCTAssertFalse(fixture.grant(try fixture.binding()))
+                XCTAssertFalse(fixture.view.acceptsFirstResponder, "A later synthetic capture needs a new focus opt-in")
                 XCTAssertTrue(fixture.window.firstResponder === fixture.input)
             }
         }
@@ -422,7 +447,8 @@ final class ChatGPTInspectorNativeFocusTests: XCTestCase {
     let host: NativeFocusInspectorHost
     let input = NSTextView(frame: NSRect(x: 20, y: 20, width: 100, height: 20))
     let id: UUID, humanID: UUID, view: WKWebView, token = UUID().uuidString
-    var lastLease: ChatGPTInspectorLease?
+    var lastLease: WebsiteBenchmarkCaptureLease?
+    private var captureRoots: [URL] = []
     init() async throws {
         window = NativeFocusInspectorWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),
                                              styleMask: [], backing: .buffered, defer: false)
@@ -460,17 +486,50 @@ final class ChatGPTInspectorNativeFocusTests: XCTestCase {
         guard let current = window.firstResponder else { return false }
         return current === view || (current as? NSView)?.isDescendant(of: view) == true
     }
-    func binding(expiresIn: TimeInterval = 60) throws -> ChatGPTInspectorLease.Binding {
-        let arm = try InspectorArmFixture(); defer { arm.remove() }; try arm.arm(expiresIn: expiresIn)
-        let lease = try XCTUnwrap(arm.consume()); lastLease = lease
-        return try XCTUnwrap(lease.bind(view: ObjectIdentifier(view), ownerToken: token,
-            generation: try XCTUnwrap(browser.documentGeneration(for: id))))
+    func binding(expiresIn: TimeInterval = 60) throws -> WebsiteBenchmarkCaptureLease.NativeFocusBinding {
+        let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("native-focus-capture-" + UUID().uuidString)
+        let directory = root.appendingPathComponent("WebsiteBenchmarkDiagnostics-v1")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        captureRoots.append(root)
+        let nonce = UUID(), generation = try XCTUnwrap(browser.documentGeneration(for: id))
+        let user = "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
+            + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: false)
+        let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID,
+            "instructions": "Synthetic native focus fixture", "tools": [], "input": [
+                ["type": "message", "role": "user", "content": [["type": "input_text", "text":
+                    "<environment_context><cwd>/tmp/computa-native-focus</cwd><shell>zsh</shell></environment_context>"]]],
+                ["type": "message", "role": "user", "content": [["type": "input_text", "text": user]]]]]))
+        let arm = directory.appendingPathComponent("arm.json")
+        try JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "purpose": WebsiteBenchmarkCaptureLease.purpose,
+            "nonce": nonce.uuidString.lowercased(), "expiresAt": InspectorArmFixture.timestamp(Date().addingTimeInterval(expiresIn))]).write(to: arm)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: arm.path)
+        let lease = try XCTUnwrap(WebsiteBenchmarkCaptureLease.consume(directory: directory, request: request,
+            taskID: UUID().uuidString.lowercased(), threadID: UUID().uuidString.lowercased(), turnID: UUID().uuidString.lowercased(),
+            runtimeGeneration: UUID(), preparationID: UUID(), isNewThread: true, isMaintenance: false, isFirstInference: true))
+        lastLease = lease
+        let marker = UUID().uuidString
+        XCTAssertTrue(lease.capture(prompt: request.prompt, outbound: request.prompt + "\n\nComputa session marker: " + marker,
+            modelID: request.model, sessionToken: token, generation: generation, marker: marker, nativeFirstFreshInstant: true))
+        return try XCTUnwrap(lease.bindNativeFocusDiagnostic(view: ObjectIdentifier(view), ownerToken: token, generation: generation))
     }
-    func grant(_ binding: ChatGPTInspectorLease.Binding) -> Bool {
-        browser.grantModelInspectorDiagnostic(binding, tabID: id, view: view, ownerToken: token,
+    func grant(_ binding: WebsiteBenchmarkCaptureLease.NativeFocusBinding) -> Bool {
+        browser.grantSyntheticBenchmarkNativeFocusDiagnostic(binding, tabID: id, view: view, ownerToken: token,
             generation: browser.documentGeneration(for: id) ?? UUID())
     }
-    func shutdown() { browser.shutdown(); window.close() }
+    func grantInspector() throws -> Bool {
+        let arm = try InspectorArmFixture(); defer { arm.remove() }; try arm.arm()
+        let lease = try XCTUnwrap(arm.consume())
+        let binding = try XCTUnwrap(lease.bind(view: ObjectIdentifier(view), ownerToken: token,
+            generation: try XCTUnwrap(browser.documentGeneration(for: id))))
+        return browser.grantModelInspectorDiagnostic(binding, tabID: id, view: view, ownerToken: token,
+            generation: try XCTUnwrap(browser.documentGeneration(for: id)))
+    }
+    func shutdown() {
+        browser.shutdown(); window.close()
+        for root in captureRoots { try? FileManager.default.removeItem(at: root) }
+    }
 }
 #endif
 

@@ -850,6 +850,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     if saved { session.benchmarkObservationBinding = benchmark.observationBinding }
                     let elapsed = WebsiteBenchmarkCaptureLease.milliseconds(.now - captureStarted)
                     Self.inspectionLog.notice("benchmarkPayloadCapture version=1 nonce=\(benchmark.nonce.uuidString.lowercased(), privacy: .public) saved=\(saved) elapsedMs=\(elapsed)")
+                    #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
+                    if saved, let binding = benchmark.bindNativeFocusDiagnostic(view: ObjectIdentifier(session.view),
+                        ownerToken: session.token, generation: generation) {
+                        browser.grantSyntheticBenchmarkNativeFocusDiagnostic(binding, tabID: session.tabID,
+                            view: session.view, ownerToken: session.token, generation: generation)
+                    }
+                    #endif
                 }
                 // Each proof-capable round has a unique transport-only suffix.
                 if session.usesSubmissionOwnership {

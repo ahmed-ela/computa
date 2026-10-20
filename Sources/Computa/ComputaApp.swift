@@ -101,7 +101,7 @@ struct ComputaApp: App {
             }
             #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
             CommandMenu("Model Diagnostics") {
-                Toggle("Focus Next Armed Model Turn", isOn: Binding(
+                Toggle("Focus Next Synthetic Benchmark", isOn: Binding(
                     get: { state.browserSession.modelNativeFocusDiagnosticRequested },
                     set: { state.browserSession.setModelNativeFocusDiagnosticRequested($0) }
                 ))
