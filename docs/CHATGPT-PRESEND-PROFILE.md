@@ -617,3 +617,57 @@ Production source hashes were unchanged during that run.
 - First attempt record: `3e6834e6ba13a6ac15a51450f82cf97bf6455c999bad4ab3b79dda1ebde8a98a`.
 - Second attempt record: `be0d6122cef68dbcec2cc667e0c77cef3b0aebff23ea474293226a374755275f`.
 - Selected native test receipt: `3395d3970a9723d55a86b3e2942945abb2ed65a7893c655dacb467a6a393966c`.
+
+## Installed build-185 native focus qualification
+
+The four prespecified build-185 Sends completed in normal-native/direct,
+allowed-native/direct order. Each direct used its paired native's complete
+51,657-byte captured payload; all four resolved to ordinary rendered HI with
+the same two-byte canonical body, exact normal Chat/GPT-6/Instant proofs and
+confirmed owned-session or tab closure. Generated native IDs/session markers
+differ across the two native requests, so those native payloads are not claimed
+byte-identical. Both build-184 admission failures remain separate and were not replayed.
+
+| Condition | Native / direct Send→Probe text | Native / direct Send→candidate | Native body→raw |
+| --- | ---: | ---: | ---: |
+| Normal focus policy | 4120 / 3795 ms | 4121 / 5536 ms | 1320 ms |
+| Native focus allowed | 4266 / 3748 ms | 4267 / 3749 ms | 1587 ms |
+
+The descriptive mean text gap is **421.5 ms** (4193 ms native, 3771.5 ms direct).
+It does not causally explain the original build-183 **1144 ms** gap or establish a
+production latency fix. Normal direct's completion control appeared 1741 ms
+after readable text; candidate and first-text endpoints must remain separate.
+The build-185 normal aux raw observation was 4121 ms, 1 ms after its Probe text;
+the body→raw column uses the independent aux clock.
+
+Normal sampled visible/unfocused at install, Send, body and end, with no focus
+acquisition. Allowed logged acquisition/restoration bound to the exact capture
+nonce/session/generation, sampled focused at Send/body, and sampled unfocused
+after restoration. Thus the achieved focus manipulation did not remove the
+1587 ms body→raw interval in that case. One request per condition, different
+generated IDs, provider/order variation and discrete focus samples prevent a
+general focus-causality or equivalence claim. Both direct aux snapshots reached
+their finite diagnostic deadline with invalidReason=none and focused Send/body;
+neither has an end-focus sample. The original remaining cause is unresolved.
+
+Within their own native elapsed epochs, candidate→transport-complete took
+1780/1777 ms, quiet waits 1601/1601 ms, and final full proofs 178/175 ms. Separate
+server-clock cleanup persistence took 117/154 ms. These nested/distinct-clock
+spans are not added into a calibrated end-to-end decomposition. The 1600 ms
+fallback, final verification and tool behavior remain unchanged; no production
+focus change or unsafe completion shortcut was enabled.
+
+Signed 0.7.0 (185), executable source
+`637630e6285c56978fa2809b477ce09a69e804e3`, passed independent 56-file bundle
+verification with the diagnostic-only native-focus condition enabled and
+Gemini diagnostics off. This is a controlled local installation, without
+notarization or release publication. The 45 selected tests above remain scoped
+evidence; the earlier build-183 live tool workflows are carried forward after byte
+verification, not reported as new build-185 executions. Safari developer features
+were restored off; final UI evidence showed no human browser tabs and the
+browser panel off.
+
+- Installed verifier: `436e6dccbcf563e39b873983beebc19744960a3163136621ada8899b58de0df0`.
+- Normal/allowed native observations: `388addbb7d8306a0aef63394f8ad334149afe4551e82fe8a7e04244668a75b04`, `a2ef1d72675ab6e63bcf0ff38ba1f5edc52b3ace00f52b5e6441b332f13efa8a`.
+- Normal/allowed direct probes: `051e82f732ab3152e59d2988a9fd530bcb4be845a17ddfcb09f034b71255139d`, `b9d0f6dd82c77d3b38cccf3c1a65af7a079482d9782368f63f1c8a8712102750`.
+- Safari/UI cleanup receipts: `ab349e301e9e710a223f52171520e00514aa02f874bda24270799ace3be82424`, `14a99cbbcc9968b1be7606d076bc9099192b63fdcb35e12ea1758b25803a464b`.
