@@ -474,3 +474,34 @@ Each mean uses five fresh saves at the stated starting size. At 200 journals, in
 - Final store test log: `dcbb0b8bfe4a42b8104b1b0f996e82daafb3f342977cf09c23f0f37746671aaa`.
 
 An additional direct focus experiment stopped during CUA setup before Temporary selection, payload insertion or Send when the tool timed out and reset. Its unsent tab was closed and Safari's developer setting restored off. It provides no focus or latency evidence; the original three-pair report remains unchanged.
+
+### Installed build-183 results
+
+Signed 0.7.0 (183), executable source `82efceff24ef64734e6b386aa67e330c901f96d5`, passed independent verification of all 56 bundle files and 52 resources. The existing engine was preserved and Gemini diagnostics stayed off. This is a controlled test installation, without notarization or release publication.
+
+All three prespecified native-first pairs passed the unchanged reader with exact whole 51,657-byte inputs, normal Chat/latest Instant, fresh Temporary chats and confirmed owned-session closure. All six responses resolved to HI.
+
+| Page endpoint (ms) | Native 1 / direct 1 | Native 2 / direct 2 | Native 3 / direct 3 | Native / direct mean |
+| --- | --- | --- | --- | --- |
+| Send to first text | 5830 / 3438 | 4912 / 4445 | 4567 / 3995 | 5103 / 3959 |
+| Send to first completion candidate | 5830 / 3439 | 4912 / 4896 | 4568 / 4558 | 5103 / 4298 |
+
+The three-pair first-text difference is 1144ms, versus build 182's 540ms. Pair 1 has a 42-byte native extracted representation of unknown production-accepted format versus direct ordinary HI, so response format and length remain confounds. Pairs 2/3 have equal ordinary HI representations: first text differs by 467/572ms, but completion candidates differ by only 16/10ms because direct completion controls appeared 451/563ms after text. This describes different endpoints; it is not a post-hoc subgroup speedup claim. The complete three-pair report is retained, and no overall first-text improvement is established.
+
+Native candidate-to-transport completion took 1764/1778/1771ms, including the unchanged 1600ms stability guard and final full-proof reads of 163/175/171ms. The previous mean was 1844ms versus 1771ms now; build 182 recorded one response change that rearmed stability, so that difference is not solely a source effect. Transport-to-physical-close took 79/72/77ms within the native timing epoch.
+
+Cleanup persistence took 182/125/133ms, averaging **147ms versus 227ms** previously. Encoded response to cleanup receipt averaged 216ms versus 293ms. Transport acceptance to native completion on log wall timestamps averaged 230ms versus 317ms. These live reductions agree in direction with the controlled synthetic save improvement, but the store inventory changed after reversible archival of four closed synthetic tasks, and cache/load also differ. They do not isolate an 81ms source-only saving. Native/server elapsed epochs and page clocks are not subtracted across sources or summed into a calibrated end-to-end decomposition.
+
+The remaining first-text difference is unresolved. Empty assistant scaffold to raw text averaged 1480ms native versus 231ms direct; first observed scaffold presence is not a common provider first-token event. Synchronous observer guards accumulated only 22–30ms, with individual calls at most 5ms. These partial wall timings do not explain the difference or establish WebKit, focus, cache or observer scheduling as its cause. Standby creation remained after first validated text.
+
+The cleanup-store suite executed 30 tests with one opt-in skip and no failures; the separate opt-in benchmark passed. Seventeen integration tests also passed, covering cleanup failure, persistence-only retry, concurrent finish/shutdown, cancellation and synthetic AppState cases. The intended nine-test filter also selected eight AppState tests; all selected results are retained. The adapter was unchanged and retains its separate build-181 406-case result, not a rerun for 183.
+
+Both fresh V86 code/terminal/browser workflows passed all twelve original checks, with no native errors, failed commands or unverified browser calls. Each changed only the helper, preserved the unrelated note/tests, ran four tests, submitted its generated reference in the built-in browser, read the exact receipt and closed its tab. Independent verification passed all eight tests and edit-preservation checks. All 22 website inferences completed and saved/closed. The fixture server exited cleanly and its port closed; Safari developer features were restored off. These are bounded workflow results, not unrestricted provider qualification. One unsent direct setup failure was retained; no provider Send was replayed.
+
+- Installed verifier: `4876b4d6089c18089128614310da760de3f693ee0ab9be6fcc64ab1abeb9b731`.
+- Matched report: `78ab99b53d1078a263f1f63ef79d6e722e025bb4bbeea23a43a7998db71c7ca6`.
+- Auxiliary reconstruction: `2b0a48c364e916ca20c930fdbd293f9f4896ccbbfe84545e72f437f24a670421`.
+- Integration test log: `69567ed507baee8f8b8d65233e62446e36fff59b0abda7cca30c9689e4a2bf04`.
+- V86 workflow report: `38e59fbb9c4eab3f8657299098ee84fb46f373da293085a5a6c8a8282cea3581`.
+- Exact V86 extraction: `29152db9dabfe0419bb51c099c8d9e3958df24a3b1ce04ca0e4e0eb5ff8df4d0`.
+- Independent R1/R2: `8e1812d674987b51823c21bfba20721c233478febfc4d467d4c9db86ff7247e3`, `1ed0c8eeba518bc884a00b919e0d2516532c229bb776dd2ada609fb2b5c6848f`.
