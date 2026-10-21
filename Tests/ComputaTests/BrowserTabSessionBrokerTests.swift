@@ -1110,14 +1110,14 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(pressed, [3])
     }
 
-    func testContentViewWarnsThatReadyOptionResultsAreFilteredWhileAllRetainsTheirExactAction() async throws {
+    func testContentViewWarnsThatOtherReadyControlsAreFilteredWhileAllRetainsTheirExactAction() async throws {
         for includeHeading in [false, true] {
             let fixture = try await BrowserBrokerTestFixture.make()
             var nodes = [
                 semanticNode(0, role: "main", name: "Synthetic workspace", children: includeHeading ? ["n1", "n2"] : ["n2"]),
-                semanticNode(2, role: "listbox", name: "Synthetic results", parent: "n0", children: ["n3"]),
-                semanticNode(3, role: "option", name: "Synthetic selectable result", parent: "n2", children: ["n4"], clickable: true),
-                semanticNode(4, role: "StaticText", name: "Synthetic result preview", parent: "n3"),
+                semanticNode(2, role: "menu", name: "Synthetic menu", parent: "n0", children: ["n3"]),
+                semanticNode(3, role: "menuitem", name: "Synthetic menu action", parent: "n2", children: ["n4"], clickable: true),
+                semanticNode(4, role: "StaticText", name: "Synthetic menu preview", parent: "n3"),
             ]
             if includeHeading { nodes.insert(semanticNode(1, role: "heading", name: "Synthetic results heading", parent: "n0"), at: 1) }
             try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
@@ -1127,28 +1127,151 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             let lines = content.snapshot.formattedText.split(separator: "\n").map(String.init)
             XCTAssertTrue(lines[1].contains("view=content")); XCTAssertTrue(lines[1].contains("semantic_readiness=ready"))
             XCTAssertTrue(lines[1].contains("source_truncated=0"))
-            XCTAssertTrue(lines[2].hasPrefix("CONTENT_VIEW_SCOPE controls_omitted=true"))
-            XCTAssertTrue(lines[2].contains("Message/search-result rows can be controls outside this view"))
-            XCTAssertTrue(lines[2].contains("read view=overview or all before absence/access claims"))
+            XCTAssertTrue(lines[2].hasPrefix("CONTENT_VIEW_SCOPE includes=readable_text,listbox_options other_controls_omitted=true"))
+            XCTAssertTrue(lines[2].contains("Included options retain original actions"))
+            XCTAssertTrue(lines[2].contains("read view=overview or all for other controls and before absence/access claims"))
             XCTAssertEqual(content.snapshot.elements.map(\.label), includeHeading ? ["Synthetic results heading"] : [])
-            XCTAssertFalse(content.snapshot.formattedText.contains("Synthetic selectable result"))
-            XCTAssertFalse(content.snapshot.formattedText.contains("Synthetic result preview"))
+            XCTAssertFalse(content.snapshot.formattedText.contains("Synthetic menu action"))
+            XCTAssertFalse(content.snapshot.formattedText.contains("Synthetic menu preview"))
             XCTAssertTrue(lines[1].contains(includeHeading ? "no_matches=0" : "no_matches=1"))
             let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: content.binding,
                 bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
             XCTAssertFalse(all.snapshot.formattedText.contains("CONTENT_VIEW_SCOPE"))
-            let option = try XCTUnwrap(all.snapshot.elements.first { $0.semanticRole == "option" })
-            XCTAssertTrue(option.isEnabled); XCTAssertTrue(option.supportsPress)
-            XCTAssertEqual(option.contentKind, .control)
-            let row = try XCTUnwrap(all.snapshot.presentation?.rows.first { $0.index == option.index })
+            let item = try XCTUnwrap(all.snapshot.elements.first { $0.semanticRole == "menuitem" })
+            XCTAssertTrue(item.isEnabled); XCTAssertTrue(item.supportsPress)
+            XCTAssertEqual(item.contentKind, .control)
+            let row = try XCTUnwrap(all.snapshot.presentation?.rows.first { $0.index == item.index })
             XCTAssertEqual(row.actions, ["AXPress"])
-            let preview = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Synthetic result preview" })
+            let preview = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Synthetic menu preview" })
             XCTAssertEqual(preview.contentKind, .control); XCTAssertFalse(preview.supportsPress)
             try await fixture.broker.perform(taskKey: "task-a", binding: all.binding, snapshot: all.snapshot,
-                elementIndex: option.index, action: "AXPress")
+                elementIndex: item.index, action: "AXPress")
             let pressed = await fixture.transport.pressedNodeIDs(targetID: all.binding.targetID)
-            XCTAssertEqual(pressed, [4], "Only the exact option receives input; the filtered text child gains no action")
+            XCTAssertEqual(pressed, [4], "Only the exact menu item receives input; the filtered text child gains no action")
         }
+    }
+
+    func testContentViewIncludesObservedListboxOptionsAndTextWithoutReclassifyingOrInferringActions() async throws {
+        for scopeRole in ["main", "complementary"] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+                semanticNode(0, role: scopeRole, name: "Synthetic workspace", children: ["n1"]),
+                semanticNode(1, role: "listbox", name: "Synthetic results", parent: "n0", children: ["n2"]),
+                semanticNode(2, role: "group", name: "Synthetic group", parent: "n1", children: ["n3", "n5"]),
+                semanticNode(3, role: "option", name: "Selectable result", parent: "n2", children: ["n7"], clickable: true),
+                semanticNode(7, role: "group", name: "Result layout", parent: "n3", children: ["n4"]),
+                semanticNode(4, role: "StaticText", name: "Result detail", parent: "n7"),
+                semanticNode(5, role: "option", name: "Read-only result", parent: "n2", children: ["n6"], readOnly: true),
+                semanticNode(6, role: "StaticText", name: "Read-only detail", parent: "n5"),
+            ], semanticReadiness: .ready)
+            let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            XCTAssertEqual(content.snapshot.elements.map(\.label),
+                ["Selectable result", "Result detail", "Read-only result", "Read-only detail"])
+            XCTAssertEqual(content.snapshot.elements.map(\.contentKind), Array(repeating: .control, count: 4))
+            XCTAssertEqual(content.snapshot.elements.map(\.contentScope),
+                Array(repeating: scopeRole == "main" ? BrowserContentScope.main : .complementary, count: 4))
+            XCTAssertEqual(content.snapshot.elements.map(\.supportsPress), [true, false, false, false])
+            XCTAssertTrue(content.snapshot.formattedText.contains("document_content_shown=0"))
+            XCTAssertTrue(content.snapshot.formattedText.contains("controls_shown=4"))
+            let option = try XCTUnwrap(content.snapshot.elements.first)
+            XCTAssertEqual(option.backendNodeID, 4); XCTAssertEqual(option.nodeID, "n3")
+            let rows = try XCTUnwrap(content.snapshot.presentation).rows
+            XCTAssertEqual(rows.first { $0.index == option.index }?.actions, ["AXPress"])
+            for element in content.snapshot.elements.dropFirst() {
+                XCTAssertEqual(rows.first { $0.index == element.index }?.actions, [])
+                await assertBrowserError(.unsupportedAction("AXPress")) {
+                    try await fixture.broker.perform(taskKey: "task-a", binding: content.binding, snapshot: content.snapshot,
+                        elementIndex: element.index, action: "AXPress")
+                }
+            }
+            try await fixture.broker.perform(taskKey: "task-a", binding: content.binding, snapshot: content.snapshot,
+                elementIndex: option.index, action: "AXPress")
+            let pressed = await fixture.transport.pressedNodeIDs(targetID: content.binding.targetID)
+            XCTAssertEqual(pressed, [4])
+        }
+    }
+
+    func testContentViewDoesNotPromoteUnscopedOptionsNavigationOrOtherControls() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "main", name: "Workspace", children: ["n1", "n2", "n3", "n4", "n7", "n10", "n13"]),
+            semanticNode(1, role: "option", name: "Bare option", parent: "n0", clickable: true),
+            semanticNode(2, role: "button", name: "Ordinary button", parent: "n0", clickable: true),
+            semanticNode(3, role: "treeitem", name: "Tree item", parent: "n0", clickable: true),
+            semanticNode(4, role: "navigation", name: "Navigation", parent: "n0", children: ["n5"]),
+            semanticNode(5, role: "listbox", name: "Navigation list", parent: "n4", children: ["n6"]),
+            semanticNode(6, role: "option", name: "Navigation option", parent: "n5", clickable: true),
+            semanticNode(7, role: "banner", name: "Banner", parent: "n0", children: ["n8"]),
+            semanticNode(8, role: "listbox", name: "Banner list", parent: "n7", children: ["n9"]),
+            semanticNode(9, role: "option", name: "Banner option", parent: "n8", clickable: true),
+            semanticNode(10, role: "contentinfo", name: "Footer", parent: "n0", children: ["n11"]),
+            semanticNode(11, role: "listbox", name: "Footer list", parent: "n10", children: ["n12"]),
+            semanticNode(12, role: "option", name: "Footer option", parent: "n11", clickable: true),
+            semanticNode(13, role: "listbox", name: "Results", parent: "n0", children: ["n14"]),
+            semanticNode(14, role: "option", name: "Result", parent: "n13", children: ["n15"], clickable: true),
+            semanticNode(15, role: "button", name: "Nested button", parent: "n14", children: ["n16"], clickable: true),
+            semanticNode(16, role: "StaticText", name: "Nested button text", parent: "n15"),
+        ])
+        let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+        XCTAssertEqual(content.snapshot.elements.map(\.label), ["Result"])
+        XCTAssertEqual(content.snapshot.elements.first?.contentKind, .control)
+        await fixture.assertNoInput()
+    }
+
+    func testContentListboxInclusionRejectsMissingAmbiguousAndCyclicParentLineage() async throws {
+        for lineage in ["missing", "duplicate", "cycle", "intervening-control"] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            var nodes = [
+                semanticNode(0, role: "main", name: "Workspace", children: ["n1"]),
+                semanticNode(1, role: "listbox", name: "Results", parent: "n0", children: ["n2"]),
+                semanticNode(2, role: "option", name: "Unverified result", parent: "n1", clickable: true),
+            ]
+            if lineage == "missing" { nodes.removeFirst() }
+            if lineage == "duplicate" { nodes.append(semanticNode(1, role: "listbox", name: "Duplicate", parent: "n0")) }
+            if lineage == "cycle" { nodes[0] = semanticNode(0, role: "main", name: "Workspace", parent: "n2", children: ["n1"]) }
+            if lineage == "intervening-control" {
+                nodes[2] = semanticNode(2, role: "option", name: "Unverified result", parent: "n3", clickable: true)
+                nodes.append(semanticNode(3, role: "button", name: "Wrapper", parent: "n1", children: ["n2"], clickable: true))
+            }
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+            let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            XCTAssertTrue(content.snapshot.elements.isEmpty)
+            await fixture.assertNoInput()
+        }
+    }
+
+    func testContentListboxRowsKeepTruncatedSourceAndImmutableContinuationFences() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let options = (2..<142).map { semanticNode($0, role: "option", name: "Result \($0)", parent: "n1", clickable: true) }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "complementary", name: "Workspace", children: ["n1"]),
+            semanticNode(1, role: "listbox", name: "Results", parent: "n0", children: options.compactMap(\.nodeID)),
+        ] + options, sourceTruncated: true)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+        let cursor = try XCTUnwrap(first.snapshot.nextCursor)
+        let firstReceipt = try XCTUnwrap(first.snapshot.readReceipt)
+        XCTAssertTrue(firstReceipt.sourceTruncated); XCTAssertEqual(firstReceipt.selectedElementCount, 140)
+        XCTAssertLessThanOrEqual(first.snapshot.formattedText.utf8.count, 16_384)
+        XCTAssertTrue(first.snapshot.elements.allSatisfy { $0.contentKind == .control && $0.contentScope == .complementary })
+        await assertBrowserError(.elementNotFound) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
+                elementIndex: 100, action: "AXPress")
+        }
+        let next = try await fixture.broker.snapshot(taskKey: "task-a", binding: first.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(cursor: cursor))
+        XCTAssertEqual(next.snapshot.readReceipt?.sourceID, firstReceipt.sourceID)
+        XCTAssertTrue(next.snapshot.readReceipt?.sourceTruncated == true)
+        XCTAssertTrue(next.snapshot.elements.allSatisfy { $0.contentKind == .control && $0.contentScope == .complementary })
+        XCTAssertTrue(Set(first.snapshot.elements.compactMap(\.nodeID)).isDisjoint(with: next.snapshot.elements.compactMap(\.nodeID)))
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
+                elementIndex: 0, action: "AXPress")
+        }
+        await fixture.assertNoInput()
     }
 
     func testLongFieldContinuationReconstructsExactUnicodeAndEscapedBytesWithBoundedOutput() async throws {

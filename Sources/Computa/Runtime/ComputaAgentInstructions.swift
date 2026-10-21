@@ -323,7 +323,7 @@ enum ComputaAgentInstructions {
     After navigation/sign-in, empty, title-only or footer-only reads are inconclusive. Use a bounded
     browser_wait, then fresh unfiltered browser_read before concluding; if still empty,
     report unresolved loading, not absence or denied access.
-    Filtered content may omit controls/selectable results. Read overview/all before absence/access claims.
+    Content includes non-navigation listbox options. Read overview/all before absence/access claims.
     Enabled observed link with href but actions=[]: browser_navigate its exact href in the bound tab.
     Background-only forbids native focus theft/global input, not offered browser navigation
     or observed sign-in/account selection. Claim policy/access denial only from actual tool evidence.

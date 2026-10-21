@@ -1128,7 +1128,7 @@ actor BrowserTabSessionBroker {
             case .links:
                 guard node.role.lowercased() == "link" else { return nil }
             case .content:
-                guard element.contentKind == .readable,
+                guard element.contentKind == .readable || isListboxOptionContent(node, nodes: sourceNodes),
                       !element.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || !(element.value ?? "").isEmpty else { return nil }
             }
@@ -1238,6 +1238,38 @@ actor BrowserTabSessionBroker {
         default:
             return .unknown
         }
+    }
+
+    /// Selectable listbox results can carry document text while remaining
+    /// controls. This changes view selection only, never their action authority
+    /// or document-content classification. Every ancestor must be observed.
+    private func isListboxOptionContent(_ node: BrowserDocumentNode,
+                                        nodes: [String: BrowserDocumentNode]) -> Bool {
+        let textRoles: Set<String> = ["statictext", "inlinetextbox", "text", "heading", "paragraph", "listitem", "term",
+            "definition", "code", "blockquote", "cell", "gridcell", "rowheader", "columnheader", "caption", "label"]
+        guard node.role.lowercased() == "option" || textRoles.contains(node.role.lowercased()) else { return false }
+        let excludedRoles: Set<String> = ["button", "checkbox", "combobox", "searchbox", "textbox", "menu", "menubar",
+            "menuitem", "menuitemcheckbox", "menuitemradio", "radio", "radiogroup", "switch", "tab", "tablist", "toolbar",
+            "slider", "spinbutton", "treeitem", "link", "navigation", "banner", "contentinfo"]
+        var current = node
+        var seen = Set<String>()
+        var optionSeen = false, listboxSeen = false
+        for _ in 0..<128 {
+            guard let id = current.nodeID, nodes[id] == current, seen.insert(id).inserted else { return false }
+            let role = current.role.lowercased()
+            if excludedRoles.contains(role) { return false }
+            if role == "option" {
+                guard !optionSeen else { return false }
+                optionSeen = true
+            } else if role == "listbox" {
+                guard optionSeen, !listboxSeen else { return false }
+                listboxSeen = true
+            }
+            guard let parentID = current.parentNodeID else { return optionSeen && listboxSeen }
+            guard let parent = nodes[parentID] else { return false }
+            current = parent
+        }
+        return false
     }
 
     private func readFields(_ element: BrowserTabElement) -> [(field: SemanticReadField, text: String)] {
@@ -1546,7 +1578,7 @@ actor BrowserTabSessionBroker {
             lines.insert("LINK_VIEW_SCOPE non_link_controls_omitted=true. Buttons/form controls may be outside this view; read view=overview or all before absence/access claims.", at: 2)
         }
         if read.view == .content {
-            lines.insert("CONTENT_VIEW_SCOPE controls_omitted=true. Message/search-result rows can be controls outside this view; read view=overview or all before absence/access claims.", at: 2)
+            lines.insert("CONTENT_VIEW_SCOPE includes=readable_text,listbox_options other_controls_omitted=true. Included options retain original actions; read view=overview or all for other controls and before absence/access claims.", at: 2)
         }
         if read.view == .overview {
             lines.append("OVERVIEW selection=observed_controls_headings_navigation ordering=interleaved_categories document_content_exhaustive=false. Read view=content for the document body; view=all retains full structural context for action planning.")

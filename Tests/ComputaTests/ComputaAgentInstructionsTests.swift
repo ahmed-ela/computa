@@ -383,9 +383,13 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     }
 
     func testFilteredContentRequiresAnUnfilteredControlViewBeforeAbsenceClaimsInBothDeliveries() {
-        // A selectable result may be a control and therefore absent from the
-        // readable-content view. Delivery of this rule is not a live result.
-        let rule = "Filtered content may omit controls/selectable results. Read overview/all before absence/access claims."
+        // Observed listbox options remain controls but are included in content;
+        // other controls can be filtered. Delivery is not a live result.
+        let rule = "Content includes non-navigation listbox options. Read overview/all before absence/access claims."
+        let read = EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" }
+        let description = read?["description"] as? String ?? ""
+        XCTAssertTrue(description.contains("content for readable text and non-navigation listbox options"))
+        XCTAssertTrue(description.contains("controls only when actions contains AXPress"))
         for referenceTools in [true, false] {
             let native = ComputaAgentInstructions.developerInstructions(
                 referenceTools: referenceTools, embeddedBrowserTools: true)
