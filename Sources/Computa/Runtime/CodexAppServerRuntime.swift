@@ -2315,8 +2315,7 @@ private extension CodexAppServerRuntime {
                     params: [
                         "threadId": threadID,
                         "input": try computerTurnInput(prompt: prompt, threadID: threadID, taskID: taskID),
-                        "effort": APIProviderCatalog.selection(for: modelID, providers: apiProviders)?
-                            .taskReasoningEffort ?? configuration.reasoningEffort,
+                        "effort": configuration.reasoningEffort,
                         "model": modelID,
                         "sandboxPolicy": accessMode.sandboxPolicy,
                         "approvalPolicy": accessMode.approvalPolicy,
