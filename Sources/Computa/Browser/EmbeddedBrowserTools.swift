@@ -323,12 +323,18 @@ actor EmbeddedBrowserToolController {
             let more = context.inventoryOffset < context.inventory.count
             context.inventoryCursor = more ? UUID().uuidString : nil
             contexts[taskKey] = context
-            return try json([
+            var result: [String: Any] = [
                 "browser": "computa_builtin", "tabs": rows, "count": context.inventory.count,
                 "returned": rows.count, "truncated": more,
                 "next_cursor": context.inventoryCursor as Any? ?? NSNull(),
                 "consistency": "retained_metadata", "content_evidence": "metadata_only",
-            ])
+            ]
+            if context.inventory.isEmpty && !more {
+                result["inventory_state"] = "no_matching_human_tabs"
+                result["authentication_evidence"] = "not_observed"
+                result["next"] = "No matching human tabs were listed; this does not establish logout, missing credentials or denied access. For an authorized known service, use browser_open at its official entrypoint, then inspect the current session before asking for sign-in help."
+            }
+            return try json(result)
         case "browser_open", "browser_bind":
             let owned = tool == "browser_open"
             if owned { try requireScope(scope, url: URL(string: object["url"] as! String)!) }

@@ -783,6 +783,9 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
             "features.unified_exec": true,
             "features.view_image": false,
             "features.workspace_dependencies": false,
+            // Computa submits Default-mode turns; the engine's structured
+            // question tool rejects that mode. Ordinary questions remain text.
+            "tools.experimental_request_user_input.enabled": false,
             "web_search": "disabled",
             "model_context_window": context.contextWindow,
             "model_auto_compact_token_limit": compactLimit,

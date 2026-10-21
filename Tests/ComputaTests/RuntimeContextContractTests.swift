@@ -424,6 +424,17 @@ final class RuntimeContextContractTests: XCTestCase {
         XCTAssertNil(config["compact_prompt"])
     }
 
+    func testDefaultModeThreadsDoNotOfferTheUnavailableStructuredQuestionTool() {
+        let apiModel = APIProviderCatalog.appModelID(providerID: "cerebras", modelID: "gpt-oss-120b")
+        for model in [LocalModelCatalog.defaultModelID, "browser/chatgpt", apiModel] {
+            let config = CodexAppServerRuntime.localThreadConfig(for: model)
+            XCTAssertEqual(config["tools.experimental_request_user_input.enabled"] as? Bool, false)
+            XCTAssertEqual(config["features.shell_tool"] as? Bool, true)
+            XCTAssertEqual(config["features.unified_exec"] as? Bool, true)
+            XCTAssertEqual(config["include_permissions_instructions"] as? Bool, true)
+        }
+    }
+
     func testNineBInheritsOnlyTheSharedComputerUseContextProfile() {
         let fourB = CodexAppServerRuntime.localThreadConfig(for: "lmstudio-community/Qwen3.5-4B-MLX-4bit")
         let nineB = CodexAppServerRuntime.localThreadConfig(for: "lmstudio-community/Qwen3.5-9B-MLX-4bit")

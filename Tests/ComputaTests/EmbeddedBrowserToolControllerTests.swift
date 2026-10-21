@@ -815,7 +815,10 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         let human = await backend.humanID
         _ = try await call(controller,"browser_tabs")
         _ = try await call(controller,"browser_bind",["tab_id":human])
-        _ = try await call(controller,"browser_tabs",key:"turn-b")
+        let busyInventory = try jsonObject(await call(controller,"browser_tabs",key:"turn-b"))
+        XCTAssertNil(busyInventory["inventory_state"]); XCTAssertNil(busyInventory["authentication_evidence"])
+        XCTAssertNil(busyInventory["next"], "An occupied tab is not an empty-inventory invitation to duplicate it")
+        XCTAssertEqual((busyInventory["tabs"] as? [[String: Any]])?.first?["availability"] as? String, "busy")
         do { _ = try await call(controller,"browser_bind",["tab_id":human],key:"turn-b"); XCTFail("Two task writers must not lease one tab") }
         catch { XCTAssertEqual(error as? BrowserTabBrokerError,.operationInProgress) }
         _ = await controller.release(taskKey:"turn-a")
@@ -1208,6 +1211,38 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testEmptyMatchingInventoryReportsUnobservedAuthenticationWithoutGrantingPageAuthority() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let scope = ComputerTaskScope(userPrompt: "Read the requested page on Wikipedia using the built-in browser.")
+        let output = try await call(controller, "browser_tabs", scope: scope)
+        let inventory = try jsonObject(output)
+        XCTAssertEqual(inventory["count"] as? Int, 0); XCTAssertEqual(inventory["returned"] as? Int, 0)
+        XCTAssertEqual(inventory["truncated"] as? Bool, false)
+        XCTAssertTrue(try XCTUnwrap(inventory["tabs"] as? [[String: Any]]).isEmpty)
+        XCTAssertTrue(inventory["next_cursor"] is NSNull)
+        XCTAssertEqual(inventory["content_evidence"] as? String, "metadata_only")
+        XCTAssertEqual(inventory["inventory_state"] as? String, "no_matching_human_tabs")
+        XCTAssertEqual(inventory["authentication_evidence"] as? String, "not_observed")
+        let next = try XCTUnwrap(inventory["next"] as? String)
+        XCTAssertTrue(next.contains("does not establish logout, missing credentials or denied access"))
+        XCTAssertTrue(next.contains("For an authorized known service, use browser_open at its official entrypoint"))
+        XCTAssertTrue(next.contains("inspect the current session before asking for sign-in help"))
+        XCTAssertFalse(next.contains("://"), "The inventory must not manufacture a service URL")
+        XCTAssertNil(inventory["authenticated"]); XCTAssertNil(inventory["snapshot_id"]); XCTAssertNil(inventory["tab_id"])
+        XCTAssertLessThan(output.utf8.count, 1_024)
+        let unrelatedHumanTabs = try await backend.humanTargets()
+        XCTAssertEqual(unrelatedHumanTabs.count, 1, "No matching tabs does not assert the whole profile has no tabs")
+        do { _ = try await call(controller, "browser_read", scope: scope); XCTFail("Inventory metadata grants no page binding") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        var counts = await backend.counts()
+        XCTAssertEqual(counts.creates, 0); XCTAssertEqual(counts.observes, 0)
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        _ = try await call(controller, "browser_open", ["url": "https://en.wikipedia.org/"], scope: scope)
+        counts = await backend.counts()
+        XCTAssertEqual(counts.creates, 1, "The ordinary authorized open remains available after empty inventory")
+        _ = await controller.shutdown()
+    }
+
     func testInventoryPagesAreBoundedAndCursorIsScopedToCurrentTurnAndInventory() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport:backend)
         await backend.addLongInventory()
@@ -1216,6 +1251,8 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         while true {
             XCTAssertLessThanOrEqual(page.utf8.count,8_192)
             let value = try XCTUnwrap(JSONSerialization.jsonObject(with:Data(page.utf8)) as? [String:Any])
+            XCTAssertNil(value["inventory_state"]); XCTAssertNil(value["authentication_evidence"])
+            XCTAssertNil(value["next"], "A nonempty retained inventory, including its last page, keeps its normal cursor contract")
             let rows = try XCTUnwrap(value["tabs"] as? [[String:Any]])
             identifiers.formUnion(rows.compactMap { $0["tab_id"] as? String })
             guard let cursor = value["next_cursor"] as? String else { break }
