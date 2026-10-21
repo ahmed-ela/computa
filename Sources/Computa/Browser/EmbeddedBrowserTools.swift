@@ -47,7 +47,7 @@ enum EmbeddedBrowserTools {
         let cursor: [String: Any] = ["type": "string", "minLength": 1,
             "description": "Omit this field on the first page or a fresh read. Only copy an exact nonempty next_cursor returned by this same tool in the current turn; never send an empty string, null or an invented cursor. At most 2048 UTF-8 bytes."]
         let query: [String: Any] = ["type": "string", "minLength": 1,
-            "description": "Optional observed-text filter, at most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
+            "description": "Local filter of captured text, not website Search; at most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
         let url: [String: Any] = ["type": "string", "minLength": 1, "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
         let mutation: [String: Any] = [
             "snapshot_id": ["type": "string", "minLength": 1, "description": "Use the ID from the latest browser_read or available current_observation returned by an input. Input consumes it: never batch another input; await the result and use its new references, or browser_read if unavailable."],

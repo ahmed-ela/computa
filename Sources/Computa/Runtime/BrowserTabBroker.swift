@@ -1143,6 +1143,15 @@ actor BrowserTabSessionBroker {
             }
             return element
         }
+        if read.view == .content {
+            // A source-order result list can fill the first bounded page before
+            // an already captured reading pane. Keep every field and its exact
+            // authority, but expose document text before selectable results.
+            let documentText = elements.filter { $0.contentKind == .readable && $0.contentScope.isDocumentContent }
+            let otherText = elements.filter { $0.contentKind == .readable && !$0.contentScope.isDocumentContent }
+            let controls = elements.filter { $0.contentKind != .readable }
+            return documentText + otherText + controls
+        }
         guard read.view == .overview else { return elements }
         // Interleave observed controls, headings, and navigation so a long
         // sidebar cannot consume the first page before controls are exposed.

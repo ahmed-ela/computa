@@ -1274,6 +1274,124 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         await fixture.assertNoInput()
     }
 
+    func testContentPrioritizesCapturedReadingPaneWhileAllKeepsSourceOrderAndExactActions() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let options = (2..<42).map {
+            semanticNode($0, role: "option", name: "Selectable result \($0) " + String(repeating: "x", count: 120),
+                parent: "n1", clickable: true)
+        }
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: [
+            semanticNode(0, role: "complementary", name: "Result region", children: ["n1"]),
+            semanticNode(1, role: "listbox", name: "Results", parent: "n0", children: options.compactMap(\.nodeID)),
+        ] + options + [
+            semanticNode(1000, role: "main", name: "Reading pane", children: ["n1001", "n1002", "n1003"]),
+            semanticNode(1001, role: "heading", name: "Opened record", parent: "n1000"),
+            semanticNode(1002, role: "StaticText", name: "The complete requested document detail.", parent: "n1000"),
+            semanticNode(1003, role: "StaticText", name: "A distinct supporting passage.", parent: "n1000"),
+        ])
+        let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+        XCTAssertEqual(Array(content.snapshot.elements.prefix(3).map(\.nodeID)), ["n1001", "n1002", "n1003"])
+        XCTAssertTrue(content.snapshot.elements.prefix(3).allSatisfy { $0.contentKind == .readable && $0.contentScope == .main })
+        let option = try XCTUnwrap(content.snapshot.elements.first { $0.semanticRole == "option" })
+        XCTAssertEqual(option.index, 3); XCTAssertEqual(option.backendNodeID, 3); XCTAssertEqual(option.nodeID, "n2")
+        XCTAssertEqual(option.contentScope, .complementary); XCTAssertEqual(option.contentKind, .control)
+        XCTAssertTrue(option.supportsPress); XCTAssertNotNil(content.snapshot.nextCursor)
+        await assertBrowserError(.unsupportedAction("AXPress")) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: content.binding, snapshot: content.snapshot,
+                elementIndex: 0, action: "AXPress")
+        }
+        try await fixture.broker.perform(taskKey: "task-a", binding: content.binding, snapshot: content.snapshot,
+            elementIndex: option.index, action: "AXPress")
+        let pressed = await fixture.transport.pressedNodeIDs(targetID: content.binding.targetID)
+        XCTAssertEqual(pressed, [3], "Reordering changes only the published index, never the exact target")
+        let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: content.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+        XCTAssertEqual(Array(all.snapshot.elements.prefix(3).map(\.nodeID)), ["n0", "n1", "n2"])
+    }
+
+    func testContentPriorityKeepsUnselectedResultsAndAllDuplicateOrDistinctSupportingText() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let duplicate = "Exact result preview"
+        let nodes = [
+            semanticNode(0, role: "complementary", name: "Results", children: ["n1"]),
+            semanticNode(1, role: "listbox", name: "Result list", parent: "n0", children: ["n2"]),
+            semanticNode(2, role: "option", name: duplicate, parent: "n1", children: ["n3", "n4"], clickable: true),
+            semanticNode(3, role: "StaticText", name: duplicate, parent: "n2"),
+            semanticNode(4, role: "StaticText", name: "Distinct detail absent from the option label", parent: "n2"),
+            semanticNode(5, role: "main", name: "Unselected reading pane"),
+        ]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: nodes)
+        let unselected = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+        XCTAssertEqual(unselected.snapshot.elements.map(\.label),
+            [duplicate, duplicate, "Distinct detail absent from the option label"])
+        XCTAssertEqual(unselected.snapshot.elements.map(\.supportsPress), [true, false, false])
+        let body = semanticNode(6, role: "StaticText", name: "Opened document passage", parent: "n5")
+        try await fixture.transport.replaceNodes(targetID: unselected.binding.targetID, nodes: nodes + [body])
+        let selected = try await fixture.broker.snapshot(taskKey: "task-a", binding: unselected.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+        XCTAssertEqual(selected.snapshot.elements.map(\.label),
+            ["Opened document passage", duplicate, duplicate, "Distinct detail absent from the option label"])
+        let query = try await fixture.broker.snapshot(taskKey: "task-a", binding: selected.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(query: "Distinct detail", view: .content))
+        XCTAssertEqual(query.snapshot.elements.map(\.nodeID), ["n4"])
+        XCTAssertEqual(query.snapshot.elements.first?.contentKind, .control)
+        XCTAssertFalse(query.snapshot.elements.first?.supportsPress ?? true)
+        await fixture.assertNoInput()
+    }
+
+    func testContentPriorityFreezesTheOrderedSelectionAcrossBoundedPagesAndSourceChanges() async throws {
+        let fixture = try await BrowserBrokerTestFixture.make()
+        let options = (2..<92).map { semanticNode($0, role: "option", name: "Result \($0)", parent: "n1", clickable: true) }
+        let original = [
+            semanticNode(0, role: "complementary", name: "Results", children: ["n1"]),
+            semanticNode(1, role: "listbox", name: "Result list", parent: "n0", children: options.compactMap(\.nodeID)),
+        ] + options + [
+            semanticNode(1000, role: "article", name: "Reading pane", children: ["n1001"]),
+            semanticNode(1001, role: "StaticText", name: "Captured document passage", parent: "n1000"),
+            semanticNode(1002, role: "StaticText", name: "Readable without a landmark"),
+        ]
+        try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID, nodes: original, sourceTruncated: true)
+        let first = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+        let firstReceipt = try XCTUnwrap(first.snapshot.readReceipt)
+        XCTAssertEqual(Array(first.snapshot.elements.prefix(2).map(\.nodeID)), ["n1001", "n1002"])
+        XCTAssertEqual(firstReceipt.selectedElementCount, 92); XCTAssertTrue(firstReceipt.sourceTruncated)
+        let firstCursor = try XCTUnwrap(first.snapshot.nextCursor)
+        await assertBrowserError(.elementNotFound) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
+                elementIndex: 100, action: "AXPress")
+        }
+        try await fixture.transport.replaceNodes(targetID: first.binding.targetID, nodes: [
+            semanticNode(1000, role: "article", name: "Reading pane", children: ["n1001"]),
+            semanticNode(1001, role: "StaticText", name: "New live passage", parent: "n1000"),
+        ])
+        var page = first
+        var labels = first.snapshot.elements.map(\.label)
+        var pages = 1
+        var cursor: String? = firstCursor
+        while let next = cursor {
+            page = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+                bundleIdentifier: "com.google.Chrome", read: .init(cursor: next))
+            pages += 1; XCTAssertLessThan(pages, 12)
+            XCTAssertEqual(page.snapshot.readReceipt?.sourceID, firstReceipt.sourceID)
+            XCTAssertTrue(page.snapshot.readReceipt?.sourceTruncated == true)
+            XCTAssertLessThanOrEqual(page.snapshot.formattedText.utf8.count, 16_384)
+            labels += page.snapshot.elements.map(\.label)
+            cursor = page.snapshot.nextCursor
+        }
+        XCTAssertEqual(labels, ["Captured document passage", "Readable without a landmark"] + options.map(\.name))
+        await assertBrowserError(.staleSnapshot) {
+            try await fixture.broker.perform(taskKey: "task-a", binding: first.binding, snapshot: first.snapshot,
+                elementIndex: 0, action: "AXPress")
+        }
+        let fresh = try await fixture.broker.snapshot(taskKey: "task-a", binding: page.binding,
+            bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+        XCTAssertEqual(fresh.snapshot.elements.map(\.label), ["New live passage"])
+        await fixture.assertNoInput()
+    }
+
     func testLongFieldContinuationReconstructsExactUnicodeAndEscapedBytesWithBoundedOutput() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         // The first split falls between a base character and its combining
