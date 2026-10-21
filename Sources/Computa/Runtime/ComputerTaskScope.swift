@@ -81,7 +81,7 @@ struct ComputerTaskScope: Equatable, Sendable {
         .init(name: "Outlook", aliases: ["outlook"], hosts: ["outlook.live.com", "outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"], routes: [
             .init(host: "www.microsoft.com", pathPattern: #"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?microsoft-365/outlook/email-and-calendar-software-microsoft-outlook/?$"#),
             .init(host: "go.microsoft.com", pathPattern: #"^/fwlink/p/?$"#,
-                  requiredQueryValues: ["LinkID": ["2125442"]], optionalQueryValues: ["deeplink": ["mail/"]]),
+                  requiredQueryValues: ["LinkID": ["2125442"]], optionalQueryValues: ["deeplink": ["mail/", "mail/inbox"]]),
             .init(host: "login.microsoftonline.com", pathPattern: #"^/common/oauth2/v2\.0/authorize/?$"#,
                   redirectURIs: ["https://outlook.live.com/mail", "https://outlook.live.com/mail/",
                                  "https://outlook.office.com/mail", "https://outlook.office.com/mail/",

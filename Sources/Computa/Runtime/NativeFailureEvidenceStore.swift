@@ -302,7 +302,8 @@ struct NativeFailureEvidenceStore: Sendable {
                   (1 ... ComputerActionEvidence.maximumOperations).contains(unresolved.intValue),
                   (0 ... unresolved.intValue).contains(failed.intValue),
                   (kind == .unverified ? record.toolName == "computer_outcome"
-                   : (record.toolName.hasPrefix("computer_v2_") || record.toolName == "computer" || record.toolName.hasPrefix("desktop_"))) else {
+                   : (record.toolName.hasPrefix("computer_v2_") || record.toolName == "computer" || record.toolName.hasPrefix("desktop_")
+                      || EmbeddedBrowserTools.names.contains(record.toolName))) else {
                 throw StoreError.invalid("record is not redacted runtime outcome evidence")
             }
         default:

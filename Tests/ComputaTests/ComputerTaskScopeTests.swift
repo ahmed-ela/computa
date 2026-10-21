@@ -91,6 +91,7 @@ final class ComputerTaskScopeTests: XCTestCase {
         let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
         for raw in [
             "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2F&sessionId=opaque",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox&sessionId=opaque",
             "https://go.microsoft.com/fwlink/p?LinkID=2125442",
             "https://go.microsoft.com:443/fwlink/p/?linkid=2125442&deeplink=mail%2F",
         ] {
@@ -102,6 +103,11 @@ final class ComputerTaskScopeTests: XCTestCase {
             "https://go.microsoft.com/fwlink/p/?LinkID=2125442&linkid=1",
             "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=https%3A%2F%2Fattacker.test",
             "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Fother",
+            "https://go.microsoft.com/fwlink/p/?LinkID=1&deeplink=mail%2Finbox",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox%2Fother",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox%3Fnext%3Dhttps%3A%2F%2Fattacker.test",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%252Finbox",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox&DEEPLink=mail%2Finbox",
             "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2F&deeplink=mail%2F",
             "https://go.microsoft.com/fwlink/?LinkID=2125442", "https://go.microsoft.com/other?LinkID=2125442",
             "http://go.microsoft.com/fwlink/p/?LinkID=2125442", "https://go.microsoft.com:444/fwlink/p/?LinkID=2125442",
@@ -158,11 +164,12 @@ final class ComputerTaskScopeTests: XCTestCase {
         let landing = try url("https://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook")
         let authorization = try url("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F")
         let forward = try url("https://go.microsoft.com/fwlink/p/?LinkID=2125442")
+        let inboxForward = try url("https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Finbox")
         let explicit = ComputerTaskScope(userPrompt: "Read Outlook at https://outlook.live.com/mail/")
         XCTAssertEqual(explicit.targetConfidence, .explicitURL)
         XCTAssertNil(explicit.siteViolation(url: try url("https://outlook.live.com/mail/")))
         for scope in [explicit, ComputerTaskScope(userPrompt: "Read Gmail")] {
-            for destination in [landing, authorization, forward] {
+            for destination in [landing, authorization, forward, inboxForward] {
                 XCTAssertNotNil(scope.siteViolation(url: destination), destination.absoluteString)
             }
         }

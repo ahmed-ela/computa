@@ -157,6 +157,27 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(threadID: valid.threadID), [valid])
     }
 
+    func testBuiltInBrowserRecoveryFailurePersistsWithoutAcceptingUnknownToolsOrPageData() throws {
+        let store = try NativeFailureEvidenceStore(directory: directory)
+        let outcome = try outcomeFixture(kind: .recoveryExhausted)
+        func record(_ tool: String, callID: String? = nil) -> NativeFailureEvidenceStore.Record {
+            .init(threadID: outcome.threadID, turnID: outcome.turnID, callID: callID ?? "call-\(tool)",
+                  toolName: tool, message: outcome.message, diagnosticText: outcome.diagnosticText,
+                  timestamp: outcome.timestamp)
+        }
+        let expected = ["browser_tabs", "browser_open", "browser_bind", "browser_navigate",
+                        "browser_read", "browser_click", "browser_fill", "browser_wait", "browser_close"].map { record($0) }
+        for value in expected { try store.append(value) }
+        XCTAssertEqual(try NativeFailureEvidenceStore(directory: directory).load(threadID: outcome.threadID), expected)
+
+        for tool in ["browser_unknown", "browser_", "exec_command"] {
+            XCTAssertThrowsError(try store.append(record(tool)))
+        }
+        let leakedPage = try withDiagnostic(record("browser_click", callID: "call-private-data")) { $0["page_text"] = "private mailbox content" }
+        XCTAssertThrowsError(try store.append(leakedPage))
+        XCTAssertEqual(try store.load(threadID: outcome.threadID), expected)
+    }
+
     func testRuntimeOutcomeBuilderRejectsInvalidCountsAndStoreRejectsWrongToolOrMessage() throws {
         for counts in [(0, 0), (65, 1), (1, 2), (1, -1)] {
             XCTAssertThrowsError(try ComputerOutcomeDiagnostic.make(kind: .unverified,
