@@ -28,6 +28,7 @@ function fixture(target: string | null) {
     disconnect() { this.active = false; }
   }
   const document = { body, documentElement: body, title: 'Outlook', readyState: 'complete', elementFromPoint: () => link,
+    getElementById: (id: string) => document.body.descendants().find(node => node.values.id === id) || null,
     addEventListener(name: string, callback: Function) {
       if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback);
     }, removeEventListener(name: string, callback: Function) { listeners.get(name)?.delete(callback); } };
@@ -40,7 +41,7 @@ function fixture(target: string | null) {
     (id: number) => timers.delete(id));
   const press = (row: any) => run({ operation: 'press', nodeID: row.backendNodeID,
     expected: row, expectedURL: location.href });
-  return { link, run, press, document, timers, observers, listeners,
+  return { Node, link, run, press, document, timers, observers, listeners,
     appendText: (text: string) => document.body.append(new Node('P', {}, text)),
     appendControl: () => document.body.append(new Node('BUTTON', {}, 'Continue')),
     appendMetadata: () => document.body.append(new Node('MAIN', { 'aria-label': 'Outlook' })),
@@ -81,6 +82,42 @@ describe('built-in browser popup-only link capabilities', () => {
     f.link.values.target = '_blank';
     await expect(f.press(link)).rejects.toThrow('element_changed');
     expect(f.link.clicks).toBe(0);
+  });
+});
+
+describe('structural application labels', () => {
+  test('a large application preserves its readable descendants without duplicating the entire page in its label', async () => {
+    const f = fixture(null), application = new f.Node('DIV', { role: 'application' });
+    const parts = Array.from({ length: 8 }, (_, index) => `Record ${index}: ` + 'x'.repeat(900));
+    for (const text of parts) application.append(new f.Node('P', {}, text));
+    application.append(new f.Node('BUTTON', {}, 'Open record'));
+    f.document.body.append(application);
+    expect(application.innerText.length).toBeGreaterThan(4096);
+    const result = await f.run({ operation: 'observe' });
+    const root = result.nodes.find((node: any) => node.role === 'application');
+    expect(root.name).toBe(''); expect(root.childNodeIDs).toHaveLength(9);
+    expect(root.isDOMClickable).toBe(false);
+    expect(result.nodes.filter((node: any) => node.role === 'statictext').map((node: any) => node.name)).toEqual(parts);
+    expect(result.nodes.find((node: any) => node.role === 'button').name).toBe('Open record');
+    expect(result.sourceTruncated).toBe(false);
+    expect(result.nodes.filter((node: any) => node.name.includes('Record 3:')).map((node: any) => node.role)).toEqual(['statictext']);
+  });
+
+  test('explicit application accessible names and child traversal remain intact', async () => {
+    for (const labelledBy of [false, true]) {
+      const f = fixture(null), label = new f.Node('SPAN', { id: 'workspace-name' }, 'Named workspace');
+      const application = new f.Node('DIV', labelledBy
+        ? { role: 'application', 'aria-labelledby': 'workspace-name' }
+        : { role: 'application', 'aria-label': 'Named workspace' });
+      application.append(new f.Node('P', {}, 'Exact child content'), new f.Node('BUTTON', {}, 'Open record'));
+      f.document.body.append(label, application);
+      const result = await f.run({ operation: 'observe' });
+      const root = result.nodes.find((node: any) => node.role === 'application');
+      expect(root.name).toBe('Named workspace'); expect(root.isDOMClickable).toBe(false);
+      expect(root.childNodeIDs).toHaveLength(2);
+      expect(result.nodes.some((node: any) => node.role === 'statictext' && node.name === 'Exact child content')).toBe(true);
+      expect(result.nodes.find((node: any) => node.role === 'button').name).toBe('Open record');
+    }
   });
 });
 

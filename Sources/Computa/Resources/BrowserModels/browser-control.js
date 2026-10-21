@@ -66,7 +66,7 @@ const nameFor = (element, role) => {
     const label = trim(Array.from(element.labels || []).map(node => node.innerText || node.textContent || '').join(' '));
     return label || trim(element.getAttribute('placeholder')) || trim(element.getAttribute('title'));
   }
-  if (['main','article','navigation','complementary','banner','contentinfo','list','listitem','region'].includes(role)) return '';
+  if (['application','main','article','navigation','complementary','banner','contentinfo','list','listitem','region'].includes(role)) return '';
   if (role === 'image') return trim(element.getAttribute('alt'));
   const rendered = typeof element.innerText === 'string' ? element.innerText : element.textContent;
   return trim(rendered || element.getAttribute('value') || element.getAttribute('title'));

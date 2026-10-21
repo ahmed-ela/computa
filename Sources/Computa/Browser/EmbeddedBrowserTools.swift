@@ -79,7 +79,7 @@ enum EmbeddedBrowserTools {
                 ]),
             specification(
                 "browser_click",
-                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If unavailable, browser_read; never repeat an input because its following observation failed. Never retry a timed-out mutation.",
+                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. Recheck the current row's label/action; indices change. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors, browser_read before input. If unavailable, browser_read; never repeat an input because its following observation failed. Never retry a timed-out mutation.",
                 mutation, ["snapshot_id", "element_index"]),
             specification(
                 "browser_fill",
@@ -709,7 +709,7 @@ actor EmbeddedBrowserToolController {
             result["current_observation"] = ["status": "available", "view": "overview",
                 "snapshot_id": snapshot.id.uuidString, "text": try readResponse(snapshot)]
             result["action_references"] = ["consumed": true, "next": "current_observation"]
-            result["next"] = "Inspect the returned observation. Use only its new references; prior references remain consumed."
+            result["next"] = "Recheck each current row's label/action; indices change. Use only its new references; prior references remain consumed. Input already dispatched: if the page is unchanged, wait/read instead of clicking again."
             let encoded = try json(result)
             // JSON quoting can expand an already bounded read. Never truncate
             // a capability-bearing snapshot or publish a partial observation.

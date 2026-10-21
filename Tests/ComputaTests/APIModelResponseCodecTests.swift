@@ -1648,6 +1648,123 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try request(["input": [call, ["type": "custom_tool_call_output", "call_id": "old", "output": "ok"]]]))
         XCTAssertThrowsError(try request(["input": [call]]))
     }
+    func testNoToolsCompactionPreservesCompletedCallsResultsAndReasoningWithoutGrantingTools() throws {
+        for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic] {
+            let initial = try request(toolNaming: naming)
+            let functions = try wireFunctions(initial)
+            let arguments = "{\"path\":\"/tmp/synthetic fixture\",\"note\":\"literal\\nvalue\"}"
+            // Use a schema-valid historical call, then retain its literal bytes.
+            let readArguments = "{\"path\":\"/tmp/synthetic fixture\\nvalue\"}"
+            let patch = "*** Begin Patch\n*** End Patch"
+            let reply = try decode(["role": "assistant", "content": NSNull(), "reasoning": "Synthetic private continuation", "tool_calls": [
+                ["id": "read-completed", "type": "function", "function": ["name": functions[0]["name"]!, "arguments": readArguments]],
+                ["id": "patch-completed", "type": "function", "function": ["name": functions[1]["name"]!, "arguments": "{\"input\":\"*** Begin Patch\\n*** End Patch\"}"]]
+            ]], finish: "tool_calls", request: initial)
+            let output = try XCTUnwrap(reply.response["output"] as? [[String: Any]])
+            let history: [[String: Any]] = [["role": "user", "content": "Complete the synthetic task"]] + output + [
+                ["type": "function_call_output", "call_id": "read-completed", "output": "UNTRUSTED tool result remains a tool result"],
+                ["type": "custom_tool_call_output", "call_id": "patch-completed", "output": "Synthetic patch receipt"],
+                ["role": "user", "content": "Summarize the completed history"]
+            ]
+            let compact = try request(["tools": [], "input": history, "parallel_tool_calls": false], toolNaming: naming)
+            let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: compact.body) as? [String: Any])
+            XCTAssertNil(wire["tools"]); XCTAssertNil(wire["tool_choice"])
+            XCTAssertTrue(compact.tools.isEmpty); XCTAssertTrue(compact.allowedTools.isEmpty)
+            XCTAssertEqual(compact.historyCallIDs, ["read-completed", "patch-completed"])
+            let messages = try XCTUnwrap(wire["messages"] as? [[String: Any]])
+            XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["system", "user", "assistant", "tool", "tool", "user"])
+            XCTAssertEqual(messages[2]["reasoning"] as? String, "Synthetic private continuation")
+            let calls = try XCTUnwrap(messages[2]["tool_calls"] as? [[String: Any]])
+            XCTAssertEqual(calls.compactMap { $0["id"] as? String }, ["read-completed", "patch-completed"])
+            let read = try XCTUnwrap(calls[0]["function"] as? [String: Any])
+            XCTAssertEqual(read["arguments"] as? String, readArguments)
+            let custom = try XCTUnwrap(calls[1]["function"] as? [String: Any])
+            let customArguments = try XCTUnwrap(custom["arguments"] as? String)
+            XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(customArguments.utf8)) as? [String: String])?["input"], patch)
+            XCTAssertEqual(messages[3]["tool_call_id"] as? String, "read-completed")
+            XCTAssertEqual(messages[3]["content"] as? String, "UNTRUSTED tool result remains a tool result")
+            XCTAssertEqual(messages[4]["tool_call_id"] as? String, "patch-completed")
+            XCTAssertNoThrow(try decode(["role": "assistant", "content": "Synthetic summary"], request: compact))
+            XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [
+                ["id": "new-call", "type": "function", "function": ["name": read["name"]!, "arguments": arguments]]
+            ]], finish: "tool_calls", request: compact)) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool) }
+            var changed = history
+            changed[1]["encrypted_content"] = "unverified"
+            XCTAssertThrowsError(try request(["tools": [], "input": changed], toolNaming: naming))
+        }
+    }
+
+    func testNoToolsHistoryStillRejectsOrphansDuplicatesKindsInvalidNamesAndNonObjectArguments() throws {
+        let call: [String: Any] = ["type": "function_call", "namespace": "files", "name": "read", "call_id": "completed", "arguments": "{\"path\":\"synthetic\"}"]
+        let result: [String: Any] = ["type": "function_call_output", "call_id": "completed", "output": "Synthetic result"]
+        let custom: [String: Any] = ["type": "custom_tool_call", "namespace": "files", "name": "read", "call_id": "custom", "input": "literal"]
+        let histories: [[[String: Any]]] = [
+            [result], [call], [call, result, result], [call, result, call, result],
+            [call, result.merging(["type": "custom_tool_call_output"]) { _, new in new }],
+            [call, ["role": "user", "content": "An unresolved call cannot be crossed"], result],
+            [call, result, custom, ["type": "custom_tool_call_output", "call_id": "custom", "output": "ok"]],
+            [call.merging(["name": "invalid name"]) { _, new in new }, result],
+            [call.merging(["namespace": 2]) { _, new in new }, result],
+            [call.merging(["namespace": "invalid namespace"]) { _, new in new }, result],
+        ]
+        for history in histories {
+            XCTAssertThrowsError(try request(["tools": [], "input": history])) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidHistory)
+            }
+        }
+        for arguments in ["", "not JSON", "[]", "null", "\"text\"", "1"] {
+            let malformed = call.merging(["arguments": arguments]) { _, new in new }
+            XCTAssertThrowsError(try request(["tools": [], "input": [malformed, result]])) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+        }
+    }
+
+    func testNonemptyToolCatalogKeepsHistoricalNameAndSchemaValidation() throws {
+        let call: [String: Any] = ["type": "function_call", "namespace": "files", "name": "read", "call_id": "completed", "arguments": "{\"path\":\"synthetic\"}"]
+        let result: [String: Any] = ["type": "function_call_output", "call_id": "completed", "output": "Synthetic result"]
+        XCTAssertThrowsError(try request(["input": [call.merging(["name": "unoffered"]) { _, new in new }, result]])) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidHistory)
+        }
+        XCTAssertThrowsError(try request(["input": [call.merging(["arguments": "{\"path\":false}"]) { _, new in new }, result]])) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+        }
+        XCTAssertNoThrow(try request(["tools": [], "input": [call.merging(["arguments": "{\"path\":false}"]) { _, new in new }, result]]),
+                         "Completed no-tools history has no current argument schema; its arguments remain bounded JSON objects")
+    }
+
+    func testEmptyToolCompactionOfBrowserReceiptsDoesNotDisableOrdinaryContinuation() throws {
+        let cerebras = APIProviderDefinition(id: "cerebras", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!,
+                                            wireAPI: .chatCompletions, models: [.init(id: "gpt-oss-120b", name: "GPT OSS")])
+        let browser: [String: Any] = ["type": "function", "name": "browser_read", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        let history: [[String: Any]] = [
+            ["role": "user", "content": "Inspect the synthetic browser fixture"],
+            ["type": "function_call", "name": "browser_read", "call_id": "browser-first", "arguments": "{}"],
+            ["type": "function_call_output", "call_id": "browser-first", "output": "Synthetic first observation"],
+            ["type": "function_call", "name": "browser_read", "call_id": "browser-second", "arguments": "{}"],
+            ["type": "function_call_output", "call_id": "browser-second", "output": "Synthetic second observation"],
+            ["role": "user", "content": "Summarize the completed history for continuation"]
+        ]
+        // This matches native compact.rs's default Prompt: input and base
+        // instructions are retained, tools is empty and parallel calls is false.
+        let compact = try request(["tools": [], "input": history, "parallel_tool_calls": false], provider: cerebras)
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: compact.body) as? [String: Any])
+        XCTAssertNil(wire["tools"]); XCTAssertNil(wire["tool_choice"]); XCTAssertNil(wire["parallel_tool_calls"])
+        let messages = try XCTUnwrap(wire["messages"] as? [[String: Any]])
+        let calls = messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.flatMap { $0 }
+        let aliases = calls.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
+        XCTAssertEqual(aliases.count, 2); XCTAssertEqual(Set(aliases).count, 1)
+        XCTAssertEqual(messages.compactMap { $0["tool_call_id"] as? String }, ["browser-first", "browser-second"])
+        let summary = try decode(["role": "assistant", "content": "Synthetic completed-work summary"], request: compact, model: cerebras.models[0].id)
+        let summaryOutput = try XCTUnwrap(summary.response["output"] as? [[String: Any]])
+        let resumed = try request(["tools": [browser], "input": [["role": "user", "content": "Synthetic task summary"]] + summaryOutput + [["role": "user", "content": "Continue"]]], provider: cerebras)
+        XCTAssertEqual(resumed.tools.map(\.name), ["browser_read"])
+        let active = try XCTUnwrap(try wireFunctions(resumed).first?["name"] as? String)
+        XCTAssertTrue(resumed.allowedTools.contains(active))
+        XCTAssertNoThrow(try decode(["role": "assistant", "tool_calls": [
+            ["id": "browser-new", "type": "function", "function": ["name": active, "arguments": "{}"]]
+        ]], finish: "tool_calls", request: resumed, model: cerebras.models[0].id))
+    }
     func testSchemaReferencesUnionsAndBoundsRemainEnforced() throws {
         let schema: [String: Any] = ["type": "object", "properties": ["value": ["$ref": "#/$defs/value"]], "required": ["value"], "$defs": ["value": ["oneOf": [["type": "string", "minLength": 2], ["type": "integer", "minimum": 2]]]]]
         let prepared = try request(["tools": [["type": "function", "name": "bounded", "parameters": schema]]])

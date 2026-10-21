@@ -523,6 +523,10 @@ enum APIModelResponseCodec {
     private static func messages(_ raw: [String: Any], tools: [Tool], selection: APIProviderCatalog.Selection,
                                  threadID: String, capsules: APIReasoningCapsules, toolNaming: ToolNaming) throws -> History {
         var messages: [[String: Any]] = [], seen = Set<String>(), pending = Set<String>(), pendingCustom = Set<String>()
+        // Native compaction deliberately offers no tools while retaining completed
+        // calls/results. Their display-only aliases cannot recover declaration
+        // indices, and must never become callable tools in the new request.
+        var uncataloguedKinds = [String: Bool]()
         var reasoning: APIReasoningCapsules.Payload?, assistant: [String: Any]?, calls: [[String: Any]] = []
         func flush() throws {
             guard var message = assistant else {
@@ -567,20 +571,49 @@ enum APIModelResponseCodec {
                 }
             case "function_call", "custom_tool_call":
                 guard let id = item["call_id"] as? String, validCallID(id), seen.insert(id).inserted,
-                      let name = item["name"] as? String,
-                      let tool = tools.first(where: { $0.name == name && $0.namespace == item["namespace"] as? String }),
-                      tool.custom == (type == "custom_tool_call") else { throw Failure.invalidHistory }
+                      let name = item["name"] as? String else { throw Failure.invalidHistory }
+                let custom = type == "custom_tool_call"
+                let tool = tools.first(where: { $0.name == name && $0.namespace == item["namespace"] as? String })
+                let wireName: String
+                if let tool {
+                    guard tool.custom == custom else { throw Failure.invalidHistory }
+                    wireName = tool.wireName
+                } else {
+                    // A nonempty catalog remains authoritative for historical
+                    // names, kinds and argument schemas.
+                    guard tools.isEmpty, validName(name), absent(item["namespace"]) || item["namespace"] is String else {
+                        throw Failure.invalidHistory
+                    }
+                    let namespace = item["namespace"] as? String
+                    guard namespace.map(validName) ?? true else { throw Failure.invalidHistory }
+                    let identity = (namespace ?? "") + "\u{0}" + name
+                    if let previous = uncataloguedKinds[identity] {
+                        guard previous == custom else { throw Failure.invalidHistory }
+                    } else {
+                        guard uncataloguedKinds.count < 256 else { throw Failure.invalidHistory }
+                        uncataloguedKinds[identity] = custom
+                    }
+                    wireName = semanticToolName(name: name, namespace: namespace)
+                }
                 let arguments: String
-                if tool.custom {
+                if custom {
                     guard let input = item["input"] as? String else { throw Failure.invalidHistory }
                     arguments = String(decoding: try json(["input": input]), as: UTF8.self); pendingCustom.insert(id)
                 } else {
                     guard let value = item["arguments"] as? String else { throw Failure.invalidHistory }
                     arguments = value
                 }
-                _ = try validatedArguments(arguments, tool: tool)
+                if let tool { _ = try validatedArguments(arguments, tool: tool) }
+                else {
+                    // No unavailable schema is invented for already-completed
+                    // history; retain the same bounded JSON-object requirement.
+                    guard arguments.utf8.count <= maximumText, let bytes = arguments.data(using: .utf8),
+                          (try? JSONSerialization.jsonObject(with: bytes)) is [String: Any] else {
+                        throw Failure.invalidArguments
+                    }
+                }
                 if assistant == nil { assistant = ["role": "assistant", "content": NSNull()] }
-                calls.append(["id": id, "type": "function", "function": ["name": tool.wireName, "arguments": arguments]])
+                calls.append(["id": id, "type": "function", "function": ["name": wireName, "arguments": arguments]])
                 pending.insert(id)
             case "function_call_output", "custom_tool_call_output":
                 try flush()

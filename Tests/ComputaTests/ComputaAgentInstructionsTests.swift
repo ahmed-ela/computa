@@ -509,7 +509,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("Model inference pages are separate"))
         XCTAssertTrue(browser.contains("It activates enabled\ncontrols/links, including follow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
-        XCTAssertTrue(browser.contains("unchanged reads"))
+        XCTAssertTrue(browser.contains("Recheck current label/action; indices change"))
+        XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_300,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
@@ -541,7 +542,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("Every new read, view change or cursor page supersedes ALL earlier action targets"))
             XCTAssertTrue(text.contains("An admitted click or fill consumes its snapshot"))
             XCTAssertTrue(text.contains("Use fresh references returned in current_observation when status=available; if absent/unavailable, browser_read"))
-            XCTAssertTrue(text.contains("After a no-input stale-target rejection, read once"))
+            XCTAssertTrue(text.contains("After stale errors, browser_read before input"))
+            XCTAssertTrue(text.contains("Recheck current label/action; indices change"))
+            XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
             XCTAssertTrue(text.contains("Never repeat uncertain input"))
             XCTAssertTrue(text.contains("Copy requested or observed URLs exactly, including punctuation"))
             XCTAssertTrue(text.contains("compare with the task; never substitute a guessed variant or homepage"))
@@ -565,7 +568,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Never batch fill and click"))
         XCTAssertTrue(text.contains("Input is not outcome proof"))
         XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
-        XCTAssertTrue(text.contains("stale-target rejection, read once and choose an eligible target"))
+        XCTAssertTrue(text.contains("After stale errors, browser_read before input"))
+        XCTAssertTrue(text.contains("Recheck current label/action; indices change"))
+        XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
         XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_300,
                                 "Named-service and sign-in/loading guidance retain all snapshot, approval and cleanup rules.")
