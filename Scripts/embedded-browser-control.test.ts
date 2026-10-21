@@ -7,11 +7,21 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 function fixture(target: string | null) {
   class Node extends Element {
+    focusOptions: unknown[] = [];
+    valueWrites: string[] = [];
     get href() { return this.values.href || ''; }
     get target() { return this.values.target || ''; }
+    get type() { return this.values.type || (this.tagName === 'INPUT' ? 'text' : ''); }
+    get readOnly() { return this.values.readonly !== undefined; }
+    get isContentEditable() { return this.values.contenteditable === 'true'; }
+    get value() { return this.values.value || ''; }
+    set value(value: string) { this.valueWrites.push(value); this.values.value = value; }
+    get textContent() { return super.textContent; }
+    set textContent(value: string) { this.replaceChildren(); this.text = value; }
     hasAttribute(name: string) { return this.values[name] !== undefined; }
     scrollIntoView() {}
     getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 20 }; }
+    focus(options?: unknown) { this.focusOptions.push(options); document.activeElement = this; this.onFocus?.(); }
   }
   const body = new Node('BODY'), link = new Node('A', {
     href: 'https://example.test/sign-in?return=%2Fmail%2F&literal=A-B', target: target || '',
@@ -27,21 +37,23 @@ function fixture(target: string | null) {
     observe(target: unknown) { this.target = target; this.active = true; }
     disconnect() { this.active = false; }
   }
-  const document = { body, documentElement: body, title: 'Outlook', readyState: 'complete', elementFromPoint: () => link,
+  const document = { body, documentElement: body, title: 'Outlook', readyState: 'complete', activeElement: null as Element | null, elementFromPoint: () => link,
     getElementById: (id: string) => document.body.descendants().find(node => node.values.id === id) || null,
     addEventListener(name: string, callback: Function) {
       if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback);
     }, removeEventListener(name: string, callback: Function) { listeners.get(name)?.delete(callback); } };
   const state = {}, location = { href: 'https://example.test/' };
   const execute = new AsyncFunction('input', 'globalThis', 'document', 'location', 'Node', 'getComputedStyle', 'TextEncoder',
-    'MutationObserver', 'setTimeout', 'clearTimeout', source);
+    'MutationObserver', 'setTimeout', 'clearTimeout', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'Event', source);
   const run = (input: Record<string, unknown>) => execute({ documentToken: 'owned-document', timeoutMS: 10000, awaitSemanticReadiness: true, ...input }, state, document, location,
     { TEXT_NODE: 3, ELEMENT_NODE: 1 }, () => ({ display: 'block', visibility: 'visible' }), TextEncoder, Observer,
     (callback: Function, delay: number) => { timers.set(++timerID, { callback, delay }); return timerID; },
-    (id: number) => timers.delete(id));
+    (id: number) => timers.delete(id), Node, Node, Node, Event);
   const press = (row: any) => run({ operation: 'press', nodeID: row.backendNodeID,
     expected: row, expectedURL: location.href });
-  return { Node, link, run, press, document, timers, observers, listeners,
+  const fill = (row: any, text: string) => run({ operation: 'fill', nodeID: row.backendNodeID,
+    expected: row, expectedURL: location.href, text });
+  return { Node, link, run, press, fill, document, location, timers, observers, listeners,
     appendText: (text: string) => document.body.append(new Node('P', {}, text)),
     appendControl: () => document.body.append(new Node('BUTTON', {}, 'Continue')),
     appendMetadata: () => document.body.append(new Node('MAIN', { 'aria-label': 'Outlook' })),
@@ -51,6 +63,164 @@ function fixture(target: string | null) {
     replaceRoot: () => { document.body = new Node('BODY'); document.documentElement = document.body; },
   };
 }
+
+describe('explicit ARIA selection item press capabilities', () => {
+  test('each supported explicit item dispatches only its exact click and exposes the resulting selection', async () => {
+    for (const role of ['option', 'treeitem', 'menuitemcheckbox', 'menuitemradio']) {
+      const f = fixture(null), item = new f.Node('DIV', { role }, 'Synthetic item');
+      const other = new f.Node('DIV', { role }, 'Other item');
+      const result = new f.Node('P', {}, 'Not selected');
+      item.onClick = () => {
+        item.values[role.startsWith('menuitem') ? 'aria-checked' : 'aria-selected'] = 'true';
+        result.text = 'Synthetic item selected';
+      };
+      f.document.body.append(item, other, result); f.document.elementFromPoint = () => item;
+      const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === role && node.name === 'Synthetic item');
+      expect(row.isDOMClickable).toBe(true); expect(row.isPressUnsupported).toBe(false); expect(row.isDisabled).toBe(false);
+      expect(await f.press(row)).toEqual({ dispatched: true, noReplay: true });
+      expect(item.clicks).toBe(1); expect(other.clicks).toBe(0);
+      expect(item.values[role.startsWith('menuitem') ? 'aria-checked' : 'aria-selected']).toBe('true');
+      expect((await f.run({ operation: 'observe' })).nodes.some((node: any) => node.name === 'Synthetic item selected')).toBe(true);
+    }
+  });
+
+  test('disabled items and stale selection-item identity, role, parent, route or obstruction never click', async () => {
+    for (const drift of ['disabled', 'becomes-disabled', 'replaced', 'role', 'parent', 'route', 'obstructed']) {
+      const f = fixture(null), item = new f.Node('DIV', { role: 'option', ...(drift === 'disabled' ? { 'aria-disabled': 'true' } : {}) }, 'Synthetic item');
+      f.document.body.append(item); f.document.elementFromPoint = () => item;
+      const capturedURL = f.location.href;
+      const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === 'option');
+      expect(row.isDisabled).toBe(drift === 'disabled');
+      if (drift === 'becomes-disabled') item.values['aria-disabled'] = 'true';
+      if (drift === 'replaced') f.document.body.replaceChildren(new f.Node('DIV', { role: 'option' }, 'Synthetic item'));
+      if (drift === 'role') item.values.role = 'row';
+      if (drift === 'parent') {
+        const group = new f.Node('DIV', { role: 'group' });
+        f.document.body.children = []; f.document.body.append(group); group.append(item);
+      }
+      if (drift === 'route') f.location.href = 'https://example.test/changed';
+      if (drift === 'obstructed') f.document.elementFromPoint = () => f.link;
+      await expect(f.run({ operation: 'press', nodeID: row.backendNodeID, expected: row, expectedURL: capturedURL })).rejects.toThrow(
+        ['disabled', 'route'].includes(drift) ? 'stale_document' : drift === 'obstructed' ? 'element_obstructed' : 'element_changed');
+      expect(item.clicks).toBe(0);
+    }
+  });
+
+  test('text and layout containers do not inherit the press capability of an interactive child', async () => {
+    for (const role of ['row', 'gridcell', 'listitem', 'statictext', 'group', 'listbox', 'tree', 'menu']) {
+      const f = fixture(null), container = new f.Node('DIV', { role }, 'Container');
+      const child = new f.Node('DIV', { role: 'option' }, 'Synthetic item');
+      container.append(child); f.document.body.append(container); f.document.elementFromPoint = () => container;
+      const snapshot = await f.run({ operation: 'observe' });
+      const row = snapshot.nodes.find((node: any) => node.role === role);
+      expect(row.isDOMClickable).toBe(false); expect(row.isPressUnsupported).toBe(false);
+      expect(snapshot.nodes.find((node: any) => node.role === 'option').isDOMClickable).toBe(true);
+      await expect(f.press(row)).rejects.toThrow('unsupported_action');
+      expect(container.clicks).toBe(0); expect(child.clicks).toBe(0);
+    }
+  });
+
+  test('native OPTION and explicit items without a DOM click implementation remain unsupported', async () => {
+    for (const nativeOption of [false, true]) {
+      const f = fixture(null), item = new f.Node(nativeOption ? 'OPTION' : 'DIV', { role: 'option' }, 'Synthetic item');
+      if (!nativeOption) Object.defineProperty(item, 'click', { value: undefined });
+      f.document.body.append(item); f.document.elementFromPoint = () => item;
+      const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === 'option');
+      expect(row.isDOMClickable).toBe(false);
+      await expect(f.press(row)).rejects.toThrow('unsupported_action');
+      expect(item.clicks).toBe(0);
+    }
+  });
+
+  test('a popup-only anchor cannot use an explicit selection role to regain press', async () => {
+    const f = fixture(null), item = new f.Node('A', { role: 'option', target: '_blank', href: 'https://example.test/observed' }, 'Synthetic item');
+    f.document.body.append(item); f.document.elementFromPoint = () => item;
+    const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === 'option');
+    expect(row.isDOMClickable).toBe(false); expect(row.isPressUnsupported).toBe(true);
+    await expect(f.press(row)).rejects.toThrow('unsupported_action'); expect(item.clicks).toBe(0);
+  });
+});
+
+describe('exact-field page-local fill focus', () => {
+  test('focus reveals a search action before the exact value and input/change events are delivered', async () => {
+    const f = fixture(null), field = new f.Node('INPUT', { type: 'search', 'aria-label': 'Search' });
+    f.document.body.append(field); f.document.elementFromPoint = () => field;
+    field.onFocus = () => f.document.body.append(new f.Node('BUTTON', {}, 'Search'));
+    const deliveries: string[] = [];
+    field.onDispatch = event => {
+      expect(f.document.activeElement).toBe(field);
+      expect(f.document.body.children.some(node => node.tagName === 'BUTTON')).toBe(true);
+      deliveries.push(event.type);
+    };
+    const before = await f.run({ operation: 'observe' });
+    expect(before.nodes.some((node: any) => node.role === 'button')).toBe(false);
+    const row = before.nodes.find((node: any) => node.role === 'searchbox');
+    const text = 'Exact search & punctuation.';
+    expect(await f.fill(row, text)).toEqual({ dispatched: true, noReplay: true });
+    expect(field.focusOptions).toEqual([{ preventScroll: true }]);
+    expect(field.valueWrites).toEqual([text]); expect(field.value).toBe(text);
+    expect(deliveries).toEqual(['input', 'change']); expect(field.clicks).toBe(0);
+    const after = await f.run({ operation: 'observe' });
+    expect(after.nodes.find((node: any) => node.role === 'button').name).toBe('Search');
+  });
+
+  test('a focus handler replacing the field cannot inherit its fill authority', async () => {
+    const f = fixture(null), field = new f.Node('INPUT', { 'aria-label': 'Search' });
+    const replacement = new f.Node('INPUT', { 'aria-label': 'Search' });
+    f.document.body.append(field); f.document.elementFromPoint = () => field;
+    const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === 'textbox');
+    field.onFocus = () => { f.document.body.replaceChildren(replacement); f.document.activeElement = replacement; };
+    await expect(f.fill(row, 'Exact search')).rejects.toThrow('element_changed');
+    expect(field.focusOptions).toEqual([{ preventScroll: true }]);
+    expect(field.valueWrites).toEqual([]); expect(replacement.valueWrites).toEqual([]);
+    expect(field.events).toEqual([]); expect(replacement.events).toEqual([]);
+  });
+
+  test('focus-time route, editability, parent, obstruction or focus drift rejects before writing', async () => {
+    for (const drift of ['route', 'readonly', 'disabled', 'parent', 'obstructed', 'focus']) {
+      const f = fixture(null), field = new f.Node('INPUT', { 'aria-label': 'Search' });
+      f.document.body.append(field); f.document.elementFromPoint = () => field;
+      const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === 'textbox');
+      field.onFocus = () => {
+        if (drift === 'route') f.location.href = 'https://example.test/changed';
+        if (drift === 'readonly') field.values.readonly = '';
+        if (drift === 'disabled') field.disabled = true;
+        if (drift === 'parent') {
+          const group = new f.Node('DIV', { role: 'group' });
+          f.document.body.children = []; f.document.body.append(group); group.append(field);
+        }
+        if (drift === 'obstructed') f.document.elementFromPoint = () => f.link;
+        if (drift === 'focus') f.document.activeElement = f.link;
+      };
+      await expect(f.fill(row, 'Exact search')).rejects.toThrow(
+        drift === 'route' ? 'stale_document' : drift === 'obstructed' ? 'element_obstructed' : 'element_changed');
+      expect(field.valueWrites).toEqual([]); expect(field.events).toEqual([]);
+    }
+  });
+
+  test('stale or obstructed preflight never focuses the field', async () => {
+    for (const drift of ['metadata', 'obstructed']) {
+      const f = fixture(null), field = new f.Node('INPUT', { 'aria-label': 'Search' });
+      f.document.body.append(field); f.document.elementFromPoint = () => field;
+      const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === 'textbox');
+      if (drift === 'metadata') field.values['aria-label'] = 'Changed field';
+      else f.document.elementFromPoint = () => f.link;
+      await expect(f.fill(row, 'Exact search')).rejects.toThrow(
+        drift === 'metadata' ? 'element_changed' : 'element_obstructed');
+      expect(field.focusOptions).toEqual([]); expect(field.valueWrites).toEqual([]); expect(field.events).toEqual([]);
+    }
+  });
+
+  test('contenteditable fill focuses the same node and preserves exact text', async () => {
+    const f = fixture(null), field = new f.Node('DIV', { contenteditable: 'true', 'aria-label': 'Editor' });
+    f.document.body.append(field); f.document.elementFromPoint = () => field;
+    const row = (await f.run({ operation: 'observe' })).nodes.find((node: any) => node.role === 'textbox');
+    const text = 'Exact line one\nLine two & punctuation.';
+    expect(await f.fill(row, text)).toEqual({ dispatched: true, noReplay: true });
+    expect(f.document.activeElement).toBe(field); expect(field.textContent).toBe(text);
+    expect(field.valueWrites).toEqual([]); expect(field.events.map((event: any) => event.type)).toEqual(['input', 'change']);
+  });
+});
 
 describe('built-in browser popup-only link capabilities', () => {
   test('ordinary same-tab anchors retain their observed press capability', async () => {

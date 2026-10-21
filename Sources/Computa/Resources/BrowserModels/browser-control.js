@@ -84,12 +84,17 @@ const metaFor = (element, role) => {
   // must reject. Task input never creates or adopts an unowned popup.
   const popupOnlyLink = element.tagName === 'A' && !!element.target
     && !['_self','_top','_parent'].includes(element.target.toLowerCase());
+  // Explicit ARIA selection/check-menu items activate through the same exact
+  // DOM click path as other controls. Native OPTION selection is separate.
+  const interactiveItem = element.tagName !== 'OPTION' && typeof element.click === 'function'
+    && ['option','treeitem','menuitemcheckbox','menuitemradio'].includes(role)
+    && trim(element.getAttribute('role')).toLowerCase() === role;
   const tooLarge = name.length > 4096 || (value?.length || 0) > 4096 || (link?.length || 0) > 2048;
   const disabled = !!element.disabled || !!element.closest('[disabled], [aria-disabled="true"]') || password || tooLarge;
   const readOnly = !!element.readOnly || element.getAttribute('aria-readonly') === 'true' || password || tooLarge || (editableRole && !nativeEditable);
   return {role, name:name.slice(0,4096), value:password ? null : value?.slice(0,4096) ?? null,
     linkURL:link?.slice(0,2048) ?? null, isDisabled:disabled, isReadOnly:readOnly, isEditable:editable && !readOnly,
-    isIgnored:false, isDOMClickable:!popupOnlyLink && ['button','link','checkbox','radio','switch','tab','menuitem'].includes(role),
+    isIgnored:false, isDOMClickable:!popupOnlyLink && (interactiveItem || ['button','link','checkbox','radio','switch','tab','menuitem'].includes(role)),
     isPressUnsupported:popupOnlyLink,
     isFocusablePointer:false, fieldTruncated:tooLarge};
 };
@@ -197,26 +202,41 @@ if (input.operation === 'wait') {
 }
 if (!['press','fill'].includes(input.operation)) throw new Error('unsupported_operation');
 const element = state.nodes.get(input.nodeID);
-if (!element?.isConnected || !visible(element)) throw new Error('element_changed');
-const current = metaFor(element, roleFor(element));
-delete current.fieldTruncated;
-let semanticParent = element.parentElement;
-while (semanticParent && !roleFor(semanticParent)) semanticParent = semanticParent.parentElement;
-const parentID = semanticParent ? String(idFor(semanticParent)) : null;
-if (parentID !== input.expected.parentNodeID) throw new Error('element_changed');
-for (const key of ['role','name','value','linkURL','isDisabled','isReadOnly','isEditable','isDOMClickable','isPressUnsupported'])
-  if (current[key] !== input.expected[key]) throw new Error('element_changed');
-if (current.isDisabled || input.expectedURL !== location.href) throw new Error('stale_document');
+const revalidateElement = () => {
+  if (globalThis[key] !== state || state.documentToken !== input.documentToken) throw new Error('stale_document');
+  if (state.nodes.get(input.nodeID) !== element || !element?.isConnected || !visible(element)) throw new Error('element_changed');
+  const current = metaFor(element, roleFor(element));
+  delete current.fieldTruncated;
+  let semanticParent = element.parentElement;
+  while (semanticParent && !roleFor(semanticParent)) semanticParent = semanticParent.parentElement;
+  const parentID = semanticParent ? String(idFor(semanticParent)) : null;
+  if (parentID !== input.expected.parentNodeID) throw new Error('element_changed');
+  for (const key of ['role','name','value','linkURL','isDisabled','isReadOnly','isEditable','isDOMClickable','isPressUnsupported'])
+    if (current[key] !== input.expected[key]) throw new Error('element_changed');
+  if (current.isDisabled || input.expectedURL !== location.href) throw new Error('stale_document');
+  return current;
+};
+const requireUnobstructed = () => {
+  const rect = element.getBoundingClientRect();
+  const hit = document.elementFromPoint(rect.left + rect.width/2, rect.top + rect.height/2);
+  if (rect.width <= 0 || rect.height <= 0 || !hit || (hit !== element && !element.contains(hit))) throw new Error('element_obstructed');
+};
+const current = revalidateElement();
 element.scrollIntoView({block:'center',inline:'center'});
-const rect = element.getBoundingClientRect();
-const hit = document.elementFromPoint(rect.left + rect.width/2, rect.top + rect.height/2);
-if (rect.width <= 0 || rect.height <= 0 || !hit || (hit !== element && !element.contains(hit))) throw new Error('element_obstructed');
+requireUnobstructed();
 if (input.operation === 'press') {
   if (!current.isDOMClickable || typeof element.click !== 'function') throw new Error('unsupported_action');
   if (element.tagName === 'A' && element.target && !['_self','_top','_parent'].includes(element.target.toLowerCase())) throw new Error('popup_unsupported');
   element.click();
 } else {
   if (!current.isEditable || current.isReadOnly) throw new Error('unsupported_action');
+  if (typeof element.focus !== 'function') throw new Error('unsupported_action');
+  // Focus belongs to this admitted page field only; it never activates a native
+  // window. Synchronous focus handlers may replace the field or change its scope.
+  element.focus({preventScroll:true});
+  revalidateElement();
+  if (document.activeElement !== element) throw new Error('element_changed');
+  requireUnobstructed();
   if (element.isContentEditable) element.textContent = input.text;
   else {
     const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : element.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
