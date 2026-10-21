@@ -193,6 +193,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(state["consumed_by_admitted_input"] as? Bool, true)
         XCTAssertEqual(state["clickable_element_indices"] as? [Int], [1])
         XCTAssertEqual(state["fillable_element_indices"] as? [Int], [0])
+        XCTAssertNil(state["continuation"], "An exhausted read cannot invent a continuation")
+        XCTAssertEqual(state["next_after_input"] as? String,
+                       "Use available current_observation from input or stale rejection; otherwise browser_read.")
         XCTAssertLessThanOrEqual(read.utf8.count, 16_384)
         let output = try await call(controller, "browser_fill", ["snapshot_id": snapshotID(read), "element_index": 0, "text": "UA 1842"])
         let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
@@ -477,6 +480,44 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testReadContinuationMetadataNamesOnlyItsExactCursorAndPreservesCapturedFilters() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        await backend.showManyControls()
+        let first = try await call(controller, "browser_read", ["view": "overview", "query": "Extra control"])
+        let metadata = try actionReferenceMetadata(first)
+        let continuation = try XCTUnwrap(metadata["continuation"] as? [String: Any])
+        XCTAssertEqual(Set(continuation.keys), ["tool", "arguments"])
+        XCTAssertEqual(continuation["tool"] as? String, "browser_read")
+        let arguments = try XCTUnwrap(continuation["arguments"] as? [String: Any])
+        XCTAssertEqual(Set(arguments.keys), ["cursor"], "Do not suggest a new view/query beside a retained cursor")
+        XCTAssertEqual(arguments["cursor"] as? String, try field("next_cursor", in: first))
+        let next = try await call(controller, "browser_read", arguments)
+        XCTAssertEqual(try field("source_observation", in: next), try field("source_observation", in: first))
+        XCTAssertEqual(try field("view", in: next), "overview")
+        XCTAssertTrue(next.contains("Extra control")); XCTAssertFalse(next.contains("Flight number"))
+        XCTAssertNotEqual(try snapshotID(next), try snapshotID(first))
+        do {
+            _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(first), "element_index": 0])
+            XCTFail("A continuation still supersedes the prior page's action references")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let nextMetadata = try actionReferenceMetadata(next)
+        let nextContinuation = try XCTUnwrap(nextMetadata["continuation"] as? [String: Any])
+        var wrongArguments = try XCTUnwrap(nextContinuation["arguments"] as? [String: Any])
+        wrongArguments["view"] = "content"
+        do {
+            _ = try await call(controller, "browser_read", wrongArguments)
+            XCTFail("Metadata does not normalize or admit changed cursor filters")
+        } catch {
+            guard let failure = error as? BrowserTabBrokerError, case .invalidRead = failure else {
+                return XCTFail("Expected filter rejection, got \(error)")
+            }
+        }
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        _ = await controller.shutdown()
+    }
+
     func testFreshReadDoesNotRetryAfterCancellationOrLeaseRelease() async throws {
         for cancelled in [false, true] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
@@ -516,7 +557,11 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             if scenario == "pagination" {
                 let cursor = try field("next_cursor", in: fresh)
                 let source = try field("source_observation", in: fresh)
-                let next = try await call(controller, "browser_read", ["cursor": cursor])
+                let continuation = try XCTUnwrap(try actionReferenceMetadata(fresh)["continuation"] as? [String: Any])
+                XCTAssertEqual(continuation["tool"] as? String, "browser_read")
+                let arguments = try XCTUnwrap(continuation["arguments"] as? [String: String])
+                XCTAssertEqual(arguments, ["cursor": cursor], "Post-input overview supplies a cursor-only call too")
+                let next = try await call(controller, "browser_read", arguments)
                 XCTAssertEqual(try field("source_observation", in: next), source)
                 XCTAssertNotNil(UUID(uuidString: source))
                 XCTAssertEqual(try field("tab_handle", in: next), try field("tab_handle", in: fresh))
@@ -884,9 +929,10 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             ($0["name"] as! String, $0["description"] as! String)
         })
         XCTAssertTrue(descriptions["browser_click"]?.contains("actions=[\"AXPress\"]") == true)
-        XCTAssertTrue(descriptions["browser_click"]?.contains("Recheck the current row's label/action; indices change") == true)
+        XCTAssertTrue(descriptions["browser_click"]?.contains("Recheck the current row's label/action against the intended operation; indices change") == true)
         XCTAssertTrue(descriptions["browser_click"]?.contains("If dispatched input leaves the page unchanged, wait/read instead of clicking again") == true)
-        XCTAssertTrue(descriptions["browser_click"]?.contains("After stale errors, browser_read before input") == true)
+        XCTAssertTrue(descriptions["browser_click"]?.contains("After stale errors use available current_observation; otherwise browser_read") == true)
+        XCTAssertFalse(descriptions["browser_click"]?.contains("After stale errors, browser_read before input") == true)
         XCTAssertTrue(descriptions["browser_read"]?.contains("actions=[] is read-only") == true)
         XCTAssertTrue(descriptions["browser_fill"]?.contains("enabled=true and settable=true") == true)
     }
@@ -899,6 +945,9 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let snapshot = try XCTUnwrap(properties["snapshot_id"] as? [String: Any])
             XCTAssertEqual(snapshot["type"] as? String, "string")
             XCTAssertTrue((snapshot["description"] as? String)?.contains("never batch another input") == true)
+            XCTAssertTrue((snapshot["description"] as? String)?.contains("available current_observation from input or stale rejection") == true)
+            XCTAssertTrue((snapshot["description"] as? String)?.contains("label/action against the intended operation") == true)
+            XCTAssertTrue((snapshot["description"] as? String)?.contains("browser_read if unavailable") == true)
         }
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller,"browser_open",["url":"http://localhost:8123/flight"])

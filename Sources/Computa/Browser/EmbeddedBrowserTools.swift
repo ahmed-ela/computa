@@ -50,7 +50,7 @@ enum EmbeddedBrowserTools {
             "description": "Local filter of captured text, not website Search; at most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
         let url: [String: Any] = ["type": "string", "minLength": 1, "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
         let mutation: [String: Any] = [
-            "snapshot_id": ["type": "string", "minLength": 1, "description": "Use the ID from the latest browser_read or available current_observation returned by an input. Input consumes it: never batch another input; await the result and use its new references, or browser_read if unavailable."],
+            "snapshot_id": ["type": "string", "minLength": 1, "description": "Use the latest browser_read or available current_observation from input or stale rejection. Recheck that row's label/action against the intended operation; indices change. Input consumes it: never batch another input; use new references, or browser_read if unavailable."],
             "element_index": ["type": "integer", "minimum": 0, "maximum": 2_999],
         ]
         return [
@@ -79,7 +79,7 @@ enum EmbeddedBrowserTools {
                 ]),
             specification(
                 "browser_click",
-                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. Recheck the current row's label/action; indices change. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors, browser_read before input. If unavailable, browser_read; never repeat an input because its following observation failed. Never retry a timed-out mutation.",
+                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its latest snapshot_id and element_index. Recheck the current row's label/action against the intended operation; indices change. actions=[] is read-only: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=links or all, query=observed text). Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",
                 mutation, ["snapshot_id", "element_index"]),
             specification(
                 "browser_fill",
@@ -806,15 +806,19 @@ actor EmbeddedBrowserToolController {
     /// create another capability or change current-snapshot/physical preflight.
     private func readResponse(_ snapshot: BrowserTabSnapshot) throws -> String {
         let text = Self.modelFacingSnapshotText(snapshot)
-        let state = try json([
+        var metadata: [String: Any] = [
             "snapshot_id": snapshot.id.uuidString,
             "supersedes_previous": true,
             "consumed_by_admitted_input": true,
             "clickable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsPress }.map(\.index),
             "fillable_element_indices": snapshot.elements.filter { $0.isEnabled && $0.supportsSetText }.map(\.index),
-            "next_after_input": "Use the input result's available current_observation; otherwise browser_read.",
+            "next_after_input": "Use available current_observation from input or stale rejection; otherwise browser_read.",
             "literal_copy_guidance": Self.literalCopyGuidance,
-        ])
+        ]
+        if let cursor = snapshot.nextCursor {
+            metadata["continuation"] = ["tool": "browser_read", "arguments": ["cursor": cursor]]
+        }
+        let state = try json(metadata)
         let result = text + "\nBROWSER_ACTION_REFERENCES " + state
         // Preserve the read's existing byte budget; instructions still explain
         // reference lifetime when unusually large metadata leaves no room.

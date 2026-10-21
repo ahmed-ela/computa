@@ -53,7 +53,18 @@ enum APIProviderCatalog {
     // Keep Cerebras limited to GPT-OSS for now. Qwen3.8 27B is hidden because of its higher token usage.
     private static let showAdditionalCerebrasModels = false
     struct Identity: Equatable, Sendable { let providerID: String; let modelID: String }
-    struct Selection: Equatable, Sendable { let provider: APIProviderDefinition; let model: APIModelDefinition }
+    struct Selection: Equatable, Sendable {
+        let provider: APIProviderDefinition
+        let model: APIModelDefinition
+
+        /// App task default, separate from the wire codec's faithful handling of
+        /// explicit effort. Resolve from the admitted endpoint and model, including
+        /// existing saved catalogs; a display name or provider ID is insufficient.
+        var taskReasoningEffort: String? {
+            provider.isCerebrasInference && provider.wireAPI == .chatCompletions
+                && model.id == "gpt-oss-120b" ? "high" : nil
+        }
+    }
     enum Failure: LocalizedError {
         case invalidProvider, invalidModel, duplicateProvider, duplicateModel, invalidCatalog
         var errorDescription: String? { "The API provider configuration is invalid. No request was sent." }

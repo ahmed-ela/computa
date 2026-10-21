@@ -410,13 +410,13 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testLiteralFilenameGroundingIsFreshAfterHistoryWithoutRewritingTheRequestOrGrantingAuthority() throws {
         let filenameRule = "Report filenames/IDs only as literally observed, never expanded from prose."
-        let attachmentRule = "For attachments, read controls/links for actual names before answering."
+        let attachmentRule = "Verify selected items match the requested person/topic; read attachment controls/links for names."
         let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
         let original = try JSONSerialization.data(withJSONObject: [
             "model": "browser/chatgpt", "input": [
                 ["role": "developer", "content": native],
-                ["role": "assistant", "content": "The prose mentions a project record; an attachment name remains unverified."],
-                ["role": "user", "content": "Locate the requested attachment and report its observed name."],
+                ["role": "assistant", "content": "The first result has an observed attachment name, but the requested person and topic remain unverified."],
+                ["role": "user", "content": "Locate the attachment matching the requested person and topic and report its observed name."],
             ],
             "tools": [["type": "function", "name": "browser_read", "parameters": ["type": "object"]]],
         ])
@@ -573,7 +573,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("Model inference pages are separate"))
         XCTAssertTrue(browser.contains("It activates enabled\ncontrols/links, including follow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
-        XCTAssertTrue(browser.contains("Recheck current label/action; indices change"))
+        XCTAssertTrue(browser.contains("Recheck current label/action against the intended operation; indices change"))
         XCTAssertTrue(browser.replacingOccurrences(of: "\n", with: " ").contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_300,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
@@ -605,9 +605,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("creates AND binds a task-owned page; read directly without another bind"))
             XCTAssertTrue(text.contains("Every new read, view change or cursor page supersedes ALL earlier action targets"))
             XCTAssertTrue(text.contains("An admitted click or fill consumes its snapshot"))
-            XCTAssertTrue(text.contains("Use fresh references returned in current_observation when status=available; if absent/unavailable, browser_read"))
-            XCTAssertTrue(text.contains("After stale errors, browser_read before input"))
-            XCTAssertTrue(text.contains("Recheck current label/action; indices change"))
+            XCTAssertTrue(text.contains("Use available current_observation from input or stale rejection; otherwise browser_read"))
+            XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
+            XCTAssertTrue(text.contains("Recheck current label/action against the intended operation; indices change"))
             XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
             XCTAssertTrue(text.contains("Never repeat uncertain input"))
             XCTAssertTrue(text.contains("Copy supplied/observed URLs exactly, including punctuation"))
@@ -625,15 +625,14 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testBuiltInBrowserUsesOnlyReturnedFreshInputReferencesOrAReadFallback() {
         let text = ComputaAgentInstructions.builtInBrowser.replacingOccurrences(of: "\n", with: " ")
-        XCTAssertTrue(text.contains("Use fresh references returned in current_observation when status=available"))
-        XCTAssertTrue(text.contains("if absent/unavailable, browser_read"))
+        XCTAssertTrue(text.contains("Use available current_observation from input or stale rejection; otherwise browser_read"))
         XCTAssertTrue(text.contains("Never reuse consumed targets"))
         XCTAssertTrue(text.contains("At most one input action per tool-call batch"))
         XCTAssertTrue(text.contains("Never batch fill and click"))
         XCTAssertTrue(text.contains("Input is not outcome proof"))
         XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
-        XCTAssertTrue(text.contains("After stale errors, browser_read before input"))
-        XCTAssertTrue(text.contains("Recheck current label/action; indices change"))
+        XCTAssertFalse(text.contains("After stale errors, browser_read before input"))
+        XCTAssertTrue(text.contains("Recheck current label/action against the intended operation; indices change"))
         XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
         XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_300,

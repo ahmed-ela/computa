@@ -211,6 +211,7 @@ final class APIProviderRuntimeContractTests: XCTestCase {
                     XCTAssertFalse(engineJSON.contains("api_key"))
                     let turn = try requestParameters("turn-start", root: root)
                     XCTAssertEqual(turn["model"] as? String, id)
+                    XCTAssertEqual(turn["effort"] as? String, "medium")
                     XCTAssertEqual(turn["approvalPolicy"] as? String, accessMode == .fullAccess ? "never" : "on-request")
                     let sandbox = try XCTUnwrap(turn["sandboxPolicy"] as? NSDictionary)
                     let expected: NSDictionary = accessMode == .fullAccess ? ["type": "dangerFullAccess"] : [
@@ -224,6 +225,38 @@ final class APIProviderRuntimeContractTests: XCTestCase {
                     _ = await runtime.shutdown()
                     throw error
                 }
+            }
+        }
+    }
+
+    func testGPTOSSTaskEffortUsesRegisteredEndpointAndModelWithoutChangingOtherProviders() async throws {
+        let oss = APIModelDefinition(id: "gpt-oss-120b", name: "Custom display")
+        let other = APIModelDefinition(id: "other-model", name: "gpt-oss-120b")
+        let cases: [(APIProviderDefinition, String)] = [
+            (.cerebras.withModels([oss]), "high"),
+            (APIProviderDefinition(id: "renamed", name: "Custom", baseURL: URL(string: "https://api.cerebras.ai:443/v1/")!,
+                                   wireAPI: .chatCompletions, models: [oss]), "high"),
+            (.cerebras.withModels([other]), "medium"),
+            (APIProviderDefinition(id: "cerebras", name: "Cerebras", baseURL: URL(string: "https://provider-fixture.invalid/v1")!,
+                                   wireAPI: .chatCompletions, models: [oss]), "medium"),
+            (APIProviderDefinition(id: "cerebras", name: "Cerebras", baseURL: APIProviderDefinition.cerebras.baseURL,
+                                   wireAPI: .responses, models: [oss]), "medium"),
+        ]
+        for (provider, effort) in cases {
+            let model = try XCTUnwrap(provider.models.first)
+            let id = APIProviderCatalog.appModelID(providerID: provider.id, modelID: model.id)
+            let (runtime, root) = try makeRuntime(modelID: id)
+            do {
+                try await runtime.configureAPIProviders([provider])
+                try await runtime.submit(prompt: "Synthetic fixture only", toTaskID: UUID().uuidString, modelID: id)
+                let turn = try requestParameters("turn-start", root: root)
+                XCTAssertEqual(turn["model"] as? String, id)
+                XCTAssertEqual(turn["effort"] as? String, effort)
+                let report = await runtime.shutdown()
+                XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            } catch {
+                _ = await runtime.shutdown()
+                throw error
             }
         }
     }

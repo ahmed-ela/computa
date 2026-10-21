@@ -1784,6 +1784,18 @@ final class APIModelResponseCodecTests: XCTestCase {
             XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "a", "type": "function", "function": ["name": "computa_tool_0", "arguments": arguments]]]], finish: "tool_calls", request: objectRequest))
         }
     }
+    func testGPTOSSWireKeepsExplicitEffortIndependentOfAppTaskDefault() throws {
+        let p = APIProviderDefinition.cerebras.withModels([.init(id: "gpt-oss-120b", name: "GPT OSS")])
+        for effort in ["low", "medium", "high"] {
+            let prepared = try request(["reasoning": ["effort": effort]], provider: p)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+            XCTAssertEqual(body["reasoning_effort"] as? String, effort)
+            XCTAssertNil(body["clear_thinking"])
+        }
+        let absent = try XCTUnwrap(JSONSerialization.jsonObject(with: request(provider: p).body) as? [String: Any])
+        XCTAssertNil(absent["reasoning_effort"])
+    }
+
     func testCerebrasProfilePreservesUserImagesButRejectsToolImagesAndMinimalEffort() throws {
         let p = APIProviderDefinition(id: "different-id", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
                                       models: [.init(id: "qwen-3.8-27b", name: "Qwen", supportsImages: true)])
