@@ -343,10 +343,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             }
         }
         let text = checks.replacingOccurrences(of: "\n", with: " ")
-        XCTAssertTrue(text.contains("Copy requested or observed URLs exactly, including punctuation"))
-        XCTAssertTrue(text.contains("If a supplied URL is unavailable, compare with the task"))
-        XCTAssertTrue(text.contains("never substitute a guessed variant or homepage"))
-        XCTAssertTrue(text.contains("Without a supplied URL, use the user-named known service's official homepage or sign-in entrypoint, then observed controls"))
+        XCTAssertTrue(text.contains("Copy supplied/observed URLs exactly, including punctuation"))
+        XCTAssertTrue(text.contains("For unavailable supplied URLs compare with the task"))
+        XCTAssertTrue(text.contains("never guess a variant/homepage"))
+        XCTAssertTrue(text.contains("Without a supplied URL, use the user-named known service's official homepage/sign-in entrypoint, then observed controls"))
         XCTAssertTrue(text.contains("Empty tab inventory is not access denial"))
         XCTAssertTrue(text.contains("Never invent deep links, account paths or message IDs"))
         XCTAssertTrue(text.contains("do not ask for passwords, tokens or cookies"))
@@ -362,15 +362,15 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(policy.contains("Offered browser navigation and observed sign-in/account controls remain allowed"))
             XCTAssertTrue(policy.contains("Full Access does not elevate this host policy"))
         }
-        XCTAssertTrue(checks.contains("After navigation/sign-in, empty, title-only or footer-only reads are inconclusive"))
-        XCTAssertTrue(checks.contains("Use a bounded browser_wait, then fresh unfiltered browser_read before concluding"))
-        XCTAssertTrue(checks.contains("if still empty, report unresolved loading, not absence or denied access"))
-        XCTAssertTrue(checks.contains("Enabled observed link with href but actions=[]: browser_navigate its exact href in the bound tab"))
-        XCTAssertTrue(checks.contains("not offered browser navigation or observed sign-in/account selection"))
-        XCTAssertTrue(checks.contains("Claim policy/access denial only from actual tool evidence"))
-        XCTAssertTrue(checks.contains("Sign-in/footer text does not prove credentials are required"))
+        XCTAssertTrue(checks.contains("Empty/title/footer-only reads after navigation/sign-in are inconclusive"))
+        XCTAssertTrue(checks.contains("bounded browser_wait, then fresh unfiltered browser_read"))
+        XCTAssertTrue(checks.contains("If still empty, report unresolved loading, not absence/denial"))
+        XCTAssertTrue(checks.contains("Enabled observed links (href, actions=[]): browser_navigate exact href in the bound tab"))
+        XCTAssertTrue(checks.contains("not offered navigation or sign-in/account selection"))
+        XCTAssertTrue(checks.contains("Claim policy/access denial only from tool evidence"))
+        XCTAssertTrue(checks.contains("Sign-in/footer text is not a credential block"))
         XCTAssertTrue(checks.contains("Follow authorized sign-in; choose an existing matching account"))
-        XCTAssertTrue(checks.contains("Ask for user help only at an actual password/MFA prompt or account ambiguity"))
+        XCTAssertTrue(checks.contains("Ask help only at actual password/MFA prompts or account ambiguity"))
         XCTAssertTrue(checks.contains("Keep sign-in in-browser; do not ask for passwords, tokens or cookies"))
         XCTAssertTrue(checks.contains("do not ask for passwords, tokens or cookies"))
         XCTAssertTrue(checks.contains("Respect actual access denials and approvals"))
@@ -385,7 +385,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     func testFilteredContentRequiresAnUnfilteredControlViewBeforeAbsenceClaimsInBothDeliveries() {
         // Observed listbox options remain controls but are included in content;
         // other controls can be filtered. Delivery is not a live result.
-        let rule = "Content includes non-navigation listbox options. Read overview/all before absence/access claims."
+        let rule = "Content includes non-navigation listbox options; read overview/all before absence/access claims."
         let read = EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" }
         let description = read?["description"] as? String ?? ""
         XCTAssertTrue(description.contains("content for readable text and non-navigation listbox options"))
@@ -404,6 +404,44 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             }
         }
         XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(rule))
+        XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_400)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_300)
+    }
+
+    func testLiteralFilenameGroundingIsFreshAfterHistoryWithoutRewritingTheRequestOrGrantingAuthority() throws {
+        let filenameRule = "Report filenames/IDs only as literally observed, never expanded from prose."
+        let attachmentRule = "For attachments, read controls/links for actual names before answering."
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let original = try JSONSerialization.data(withJSONObject: [
+            "model": "browser/chatgpt", "input": [
+                ["role": "developer", "content": native],
+                ["role": "assistant", "content": "The prose mentions a project record; an attachment name remains unverified."],
+                ["role": "user", "content": "Locate the requested attachment and report its observed name."],
+            ],
+            "tools": [["type": "function", "name": "browser_read", "parameters": ["type": "object"]]],
+        ])
+        let request = try WebModelResponseCodec.prepareRequest(original)
+        let fresh = try assertRequestValuesAndHandoff(original, request: request, includedInstructionText: [native])
+        XCTAssertEqual(request.continuationRequest, original, "Grounding is current guidance, not rewritten user/history text")
+        let end = try XCTUnwrap(request.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
+        let ruleAfterRequest = try XCTUnwrap(request.prompt.range(of: filenameRule,
+            range: end.upperBound..<request.prompt.endIndex))
+        XCTAssertGreaterThan(ruleAfterRequest.lowerBound, end.upperBound)
+        for delivered in [native, fresh] {
+            for rule in [filenameRule, attachmentRule] {
+                XCTAssertEqual(delivered.components(separatedBy: rule).count - 1, 1)
+            }
+            XCTAssertTrue(delivered.contains("never guess a variant/homepage"))
+            XCTAssertTrue(delivered.contains("Never invent deep links, account paths or message IDs"))
+            XCTAssertTrue(delivered.contains("do not ask for passwords, tokens or cookies"))
+            XCTAssertTrue(delivered.contains("Respect actual access denials and approvals"))
+            XCTAssertTrue(delivered.contains("native focus theft/global input"))
+            XCTAssertTrue(delivered.contains("actual password/MFA prompts or account ambiguity"))
+            XCTAssertTrue(delivered.contains("read overview/all before absence/access claims"))
+        }
+        XCTAssertTrue(native.contains("Never repeat uncertain input"))
+        XCTAssertTrue(native.contains("Automatic cleanup is not proof"))
+        XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(filenameRule))
         XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_400)
         XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_300)
     }
@@ -572,8 +610,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(text.contains("Recheck current label/action; indices change"))
             XCTAssertTrue(text.contains("If dispatched input leaves the page unchanged, wait/read"))
             XCTAssertTrue(text.contains("Never repeat uncertain input"))
-            XCTAssertTrue(text.contains("Copy requested or observed URLs exactly, including punctuation"))
-            XCTAssertTrue(text.contains("compare with the task; never substitute a guessed variant or homepage"))
+            XCTAssertTrue(text.contains("Copy supplied/observed URLs exactly, including punctuation"))
+            XCTAssertTrue(text.contains("compare with the task; never guess a variant/homepage"))
             XCTAssertTrue(text.contains("At most one input action per tool-call batch"))
             XCTAssertTrue(text.contains("Never batch fill and click"))
             XCTAssertTrue(text.contains("Preserve complete requested identifiers"))

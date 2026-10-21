@@ -314,21 +314,23 @@ enum ComputaAgentInstructions {
     /// Shared native guidance and always-current post-history browser handoff.
     /// Delivery is testable; this is not proof that a model follows an address.
     static let browserAddressChecks = """
-    Copy requested or observed URLs exactly, including punctuation. If a supplied
-    URL is unavailable, compare with the task; never substitute a guessed variant or homepage.
-    Without a supplied URL, use the user-named known service's official homepage
-    or sign-in entrypoint, then observed controls. Empty tab inventory is not access
-    denial. Navigate; ask which service only if unclear.
-    Never invent deep links, account paths or message IDs. Keep sign-in in-browser; do not ask for passwords, tokens or cookies. Respect actual access denials and approvals.
-    After navigation/sign-in, empty, title-only or footer-only reads are inconclusive. Use a bounded
-    browser_wait, then fresh unfiltered browser_read before concluding; if still empty,
-    report unresolved loading, not absence or denied access.
-    Content includes non-navigation listbox options. Read overview/all before absence/access claims.
-    Enabled observed link with href but actions=[]: browser_navigate its exact href in the bound tab.
-    Background-only forbids native focus theft/global input, not offered browser navigation
-    or observed sign-in/account selection. Claim policy/access denial only from actual tool evidence.
-    Sign-in/footer text does not prove credentials are required. Follow authorized sign-in; choose an existing matching account. Ask for user help only at an actual
-    password/MFA prompt or account ambiguity.
+    Copy supplied/observed URLs exactly, including punctuation. For unavailable supplied
+    URLs compare with the task; never guess a variant/homepage.
+    Without a supplied URL, use the user-named known service's official homepage/sign-in
+    entrypoint, then observed controls. Empty tab inventory is not access denial.
+    Ask which service only if unclear. Never invent deep links, account paths or message IDs.
+    Keep sign-in in-browser; do not ask for passwords, tokens or cookies.
+    Respect actual access denials and approvals. Empty/title/footer-only reads after
+    navigation/sign-in are inconclusive: bounded browser_wait, then fresh unfiltered browser_read.
+    If still empty, report unresolved loading, not absence/denial.
+    Content includes non-navigation listbox options; read overview/all before absence/access claims.
+    Enabled observed links (href, actions=[]): browser_navigate exact href in the bound tab.
+    Background-only forbids native focus theft/global input, not offered navigation or sign-in/account selection.
+    Claim policy/access denial only from tool evidence. Sign-in/footer text is not a credential block.
+    Follow authorized sign-in; choose an existing matching account. Ask help only at
+    actual password/MFA prompts or account ambiguity.
+    Report filenames/IDs only as literally observed, never expanded from prose.
+    For attachments, read controls/links for actual names before answering.
     """
 
     static let builtInBrowser = """
