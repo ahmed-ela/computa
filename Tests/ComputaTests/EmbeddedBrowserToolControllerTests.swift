@@ -935,6 +935,180 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         XCTAssertEqual(repeated, initial, "Later absence cannot replace the original pending observation with successful closure")
     }
 
+    func testFailedOwnedBindWithConfirmedCloseAllowsTheNextOpen() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.failObservations([.browserUnavailable("Synthetic bind read failed")])
+        do { _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"]); XCTFail("Binding must fail") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("Synthetic bind read failed")) }
+        let failed = await backend.counts()
+        XCTAssertEqual(failed.creates, 1); XCTAssertEqual(failed.closes, 1); XCTAssertEqual(failed.closeAttempts, 1)
+        let opened = try jsonObject(await call(controller, "browser_open", ["url": "http://localhost:8123/result"]))
+        XCTAssertEqual(opened["bound"] as? Bool, true)
+        let read = try await call(controller, "browser_read")
+        XCTAssertTrue(read.contains("/result"))
+        let reopened = await backend.counts()
+        XCTAssertEqual(reopened.creates, 2); XCTAssertEqual(reopened.closes, 1)
+        XCTAssertEqual(reopened.closeAttempts, 1, "Confirmed failed-open disposal must not be attempted a second time")
+        let report = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertTrue(report.isSettled)
+        XCTAssertTrue(report.targets.allSatisfy(\.closed))
+        _ = await controller.shutdown()
+    }
+
+    func testFailedOwnedBindCloseRemainsReservedAndCleanupIsRetriedWithoutCreatingAnotherTab() async throws {
+        for retryFails in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.failObservations([.browserUnavailable("Synthetic bind read failed")])
+            await backend.failNextClose()
+            do { _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"]); XCTFail("Binding must fail") }
+            catch { XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("Synthetic bind read failed")) }
+            let inventory = try jsonObject(await call(controller, "browser_tabs", key: "turn-b"))
+            let rows = try XCTUnwrap(inventory["tabs"] as? [[String: Any]])
+            let reserved = try XCTUnwrap(rows.first { $0["availability"] as? String == "busy" })
+            let targetID = try XCTUnwrap(reserved["tab_id"] as? String)
+            do {
+                _ = try await call(controller, "browser_bind", ["tab_id": targetID], key: "turn-b")
+                XCTFail("An unconfirmed created target cannot become another task's borrowed tab")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
+            if retryFails { await backend.failNextClose() }
+            do {
+                _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/result"])
+                XCTAssertFalse(retryFails, "Another failed close must block creation")
+            } catch {
+                XCTAssertTrue(retryFails)
+                XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("Previous task-tab cleanup could not be confirmed."))
+            }
+            let retried = await backend.counts()
+            XCTAssertEqual(retried.closeAttempts, 2, "The retained cleanup target must be retried once")
+            XCTAssertEqual(retried.creates, retryFails ? 1 : 2)
+            XCTAssertEqual(retried.closes, retryFails ? 0 : 1)
+            if retryFails {
+                for key in ["turn-a", "turn-b"] {
+                    let inventory = try jsonObject(await call(controller, "browser_tabs", key: key))
+                    let rows = try XCTUnwrap(inventory["tabs"] as? [[String: Any]])
+                    XCTAssertEqual(rows.first { $0["tab_id"] as? String == targetID }?["availability"] as? String, "busy")
+                    do { _ = try await call(controller, "browser_bind", ["tab_id": targetID], key: key); XCTFail("A failed cleanup retry must not expose its surviving target") }
+                    catch { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
+                }
+            }
+            let report = await controller.releaseReport(taskKey: "turn-a")
+            if retryFails {
+                XCTAssertFalse(report.isSettled)
+                XCTAssertTrue(report.failures.contains(.ownedTargetCloseFailed))
+                XCTAssertEqual(report.targets.map(\.closed), [false], "Unconfirmed disposal must remain in the cleanup report")
+                let inventory = try jsonObject(await call(controller, "browser_tabs", key: "turn-b"))
+                let rows = try XCTUnwrap(inventory["tabs"] as? [[String: Any]])
+                XCTAssertEqual(rows.first { $0["tab_id"] as? String == targetID }?["availability"] as? String, "busy",
+                               "Removing the original context cannot release physical-disposal uncertainty")
+                do { _ = try await call(controller, "browser_bind", ["tab_id": targetID], key: "turn-b"); XCTFail("Retired context quarantine remains binding") }
+                catch { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
+            } else { XCTAssertTrue(report.isSettled) }
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testLateFailedOpenDisposalRemainsQuarantinedAfterItsContextWasRemoved() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.holdNextCreate()
+        let pending = Task { try await self.call(controller, "browser_open", ["url": "http://localhost:8123/flight"]) }
+        await backend.waitUntilCreateHeld()
+        let original = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertTrue(original.pendingOperation); XCTAssertTrue(original.targets.isEmpty)
+        await backend.failNextClose()
+        await backend.resumeCreate()
+        do { _ = try await pending.value; XCTFail("A retired opening cannot publish a binding") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+        let inventory = try jsonObject(await call(controller, "browser_tabs", key: "turn-b"))
+        let rows = try XCTUnwrap(inventory["tabs"] as? [[String: Any]])
+        let target = try XCTUnwrap(rows.first { $0["availability"] as? String == "busy" })
+        let id = try XCTUnwrap(target["tab_id"] as? String)
+        do { _ = try await call(controller, "browser_bind", ["tab_id": id], key: "turn-b"); XCTFail("Late failed close cannot expose an orphaned owned target") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .operationInProgress) }
+        let repeated = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertEqual(repeated, original, "Quarantine does not rewrite immutable cleanup evidence")
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.closeAttempts, 1); XCTAssertEqual(counts.closes, 0)
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testQuarantineDoesNotAttachToANewTargetIncarnation() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        await backend.failNextClose()
+        do { _ = try await call(controller, "browser_close"); XCTFail("Close must remain unconfirmed") } catch { }
+        let original = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertFalse(original.isSettled)
+        await backend.replaceOwnedTargetWithHumanIncarnation()
+        let inventory = try jsonObject(await call(controller, "browser_tabs", key: "turn-b"))
+        let rows = try XCTUnwrap(inventory["tabs"] as? [[String: Any]])
+        let replacement = try XCTUnwrap(rows.first { $0["title"] as? String == "Replacement user tab" })
+        XCTAssertEqual(replacement["availability"] as? String, "available")
+        let id = try XCTUnwrap(replacement["tab_id"] as? String)
+        let bound = try jsonObject(await call(controller, "browser_bind", ["tab_id": id], key: "turn-b"))
+        XCTAssertEqual(bound["ownership"] as? String, "user_existing")
+        let released = await controller.releaseReport(taskKey: "turn-b")
+        XCTAssertTrue(released.isSettled); XCTAssertTrue(released.userBindingReleased)
+        let repeated = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertEqual(repeated, original)
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.closeAttempts, 1); XCTAssertEqual(counts.closes, 0,
+            "An old target/token quarantine cannot close or reserve a different incarnation")
+        _ = await controller.shutdown()
+    }
+
+    func testFailedBorrowedBindRetiresOnlyItsLocalLeaseAndNeverClosesTheUserTab() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_tabs")
+        let targetID = await backend.humanID
+        await backend.failObservations([.browserUnavailable("Synthetic bind read failed")])
+        do { _ = try await call(controller, "browser_bind", ["tab_id": targetID]); XCTFail("Binding must fail") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .browserUnavailable("Synthetic bind read failed")) }
+        let reopened = try jsonObject(await call(controller, "browser_bind", ["tab_id": targetID]))
+        XCTAssertEqual(reopened["bound"] as? Bool, true)
+        XCTAssertEqual(reopened["ownership"] as? String, "user_existing")
+        _ = try await call(controller, "browser_read")
+        let report = await controller.releaseReport(taskKey: "turn-a")
+        XCTAssertTrue(report.isSettled); XCTAssertTrue(report.userBindingReleased); XCTAssertTrue(report.targets.isEmpty)
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.creates, 0); XCTAssertEqual(counts.closes, 0); XCTAssertEqual(counts.closeAttempts, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testCancelledOrReleasedBindCleanupCannotClearTheNextContext() async throws {
+        for cancelled in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            await backend.holdNextRead()
+            let pending = Task { try await self.call(controller, "browser_open", ["url": "http://localhost:8123/flight"]) }
+            await backend.waitUntilObservationHeld()
+            var released: EmbeddedBrowserCleanupReport?
+            let nextKey = cancelled ? "turn-a" : "turn-b"
+            if cancelled { pending.cancel() }
+            else {
+                released = await controller.releaseReport(taskKey: "turn-a")
+                _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/result"], key: nextKey)
+            }
+            await backend.resumeObservation()
+            do { _ = try await pending.value; XCTFail("Retired binding cannot publish") }
+            catch {
+                if cancelled { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertTrue(error is BrowserTabBrokerError) }
+            }
+            if cancelled { _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/result"], key: nextKey) }
+            let current = try await call(controller, "browser_read", key: nextKey)
+            XCTAssertTrue(current.contains("/result"))
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.creates, 2); XCTAssertEqual(counts.closes, 1)
+            XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0)
+            if let released {
+                XCTAssertFalse(released.isSettled); XCTAssertTrue(released.pendingOperation)
+                let repeated = await controller.releaseReport(taskKey: "turn-a")
+                XCTAssertEqual(repeated, released, "Late cleanup cannot rewrite the original pending release as a success")
+            }
+            _ = await controller.shutdown()
+        }
+    }
+
     func testFailedExplicitCloseRemainsUnconfirmedAtTurnEndWithoutReplayingClose() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
@@ -1186,7 +1360,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
 }
 
 private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
-    struct Counts: Sendable { var creates=0,closes=0,observes=0,presses=0,fills=0,navigations=0 }
+    struct Counts: Sendable { var creates=0,closes=0,closeAttempts=0,observes=0,presses=0,fills=0,navigations=0 }
     let humanID = UUID().uuidString
     private var targets = [String: BrowserTarget](), owned = Set<String>(), stats = Counts()
     private var generation = UUID().uuidString, field = "", result = ""
@@ -1243,6 +1417,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func target(id:String) async throws -> BrowserTarget? { protectedTargets.contains(id) ? nil : targets[id] }
     func activateTarget(id:String) async throws { }
     func closeTarget(target:BrowserTarget) async throws {
+        stats.closeAttempts += 1
         guard targets[target.targetID]?.instanceToken == target.instanceToken else { throw BrowserTabBrokerError.targetClosed }
         if shouldFailClose { shouldFailClose = false; throw BrowserTabBrokerError.browserUnavailable("Synthetic close failure") }
         guard owned.remove(target.targetID) != nil else { throw BrowserTabBrokerError.ownershipMismatch }
@@ -1364,6 +1539,14 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             guard let target = targets[id] else { continue }
             targets[id] = BrowserTarget(targetID:id,instanceToken:UUID().uuidString,title:target.title,
                                         url:target.url,webSocketURL:nil)
+        }
+    }
+    func replaceOwnedTargetWithHumanIncarnation() {
+        for id in Array(owned) {
+            guard let target = targets[id] else { continue }
+            targets[id] = BrowserTarget(targetID: id, instanceToken: UUID().uuidString,
+                title: "Replacement user tab", url: target.url, webSocketURL: nil)
+            owned.remove(id)
         }
     }
     func redirectOwnedTarget(to url: URL) {

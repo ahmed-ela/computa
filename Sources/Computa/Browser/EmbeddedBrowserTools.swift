@@ -189,6 +189,11 @@ enum EmbeddedBrowserTools {
 /// Each active turn receives its own taskKey from the runtime. The controller
 /// retains an exact tab lease and capability; it never operates on an active tab.
 actor EmbeddedBrowserToolController {
+    private struct TargetIdentity: Hashable {
+        let id: String
+        let instanceToken: String
+        init(_ target: BrowserTarget) { id = target.targetID; instanceToken = target.instanceToken }
+    }
     private struct Context {
         let id = UUID()
         let lifetime = BrowserTabLifetime()
@@ -210,6 +215,9 @@ actor EmbeddedBrowserToolController {
     private let broker: BrowserTabSessionBroker
     private var contexts = [String: Context]()
     private var leases = [String: String]()
+    // Physical disposal may outlive its task/context. Never offer the same
+    // unconfirmed target incarnation as a borrowable user tab.
+    private var quarantinedTargets = Set<TargetIdentity>()
     private var inFlight = Set<String>()
     // A repeated release cannot turn a failed or pending disposal into an
     // empty successful result. Retired keys never grant browser authority.
@@ -297,8 +305,8 @@ actor EmbeddedBrowserToolController {
                 var row: [String: Any] = [
                     "tab_id": target.targetID, "title": title.text,
                     "title_truncated": title.truncated,
-                    "availability": leases[target.targetID].map { $0 == taskKey ? "bound_here" : "busy" }
-                        ?? "available",
+                    "availability": quarantinedTargets.contains(TargetIdentity(target)) ? "busy"
+                        : leases[target.targetID].map { $0 == taskKey ? "bound_here" : "busy" } ?? "available",
                 ]
                 if target.url.absoluteString.utf8.count <= 2_048 {
                     row["url"] = target.url.absoluteString
@@ -339,6 +347,9 @@ actor EmbeddedBrowserToolController {
                 else {
                     throw BrowserTabBrokerError.targetClosed
                 }
+                guard !quarantinedTargets.contains(TargetIdentity(current)) else {
+                    throw BrowserTabBrokerError.operationInProgress
+                }
                 try requireScope(scope, url: current.url, title: current.title)
                 try check(taskKey, contextID)
                 selected = current
@@ -369,6 +380,9 @@ actor EmbeddedBrowserToolController {
             do {
                 try check(taskKey, contextID)
                 try requireScope(scope, url: target.url, title: target.title)
+                guard !quarantinedTargets.contains(TargetIdentity(target)) else {
+                    throw BrowserTabBrokerError.operationInProgress
+                }
                 guard leases[target.targetID] == nil || leases[target.targetID] == taskKey else {
                     throw BrowserTabBrokerError.operationInProgress
                 }
@@ -381,6 +395,9 @@ actor EmbeddedBrowserToolController {
                     taskKey: taskKey, processIdentifier: Int32(ProcessInfo.processInfo.processIdentifier),
                     target: target, lifetime: bindingLifetime)
                 try check(taskKey, contextID)
+                guard !quarantinedTargets.contains(TargetIdentity(target)) else {
+                    throw BrowserTabBrokerError.operationInProgress
+                }
                 contexts[taskKey]?.binding = binding
                 // Creation and successful binding are a current observation of
                 // this exact instance. A redundant bind can reuse the existing
@@ -388,8 +405,39 @@ actor EmbeddedBrowserToolController {
                 if owned { contexts[taskKey]?.observedTargets[target.targetID] = target }
                 return try bindingResponse(target: target, binding: binding, owned: owned)
             } catch {
-                if leases[target.targetID] == taskKey { leases.removeValue(forKey: target.targetID) }
-                if owned { try? await transport.closeTarget(target: target) }
+                // Failed binding never retains read/input authority. Keep a
+                // created target reserved for cleanup until close is confirmed.
+                if contexts[taskKey]?.id == contextID {
+                    contexts[taskKey]?.bindingLifetime?.revoke()
+                    contexts[taskKey]?.binding = nil
+                    contexts[taskKey]?.snapshot = nil
+                    if owned {
+                        contexts[taskKey]?.ownedTarget = target
+                        contexts[taskKey]?.leasedTarget = target
+                        contexts[taskKey]?.observedTargets.removeValue(forKey: target.targetID)
+                        if leases[target.targetID] == nil { leases[target.targetID] = taskKey }
+                    }
+                }
+                var disposed = !owned
+                if owned {
+                    let identity = TargetIdentity(target)
+                    quarantinedTargets.insert(identity)
+                    do {
+                        try await transport.closeTarget(target: target)
+                        quarantinedTargets.remove(identity)
+                        disposed = true
+                    } catch { }
+                }
+                if disposed {
+                    if contexts[taskKey]?.id == contextID,
+                       contexts[taskKey]?.leasedTarget?.targetID == target.targetID,
+                       contexts[taskKey]?.leasedTarget?.instanceToken == target.instanceToken {
+                        contexts[taskKey]?.ownedTarget = nil
+                        contexts[taskKey]?.leasedTarget = nil
+                        contexts[taskKey]?.bindingLifetime = nil
+                    }
+                    if leases[target.targetID] == taskKey { leases.removeValue(forKey: target.targetID) }
+                }
                 throw error
             }
         case "browser_read":
@@ -523,6 +571,7 @@ actor EmbeddedBrowserToolController {
         var targets = context.cleanupTargets
         var failures = context.cleanupFailures
         var userBindingReleased = context.userBindingReleased
+        if let target = context.ownedTarget { quarantinedTargets.insert(TargetIdentity(target)) }
         context.bindingLifetime?.revoke()
         if removeContext {
             contexts.removeValue(forKey: taskKey)
@@ -548,7 +597,11 @@ actor EmbeddedBrowserToolController {
         }
         if let target = context.ownedTarget {
             var disposed = false
-            do { try await transport.closeTarget(target: target); disposed = true } catch {
+            do {
+                try await transport.closeTarget(target: target)
+                quarantinedTargets.remove(TargetIdentity(target))
+                disposed = true
+            } catch {
                 failures.append(.ownedTargetCloseFailed)
             }
             if targets.count < 64 {
@@ -768,6 +821,9 @@ actor EmbeddedBrowserToolController {
             target.instanceToken == binding.targetInstanceToken
         else {
             throw BrowserTabBrokerError.targetClosed
+        }
+        guard !quarantinedTargets.contains(TargetIdentity(target)) else {
+            throw BrowserTabBrokerError.operationInProgress
         }
         try requireScope(scope, url: target.url)
         return target

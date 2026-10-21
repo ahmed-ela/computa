@@ -86,25 +86,46 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     }
 
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation {
+        try await observe(target: target, waitForSemanticReadiness: false)
+    }
+
+    func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation {
+        try await observe(target: target, waitForSemanticReadiness: true)
+    }
+
+    private func observe(target: BrowserTarget, waitForSemanticReadiness: Bool) async throws -> BrowserDocumentObservation {
         let id = try exactID(target)
         try session.markHumanDocumentUsedByTool(tabID: id, generation: generation(for: id))
         try await session.waitForHumanTabReady(id: id, until: .now + .seconds(12))
         let generation = try generation(for: id)
         try session.markHumanDocumentUsedByTool(tabID: id, generation: generation)
         let data = try await run(
-            id: id, generation: generation, input: ["operation": "observe", "timeoutMS": 10_000], timeoutMS: 12_000)
+            id: id, generation: generation,
+            input: ["operation": "observe", "awaitSemanticReadiness": waitForSemanticReadiness, "timeoutMS": 10_000],
+            timeoutMS: 12_000)
         guard data.count <= 1_000_000,
             let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             raw["loaderID"] as? String == generation.uuidString,
             let urlString = raw["url"] as? String, let url = URL(string: urlString),
             let title = raw["title"] as? String, let rows = raw["nodes"] as? [[String: Any]],
             rows.count <= 3_000,
-            let truncated = raw["sourceTruncated"] as? Bool,
-            let readinessValue = raw["semanticReadiness"] as? String,
-            let readiness = BrowserDocumentObservation.SemanticReadiness(rawValue: readinessValue)
+            let truncated = raw["sourceTruncated"] as? Bool
         else {
             throw BrowserTabBrokerError.browserUnavailable(
                 "The built-in page returned an invalid bounded observation.")
+        }
+        let readiness: BrowserDocumentObservation.SemanticReadiness?
+        if waitForSemanticReadiness {
+            guard let value = raw["semanticReadiness"] as? String,
+                  let parsed = BrowserDocumentObservation.SemanticReadiness(rawValue: value) else {
+                throw BrowserTabBrokerError.browserUnavailable("The built-in page returned invalid semantic readiness.")
+            }
+            readiness = parsed
+        } else {
+            guard raw["semanticReadiness"] == nil else {
+                throw BrowserTabBrokerError.browserUnavailable("An immediate observation cannot claim semantic readiness.")
+            }
+            readiness = nil
         }
         try EmbeddedBrowserURLPolicy.validate(url)
         let nodes = try rows.map { row -> BrowserDocumentNode in
@@ -249,6 +270,12 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         return generation
     }
 
+    private func requireCurrentReadDocument(id: UUID, view: WKWebView, generation: UUID) throws {
+        guard let current = session.webView(for: id) else { throw BrowserTabBrokerError.targetClosed }
+        guard current === view else { throw BrowserTabBrokerError.targetReplaced }
+        guard try self.generation(for: id) == generation else { throw BrowserTabBrokerError.staleDocument }
+    }
+
     private func run(
         id: UUID, generation: UUID, input: [String: Any], timeoutMS: Int,
         deadline: ContinuousClock.Instant? = nil,
@@ -260,78 +287,83 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         var input = input
         input["documentToken"] = generation.uuidString
         let result = EmbeddedBrowserScriptResult()
-        let bytes: Data = try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            return try await withCheckedThrowingContinuation { continuation in
-                // A wait's millisecond script budget is rounded down. Its host
-                // timer must use the original deadline so it cannot expire first
-                // and turn a normal unmatched wait into a browser failure.
-                result.install(continuation, until: deadline ?? .now + .milliseconds(timeoutMS), mutation: mutation)
-                let enqueue = {
-                    let operationID: UUID?
-                    if mutation {
-                        operationID = try self.session.prepareToolMutation(tabID: id, generation: generation)
-                    } else {
-                        operationID = nil
-                    }
-                    view.callAsyncJavaScript(source, arguments: ["input": input], in: nil, in: self.world) {
-                        reply in
-                        do {
-                            let value = try reply.get()
-                            guard JSONSerialization.isValidJSONObject(value) else {
-                                throw BrowserTabBrokerError.browserUnavailable(
-                                    "The built-in script returned an invalid result.")
-                            }
-                            if let operationID, self.session.toolPopupWasRejected(tabID: id, operationID: operationID) {
-                                result.finish(.failure(BrowserTabBrokerError.mutationRejected(
-                                    "Browser input was dispatched, but a pop-up was blocked. No replay is allowed. Open the observed destination with browser tools; human pop-ups on this document require a fresh navigation.")))
-                                return
-                            }
-                            result.finish(.success(try JSONSerialization.data(withJSONObject: value)))
-                        } catch {
-                            // An empty-shell wait can span a real navigation,
-                            // which destroys its JS context before returning.
-                            // Only read-only operations may use the existing
-                            // fresh-read retry; mutation dispatch is never replayed.
-                            if !mutation {
-                                do {
-                                    guard let currentView = self.session.webView(for: id) else {
-                                        throw BrowserTabBrokerError.targetClosed
-                                    }
-                                    guard currentView === view else {
-                                        throw BrowserTabBrokerError.targetReplaced
-                                    }
-                                    if try self.generation(for: id) != generation {
-                                        throw BrowserTabBrokerError.staleDocument
-                                    }
-                                } catch {
-                                    result.finish(.failure(error))
+        let bytes: Data
+        do {
+            bytes = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await withCheckedThrowingContinuation { continuation in
+                    // A wait's millisecond script budget is rounded down. Its host
+                    // timer must use the original deadline so it cannot expire first
+                    // and turn a normal unmatched wait into a browser failure.
+                    result.install(continuation, until: deadline ?? .now + .milliseconds(timeoutMS), mutation: mutation)
+                    let enqueue = {
+                        let operationID: UUID?
+                        if mutation {
+                            operationID = try self.session.prepareToolMutation(tabID: id, generation: generation)
+                        } else {
+                            operationID = nil
+                        }
+                        view.callAsyncJavaScript(source, arguments: ["input": input], in: nil, in: self.world) {
+                            reply in
+                            do {
+                                let value = try reply.get()
+                                guard JSONSerialization.isValidJSONObject(value) else {
+                                    throw BrowserTabBrokerError.browserUnavailable(
+                                        "The built-in script returned an invalid result.")
+                                }
+                                if let operationID, self.session.toolPopupWasRejected(tabID: id, operationID: operationID) {
+                                    result.finish(.failure(BrowserTabBrokerError.mutationRejected(
+                                        "Browser input was dispatched, but a pop-up was blocked. No replay is allowed. Open the observed destination with browser tools; human pop-ups on this document require a fresh navigation.")))
                                     return
                                 }
+                                result.finish(.success(try JSONSerialization.data(withJSONObject: value)))
+                            } catch {
+                                // An empty-shell wait can span a real navigation,
+                                // which destroys its JS context before returning.
+                                // Only read-only operations may use the existing
+                                // fresh-read retry; mutation dispatch is never replayed.
+                                if !mutation {
+                                    do {
+                                        try self.requireCurrentReadDocument(id: id, view: view, generation: generation)
+                                    } catch {
+                                        result.finish(.failure(error))
+                                        return
+                                    }
+                                }
+                                result.finish(
+                                    .failure(
+                                        BrowserTabBrokerError.browserUnavailable(
+                                            mutation
+                                                ? "The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."
+                                                : "The built-in page could not be inspected. Its document may have changed."
+                                        ))
+                                )
                             }
-                            result.finish(
-                                .failure(
-                                    BrowserTabBrokerError.browserUnavailable(
-                                        mutation
-                                            ? "The built-in action could not be confirmed. No replay is allowed; read the page before deciding what to do next."
-                                            : "The built-in page could not be inspected. Its document may have changed."
-                                    ))
-                            )
                         }
                     }
+                    do { if let permit { try permit.commit(enqueue) } else { try enqueue() } } catch {
+                        result.finish(.failure(error))
+                    }
                 }
-                do { if let permit { try permit.commit(enqueue) } else { try enqueue() } } catch {
-                    result.finish(.failure(error))
-                }
+            } onCancel: {
+                result.finish(.failure(CancellationError()))
             }
-        } onCancel: {
-            result.finish(.failure(CancellationError()))
+        } catch {
+            if !mutation {
+                try Task.checkCancellation()
+                // A redirect can retire the JS context without delivering its
+                // callback. Apply the same exact fence to native timer errors;
+                // an unchanged document preserves the original timeout/error.
+                try requireCurrentReadDocument(id: id, view: view, generation: generation)
+            }
+            throw error
         }
         // Read results cannot publish stale content after a navigation or close.
         // A dispatched mutation may itself navigate; report dispatch only and
         // require a new read instead of misclassifying it as undispatched input.
-        if !mutation, try self.generation(for: id) != generation {
-            throw BrowserTabBrokerError.staleDocument
+        if !mutation {
+            try Task.checkCancellation()
+            try requireCurrentReadDocument(id: id, view: view, generation: generation)
         }
         return bytes
     }

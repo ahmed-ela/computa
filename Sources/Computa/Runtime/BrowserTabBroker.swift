@@ -122,6 +122,9 @@ protocol BrowserTabTransport: Sendable {
     func activateTarget(id: String) async throws
     func closeTarget(target: BrowserTarget) async throws
     func observe(target: BrowserTarget) async throws -> BrowserDocumentObservation
+    /// Fresh user reads may await semantic content. Binding, continuation and
+    /// mutation preflight retain the immediate observation contract.
+    func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation
     func press(
         target: BrowserTarget,
         backendNodeID: Int64,
@@ -135,6 +138,12 @@ protocol BrowserTabTransport: Sendable {
         document: BrowserDocumentObservation,
         permit: BrowserMutationPermit
     ) async throws
+}
+
+extension BrowserTabTransport {
+    func observeForRead(target: BrowserTarget) async throws -> BrowserDocumentObservation {
+        try await observe(target: target)
+    }
 }
 
 /// Target lifetime is independent of browser/process ownership. A borrowed
@@ -637,7 +646,12 @@ actor BrowserTabSessionBroker {
         entry.readState = nil
         entries[suppliedBinding.handle] = entry
         let target = try await currentTarget(for: suppliedBinding.handle, entry: entry)
-        let freshDocument = try await transport.observe(target: target)
+        let freshDocument: BrowserDocumentObservation
+        if read.cursor == nil, read.snapshotID == nil {
+            freshDocument = try await transport.observeForRead(target: target)
+        } else {
+            freshDocument = try await transport.observe(target: target)
+        }
         // The observation may have suspended across target detach/replacement.
         // Recheck exact identity, then local validity after that extra await.
         _ = try self.entry(

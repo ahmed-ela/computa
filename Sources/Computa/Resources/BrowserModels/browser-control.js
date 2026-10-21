@@ -166,6 +166,7 @@ const waitForCapture = async matches => {
   });
 };
 if (input.operation === 'observe') {
+  if (input.awaitSemanticReadiness !== true) return capture();
   const result = await waitForCapture(hasSemanticContent);
   return {...result.snapshot, semanticReadiness:result.matched ? 'ready' : 'empty_at_deadline'};
 }

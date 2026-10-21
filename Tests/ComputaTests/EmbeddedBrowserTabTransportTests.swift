@@ -268,7 +268,7 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let (session, transport, view, target) = try await semanticReadinessFixture()
         defer { session.shutdown() }
         let generation = session.documentGeneration(for: try XCTUnwrap(UUID(uuidString: target.targetID)))
-        let pending = Task { try await transport.observe(target: target) }
+        let pending = Task { try await transport.observeForRead(target: target) }
         try await waitForSemanticObserver(view)
         _ = try await script(view, "const p=document.createElement('p');p.textContent='Rendered fixture content';document.body.appendChild(p);return true;")
         let observed = try await pending.value
@@ -278,10 +278,34 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         XCTAssertEqual(observed.title, "Outlook")
     }
 
+    func testBlankBindingAndMutationPreflightUseImmediateObservationWithoutWaitingForContent() async throws {
+        let (session, transport, view, target) = try await semanticReadinessFixture()
+        defer { session.shutdown() }
+        let immediate = try await transport.observe(target: target)
+        XCTAssertNil(immediate.semanticReadiness, "No semantic deadline was awaited for this identity observation")
+        let broker = BrowserTabSessionBroker(transport: transport, browserGeneration: UUID(), ownership: .borrowed)
+        let binding = try await broker.bindBorrowed(taskKey: "immediate", processIdentifier: 42, target: target)
+        var armed = try await script(view, "return document.documentElement.hasAttribute('data-computa-readiness-test-armed');")
+        XCTAssertEqual(armed, Data("false".utf8), "A blank binding does not register the semantic observer")
+        _ = try await script(view, "const b=document.createElement('button');b.id='fixture-action';b.textContent='Continue';document.body.appendChild(b);return true;")
+        let read = try await broker.snapshot(taskKey: "immediate", binding: binding,
+            bundleIdentifier: "com.ahmedelamin.computa", read: .init(view: .all))
+        let button = try XCTUnwrap(read.snapshot.elements.first { $0.label == "Continue" })
+        _ = try await script(view, "document.getElementById('fixture-action').remove();return true;")
+        do {
+            try await broker.perform(taskKey: "immediate", binding: read.binding, snapshot: read.snapshot,
+                                     elementIndex: button.index, action: "AXPress")
+            XCTFail("The removed control cannot inherit input authority")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .elementNotFound) }
+        armed = try await script(view, "return document.documentElement.hasAttribute('data-computa-readiness-test-armed');")
+        XCTAssertEqual(armed, Data("false".utf8), "Mutation preflight observes the blank document immediately")
+        try await broker.revoke(taskKey: "immediate", binding: read.binding)
+    }
+
     func testSemanticReadinessNavigationContextFailureRemainsAStaleRead() async throws {
         let (session, transport, view, target) = try await semanticReadinessFixture()
         defer { session.shutdown() }
-        let pending = Task { try await transport.observe(target: target) }
+        let pending = Task { try await transport.observeForRead(target: target) }
         try await waitForSemanticObserver(view)
         let id = try XCTUnwrap(UUID(uuidString: target.targetID))
         try session.navigate(tabID: id, to: XCTUnwrap(URL(string: "about:blank")))
@@ -293,7 +317,7 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
     func testSemanticReadinessCannotPublishAfterCancellationOrTabClosure() async throws {
         for closed in [false, true] {
             let (session, transport, view, target) = try await semanticReadinessFixture()
-            let pending = Task { try await transport.observe(target: target) }
+            let pending = Task { try await transport.observeForRead(target: target) }
             try await waitForSemanticObserver(view)
             let id = try XCTUnwrap(UUID(uuidString: target.targetID))
             if closed { session.closeTab(id) } else { pending.cancel() }
@@ -305,6 +329,34 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
                 if closed { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
                 else { XCTAssertTrue(error is CancellationError) }
             }
+            session.shutdown()
+        }
+    }
+
+    func testReadDeadlineWithoutJSReplyPreservesTimeoutOrReportsTheRetiredGeneration() async throws {
+        for retired in [false, true] {
+            let (session, _, view, target) = try await semanticReadinessFixture()
+            let heldScript = """
+            document.documentElement.setAttribute('data-computa-readiness-test-armed','yes');
+            return await new Promise(resolve=>{
+              document.addEventListener('computa-readiness-test-release',()=>resolve({}),{once:true});
+            });
+            """
+            let transport = EmbeddedBrowserTabTransport(session: session, script: heldScript)
+            let pending = Task { try await transport.observeForRead(target: target) }
+            try await waitForSemanticObserver(view)
+            if retired { session.stop(tabID: try XCTUnwrap(UUID(uuidString: target.targetID))) }
+            do { _ = try await pending.value; XCTFail("A deliberately withheld JS response cannot publish content") }
+            catch {
+                if retired { XCTAssertEqual(error as? BrowserTabBrokerError, .staleDocument) }
+                else {
+                    XCTAssertEqual(error as? BrowserTabBrokerError,
+                        .browserUnavailable("The built-in page observation timed out."))
+                }
+            }
+            // Release the synthetic callback after the native deadline. It
+            // cannot resume the already-finished result or regain authority.
+            _ = try? await script(view, "document.dispatchEvent(new Event('computa-readiness-test-release'));return true;")
             session.shutdown()
         }
     }

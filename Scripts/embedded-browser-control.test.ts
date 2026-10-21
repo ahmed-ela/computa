@@ -34,7 +34,7 @@ function fixture(target: string | null) {
   const state = {}, location = { href: 'https://example.test/' };
   const execute = new AsyncFunction('input', 'globalThis', 'document', 'location', 'Node', 'getComputedStyle', 'TextEncoder',
     'MutationObserver', 'setTimeout', 'clearTimeout', source);
-  const run = (input: Record<string, unknown>) => execute({ documentToken: 'owned-document', timeoutMS: 10000, ...input }, state, document, location,
+  const run = (input: Record<string, unknown>) => execute({ documentToken: 'owned-document', timeoutMS: 10000, awaitSemanticReadiness: true, ...input }, state, document, location,
     { TEXT_NODE: 3, ELEMENT_NODE: 1 }, () => ({ display: 'block', visibility: 'visible' }), TextEncoder, Observer,
     (callback: Function, delay: number) => { timers.set(++timerID, { callback, delay }); return timerID; },
     (id: number) => timers.delete(id));
@@ -85,6 +85,11 @@ describe('built-in browser popup-only link capabilities', () => {
 });
 
 describe('bounded built-in semantic readiness', () => {
+  test('identity and preflight captures of blank documents do not register a semantic wait or claim a deadline', async () => {
+    const f = fixture(null), result = await f.run({ operation: 'observe', awaitSemanticReadiness: false });
+    expect(result.nodes).toEqual([]); expect(result.semanticReadiness).toBeUndefined();
+    expect(f.observers).toHaveLength(0); expect(f.timers.size).toBe(0);
+  });
   test('meaningful pages return immediately without registering a wait', async () => {
     const f = fixture('_self'), result = await f.run({ operation: 'observe' });
     expect(result.semanticReadiness).toBe('ready');
