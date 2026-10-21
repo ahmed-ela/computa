@@ -182,6 +182,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     allowFirstUserBinding: nativeFingerprint === undefined, ...request },
     document, window, location, (node: Element, pseudo?: string) => ({ visibility: node.cssVisibility,
       display: node.values['data-fixture-display'] ?? (node.getAttribute('hidden') !== null ? 'none' : 'block'),
+      opacity: node.values['data-fixture-opacity'] ?? '1',
       content: pseudo === '::before' ? node.beforeContent : node.afterContent }), Observer, (callback: () => void, delay: number) => {
       timers.push(callback); scheduledDelays.push(delay);
     }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
@@ -739,6 +740,135 @@ describe('ChatGPT terminal completion admission', () => {
         if (mutation === 'owner') p.x.f.world.__computaModelOwner = 'foreign-owner'; };
       const result = await p.x.observe(p.record, { deferModelVerification: false, terminalCompletionCandidate: p.candidate });
       expect(opens).toBe(2); expect(result.terminalCompletionMatched, mutation).toBeUndefined(); expect(p.x.send.clicks).toBe(1);
+    }
+  });
+});
+
+describe('ChatGPT literal terminal source equivalence', () => {
+  const messageID = 'cea6201b-846d-404a-b4dc-f974e184065a';
+  const start = source.indexOf('function chatGPTSingleJSONFence(text) {');
+  const end = source.indexOf('function chatGPTTerminalCompletionMatches(observed) {', start);
+  const extractionStart = source.indexOf('function modelResponseExtraction(answer) {');
+  const extractionEnd = source.indexOf('function modelResponseText(', extractionStart);
+  const read = new Function('rawSource', 'answer', 'messageID', 'getComputedStyle',
+    source.slice(start, end) + source.slice(extractionStart, extractionEnd)
+      + 'const extraction=modelResponseExtraction(answer);return {relation:chatGPTTerminalResponseTextRelation(rawSource,answer,extraction,messageID),text:extraction.text,flags:extraction.flags};');
+  const style = (node: any, pseudo?: string) => ({ visibility: node.cssVisibility || 'visible',
+    display: node.literalDisplay || (node.getAttribute('hidden') !== null ? 'none' : 'block'),
+    opacity: node.literalOpacity || '1', content: pseudo === '::before' ? node.beforeContent : node.afterContent });
+  const wrap = (body: string) => '```json\n' + body + '\n```';
+  function literal(body: string) {
+    const answer = new Element('DIV', { 'data-markdown-text-style': 'assistant-message' });
+    const copy = new Element('DIV', { class: 'my-4', 'data-dil-source-message-id': messageID,
+      'data-chatgpt-copy-reference': '0', 'data-markdown-copy': 'contents' });
+    const layout = new Element('DIV', { class: 'layout' }), hidden = new Element('DIV', { hidden: '' });
+    const portal = new Element('DIV', { class: 'relative PortalBoundary-TFj9W2 Renderer-ojZscX', 'data-theme': 'light', style: '--puik-portal-zoom: 1;' });
+    const dil = new Element('DIV', { class: 'DilRenderer-tB76Jj DilResponseRoot-HfQrEh Reveal-k2IWvM',
+      dir: 'auto', 'data-d-inline-reveal': '', 'data-d-direction': 'col', 'data-dil-message-id': messageID });
+    const p = new Element('P', { class: 'TextBase-hXhSqg Text-lIMP0_', 'data-d-text-flow': '', 'data-d-component': 'text' });
+    const span = (text: string) => new Element('SPAN', { 'data-d-text-flow': 'word', 'data-d-stream-word': '' }, text);
+    p.append(span('```json\n'), span(body + '\n'), span('```'));
+    dil.append(p); portal.append(dil); layout.append(hidden, portal); copy.append(layout); answer.append(copy);
+    Object.defineProperty(answer, 'innerText', { configurable: true, get: () => p.children.map(child => child.textContent.replace(/\r?\n$/, ' ')).join('') + '\n' });
+    const raw = () => p.textContent;
+    return { answer, copy, layout, hidden, portal, dil, p, span, raw,
+      read: (value = '<escape>' + raw() + '</escape>') => read(value, answer, messageID, style) };
+  }
+  test('the actual three-span source preserves LF, JSON escapes and a single exact escape wrapper', () => {
+    expect(start).toBeGreaterThan(0); expect(extractionStart).toBeGreaterThan(end);
+    for (const envelope of [
+      { type: 'message', text: 'HI' },
+      { type: 'tool_calls', calls: [{ name: 'exec_command', arguments: { cmd: 'printf "quoted\\n"\npath="C:\\tmp\\file"' } }] },
+    ]) {
+      const raw = JSON.stringify(envelope), f = literal(raw), before = f.raw();
+      expect(f.read().relation).toBe('dil_escaped_literal_json_fence');
+      expect(f.read(f.raw()).relation).toBe('dil_literal_json_fence');
+      expect(f.read().text).toBe('```json ' + raw + ' ```');
+      expect(f.read().flags.selectedExtraction).toBe('rendered_fallback');
+      expect(f.raw()).toBe(before); expect(f.raw()).toBe(wrap(raw));
+    }
+  });
+  test('only an accepted sole literal code body can match one JSON fence, with its single presentation LF', () => {
+    const raw = JSON.stringify({ type: 'tool_calls', calls: [{ name: 'exec_command', arguments: { cmd: 'echo "a\\n"' } }] });
+    for (const text of [raw, raw + '\n', raw.replace(/\n/g, '\r\n') + '\r\n']) {
+      const f = fixture(); observedChatGPTCodeBlock(f, text);
+      expect(read(wrap(raw), f.answer, messageID, style).relation).toBe('json_code_fence');
+      expect(read(wrap(raw).replace(/\n/g, '\r\n'), f.answer, messageID, style).relation).toBe('json_code_fence');
+    }
+    const f = fixture(); observedChatGPTCodeBlock(f, raw + '\n\n');
+    expect(read(wrap(raw), f.answer, messageID, style).relation).toBeNull();
+  });
+  test('malformed, mixed-prose, multiple, non-json and ambiguous wrappers cannot use a representation mapping', () => {
+    const f = literal('{"type":"message","text":"HI"}'), raw = f.raw();
+    for (const value of ['Before\n' + raw, raw + '\nAfter', raw + '\n' + raw, raw.replace('```json', '```javascript'),
+      raw.replace('```json', '```JSON'), raw.slice(0, -1), '<escape>' + raw, raw + '</escape>',
+      '<escape><escape>' + raw + '</escape></escape>', '<ESCAPE>' + raw + '</ESCAPE>'])
+      expect(f.read(value).relation, value).toBeNull();
+    for (const value of ['{"type":"message",}', '{"type":"unknown","text":"HI"}', '[{"type":"message"}]',
+      '{"type":"message","text":"<escape>literal</escape>"}', '{"type":"message","text":"literal ``` token"}'])
+      expect(literal(value).read().relation, value).toBeNull();
+  });
+  test('hidden ancestors, extra attributes/nodes, pseudo content and mismatched message identities are excluded', () => {
+    const mutations = [
+      (f: ReturnType<typeof literal>) => { f.answer.values.inert = ''; },
+      (f: ReturnType<typeof literal>) => { f.answer.values['aria-hidden'] = 'true'; },
+      (f: ReturnType<typeof literal>) => { f.p.values.onclick = 'not invoked'; },
+      (f: ReturnType<typeof literal>) => { f.p.children[0].values.style = 'display:none'; },
+      (f: ReturnType<typeof literal>) => { f.p.children[0].beforeContent = '"extra"'; },
+      (f: ReturnType<typeof literal>) => { f.hidden.text = 'Hidden extra'; },
+      (f: ReturnType<typeof literal>) => { (f.hidden as any).literalDisplay = 'block'; f.hidden.values.hidden = 'false'; },
+      (f: ReturnType<typeof literal>) => { f.layout.append(new Element('DIV', {}, 'Extra')); },
+      (f: ReturnType<typeof literal>) => { f.p.children[0].append(new Element('B', {}, 'nested')); },
+      (f: ReturnType<typeof literal>) => { f.dil.values['data-dil-message-id'] = firstMarker; },
+      (f: ReturnType<typeof literal>) => { f.copy.values['data-dil-source-message-id'] = firstMarker; },
+      (f: ReturnType<typeof literal>) => { f.copy.values['data-chatgpt-copy-reference'] = '1'; },
+      (f: ReturnType<typeof literal>) => { f.portal.values.class = 'Renderer-ojZscX'; },
+      (f: ReturnType<typeof literal>) => { (f.dil as any).literalOpacity = '0'; },
+    ];
+    for (const mutate of mutations) {
+      const f = literal('{"type":"message","text":"HI"}'), raw = '<escape>' + f.raw() + '</escape>';
+      mutate(f); expect(f.read(raw).relation, String(mutate)).toBeNull();
+    }
+  });
+  test('presentation changes and late literal source changes cannot retain a prior relation', () => {
+    const f = literal('{"type":"message","text":"HI"}'), raw = '<escape>' + f.raw() + '</escape>';
+    expect(f.read(raw).relation).toBe('dil_escaped_literal_json_fence');
+    Object.defineProperty(f.answer, 'innerText', { configurable: true, get: () => '```json  {"type":"message","text":"HI"} ```\n' });
+    expect(f.read(raw).relation).toBeNull();
+    Object.defineProperty(f.answer, 'innerText', { configurable: true, get: () => f.p.children.map(child => child.textContent.replace(/\r?\n$/, ' ')).join('') + '\n' });
+    f.p.children[1].text = '{"type":"message","text":"CHANGED"}\n';
+    expect(f.read(raw).relation).toBeNull();
+  });
+  test('a fenced DIL source still obtains full fresh proof and is rechecked after the last picker await', async () => {
+    for (const mutation of ['none', 'raw_line_ending', 'dil_identity', 'extra_attribute']) {
+      const choice = { key: 'chat/latest/medium', label: 'Medium' }, conversationID = '6ad86c7a-2284-8331-b846-a59490db0c46';
+      const x = await chatTurnFixture(choice), click = x.send.onClick!;
+      x.send.onClick = () => { click(); x.f.location.pathname = '/c/' + conversationID;
+        x.f.document.URL = 'https://chatgpt.com' + x.f.location.pathname + '?temporary-chat=true'; };
+      const record = await x.dispatch('Exact owned DIL terminal source', { deferModelVerification: true });
+      const body = literal('{"type":"message","text":"HI"}'), root = x.answer('placeholder');
+      root.children[0].connected = false; root.children[0] = body.answer; body.answer.parentElement = root;
+      root.values['data-chatgpt-selection-message-id'] = messageID;
+      const candidate = { correlationID: '245e3c88-8dac-4239-947b-1aff997b9f61', sequence: 1,
+        inputSHA256: createHash('sha256').update(record.outbound).digest('hex'),
+        inputMessageID: 'ae2e44b2-714e-43cd-ba07-d5c3f09c9463', conversationID, messageID,
+        text: '<escape>' + body.raw() + '</escape>' };
+      const picker: any = x.picker, open = picker.trigger.onClick; let opens = 0;
+      picker.trigger.onClick = () => { open(); if (++opens !== 2) return;
+        if (mutation === 'raw_line_ending') body.p.children[0].text = '```json\r\n';
+        if (mutation === 'dil_identity') body.dil.values['data-dil-message-id'] = firstMarker;
+        if (mutation === 'extra_attribute') body.p.values.onclick = 'not invoked'; };
+      const observed = await x.observe(record, { deferModelVerification: false, terminalCompletionCandidate: candidate });
+      expect(opens).toBe(2); expect(x.send.clicks).toBe(1);
+      if (mutation === 'none') {
+        expect(observed.error).toBeUndefined(); expect(observed.terminalCompletionMatched).toBe(true);
+        expect(observed.terminalCompletionRepresentation).toBe('dil_escaped_literal_json_fence');
+        expect(observed.modelEvidence.selected).toEqual(choice); expect(observed.submissionProof.fingerprint).toBe(record.fingerprint);
+      } else {
+        expect(observed.terminalCompletionMatched, mutation).toBeUndefined();
+        expect(observed.terminalCompletionRepresentation, mutation).toBeUndefined();
+      }
+      expect(candidate.text).toBe('<escape>```json\n{"type":"message","text":"HI"}\n```</escape>');
     }
   });
 });
@@ -2772,6 +2902,92 @@ describe('normal ChatGPT product provenance', () => {
         .toBe(['off', 'save_aria', 'save_text'].includes(condition));
       if (condition === 'off') expect(unrelatedLayoutReads).toBe(0);
     }
+  });
+
+  describe('temporary outlined user body physical witness', () => {
+    const start = source.indexOf('function chatGPTTemporaryOutlineForRoot(root, body) {');
+    const end = source.indexOf('// This fallback observes', start);
+    const read = new Function('root', 'body', 'getComputedStyle', source.slice(start, end)
+      + 'return chatGPTTemporaryOutlineForRoot(root, body);');
+    function outlined(shape: 'div' | 'span' = 'span') {
+      const element = (tag: string, attrs: Record<string, string> = {}, text = '') => {
+        const node: any = new Element(tag, attrs, text);
+        node.namespaceURI = ['SVG', 'RECT'].includes(tag) ? 'http://www.w3.org/2000/svg' : 'http://www.w3.org/1999/xhtml';
+        node.hasAttribute = (name: string) => node.getAttribute(name) !== null;
+        node.outlineStyle = { display: 'block', visibility: 'visible', opacity: '1',
+          stroke: 'currentColor', strokeOpacity: '0.4', strokeWidth: '1px' };
+        Object.defineProperties(node, {
+          localName: { get: () => node.tagName.toLowerCase() },
+          firstElementChild: { get: () => node.children[0] || null },
+          lastElementChild: { get: () => node.children.at(-1) || null },
+        });
+        return node;
+      };
+      const parent = element('DIV'), root = element('DIV', { 'data-user-message-bubble': 'true' });
+      const body = element('SPAN', { class: 'text-size-chat leading-relaxed whitespace-pre-wrap', dir: 'auto' }, 'Synthetic owned body');
+      const svg = element('SVG', { 'aria-hidden': 'true', focusable: 'false',
+        class: 'pointer-events-none absolute inset-0 h-full w-full temporaryOutline-bbkcxS' });
+      const rect = element('RECT', { x: '0.5', y: '0.5', width: 'calc(100% - 1px)', height: 'calc(100% - 1px)',
+        fill: 'none', stroke: 'currentColor', 'stroke-opacity': '0.4', 'stroke-width': '1',
+        'stroke-dasharray': '8 8', 'vector-effect': 'non-scaling-stroke' });
+      svg.append(rect); parent.append(root);
+      const content = shape === 'span' ? body : element('DIV');
+      if (content !== body) content.append(body);
+      root.append(svg, content);
+      return { parent, root, body, svg, rect, content, element,
+        read: () => read(root, body, (node: any) => node.outlineStyle) };
+    }
+
+    test('accepts the observed direct SPAN body and the original containing DIV wrapper', () => {
+      expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+      for (const shape of ['span', 'div'] as const) {
+        const f = outlined(shape);
+        expect(f.read()).toBe(true);
+        expect(f.root.children).toEqual([f.svg, f.content]);
+        expect(f.body.tagName).toBe('SPAN');
+      }
+    });
+
+    test('rejects extra or sibling content, nested SPAN wrappers, wrong tags and another selected body', () => {
+      const mutations = [
+        (f: ReturnType<typeof outlined>) => f.root.append(f.element('SPAN')),
+        (f: ReturnType<typeof outlined>) => { const wrapper = f.element('SPAN'); f.root.children.pop(); wrapper.append(f.body); f.root.append(wrapper); },
+        (f: ReturnType<typeof outlined>) => { f.body.tagName = 'P'; },
+        (f: ReturnType<typeof outlined>) => { f.body.values.class = 'text-size-chat'; f.body.values['data-markdown-text-style'] = 'user-message'; },
+        (f: ReturnType<typeof outlined>) => { f.svg.append(f.element('SPAN', { class: 'whitespace-pre-wrap' }, 'Sibling body')); },
+      ];
+      for (const mutate of mutations) { const f = outlined(); mutate(f); expect(f.read()).toBe(false); }
+    });
+
+    test('preserves exact SVG and rectangle decoration checks for both content shapes', () => {
+      const mutations = [
+        (f: ReturnType<typeof outlined>) => { f.svg.values['data-extra'] = 'true'; },
+        (f: ReturnType<typeof outlined>) => { f.svg.values.class += ' unexpected'; },
+        (f: ReturnType<typeof outlined>) => { f.svg.namespaceURI = 'http://www.w3.org/1999/xhtml'; },
+        (f: ReturnType<typeof outlined>) => { f.rect.values['stroke-dasharray'] = '4 4'; },
+        (f: ReturnType<typeof outlined>) => { delete f.rect.values['vector-effect']; },
+        (f: ReturnType<typeof outlined>) => { f.rect.outlineStyle.stroke = 'none'; },
+        (f: ReturnType<typeof outlined>) => { f.body.append(f.element('SVG', { class: 'temporaryOutline-duplicate' })); },
+      ];
+      for (const shape of ['span', 'div'] as const) for (const mutate of mutations) {
+        const f = outlined(shape); mutate(f); expect(f.read()).toBe(false);
+      }
+    });
+
+    test('preserves physical visibility and excluded-scope requirements', () => {
+      const mutations = [
+        (f: ReturnType<typeof outlined>) => { f.parent.values.inert = ''; },
+        (f: ReturnType<typeof outlined>) => { f.parent.values['aria-hidden'] = 'true'; },
+        (f: ReturnType<typeof outlined>) => { f.body.outlineStyle.display = 'none'; },
+        (f: ReturnType<typeof outlined>) => { f.root.outlineStyle.opacity = '0'; },
+        (f: ReturnType<typeof outlined>) => { f.parent.values['data-message-author-role'] = 'assistant'; },
+        (f: ReturnType<typeof outlined>) => { f.parent.tagName = 'BUTTON'; },
+        (f: ReturnType<typeof outlined>) => { f.root.values['data-user-message-bubble'] = 'false'; },
+      ];
+      for (const shape of ['span', 'div'] as const) for (const mutate of mutations) {
+        const f = outlined(shape); mutate(f); expect(f.read()).toBe(false);
+      }
+    });
   });
 
   test('one product proof reuses only its synchronous temporary observation and rereads later calls', () => {
