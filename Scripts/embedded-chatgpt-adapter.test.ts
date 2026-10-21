@@ -32,6 +32,13 @@ class Element {
   constructor(public tagName: string, public values: Record<string, string> = {}, public text = "") {}
   get nodeType() { return 1; }
   get childElementCount() { return this.children.length; }
+  get firstElementChild() { return this.children[0] || null; }
+  get lastElementChild() { return this.children.at(-1) || null; }
+  get localName() { return this.tagName.toLowerCase(); }
+  private namespaceOverride?: string;
+  get namespaceURI() { return this.namespaceOverride ?? (['SVG', 'RECT'].includes(this.tagName) ? 'http://www.w3.org/2000/svg' : 'http://www.w3.org/1999/xhtml'); }
+  set namespaceURI(value: string) { this.namespaceOverride = value; }
+  hasAttribute(name: string) { return this.getAttribute(name) !== null; }
   get childNodes(): any[] { return [...(this.text ? [{ nodeType: 3, textContent: this.text, parentElement: this }] : []), ...this.children]; }
   get attributes() { return Object.entries(this.values).map(([name, value]) => ({ name, value })); }
   get classList() { const names = (this.values.class || "").split(/\s+/).filter(Boolean); return { contains: (name: string) => names.includes(name), [Symbol.iterator]: () => names[Symbol.iterator]() }; }
@@ -138,7 +145,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     messages.children.unshift(user); user.parentElement = messages;
   }
   const location = { origin: "https://chatgpt.com", pathname: "/" };
-  const posted: unknown[] = [], timers: (() => void)[] = [], scheduledDelays: number[] = [];
+  const posted: unknown[] = [], timers: (() => void)[] = [], scheduledDelays: number[] = [], digestInputs: string[] = [];
   const observers: { callback: (records: unknown[]) => void; options?: Record<string, unknown> }[] = [];
   class Observer {
     options?: Record<string, unknown>;
@@ -183,16 +190,18 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     document, window, location, (node: Element, pseudo?: string) => ({ visibility: node.cssVisibility,
       display: node.values['data-fixture-display'] ?? (node.getAttribute('hidden') !== null ? 'none' : 'block'),
       opacity: node.values['data-fixture-opacity'] ?? '1',
+      stroke: node.values.stroke ?? 'none', strokeOpacity: node.values['stroke-opacity'] ?? '0', strokeWidth: node.values['stroke-width'] ?? '0',
       content: pseudo === '::before' ? node.beforeContent : node.afterContent }), Observer, (callback: () => void, delay: number) => {
       timers.push(callback); scheduledDelays.push(delay);
     }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
+      digestInputs.push(new TextDecoder().decode(data));
       const digest = await crypto.subtle.digest(algorithm, data);
       if (useHook && (digestExpectedText === undefined || new TextDecoder().decode(data) === digestExpectedText)) {
         const hook = digestHook; digestHook = undefined; digestExpectedText = undefined; await hook?.();
       }
       return digest;
     } } }, class TextArea extends Element {}, { now: () => Date.now() + adapterClockOffset });
-  return { rawRun: invoke, messages, posted, observers, location, document, world, window, body, temporary, composer, modeGroup, chatMode, workMode, scheduledDelays, userBody, answer: outer,
+  return { rawRun: invoke, messages, posted, observers, location, document, world, window, body, temporary, composer, modeGroup, chatMode, workMode, scheduledDelays, digestInputs, userBody, answer: outer,
     advanceTime: (milliseconds: number) => { adapterClockOffset += milliseconds; },
     setHit: (node: Element | null | undefined) => { hitOverride = node; },
     appendUser: (prompt: string) => {
@@ -1676,6 +1685,140 @@ describe('ChatGPT per-round canonical submission ownership', () => {
     x.f.composer.text = record.outbound;
     const replay = await x.f.rawRun({ action: 'submit', prompt: record.outbound, expectedUserCounts: [0], ...x.values(record) });
     expect(replay.error).toBeDefined(); expect(x.send.clicks).toBe(1);
+  });
+});
+
+describe('ChatGPT optimistic submission body deferral', () => {
+  const choice = { key: 'chat/latest/medium', label: 'Medium' };
+  const optimistic = (x: Awaited<ReturnType<typeof chatTurnFixture>>, record: { sequence: number; outbound: string }) => {
+    const old = x.f.document.querySelectorAll('article[data-turn="user"]')[record.sequence - 1];
+    const root = new Element('DIV', { 'data-user-message-bubble': 'true' });
+    const body = new Element('SPAN', { class: 'text-size-chat leading-relaxed whitespace-pre-wrap' }, record.outbound);
+    const svg = new Element('SVG', { 'aria-hidden': 'true', focusable: 'false',
+      class: 'pointer-events-none absolute inset-0 h-full w-full temporaryOutline-bbkcxS' });
+    const rect = new Element('RECT', { x: '0.5', y: '0.5', width: 'calc(100% - 1px)', height: 'calc(100% - 1px)',
+      fill: 'none', stroke: 'currentColor', 'stroke-opacity': '0.4', 'stroke-width': '1',
+      'stroke-dasharray': '8 8', 'vector-effect': 'non-scaling-stroke' });
+    svg.append(rect); root.append(svg, body);
+    const parent = old.parentElement!, index = parent.children.indexOf(old);
+    parent.children[index] = root; root.parentElement = parent; old.connected = false;
+    return { root, body, svg, rect, parent, index,
+      remount(clipped = false) {
+        const durable = new Element('ARTICLE', { 'data-turn': 'user' });
+        const currentBody = new Element('DIV', { class: 'whitespace-pre-wrap' }, clipped ? record.outbound.slice(0, 10_240) : record.outbound);
+        durable.append(currentBody); parent.children[index] = durable; durable.parentElement = parent; root.connected = false;
+        const more = new Element('BUTTON', { 'aria-label': 'Show more' });
+        more.onClick = () => { currentBody.text = record.outbound; }; if (clipped) durable.append(more);
+        return { root: durable, body: currentBody, more };
+      } };
+  };
+  test('first optimistic full echo stays negative without hashing or pinning and normal DIV binds once', async () => {
+    const x = await chatTurnFixture(choice), record = await x.dispatch('Owned optimistic first ' + 'A'.repeat(11_000));
+    const o = optimistic(x, record); x.answer('Final');
+    x.f.temporary.values['aria-hidden'] = 'true'; // Actual post-Send page has only the scoped outline witness.
+    const state: any = x.f.world.__computaChatSubmissionState, pending = state.pending;
+    const hashes = x.f.digestInputs.length, timers = x.f.scheduledDelays.length;
+    for (const action of ['inspect', 'verifyModel', 'verifyProductMode', 'inspect']) {
+      expect(await x.observe(record, { action })).toEqual({ error: 'submission_observation_pending', detail: 'optimistic_user_body',
+        submissionSequence: 1, submissionFingerprint: record.fingerprint });
+      expect(state.pending).toBe(pending); expect(pending.phase).toBe('send_claimed'); expect(state.lastVerified).toBeNull();
+      expect(pending.root).toBeNull(); expect(pending.body).toBeNull(); expect(pending.expansionAttempted).toBe(false);
+      expect(x.f.world.__computaModelFirstProof).toBeUndefined(); expect(x.f.world.__computaModelFirstExpansion).toBeUndefined();
+    }
+    expect(x.f.digestInputs.length).toBe(hashes); expect(x.f.scheduledDelays.length).toBe(timers); expect(x.send.clicks).toBe(1);
+    delete x.f.temporary.values['aria-hidden'];
+    o.remount(); const result = await x.observe(record);
+    expect(result.error).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: record.fingerprint });
+    expect(state.pending).toBeNull(); expect(state.lastVerified.phase).toBe('verified'); expect(x.send.clicks).toBe(1);
+  });
+  test('first and retained optimistic echoes allow the existing one-click clipped DIV expansion after remount', async () => {
+    for (const sequence of [1, 2]) {
+      const x = await chatTurnFixture(choice);
+      if (sequence === 2) { const first = await x.dispatch('Prior verified request'); x.answer('First'); await x.observe(first); }
+      const record = await x.dispatch('Owned optimistic clipped ' + 'A'.repeat(11_000)), o = optimistic(x, record); x.answer('Final');
+      const state: any = x.f.world.__computaChatSubmissionState, parent = state.lastVerified;
+      for (let read = 0; read < 2; read++) {
+        expect(await x.observe(record, { deferModelVerification: true })).toMatchObject({ error: 'submission_observation_pending', submissionSequence: sequence });
+        expect(state.lastVerified).toBe(parent); expect(state.pending.phase).toBe('send_claimed');
+      }
+      const d = o.remount(true); x.f.setHit(d.more);
+      const result = await x.observe(record, { deferModelVerification: true, allowFirstUserExpansion: true,
+        firstUserExpansionModelChoice: choice, allowSubmissionExpansion: true });
+      expect(result.error).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence, fingerprint: record.fingerprint });
+      expect(d.more.clicks).toBe(1); expect(x.send.clicks).toBe(sequence);
+      expect((await x.observe(record, { deferModelVerification: true })).error).toBeUndefined(); expect(d.more.clicks).toBe(1);
+    }
+  });
+  test('the original containing DIV layout may verify a selected SPAN body normally', async () => {
+    const x = await chatTurnFixture(choice), record = await x.dispatch('Known normal containing DIV request');
+    const o = optimistic(x, record); x.answer('Final');
+    const content = new Element('DIV'); content.append(o.body); o.root.children = [o.svg, content]; content.parentElement = o.root;
+    const result = await x.observe(record);
+    expect(result.error).toBeUndefined(); expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: record.fingerprint });
+    expect((x.f.world.__computaChatSubmissionState as any).pending).toBeNull(); expect(x.send.clicks).toBe(1);
+  });
+  test('explicit post-Send product-only recheck cannot pin optimistic or durable first and retained bodies', async () => {
+    for (const sequence of [1, 2]) for (const shape of ['optimistic', 'durable']) {
+      const x = await chatTurnFixture(choice);
+      if (sequence === 2) { const first = await x.dispatch('Prior verified product request'); x.answer('First'); await x.observe(first); }
+      const record = await x.dispatch('Current product-only request'), o = optimistic(x, record); x.answer('Final');
+      if (shape === 'durable') o.remount();
+      const state: any = x.f.world.__computaChatSubmissionState, pending = state.pending, parent = state.lastVerified;
+      const firstProof = x.f.world.__computaModelFirstProof, hashes = x.f.digestInputs.length;
+      const result = await x.observe(record, { action: 'verifyProductMode', allowFirstUserBinding: false,
+        pendingSubmissionProductRecheck: { sequence, fingerprint: record.fingerprint } });
+      expect(Object.keys(result).sort()).toEqual(['chatModeActionAvailable', 'chatModeReady', 'productModeEvidence', 'temporary']);
+      expect(result).toMatchObject({ chatModeReady: true, temporary: true, productModeEvidence: { temporaryTransition: 'acknowledged' } });
+      expect(x.f.digestInputs.length).toBe(hashes); expect(state.pending).toBe(pending); expect(state.lastVerified).toBe(parent);
+      expect(pending.phase).toBe('send_claimed'); expect(pending.root).toBeNull(); expect(pending.body).toBeNull();
+      expect(x.f.world.__computaModelFirstProof).toBe(firstProof); expect(x.send.clicks).toBe(sequence);
+    }
+  });
+  test('product-only native scope rejects wrong action fields round pins product and spent state without ownership proof', async () => {
+    for (const mutation of ['action', 'extra', 'sequence', 'fingerprint', 'pin', 'product', 'spent']) {
+      const x = await chatTurnFixture(choice), record = await x.dispatch('Scoped post-Send product request'); optimistic(x, record);
+      const request: any = { sequence: 1, fingerprint: record.fingerprint }, overrides: any = { action: 'verifyProductMode', allowFirstUserBinding: false };
+      if (mutation === 'action') overrides.action = 'inspect';
+      if (mutation === 'extra') request.extra = true;
+      if (mutation === 'sequence') request.sequence = 2;
+      if (mutation === 'fingerprint') request.fingerprint = '0'.repeat(64);
+      if (mutation === 'pin') overrides.expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+      if (mutation === 'product') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+      if (mutation === 'spent') (x.f.world.__computaChatSubmissionState as any).pending.phase = 'verified';
+      const result = await x.observe(record, { ...overrides, pendingSubmissionProductRecheck: request });
+      expect(result.error).toBeDefined(); expect(result).not.toHaveProperty('firstUserVerified', true);
+      expect(result).not.toHaveProperty('submissionProof'); expect(result).not.toHaveProperty('text'); expect(x.send.clicks).toBe(1);
+    }
+  });
+  test('optimistic deferral rejects changed prefix marker scope physical witness owner and native round pins', async () => {
+    for (const mutation of ['prefix', 'marker', 'scope', 'outline', 'owner', 'sequence', 'pin', 'native_first_pin', 'private_first_pin']) {
+      const x = await chatTurnFixture(choice), record = await x.dispatch('Owned optimistic negatives ' + 'A'.repeat(11_000));
+      const o = optimistic(x, record); x.answer('Final'); const overrides: any = {};
+      if (mutation === 'prefix') o.body.text = 'Wrong' + o.body.text.slice(0, 30);
+      if (mutation === 'marker') o.body.text = 'Prefix\nComputa session marker: ' + record.marker;
+      if (mutation === 'scope') o.root.values['data-user-message-bubble'] = 'false';
+      if (mutation === 'outline') o.rect.values['stroke-dasharray'] = '4 4';
+      if (mutation === 'owner') overrides.ownerToken = 'foreign-owner';
+      if (mutation === 'sequence') overrides.submissionSequence = 2;
+      if (mutation === 'pin') overrides.expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+      if (mutation === 'native_first_pin') overrides.expectedFirstUserFingerprint = record.fingerprint;
+      if (mutation === 'private_first_pin') x.f.world.__computaModelFirstProof = { marker: firstMarker, fingerprint: record.fingerprint };
+      const result = await x.observe(record, overrides);
+      expect(result.error, mutation).toBeDefined(); expect(result.error, mutation).not.toBe('submission_observation_pending');
+      expect(result).not.toHaveProperty('submissionProof'); expect(result).not.toHaveProperty('firstUserVerified', true);
+      expect(result).not.toHaveProperty('text'); expect(x.send.clicks).toBe(1);
+    }
+  });
+  test('retained optimistic echo cannot hide altered prior body or a spent verified round', async () => {
+    for (const mutation of ['prior', 'verified']) {
+      const x = await chatTurnFixture(choice), first = await x.dispatch('Prior intact request'); x.answer('First'); await x.observe(first);
+      const record = await x.dispatch('Current optimistic request'); optimistic(x, record); x.answer('Final');
+      if (mutation === 'prior') x.f.document.querySelectorAll('article[data-turn="user"]')[0].children[0].text += '!';
+      if (mutation === 'verified') (x.f.world.__computaChatSubmissionState as any).pending.phase = 'verified';
+      const result = await x.observe(record);
+      expect(result.error).toBeDefined(); expect(result.error).not.toBe('submission_observation_pending');
+      expect(result).not.toHaveProperty('submissionProof'); expect(x.send.clicks).toBe(2);
+    }
   });
 });
 

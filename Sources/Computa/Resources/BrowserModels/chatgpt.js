@@ -2924,6 +2924,36 @@ function chatGPTPendingProductSubmission(state, record, roots, root, body, rende
       && chatGPTSubmissionCanonical(body.innerText || body.textContent || '') === rendered;
   } catch { return false; }
 }
+function chatGPTOptimisticSubmissionPending(state, record, roots, root, body, rendered) {
+  // This observed direct-SPAN layout is an optimistic echo. React replaces it
+  // with the normal (possibly clipped) DIV body; do not pin either first-user
+  // lineage or a retained round to its temporary physical nodes. No positive
+  // proof, new deadline, expansion or Send comes from this negative receipt.
+  if (!body || body.tagName !== 'SPAN' || body.parentElement !== root) return null;
+  const parent = state?.lastVerified, first = globalThis.__computaModelFirstProof;
+  const markerLine = `Computa session marker: ${record?.marker}`;
+  if (!['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action)
+    || !record || state.pending !== record || record.phase !== 'send_claimed'
+    || record.root != null || record.body != null || record.expansionAttempted !== false
+    || record.document !== document || record.owner !== state.owner || !chatGPTSubmissionContext(state)
+    || input.submissionSequence !== record.sequence || input.submissionMarker !== record.marker
+    || !chatGPTSubmissionPins(record) || roots.length !== record.sequence || roots[record.sequence - 1] !== root
+    || !root?.isConnected || !body.isConnected || body.parentElement !== root || chatGPTUserBody(root) !== body
+    || root.getAttribute('data-user-message-bubble') !== 'true' || !body.classList.contains('whitespace-pre-wrap')
+    || !chatGPTTemporaryOutlineForRoot(root, body)
+    || typeof rendered !== 'string' || !rendered || (rendered !== record.canonical
+      && (rendered.length >= record.canonical.length || !record.canonical.startsWith(rendered) || rendered.includes(markerLine)))
+    || (record.sequence === 1
+      ? parent != null || first != null || input.expectedFirstUserFingerprint != null || input.allowFirstUserBinding !== true
+        || globalThis.__computaModelLastSubmissionCount !== 0
+      : !parent || parent.sequence !== record.sequence - 1 || !chatGPTSubmissionPins(parent)
+        || !chatGPTSubmissionBodyIntact(parent, roots) || !first || first.marker !== input.expectedFirstUserMarker
+        || first.fingerprint !== input.expectedFirstUserFingerprint
+        || globalThis.__computaModelLastSubmissionCount !== record.sequence - 1))
+    return chatGPTSubmissionFailure(state, 'observe_optimistic', record);
+  return { error: 'submission_observation_pending', detail: 'optimistic_user_body',
+    submissionSequence: record.sequence, submissionFingerprint: record.fingerprint };
+}
 async function chatGPTSubmissionResult(request, observed) {
   if (observed.error) return observed;
   const capability = { submissionOwnershipCapability: 'per_submission_ownership_v1' };
@@ -2955,6 +2985,10 @@ async function chatGPTSubmissionResult(request, observed) {
   if (!root?.isConnected || !body?.isConnected || record.phase === 'verified' && (root !== record.root || body !== record.body) && !replacement)
     return chatGPTSubmissionFailure(state, 'observe_body', record);
   let rendered = chatGPTSubmissionCanonical(body.innerText || body.textContent || ''), expanded = false;
+  if (record === pending) {
+    const optimistic = chatGPTOptimisticSubmissionPending(state, record, roots, root, body, rendered);
+    if (optimistic) return optimistic;
+  }
   if (rendered !== record.canonical && record === pending && record.sequence > 1) {
     if (chatGPTPendingProductSubmission(state, record, roots, root, body, rendered, observed))
       return { ...observed, ...capability, submissionPending: true, text: '', answerComplete: false };
@@ -5049,10 +5083,49 @@ const finalReadContextFailure = observed => {
   if (!chatGPTTemporaryVerified()) return { error: 'temporary_mode_unverified' };
   return null;
 };
+if (input.pendingSubmissionProductRecheck != null) {
+  // The explicitly scoped native post-Send recheck observes product controls
+  // only. It precedes native dispatch acknowledgment and cannot bind the newly
+  // rendered user, even when the optimistic echo already contains every byte.
+  const request = input.pendingSubmissionProductRecheck;
+  const state = globalThis.__computaChatSubmissionState, record = state?.pending, parent = state?.lastVerified;
+  const first = globalThis.__computaModelFirstProof;
+  if (input.action !== 'verifyProductMode' || !request || typeof request !== 'object' || Array.isArray(request)
+    || Object.keys(request).sort().join(',') !== 'fingerprint,sequence'
+    || !record || record.phase !== 'send_claimed' || record.root != null || record.body != null
+    || record.expansionAttempted !== false || request.sequence !== record.sequence || request.fingerprint !== record.fingerprint
+    || input.submissionSequence !== record.sequence || input.submissionMarker !== record.marker
+    || !chatGPTSubmissionPins(record) || record.document !== document || record.owner !== state.owner
+    || !chatGPTSubmissionContext(state) || ![record.sequence - 1, record.sequence].includes(ownedUserCount)
+    || (record.sequence === 1
+      ? parent != null || first != null || input.expectedFirstUserFingerprint != null || globalThis.__computaModelLastSubmissionCount !== 0
+      : !parent || parent.sequence !== record.sequence - 1 || !chatGPTSubmissionPins(parent)
+        || !chatGPTSubmissionBodyIntact(parent, ownedMessages) || !first || first.marker !== input.expectedFirstUserMarker
+        || first.fingerprint !== input.expectedFirstUserFingerprint
+        || globalThis.__computaModelLastSubmissionCount !== record.sequence - 1))
+    return chatGPTSubmissionFailure(state, 'observe_product_ack', record);
+  if (ownedUserCount === record.sequence) {
+    const root = ownedMessages[record.sequence - 1], body = root && chatGPTUserBody(root);
+    const rendered = body && chatGPTSubmissionCanonical(body.innerText || body.textContent || '');
+    if (!root?.isConnected || !body?.isConnected || !rendered || rendered !== record.canonical
+      && (rendered.length >= record.canonical.length || !record.canonical.startsWith(rendered)
+        || rendered.includes(`Computa session marker: ${record.marker}`)))
+      return chatGPTSubmissionFailure(state, 'observe_product_ack_body', record);
+  }
+  const product = chatGPTProductModeAction(input);
+  return product.error ? product : { ...product, temporary: chatGPTTemporaryVerified() };
+}
 if (ownedUserCount > 0) {
   const marker = input.expectedFirstUserMarker;
   const first = chatGPTUserBody(ownedMessages[0]);
   let rendered = normalizedFirstBody(first);
+  const firstSubmissionState = globalThis.__computaChatSubmissionState;
+  const firstPending = firstSubmissionState?.pending;
+  if (firstPending?.sequence === 1 && firstPending.phase === 'send_claimed') {
+    const optimistic = chatGPTOptimisticSubmissionPending(firstSubmissionState, firstPending,
+      ownedMessages, ownedMessages[0], first, rendered);
+    if (optimistic) return optimistic;
+  }
   const consumedExpansion = globalThis.__computaModelFirstExpansion;
   let expansionRejected = false;
   if (globalThis.__computaModelFirstProof == null && consumedExpansion != null

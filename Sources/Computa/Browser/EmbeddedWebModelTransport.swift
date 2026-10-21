@@ -1636,6 +1636,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return true
     }
 
+    /// Only the original first submit's post-click product recheck can run
+    /// before native accepts its Send acknowledgment. It must not inspect or
+    /// bind a message that the provider is still rendering optimistically.
+    private func canRecheckUnacknowledgedChatGPTProduct(_ session: Session) -> Bool {
+        guard !Task.isCancelled, session.provider == .chatgpt, !session.isDiscovery, !session.isRecoveryProbe,
+              sessions[session.token] === session, session.terminalFailure == nil,
+              session.state == "running", session.submitted, session.usesSubmissionOwnership,
+              session.sequence == 1, session.acknowledgedSendSequence == 0, session.confirmedUsers == 0,
+              session.pendingSubmission, !session.currentSubmissionVerified, session.firstUserFingerprint == nil,
+              session.temporaryRequested, session.temporary,
+              session.productModeEvidence?.temporaryTransition == .acknowledged,
+              session.modelSelectionVerified, session.modelChoice != nil,
+              let current = session.currentSubmission, let prepared = session.preparedSubmission,
+              current.sequence == 1, prepared.sequence == 1,
+              current.marker == session.firstUserMarker, prepared.marker == current.marker,
+              !current.promptFingerprint.isEmpty, prepared.promptFingerprint == current.promptFingerprint,
+              !current.outboundFingerprint.isEmpty, prepared.outboundFingerprint == current.outboundFingerprint else { return false }
+        return true
+    }
+
     /// An already stable candidate still needs one fresh, complete answer/model
     /// proof. Use it as this poll's observation instead of first queueing a
     /// deferred observation and then immediately inspecting the same answer.
@@ -1711,7 +1731,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if (error as? Failure) == .submissionObservationPending {
                 try Task.checkCancellation()
                 // The fixed adapter discarded a read crossed only by the
-                // already-claimed submission's asynchronous user append. No
+                // already-claimed submission's pending render. No
                 // observation is admitted; the versioned DOM signal wakes a
                 // fresh read which recomputes every ownership proof.
                 return try snapshot(session)
@@ -3397,6 +3417,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
                       preferQuietChatGPTCompletion: Bool = false,
+                      pendingSubmissionProductRecheck: Bool = false,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
                       prepareFirstInstantInInsert: Bool = false,
                       preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
@@ -3497,6 +3518,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        if pendingSubmissionProductRecheck {
+            guard action == "verifyProductMode", !enforceModel, !recheckModelAfterAwait, !recheckProductAfterAwait,
+                  !allowBlockedProvider, canRecheckUnacknowledgedChatGPTProduct(session),
+                  let binding = session.currentSubmission else { throw Failure.ownershipFailure(.javaScriptSubmission) }
+            input["pendingSubmissionProductRecheck"] = ["sequence": binding.sequence, "fingerprint": binding.outboundFingerprint]
+        }
         // Normal owned replies do not consume the generic page anatomy log.
         // The adapter still collects it for an actually empty user/answer side;
         // first-user failures retain their independent diagnostic path.
@@ -3746,12 +3773,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 #if DEBUG
                 if !nextContinuation.isEmpty { await firstUserExpansionRouteCheckpointForTesting?(.routeAccepted) }
                 #endif
-                return try await page(session, action: "inspect", enforceModel: enforceModel,
+                return try await page(session, action: pendingSubmissionProductRecheck ? "verifyProductMode" : "inspect", enforceModel: enforceModel,
                                       refreshChangedRoute: awaitingLocalPromotion, recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
                                       refreshReadOnlyObservation: refreshReadOnlyObservation,
                                       allowBlockedProvider: allowBlockedProvider,
                                       allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                       preferQuietChatGPTCompletion: preferQuietChatGPTCompletion,
+                                      pendingSubmissionProductRecheck: pendingSubmissionProductRecheck,
                                       firstUserExpansionRouteContinuation: nextContinuation,
                                       maximumWait: evaluationDeadline - .now)
             }
@@ -3915,10 +3943,33 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 throw recordedWebsiteBlocker(.usageLimited(provider), session: session)
             case "submission_observation_pending":
-                guard provider == .gemini, action == "inspect", session.state == "running",
-                      session.submitted, session.pendingSubmission, session.firstUserFingerprint != nil,
-                      session.confirmedUsers + 1 == session.sequence else {
-                    throw Failure.ownershipFailure(.javaScriptUserCount)
+                if provider == .chatgpt {
+                    // The acknowledged Send's optimistic SPAN is not a durable
+                    // message. Discard only this exact negative observation;
+                    // never bind its body, publish output or replay an action.
+                    guard ["inspect", "verifyModel", "verifyProductMode"].contains(action),
+                          !Task.isCancelled, !session.isDiscovery, !session.isRecoveryProbe,
+                          sessions[session.token] === session, session.terminalFailure == nil,
+                          session.state == "running", session.submitted, session.usesSubmissionOwnership,
+                          session.pendingSubmission, !session.currentSubmissionVerified,
+                          session.acknowledgedSendSequence == session.sequence,
+                          session.sequence == session.confirmedUsers + 1,
+                          (session.sequence == 1 ? session.firstUserFingerprint == nil : session.firstUserFingerprint != nil),
+                          let current = session.currentSubmission, let prepared = session.preparedSubmission,
+                          current.sequence == session.sequence, prepared.sequence == current.sequence,
+                          prepared.marker == current.marker, prepared.promptFingerprint == current.promptFingerprint,
+                          prepared.outboundFingerprint == current.outboundFingerprint,
+                          Self.isChatGPTOptimisticSubmissionPending(observed, sequence: current.sequence,
+                              fingerprint: current.outboundFingerprint) else {
+                        throw Failure.ownershipFailure(.javaScriptSubmission)
+                    }
+                } else {
+                    // Preserve Gemini's existing pending-append contract.
+                    guard provider == .gemini, action == "inspect", session.state == "running",
+                          session.submitted, session.pendingSubmission, session.firstUserFingerprint != nil,
+                          session.confirmedUsers + 1 == session.sequence else {
+                        throw Failure.ownershipFailure(.javaScriptUserCount)
+                    }
                 }
                 throw Failure.submissionObservationPending
             case "not_fresh": throw Failure.notFresh
@@ -3926,6 +3977,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case "composer_unavailable", "composer_not_empty", "prompt_not_inserted", "send_unavailable", "caret_unavailable", "insert_command_rejected": throw Failure.editorFailure(error)
             default: throw Failure.composerUnavailable
             }
+        }
+        if pendingSubmissionProductRecheck {
+            guard canRecheckUnacknowledgedChatGPTProduct(session),
+                  Self.isChatGPTPendingProductReceipt(observed) else { throw Failure.ownershipFailure(.javaScriptSubmission) }
         }
         // Once the first message is bound, the final model read also proves
         // Chat mode and the same owned lineage. Initial binding, pending appends
@@ -4231,13 +4286,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Native awaits can cross a Work-mode change without a navigation.
         // Re-read only the fixed product controls; never replay a click or Send.
         if recheck, !["verifyProductMode", "ensureChatMode", "stop", "cleanup"].contains(action) {
-            let freshAction = session.pendingSubmission && session.firstUserFingerprint == nil ? "inspect" : "verifyProductMode"
+            let productOnlyPending = action == "submit" && canRecheckUnacknowledgedChatGPTProduct(session)
+            let freshAction = productOnlyPending ? "verifyProductMode"
+                : session.pendingSubmission && session.firstUserFingerprint == nil ? "inspect" : "verifyProductMode"
             let fresh = try await page(session, action: freshAction, enforceModel: false,
                                        refreshChangedRoute: refreshChangedRoute,
                                        recheckModelAfterAwait: false, recheckProductAfterAwait: false,
                                        refreshReadOnlyObservation: refreshReadOnlyObservation,
                                        allowBlockedProvider: allowBlockedProvider, allowPendingModelTemporary: pendingPicker,
                                        allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
+                                       pendingSubmissionProductRecheck: productOnlyPending,
                                        preparedReadinessRequest: preparedReadinessRequest,
                                        preparedReadinessSink: preparedReadinessSink,
                                        maximumWait: maximumWait)
@@ -4569,6 +4627,28 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               observed.utf8.count == 64, observed.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
               observed == fingerprint else { return false }
         return true
+    }
+
+    /// This negative packet carries no response, URL or positive proof. Its
+    /// sequence/hash must name the already acknowledged native submission.
+    static func isChatGPTOptimisticSubmissionPending(_ raw: Any, sequence: Int, fingerprint: String) -> Bool {
+        guard (1...maximumTurnSubmissions).contains(sequence),
+              let value = raw as? [String: Any],
+              Set(value.keys) == ["error", "detail", "submissionSequence", "submissionFingerprint"],
+              value["error"] as? String == "submission_observation_pending",
+              value["detail"] as? String == "optimistic_user_body",
+              let observedSequence = value["submissionSequence"],
+              let observedFingerprint = value["submissionFingerprint"] else { return false }
+        return validSubmissionProof(["sequence": observedSequence, "fingerprint": observedFingerprint],
+                                    sequence: sequence, fingerprint: fingerprint)
+    }
+
+    static func isChatGPTPendingProductReceipt(_ value: [String: Any]) -> Bool {
+        Set(value.keys) == ["chatModeReady", "chatModeActionAvailable", "productModeEvidence", "temporary"]
+            && firstUserDiagnosticBool(value["chatModeReady"]) == true
+            && firstUserDiagnosticBool(value["chatModeActionAvailable"]) == false
+            && firstUserDiagnosticBool(value["temporary"]) == true
+            && value["productModeEvidence"] is [String: Any]
     }
 
     /// Diagnostic-only projection. Never publish message text, markers, hashes,

@@ -588,6 +588,46 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertTrue(EmbeddedWebModelTransport.isChatGPTDispatchOnlySubmissionAcknowledgement(measured))
     }
 
+    func testChatGPTOptimisticPendingPacketRejectsProofFieldsAndWrongSubmission() {
+        let hash = String(repeating: "a", count: 64)
+        let packet: [String: Any] = ["error": "submission_observation_pending", "detail": "optimistic_user_body",
+            "submissionSequence": 1, "submissionFingerprint": hash]
+        XCTAssertTrue(EmbeddedWebModelTransport.isChatGPTOptimisticSubmissionPending(packet, sequence: 1, fingerprint: hash))
+        var retained = packet; retained["submissionSequence"] = 2
+        XCTAssertTrue(EmbeddedWebModelTransport.isChatGPTOptimisticSubmissionPending(retained, sequence: 2, fingerprint: hash))
+        for key in packet.keys {
+            var missing = packet; missing.removeValue(forKey: key)
+            XCTAssertFalse(EmbeddedWebModelTransport.isChatGPTOptimisticSubmissionPending(missing, sequence: 1, fingerprint: hash), key)
+        }
+        let changes: [(String, Any)] = [("error", "other"), ("detail", "readonly_model_observation"),
+            ("submissionSequence", true), ("submissionSequence", 1.5), ("submissionSequence", "1"),
+            ("submissionSequence", 0), ("submissionSequence", 2), ("submissionSequence", NSNull()),
+            ("submissionFingerprint", String(repeating: "A", count: 64)), ("submissionFingerprint", String(repeating: "a", count: 63)),
+            ("submissionFingerprint", String(repeating: "b", count: 64)), ("submissionFingerprint", NSNull()),
+            ("url", "https://chatgpt.com/"), ("text", "unverified reply"), ("firstUserVerified", true),
+            ("submissionProof", [:]), ("modelEvidence", [:]), ("answerComplete", false)]
+        for (key, value) in changes {
+            var changed = packet; changed[key] = value
+            XCTAssertFalse(EmbeddedWebModelTransport.isChatGPTOptimisticSubmissionPending(changed, sequence: 1, fingerprint: hash), key)
+        }
+        XCTAssertFalse(EmbeddedWebModelTransport.isChatGPTOptimisticSubmissionPending(packet, sequence: 0, fingerprint: hash))
+        var overLimit = packet; overLimit["submissionSequence"] = 17
+        XCTAssertFalse(EmbeddedWebModelTransport.isChatGPTOptimisticSubmissionPending(overLimit, sequence: 17, fingerprint: hash))
+        let product: [String: Any] = ["chatModeReady": true, "chatModeActionAvailable": false,
+            "productModeEvidence": [:], "temporary": true]
+        XCTAssertTrue(EmbeddedWebModelTransport.isChatGPTPendingProductReceipt(product))
+        for key in product.keys {
+            var missing = product; missing.removeValue(forKey: key)
+            XCTAssertFalse(EmbeddedWebModelTransport.isChatGPTPendingProductReceipt(missing), key)
+        }
+        for (key, value) in [("chatModeReady", 1), ("chatModeActionAvailable", true), ("temporary", false),
+                             ("productModeEvidence", NSNull()), ("url", "https://chatgpt.com/"),
+                             ("firstUserFingerprint", hash), ("text", "reply"), ("userCount", 1)] as [(String, Any)] {
+            var changed = product; changed[key] = value
+            XCTAssertFalse(EmbeddedWebModelTransport.isChatGPTPendingProductReceipt(changed), key)
+        }
+    }
+
     func testChatGPTContinuationDispatchWithholdsOutputUntilFreshProductModelAndBodyProof() async throws {
         for drift in ["work", "temporary", "model", "body"] {
             let fixture = try Fixture()
@@ -4589,6 +4629,135 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testOptimisticChatGPTFirstAndRetainedBodiesWaitForDurableFreshProofWithoutResending() async throws {
+        let fixture = try Fixture(page: Self.optimisticTemporarySubmissionPage())
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.chatgpt)
+        let started = try await fixturePhaseProbe("optimistic_start") { try await startChoice(choice, in: fixture) }
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        _ = try await fixturePhaseProbe("optimistic_ready") { try await waitForState("ready", fixture.transport, token: token) }
+        let generation = fixture.browser.documentGeneration(for: ownedID)
+        var firstPin: String?
+        for round in 1...2 {
+            let prompt = String(repeating: "Round \(round) exact optimistic then durable body.\n", count: 360)
+            // The fixture inserts the real optimistic SPAN synchronously in
+            // Send, including the pre-acknowledgment product recheck window.
+            let sent = try await fixturePhaseProbe("optimistic_send") { try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt]) }
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+            let pending = try await fixturePhaseProbe("optimistic_pending_poll") { try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+            try assertRunningOrVerifiedChoice(pending, choice: choice)
+            let context = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
+            XCTAssertEqual(context["sequence"] as? Int, round)
+            XCTAssertEqual(context["submittedPromptFingerprint"] as? String, "")
+            XCTAssertEqual(context["firstUserFingerprint"] as? String, firstPin ?? "")
+            let privateState = try await evaluate(view, """
+                const state=globalThis.__computaChatSubmissionState;
+                return {phase:state?.pending?.phase, sequence:state?.pending?.sequence,
+                  lastVerified:state?.lastVerified?.sequence || 0, firstBound:!!globalThis.__computaModelFirstProof?.fingerprint};
+                """, world: .world(name: "computa-chatgpt-model-v1")) as? [String: Any]
+            XCTAssertEqual(privateState?["phase"] as? String, "send_claimed")
+            XCTAssertEqual(privateState?["sequence"] as? Int, round)
+            XCTAssertEqual(privateState?["lastVerified"] as? Int, round - 1)
+            XCTAssertEqual(privateState?["firstBound"] as? Bool, round > 1)
+            try await assertChoiceLedger(view, insertions: round, sends: round, selections: 1)
+            _ = try await evaluate(view, "document.dispatchEvent(new Event('fixture-commit-durable-user')); return true;")
+            let complete = try await fixturePhaseProbe("optimistic_complete") { try await waitForState("complete", fixture.transport, token: token) }
+            try assertChoiceEvidence(complete, choice: choice)
+            let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
+            XCTAssertEqual(proof["sequence"] as? Int, round)
+            if round == 1 {
+                firstPin = try XCTUnwrap(proof["firstUserFingerprint"] as? String)
+                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+            } else { XCTAssertEqual(proof["firstUserFingerprint"] as? String, firstPin) }
+            try await assertChoiceLedger(view, insertions: round, sends: round, selections: 1)
+        }
+        XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testOptimisticChatGPTPendingDoesNotRenewDeadlineOrAdmitChangedDurableBody() async throws {
+        for expires in [false, true] {
+            let fixture = try Fixture(page: Self.optimisticTemporarySubmissionPage())
+            defer { fixture.shutdown() }
+            let started = try await fixturePhaseProbe("optimistic_start") { try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture) }
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            _ = try await fixturePhaseProbe("optimistic_ready") { try await waitForState("ready", fixture.transport, token: token) }
+            _ = try await fixturePhaseProbe("optimistic_send") { try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                "prompt": String(repeating: "Keep the complete exact request.\n", count: 400)]) }
+            let pending = try await fixturePhaseProbe("optimistic_pending_poll") { try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+            try assertRunningOrVerifiedChoice(pending, choice: Self.fixtureChoice(.chatgpt))
+            if expires {
+                fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .milliseconds(1))
+            } else {
+                _ = try await evaluate(view, """
+                    document.dispatchEvent(new Event('fixture-commit-durable-user'));
+                    const body=document.querySelector('[data-user-message-bubble="true"] .whitespace-pre-wrap');
+                    body.textContent=body.textContent.replace('Keep','Changed'); return true;
+                    """)
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A pending observation cannot authorize expired or changed response proof")
+            } catch {
+                let failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure)
+                if expires { XCTAssertEqual(failure, .deadline) }
+                else { XCTAssertTrue(failure == .ownershipFailure(.javaScriptFirstUser) || failure == .ownershipFailure(.javaScriptSubmission)) }
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
+    }
+
+    func testOptimisticChatGPTPreAcknowledgmentProductReadPreservesScopeAcrossRoutePromotion() async throws {
+        let fixture = try Fixture(page: Self.optimisticTemporarySubmissionPage())
+        defer { fixture.transport.setBeforePageResultValidationDetailedForTesting(nil); fixture.shutdown() }
+        let started = try await fixturePhaseProbe("optimistic_start") { try await startChoice(Self.fixtureChoice(.chatgpt), in: fixture) }
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        _ = try await fixturePhaseProbe("optimistic_ready") { try await waitForState("ready", fixture.transport, token: token) }
+        let routes = ["/c/local-chatgpt%3Aoptimistic-product?temporary-chat=true", "/c/optimistic-product-public?temporary-chat=true"]
+        var crossed = 0
+        fixture.transport.setBeforePageResultValidationDetailedForTesting { action, enforceModel in
+            guard action == "verifyProductMode", !enforceModel, crossed < routes.count else { return }
+            let facts = try? await self.evaluate(view, """
+                const state=globalThis.__computaChatSubmissionState;
+                return state?.pending?.phase==='send_claimed' && state.pending.sequence===1
+                  && !globalThis.__computaModelFirstProof
+                  && document.querySelector('[data-user-message-bubble="true"]')?.lastElementChild?.tagName==='SPAN';
+                """, world: .world(name: "computa-chatgpt-model-v1"))
+            guard facts as? Bool == true else { return }
+            let route = routes[crossed]; crossed += 1
+            _ = try? await self.evaluate(view, "history.pushState({}, '', \(String(reflecting: route))); return true;")
+        }
+        _ = try await fixturePhaseProbe("optimistic_send") { try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+            "prompt": String(repeating: "Preserve the product-only route read.\n", count: 400)]) }
+        XCTAssertEqual(crossed, 2)
+        fixture.transport.setBeforePageResultValidationDetailedForTesting(nil)
+        let pending = try await fixturePhaseProbe("optimistic_pending_poll") { try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+        try assertRunningOrVerifiedChoice(pending, choice: Self.fixtureChoice(.chatgpt))
+        let pendingContext = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
+        XCTAssertEqual(pendingContext["firstUserFingerprint"] as? String, "")
+        XCTAssertEqual(pendingContext["submittedPromptFingerprint"] as? String, "")
+        _ = try await evaluate(view, "document.dispatchEvent(new Event('fixture-commit-durable-user')); return true;")
+        let complete = try await fixturePhaseProbe("optimistic_complete") { try await waitForState("complete", fixture.transport, token: token) }
+        try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testTemporaryUserOutlineSurvivesFirstExpansionAndRetainedSecondSend() async throws {
         let fixture = try Fixture(page: Self.temporaryOutlineFirstUserPage())
         defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
@@ -4706,7 +4875,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             if clicks == 1, expansionObservedIn == nil {
                 expansionObservedIn = action
                 XCTAssertEqual(action, "inspect")
-                XCTAssertFalse(enforceModel, "The first post-Send product read needs its separate expected-family input")
+                XCTAssertTrue(enforceModel, "Only the acknowledged outer inspection may claim the first body expansion")
             }
         }
         defer {
@@ -6006,7 +6175,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    func testChatGPTFirstSendRefreshesEmptyLocalAndPublicRoutesInOneUnboundInspectionChain() async throws {
+    func testChatGPTFirstSendRefreshesEmptyLocalAndPublicRoutesInOneUnboundProductChain() async throws {
         let choice = Self.fixtureChoice(.chatgpt)
         let fixture = try Fixture(page: Self.firstSendRoutePromotionPage())
         defer { fixture.shutdown() }
@@ -6019,18 +6188,21 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         _ = try await waitForState("ready", fixture.transport, token: token)
         let routes = ["/c/local-chatgpt%3Aunbound-first-read?temporary-chat=true",
                       "/c/public-unbound-first-read?temporary-chat=true"]
-        var acknowledgedSends = 0
-        var firstSendReturned = false
-        var firstSendInspectionLocalRoutes: [Bool] = []
+        @MainActor final class ProductReadTrace {
+            var acknowledgedSends = 0
+            var firstSendReturned = false
+            var localRoutes: [Bool] = []
+        }
+        let trace = ProductReadTrace()
         fixture.transport.setBeforePageResultValidationForTesting { action in
-            if action == "submit" { acknowledgedSends += 1 }
-            guard action == "inspect", acknowledgedSends == 1, !firstSendReturned else { return }
-            firstSendInspectionLocalRoutes.append(EmbeddedWebModelTransport.Provider.chatgpt.isLocalConversation(view.url?.absoluteString))
-            let index = firstSendInspectionLocalRoutes.count - 1
+            if action == "submit" { trace.acknowledgedSends += 1 }
+            guard action == "verifyProductMode", trace.acknowledgedSends == 1, !trace.firstSendReturned else { return }
+            trace.localRoutes.append(EmbeddedWebModelTransport.Provider.chatgpt.isLocalConversation(view.url?.absoluteString))
+            let index = trace.localRoutes.count - 1
             guard index < routes.count else { return }
             // This checkpoint precedes every native result/first-message bind.
-            // Both edges therefore cross the same recursive first inspection,
-            // rather than two later polls after a route has been admitted.
+            // Both edges cross the same product-only pre-acknowledgment read;
+            // neither its route nor its body can become a lineage proof.
             let changed = try? await self.evaluate(view, """
                 if (window.fixturePrompts.length !== 1 || window.fixtureInputCount !== 1
                   || document.querySelectorAll('[data-message-author-role="user"]').length !== 1) return false;
@@ -6041,20 +6213,24 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         defer { fixture.transport.setBeforePageResultValidationForTesting(nil) }
         let firstSent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
             "prompt": "First local-to-public promotion before native lineage binding"])
-        firstSendReturned = true
+        trace.firstSendReturned = true
         XCTAssertEqual(firstSent["state"] as? String, "running")
-        XCTAssertEqual(acknowledgedSends, 1)
-        XCTAssertEqual(firstSendInspectionLocalRoutes, [false, true, false],
+        XCTAssertEqual(trace.acknowledgedSends, 1)
+        XCTAssertEqual(trace.localRoutes, [false, true, false],
             "Empty, local and public reads must all occur before the first Send returns")
         try assertRunningOrVerifiedChoice(firstSent, choice: choice)
         let firstContext = try XCTUnwrap(firstSent["pendingSubmissionContext"] as? [String: Any])
-        let firstFingerprint = try XCTUnwrap(firstContext["firstUserFingerprint"] as? String)
-        XCTAssertEqual(firstFingerprint.count, 64)
+        XCTAssertEqual(firstContext["firstUserFingerprint"] as? String, "",
+            "A product-only pre-acknowledgment read cannot bind user lineage")
+        XCTAssertEqual(firstContext["submittedPromptFingerprint"] as? String, "")
         XCTAssertEqual(view.url?.path, "/c/public-unbound-first-read")
         try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
         fixture.transport.setBeforePageResultValidationForTesting(nil)
         let firstComplete = try await waitForState("complete", fixture.transport, token: token)
         XCTAssertEqual(firstComplete["text"] as? String, Self.fixtureToolReply)
+        let firstProof = try XCTUnwrap(firstComplete["modelProofContext"] as? [String: Any])
+        let firstFingerprint = try XCTUnwrap(firstProof["firstUserFingerprint"] as? String)
+        XCTAssertEqual(firstFingerprint.count, 64)
         let secondSent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
             "prompt": #"{"type":"tool_results","results":[{"name":"exec_command","output":"fixture output"}]}"#])
         try assertRunningOrVerifiedChoice(secondSent, choice: choice)
@@ -6101,7 +6277,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             var acknowledgedSends = 0, firstSendInspections = 0
             fixture.transport.setBeforePageResultValidationForTesting { action in
                 if action == "submit" { acknowledgedSends += 1 }
-                guard action == "inspect", acknowledgedSends == 1 else { return }
+                guard action == "verifyProductMode", acknowledgedSends == 1 else { return }
                 let index = firstSendInspections
                 firstSendInspections += 1
                 guard index < routes.count else { return }
@@ -11230,6 +11406,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
               });
               user.appendChild(more);
             }
+            """)
+    }
+
+    private static func optimisticTemporarySubmissionPage() -> String {
+        temporaryOutlineFirstUserPage().replacingOccurrences(of: "window.fixtureTemporaryOutline = outline;", with: """
+            window.fixtureTemporaryOutline = outline;
+            const optimistic = document.createElement('span');
+            optimistic.className = 'whitespace-pre-wrap'; optimistic.style.whiteSpace = 'pre-wrap'; optimistic.textContent = prompt;
+            user.replaceChildren(outline, optimistic);
+            document.addEventListener('fixture-commit-durable-user', () => {
+              const durable = user.cloneNode(false);
+              durable.append(outline.cloneNode(true), content); user.replaceWith(durable);
+            }, {once:true});
             """)
     }
 

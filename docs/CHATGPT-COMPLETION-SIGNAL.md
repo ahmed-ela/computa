@@ -48,3 +48,16 @@ The first installed trial also exposed an existing Temporary-mode check that
 rejected the optimistic user message's direct `SPAN` body before ChatGPT remounted
 it inside a `DIV`. That check now accepts only the observed direct body while
 retaining its exact SVG outline, visibility, scope, and child-count checks.
+
+That optimistic body can briefly contain the full prompt before the regular view
+collapses it behind Show more. A pending submission in this exact optimistic
+shape therefore supplies no ownership or response proof. The existing document
+events wake a fresh read after the regular view appears; normal expansion and
+full-text hashing then establish ownership. This does not add a timer, replay
+Send, rebind an already verified message, or extend the response deadline.
+
+The first Send also retains a fresh product/Temporary recheck before native accepts
+its acknowledgment. This narrowly scoped read returns only those controls; it
+cannot pin the optimistic user body or publish a response. A route promotion
+retains that scope and the original deadline. Ownership is established by the
+normal acknowledged read after the durable message appears.
