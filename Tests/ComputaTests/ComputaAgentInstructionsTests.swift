@@ -365,13 +365,13 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(checks.contains("After navigation/sign-in, empty, title-only or footer-only reads are inconclusive"))
         XCTAssertTrue(checks.contains("Use a bounded browser_wait, then fresh unfiltered browser_read before concluding"))
         XCTAssertTrue(checks.contains("if still empty, report unresolved loading, not absence or denied access"))
-        XCTAssertTrue(checks.contains("For an enabled observed link with href but actions=[], browser_navigate its exact href in the current bound tab"))
+        XCTAssertTrue(checks.contains("Enabled observed link with href but actions=[]: browser_navigate its exact href in the bound tab"))
         XCTAssertTrue(checks.contains("not offered browser navigation or observed sign-in/account selection"))
         XCTAssertTrue(checks.contains("Claim policy/access denial only from actual tool evidence"))
         XCTAssertTrue(checks.contains("Sign-in/footer text does not prove credentials are required"))
-        XCTAssertTrue(checks.contains("Follow the authorized service's sign-in flow and choose an existing matching account"))
+        XCTAssertTrue(checks.contains("Follow authorized sign-in; choose an existing matching account"))
         XCTAssertTrue(checks.contains("Ask for user help only at an actual password/MFA prompt or account ambiguity"))
-        XCTAssertTrue(checks.contains("never ask for passwords in chat"))
+        XCTAssertTrue(checks.contains("Keep sign-in in-browser; do not ask for passwords, tokens or cookies"))
         XCTAssertTrue(checks.contains("do not ask for passwords, tokens or cookies"))
         XCTAssertTrue(checks.contains("Respect actual access denials and approvals"))
         let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
@@ -380,6 +380,28 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         for delivered in [native, fresh] {
             XCTAssertTrue(delivered.contains(ComputaAgentInstructions.browserAddressChecks))
         }
+    }
+
+    func testFilteredContentRequiresAnUnfilteredControlViewBeforeAbsenceClaimsInBothDeliveries() {
+        // A selectable result may be a control and therefore absent from the
+        // readable-content view. Delivery of this rule is not a live result.
+        let rule = "Filtered content may omit controls/selectable results. Read overview/all before absence/access claims."
+        for referenceTools in [true, false] {
+            let native = ComputaAgentInstructions.developerInstructions(
+                referenceTools: referenceTools, embeddedBrowserTools: true)
+            let fresh = ComputaAgentInstructions.webResponseContract(
+                offeredToolNames: ["relay.browser_read"], includedInstructionText: [native])
+            for delivered in [native, fresh] {
+                XCTAssertEqual(delivered.components(separatedBy: rule).count - 1, 1,
+                    "Current filtered-view limits must survive native-history deduplication")
+                XCTAssertTrue(delivered.contains("Never invent deep links, account paths or message IDs"))
+                XCTAssertTrue(delivered.contains("Respect actual access denials and approvals"))
+                XCTAssertTrue(delivered.contains("do not ask for passwords, tokens or cookies"))
+            }
+        }
+        XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: []).contains(rule))
+        XCTAssertLessThan(ComputaAgentInstructions.browserAddressChecks.utf8.count, 1_400)
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_300)
     }
 
     func testFreshBrowserAddressChecksRequireAnExactOfferedNoncustomCapability() {

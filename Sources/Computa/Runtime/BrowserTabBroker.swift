@@ -1545,6 +1545,9 @@ actor BrowserTabSessionBroker {
         if read.view == .links {
             lines.insert("LINK_VIEW_SCOPE non_link_controls_omitted=true. Buttons/form controls may be outside this view; read view=overview or all before absence/access claims.", at: 2)
         }
+        if read.view == .content {
+            lines.insert("CONTENT_VIEW_SCOPE controls_omitted=true. Message/search-result rows can be controls outside this view; read view=overview or all before absence/access claims.", at: 2)
+        }
         if read.view == .overview {
             lines.append("OVERVIEW selection=observed_controls_headings_navigation ordering=interleaved_categories document_content_exhaustive=false. Read view=content for the document body; view=all retains full structural context for action planning.")
         }

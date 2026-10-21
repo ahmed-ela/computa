@@ -1110,6 +1110,47 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
         XCTAssertEqual(pressed, [3])
     }
 
+    func testContentViewWarnsThatReadyOptionResultsAreFilteredWhileAllRetainsTheirExactAction() async throws {
+        for includeHeading in [false, true] {
+            let fixture = try await BrowserBrokerTestFixture.make()
+            var nodes = [
+                semanticNode(0, role: "main", name: "Synthetic workspace", children: includeHeading ? ["n1", "n2"] : ["n2"]),
+                semanticNode(2, role: "listbox", name: "Synthetic results", parent: "n0", children: ["n3"]),
+                semanticNode(3, role: "option", name: "Synthetic selectable result", parent: "n2", children: ["n4"], clickable: true),
+                semanticNode(4, role: "StaticText", name: "Synthetic result preview", parent: "n3"),
+            ]
+            if includeHeading { nodes.insert(semanticNode(1, role: "heading", name: "Synthetic results heading", parent: "n0"), at: 1) }
+            try await fixture.transport.replaceNodes(targetID: fixture.observation.binding.targetID,
+                nodes: nodes, semanticReadiness: .ready)
+            let content = try await fixture.broker.snapshot(taskKey: "task-a", binding: fixture.observation.binding,
+                bundleIdentifier: "com.google.Chrome", read: .init(view: .content))
+            let lines = content.snapshot.formattedText.split(separator: "\n").map(String.init)
+            XCTAssertTrue(lines[1].contains("view=content")); XCTAssertTrue(lines[1].contains("semantic_readiness=ready"))
+            XCTAssertTrue(lines[1].contains("source_truncated=0"))
+            XCTAssertTrue(lines[2].hasPrefix("CONTENT_VIEW_SCOPE controls_omitted=true"))
+            XCTAssertTrue(lines[2].contains("Message/search-result rows can be controls outside this view"))
+            XCTAssertTrue(lines[2].contains("read view=overview or all before absence/access claims"))
+            XCTAssertEqual(content.snapshot.elements.map(\.label), includeHeading ? ["Synthetic results heading"] : [])
+            XCTAssertFalse(content.snapshot.formattedText.contains("Synthetic selectable result"))
+            XCTAssertFalse(content.snapshot.formattedText.contains("Synthetic result preview"))
+            XCTAssertTrue(lines[1].contains(includeHeading ? "no_matches=0" : "no_matches=1"))
+            let all = try await fixture.broker.snapshot(taskKey: "task-a", binding: content.binding,
+                bundleIdentifier: "com.google.Chrome", read: .init(view: .all))
+            XCTAssertFalse(all.snapshot.formattedText.contains("CONTENT_VIEW_SCOPE"))
+            let option = try XCTUnwrap(all.snapshot.elements.first { $0.semanticRole == "option" })
+            XCTAssertTrue(option.isEnabled); XCTAssertTrue(option.supportsPress)
+            XCTAssertEqual(option.contentKind, .control)
+            let row = try XCTUnwrap(all.snapshot.presentation?.rows.first { $0.index == option.index })
+            XCTAssertEqual(row.actions, ["AXPress"])
+            let preview = try XCTUnwrap(all.snapshot.elements.first { $0.label == "Synthetic result preview" })
+            XCTAssertEqual(preview.contentKind, .control); XCTAssertFalse(preview.supportsPress)
+            try await fixture.broker.perform(taskKey: "task-a", binding: all.binding, snapshot: all.snapshot,
+                elementIndex: option.index, action: "AXPress")
+            let pressed = await fixture.transport.pressedNodeIDs(targetID: all.binding.targetID)
+            XCTAssertEqual(pressed, [4], "Only the exact option receives input; the filtered text child gains no action")
+        }
+    }
+
     func testLongFieldContinuationReconstructsExactUnicodeAndEscapedBytesWithBoundedOutput() async throws {
         let fixture = try await BrowserBrokerTestFixture.make()
         // The first split falls between a base character and its combining
@@ -1973,12 +2014,14 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
         nextMutationHook = hook
     }
 
-    func replaceNodes(targetID: String, nodes: [BrowserDocumentNode], sourceTruncated: Bool = false) throws {
+    func replaceNodes(targetID: String, nodes: [BrowserDocumentNode], sourceTruncated: Bool = false,
+                      semanticReadiness: BrowserDocumentObservation.SemanticReadiness? = nil) throws {
         guard var state = states[targetID] else { throw BrowserTabBrokerError.targetClosed }
         state.document = BrowserDocumentObservation(
             loaderID: state.document.loaderID, title: state.document.title, url: state.document.url,
             nodes: nodes, sourceTruncated: sourceTruncated
         )
+        state.document.semanticReadiness = semanticReadiness
         states[targetID] = state
     }
 
