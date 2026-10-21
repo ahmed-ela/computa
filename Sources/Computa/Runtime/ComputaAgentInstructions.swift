@@ -9,7 +9,7 @@ enum ComputaAgentInstructions {
         let surfaces = externalChromeTools
             ? "offered background AX, authorized Chrome, or built-in browser UI operations"
             : "offered native background AX or built-in browser UI operations"
-        return "APP_RUNTIME_INTERACTION_POLICY: background_only. No activation or global input, including recovery. Use only \(surfaces). Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."
+        return "APP_RUNTIME_INTERACTION_POLICY: background_only. No native activation, focus theft or global input, including recovery. Use only \(surfaces). Offered browser navigation and observed sign-in/account controls remain allowed. Terminal/file operations follow the engine's separate permissions. Images are observation-only. Full Access does not elevate this host policy."
     }
 
     static let ordinaryRequests = """
@@ -321,6 +321,10 @@ enum ComputaAgentInstructions {
     denial. Use offered navigation tools; ask which service only if genuinely unclear.
     Never invent deep links, account paths or message IDs. Keep sign-in in the
     browser; do not ask for passwords, tokens or cookies. Respect actual access denials and approvals.
+    Empty/loading reads are inconclusive: use one bounded browser_wait, then browser_read.
+    For an enabled observed link with href but actions=[], browser_navigate its exact href in the current bound tab.
+    Background-only forbids native focus theft/global input, not offered browser navigation
+    or observed sign-in/account selection. Claim policy/access denial only from actual tool evidence.
     """
 
     static let builtInBrowser = """

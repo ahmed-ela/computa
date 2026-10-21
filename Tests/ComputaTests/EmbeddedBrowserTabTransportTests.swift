@@ -224,6 +224,46 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         XCTAssertEqual(clicks,Data("1".utf8),"The oversized normalized role must not disable unrelated controls")
     }
 
+    func testRealWebKitPopupLinkIsReadableWithoutOfferingAnUndispatchablePress() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let controller = EmbeddedBrowserToolController(transport: transport)
+        defer { session.shutdown() }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString("""
+            <a href="/sign-in?return=%2Fmail%2F&amp;literal=A-B" target="_blank">Sign in</a>
+            <a href="#ordinary" target="_self" onclick="event.preventDefault();window.clicks=(window.clicks||0)+1">Continue</a>
+            """, baseURL: URL(string: "http://localhost:8123/popup-links"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        _ = try await controller.execute(taskKey: "popup-link", tool: "browser_tabs", arguments: Data("{}".utf8))
+        _ = try await controller.execute(taskKey: "popup-link", tool: "browser_bind",
+            arguments: JSONSerialization.data(withJSONObject: ["tab_id": id.uuidString]))
+        let read = try await controller.execute(taskKey: "popup-link", tool: "browser_read",
+            arguments: Data(#"{"view":"links"}"#.utf8))
+        let popup = try XCTUnwrap(read.split(separator: "\n").first { $0.contains("label=\"Sign in\"") })
+        let ordinary = try XCTUnwrap(read.split(separator: "\n").first { $0.contains("label=\"Continue\"") })
+        XCTAssertTrue(popup.contains("href=\"http://localhost:8123/sign-in?return=%2Fmail%2F&literal=A-B\""))
+        XCTAssertTrue(popup.contains("enabled=true")); XCTAssertTrue(popup.contains("actions=[]"))
+        XCTAssertFalse(popup.contains("follow_link=true"))
+        XCTAssertTrue(ordinary.contains("actions=[\"AXPress\"]")); XCTAssertTrue(ordinary.contains("follow_link=true"))
+        let header = try XCTUnwrap(read.split(separator: "\n").first)
+        let snapshot = try XCTUnwrap(header.split(separator: " ").first { $0.hasPrefix("id=") })
+        func arguments(_ row: Substring) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["snapshot_id": String(snapshot.dropFirst(3)),
+                "element_index": try XCTUnwrap(Int(row.dropFirst().prefix { $0.isNumber }))])
+        }
+        do {
+            _ = try await controller.execute(taskKey: "popup-link", tool: "browser_click", arguments: arguments(popup))
+            XCTFail("A popup-only link is read-only before any backend input")
+        } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .pressUnavailable) }
+        XCTAssertEqual(session.humanTabs.count, 1)
+        _ = try await controller.execute(taskKey: "popup-link", tool: "browser_click", arguments: arguments(ordinary))
+        let clicks = try await script(view, "return window.clicks || 0;")
+        XCTAssertEqual(clicks, Data("1".utf8), "Rejecting the popup-only press preserves the read for a supported action")
+        _ = await controller.shutdown()
+    }
+
     func testPrivateWorldResistsPageForgedIDsAndStaleNodeMetadata() async throws {
         let session=EmbeddedBrowserSession(persistent:false), transport=EmbeddedBrowserTabTransport(session:session)
         defer { session.shutdown() }

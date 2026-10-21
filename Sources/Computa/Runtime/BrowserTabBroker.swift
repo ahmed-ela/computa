@@ -51,6 +51,9 @@ struct BrowserDocumentNode: Equatable, Sendable {
     /// Browser-reported clickability for this exact backend node, never
     /// inferred from labels, CSS, descendants, or a clickable ancestor.
     let isDOMClickable: Bool
+    /// An explicit backend veto overrides role-derived press support without
+    /// hiding a readable link or pretending its enabled state is disabled.
+    let isPressUnsupported: Bool
     /// An exact-node activation candidate checked by the transport: AX
     /// focusability plus visible positive rendered bounds and pointer cursor.
     /// This is not proof that pressing it completes any user-requested action.
@@ -65,7 +68,7 @@ struct BrowserDocumentNode: Equatable, Sendable {
         nodeID: String? = nil, parentNodeID: String? = nil,
         childNodeIDs: [String] = [], linkURL: String? = nil,
         isDOMClickable: Bool = false, isFocusablePointer: Bool = false,
-        isEditable: Bool = false
+        isEditable: Bool = false, isPressUnsupported: Bool = false
     ) {
         self.backendNodeID = backendNodeID
         self.role = role
@@ -79,6 +82,7 @@ struct BrowserDocumentNode: Equatable, Sendable {
         self.childNodeIDs = childNodeIDs
         self.linkURL = linkURL
         self.isDOMClickable = isDOMClickable
+        self.isPressUnsupported = isPressUnsupported
         self.isFocusablePointer = isFocusablePointer
         self.isEditable = isEditable
     }
@@ -1399,7 +1403,8 @@ actor BrowserTabSessionBroker {
         let role = axRole(for: node.role)
         let label = node.name.isEmpty ? (node.value ?? "") : node.name
         let normalizedRole = node.role.lowercased()
-        let supportsPress = supportsSemanticPress(role: normalizedRole) || node.isDOMClickable || node.isFocusablePointer
+        let supportsPress = !node.isPressUnsupported
+            && (supportsSemanticPress(role: normalizedRole) || node.isDOMClickable || node.isFocusablePointer)
         let supportsSetText = !node.isReadOnly && [
             "combobox", "searchbox", "textbox",
         ].contains(normalizedRole)

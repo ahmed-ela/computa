@@ -12,16 +12,58 @@ struct ComputerTaskScope: Equatable, Sendable {
         case unknown, ambiguous, explicitURL, recognizedService, exactTabTitle
     }
 
+    /// A service can use a narrowly identified landing or authorization route
+    /// on a shared host without admitting unrelated content on that host.
+    private struct ServiceRoute: Equatable, Sendable {
+        let host: String
+        let pathPattern: String
+        var requiredQueryValues: [String: Set<String>] = [:]
+        var optionalQueryValues: [String: Set<String>] = [:]
+        var redirectURIs: Set<String> = []
+        var scopeURLs: Set<String> = []
+
+        func matches(_ url: URL) -> Bool {
+            guard url.scheme?.lowercased() == "https", url.host?.lowercased() == host,
+                  url.port == nil || url.port == 443, url.user == nil, url.password == nil,
+                  url.path.range(of: pathPattern, options: .regularExpression) != nil else { return false }
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            func values(_ name: String) -> [URLQueryItem] {
+                items.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+            }
+            for (name, allowed) in requiredQueryValues {
+                let found = values(name)
+                guard found.count == 1, let value = found[0].value, allowed.contains(value) else { return false }
+            }
+            for (name, allowed) in optionalQueryValues {
+                let found = values(name)
+                guard found.count <= 1, found.isEmpty || found[0].value.map({ allowed.contains($0) }) == true else { return false }
+            }
+            guard !redirectURIs.isEmpty || !scopeURLs.isEmpty else { return true }
+            let redirects = values("redirect_uri"), scopes = values("scope")
+            guard redirects.count <= 1, scopes.count <= 1 else { return false }
+            let redirectBound = redirects.first.flatMap { $0.value }.map { redirectURIs.contains($0) } == true
+            let scopeBound = scopes.first?.value?.split(separator: " ").contains { scopeURLs.contains(String($0)) } == true
+            // A known mail destination binds the authorization to Outlook.
+            // Without one, require the explicit Outlook resource scope; an
+            // arbitrary Microsoft authorization request is not enough.
+            return redirects.isEmpty ? scopeBound : redirectBound
+        }
+    }
+
     private struct Site: Equatable, Sendable {
         let name: String
         let hosts: Set<String>
         let port: Int?
+        var serviceRoutes: [ServiceRoute] = []
 
         func matches(_ url: URL) -> Bool {
             guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
                   let host = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")),
-                  hosts.contains(host), url.user == nil, url.password == nil else { return false }
-            return port == nil || (url.port ?? (url.scheme == "https" ? 443 : 80)) == port
+                  url.user == nil, url.password == nil else { return false }
+            if hosts.contains(host) {
+                return port == nil || (url.port ?? (url.scheme == "https" ? 443 : 80)) == port
+            }
+            return serviceRoutes.contains { $0.matches(url) }
         }
     }
 
@@ -29,13 +71,24 @@ struct ComputerTaskScope: Equatable, Sendable {
         let name: String
         let aliases: [String]
         let hosts: Set<String>
+        var routes: [ServiceRoute] = []
     }
 
     // Identity catalog, not task-specific recovery code. Exact hosts prevent a
     // misleading title, URL query, or attacker-controlled suffix from matching.
     private static let services: [Service] = [
         .init(name: "Gmail", aliases: ["gmail"], hosts: ["mail.google.com"]),
-        .init(name: "Outlook", aliases: ["outlook"], hosts: ["outlook.live.com", "outlook.office.com", "outlook.office365.com"]),
+        .init(name: "Outlook", aliases: ["outlook"], hosts: ["outlook.live.com", "outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"], routes: [
+            .init(host: "www.microsoft.com", pathPattern: #"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?microsoft-365/outlook/email-and-calendar-software-microsoft-outlook/?$"#),
+            .init(host: "go.microsoft.com", pathPattern: #"^/fwlink/p/?$"#,
+                  requiredQueryValues: ["LinkID": ["2125442"]], optionalQueryValues: ["deeplink": ["mail/"]]),
+            .init(host: "login.microsoftonline.com", pathPattern: #"^/common/oauth2/v2\.0/authorize/?$"#,
+                  redirectURIs: ["https://outlook.live.com/mail", "https://outlook.live.com/mail/",
+                                 "https://outlook.office.com/mail", "https://outlook.office.com/mail/",
+                                 "https://outlook.office365.com/mail", "https://outlook.office365.com/mail/",
+                                 "https://outlook.cloud.microsoft/mail", "https://outlook.cloud.microsoft/mail/"],
+                  scopeURLs: ["https://outlook.office.com/.default"]),
+        ]),
         .init(name: "YouTube", aliases: ["youtube"], hosts: ["youtube.com", "www.youtube.com", "m.youtube.com"]),
         .init(name: "GitHub", aliases: ["github"], hosts: ["github.com", "www.github.com"]),
         .init(name: "Google Calendar", aliases: ["google calendar"], hosts: ["calendar.google.com"]),
@@ -94,7 +147,7 @@ struct ComputerTaskScope: Equatable, Sendable {
             site = Site(name: host, hosts: [host], port: url.port ?? (url.scheme == "https" ? 443 : 80))
             targetConfidence = .explicitURL
         } else if let service = mentioned.first {
-            site = Site(name: service.name, hosts: service.hosts, port: nil)
+            site = Site(name: service.name, hosts: service.hosts, port: nil, serviceRoutes: service.routes)
             targetConfidence = .recognizedService
         } else {
             site = nil

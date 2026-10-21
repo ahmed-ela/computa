@@ -112,6 +112,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                 let disabled = row["isDisabled"] as? Bool, let readOnly = row["isReadOnly"] as? Bool,
                 let ignored = row["isIgnored"] as? Bool, let editable = row["isEditable"] as? Bool,
                 let clickable = row["isDOMClickable"] as? Bool,
+                let pressUnsupported = row["isPressUnsupported"] as? Bool,
                 let pointer = row["isFocusablePointer"] as? Bool,
                 let nodeID = row["nodeID"] as? String, let children = row["childNodeIDs"] as? [String]
             else {
@@ -124,7 +125,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                 isIgnored: ignored,
                 nodeID: nodeID, parentNodeID: row["parentNodeID"] as? String, childNodeIDs: children,
                 linkURL: row["linkURL"] as? String, isDOMClickable: clickable, isFocusablePointer: pointer,
-                isEditable: editable)
+                isEditable: editable, isPressUnsupported: pressUnsupported)
         }
         var result = BrowserDocumentObservation(
             loaderID: generation.uuidString, title: title, url: url, nodes: nodes,
@@ -168,6 +169,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
             "linkURL": node.linkURL as Any? ?? NSNull(), "isDisabled": node.isDisabled,
             "isReadOnly": node.isReadOnly,
             "isEditable": node.isEditable, "isDOMClickable": node.isDOMClickable,
+            "isPressUnsupported": node.isPressUnsupported,
             "parentNodeID": node.parentNodeID as Any? ?? NSNull(),
         ]
         var input: [String: Any] = [

@@ -186,7 +186,8 @@ final class RuntimeIsolationTransportTests: XCTestCase {
             "Background mode must describe the offered built-in browser instead of implying Chrome is the only browser.")
         XCTAssertTrue(interactionPolicy.contains("Terminal/file"),
             "The UI interaction ceiling must remain distinct from engine terminal/file permissions.")
-        XCTAssertTrue(interactionPolicy.contains("No activation or global input"))
+        XCTAssertTrue(interactionPolicy.contains("No native activation, focus theft or global input"))
+        XCTAssertTrue(interactionPolicy.contains("Offered browser navigation and observed sign-in/account controls remain allowed"))
         XCTAssertFalse(requests.contains { $0["method"] as? String == "thread/compact/start" })
     }
 }

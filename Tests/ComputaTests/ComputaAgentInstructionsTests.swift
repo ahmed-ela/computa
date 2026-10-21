@@ -351,7 +351,29 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Never invent deep links, account paths or message IDs"))
         XCTAssertTrue(text.contains("do not ask for passwords, tokens or cookies"))
         XCTAssertTrue(text.contains("Respect actual access denials and approvals"))
-        XCTAssertLessThan(checks.utf8.count, 700, "The shared rule is refreshed on website turns; retain a compact instruction budget")
+        XCTAssertLessThan(checks.utf8.count, 1_100, "The shared rule includes bounded loading recovery and sign-in scope clarification on refreshed website turns")
+    }
+
+    func testBackgroundOnlyBrowserRecoveryKeepsSignInInTheBrowserWithoutInventingAnAccessBlock() {
+        let checks = ComputaAgentInstructions.browserAddressChecks.replacingOccurrences(of: "\n", with: " ")
+        for externalChromeTools in [false, true] {
+            let policy = ComputaAgentInstructions.runtimeInteractionPolicy(externalChromeTools: externalChromeTools)
+            XCTAssertTrue(policy.contains("No native activation, focus theft or global input, including recovery"))
+            XCTAssertTrue(policy.contains("Offered browser navigation and observed sign-in/account controls remain allowed"))
+            XCTAssertTrue(policy.contains("Full Access does not elevate this host policy"))
+        }
+        XCTAssertTrue(checks.contains("Empty/loading reads are inconclusive: use one bounded browser_wait, then browser_read"))
+        XCTAssertTrue(checks.contains("For an enabled observed link with href but actions=[], browser_navigate its exact href in the current bound tab"))
+        XCTAssertTrue(checks.contains("not offered browser navigation or observed sign-in/account selection"))
+        XCTAssertTrue(checks.contains("Claim policy/access denial only from actual tool evidence"))
+        XCTAssertTrue(checks.contains("do not ask for passwords, tokens or cookies"))
+        XCTAssertTrue(checks.contains("Respect actual access denials and approvals"))
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let fresh = ComputaAgentInstructions.webResponseContract(offeredToolNames: ["relay.browser_navigate"],
+            includedInstructionText: [native])
+        for delivered in [native, fresh] {
+            XCTAssertTrue(delivered.contains(ComputaAgentInstructions.browserAddressChecks))
+        }
     }
 
     func testFreshBrowserAddressChecksRequireAnExactOfferedNoncustomCapability() {
@@ -476,8 +498,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("It activates enabled\ncontrols/links, including follow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("unchanged reads"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 2_500,
-                          "The bounded browser contract includes approximately 0.5 KB clarifying named-service entrypoints without removing verification or cleanup guidance.")
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_000,
+                          "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
     }
@@ -533,8 +555,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
         XCTAssertTrue(text.contains("stale-target rejection, read once and choose an eligible target"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
-        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 2_500,
-                                "Named-service navigation adds approximately 0.5 KB; all snapshot, approval and cleanup rules remain present.")
+        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_000,
+                                "Named-service and sign-in/loading guidance retain all snapshot, approval and cleanup rules.")
     }
 
     func testLiteralIdentifierGuidanceIsSharedWithoutChangingExactUserOutputConstraints() {

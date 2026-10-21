@@ -31,6 +31,12 @@ enum ComputaModelToolCatalog {
         let overrides = nativeToolDescriptions(modelID: modelID)
         let appsSchema = ComputerV2ToolContract.specs(for: modelID, externalChromeTools: false)
             .first { $0["name"] as? String == "computer_v2_apps" }?["inputSchema"] as? [String: Any]
+        let browserReadProperties = EmbeddedBrowserTools.definitions().reduce(into: [String: [String: Any]]()) { result, definition in
+            guard let name = definition["name"] as? String, ["browser_tabs", "browser_read"].contains(name),
+                  let schema = definition["inputSchema"] as? [String: Any],
+                  let properties = schema["properties"] as? [String: Any] else { return }
+            result[name] = properties
+        }
         func visible(_ definition: [String: Any]) -> [String: Any]? {
             var value = definition
             if value["type"] as? String == "namespace", let children = value["tools"] as? [[String: Any]] {
@@ -47,6 +53,17 @@ enum ComputaModelToolCatalog {
                 // original catalog before this projection, including old errors.
                 for key in ["parameters", "inputSchema"] where value[key] is [String: Any] {
                     value[key] = appsSchema
+                }
+            }
+            if value["type"] as? String == "function", let current = browserReadProperties[name] {
+                for key in ["parameters", "inputSchema"] {
+                    guard var schema = value[key] as? [String: Any],
+                          var properties = schema["properties"] as? [String: Any] else { continue }
+                    for field in ["cursor", "query"] where properties[field] != nil {
+                        if let canonical = current[field] { properties[field] = canonical }
+                    }
+                    schema["properties"] = properties
+                    value[key] = schema
                 }
             }
             if name == "computer_v2_open" {

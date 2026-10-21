@@ -104,6 +104,67 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testRestoredBrowserReadFieldsRefreshWithoutChangingViewsOrFailedHistory() throws {
+        let p = APIProviderDefinition(id: "cerebras-fixture", name: "Cerebras Fixture",
+            baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
+            models: [.init(id: "gpt-oss-120b", name: "GPT OSS")])
+        let modelID = APIProviderCatalog.appModelID(providerID: p.id, modelID: p.models[0].id)
+        for name in ["browser_tabs", "browser_read"] {
+            let current = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            let currentSchema = try XCTUnwrap(current["inputSchema"] as? [String: Any])
+            let currentProperties = try XCTUnwrap(currentSchema["properties"] as? [String: Any])
+            var oldProperties: [String: Any] = ["cursor": ["type": "string"]]
+            if name == "browser_read" {
+                oldProperties["query"] = ["type": "string"]
+                oldProperties["view"] = ["type": "string", "enum": ["content"]]
+            }
+            let oldSchema: [String: Any] = ["type": "object", "properties": oldProperties,
+                                          "required": [String](), "additionalProperties": false]
+            for key in ["parameters", "inputSchema"] {
+                let old: [String: Any] = ["type": "function", "name": name, key: oldSchema]
+                let refreshed = try XCTUnwrap(ComputaModelToolCatalog.visibleToolDefinitions([old], modelID: modelID).first)
+                let schema = try XCTUnwrap(refreshed[key] as? [String: Any])
+                let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+                for field in ["cursor", "query"] where oldProperties[field] != nil {
+                    XCTAssertEqual(properties[field] as? NSDictionary, currentProperties[field] as? NSDictionary)
+                }
+                XCTAssertEqual(properties["view"] as? NSDictionary, oldProperties["view"] as? NSDictionary)
+                XCTAssertEqual(schema["required"] as? [String], [])
+                XCTAssertEqual(old[key] as? NSDictionary, oldSchema as NSDictionary)
+            }
+            let saved: [String: Any] = ["type": "function", "name": name, "parameters": oldSchema]
+            let history: [[String: Any]] = [
+                ["role": "user", "content": "Read the built-in browser"],
+                ["type": "function_call", "call_id": "old-empty-cursor", "name": name,
+                 "namespace": "functions", "arguments": "{\"cursor\":\"\"}"],
+                ["type": "function_call_output", "call_id": "old-empty-cursor", "output": "Invalid built-in browser string argument."],
+                ["role": "user", "content": "Continue with current tools"],
+            ]
+            let prepared = try request(["tools": [["type": "namespace", "name": "functions", "tools": [saved]]],
+                                        "input": history], provider: p, toolNaming: .semantic)
+            let wire = try XCTUnwrap(try wireFunctions(prepared).first)
+            let parameters = try XCTUnwrap(wire["parameters"] as? [String: Any])
+            let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+            for field in ["cursor", "query"] where oldProperties[field] != nil {
+                XCTAssertEqual(properties[field] as? NSDictionary, currentProperties[field] as? NSDictionary)
+            }
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let oldCall = try XCTUnwrap(messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
+            XCTAssertEqual((oldCall["function"] as? [String: Any])?["arguments"] as? String, "{\"cursor\":\"\"}")
+            let alias = try XCTUnwrap(wire["name"] as? String)
+            XCTAssertNoThrow(try decode(["role": "assistant", "tool_calls": [["id": "current-browser", "type": "function",
+                "function": ["name": alias, "arguments": "{}"]]]], finish: "tool_calls", request: prepared, model: p.models[0].id))
+            for field in ["cursor", "query"] where oldProperties[field] != nil {
+                let arguments = String(decoding: try JSONSerialization.data(withJSONObject: [field: ""]), as: UTF8.self)
+                XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "current-browser", "type": "function",
+                    "function": ["name": alias, "arguments": arguments]]]], finish: "tool_calls", request: prepared, model: p.models[0].id)) {
+                        XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                }
+            }
+        }
+    }
+
     private func cerebrasErrorWire(_ envelope: Any, event: String? = nil, prefix: Data = Data()) throws -> Data {
         var result = prefix
         if let event { result.append(Data("event: \(event)\n".utf8)) }

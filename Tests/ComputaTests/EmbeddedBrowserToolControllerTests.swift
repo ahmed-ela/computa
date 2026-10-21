@@ -453,6 +453,47 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         }
     }
 
+    func testOptionalBrowserReadArgumentsAdvertiseOmissionAndRejectEmptyStrings() throws {
+        for name in ["browser_tabs", "browser_read"] {
+            let specification = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            let schema = try XCTUnwrap(specification["inputSchema"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            let required = try XCTUnwrap(schema["required"] as? [String])
+            let cursor = try XCTUnwrap(properties["cursor"] as? [String: Any])
+            XCTAssertEqual(cursor["type"] as? String, "string")
+            XCTAssertEqual(cursor["minLength"] as? Int, 1)
+            XCTAssertFalse(required.contains("cursor"))
+            let guidance = try XCTUnwrap(cursor["description"] as? String)
+            XCTAssertTrue(guidance.contains("Omit this field on the first page or a fresh read"))
+            XCTAssertTrue(guidance.contains("exact nonempty next_cursor"))
+            XCTAssertTrue(guidance.contains("current turn"))
+            XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: [:]))
+            XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": ""]))
+            XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: ["cursor": UUID().uuidString]))
+        }
+        let read = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_read" })
+        let schema = try XCTUnwrap(read["inputSchema"] as? [String: Any])
+        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        let query = try XCTUnwrap(properties["query"] as? [String: Any])
+        XCTAssertEqual(query["minLength"] as? Int, 1)
+        XCTAssertNil(query["pattern"], "Existing whitespace-only queries retain their unfiltered-read semantics")
+        XCTAssertTrue((query["description"] as? String)?.contains("Omit this field for an unfiltered read") == true)
+        XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: "browser_read", arguments: ["query": ""]))
+        XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: "browser_read", arguments: ["query": " \t\n"]))
+    }
+
+    func testOptionalBrowserReadArgumentsKeepNativeUTF8BoundsWithoutNormalizing() throws {
+        for (name, field) in [("browser_tabs", "cursor"), ("browser_read", "cursor"), ("browser_read", "query")] {
+            let boundary = String(repeating: "é", count: 1024)
+            XCTAssertEqual(boundary.utf8.count, 2048)
+            XCTAssertNoThrow(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: boundary]))
+            XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: boundary + "x"]))
+            for value: Any in ["", NSNull(), 17] {
+                XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: name, arguments: [field: value]))
+            }
+        }
+    }
+
     func testKnownServiceEntrypointGuidanceKeepsExplicitNavigationAndTargetChecks() throws {
         let definitions = EmbeddedBrowserTools.definitions()
         let inventory = try XCTUnwrap(definitions.first { $0["name"] as? String == "browser_tabs" })
@@ -924,6 +965,35 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testPopupOnlyLinkRetainsExactDestinationButRejectsPressBeforeInput() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let destination = "http://localhost:8123/sign-in?return=%2Fmail%2F&literal=A-B"
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        await backend.setLink(destination, pressUnsupported: true)
+        let read = try await call(controller, "browser_read", ["view": "links"])
+        let row = try XCTUnwrap(read.split(separator: "\n").first { $0.hasPrefix("#0 ") }).description
+        XCTAssertTrue(row.contains("semantic_role=\"link\""))
+        XCTAssertTrue(row.contains("href=\"\(destination)\""))
+        XCTAssertTrue(row.contains("enabled=true")); XCTAssertTrue(row.contains("actions=[]"))
+        XCTAssertFalse(row.contains("follow_link=true"))
+        let arguments: [String: Any] = ["snapshot_id": try snapshotID(read), "element_index": 0]
+        for preflight in [true, false] {
+            do {
+                if preflight {
+                    try await controller.preflightMutation(taskKey: "turn-a", tool: "browser_click",
+                        arguments: JSONSerialization.data(withJSONObject: arguments))
+                } else { _ = try await call(controller, "browser_click", arguments) }
+                XCTFail("A readable popup destination does not grant press authority")
+            } catch { XCTAssertEqual(error as? EmbeddedBrowserTools.MutationEligibilityFailure, .pressUnavailable) }
+        }
+        let before = await backend.counts()
+        XCTAssertEqual(before.presses, 0); XCTAssertEqual(before.navigations, 0)
+        _ = try await call(controller, "browser_navigate", ["url": destination])
+        let after = await backend.counts()
+        XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.navigations, 1)
+        _ = await controller.shutdown()
+    }
+
     private func snapshotID(_ text: String) throws -> String {
         let prefix = "AXSNAPSHOT id="
         guard let start = text.range(of:prefix), let id = text[start.upperBound...].split(separator:" ").first, UUID(uuidString:String(id)) != nil else {
@@ -941,7 +1011,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var observationSourceName = "computa_webkit_dom"
     private var buttonID: Int64 = 2, buttonDisabled = false
     private var pendingRedirect: URL?
-    private var link: String?
+    private var link: String?, linkPressUnsupported = false
     private var holdCreate=false, createHeld=false, createContinuation: CheckedContinuation<Void,Never>?
     private var holdMutation=false, mutationHeld=false, mutationContinuation: CheckedContinuation<Void,Never>?
     private var shouldFailClose = false
@@ -1023,7 +1093,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
             BrowserDocumentNode(backendNodeID:3,role:"statictext",name:result,value:nil,isDisabled:true,isReadOnly:true,isIgnored:false,nodeID:"3")
         ]
         if let link {
-            nodes.append(BrowserDocumentNode(backendNodeID:4,role:"link",name:"Destination",value:nil,isDisabled:false,isReadOnly:false,isIgnored:false,nodeID:"4",linkURL:link,isDOMClickable:true))
+            nodes.append(BrowserDocumentNode(backendNodeID:4,role:"link",name:"Destination",value:nil,isDisabled:false,isReadOnly:false,isIgnored:false,nodeID:"4",linkURL:link,isDOMClickable:!linkPressUnsupported,isPressUnsupported:linkPressUnsupported))
         }
         if manyControls {
             for index in 10..<110 {
@@ -1079,7 +1149,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
         }
         afterInputScenario = nil
     }
-    func setLink(_ url: String) { link = url }
+    func setLink(_ url: String, pressUnsupported: Bool = false) { link = url; linkPressUnsupported = pressUnsupported }
     func disableButton() { buttonDisabled = true }
     func replaceButton() { buttonID = 99 }
     func replaceOwnedTarget() {

@@ -80,12 +80,17 @@ const metaFor = (element, role) => {
   const password = element.tagName === 'INPUT' && element.type === 'password';
   const value = editable && !password ? String(element.isContentEditable ? element.innerText : element.value ?? '') : null;
   const link = role === 'link' ? String(element.href || '') : null;
+  // Keep the destination observable without offering an action this backend
+  // must reject. Task input never creates or adopts an unowned popup.
+  const popupOnlyLink = element.tagName === 'A' && !!element.target
+    && !['_self','_top','_parent'].includes(element.target.toLowerCase());
   const tooLarge = name.length > 4096 || (value?.length || 0) > 4096 || (link?.length || 0) > 2048;
   const disabled = !!element.disabled || !!element.closest('[disabled], [aria-disabled="true"]') || password || tooLarge;
   const readOnly = !!element.readOnly || element.getAttribute('aria-readonly') === 'true' || password || tooLarge || (editableRole && !nativeEditable);
   return {role, name:name.slice(0,4096), value:password ? null : value?.slice(0,4096) ?? null,
     linkURL:link?.slice(0,2048) ?? null, isDisabled:disabled, isReadOnly:readOnly, isEditable:editable && !readOnly,
-    isIgnored:false, isDOMClickable:['button','link','checkbox','radio','switch','tab','menuitem'].includes(role),
+    isIgnored:false, isDOMClickable:!popupOnlyLink && ['button','link','checkbox','radio','switch','tab','menuitem'].includes(role),
+    isPressUnsupported:popupOnlyLink,
     isFocusablePointer:false, fieldTruncated:tooLarge};
 };
 const capture = () => {
@@ -101,7 +106,7 @@ const capture = () => {
       const id = idFor(node), name = text.slice(0,4096);
       truncated ||= text.length > 4096;
       nodes.push({backendNodeID:id,nodeID:String(id),parentNodeID:item.parent,childNodeIDs:[],role:'statictext',name,
-        value:null,isDisabled:true,isReadOnly:true,isIgnored:false,isDOMClickable:false,isFocusablePointer:false,isEditable:false,linkURL:null});
+        value:null,isDisabled:true,isReadOnly:true,isIgnored:false,isDOMClickable:false,isPressUnsupported:false,isFocusablePointer:false,isEditable:false,linkURL:null});
       budget += name.length * 3 + 200;
       continue;
     }
@@ -158,7 +163,7 @@ let semanticParent = element.parentElement;
 while (semanticParent && !roleFor(semanticParent)) semanticParent = semanticParent.parentElement;
 const parentID = semanticParent ? String(idFor(semanticParent)) : null;
 if (parentID !== input.expected.parentNodeID) throw new Error('element_changed');
-for (const key of ['role','name','value','linkURL','isDisabled','isReadOnly','isEditable','isDOMClickable'])
+for (const key of ['role','name','value','linkURL','isDisabled','isReadOnly','isEditable','isDOMClickable','isPressUnsupported'])
   if (current[key] !== input.expected[key]) throw new Error('element_changed');
 if (current.isDisabled || input.expectedURL !== location.href) throw new Error('stale_document');
 element.scrollIntoView({block:'center',inline:'center'});

@@ -62,6 +62,112 @@ final class ComputerTaskScopeTests: XCTestCase {
         }
     }
 
+    func testOutlookScopeIncludesDedicatedMailHostsAndOnlyItsProductLandingPath() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
+        for raw in [
+            "https://outlook.live.com/mail/", "https://outlook.office.com/mail/",
+            "https://outlook.office365.com/mail/", "https://outlook.cloud.microsoft/mail",
+            "https://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook?deeplink=%2Fmail%2F&sdf=0&sessionId=opaque",
+            "https://www.microsoft.com/fr-fr/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook/",
+            "https://www.microsoft.com/en/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+            "https://www.microsoft.com/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+        ] {
+            XCTAssertNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+        for raw in [
+            "https://www.microsoft.com/", "https://www.microsoft.com/en-us/microsoft-365/",
+            "https://www.microsoft.com/en-us/microsoft-365/outlook/another-product",
+            "https://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook/other",
+            "https://www.microsoft.com.attacker.test/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+            "http://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+            "https://www.microsoft.com:444/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+            "https://user:secret@www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook",
+        ] {
+            XCTAssertNotNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+    }
+
+    func testOutlookScopeAcceptsOnlyTheObservedSignInForwardLink() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
+        for raw in [
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2F&sessionId=opaque",
+            "https://go.microsoft.com/fwlink/p?LinkID=2125442",
+            "https://go.microsoft.com:443/fwlink/p/?linkid=2125442&deeplink=mail%2F",
+        ] {
+            XCTAssertNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+        for raw in [
+            "https://go.microsoft.com/fwlink/p/", "https://go.microsoft.com/fwlink/p/?LinkID=1",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&LinkID=2125442",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&linkid=1",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=https%3A%2F%2Fattacker.test",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2Fother",
+            "https://go.microsoft.com/fwlink/p/?LinkID=2125442&deeplink=mail%2F&deeplink=mail%2F",
+            "https://go.microsoft.com/fwlink/?LinkID=2125442", "https://go.microsoft.com/other?LinkID=2125442",
+            "http://go.microsoft.com/fwlink/p/?LinkID=2125442", "https://go.microsoft.com:444/fwlink/p/?LinkID=2125442",
+            "https://user@go.microsoft.com/fwlink/p/?LinkID=2125442",
+        ] {
+            XCTAssertNotNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+    }
+
+    func testOutlookAuthorizationRequiresAnExactKnownMailDestinationOrOutlookResource() throws {
+        let scope = ComputerTaskScope(userPrompt: "Read my Outlook inbox")
+        let authorization = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        for host in ["outlook.live.com", "outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"] {
+            for path in ["/mail", "/mail/"] {
+                var components = try XCTUnwrap(URLComponents(string: authorization))
+                components.queryItems = [URLQueryItem(name: "redirect_uri", value: "https://" + host + path),
+                                         URLQueryItem(name: "scope", value: "openid profile https://outlook.office.com/.default")]
+                XCTAssertNil(scope.siteViolation(url: try XCTUnwrap(components.url)), host + path)
+            }
+        }
+        for query in [
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F&scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "redirect_uri=https%3A%2F%2Foutlook.cloud.microsoft%2Fmail&scope=openid%20profile",
+            "redirect_uri=https%3A%2F%2Foutlook.office.com%2Fmail%2F",
+            "scope=openid%20https%3A%2F%2Foutlook.office.com%2F.default",
+        ] {
+            XCTAssertNil(scope.siteViolation(url: try url(authorization + "?" + query)), query)
+        }
+        for query in [
+            "", "scope=openid%20profile", "redirect_uri=", "redirect_uri=https%3A%2F%2Fattacker.test%2Fmail%2F",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com.attacker.test%2Fmail%2F&scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "redirect_uri=http%3A%2F%2Foutlook.live.com%2Fmail%2F",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%3A444%2Fmail%2F",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2Fother",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F%3Fnext%3Dhttps%3A%2F%2Fattacker.test",
+            "redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F&REDIRECT_URI=https%3A%2F%2Foutlook.live.com%2Fmail%2F",
+            "scope=https%3A%2F%2Foutlook.office.com%2F.default&SCOPE=openid",
+        ] {
+            XCTAssertNotNil(scope.siteViolation(url: try url(authorization + "?" + query)), query)
+        }
+        for raw in [
+            "https://login.microsoftonline.com/other/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "https://login.microsoftonline.com/common/other?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "https://login.microsoftonline.com.attacker.test/common/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "http://login.microsoftonline.com/common/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "https://login.microsoftonline.com:444/common/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+            "https://user@login.microsoftonline.com/common/oauth2/v2.0/authorize?scope=https%3A%2F%2Foutlook.office.com%2F.default",
+        ] {
+            XCTAssertNotNil(scope.siteViolation(url: try url(raw)), raw)
+        }
+    }
+
+    func testOutlookSupplementalRoutesDoNotExpandExplicitURLOrOtherServiceScopes() throws {
+        let landing = try url("https://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook")
+        let authorization = try url("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F")
+        let forward = try url("https://go.microsoft.com/fwlink/p/?LinkID=2125442")
+        let explicit = ComputerTaskScope(userPrompt: "Read Outlook at https://outlook.live.com/mail/")
+        XCTAssertEqual(explicit.targetConfidence, .explicitURL)
+        XCTAssertNil(explicit.siteViolation(url: try url("https://outlook.live.com/mail/")))
+        for scope in [explicit, ComputerTaskScope(userPrompt: "Read Gmail")] {
+            for destination in [landing, authorization, forward] {
+                XCTAssertNotNil(scope.siteViolation(url: destination), destination.absoluteString)
+            }
+        }
+    }
+
     func testExplicitURLMatchesHostAndPortNotMisleadingSubstring() throws {
         let scope = ComputerTaskScope(userPrompt: "Inspect https://fixture.example:8123/search?q=flights.")
         XCTAssertEqual(scope.targetConfidence, .explicitURL)

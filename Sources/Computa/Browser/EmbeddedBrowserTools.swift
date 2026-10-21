@@ -42,6 +42,10 @@ enum EmbeddedBrowserTools {
             ]
         }
         let string: [String: Any] = ["type": "string"]
+        let cursor: [String: Any] = ["type": "string", "minLength": 1,
+            "description": "Omit this field on the first page or a fresh read. Only copy an exact nonempty next_cursor returned by this same tool in the current turn; never send an empty string, null or an invented cursor. At most 2048 UTF-8 bytes."]
+        let query: [String: Any] = ["type": "string", "minLength": 1,
+            "description": "Optional observed-text filter, at most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
         let url: [String: Any] = ["type": "string", "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
         let mutation: [String: Any] = [
             "snapshot_id": ["type": "string", "description": "Use the ID from the latest browser_read or available current_observation returned by an input. Input consumes it: never batch another input; await the result and use its new references, or browser_read if unavailable."],
@@ -50,8 +54,8 @@ enum EmbeddedBrowserTools {
         return [
             specification(
                 "browser_tabs",
-                "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Empty inventory means no matching user tabs were listed, not denied access; use browser_open for a named known service's official entrypoint. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
-                ["cursor": string]),
+                "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Omit cursor for the first page. Empty inventory means no matching user tabs were listed, not denied access; use browser_open for a named known service's official entrypoint. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
+                ["cursor": cursor]),
             specification(
                 "browser_open",
                 "Create and bind one background task-owned tab in Computa's built-in browser, sharing its signed-in profile. A user-provided URL is not required for a user-named known service's official homepage or sign-in entrypoint. Preserve any supplied URL exactly; use observed controls for deeper pages. Only this created tab is cleaned up at turn end.",
@@ -66,10 +70,10 @@ enum EmbeddedBrowserTools {
                 ["url": url], ["url"]),
             specification(
                 "browser_read",
-                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for document text, all for structure. Continue with browser_read(cursor=next_cursor) alone, never computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only, even when enabled=true; content containers do not inherit a child link's action. Use view=links or all with observed text to find the actual control. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",
+                "Read compact visible DOM semantics for the bound built-in tab. Use overview for controls/headings, content for document text, all for structure. Continue with browser_read(cursor=next_cursor) alone, never computer_v2_continue. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] is read-only, even when enabled=true; content containers do not inherit a child link's action. For a popup-only link without AXPress, use browser_navigate with its complete exact observed href in the same bound tab; never reconstruct href_fragment or href_omitted destinations. Use view=links or all with observed text to find the actual control. Snapshot IDs and indices authorize one subsequent action only; act on observed navigation without repeating unchanged reads.",
                 [
                     "view": ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]],
-                    "query": string, "cursor": string,
+                    "query": query, "cursor": cursor,
                 ]),
             specification(
                 "browser_click",
