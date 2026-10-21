@@ -53,6 +53,57 @@ final class APIModelResponseCodecTests: XCTestCase {
         try request(provider: .init(id: "cerebras-fixture", name: "Cerebras Fixture", baseURL: URL(string: "https://api.cerebras.ai/v1")!,
             wireAPI: .chatCompletions, models: [.init(id: "fixture-model", name: "Fixture")]))
     }
+
+    func testRestoredAppsSchemaRefreshReachesCerebrasWithoutRewritingFailedHistory() throws {
+        let p = APIProviderDefinition(id: "cerebras-fixture", name: "Cerebras Fixture",
+            baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
+            models: [.init(id: "gpt-oss-120b", name: "GPT OSS")])
+        let modelID = APIProviderCatalog.appModelID(providerID: p.id, modelID: p.models[0].id)
+        let oldSchema: [String: Any] = ["type": "object", "properties": ["query": ["type": "string"]],
+                                      "required": [String](), "additionalProperties": false]
+        let canonical = try XCTUnwrap(ComputerV2ToolContract.specs(for: modelID)
+            .first { $0["name"] as? String == "computer_v2_apps" }?["inputSchema"] as? [String: Any])
+        for key in ["parameters", "inputSchema"] {
+            let saved: [String: Any] = ["type": "function", "name": "computer_v2_apps", key: oldSchema]
+            let visible = try XCTUnwrap(ComputaModelToolCatalog.visibleToolDefinitions([saved], modelID: modelID).first)
+            XCTAssertEqual(visible[key] as? NSDictionary, canonical as NSDictionary)
+            XCTAssertEqual(saved[key] as? NSDictionary, oldSchema as NSDictionary, "Saved definitions remain unchanged")
+        }
+        let saved: [String: Any] = ["type": "function", "name": "computer_v2_apps", "parameters": oldSchema]
+        let history: [[String: Any]] = [
+            ["role": "user", "content": "Find the requested application"],
+            ["type": "function_call", "call_id": "old-empty-apps", "name": "computer_v2_apps",
+             "namespace": "functions", "arguments": "{\"query\":\"\"}"],
+            ["type": "function_call_output", "call_id": "old-empty-apps", "output": "Invalid computer V2 argument: query"],
+            ["role": "user", "content": "Continue using current tools"],
+        ]
+        let prepared = try request(["tools": [["type": "namespace", "name": "functions", "tools": [saved]]],
+                                    "input": history], provider: p, toolNaming: .semantic)
+        let wire = try XCTUnwrap(try wireFunctions(prepared).first)
+        XCTAssertEqual(wire["parameters"] as? NSDictionary, canonical as NSDictionary)
+        let properties = try XCTUnwrap(canonical["properties"] as? [String: Any])
+        let query = try XCTUnwrap(properties["query"] as? [String: Any])
+        XCTAssertEqual(query["minLength"] as? Int, 1)
+        XCTAssertNotNil(query["pattern"] as? String); XCTAssertNil(query["maxLength"])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let oldCall = try XCTUnwrap(messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
+        XCTAssertEqual((oldCall["function"] as? [String: Any])?["arguments"] as? String, "{\"query\":\"\"}")
+        XCTAssertEqual(messages.first { $0["role"] as? String == "tool" }?["content"] as? String,
+                       "Invalid computer V2 argument: query")
+        let alias = try XCTUnwrap(wire["name"] as? String)
+        for arguments in ["{}", "{\"query\":\"Outlook\"}"] {
+            XCTAssertNoThrow(try decode(["role": "assistant", "tool_calls": [["id": "current-apps", "type": "function",
+                "function": ["name": alias, "arguments": arguments]]]], finish: "tool_calls", request: prepared, model: p.models[0].id))
+        }
+        for arguments in ["{\"query\":\"\"}", "{\"query\":\" \\t\"}", "{\"query\":\"\\u200b\"}"] {
+            XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "current-apps", "type": "function",
+                "function": ["name": alias, "arguments": arguments]]]], finish: "tool_calls", request: prepared, model: p.models[0].id)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+        }
+    }
+
     private func cerebrasErrorWire(_ envelope: Any, event: String? = nil, prefix: Data = Data()) throws -> Data {
         var result = prefix
         if let event { result.append(Data("event: \(event)\n".utf8)) }

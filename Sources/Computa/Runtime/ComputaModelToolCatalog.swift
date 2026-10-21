@@ -29,6 +29,8 @@ enum ComputaModelToolCatalog {
     static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String) -> [[String: Any]] {
         guard !enableExternalChromeTools else { return definitions }
         let overrides = nativeToolDescriptions(modelID: modelID)
+        let appsSchema = ComputerV2ToolContract.specs(for: modelID, externalChromeTools: false)
+            .first { $0["name"] as? String == "computer_v2_apps" }?["inputSchema"] as? [String: Any]
         func visible(_ definition: [String: Any]) -> [String: Any]? {
             var value = definition
             if value["type"] as? String == "namespace", let children = value["tools"] as? [[String: Any]] {
@@ -40,6 +42,13 @@ enum ComputaModelToolCatalog {
             guard let name = value["name"] as? String else { return value }
             guard !externalChromeToolNames.contains(name) else { return nil }
             if let description = overrides[name] { value["description"] = description }
+            if name == "computer_v2_apps", value["type"] as? String == "function", let appsSchema {
+                // Refresh current calls only. API history is parsed against its
+                // original catalog before this projection, including old errors.
+                for key in ["parameters", "inputSchema"] where value[key] is [String: Any] {
+                    value[key] = appsSchema
+                }
+            }
             if name == "computer_v2_open" {
                 for key in ["parameters", "inputSchema"] {
                     guard var schema = value[key] as? [String: Any], var properties = schema["properties"] as? [String: Any] else { continue }
