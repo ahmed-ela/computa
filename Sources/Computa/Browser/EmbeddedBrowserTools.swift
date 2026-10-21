@@ -186,6 +186,14 @@ enum EmbeddedBrowserTools {
     }
 }
 
+/// A rejected preflight stays a tool failure. The runtime may publish this
+/// separate bounded read only after its normal failure/terminal checks.
+struct EmbeddedBrowserPreflightRecoveryFailure: Error, LocalizedError, Sendable {
+    let original: BrowserTabBrokerError = .staleSnapshot
+    let observationResponse: String
+    var errorDescription: String? { original.localizedDescription }
+}
+
 /// Each active turn receives its own taskKey from the runtime. The controller
 /// retains an exact tab lease and capability; it never operates on an active tab.
 actor EmbeddedBrowserToolController {
@@ -206,6 +214,7 @@ actor EmbeddedBrowserToolController {
         var inventory = [BrowserTarget]()
         var inventoryOffset = 0
         var inventoryCursor: String?
+        var stalePreflightRecoveryIDs = Set<UUID>()
         var scope: ComputerTaskScope?
         var cleanupTargets = [EmbeddedBrowserCleanupReport.Target]()
         var cleanupFailures = [EmbeddedBrowserCleanupReport.Issue]()
@@ -255,8 +264,14 @@ actor EmbeddedBrowserToolController {
         guard context.scope == scope else {
             throw BrowserTabBrokerError.invalidRead("The host browser scope changed within this turn; start a new turn.")
         }
-        _ = try await capturedMutation(taskKey: taskKey, contextID: context.id,
-                                       tool: tool, object: object, scope: scope)
+        do {
+            _ = try await capturedMutation(taskKey: taskKey, contextID: context.id,
+                                           tool: tool, object: object, scope: scope)
+        } catch BrowserTabBrokerError.staleSnapshot {
+            let rejectedID = UUID(uuidString: object["snapshot_id"] as! String)!
+            throw try await stalePreflightRecovery(taskKey: taskKey, contextID: context.id,
+                                                   rejectedID: rejectedID, scope: scope)
+        }
     }
 
     func execute(taskKey: String, tool: String, arguments: Data, scope: ComputerTaskScope? = nil)
@@ -727,6 +742,45 @@ actor EmbeddedBrowserToolController {
             result["action_references"] = ["consumed": true, "next": "browser_read"]
             result["next"] = "Input was dispatched. Do not repeat it. Use browser_read for current evidence and new references if the bound tab is still available."
             return try json(result)
+        }
+    }
+
+    /// Called only after capturedMutation rejected before approval or input.
+    /// Neither a failed recovery nor an explicit read refunds this turn's cap.
+    private func stalePreflightRecovery(taskKey: String, contextID: UUID, rejectedID: UUID,
+                                         scope: ComputerTaskScope?) async throws -> EmbeddedBrowserPreflightRecoveryFailure {
+        try Task.checkCancellation()
+        try check(taskKey, contextID)
+        var result: [String: Any] = [
+            "success": false, "error": ["code": "stale_snapshot", "message": BrowserTabBrokerError.staleSnapshot.localizedDescription],
+            "dispatched": false, "no_replay": true,
+        ]
+        let repeated = contexts[taskKey]!.stalePreflightRecoveryIDs.contains(rejectedID)
+        let exhausted = contexts[taskKey]!.stalePreflightRecoveryIDs.count >= 3
+        if repeated || exhausted {
+            result["current_observation"] = ["status": "unavailable", "reason": repeated ? "recovery_already_attempted" : "recovery_limit"]
+            result["next"] = "No input was dispatched. The stale reference was rejected and not retried. Use browser_read for current evidence before choosing another input."
+            return EmbeddedBrowserPreflightRecoveryFailure(observationResponse: try json(result))
+        }
+        contexts[taskKey]?.stalePreflightRecoveryIDs.insert(rejectedID)
+        do {
+            let snapshot = try await currentObservation(taskKey: taskKey, contextID: contextID,
+                scope: scope, read: SemanticReadRequest(view: .overview))
+            try Task.checkCancellation()
+            try check(taskKey, contextID)
+            result["current_observation"] = ["status": "available", "view": "overview",
+                "snapshot_id": snapshot.id.uuidString, "text": try readResponse(snapshot)]
+            result["next"] = "No input was dispatched or retried. Inspect the current row's label/action and use only its new references in a separate call; never reuse the rejected reference or assume its old index still identifies the intended control."
+            let response = try json(result)
+            guard response.utf8.count <= 20_480 else { throw PostInputObservationFailure.outputLimit }
+            try Task.checkCancellation()
+            return EmbeddedBrowserPreflightRecoveryFailure(observationResponse: response)
+        } catch {
+            if contexts[taskKey]?.id == contextID { contexts[taskKey]?.snapshot = nil }
+            try Task.checkCancellation()
+            result["current_observation"] = ["status": "unavailable", "reason": Self.observationFailureReason(error)]
+            result["next"] = "No input was dispatched. The stale reference was rejected and not retried. Use browser_read for current evidence if the bound tab is still available."
+            return EmbeddedBrowserPreflightRecoveryFailure(observationResponse: try json(result))
         }
     }
 

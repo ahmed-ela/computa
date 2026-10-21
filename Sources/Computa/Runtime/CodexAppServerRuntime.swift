@@ -4954,6 +4954,13 @@ private extension CodexAppServerRuntime {
                     return
                 }
                 var failureItems = [textContent(message)]
+                if EmbeddedBrowserTools.names.contains(tool),
+                   let recovery = error as? EmbeddedBrowserPreflightRecoveryFailure {
+                    // This remains a failed, undispatched action. The controller
+                    // only refreshed a read before approval; retry accounting
+                    // above and the normal final publication fences still apply.
+                    failureItems.append(textContent(recovery.observationResponse))
+                }
                 if requestedAlias != nil, terminal == nil, let taskID,
                    let recovery = await recoverReferencePresentation(after: error, taskID: taskID) {
                     if recovery.didRead {

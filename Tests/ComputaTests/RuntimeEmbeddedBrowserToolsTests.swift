@@ -553,6 +553,59 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
         }
     }
 
+    func testStaleBrowserPreflightReturnsFailedReadRecoveryAndRequiresANewApprovedCall() async throws {
+        try await withHarness(approval: true) { harness in
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"], "saveSnapshot": "old_snapshot"],
+                ["tool": "browser_read", "arguments": ["view": "content"]],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@old_snapshot", "element_index": "@field", "text": "MUST_NOT_FILL"], "captureRecovery": true],
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "UA 123"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+            ])
+            try await self.waitFor { harness.rowCount == 6 && harness.audit.status == .completed }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, false, true, true])
+            let failure = try XCTUnwrap(rows[3]["text"] as? String)
+            XCTAssertTrue(failure.contains("stale_snapshot"))
+            XCTAssertTrue(failure.contains("\"dispatched\":false"))
+            XCTAssertTrue(failure.contains("\"status\":\"available\""))
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open", "browser_fill"])
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.fills, 1); XCTAssertEqual(counts.presses, 0)
+            XCTAssertTrue((rows.last?["text"] as? String)?.contains("UA 123") == true)
+            XCTAssertFalse((rows.last?["text"] as? String)?.contains("MUST_NOT_FILL") == true)
+        }
+    }
+
+    func testBrowserReadRecoveryDoesNotResetRepeatedFailureStopOrReplayInput() async throws {
+        try await withHarness(approval: true) { harness in
+            let stale: [String: Any] = ["tool": "browser_fill", "arguments": [
+                "snapshot_id": "@old_snapshot", "element_index": "@field", "text": "MUST_NOT_FILL",
+            ]]
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"], "saveSnapshot": "old_snapshot"],
+                ["tool": "browser_read", "arguments": ["view": "content"]],
+                stale, stale, stale,
+                ["tool": "browser_fill", "arguments": ["snapshot_id": "@snapshot", "element_index": "@field", "text": "MUST_NOT_FILL_AFTER_STOP"]],
+            ])
+            try await self.waitFor {
+                harness.rowCount == 6 && harness.audit.status == .waiting
+                    && harness.audit.entries.contains { $0.title == "Native action stopped" }
+            }
+            let rows = try harness.rows()
+            XCTAssertEqual(rows.map { $0["success"] as? Bool }, [true, true, true, false, false, false])
+            XCTAssertTrue((rows[3]["text"] as? String)?.contains("\"status\":\"available\"") == true)
+            XCTAssertTrue((rows[4]["text"] as? String)?.contains("\"status\":\"unavailable\"") == true)
+            let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: harness.root.appendingPathComponent("requests.json"))) as? [[String: Any]])
+            XCTAssertEqual(sent.count, 6, "The third unchanged failure must interrupt before another input request")
+            XCTAssertEqual(harness.audit.approvals.map(\.summary), ["browser_open"])
+            let counts = await harness.backend.counts()
+            XCTAssertEqual(counts.mutations, 0)
+        }
+    }
+
     func testStopAndShutdownCloseOnlyTaskCreatedPages() async throws {
         for stop in [false, true] {
             try await withHarness(approval: true) { harness in
@@ -835,16 +888,26 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
       const text = (message.result?.contentItems ?? []).map(item => item.text ?? '').join('\n');
       rows.push({turnId, tool:plan.calls[step].tool, success:message.result?.success === true, text, error:message.error?.message ?? null});
       save('results.json', rows);
-      if (message.result?.success) {
+      let observationText = message.result?.success ? text : null;
+      if (!message.result?.success && plan.calls[step].captureRecovery) {
+        for (const item of message.result?.contentItems ?? []) {
+          try {
+            const recovery = JSON.parse(item.text);
+            if (recovery.success === false && recovery.dispatched === false && recovery.error?.code === 'stale_snapshot'
+                && recovery.current_observation?.status === 'available') observationText = recovery.current_observation.text;
+          } catch {}
+        }
+      }
+      if (observationText) {
         try { const data = JSON.parse(text); if (data.tabs?.[0]?.tab_id) refs.human = data.tabs[0].tab_id; } catch {}
-        const snapshot = text.match(/AXSNAPSHOT id=([A-Fa-f0-9-]{36})/);
+        const snapshot = observationText.match(/AXSNAPSHOT id=([A-Fa-f0-9-]{36})/);
         if (snapshot) {
           refs.snapshot = snapshot[1];
           if (plan.calls[step].saveSnapshot) refs[plan.calls[step].saveSnapshot] = snapshot[1];
-          const field = text.split('\n').find(line => line.startsWith('#') && line.includes('label="Search flights"'));
-          const button = text.split('\n').find(line => line.startsWith('#') && line.includes('label="Find flight"'));
-          const heading = text.split('\n').find(line => line.startsWith('#') && line.includes('label="United flight fixture"'));
-          const nativeRow = text.split('\n').find(line => line.startsWith('#') && line.includes('label="Pending native selection"'));
+          const field = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="Search flights"'));
+          const button = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="Find flight"'));
+          const heading = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="United flight fixture"'));
+          const nativeRow = observationText.split('\n').find(line => line.startsWith('#') && line.includes('label="Pending native selection"'));
           if (field) refs.field = Number(field.match(/^#(\d+)/)[1]);
           if (button) refs.button = Number(button.match(/^#(\d+)/)[1]);
           if (heading) refs.heading = Number(heading.match(/^#(\d+)/)[1]);
