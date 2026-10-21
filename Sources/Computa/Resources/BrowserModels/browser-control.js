@@ -133,26 +133,49 @@ const capture = () => {
   for (const node of nodes) if (node.parentNodeID && byID.has(node.parentNodeID)) byID.get(node.parentNodeID).childNodeIDs.push(node.nodeID);
   return {loaderID:input.documentToken, title:String(document.title).slice(0,512), url:location.href, nodes, sourceTruncated:truncated};
 };
-if (input.operation === 'observe') return capture();
-if (input.operation === 'wait') {
-  const text = String(input.text || '');
-  const matches = () => document.readyState !== 'loading' && (!text || capture().nodes.some(node => node.name.includes(text) || (node.value || '').includes(text)));
-  if (matches()) return {matched:true};
+const isSemanticNode = node =>
+  ['button','link','checkbox','combobox','searchbox','textbox','menu','menubar','menuitem',
+    'menuitemcheckbox','menuitemradio','radio','radiogroup','switch','tab','tablist',
+    'toolbar','slider','spinbutton','listbox','option','treeitem'].includes(node.role)
+  || (['statictext','inlinetextbox','text','heading','paragraph','listitem','term','definition',
+    'code','blockquote','cell','gridcell','rowheader','columnheader','caption','label'].includes(node.role)
+    && !!trim(node.name || node.value));
+const hasSemanticContent = snapshot => snapshot.nodes.some(isSemanticNode);
+// Only empty semantic shells wait. A meaningful page returns immediately;
+// expiration is a bounded observation, never proof that requested content is absent.
+const waitForCapture = async matches => {
+  const initial = capture();
+  if (matches(initial)) return {snapshot:initial, matched:true};
+  if (!Number.isInteger(input.timeoutMS) || input.timeoutMS < 1 || input.timeoutMS > 10000)
+    throw new Error('invalid_readiness_timeout');
   return await new Promise(resolve => {
     let finished = false;
-    const done = matched => {
+    const events = ['DOMContentLoaded','readystatechange','input','change'];
+    const done = (snapshot, matched) => {
       if (finished) return;
       finished = true; observer.disconnect(); clearTimeout(timer);
-      for (const event of ['DOMContentLoaded','input','change']) document.removeEventListener(event, changed, true);
-      resolve({matched});
+      for (const event of events) document.removeEventListener(event, changed, true);
+      resolve({snapshot, matched});
     };
-    const changed = () => { if (matches()) done(true); };
+    const changed = () => { const snapshot = capture(); if (matches(snapshot)) done(snapshot, true); };
     const observer = new MutationObserver(changed);
-    observer.observe(document.documentElement, {subtree:true,childList:true,characterData:true,attributes:true});
-    const timer = setTimeout(() => done(false), input.timeoutMS);
-    for (const event of ['DOMContentLoaded','input','change']) document.addEventListener(event, changed, true);
+    observer.observe(document, {subtree:true,childList:true,characterData:true,attributes:true});
+    const timer = setTimeout(() => { const snapshot = capture(); done(snapshot, matches(snapshot)); }, input.timeoutMS);
+    for (const event of events) document.addEventListener(event, changed, true);
     changed(); // Registration race is closed without polling.
   });
+};
+if (input.operation === 'observe') {
+  const result = await waitForCapture(hasSemanticContent);
+  return {...result.snapshot, semanticReadiness:result.matched ? 'ready' : 'empty_at_deadline'};
+}
+if (input.operation === 'wait') {
+  const text = String(input.text || '');
+  const result = await waitForCapture(snapshot => document.readyState !== 'loading'
+    && (text ? snapshot.nodes.some(node => isSemanticNode(node)
+        && (node.name.includes(text) || (node.value || '').includes(text)))
+      : hasSemanticContent(snapshot)));
+  return {matched:result.matched};
 }
 if (!['press','fill'].includes(input.operation)) throw new Error('unsupported_operation');
 const element = state.nodes.get(input.nodeID);

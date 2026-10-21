@@ -89,12 +89,20 @@ struct BrowserDocumentNode: Equatable, Sendable {
 }
 
 struct BrowserDocumentObservation: Equatable, Sendable {
+    enum SemanticReadiness: String, Equatable, Sendable {
+        /// Observed semantics exist; this is not a match for the user's task.
+        case ready
+        case emptyAtDeadline = "empty_at_deadline"
+    }
     let loaderID: String
     let title: String
     let url: URL
     let nodes: [BrowserDocumentNode]
     let sourceTruncated: Bool
     var sourceName = "chrome_devtools"
+    /// Optional for other backends. An empty bounded observation is not proof
+    /// that requested content is absent or that SPA initialization has ended.
+    var semanticReadiness: SemanticReadiness? = nil
     /// Host-only immutable plan carried to the final CDP mutation preflight.
     /// Never accepted from a browser document or model response.
     var verificationPlan: BrowserActionVerification.Plan? = nil
@@ -1507,7 +1515,8 @@ actor BrowserTabSessionBroker {
                 + "output_truncated=\(nextCursor == nil ? 0 : 1) field_truncated=\(fieldsTruncated ? 1 : 0) "
                 + "metadata_truncated=\(metadataTruncated ? 1 : 0) "
                 + "no_matches=\(totalMatches == 0 ? 1 : 0) visibility=unknown "
-                + "next_cursor=\(nextCursor ?? "none") observation=\(retainedObservation ? "retained" : "live")",
+                + "next_cursor=\(nextCursor ?? "none") observation=\(retainedObservation ? "retained" : "live")"
+                + (document.semanticReadiness.map { " semantic_readiness=\($0.rawValue)" } ?? ""),
             "CONTENT_EVIDENCE document_content_shown=\(elements.filter { $0.contentKind == .readable && $0.contentScope.isDocumentContent }.count) "
                 + "navigation_shown=\(elements.filter { $0.contentScope == .navigation }.count) "
                 + "complementary_shown=\(elements.filter { $0.contentScope == .complementary }.count) "
@@ -1523,6 +1532,9 @@ actor BrowserTabSessionBroker {
             lines.append("OVERVIEW selection=observed_controls_headings_navigation ordering=interleaved_categories document_content_exhaustive=false. Read view=content for the document body; view=all retains full structural context for action planning.")
         }
         lines.append(contentsOf: rows)
+        if document.semanticReadiness == .emptyAtDeadline {
+            lines.append("No readable text or controls were observed before the readiness deadline. This empty observation does not establish that requested content is absent; loading or page initialization may remain unresolved.")
+        }
         lines.append("Content scopes and counts describe only this exposed page's observed structure; subject relevance is not verified. Tab titles and navigation/sidebar labels alone do not establish the document's contents. Unknown scope is not proof that content is absent.")
         lines.append("Readable fields are distinct from controls and metadata. Use view=all or links for navigation/controls. Exhausting a captured selection does not establish that virtualized or uncaptured content is absent.")
         if rows.contains(where: { $0.contains(" region_changed_candidate=true ") }) {

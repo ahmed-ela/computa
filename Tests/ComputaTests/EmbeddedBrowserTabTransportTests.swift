@@ -264,6 +264,51 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testRealWebKitReadWaitsForSemanticDOMWithoutTreatingItsTitleAsContent() async throws {
+        let (session, transport, view, target) = try await semanticReadinessFixture()
+        defer { session.shutdown() }
+        let generation = session.documentGeneration(for: try XCTUnwrap(UUID(uuidString: target.targetID)))
+        let pending = Task { try await transport.observe(target: target) }
+        try await waitForSemanticObserver(view)
+        _ = try await script(view, "const p=document.createElement('p');p.textContent='Rendered fixture content';document.body.appendChild(p);return true;")
+        let observed = try await pending.value
+        XCTAssertEqual(observed.semanticReadiness, .ready)
+        XCTAssertTrue(observed.nodes.contains { $0.role == "statictext" && $0.name == "Rendered fixture content" })
+        XCTAssertEqual(observed.loaderID, generation?.uuidString)
+        XCTAssertEqual(observed.title, "Outlook")
+    }
+
+    func testSemanticReadinessNavigationContextFailureRemainsAStaleRead() async throws {
+        let (session, transport, view, target) = try await semanticReadinessFixture()
+        defer { session.shutdown() }
+        let pending = Task { try await transport.observe(target: target) }
+        try await waitForSemanticObserver(view)
+        let id = try XCTUnwrap(UUID(uuidString: target.targetID))
+        try session.navigate(tabID: id, to: XCTUnwrap(URL(string: "about:blank")))
+        do { _ = try await pending.value; XCTFail("The old document cannot publish after navigation destroys its context") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleDocument) }
+        XCTAssertTrue(session.webView(for: id) === view)
+    }
+
+    func testSemanticReadinessCannotPublishAfterCancellationOrTabClosure() async throws {
+        for closed in [false, true] {
+            let (session, transport, view, target) = try await semanticReadinessFixture()
+            let pending = Task { try await transport.observe(target: target) }
+            try await waitForSemanticObserver(view)
+            let id = try XCTUnwrap(UUID(uuidString: target.targetID))
+            if closed { session.closeTab(id) } else { pending.cancel() }
+            // Release the synthetic DOM wait too; its late result cannot revive
+            // a canceled continuation or this never-reused closed tab identity.
+            _ = try? await script(view, "const p=document.createElement('p');p.textContent='Late fixture content';document.body.appendChild(p);return true;")
+            do { _ = try await pending.value; XCTFail("Retired read cannot publish content") }
+            catch {
+                if closed { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
+                else { XCTAssertTrue(error is CancellationError) }
+            }
+            session.shutdown()
+        }
+    }
+
     func testPrivateWorldResistsPageForgedIDsAndStaleNodeMetadata() async throws {
         let session=EmbeddedBrowserSession(persistent:false), transport=EmbeddedBrowserTabTransport(session:session)
         defer { session.shutdown() }
@@ -490,6 +535,47 @@ final class EmbeddedBrowserTabTransportTests: XCTestCase {
         let fresh=try await transport.observe(target:target)
         XCTAssertNotEqual(fresh.loaderID,observed.loaderID)
         XCTAssertFalse(fresh.nodes.contains { $0.value=="MUST_NOT_APPEAR" })
+    }
+
+    private func semanticReadinessFixture() async throws -> (EmbeddedBrowserSession, EmbeddedBrowserTabTransport, WKWebView, BrowserTarget) {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let resource = root.appendingPathComponent("Sources/Computa/Resources/BrowserModels/browser-control.js")
+        let source = try String(contentsOf: resource, encoding: .utf8)
+        let registration = "observer.observe(document, {subtree:true,childList:true,characterData:true,attributes:true});"
+        XCTAssertEqual(source.components(separatedBy: registration).count, 2)
+        // A fixture-only DOM signal lets the test await actual observer
+        // registration, without timing sleeps or polling either WebView.
+        let instrumented = source.replacingOccurrences(of: registration, with:
+            registration + "\ndocument.documentElement.setAttribute('data-computa-readiness-test-armed','yes');")
+        let session = EmbeddedBrowserSession(persistent: false)
+        let transport = EmbeddedBrowserTabTransport(session: session, script: instrumented)
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        view.loadHTMLString("<!doctype html><title>Outlook</title><body><main aria-label='Outlook'></main></body>",
+                            baseURL: URL(string: "http://localhost:8123/semantic-readiness"))
+        try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        let available = try await transport.target(id: id.uuidString)
+        return (session, transport, view, try XCTUnwrap(available))
+    }
+
+    private func waitForSemanticObserver(_ view: WKWebView) async throws {
+        let source = """
+        if(document.documentElement.getAttribute('data-computa-readiness-test-armed')==='yes')return true;
+        return await new Promise((resolve,reject)=>{
+          const observer=new MutationObserver(changed);
+          const timer=setTimeout(()=>{observer.disconnect();reject(new Error('Fixture observer did not arm'));},5000);
+          function changed(){if(document.documentElement.getAttribute('data-computa-readiness-test-armed')==='yes'){
+            observer.disconnect();clearTimeout(timer);resolve(true);}}
+          observer.observe(document,{subtree:true,attributes:true,childList:true});changed();
+        });
+        """
+        let matched = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+            view.callAsyncJavaScript(source, arguments: [:], in: nil, in: .page) { reply in
+                do { continuation.resume(returning: try XCTUnwrap(reply.get() as? Bool)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+        XCTAssertTrue(matched)
     }
 
     private func script(_ view:WKWebView,_ source:String) async throws -> Data {

@@ -316,6 +316,78 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testSemanticReadinessDefaultsToAbsentForOtherBackends() async throws {
+        let observation = BrowserDocumentObservation(loaderID: "ordinary", title: "Fixture",
+            url: URL(string: "http://localhost:8123/flight")!, nodes: [])
+        XCTAssertNil(observation.semanticReadiness)
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.setObservationSourceName("chrome_devtools")
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let read = try await call(controller, "browser_read", ["view": "all"])
+        XCTAssertTrue(read.contains("source=chrome_devtools"))
+        XCTAssertFalse(read.contains("semantic_readiness="))
+        XCTAssertTrue(read.contains("actions=[\"AXPress\"]"), "Absent optional metadata does not change existing capabilities")
+        _ = await controller.shutdown()
+    }
+
+    func testReadyObservationPublishesOnlyTheFiniteReadinessMarker() async throws {
+        let wait = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_wait" })
+        let description = try XCTUnwrap(wait["description"] as? String)
+        XCTAssertTrue(description.contains("When text is omitted, wait for readable text or controls after document readiness"))
+        XCTAssertTrue(description.contains("a title-only or empty shell is not ready"))
+        XCTAssertTrue(description.contains("This readiness is not proof that requested content exists"))
+        XCTAssertTrue(description.contains("Does not refresh or replay actions"))
+        let schema = try XCTUnwrap(wait["inputSchema"] as? [String: Any])
+        XCTAssertFalse((schema["required"] as? [String] ?? []).contains("text"))
+        let properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
+        let omission = try XCTUnwrap(properties["text"]?["description"] as? String)
+        XCTAssertTrue(omission.contains("Omit text to wait for readable text or controls after document readiness"))
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        await backend.setSemanticReadiness(.ready)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let read = try await call(controller, "browser_read", ["view": "all"])
+        XCTAssertEqual(try field("semantic_readiness", in: read), "ready")
+        XCTAssertEqual(read.components(separatedBy: "semantic_readiness=").count - 1, 1)
+        XCTAssertTrue(read.contains("Check flight"))
+        XCTAssertTrue(read.contains("subject_relevance=not_verified"), "Readiness is not task success or document relevance")
+        let references = try actionReferenceMetadata(read)
+        XCTAssertEqual(references["clickable_element_indices"] as? [Int], [1])
+        XCTAssertEqual(references["fillable_element_indices"] as? [Int], [0])
+        let before = await backend.counts()
+        XCTAssertEqual(before.presses, 0); XCTAssertEqual(before.fills, 0); XCTAssertEqual(before.navigations, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testEmptyAtDeadlineIsNonErrorInconclusiveEvidenceWithoutMutationAuthority() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        let first = try await call(controller, "browser_read", ["view": "all"])
+        await backend.setSemanticReadiness(.emptyAtDeadline, empty: true)
+        let empty = try await call(controller, "browser_read", ["view": "all"])
+        XCTAssertEqual(try field("semantic_readiness", in: empty), "empty_at_deadline")
+        XCTAssertTrue(empty.contains("source_nodes=0")); XCTAssertTrue(empty.contains("no_matches=1"))
+        XCTAssertTrue(empty.contains("subject_relevance=not_verified"))
+        XCTAssertNotEqual(try snapshotID(empty), try snapshotID(first))
+        let references = try actionReferenceMetadata(empty)
+        XCTAssertEqual(references["clickable_element_indices"] as? [Int], [])
+        XCTAssertEqual(references["fillable_element_indices"] as? [Int], [])
+        for (id, index, expected) in [(try snapshotID(first), 1, BrowserTabBrokerError.staleSnapshot),
+                                      (try snapshotID(empty), 0, .elementNotFound)] {
+            do {
+                _ = try await call(controller, "browser_click", ["snapshot_id": id, "element_index": index])
+                XCTFail("Readiness metadata cannot create or retain input authority")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, expected) }
+        }
+        await backend.setSemanticReadiness(.ready)
+        let fresh = try await call(controller, "browser_read", ["view": "all"])
+        XCTAssertEqual(try field("semantic_readiness", in: fresh), "ready")
+        XCTAssertEqual(try field("tab_handle", in: fresh), try field("tab_handle", in: first))
+        XCTAssertTrue(fresh.contains("Check flight"), "A later read may expose new ordinary content under the same lease")
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.presses, 0); XCTAssertEqual(counts.fills, 0); XCTAssertEqual(counts.navigations, 0)
+        _ = await controller.shutdown()
+    }
+
     func testFreshReadRetryIsBoundedAndDoesNotRecoverOtherFailures() async throws {
         for failures: [BrowserTabBrokerError] in [[.staleDocument, .staleDocument], [.browserUnavailable("read failed")]] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
@@ -1119,6 +1191,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var targets = [String: BrowserTarget](), owned = Set<String>(), stats = Counts()
     private var generation = UUID().uuidString, field = "", result = ""
     private var observationSourceName = "computa_webkit_dom"
+    private var semanticReadiness: BrowserDocumentObservation.SemanticReadiness?, emptyObservation = false
     private var buttonID: Int64 = 2, buttonDisabled = false
     private var pendingRedirect: URL?
     private var link: String?, linkPressUnsupported = false
@@ -1137,6 +1210,9 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func fieldValue() -> String { field }
     func setObservedResult(_ text: String) { result = text }
     func setObservationSourceName(_ name: String) { observationSourceName = name }
+    func setSemanticReadiness(_ value: BrowserDocumentObservation.SemanticReadiness?, empty: Bool = false) {
+        semanticReadiness = value; emptyObservation = empty
+    }
     func failNextClose() { shouldFailClose = true }
     func addInventoryTarget(title:String,url:URL) -> String {
         let id=UUID().uuidString
@@ -1227,8 +1303,9 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
                     nodeID: String(index), isDOMClickable: true))
             }
         }
-        var observation=BrowserDocumentObservation(loaderID:generation,title:target.title,url:targets[target.targetID]?.url ?? target.url,nodes:nodes)
+        var observation=BrowserDocumentObservation(loaderID:generation,title:target.title,url:targets[target.targetID]?.url ?? target.url,nodes:emptyObservation ? [] : nodes)
         observation.sourceName = observationSourceName
+        observation.semanticReadiness = semanticReadiness
         if driftAfterCapture {
             targets[target.targetID] = BrowserTarget(targetID: target.targetID, instanceToken: target.instanceToken,
                 title: target.title, url: URL(string: "http://localhost:8123/changed-after-capture")!, webSocketURL: nil)

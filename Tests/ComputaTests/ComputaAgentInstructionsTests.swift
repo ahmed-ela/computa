@@ -362,7 +362,9 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(policy.contains("Offered browser navigation and observed sign-in/account controls remain allowed"))
             XCTAssertTrue(policy.contains("Full Access does not elevate this host policy"))
         }
-        XCTAssertTrue(checks.contains("Empty/loading reads are inconclusive: use one bounded browser_wait, then browser_read"))
+        XCTAssertTrue(checks.contains("After navigation or sign-in, a title-only/empty read is inconclusive"))
+        XCTAssertTrue(checks.contains("Use one bounded browser_wait, then a fresh unfiltered browser_read before concluding"))
+        XCTAssertTrue(checks.contains("if still empty, report unresolved loading, not absent content or denied access"))
         XCTAssertTrue(checks.contains("For an enabled observed link with href but actions=[], browser_navigate its exact href in the current bound tab"))
         XCTAssertTrue(checks.contains("not offered browser navigation or observed sign-in/account selection"))
         XCTAssertTrue(checks.contains("Claim policy/access denial only from actual tool evidence"))

@@ -321,7 +321,9 @@ enum ComputaAgentInstructions {
     denial. Use offered navigation tools; ask which service only if genuinely unclear.
     Never invent deep links, account paths or message IDs. Keep sign-in in the
     browser; do not ask for passwords, tokens or cookies. Respect actual access denials and approvals.
-    Empty/loading reads are inconclusive: use one bounded browser_wait, then browser_read.
+    After navigation or sign-in, a title-only/empty read is inconclusive. Use one bounded
+    browser_wait, then a fresh unfiltered browser_read before concluding; if still empty,
+    report unresolved loading, not absent content or denied access.
     For an enabled observed link with href but actions=[], browser_navigate its exact href in the current bound tab.
     Background-only forbids native focus theft/global input, not offered browser navigation
     or observed sign-in/account selection. Claim policy/access denial only from actual tool evidence.

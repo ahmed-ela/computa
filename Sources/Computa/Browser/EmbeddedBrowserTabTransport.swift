@@ -92,14 +92,16 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         let generation = try generation(for: id)
         try session.markHumanDocumentUsedByTool(tabID: id, generation: generation)
         let data = try await run(
-            id: id, generation: generation, input: ["operation": "observe"], timeoutMS: 12_000)
+            id: id, generation: generation, input: ["operation": "observe", "timeoutMS": 10_000], timeoutMS: 12_000)
         guard data.count <= 1_000_000,
             let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             raw["loaderID"] as? String == generation.uuidString,
             let urlString = raw["url"] as? String, let url = URL(string: urlString),
             let title = raw["title"] as? String, let rows = raw["nodes"] as? [[String: Any]],
             rows.count <= 3_000,
-            let truncated = raw["sourceTruncated"] as? Bool
+            let truncated = raw["sourceTruncated"] as? Bool,
+            let readinessValue = raw["semanticReadiness"] as? String,
+            let readiness = BrowserDocumentObservation.SemanticReadiness(rawValue: readinessValue)
         else {
             throw BrowserTabBrokerError.browserUnavailable(
                 "The built-in page returned an invalid bounded observation.")
@@ -131,6 +133,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
             loaderID: generation.uuidString, title: title, url: url, nodes: nodes,
             sourceTruncated: truncated)
         result.sourceName = "computa_webkit_dom"
+        result.semanticReadiness = readiness
         return result
     }
 
@@ -286,6 +289,26 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
                             }
                             result.finish(.success(try JSONSerialization.data(withJSONObject: value)))
                         } catch {
+                            // An empty-shell wait can span a real navigation,
+                            // which destroys its JS context before returning.
+                            // Only read-only operations may use the existing
+                            // fresh-read retry; mutation dispatch is never replayed.
+                            if !mutation {
+                                do {
+                                    guard let currentView = self.session.webView(for: id) else {
+                                        throw BrowserTabBrokerError.targetClosed
+                                    }
+                                    guard currentView === view else {
+                                        throw BrowserTabBrokerError.targetReplaced
+                                    }
+                                    if try self.generation(for: id) != generation {
+                                        throw BrowserTabBrokerError.staleDocument
+                                    }
+                                } catch {
+                                    result.finish(.failure(error))
+                                    return
+                                }
+                            }
                             result.finish(
                                 .failure(
                                     BrowserTabBrokerError.browserUnavailable(
