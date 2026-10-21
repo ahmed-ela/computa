@@ -170,3 +170,83 @@ Evidence: `optimized188-fixtures1.json`, SHA-256
 `c782d6045c7131548b47fe52ed89183fd22f6624f29f315f8b86a0af1813369f`;
 independent verifier results `ba531d720b7ed3ba2fd65e7e5cf9509a44b0dc5a9d0c8b637962c1a9ceb2ebff`
 and `c30bfea074009e62a722cbd3911148b9c89ce2c7c81ab9f8e31a27b86b90671a`.
+
+## Build-189 diagnostic follow-up
+
+The build-188 trace did not establish 11 quiet fallbacks. Its 11 explicit
+decoded-terminal admissions belonged to distinct sessions: ten without quiet
+readiness and one after quiet readiness. Of the other 11 sessions, seven completed
+less than 1600 ms after their first candidate without admission or quiet-ready
+logs; four had quiet-ready marks with no admission log. Missing info-level logs
+cannot identify a fallback. The five quiet-ready histories therefore comprise
+one confirmed decoded admission and four unclassified completions. Their saved
+artifacts lack the raw source, DOM representation and route needed to determine
+why those sessions reached quiet readiness.
+
+Build 189 adds session-linked notice records for the final admission method,
+terminal/invalidation delivery and the first finite observer rejection. The
+adapter records only a closed rejection reason and route kind. These diagnostics
+cannot grant/revoke a receipt, wake the model channel or renew a deadline. A first
+observer rejection can concern an unrelated, unclaimed decoder. Matching,
+observer caps, ownership/model/product checks and the 1600 ms fallback are
+unchanged.
+
+The installed signed-test app was 0.7.0 (189), built from executable source
+`13cf92225348d82fad3e8b5f886daa1b280419c3`. Its signed bundle matched all 57 files
+and 53 resources. Both optional native-focus and Gemini diagnostic compiler flags
+were verified off. No release was published.
+
+Both fresh V88 workflows passed all 12 checks each, including isolated file
+editing, terminal commands and the localhost browser form. All 22 website
+inferences were saved and closed, with no failed inference or unverified browser
+call. Eight additional independent fixture-test executions passed. The fixture
+server was stopped and its port refused connections. Validation also recorded
+451 passing JavaScript tests and 30 unique native tests across the preservation
+and final handler selections; two native tests were repeated.
+
+The single scoped trace contains 22 exact session-linked `decoded_terminal`
+decisions, all with `quietReady=false`, current receipts and matching initial/final
+DOM checks. It has 22 terminal-signal records and no observer-rejection record.
+Exact session UUIDs and independently saved inference IDs bind every response.
+
+| Boundary across these 22 responses | Median | Range |
+| --- | ---: | ---: |
+| First native completion candidate → verified transport complete | 446 ms | 157–1842 ms |
+| Latest candidate rearm → verified transport complete | 171.5 ms | 154–205 ms |
+| Final fresh full inspection | 170.5 ms | 154–205 ms |
+| Native terminal-signal notice → transport-complete notice | 2422.717 ms | 859.372–3673.324 ms |
+
+The first three rows use each session's native elapsed-time epoch. The last uses
+OSLog notice timestamps, begins at native receipt delivery and includes remaining
+DOM and verification work. It is not an exact provider-event clock or pure app
+overhead. The 1709/1842 ms first-candidate tails included response-byte or
+response-count changes and rearming; completion followed the latest rearm by
+193/202 ms, spent in the final full inspection. Neither was a quiet fallback.
+
+An additional native HI request also recorded decoded-terminal admission without
+quiet readiness: native turn start to verified completion was 4941 ms and its
+candidate/final-proof interval was 166 ms. Its byte-identical 51,657-byte direct
+control recorded terminal admission at 3677 ms and matched complete DOM at
+4188 ms. The native host UI boundary was approximately 7548 ms and includes
+preparation; the direct page clocks start after preparation. The independent
+pair audit confirmed normal Chat, latest GPT-6/Instant, current full-user/DOM
+proof, Temporary mode and owned cleanup. Both owned website tabs were closed and
+Safari's temporary developer setting was restored off. These endpoints must not
+be subtracted as pure overhead; this is one pair with different website-view
+setups and verification boundaries.
+
+The extractor published its input before a mistyped final receipt path caused
+exit 1. The failed invocation remains saved; independent provenance/schema
+checks recovered the audit offline and the grader passed without a second
+discovery query. This recovery is not the missing original successful receipt.
+
+The 23 observed native admissions used the decoded path, but these runs did not
+reproduce the five historical quiet-ready histories. A diagnostic-only change
+does not establish their cause or a semantic fallback fix.
+
+Evidence: `optimized189-completion-analysis1.json`, SHA-256
+`2f054c15418a059130cf31e199f335527563df2c8ae2f9dee092e6bbf9d1f497`;
+workflow report `optimized189-fixtures1.json`, SHA-256
+`80632e0da92c3df62f6158a87c288e4a9e59805feeafb5b9b76d0c3dc6989b13`;
+matched HI audit `native189-one-pair-analysis1.json`, SHA-256
+`d93536c370d323cc90b5f5eced2a89c37433475edd139e3d1cb1169b77d90732`.
