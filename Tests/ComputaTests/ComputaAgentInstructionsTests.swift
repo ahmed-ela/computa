@@ -351,7 +351,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("Never invent deep links, account paths or message IDs"))
         XCTAssertTrue(text.contains("do not ask for passwords, tokens or cookies"))
         XCTAssertTrue(text.contains("Respect actual access denials and approvals"))
-        XCTAssertLessThan(checks.utf8.count, 1_100, "The shared rule includes bounded loading recovery and sign-in scope clarification on refreshed website turns")
+        XCTAssertLessThan(checks.utf8.count, 1_400, "The refreshed rule includes bounded loading recovery and distinguishes an existing-account sign-in flow from a real credential block")
     }
 
     func testBackgroundOnlyBrowserRecoveryKeepsSignInInTheBrowserWithoutInventingAnAccessBlock() {
@@ -366,6 +366,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(checks.contains("For an enabled observed link with href but actions=[], browser_navigate its exact href in the current bound tab"))
         XCTAssertTrue(checks.contains("not offered browser navigation or observed sign-in/account selection"))
         XCTAssertTrue(checks.contains("Claim policy/access denial only from actual tool evidence"))
+        XCTAssertTrue(checks.contains("A Sign in link alone does not prove credentials are required"))
+        XCTAssertTrue(checks.contains("Follow the authorized service's sign-in flow and choose an existing matching account"))
+        XCTAssertTrue(checks.contains("Ask for user help only at an actual password/MFA prompt or account ambiguity"))
+        XCTAssertTrue(checks.contains("never ask for passwords in chat"))
         XCTAssertTrue(checks.contains("do not ask for passwords, tokens or cookies"))
         XCTAssertTrue(checks.contains("Respect actual access denials and approvals"))
         let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
@@ -444,7 +448,13 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 "parameters": ["type": "object", "properties": ["url": ["type": "string"]]]]]]],
         ])
         let request = try WebModelResponseCodec.prepareRequest(original)
-        let handoff = try assertRequestValuesAndHandoff(original, request: request, includedInstructionText: [native])
+        let expectedCurrentTools: [[String: Any]] = [["type": "namespace", "name": "relay", "tools": [
+            ["type": "function", "name": "browser_open", "parameters": ["type": "object", "properties": [
+                "url": ["type": "string", "minLength": 1],
+            ]]],
+        ]]]
+        let handoff = try assertRequestValuesAndHandoff(original, request: request,
+            includedInstructionText: [native], expectedCurrentTools: expectedCurrentTools)
         XCTAssertEqual(request.continuationRequest, original)
         let end = try XCTUnwrap(request.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
         let fresh = try XCTUnwrap(request.prompt.range(of: ComputaAgentInstructions.browserAddressChecks,
@@ -498,7 +508,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(browser.contains("It activates enabled\ncontrols/links, including follow_link=true"))
         XCTAssertTrue(browser.contains("not computer_v2 references"))
         XCTAssertTrue(browser.contains("unchanged reads"))
-        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_000,
+        XCTAssertLessThan(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_300,
                           "The bounded browser contract also clarifies loading recovery and background sign-in without removing verification or cleanup guidance.")
         XCTAssertEqual(ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true),
             ComputaAgentInstructions.developerInstructions() + "\n\n" + ComputaAgentInstructions.builtInBrowser)
@@ -555,7 +565,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("bounded browser_wait if the result is not exposed"))
         XCTAssertTrue(text.contains("stale-target rejection, read once and choose an eligible target"))
         XCTAssertTrue(text.contains("Never repeat uncertain input"))
-        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_000,
+        XCTAssertLessThanOrEqual(ComputaAgentInstructions.builtInBrowser.utf8.count, 3_300,
                                 "Named-service and sign-in/loading guidance retain all snapshot, approval and cleanup rules.")
     }
 
@@ -883,13 +893,18 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     private func assertRequestValuesAndHandoff(_ original: Data, request: WebModelResponseCodec.Request,
                                                  includedInstructionText: [String] = [],
+                                                 expectedCurrentTools: [[String: Any]]? = nil,
                                                  file: StaticString = #filePath, line: UInt = #line) throws -> String {
         let prompt = Data(request.prompt.utf8)
         let start = try XCTUnwrap(prompt.range(of: Data("COMPLETE_RESPONSES_REQUEST_JSON:\n".utf8)), file: file, line: line).upperBound
         let terminator = Data("\nEND_COMPLETE_RESPONSES_REQUEST_JSON.".utf8)
         let end = try XCTUnwrap(prompt.range(of: terminator, in: start..<prompt.count), file: file, line: line).lowerBound
+        var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any], file: file, line: line)
+        // Only explicitly declared current constraints may differ from the
+        // original tools; every other request and history value stays exact.
+        if let expectedCurrentTools { expected["tools"] = expectedCurrentTools }
         XCTAssertEqual(try JSONSerialization.jsonObject(with: prompt.subdata(in: start..<end)) as? NSDictionary,
-                       try JSONSerialization.jsonObject(with: original) as? NSDictionary, file: file, line: line)
+                       expected as NSDictionary, file: file, line: line)
         let suffix = String(decoding: prompt[end...], as: UTF8.self)
         let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
             customToolNames: request.customToolNames,

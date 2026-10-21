@@ -31,8 +31,8 @@ enum ComputaModelToolCatalog {
         let overrides = nativeToolDescriptions(modelID: modelID)
         let appsSchema = ComputerV2ToolContract.specs(for: modelID, externalChromeTools: false)
             .first { $0["name"] as? String == "computer_v2_apps" }?["inputSchema"] as? [String: Any]
-        let browserReadProperties = EmbeddedBrowserTools.definitions().reduce(into: [String: [String: Any]]()) { result, definition in
-            guard let name = definition["name"] as? String, ["browser_tabs", "browser_read"].contains(name),
+        let browserProperties = EmbeddedBrowserTools.definitions().reduce(into: [String: [String: Any]]()) { result, definition in
+            guard let name = definition["name"] as? String,
                   let schema = definition["inputSchema"] as? [String: Any],
                   let properties = schema["properties"] as? [String: Any] else { return }
             result[name] = properties
@@ -55,12 +55,20 @@ enum ComputaModelToolCatalog {
                     value[key] = appsSchema
                 }
             }
-            if value["type"] as? String == "function", let current = browserReadProperties[name] {
+            if value["type"] as? String == "function", let current = browserProperties[name] {
                 for key in ["parameters", "inputSchema"] {
                     guard var schema = value[key] as? [String: Any],
                           var properties = schema["properties"] as? [String: Any] else { continue }
-                    for field in ["cursor", "query"] where properties[field] != nil {
-                        if let canonical = current[field] { properties[field] = canonical }
+                    // The engine's limited schema representation drops these
+                    // constraints. Restore current native limits only on fields
+                    // already offered; preserve types, enum, required and history.
+                    for (field, value) in properties {
+                        guard var property = value as? [String: Any],
+                              let canonical = current[field] as? [String: Any] else { continue }
+                        for constraint in ["minimum", "maximum", "minLength", "pattern"] {
+                            if let value = canonical[constraint] { property[constraint] = value }
+                        }
+                        properties[field] = property
                     }
                     schema["properties"] = properties
                     value[key] = schema

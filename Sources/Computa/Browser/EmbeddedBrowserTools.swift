@@ -41,15 +41,17 @@ enum EmbeddedBrowserTools {
                 ],
             ]
         }
-        let string: [String: Any] = ["type": "string"]
+        let waitText: [String: Any] = ["type": "string", "minLength": 1,
+            "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
+            "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait only for document readiness; never send an empty or whitespace-only string."]
         let cursor: [String: Any] = ["type": "string", "minLength": 1,
             "description": "Omit this field on the first page or a fresh read. Only copy an exact nonempty next_cursor returned by this same tool in the current turn; never send an empty string, null or an invented cursor. At most 2048 UTF-8 bytes."]
         let query: [String: Any] = ["type": "string", "minLength": 1,
             "description": "Optional observed-text filter, at most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
-        let url: [String: Any] = ["type": "string", "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
+        let url: [String: Any] = ["type": "string", "minLength": 1, "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
         let mutation: [String: Any] = [
-            "snapshot_id": ["type": "string", "description": "Use the ID from the latest browser_read or available current_observation returned by an input. Input consumes it: never batch another input; await the result and use its new references, or browser_read if unavailable."],
-            "element_index": ["type": "integer", "minimum": 0],
+            "snapshot_id": ["type": "string", "minLength": 1, "description": "Use the ID from the latest browser_read or available current_observation returned by an input. Input consumes it: never batch another input; await the result and use its new references, or browser_read if unavailable."],
+            "element_index": ["type": "integer", "minimum": 0, "maximum": 2_999],
         ]
         return [
             specification(
@@ -63,7 +65,7 @@ enum EmbeddedBrowserTools {
             specification(
                 "browser_bind",
                 "Bind the exact observed available human built-in tab without activating or navigating it. Existing user tabs are preserved at cleanup.",
-                ["tab_id": string], ["tab_id"]),
+                ["tab_id": ["type": "string", "minLength": 1]], ["tab_id"]),
             specification(
                 "browser_navigate",
                 "Navigate the currently bound built-in tab once. A timeout never replays navigation. Read its new document before acting.",
@@ -87,7 +89,7 @@ enum EmbeddedBrowserTools {
             specification(
                 "browser_wait",
                 "Wait by DOM mutation events until visible semantic text contains text, or until the document is ready when text is omitted. Bounded, read-only; matched=false at deadline. Does not refresh or replay actions.",
-                ["text": string, "timeout_ms": ["type": "integer", "minimum": 1, "maximum": 10_000]]),
+                ["text": waitText, "timeout_ms": ["type": "integer", "minimum": 1, "maximum": 10_000]]),
             specification(
                 "browser_close",
                 "Release the bound built-in tab. Closes only this task's created tab; a bound existing user tab stays open."
@@ -396,8 +398,20 @@ actor EmbeddedBrowserToolController {
                 query: object["query"] as? String,
                 view: view ?? (object["cursor"] == nil ? .overview : nil),
                 cursor: object["cursor"] as? String)
-            let snapshot = try await currentObservation(
-                taskKey: taskKey, contextID: contextID, scope: scope, read: read)
+            let snapshot: BrowserTabSnapshot
+            do {
+                snapshot = try await currentObservation(
+                    taskKey: taskKey, contextID: contextID, scope: scope, read: read)
+            } catch BrowserTabBrokerError.staleDocument where read.cursor == nil {
+                // Navigation can invalidate a read while it is in flight.
+                // Retry only a fresh read, with the same exact lease and all
+                // scope checks; never restart pagination or replay input.
+                contexts[taskKey]?.snapshot = nil
+                try Task.checkCancellation()
+                try check(taskKey, contextID)
+                snapshot = try await currentObservation(
+                    taskKey: taskKey, contextID: contextID, scope: scope, read: read)
+            }
             return try readResponse(snapshot)
         case "browser_click", "browser_fill":
             let (binding, snapshot, index) = try await capturedMutation(

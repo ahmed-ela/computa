@@ -293,6 +293,116 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
         _ = await controller.shutdown()
     }
 
+    func testFreshReadRetriesOneNavigationRaceWithTheSameLeaseAndFreshReferences() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let scope = ComputerTaskScope(userPrompt: "Read http://localhost:8123/flight only.")
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+        let first = try await call(controller, "browser_read", ["view": "all"], scope: scope)
+        let before = await backend.counts()
+        await backend.failObservations([.staleDocument], redirect: URL(string: "http://localhost:8123/result")!)
+        let fresh = try await call(controller, "browser_read", ["view": "all", "query": "Check flight"], scope: scope)
+        XCTAssertTrue(fresh.contains("/result"))
+        XCTAssertTrue(fresh.contains("Check flight"), "The retry retains the caller's view and query")
+        XCTAssertEqual(try field("tab_handle", in: fresh), try field("tab_handle", in: first))
+        XCTAssertNotEqual(try snapshotID(fresh), try snapshotID(first))
+        do {
+            _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(first), "element_index": 1], scope: scope)
+            XCTFail("A failed old-document read must not preserve old action authority")
+        } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+        let after = await backend.counts()
+        XCTAssertEqual(after.observes, before.observes + 2)
+        XCTAssertEqual(after.creates, before.creates); XCTAssertEqual(after.navigations, 0)
+        XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testFreshReadRetryIsBoundedAndDoesNotRecoverOtherFailures() async throws {
+        for failures: [BrowserTabBrokerError] in [[.staleDocument, .staleDocument], [.browserUnavailable("read failed")]] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let first = try await call(controller, "browser_read")
+            let before = await backend.counts()
+            await backend.failObservations(failures)
+            do { _ = try await call(controller, "browser_read"); XCTFail("The final read failure must propagate") }
+            catch { XCTAssertEqual(error as? BrowserTabBrokerError, failures.last) }
+            let after = await backend.counts()
+            XCTAssertEqual(after.observes, before.observes + failures.count)
+            do {
+                _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(first), "element_index": 1])
+                XCTFail("Failed reads cannot leave an old controller capability current")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0); XCTAssertEqual(after.navigations, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testFreshReadRetryRechecksScopeAndPhysicalTargetBeforeObservingAgain() async throws {
+        for replaced in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            let scope = ComputerTaskScope(userPrompt: "Read http://localhost:8123/flight only.")
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"], scope: scope)
+            let first = try await call(controller, "browser_read", scope: scope)
+            let before = await backend.counts()
+            await backend.failObservations([.staleDocument],
+                redirect: replaced ? nil : URL(string: "https://unrelated.example/private")!, replaceTarget: replaced)
+            do { _ = try await call(controller, "browser_read", scope: scope); XCTFail("Changed target or scope must fail") }
+            catch {
+                if replaced { XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed) }
+                else if let failure = error as? BrowserTabBrokerError, case .invalidRead = failure { /* Scope still rejects the redirect. */ }
+                else { XCTFail("Expected a scope failure, got \(error)") }
+            }
+            let after = await backend.counts()
+            XCTAssertEqual(after.observes, before.observes + 1, "Denial must precede the retry's observation")
+            do {
+                _ = try await call(controller, "browser_click", ["snapshot_id": snapshotID(first), "element_index": 1], scope: scope)
+                XCTFail("An invalidated read cannot revive old references")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleSnapshot) }
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
+    func testReadContinuationNeverRestartsAfterNavigation() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+        await backend.showManyControls()
+        let first = try await call(controller, "browser_read", ["view": "all"])
+        let cursor = try field("next_cursor", in: first)
+        XCTAssertNotEqual(cursor, "none")
+        let before = await backend.counts()
+        await backend.failObservations([.staleDocument])
+        do { _ = try await call(controller, "browser_read", ["cursor": cursor]); XCTFail("A stale continuation cannot become a new read") }
+        catch { XCTAssertEqual(error as? BrowserTabBrokerError, .staleDocument) }
+        let after = await backend.counts()
+        XCTAssertEqual(after.observes, before.observes + 1)
+        XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0)
+        _ = await controller.shutdown()
+    }
+
+    func testFreshReadDoesNotRetryAfterCancellationOrLeaseRelease() async throws {
+        for cancelled in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
+            let before = await backend.counts()
+            await backend.failObservations([.staleDocument])
+            await backend.holdNextRead()
+            let operation = Task { try await self.call(controller, "browser_read") }
+            await backend.waitUntilObservationHeld()
+            if cancelled { operation.cancel() }
+            else { _ = await controller.release(taskKey: "turn-a") }
+            await backend.resumeObservation()
+            do { _ = try await operation.value; XCTFail("A cancelled or released read must not recover") }
+            catch {
+                if cancelled { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+            }
+            let after = await backend.counts()
+            XCTAssertEqual(after.observes, before.observes + 1)
+            XCTAssertEqual(after.presses, 0); XCTAssertEqual(after.fills, 0); XCTAssertEqual(after.navigations, 0)
+            _ = await controller.shutdown()
+        }
+    }
+
     func testPostInputObservationRetainsDocumentAndPaginationAuthority() async throws {
         for scenario in ["new_document", "same_url_reload", "pagination"] {
             let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
@@ -1020,6 +1130,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     private var protectedTargets = Set<String>()
     private var observationHeld = false, observationContinuation: CheckedContinuation<Void, Never>?
     private var observationWaiters = [CheckedContinuation<Void, Never>]()
+    private var observationFailures = [BrowserTabBrokerError](), failureRedirect: URL?, replaceOnFailure = false, holdRead = false
 
     init() { targets[humanID] = BrowserTarget(targetID:humanID,instanceToken:humanID,title:"Flights",url:URL(string:"http://localhost:8123/flight")!,webSocketURL:nil) }
     func counts() -> Counts { stats }
@@ -1066,6 +1177,20 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     }
     func observe(target:BrowserTarget) async throws -> BrowserDocumentObservation {
         stats.observes += 1
+        if holdRead {
+            holdRead = false; observationHeld = true
+            observationWaiters.forEach { $0.resume() }; observationWaiters.removeAll()
+            await withCheckedContinuation { observationContinuation = $0 }
+        }
+        if !observationFailures.isEmpty {
+            let failure = observationFailures.removeFirst()
+            if let redirect = failureRedirect {
+                generation = UUID().uuidString
+                redirectOwnedTarget(to: redirect); failureRedirect = nil
+            }
+            if replaceOnFailure { replaceOwnedTarget(); replaceOnFailure = false }
+            throw failure
+        }
         var driftAfterCapture = false
         if postInputPending {
             postInputPending = false
@@ -1129,6 +1254,11 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func waitUntilMutationHeld() async { if !mutationHeld { await withCheckedContinuation { mutationWaiters.append($0) } } }
     func resumeMutation() { mutationContinuation?.resume(); mutationContinuation=nil; holdMutation=false }
     func redirectOnNextObserve(to url: URL) { pendingRedirect = url }
+    func failObservations(_ failures: [BrowserTabBrokerError], redirect: URL? = nil, replaceTarget: Bool = false) {
+        observationFailures = failures; failureRedirect = redirect; replaceOnFailure = replaceTarget
+    }
+    func showManyControls() { manyControls = true }
+    func holdNextRead() { holdRead = true }
     func configureAfterInput(_ scenario: String) { afterInputScenario = scenario }
     func waitUntilObservationHeld() async {
         if !observationHeld { await withCheckedContinuation { observationWaiters.append($0) } }

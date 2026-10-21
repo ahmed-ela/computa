@@ -110,9 +110,6 @@ final class APIModelResponseCodecTests: XCTestCase {
             models: [.init(id: "gpt-oss-120b", name: "GPT OSS")])
         let modelID = APIProviderCatalog.appModelID(providerID: p.id, modelID: p.models[0].id)
         for name in ["browser_tabs", "browser_read"] {
-            let current = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
-            let currentSchema = try XCTUnwrap(current["inputSchema"] as? [String: Any])
-            let currentProperties = try XCTUnwrap(currentSchema["properties"] as? [String: Any])
             var oldProperties: [String: Any] = ["cursor": ["type": "string"]]
             if name == "browser_read" {
                 oldProperties["query"] = ["type": "string"]
@@ -126,7 +123,10 @@ final class APIModelResponseCodecTests: XCTestCase {
                 let schema = try XCTUnwrap(refreshed[key] as? [String: Any])
                 let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
                 for field in ["cursor", "query"] where oldProperties[field] != nil {
-                    XCTAssertEqual(properties[field] as? NSDictionary, currentProperties[field] as? NSDictionary)
+                    let property = try XCTUnwrap(properties[field] as? [String: Any])
+                    XCTAssertEqual(property["minLength"] as? Int, 1)
+                    XCTAssertEqual(property["type"] as? String, "string")
+                    XCTAssertNil(property["description"], "Constraint repair does not replace saved property metadata")
                 }
                 XCTAssertEqual(properties["view"] as? NSDictionary, oldProperties["view"] as? NSDictionary)
                 XCTAssertEqual(schema["required"] as? [String], [])
@@ -146,7 +146,9 @@ final class APIModelResponseCodecTests: XCTestCase {
             let parameters = try XCTUnwrap(wire["parameters"] as? [String: Any])
             let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
             for field in ["cursor", "query"] where oldProperties[field] != nil {
-                XCTAssertEqual(properties[field] as? NSDictionary, currentProperties[field] as? NSDictionary)
+                let property = try XCTUnwrap(properties[field] as? [String: Any])
+                XCTAssertEqual(property["minLength"] as? Int, 1)
+                XCTAssertEqual(property["type"] as? String, "string")
             }
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
             let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
@@ -160,6 +162,155 @@ final class APIModelResponseCodecTests: XCTestCase {
                 XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "current-browser", "type": "function",
                     "function": ["name": alias, "arguments": arguments]]]], finish: "tool_calls", request: prepared, model: p.models[0].id)) {
                         XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                }
+            }
+        }
+    }
+
+    func testEngineProjectedBrowserWaitBoundsAreRestoredBeforeCerebrasValidationAndCorrection() throws {
+        let p = APIProviderDefinition(id: "cerebras-fixture", name: "Cerebras Fixture",
+            baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
+            models: [.init(id: "gpt-oss-120b", name: "GPT OSS")])
+        let modelID = APIProviderCatalog.appModelID(providerID: p.id, modelID: p.models[0].id)
+        // Pinned codex-tools JsonSchema retains integer type but has no numeric
+        // bound fields. The original dynamic-tool rollout still has the bounds.
+        let engineSchema: [String: Any] = ["type": "object", "properties": [
+            "text": ["type": "string"], "timeout_ms": ["type": "integer"]],
+            "required": [String](), "additionalProperties": false]
+        let canonical = try XCTUnwrap(EmbeddedBrowserTools.definitions()
+            .first { $0["name"] as? String == "browser_wait" }?["inputSchema"] as? [String: Any])
+        let currentProperties = try XCTUnwrap(canonical["properties"] as? [String: Any])
+        for key in ["parameters", "inputSchema"] {
+            let original: [String: Any] = ["type": "function", "name": "browser_wait", key: engineSchema]
+            let refreshed = try XCTUnwrap(ComputaModelToolCatalog.visibleToolDefinitions([original], modelID: modelID).first)
+            let schema = try XCTUnwrap(refreshed[key] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            XCTAssertEqual(properties["timeout_ms"] as? NSDictionary, currentProperties["timeout_ms"] as? NSDictionary)
+            XCTAssertEqual(original[key] as? NSDictionary, engineSchema as NSDictionary)
+        }
+        let saved: [String: Any] = ["type": "function", "name": "browser_wait", "parameters": engineSchema]
+        let historicalArguments = #"{"text":"Inbox","timeout_ms":15000}"#
+        let history: [[String: Any]] = [
+            ["role": "user", "content": "Read the mailbox"],
+            ["type": "function_call", "call_id": "old-unbounded-wait", "name": "browser_wait",
+             "namespace": "functions", "arguments": historicalArguments],
+            ["type": "function_call_output", "call_id": "old-unbounded-wait",
+             "output": "The browser wait deadline must be from 1 to 10000 milliseconds."],
+            ["role": "user", "content": "Continue with current tools"],
+        ]
+        let prepared = try request(["tools": [["type": "namespace", "name": "functions", "tools": [saved]]],
+                                    "input": history], provider: p, toolNaming: .semantic)
+        let wire = try XCTUnwrap(try wireFunctions(prepared).first)
+        let parameters = try XCTUnwrap(wire["parameters"] as? [String: Any])
+        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+        let timeout = try XCTUnwrap(properties["timeout_ms"] as? [String: Any])
+        XCTAssertEqual(timeout["minimum"] as? Int, 1); XCTAssertEqual(timeout["maximum"] as? Int, 10_000)
+        let waitText = try XCTUnwrap(properties["text"] as? [String: Any])
+        XCTAssertEqual(waitText["minLength"] as? Int, 1)
+        XCTAssertNotNil(waitText["pattern"] as? String)
+        XCTAssertNil(waitText["maxLength"], "A code-point length constraint would misstate the native UTF-8 byte limit")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let historicalCall = try XCTUnwrap(messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
+        XCTAssertEqual((historicalCall["function"] as? [String: Any])?["arguments"] as? String, historicalArguments)
+        let alias = try XCTUnwrap(wire["name"] as? String)
+        func message(_ arguments: String) -> [String: Any] {
+            ["role": "assistant", "tool_calls": [["id": "current-wait", "type": "function",
+                "function": ["name": alias, "arguments": arguments]]]]
+        }
+        for arguments in ["{}", #"{"text":"Inbox"}"#, #"{"timeout_ms":1}"#, #"{"timeout_ms":10000}"#] {
+            let reply = try decode(message(arguments), finish: "tool_calls", request: prepared, model: p.models[0].id)
+            XCTAssertEqual((reply.response["output"] as? [[String: Any]])?.first?["arguments"] as? String, arguments,
+                           "Valid current arguments remain byte-for-byte unchanged")
+        }
+        for arguments in [historicalArguments, #"{"timeout_ms":0}"#, #"{"timeout_ms":-1}"#,
+                          #"{"timeout_ms":10001}"#, #"{"timeout_ms":1.5}"#, #"{"timeout_ms":true}"#,
+                          #"{"timeout_ms":"10000"}"#] {
+            XCTAssertThrowsError(try decode(message(arguments), finish: "tool_calls", request: prepared, model: p.models[0].id)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+        }
+        for text in ["", " \t\n", "\u{200b}", "\u{0085}\u{00a0}", "\u{3000}"] {
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["text": text]), as: UTF8.self)
+            XCTAssertThrowsError(try EmbeddedBrowserTools.validate(tool: "browser_wait", arguments: ["text": text]))
+            XCTAssertThrowsError(try decode(message(arguments), finish: "tool_calls", request: prepared, model: p.models[0].id)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+        }
+        guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(
+            correctionResult(prepared, arguments: historicalArguments), request: prepared) else {
+            return XCTFail("An out-of-range current response must be withheld before native dispatch")
+        }
+        let correction = try APIModelResponseCodec.correctiveRequest(prepared, rejectionDetails: details)
+        let correctedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: correction.body) as? [String: Any])
+        XCTAssertEqual(correctedBody["tools"] as? NSArray, body["tools"] as? NSArray,
+                       "Correction keeps the same canonical advertised bounds")
+        XCTAssertTrue(String(decoding: correction.body, as: UTF8.self).contains("No call from that rejected response was executed"))
+        let correctedArguments = #"{"text":"Inbox","timeout_ms":10000}"#
+        let reply = try decode(message(correctedArguments), finish: "tool_calls", request: correction, model: p.models[0].id)
+        XCTAssertEqual((reply.response["output"] as? [[String: Any]])?.first?["arguments"] as? String, correctedArguments)
+    }
+
+    func testOwnedBrowserConstraintOverlayRepairsEngineLossWithoutAddingFieldsOrRestrictingEmptyText() throws {
+        let p = APIProviderDefinition(id: "cerebras-fixture", name: "Cerebras Fixture",
+            baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions,
+            models: [.init(id: "gpt-oss-120b", name: "GPT OSS")])
+        let constraints: Set<String> = ["minimum", "maximum", "minLength", "pattern"]
+        let id = "11111111-1111-4111-8111-111111111111"
+        let cases: [(String, [String], [String])] = [
+            ("browser_open", [#"{"url":"https://outlook.live.com/mail/"}"#], [#"{"url":""}"#]),
+            ("browser_navigate", [#"{"url":"https://outlook.live.com/mail/"}"#], [#"{"url":""}"#]),
+            ("browser_bind", ["{\"tab_id\":\"\(id)\"}"], [#"{"tab_id":""}"#]),
+            ("browser_tabs", ["{}"], [#"{"cursor":""}"#]),
+            ("browser_read", ["{}", #"{"view":"content"}"#], [#"{"cursor":""}"#, #"{"query":""}"#, #"{"view":"overview"}"#]),
+            ("browser_click", ["{\"snapshot_id\":\"\(id)\",\"element_index\":0}",
+                               "{\"snapshot_id\":\"\(id)\",\"element_index\":2999}"],
+                              [#"{"snapshot_id":"","element_index":0}"#,
+                               "{\"snapshot_id\":\"\(id)\",\"element_index\":-1}",
+                               "{\"snapshot_id\":\"\(id)\",\"element_index\":3000}"]),
+            ("browser_fill", ["{\"snapshot_id\":\"\(id)\",\"element_index\":0,\"text\":\"\"}"],
+                             [#"{"snapshot_id":"","element_index":0,"text":""}"#]),
+            ("browser_wait", ["{}", #"{"text":"Inbox"}"#, #"{"timeout_ms":10000}"#],
+                             [#"{"timeout_ms":15000}"#, #"{"text":""}"#, #"{"text":" \t"}"#]),
+            ("browser_close", ["{}"], []),
+        ]
+        for (name, accepted, rejected) in cases {
+            let definition = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            var schema = try XCTUnwrap(definition["inputSchema"] as? [String: Any])
+            let canonical = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
+            var projected = canonical.mapValues { $0.filter { !constraints.contains($0.key) } }
+            if name == "browser_read" {
+                projected["view"] = ["type": "string", "enum": ["content"]]
+                projected.removeValue(forKey: "query")
+            }
+            schema["properties"] = projected
+            let originalRequired = schema["required"] as? [String]
+            let prepared = try request(["tools": [["type": "function", "name": name, "parameters": schema]]],
+                                       provider: p, toolNaming: .semantic)
+            let wire = try XCTUnwrap(try wireFunctions(prepared).first)
+            let repaired = try XCTUnwrap(wire["parameters"] as? [String: Any])
+            let properties = try XCTUnwrap(repaired["properties"] as? [String: [String: Any]])
+            XCTAssertEqual(Set(properties.keys), Set(projected.keys)); XCTAssertEqual(repaired["required"] as? [String], originalRequired)
+            for (field, property) in properties {
+                XCTAssertEqual(property["type"] as? String, projected[field]?["type"] as? String)
+                XCTAssertEqual(property["enum"] as? [String], projected[field]?["enum"] as? [String])
+                for constraint in constraints {
+                    XCTAssertEqual(property[constraint] as? NSObject, canonical[field]?[constraint] as? NSObject,
+                                   "Every current constraint must reach the actual provider wire unchanged")
+                }
+            }
+            let alias = try XCTUnwrap(wire["name"] as? String)
+            func message(_ arguments: String) -> [String: Any] {
+                ["role": "assistant", "tool_calls": [["id": "current-browser", "type": "function",
+                    "function": ["name": alias, "arguments": arguments]]]]
+            }
+            for arguments in accepted {
+                let reply = try decode(message(arguments), finish: "tool_calls", request: prepared, model: p.models[0].id)
+                XCTAssertEqual((reply.response["output"] as? [[String: Any]])?.first?["arguments"] as? String, arguments)
+            }
+            for arguments in rejected {
+                XCTAssertThrowsError(try decode(message(arguments), finish: "tool_calls", request: prepared, model: p.models[0].id)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
                 }
             }
         }
@@ -852,7 +1003,13 @@ final class APIModelResponseCodecTests: XCTestCase {
     func testSemanticToolNamesStayStableAcrossFilteringReorderingAndNamedChoice() throws {
         let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
         let browser: [String: Any] = ["type": "function", "name": "browser_open", "description": "Open the requested built-in page.",
-            "parameters": ["type": "object", "properties": ["url": ["type": "string"]], "required": ["url"], "additionalProperties": false]]
+            "parameters": ["type": "object", "properties": ["url": ["type": "string"],
+                "caller_scope": ["type": "string", "enum": ["fixture"], "description": "Caller-owned optional field."]],
+                "required": ["url"], "additionalProperties": false]]
+        let expectedParameters: [String: Any] = ["type": "object", "properties": [
+            "url": ["type": "string", "minLength": 1],
+            "caller_scope": ["type": "string", "enum": ["fixture"], "description": "Caller-owned optional field."]],
+            "required": ["url"], "additionalProperties": false]
         var aliases: [String] = []
         for definitions in [[browser], [chrome, browser], [browser, chrome]] {
             let prepared = try request(["tools": [["type": "namespace", "name": "functions", "tools": definitions]],
@@ -864,7 +1021,8 @@ final class APIModelResponseCodecTests: XCTestCase {
             aliases.append(alias)
             XCTAssertNotNil(alias.range(of: #"^browser_open__[0-9a-f]{24}$"#, options: .regularExpression))
             XCTAssertTrue((function["description"] as? String ?? "").contains("Callable API function: \(alias)."))
-            XCTAssertEqual(function["parameters"] as? NSDictionary, browser["parameters"] as? NSDictionary)
+            XCTAssertEqual(function["parameters"] as? NSDictionary, expectedParameters as NSDictionary,
+                           "Only the canonical URL constraint changes; caller fields, enum and identity stay intact")
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
             XCTAssertEqual(((body["tool_choice"] as? [String: Any])?["function"] as? [String: Any])?["name"] as? String, alias)
             XCTAssertEqual(prepared.allowedTools, [alias])
@@ -1004,6 +1162,8 @@ final class APIModelResponseCodecTests: XCTestCase {
     func testChatToolDescriptionsIdentifyCurrentAndFilteredBrowserAliasesWithoutChangingSchemas() throws {
         let browser: [String: Any] = ["type": "function", "name": "browser_open", "description": "Create one task-owned browser tab.",
             "parameters": ["type": "object", "properties": ["url": ["type": "string"]], "required": ["url"], "additionalProperties": false]]
+        let expectedParameters: [String: Any] = ["type": "object", "properties": ["url": ["type": "string", "minLength": 1]],
+                                               "required": ["url"], "additionalProperties": false]
         let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
         for (definitions, alias) in [([browser], "computa_tool_0"), ([chrome, browser], "computa_tool_1")] {
             let prepared = try request(["instructions": "Use browser_open for the requested page.",
@@ -1018,7 +1178,8 @@ final class APIModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(description.contains("Callable API function: \(alias).\n"))
             XCTAssertTrue(description.hasSuffix("Create one task-owned browser tab."))
             XCTAssertFalse(description.contains("computer_v2_tabs"))
-            XCTAssertEqual(tool["parameters"] as? NSDictionary, browser["parameters"] as? NSDictionary)
+            XCTAssertEqual(tool["parameters"] as? NSDictionary, expectedParameters as NSDictionary,
+                           "The current URL constraint is restored without rewriting the declared fields")
             XCTAssertEqual(prepared.tools.first?.description, browser["description"] as? String)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
             XCTAssertEqual((body["messages"] as? [[String: Any]])?.first?["content"] as? String,

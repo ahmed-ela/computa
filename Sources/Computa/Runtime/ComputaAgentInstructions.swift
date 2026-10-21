@@ -325,6 +325,9 @@ enum ComputaAgentInstructions {
     For an enabled observed link with href but actions=[], browser_navigate its exact href in the current bound tab.
     Background-only forbids native focus theft/global input, not offered browser navigation
     or observed sign-in/account selection. Claim policy/access denial only from actual tool evidence.
+    A Sign in link alone does not prove credentials are required. Follow the authorized service's
+    sign-in flow and choose an existing matching account. Ask for user help only at an actual
+    password/MFA prompt or account ambiguity; never ask for passwords in chat.
     """
 
     static let builtInBrowser = """
